@@ -119,7 +119,7 @@ We might express assumptions about objects as a collection of named assertions. 
 
 ## Effects
 
-Even without a runtime, effects are convenient for implicit dataflow, backtracking and error handling, flexible composition, extensible behavior, etc.. 
+Even without a runtime, effects are convenient for implicit dataflow, backtracking and error handling, flexible composition, extensible behavior, etc.. I'll use Haskell(-ish) syntax to describe these, but it should be easy to translate.
 
         type Eff rq a =
             | Yield (rq x) (x -> Eff rq a)
@@ -144,43 +144,83 @@ We can specialize the monadic operators for our only monad. Our untyped lambda c
 
 Effectively, '>>=' captures the continuation into 'Yield'. Unfortunately, it's left-associative, i.e. `((((k1 >>> k2) >>> k3) >>> k4) >>> k5)`. If implemented directly, this will repeatedly rebuild four compositions every time 'k1' yields. Right-associative `(k1 >>> (k2 >>> (k3 >>> (k4 >>> k5))))` performance is vastly superior. To resolve this, it is feasible to explicitly model a queue of continuations, or to *accelerate* '>>>' (or '.' in general). In context, I favor acceleration. 
 
-Effects logic is embodied in the runner or handler. In many cases, we can usefully build 'stacks' of handlers, passing unhandled requests down the stack.
+Behavior is embodied in the runners (aka handlers). It is often convenient to express 'stacks' of partial handlers for local subtasks that forward unrecognized requests.
 
-        runReaderT env (Yield Ask k) = runReaderT env (k env)
-        runReaderT env (Yield rq k) = Yield rq (runReaderT env . k)
-        runReaderT env (Return result) = Return result
+        -- generalize Reader to pure queries; forwards unhandled queries
+        runEnvT env (Yield (Env q) k) | Just r <- env q = runEnvT env (k r)
+        runEnvT env (Yield rq k) = Yield rq (runEnvT . k)
+        runEnvT _ r@(Return _) = r
 
-        runStateT st (Yield Get k) = runStateT st (k st)
-        runStateT _ (Yield (Put st') k) = runStateT st' (k ())
-        runStateT st (Yield rq k) = Yield rq (runStateT st . k)
-        runStateT st (Return result) = Return (result, st)
+        -- generalize Env to effectful requests, a command shell
+        runCmdT sh (Yield (Cmd cmd) k) = sh cmd >>= runCmdT sh . k
+        runCmdT sh (Yield rq k) = Yield rq (runCmdT sh . k)
+        runCmdT _ r@(Return _) = r
 
-        -- threads or coroutines; round-robin, no preemption
-        runThreadT (Yield (Spawn t) k):ks = runThreadT (k ()):t:ts
-        runThreadT (Yield Pause k):ts = runThreadT (ts ++ [k ()])
-        runThreadT (Yield rq k):ts = Yield rq (runThreadT . (:ts) . k)
-        runThreadT (Return _):ts = runThreadT ts -- drop results
-        runThreadT [] = Return ()
+        -- generalize State to indexed, scoped Memory
+        --   memory is extensible via unique symbols
+        runMemT m (Yield (Mem idx op) k) =
+            match idx with
+              Outer idx' -> 
+                Yield (Mem idx' op) (runMemT m . k)
+              _ ->
+                match op with
+                  Get -> runMemT m (k (m[idx])) 
+                  Put v -> runMemT (m with { [idx] = v }) (k ())
+                  Del -> runMemT (m without idx) (k ())
+        runMemT m (Return r) = (Return (r, m))
 
-We can also use runners that scope effects. 
+        -- cooperative threads: round-robin, no preemption
+        runThreadT (Yield rq k):ts = 
+            match rq with
+              Spawn t -> runThreadT (k ()):t:ts
+              Pause -> runThreadT (ts ++ [k ()])
+              _ -> Yield rq (runThreadT . (:ts) . k)
+        runThreadT (Return _):ts = runThreadT ts
+        runThreadT [] = return ()
 
+        -- effectful choice, commit on Return but captures search state
+        runChoiceT bt (Yield rq k) =
+            match rq with
+              Choose (x:xs) ->
+                let bt' = runSearchT bt (Yield (Choose xs) k)
+                runSearchT bt' (k x) 
+             Choose [] -> bt
+             _ -> Yield rq (runSearchT bt . k)
+        runChoiceT bt (Return r) = Return (r, bt)
+
+        -- sample auxilliary functions for runChoiceT
+        eff rq = Yield rq Return
+        fork xs = eff (Choose xs)
+        fail = fork [] 
+        return = Return
+        onAbort op = 
+            fork [false, true] >>= \ aborted ->
+            if aborted then (op >> fail) else return ()
+
+We can also model runners that scope effects:
+
+        -- fobid effects from escaping
         runPure (Return result) = result
-        runPure (Yield _ _) = error "unhandled request in pure scope"
-
-        runReader env = runPure . runReaderT env
-        runState s = runPure . runStateT s
+        runPure (Yield _ _) = error "unhandled request in runPure"
+ 
+        runEnv env = runPure . runEnvT env
+        runMem m = runPure . runMemT m
         -- pure 'runThread' is useless
 
-        -- runChoiceT omitted for dubious semantics
+        -- choice can be heavily optimized with laziness
         runChoice (Yield (Choose xs) k) = List.flatMap (runChoice . k) xs
-        runChoice (Yield _ _) = error "cannot backtrack effects!"
+        runChoice (Yield _ _) = error "unhandled request in runChoice"
         runChoice (Return result) = List.singleton result
 
-        runScopeT (Yield (Outer rq) k) = (Yield rq (runScopeT . k))
-        runScopeT (Yield _ _) = error "unhandled request in scope"
-        runScopeT r@(Return _) = r
+        -- secure effects with bearer token
+        runSecureT auth (Yield rq k) =
+            match rq with
+            | (Auth tok rq) | (auth tok rq) -> 
+                Yield rq (runSecureT auth . k)
+            | _ -> error "unauthorized request"
+        runSecureT _ r@(Return _) = r
 
-We'll need to develop a library of useful, reusable handlers. Maybe a little metaprogramming. But it probably isn't something that everyone needs to mess with.
+We'll need a library of useful, reusable handlers. However, we don't need a lot of handlers, just several deliberately designed handlers that flexibly cover most use cases. For example, I introduce MemT as a more-extensible State monad, and EnvT as a more-extensible Reader, because I frequently found the Haskell originals awkward to work with.
 
 *Note:* Although we can leverage effects for general-purpose programming, doing so dilutes design. Many of my design decisions about reasoning and performance are dubious in context of runtime effects. This project shall focus exclusively on assembly-time programming.
 
@@ -199,7 +239,7 @@ A module is represented by a file. Modules may reference other files within the 
 
 A content-addressed remote folder is uniquely identified and authenticated by secure hash of content or DVCS revision history. However, they are not *located* by secure hash. Instead, a remote import may provide a list of locations (URLs), and configurations may suggest a few more. It is useful to include a DVCS tag or branch name for shallow cloning and to notify users of updates, but it cannot replace the secure hash.
 
-Modules are modeled as basic objects with limited effects, roughly `Dict -> Dict ->  {load, gensym} Dict` (in roles `Base -> Self -> Instance`). We aren't bothering with multiple inheritance. The Base argument receives a host environment (dict 'env') for adaptability, while Self supports overrides for extensibility. Here 'load' brings another module into scope, and 'gensym' is our source of unique identifiers. We can enforce filepath constraints on load, and also raise an error for dependency cycles.
+Modules are modeled as basic objects with limited effects during construction, roughly `Dict -> Dict -> {load, gensym} Dict` (in roles `Base -> Self -> Instance`). We aren't bothering with multiple inheritance. The Base argument receives a host environment (dict 'env') for adaptability, while Self supports overrides for extensibility. Here 'load' brings another module into scope, and 'gensym' is our source of unique identifiers. We can enforce filepath constraints on load, and also raise an error for dependency cycles.
 
 Aside from adaptability and extensibility, a motivating use case for parametric modules is to isolate remote references into very a few files, simplifying maintenance. Aside from one imports file per project, desired definitions should be available through 'env.\*'. We assume lazy loading and caching to support very large environments.
 
@@ -224,19 +264,69 @@ Excepting 'env', configuration shall not influence an assembly's binary output. 
 
 ### Assembly
 
-Any module that specifies a binary, or comes close enough for the command line, effectively serves as an assembly. 
+Any module that specifies a binary, or comes close enough for the command line to cover the gap, effectively serves as an assembly. The assembler CLI will support parameterizing an assembly-defined function with few command-line arguments, and scripting (i.e. of a mixin for an assembly).
 
-A selected module is parameterized by the configured environment. Some assemblies may be script-like, mostly composing resources defined in this environment. Users may also extract binaries from the configured environment without reference to a separate assembly module. 
+The selected module is parameterized by the configured environment. Some assemblies may be script-like, mostly composing resources defined in this environment. Users may also extract binaries from the configured environment without reference to a separate assembly module. 
 
-The assembler has no built-in knowledge of CPU architectures or assembly mnemonics. It is feasible to 'assemble' documents, ray-traced images, or JSON configuration files.
+Unlike configuration files, assembly modules don't need the ".g" extension. The configured enviroment may define front-end compilers for other file extensions. See *User-Defined Syntax*.
+
+*Note:* The assembler has no built-in knowledge of CPU architectures or assembly mnemonics. It is feasible to 'assemble' documents, ray-traced images, JSON configuration files, websites, etc.. Multi-file assemblies can be expressed via tarball or zipfile or similar.
+
+## User-Defined Syntax
+
+When loading a module, a front-end compiler is selected from the provided environment based on file extension, i.e. `Base.env.lang.[FileExt]` should define a language object that defines a 'compile' method. Users may indicate interpretation as an alternative file extension, overriding the actual file extension.
+
+The 'compile' method is a monadic expression with access to several effects:
+
+- parser combinator over file binary
+  - integrates metadata about what we 'expect' to parse for debugging
+  - maintains source location for source-mapping annotations
+  - split binary into sections that are parsed separately to isolate errors
+  - multi-pass, e.g. to extract names or general structure in separate rounds
+- gensym for unique symbols
+- import and include operations
+- write definitions instead of returning them
+  - ensures we never define things twice
+  - can skip writes from broken sections
+  - captures parse locations and dependencies
+
+An important design constraint is that the front-end compiler never directly observe Base or Self arguments to a module. This significantly mitigates risk of divergence on fixpoint or compromising extensibility, at least at the module layer. It also never directly observes filepaths, mitigating risk of location dependence. Integration with debugging and isolation of errors are also valuable.
+
+### Syntax Bootstrap
+
+If the final `Self.env.lang.[FileExt].compile` method is different from the Base version, the assembler attempts bootstrap. This involves recompiling with the Self version, repeating until fixpoint is reached.
+
+        # pseudocode
+        #   args include Base, file binary
+        bootstrap(ext, args, compiler) =
+            let m = compile(compiler, args) 
+            let compiler' = 
+                m.env.lang.[ext].compile if defined
+                or builtin if ext is "g"
+                or error "no compiler found"
+            if(compiler == compiler') then m else
+            bootstrap(ext, args, compiler')
+
+The built-in compiler is simply treated as one more compiler in the bootstrap cycle, equivalent to itself. A module may simply delete a provided "g" implementation to avoid user-defined feature extensions. In practice, syntax bootstrapping should be relatively rare: it's expensive and easily goes wrong. 
+
+But it has some use cases. Mostly, adding features to the primary ".g" language and shifting dependencies from assembler version to module system.
+
+## Editable Projection
+
+I have the idea and intention that, alongside definitions - perhaps as a form of annotation - we could 'write' some objects representing views and editable projections of code. Details TBD. Miscellaneous observations:
+
+- The 'edit' half of a projectional editor is essentially limited to a local project folder. Users that share a project through DVCS would still edit locally. But a projectional editor should be able to navigate remote DVCS resources, support visualization, and support users in updating revision hashes.
+- Editable views must be bound to source elements at meaningful boundaries, i.e. essentially to parser combinators that also describe what is 'expected'. We can feasibly inject some metadata alongside the indicator that we're parsing an 'integer'. For example, we could provide a function that converts an integer into valid source code at that location. This must be captured for projectional editing. 
+- Ideally, editable views may gather related elements from multiple locations within a file, and even across multiple files, to support collective views and shared editing. As a simple example, we might want to lookup and rename all references to a module definition. This suggests 'writing' some content-dependent indices alongside writing definitions. 
+- To support projectional editing, we cannot just view sources. We also need a clear view of outcomes, what happens when you twiddle this or that bit. A viable solution is to visualize testing alongside projections, treating tests as viewports into outcomes.
 
 ## Reasoning
 
 What can we feasibly implement to support developers in reasoning about the assembly process and product?
 
-* *Testing*: Modules or objects may define test methods that are implicitly evaluated upon instantiation. Instead of simple pass/fail, I propose to model tests monadically with non-deterministic choice. Use of non-deterministic choice simplifies work sharing, parallelization, fuzz testing, simulation of race conditions, etc.. Assuming sufficiently-advanced acceleration, we could emulate the machine code to test the product.
+* *Testing*: Testing involves sampling behavior and judging it. I propose to model tests monadically with non-deterministic choice. Choice simplifies work sharing, parallelization, fuzzing, simulation of race conditions, etc.. Ideally, tests also support effective visualization, sorting, and graphing. This suggests reporting test conditions and outcomes as a structure that is fairly uniform between tests from the same origin. Instead of reporting only the final record at the end, it would be useful to report partial outputs. Each test may also generate a 'log' to flag events and states for future review.
 
-* *Visualization*: We can easily introduce annotations for logging and profiling to obtain feedback. Plain text is very limiting. The assembler can provide a local web server or GUI, and the 'log messages' might be expressed as renderable objects. Although immutable, interaction is still useful for progressive disclosure, filtered views, rotating graphs, queries, etc.. (Of course, messages should *also* support a plain text rendering.)
+* *Visualization*: We can easily introduce annotations for logging and profiling to obtain feedback. Plain text is very limiting. The assembler can provide a local web server or projectional editor GUI, and the 'log messages' might be expressed as renderable objects. Although immutable, interaction with visualizations is still useful for progressive disclosure, filtered views, rotating graphs, queries, etc.. (Of course, messages should *also* support a plain text rendering.)
 
 * *Reflection*: A peek under the hood might let us render computations in small steps to understand a problem. Access to the continuation might support testing and visualization with 'what if' scenarios. I hesitate to introduce reflection in general because it compromises type and abstraction-based reasoning. But we can safely provide a reflection API in context of assertion or logging annotations.
 
@@ -250,38 +340,31 @@ Note how tests and types are bound to definitions. It would not be difficult to 
 
 I hope to leverage abstract interpretation as the main tool for sophisticated reasoning about assembly output. I find it easier to trust code that I control directly (as opposed to an assembler's "best effort" at types), and there is more opportunity extend or tune the reasoning. A constraint system can be very expressive, effective for phantom types, substructural types, dependent types. We can feasibly leverage explicit reasoning outside of annotations for program search.
 
-### Expressing Constraints
+### Constraint Systems
 
-To support abstract interpretation, we can introduce a constraint monad. Essentially, this is a more sophisticated choice monad that remembers prior choices, binding them to variables. 
+To support abstract interpretation, we can introduce a constraint monad. Essentially, this is a more sophisticated choice monad that remembers prior choices, binding them to variables. Relevant operations:
 
-This should support declaring variables like 'x'. then 'ask' about conditions like `(x < 5)`. If 'x' hasn't been constrained, this generates a true/false choice. If we're already on a choice path where we know `(x < 5)` (e.g. if we know `x = 3`), then ask returns true only. We might also 'insist' on conditions, equivalent to 'ask' followed by 'fail' on the false branch. Use of 'insist' pushes constraints.
+- Query properties on variables, e.g. `(x < 5)` or `(x > y)`. This returns a true/false branching *choice*. But if we already know something about the variable, e.g. that `x = 3`, then we implicitly fail the conflict branch.
+- Insist on properties, i.e. to push constraints. This is equivalent to query followed by failing the false branch. The only reason for insist is performance. (I'd use "assert", but that has other connotations in programming.)
+- Check, i.e. trigger an sat/unsat check for the current branch. Useful for performance or for a 'runConstraintT' where we want to record some metadata that we won't backtrck.
+- Choose from a list, same as runChoice. Failure is expressed as choosing from an empty list. Technically, this can be expressed with Query and a throw-away variable, so introducing Choose is for performance. 
 
-This assumes a DSL for expressing questions that the constraint monad can interpret, ideally something that can target SMTLIB2 with a little translation. We can use an accelerator like Z3 to test the constraints. We cannot observe Z3's discovered solution (Z3 is version-specific and non-deterministic), but sat/unsat should be deterministic. We use this to prune branches.
+Ignoring the several performance options, this essentially reduces to Query. We need a DSL for the query, but fortunately that design is already covered: directly adapt SMTLIB2 to support acceleration! Variables shall be globally named, e.g. as `(Var "x")` in the DSL, where `"x"` may be any valid dictionary key. We'll rely on unique symbols and user-defined allocation and naming strategies to control conflicts.
 
-Aside from analyzing for sat/unsat, it may prove useful to analyze 'blame', e.g. based on [Cornell's SHErrLoc project](https://www.cs.cornell.edu/projects/SHErrLoc/). This requires keeping some extra metadata in the constraint system. After we isolate blame to some fragment of the output, we can trace it further to assembly sources.
+We cannot ask for the value of a variable. Potential values for 'x' knowing `(x < 5)` include 4.9999999, 4.9999998, 3.1415926, -12, etc. so asking would murder performance. Even with acceleration, we *cannot view* solutions discovered by an accelerator such as Z3 because the solution Z3 discovers certainly isn't the solution the accelerated function would discover. Only sat/unsat is safely observable. But we can extract the full constraint system and unevaluated branches upon return.
 
-*Aside:* A constraint monad is an obvious candidate for *Commutative Effects* described earlier. The order in which constraints are pushed, branches are pruned, does not influence outcome, but can hugely impact performance.
+Aside from analyzing for sat/unsat, it may prove useful to analyze 'blame', e.g. based on [Cornell's SHErrLoc project](https://www.cs.cornell.edu/projects/SHErrLoc/). After we isolate blame to some fragment of the output, we can trace it further to assembly sources.
 
-## User-Defined Syntax
-
-When loading a module, we may specify a front-end compiler. If no compiler is specified, one will be chosen based on file extension. In case of the ".g" file extension, the assembler provides a built-in compiler. Otherwise, we'll ask the provided environment, e.g. `env.lang.select(FileExt)` should return an object that implements a 'compile' method (details TBD).
-
-A front-end compiler will be expressed as a monadic function: a parser combinator with access to gensym and loading more modules, that simultaneously assigns definitions. Several desiderata:
-
-- parsing provides some feedback on what input is expected (keywords, name or number, etc.) for error reporting
-- can easily split files or sections into subsections that are parsed independently (isolating errors per section)
-- can output definitions from different parts independently (i.e. so we can work with modules that have syntax errors)
-- supports implicit source mapping for tracing or debug views
-
-Users may extract the binary to end-of-file, but they'd lose a lot of system integration.
-
-User-defined syntax is a low priority for now (we'll just focus on the built-in syntax) but eventually it will support flexible external DSLs and high-level languages. 
-
-*Note:* A file does not need to exist to be loaded. If it does not exist, it is treated as an empty file. This is potentially useful for projectional editing. However, any other error (permissions issues, unreachable remote, etc.) are reported.
+*Aside:* A constraint monad is an obvious candidate for *Commutative Effects* described earlier. The order in which constraints are pushed, branches are pruned, does not influence outcome, but can hugely impact performance. May need to add an effect for this.
 
 
 # OLD CONTENT
 
+## Syntax Ideas 
+
+### User Data
+
+I hope to develop a lightweight syntax for users to define data constructors, leveraging unique symbols for pattern matching and sealing. We can leverage smart constructors, active patterns, and type annotations.
 
 ## Assembly Ideas
 
@@ -304,203 +387,4 @@ Labels may need specialized syntax within an assembly definition.
 Although we can directly manipulate the stack pointer, it would be convenient if we can automatically allocate stack locations based on usage, similar to how we allocate '.bss' sections. This seems feasible if we automatically accumulate sizes for referenced stack data elements.
 
 *TBD:* Generalize so we can leverage yet again for associative heap allocations.
-
-## Verification
-
-Verification is driven by annotations. Though, it may also be relaxed or disabled by configuration.
-
-There are two problems here: verifying the assembly process, and verifying the generated binary. In general, it's a lot easier to verify the process, so it's convenient to align verification of the generated binary with verification of the process.
-
-But it is also feasible to support something like Hoare logic at the level of registers, and build up precise descriptions of the behavior for every CPU instruction. We might need to pass resulting constraint systems to an SMT solver, perhaps as an annotation, a specialized assertion of sorts.
-
-TBD: review SMT solvers, or perhaps [SHErrLoc's](https://www.cs.cornell.edu/projects/SHErrLoc/) intermediate constraint language.
-
-### Assertions
-
-We can easily have assertions at many layers: modules, specs or objects (as a whole), and functions (local per call). Assertions modeled as annotations cannot influence output, but we coould feasibly support effectful assertions that raise an error. Probably want to distinguish the two.
-
-### Types
-
-Pervasive use of tagged data supports flexible pattern matching and ad hoc polymorphism. Effectively, we have a dynamically typed language. Though, in context of compile-time metaprogramming, this 'dynamic' refers to a late stage after modules are loaded.
-
-However, it is feasible to perform static analysis to detect some errors earlier. We can introduce type annotations to guide this analysis.
-
-Usefully, type annotations can potentially express 
-
-Most types cannot say much about the assembly code, only about the metaprogramming framework. 
-
-only about the framewor
-
-Ultimately, we'll pro also want the opportunity to analyze assembly
-
-These 'types' apply to the compile-time metaprogram. It may be feasible to support some assertions that are contingent on assembly, but it certainly is not trivial.
-
-## Tests
-
-To detect errors earlier, we can support tests per assembly module. 
-
-A simple way to express tests is a simple `Integer -> Boolean` function.  
-
-To mitigate, we can express some tests per module, e.g. as assertions. 
-
-Of course, we can expres tests for modules, perhaps even per specification.  tests for modules
-
-
-
-Ideally, we can detect many errors earlier, before modules are shared. 
-
-We can perform some type inference and check for consistency issues. But 
-
-
-Although it is better to detect errors later than never, it is best to detect errors early. One relevant boundary is to detect errors within a module before it is shared and used in an assembly.
-
-We can develop static analysis leveraging dataflow, abstract interpretation, etc. to detect some errors ahead of time. But, in context of higher-order metaprogramming, inference is limited. To support analysis, we can introduce annotations 
-
-
-for assembly modules that search for problems. We can introduce type annotations to precisely describe programmer assumptions.
-
-
-
-
-
-
-given assembly languages have no runtime, and all this computation is
-
-this 'dynamic' must be understood in the context of assembly-time stages. 
-
-The 
-
- to dynamically typed languages. 
-
-though 'dynamic' in this context refers to the 'evaluation' stage of assembly, which is still 
-
-We may benefit from analysis to  prior to evaluati
-
-Although all computation is static, we can still distinguish stages such as parse and evaluation.
-
- Although f
-
-
-
-
-We build upon the untyped lambda calculus. However, t
-
-
-
-Static dataflow analysis can potentially detect some errors before evaluation.
-
-
-
-
-
-
-
- may detect obvious errors, e.g. providing a number where a function is expected.
-
-The 
-
-
-I'm envisioning gradual types, partial types, using types to help detect or isolate errors. In some contexts, failure to prove a type might be a warning instead of an error, and only an active disproof is an error. 
-
-Non-trivial type checking may be separated from the assembler, run as an independent operation with its own output and debugger.
-
-## Instrumentation
-
-logging, Profiling, 
-
-## Assembler CLI
-
-This project should develop an initial assembler executable
-
- is parameterized by an assembly file and specification name.
-
-## Syntax Ideas 
-
-### User Data
-
-I hope to develop a lightweight syntax for users to define data constructors, leveraging unique symbols for pattern matching and sealing. We can leverage smart constructors, active patterns, and type annotations.
-
-### Texts
-
-The syntax will support '"'-quoted strings of printable ASCII (0x20-0x7E minus 0x22) as a limited embedding for binary data. There are no escape characters, but users may apply a functions to process the string, e.g. to support tabs and newlines, hexadecimal, or base64.
-
-For large texts (and binaries), users may simply load a file from the module system as a binary. This may eventually support DSLs or higher-level general purpose languages.
-
-*TBD:* I'll want a lightweight syntax for building lists. A syntactic sugar for a writer monad (or free monad used as writer) seems viable.
-
-## Annotations
-
-Annotations are structured comments that support instrumentation, verification, performance, and other tools. Annotations must have no impact on primary outputs except to halt compilation with errors. But they may influence *auxilliary* outputs, such as:
-
-- message logs: debug trace, warning
-- compile-time performance, profiling
-- caching for incremental compilation
-- source maps for runtime debugging
-
-To resist silent degradation, we'll report warnings for unrecognized or unsupported annotations.
-
-## Acceleration
-
-With guidance from annotations, compilers may substitute user-defined functions with built-ins. This pattern is called *acceleration*. The aforementioned *Data Extensions* are essentially standard accelerators.
-
-An especially useful pattern is to accelerate an *interpreter* for a virtual CPU or GPGPU, such that we can leverage low-level hardware for number crunching at compile-time. 
-
-## 
-
-
-###
-
-## Modeling Objects
-
-## Content-Addressed Memory
-
-
-## Sketch of Syntax
-
-TBD.
-
-I'd like to avoid pervasive use of indentation. But we have specs, definitions within specs, etc. Perhaps we can simply use a visually distinctive section separators.
-
-A literate programming style might also be nice.
-
-## Design Concerns
-
-### Reproducibility
-
-If there is no error, primary assembler output is a deterministic binary on stdout. This binary must depend only on locally reproducible inputs: e.g. source code and a clear subset of command-line arguments (e.g. after '--'). *Note:* Auxilliary outputs (logs, warnings, cache, heat generated, etc.) are not restricted.
-
-### Update Path
-
-We can extend assemblers with new features, but we must respect reproducibility. Thus, attempting to use the features with the prior version of the assembler must generate an error. Conversely, we must also be able to deprecate old features, so long as we raise an error when an old assembly depends on the deprecated feature.
-
-A viable approach is to forbid reflection (ifdef or iteration) on some dictionaries. This allows us to provide assembler features without letting binary output observably depend on assembler version.
-
-
-...
-
-
-
-If there is no error, primary assembler output shall be a deterministic binary, depending only on source code, command-line arguments, and optionally a binary input. If there is an error, a partial binary may be produced before halting with error.
-
-Auxilliary outputs (logs, cache, heat generated, etc.) are less restricted and may depend on assembler version. Assemblers may introduce new 'features' but only if it results in errors.
-
-independent of assembler version. Of course, it does depend on source updates and command-line parameters and source updates, of course.
-
-This usually represents an executable binary or library, but nothing prevents leveraging assembly language as a simple calculator. 
-
-
-That is, there are no implicit optimizers.
-
-Though, it may depend on command-line parameters passed to the assembly. 
-
- modulo updates to source code and a few command-line arguments passed to the assembly. There is no hidden optimization step. 
-
-The 'compiler' in this case is responsible for loading modules and lazily evaluating pure functions, ultimately extracting a deterministic binary from the module system.
-
-
-
-
-
-
-
 
