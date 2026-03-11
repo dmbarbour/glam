@@ -134,7 +134,7 @@ We can easily introduce some syntactic sugar:
         op2             op2 >>
         op3 a           op3 a
 
-Haskell has a *RecursiveDo* extension, enabling the user to capture outputs from a monad's future as inputs to prior operations. In context of assembly, we'll probably want this feature by default to support jumping or branching to forward labels. I don't anticipate any trouble encoding this, but actually using it requires caution to avoid divergence.
+Haskell has a *RecursiveDo* extension, enabling the user to capture outputs from a monad's future as inputs to prior operations. In context of assembly, we'll likely want this feature by default. For example, with assembly it's convenient if we can reference forward labels that haven't been defined yet. To keep it simple, we'll generally forbid name shadowing.
 
 We can specialize the monadic operators for our only monad. Our untyped lambda calculus doesn't offer a direct solution to type-indexed behavior, such as typeclasses, so this is convenient:
 
@@ -142,9 +142,9 @@ We can specialize the monadic operators for our only monad. Our untyped lambda c
         (Return a) >>= k = k a
         k1 >>> k2 = (>>= k2) . k1
 
-Effectively, '>>=' captures the continuation into 'Yield'. Unfortunately, it's left-associative, i.e. `((((k1 >>> k2) >>> k3) >>> k4) >>> k5)`. If implemented directly, this will repeatedly rebuild four compositions every time 'k1' yields. Right-associative `(k1 >>> (k2 >>> (k3 >>> (k4 >>> k5))))` performance is vastly superior. To resolve this, it is feasible to explicitly model a queue of continuations, or to *accelerate* '>>>' (or '.' in general). In context, I favor acceleration. 
+Effectively, '>>=' captures the continuation into 'Yield'. Unfortunately, it's left-associative, i.e. `((((k1 >>> k2) >>> k3) >>> k4) >>> k5)`. If implemented directly, this will repeatedly rebuild four compositions every time 'k1' yields. Right-associative `(k1 >>> (k2 >>> (k3 >>> (k4 >>> k5))))` performance is vastly superior. To resolve this, it is feasible to explicitly model a queue of continuations, or to *accelerate* '.' (function composition). I favor acceleration. 
 
-Behavior is embodied in the runners (aka handlers). It is often convenient to express 'stacks' of partial handlers for local subtasks that forward unrecognized requests.
+Behavior is embodied in the runners (aka handlers). It is often convenient to express 'stacks' of partial handlers for local subtasks that forward unrecognized requests. Basically, any effect can be encoded except race conditions (outcome is deterministic). Examples:
 
         -- generalize Reader to pure queries; forwards unhandled queries
         runEnvT env (Yield (Env q) k) | Just r <- env q = runEnvT env (k r)
@@ -164,51 +164,45 @@ Behavior is embodied in the runners (aka handlers). It is often convenient to ex
                   Del -> runMemT (m without idx) (k ())
         runMemT m (Return r) = (Return (r, m))
 
-        -- cooperative threads: round-robin, no preemption
-        --   (todo: semaphores, priority)
-        runThreadT (Yield rq k):ts = match rq with
-            Spawn t -> runThreadT (k ()):t:ts
-            Pause -> runThreadT (ts ++ [k ()])
-            rq -> Yield rq (runThread . (:ts) . k)
-        runThreadT (Return _):ts = match ts with
-            [] -> Return ()
-            _ -> runThreadT ts
+        -- cooperative threads (round robin, no preemption, no sync)
+        runThreadT (Yield (Spawn t) k):ts = runThreadT (k ()):t:ts
+        runThreadT (Yield Pause k):ts = runThreadT (ts ++ [k ()])
+        runThreadT (Yield rq k):ts = Yield rq (runThreadT . (:ts) . k)
+        runThreadT (Return ()):ts = runThreadT ts
+        runThreadT [] = Return ()
+
+        -- delimited continuations 
+        runContT (Yield (Reset op) k) = runContT op >>= runContT . k
+        runContT (Yield (Shift fn) k) = runContT (fn k)
+        runContT (Yield rq k) = Yield rq (runContT . k)
+        runContT r@(Return _) = r
 
         -- effectful choice, commit on Return but captures search state
-        runChoiceT bt (Yield rq k) =
-            match rq with
-              Choose (x:xs) ->
-                let bt' = runSearchT bt (Yield (Choose xs) k)
-                runSearchT bt' (k x) 
-             Choose [] -> bt
-             _ -> Yield rq (runSearchT bt . k)
-        runChoiceT bt (Return r) = Return (r, bt)
-
-        -- sample auxilliary functions for runChoiceT
-        eff rq = Yield rq Return
-        fork xs = eff (Choose xs)
-        fail = fork [] 
-        return = Return
-        onAbort op = 
-            fork [false, true] >>= \ aborted ->
-            if aborted then (op >> fail) else return ()
+        --   (initial bt: Return None)
+        runChoiceT bt (Yield (Choose x:xs) k) =
+            let bt' = runChoiceT bt (Yield (Choose xs) k)
+            runChoiceT bt' (k x)
+        runChoiceT bt (Yield (Choose []) _) = bt
+        runChoiceT bt (Yield rq k) = Yield rq (runChoiceT bt . k)
+        runChoiceT bt (Return r) = Return (Just (r, bt))
 
 We can also model runners that scope effects:
 
         -- forbid effects from escaping
         runPure (Return r) = r
-        runPure (Yield _ _) = error "unhandled request in runPure"
+        runPure (Yield _ _) = error "unhandled effect in runPure"
  
         runEnv env = runPure . runEnvT env
         runMem m = runPure . runMemT m
+        runCont = runPure . runContT
         -- pure 'runThread' is useless
 
-        -- choice can be heavily optimized with laziness
+        -- pure choice can be heavily optimized with laziness
         runChoice (Yield (Choose xs) k) = List.flatMap (runChoice . k) xs
         runChoice (Yield _ _) = error "unhandled request in runChoice"
         runChoice (Return result) = List.singleton result
 
-We'll want a library of useful, reusable handlers. However, I hope we deliberately design handlers with flexibility and extensibility in mind. Regular users should very rarely be writing handlers.
+We'll want a library of useful, reusable handlers. However, I hope we deliberately design handlers with flexibility and extensibility in mind. Regular users should rarely feel the need to write custom handlers.
 
 *Note:* Although we can leverage effects for general-purpose programming, doing so would dilute design. Eschewing the runtime eliminates or ameliorates many complicating factors for reasoning and performance. So, we'll focus exclusively on binary assembly.
 
@@ -264,30 +258,30 @@ Unlike configuration files, assembly modules don't need the ".g" extension. The 
 
 ## User-Defined Syntax
 
-When loading a module, a front-end compiler is selected from the provided environment based on file extension, i.e. `Base.env.lang.[FileExt]` should define a language object that defines a 'compile' method. The 'compile' is monadic, combining a parser combinator, module system tools, and writing definitions.
+User-defined syntax is a convenient approach to external DSLs and metaprogramming. When loading a module, a front-end compiler is selected from the provided environment based on file extension, i.e. `Base.env.lang.[FileExt]` evaluate to a language object that defines 'compile'. This is also the case for the standard "g" files, but the assembler provides a built-in fallback.
 
-Desiderata:
+A significant design challenge for user-defined syntax is integration with a development environment: tracing bugs, isolating syntax errors, visualization and editable projections, index and search, autocomplete, autoformat, etc.. The conventional solution is to develop a suite of external tools, IDE plugins, etc. for each syntax. The language object serves is intended to serve this role: aside from 'compile' it may define methods for tooling, e.g. a language-server protocol.
 
-- parser combinator over file binary
-  - integrates metadata about what we 'expect' to parse for debugging
-  - maintains source location for source-mapping annotations
-  - split binary into sections that are parsed separately to isolate errors
-  - multi-pass or overlay 'parses', i.e. gather structure from across file
-- gensym for unique symbols
-- import and include operations
-- write definitions instead of returning them
-  - track what names a section is *intended* to define, even on failure
-  - guard against defining things twice by accident, explicit overrides
-  - more robustly captures parse locations and dependencies
-- write annotations - named tests, projections, indices
+But the conventional solution is not very well integrated. It involves a lot of rework, and is fragile to changes in syntax. I hope we can do better by integrating features into the compiler.
 
-The compiler never directly touches the Base or Self arguments. Usually, it shouldn't observe the full binary, because doing so makes it difficult to trace dependencies. Compilers do not know which file they are compiling, which ensures location independence. 
+Some design thoughts:
+
+- Parser combinators are a good starting point. Parser combinators can easily describe what they 'expect' to see at any given step, and they can track source location, providing effective feedback in case of syntax errors. We can extend the monad with more effects.
+- However, to simplify tracing, blame, error isolation, etc. the compiler cannot directly observe parse results. We could feasibly return some abstract data from each parse operation, and manipulate this data indirectly similar to applicative functors.
+- Observing a failed parse is equivalent to observing the binary, e.g. because we can test for 0, fail, try 1, etc.. Thus, we'll capture failure within the abstract data, too. This could be supported via something like a Maybe value from all parses. *Note:* We cannot *directly* use failure to model parse loops. But the parser effects API may provide loops as a built-in.
+- To support syntax-driven effects without observing the syntax, we may need to introduce an eval effect that lifts a user expression into the front-end compiler, e.g. `(Eval expr)`. The result of Eval is then abstracted. This effectively also supports forms of macros.
+- It is useful to support multi-pass parses, e.g. where one parse delimits the 'region' for another. This is very useful for error isolation.
+- Aside from source locations, the front-end compiler should be able to inject additional annotations on abstract nodes to support validation, visualization, editable projections, indexing, etc.. 
+- Using gensym, we can generate a unique abstract data type for the applicative per file. This is useful to control staging, i.e. it is useless to hold onto the abstract data.
+
+Expressing a compiler without being able to 'see' the binary seems possible in theory, but I'm not entirely convinced that we won't reintroduce the tracing problem via Eval. To gain confidence, I must try it first with the standard syntax. After all, we should be able to override and extend the standard syntax, too. Worst case, I'm back to the conventional approach.
+
+*Note:* We'll convert FileExt ASCII characters to lower-case and strip an initial '.', but otherwise it's just taken as a string. 
 
 ### Syntax Bootstrap
 
 If the final `Self.env.lang.[FileExt].compile` method is different from the Base version, the assembler attempts bootstrap. This involves recompiling with the Self version, repeating until fixpoint is reached.
 
-        # pseudocode
         bootstrap(ext, base, binary, compiler) =
             let m = compile(compiler, base, binary) 
             let compiler' = 
@@ -300,22 +294,15 @@ The built-in compiler is simply treated as one more compiler in the bootstrap cy
 
 But it has some use cases. Mostly, adding features to the primary ".g" language and shifting dependencies from assembler version to module system.
 
-### Namespace Macros
+### Editable Projections
 
-Namespace macros are expressed as an 'import' or 'include' without naming a file. Instead, we'll express a front-end compiler using Self for import or Base for include (but not limited to 'env.\*'), then compile an 'empty' file. Any relevant parameters should already be included in the compiler expression.
+Some user-defined syntax may be graphical. And even for purely textual syntax, we'll often want to integrate some visualizations or provide edit widgets like color pickers. Miscellaneous observations:
 
-Namespace macros have full access to gensym and module system loads, and thus may fully simulate a module system. There is a significant risk of divergence on fixpoint, but it's easy to detect and debug.
-
-*Note:* We don't support text macros. Most use cases for text macros are adequately handled by monadic effects, and namespace macros are better for the few exceptions. 
-
-## Editable Projection
-
-I have the idea and intention that, alongside definitions - perhaps as a form of annotation - we could 'write' some objects representing views and editable projections of code. Details TBD. Miscellaneous observations:
-
-- The 'edit' half of a projectional editor is essentially limited to a local project folder. Users that share a project through DVCS would still edit locally. But a projectional editor should be able to navigate remote DVCS resources, support visualization, and support users in updating revision hashes.
-- Editable views must be bound to source elements at meaningful boundaries, i.e. essentially to parser combinators that also describe what is 'expected'. We can feasibly inject some metadata alongside the indicator that we're parsing an 'integer'. For example, we could provide a function that converts an integer into valid source code at that location. This must be captured for projectional editing. 
-- Ideally, editable views may gather related elements from multiple locations within a file, and even across multiple files, to support collective views and shared editing. As a simple example, we might want to lookup and rename all references to a module definition. This suggests 'writing' some content-dependent indices alongside writing definitions. 
-- To support projectional editing, we cannot just view sources. We also need a clear view of outcomes, what happens when you twiddle this or that bit. A viable solution is to visualize testing alongside projections, treating tests as viewports into outcomes.
+- At the lowest level, our editable projections will benefit from compiler integration, e.g. with lenses for editing the relevant file sources, maintaining metadata about source locations. 
+- The 'edit' half of a projectional editor is essentially limited to actual files in a local project folder. But read-only views are still useful for remote sources, read-only files in the local folder, and namespace macros.
+- We can treat a file that does not exist as equivalent to an empty file. This way, simply referring to the file is sufficient to obtain the hyperlink and a projectional editor (on the empty file).
+- It may be useful to support indexing of modules and build projectional editors from indices.
+- We'll also want to visualize outcomes, i.e. based on the final definitions with overloads. These might not be editable, but we'll want the view of outcomes to be at least spatially adjacent to the editor.
 
 ## Reasoning
 
@@ -345,26 +332,22 @@ For anonymous assertions, logging, embedded type annotations, etc. we might refe
 
 Tests can be expressed monadically with simple, useful effects:
 
-- Choice. Non-deterministic choice will support selecting test parameters, simulating race conditions, parallelism, sharing test setup, fuzz testing, etc.. Choosing from the empty list will cancel a test, neither pass nor fail; useful if our test conditions are out of bounds.
-- Status. This may be modeled as a dict of 'public' state (like runMemT). Minimally, this record should contain test parameters and relevant outcomes. Perhaps also a log message, or list thereof. We can also represent intermediate states to support animation of a test. 
+- Choice. Non-deterministic choice will support selecting test parameters, simulating race conditions, fuzz testing, etc.. It's also convenient for sharing test setup and parallel evaluation. Choosing from the empty list will cancel a test, neither pass nor fail; useful if our test conditions are out of bounds.
+- Status. Essentially a test's 'public' state, expressed as a dictionary. At the end of a test, this should contain test parameters, relevant outcomes, perhaps a log message, i.e. anything we might want to cache or visualize. We can feasibly *animate* the evolution of status as a test runs (perhaps keep a 'frame' parameter in Status for this purpose). We can also use Status for Choice heuristics.
 
-The pass/fail status is indicated by final return value.
+The pass/fail/etc. result is indicated by a final return value.
 
-### Constraint Monad
+A test runner is relatively easy to implement, e.g. it's basically just a fusion of runChoice and runMemT to ensure we can view status before tests complete. But heuristics for effective fuzzing are not so easy to implement. And ideally, tests should also support incremental computing.
 
-To support abstract interpretations, I propose to introduce a constraint monad and accelerate with Z3 or similar solvers. An accelerator cannot observe the *solution* Z3 discovers, but it can use the sat/unsat judgement.
+### Constraints
 
-Relevant operations:
+Constraint systems are a convenient mechanism for abstract interpretation. We can feasibly accelerate constraint systems with Z3 or other solvers. Unfortunately, the accelerator cannot observe the *solution* because it's effectively non-deterministic. But we can use the sat/unsat judgement.
 
-- Query properties on variables, e.g. `(x < 5)` or `(x > y)`. This returns a true/false branching *choice*. But if we already know something about the variable, e.g. that `x = 3`, then we can drop the conflicting branch.
-- Insist on properties, i.e. to push constraints. Equivalent to query followed by failing the false branch.
-- Choose a value from a list. Equivalent to querying with a throw-away variable.
+The DSL for constraints can be directly adapted from SMTLIB2. For variables, we can easily use `(Var symbol)` or similar, using a distinct symbol per variable. We easily can control naming conflicts between globally-unique symbols and constructed symbols with local naming strategies.
 
-Unlike a choice monad, the constraint system is something we might be interested in observing even if unsatisfiable. We can design a runner to return constraints from 'failed' branches.
+In context of writing code monadically, it is convenient to build a constraint system statefully, within a monad. We can do so for assembly code, and it may also be useful to do so via the front-end compiler. Perhaps we can directly model our type systems.
 
-The DSL for queries is basically an adaptation of SMTLIB2. Variables are globals, e.g. `(Var key)` where key is any valid dictionary key. We can control conflict with globally-unique symbols, naming strategies, and lazy translations if needed.
-
-*Aside:* A constraint monad is an obvious candidate for *Commutative Effects* described earlier.
+### Log Messages
 
 
 
