@@ -39,7 +39,7 @@ Some existing languages align with some of my desiderata. For example, F\* or Va
 
 I propose to build upon a pure, untyped lambda calculus with lazy evaluation, extended with annotations and module-level gensym. I do not believe untyped lambda calculus or lazy evaluation require introduction. We model data, effects, and OO-style inheritance upon this foundation:
 
-- Data is logically [Church or Scott encoded](https://en.wikipedia.org/wiki/Church_encoding). 
+- Data is *logically* Church or Scott encoded. Actual encoding is accelerated.
 - Monadic effects, via [Free-er Monads, More Extensible Effects](https://okmij.org/ftp/Haskell/extensible/more.pdf).
 - Inheritance, adapting [Prototypes: Object-Orientation, Functionally](http://fare.tunes.org/files/cs/poof.pdf).
 
@@ -79,11 +79,11 @@ User-defined data types will mostly be modeled as tagged unions with declared un
 Pure functions can model stateless objects in terms of open recursion via latent fixpoint. A basic object model with mixin composition is `Dict -> Dict -> Dict` in roles `Base -> Self -> Instance`. Here, 'Base' represents the mixin target or host environment, and 'Self' the future fixpoint.
 
         mix child parent = λbase. λself.
-            (child (parent base self) self)
+           (child (parent base self) self)
+        fix f = let x = f x in x     -- lazy fixpoint
         new spec env = fix (spec env)
-        # fix is lazy fixpoint
 
-Most observations on Base or Self prior to instantiation will either diverge on fixpoint or compromise extensibility. Although fixpoint divergence is easy to detect and debug, an opportunity cost to extensibility is invisible and awkward to explain. It's best to provide a syntax that avoids potential pitfalls.
+Most observations on Base or Self prior to instantiation will either diverge on fixpoint or compromise extensibility. Although fixpoint divergence is easy to detect and debug, the opportunity cost to extensibility is invisible and awkward to explain. It's best to ensure syntax avoids potential pitfalls.
 
 Inheritance and override is a useful mechanism for extensibility. For example, we can model a grammar as an object where the methods represent parser combinators, then extend the integer parser. In context of binary specification, available overrides will likely be less structured, more organic, but still useful.
 
@@ -107,7 +107,7 @@ Tags don't need to be globally unique but must not be reused in scope of lineari
 
 ### Symbolic Method Names
 
-Using short strings as method names, especially generic and contextual names like "map" or "draw", easily leads to ambiguities and collisions, especially in context of dynamic mixins and multiple inheritance. There are other weaknesses: no feedback upon deprecating a name, no clear mechanism for private names.
+Using short strings as method names, especially generic and context-dependent names like "map" or "draw", easily leads to ambiguities and collisions, especially in context of multiple inheritance or dynamic mixins. There are other weaknesses: no clear mechanism for private names, no feedback on deprecating names.
 
 A robust alternative is symbolic names. 
 
@@ -115,7 +115,7 @@ Modules may generate unforgeable symbols upon import, then export them. By using
 
 At external tooling boundaries, e.g. logging or IDE, it is awkward to reference names through the module system. Instead, we'll construct global symbols such as `symbol("glam-lang.org/2026/log/text")`. We can at least ensure these symbols are unambiguous based on naming convention.
 
-At the module layer, we use short strings: they're necessary for concise syntax! Fortunately, modules are constrained in ways that mitigate concerns of collision: no multiple inheritance, static mixins only (via include), and *Explicit Override* still applies.
+At the module layer, we're effectively stuck with short strings: they're necessary for concise syntax! But modules are constrained in other ways that mitigate concerns of collision: no multiple inheritance, static mixins only (via include). Also, *Explicit Override* still applies, and the module dictionary is abstracted.
 
 ## Effects
 
@@ -134,7 +134,7 @@ We can easily introduce some syntactic sugar:
         op2             op2 >>
         op3 a           op3 a
 
-Haskell also has a *RecursiveDo* sugar, enabling a result to be used before it is defined. I'm less familiar with this desugaring, but we'll probably want RecursiveDo by default. It seems convenient for branching to forward labels, for example.
+*Note:* Haskell also has a *RecursiveDo* sugar, enabling a result to be used before it is defined. I'm less familiar with this desugaring, but I'll surely want RecursiveDo by default. It seems convenient for branching to forward labels, for example. This has consequences for syntax: no shadowing names, because it would be unclear whether you're referring forwards or backwards.
 
 We can specialize the monadic operators for our only monad. Our untyped lambda calculus doesn't offer a direct solution to type-indexed behavior, such as typeclasses, so this is convenient:
 
@@ -142,14 +142,9 @@ We can specialize the monadic operators for our only monad. Our untyped lambda c
         (Return a) >>= k = k a
         k1 >>> k2 = (>>= k2) . k1
 
-Effectively, '>>=' captures the continuation into 'Yield'. Unfortunately, it grows left-associative, i.e. `((((k1 >>> k2) >>> k3) >>> k4) >>> k5)`. Right-associative `(k1 >>> (k2 >>> (k3 >>> (k4 >>> k5))))` performance is vastly superior. To resolve this, I propose to *accelerate* function composition (the '.' op) to dynamically rewrite to right-associative. 
+Effectively, '>>=' captures the continuation into 'Yield'. Unfortunately, the Kleisli composition is left-associative, i.e. `((((k1 >>> k2) >>> k3) >>> k4) >>> k5)`. Right-associative `(k1 >>> (k2 >>> (k3 >>> (k4 >>> k5))))` performance is vastly superior. To resolve this, we could lift into semantics (change Yield continuation to a queue), or insist on a built-in optimization (similar reasoning as tail-call optimization). I favor the latter.
 
 Behavior is embodied in the runners aka handlers. It is convenient to express 'stacks' of partial handlers for local subtasks that forward unrecognized requests. Basically, any effect can be encoded except race conditions (outcome is deterministic). I wrote a few examples to help myself grasp this: 
-
-        -- generalize Reader to pure queries; forwards unhandled queries
-        runEnvT env (Yield (Env q) k) | Just r <- env q = runEnvT env (k r)
-        runEnvT env (Yield rq k) = Yield rq (runEnvT . k)
-        runEnvT _ r@(Return _) = r
 
         -- generalize State to indexed, hierarchical Memory
         -- use guaranteed-unique symbols to avoid conflicts
@@ -169,7 +164,7 @@ Behavior is embodied in the runners aka handlers. It is convenient to express 's
         runContT r@(Return _) = r
 
         -- cooperative threads (round robin, non-preemptive, hierarchical)
-        --  with per-thread continuations (to model mutexes, semaphores)
+        --  with per-thread continuations (needed for mutexes, semaphores)
         runThreadT (Yield (Thread op) k):ts = match op with
             (Spawn t) -> runThreadT (k ()):t:ts
             Pause -> runThreadT (ts ++ [k()])
@@ -185,7 +180,6 @@ We can also model runners that scope effects:
         runPure (Return r) = r
         runPure (Yield _ _) = error "unhandled effect in runPure"
  
-        runEnv env = runPure . runEnvT env
         runMem m = runPure . runMemT m
         runCont = runPure . runContT
         -- pure 'runThread' is useless
@@ -201,27 +195,34 @@ We'll need a library of useful, reusable handlers. However, I hope we deliberate
 
 ### Commutative Effects
 
-Monads easily overspecify order. Many effects can be at partially reordered without influencing outcome, yet with a significant impact on performance. To mitigate this, it can be useful to model asynchronous and threaded effects.
+Monads frequently overspecify order. Many effects can be at partially reordered without influencing outcome, yet with a significant impact on performance. To mitigate this, it is useful to model asynchronous and threaded effects.
 
-Asynchronous effects enable the runner to aggregate several requests from a single thread, enabling a reordering before we compute observations. Threaded effects enable the runner to examine pending requests from multiple threads before making any decisions.
+Asynchronous effects simply buffer requests to perform later. They may return an abstract future in some cases. Regardless, the handler has an opportunity to reorder requests prior to implementing them.
+
+Threaded effects involve running multiple monadic threads. Like runThreadT but without Pause. Instead, the handler actually examines available requests and makes heuristic decisions about which to handle next, or perhaps handling them all. 
 
         [(Yield BranchingQuery k1), (Yield TightConstraint k2), ...]
         -- constraint-choice runner: let's apply TightConstraint next!
 
-These techniques work very well together, e.g. we can model asynchronous interactions between threads. They also work nicely with spark-based parallelism: a runner heuristically sparks evaluation for a past request when the data becomes available, or a runner can batch-process several threaded effects then parallelize evaluation of each thread's next step.
+These techniques work well together, e.g. we can buffer asynchronous requests locally per thread, then yield heuristically (to flush the buffer) or when an external response is needed. The main benefit of buffering would be doing more work per step, which is mostly useful in context of spark-based parallelism.
 
 ## Modularity
 
 A module is represented by a file. Modules may reference other files within the same folder or subfolders, or a content-addressed remote. We forbid Parent-relative ("../") and absolute filepaths. These constraints ensure folders are location-independent and temporally stable, yet editable by conventional means.
 
-Modules are modeled as basic objects with limited effects during construction, conceptually `Dict -> Dict -> {import, gensym} Dict` (in roles `Base -> Self -> Instance`), but this is abstracted by an effects API for *User-Defined Syntax*. There are two mechanisms to integrate more modules:
+Modules are modeled as mixins objects with limited effects during construction, conceptually `Dict -> Dict -> Eff {load | gensym} Dict` (in roles `Base -> Self -> Instance`). The module type is fully abstracted (see *User-Defined Syntax*). But we'll discuss it in these terms here.
 
-* *include* - bind included module's Base to host's 'current' Base; share Self. Effectively applies a module as a mixin, also treating prior definitions as mixins. Eager evaluation.
-* *import* - binds imported module's Base to a host-provided environment (e.g. `{ "env": Self.env }` by default). Defines local name to instance dictionary. Lazy loading. To 'override' an import, simply replace the definition.
+There are a few mechanisms to integrate loaded modules:
+
+* *include* - bind included module's Base to host's current Base, treating prior definitions as mixins. Share Self. Effectively applies a module as a mixin. Adds arbitrary names to namespace.
+  * *include at* - apply to a dictionary defined within Base instead of directly to Base. Useful for lazy loading.
+* *import as* - equivalent to introducing a dictionary with `{ "env": Self.env }` then translating an include to that dictionary. 
+
+This design ensures there is only one Self for an entire configuration or assembly. We can override names defined deeply within other modules. Although definitions aren't mutable, they'll feel mutable in context of the toplevel. Meanwhile, we can lazily load scoped includes.
 
 Dependencies between files must form a directed acyclic graph. However, each import or include is independent for gensym and Base, and it's awkward to maintain scattered references to content-addressed remotes. In most use cases, we'll share definitions through 'env.\*' instead of loading a module twice.
 
-To ensure extensibility, there are no 'private' definitions or export controls at the module layer except via naming convention, such as Python's `"_name"`. Access to private definitions is mitigated by content-addressing of remote dependencies, i.e. a breaking change won't propagate implicitly.
+Although it would not be difficult to support 'private' definitions per module (via gensym), doing so would harm extensibility and complicate the intuition of 'include'. We'll just use a convention like Python's `"_name"` at the module level. 
 
 ### Configuration
 
@@ -231,7 +232,7 @@ The configuration serves several roles:
 
 - *Assembly environment*: define 'env'. This is passed to the assembly as if importing the assembly into the configuration, e.g. `{ "env": Config.env }`. This environment is analogous to system includes and shared libraries, supporting adaptive assembly. 
 - *Command-line macros*: if the first command-line argument to the assembler does not start with '-', we apply 'cli', which should be a function of type `List of String -> List of String` that returns valid arguments or empty list.
-- *Development environment*: Define an *Integrated Development Environment* for '-i' interactive mode. Filter outputs to standard error. Decide which logs are saved to disk, and at what level of detail.
+- *Development environment*: Define an *Integrated Development Environment* for '-i' interactive mode. Filter outputs to standard error.
 - *Resource management*: ad hoc, e.g. specify GPGPUs available for acceleration, cache locations and replacement heuristcs, history management, shared proxy compilation and cache, search locations for content-addressed remotes, tune assembler JIT or GC heuristics, control expensive tests and checks (e.g. assertions, fuzzing).
 
 Configurations never directly control assembler output: An assembly may ignore your configured environment and substitute its own. Command-line macros may always be written out long form. Resources influence performance and error detection but not a valid binary result.
@@ -247,6 +248,10 @@ The assembler receives command-line arguments that express an assembly module as
 - `-- List Of Args` - assembler defines 'args' before including files or scripts. Default is empty list, but caller may override with elements following the '--' separator.
 
 Aside from 'args', the assembly module is implicitly parameterized by the configured 'env'. The assembly module shall define 'result', representing the assembled product, i.e. a binary or folder.
+
+### Scripts
+
+In some cases, it is convenient to just compute some text then interpret it as an include or import with a specified file extension. We already do this when specifying an *Assembly*. We can easily support it as a special case for import and include within a module, too.
 
 ### Remotes
 
@@ -276,11 +281,12 @@ By default, we expect a binary result and extract to standard output. However, t
   - `--stdout` (default) - write binary to standard output
     - incompatible with folders and interactive development
   - `--discard` - extract for testing; drop the data
+    - still accessible in interactive mode, e.g. HTTP request
   - `(-o|--out) Destination` - output to named file or folder
 
 Although we could model folders via tarball or zipfile, making folders explicit is more convenient in context of interactive development.
 
-Machine-code mnemonics are entirely left to libraries and syntactic sugars. Assuming suitable accelerators and user-defined syntax, it should be easy to adapt the assembler to many targets: configuration files, ray tracing, typesetting, constructing websites, simulations, etc..
+Machine-code mnemonics are left to libraries and syntactic sugars. Assuming suitable accelerators and user-defined syntax, it should be easy to adapt the assembler to many targets: configuration files, ray tracing, typesetting, constructing websites, simulations, etc..
 
 The above covers basic non-interactive extraction of a completed assembly product. But there is a lot more to say about development and debugging!
 
@@ -304,191 +310,43 @@ The IDE does not receive general access to effects, merely enough to perform its
 
 ### Debugging
 
-Developers will support debugging via annotations, e.g. for logs and profiles, types and tests, tracing and blame. Logging extends to graphical visualizations. Testing includes non-deterministic choice to support heuristic fuzzing and property checks. 
+Developers support debugging via annotations, e.g. for types and tests, logs and profiles, tracing and blame. Logging extends to graphical visualizations. The assembler has built-in support for fuzz testing and property checking via non-deterministic choice in named tests.
 
-Debugging machine code needs some attention. With accelerated interpretation of abstract machines, it should be feasible to emulate machine code for testing purposes. Performance and scale suffer, but we can improve our confidence before trying things for real. With an accelerated SMT solver (via cvc5 or Z3) we can also 'test' sat/unsat for constraint models. This could support abstract interpretation of machine code to check assumptions.
+Effective debugging of assembly will inevitably depend on acceleration. With acceleration of an abstract machine, it is feasible to test machine code by emulation. With acceleration of an SMT solver, it is feasible to test machine code via abstract interpretation.
 
-Debugging is best performed in context of interactive development. Tracing errors or outcomes back to sources is less difficult with replay. Interactive views of graphs are more convenient than guessing what a user will want to see later. In context of non-deterministic testing, users might focus on specific branches that catch their attention. 
+Although we do not require use of type annotations, we'll not discourage them. Enforcement is best effort, warning if an error is neither proven nor disproven. I hope to support a debuggable visualization of the typechecking process, and to support constraint-based heuristic analysis to isolate errors similar to [Cornell's SHErrLoc project](https://www.cs.cornell.edu/projects/SHErrLoc/).
 
-In non-interactive mode, we can print some text messages to standard error and save some logs to disk. The configuration may influence this, but we'll at least report number of skipped messages and severity. Fortunately, for most tests, it is sufficient to record enough information to replay the failed test, e.g. test name and a sequence of indices representing non-deterministic choices. Users can fire up interactive mode to view failed tests. 
+Debugging is best performed in context of interactive development. Access to replay greatly simplifies some tracing and analysis methods. The GUI view simplifies attention, visualization, and comprehension. And because everything *except* non-deterministic choice in named tests is highly reproducible (unlike runtime errors) it is no problem to fire up the IDE for interactive debugging. 
 
-For very long-running tests, saving and trawling logs might be more efficient than replay. But this can be mitigated by a checkpoint system for tests, continuing from an easily serializable state. We can heuristically choose a checkpoint leading to failure based on replay cost.
+In non-interactive mode, we'll print some messages to standard error in a relatively conventional manner. The configuration may provide some filters. Then we instead report a number of skipped messages by domain and severity. We can heuristically cache failed tests (name, checkpoint, sequence of choices) for replay in interactive mode.
 
-*Note:* In interactive mode, the IDE may disable standard error to support TUI. But the content remains available for perusal, up to some configurable quota. We'll manage persistence and such independent of interactive mode.
+*Note:* In interactive mode, the IDE may disable standard error to support TUI, and the IDE may do whatever it wants with messages.
 
 ### Live Programming
 
+Another process may 'run' interactive assembly output, watching for changes and integrating them. What can we easily do to improve this use case?
 
+- Windows:
+  - Readers open files with FILE_SHARE_DELETE. (They continue reading 'old' data.)
+  - Writer edits temporary file then calls ReplaceFile 
+    - or MoveFileEx with `MOVEFILE_REPLACE_EXISTING` 
+- Linux:
+  - Readers open file
+  - Writer edits temporary file then calls rename
 
-### Interaction
+This allows the writer to proceed without waiting on readers. We can feasibly do better with shared memory and explicit double buffering, but it will require another extraction mode. (We could use a RAM disk instead.)
 
-
-The above covers most non-interactive use of the assembler, but we'll also support an interactive mode. In interactive mode, users may edit files and we'll continuously update the result, debug outputs, etc.. We also don't close the assembler until requested, allowing for interactive debugging. (Details TBD.)
-
-
-
-
-Such messages benefit significantly from lazy evaluation. But they also assume the assembler doesn't immediately exit when the user is finished. We may need a command-line parameter for debug or IDE mode, where the assembler opens a GUI or local HTTP port.
-
+Aside from efficient and atomic updates, it is convenient if the runner can report discovered issues, e.g. that there's a problem at byte 30467, so we can trace sources and draw the user's attention. This could be supported by an HTTP POST to the IDE running in interactive mode. 
 
 ### History
 
+Deterministic functions, location-independent folders, and content-addressed remote modules all contribute to reproducibility. But we still cannot reproduce the output if we cannot reproduce the initial conditions. To improve practical reproducibility, the assembler should automatically maintain a sufficient history to reproduce prior assemblies, ideally with structure sharing and effective pruning.
 
-
-
-
-
-, though it's still evaluated 
-
-
-
-In some cases, we may be more interested in the secondary output, e.g. we could 
-
-And there are some questions on what to do with 'result', e.g. write to standard out? to file? continuously maintain as live code? unzip into a folder?
-
-
-By default, the assembler returns the binary by writing it to standard output. It also writes errors, warnings, status, etc. to standard error. Standard input might be monitored for queries in long-running computations, e.g. push 'p' to get detailed profiling info or 'g' for garbage collector metadata. But 
-
-
-
-
-We also write errors, warnings, and status to standard error. 
-
- to standard error, and perhaps monitor standard input for 
-
- close standard input. However
-
-But there are other options: we 
-
-However, writing to a stream limits our options. For example, we cannot model *Live Coding* with standard output. So, we'll also support arguments like `"-o Outfile"` to write the content to a file directly. Then, our assembler could usefully  up a 
-
-
- but streaming output limits our options. Users may instead
-, but users may redirect to a file or folder via `"-o Outfile"`
-
-useful status information. 
-
- However, this may be influenced by other command-line arguments. For example, `"-o Outfile"` could write to a file. And if we're writing to a file, we have additiona
-
-This binary should be fully deterministic, independent of executable version.
-
-Aside from this primary behavior
-
-
-
-load a configuration, interpret an assembly based on a few command-line arguments, 
-
-. The generated binary should be deterministic, independent of executable version.
-
-
-
-
-*Note:* Efficient integration of the binary requires additional attention in contexts such as *Live Coding*.
-
-
-In practice, we'll frequently want to *accelerate* expression of the binary result. For example, instead of directly representing the binary list, we could express a binary as an effectful operation that yields `(Write Binary)` any number of times before returning.  
-
-By default, that binary is written to standard output, but the assembler provides additional command-line arguments to manage output; see *Assembler Output*.
-
-guide or integrate output, e.g. `"-o Outfile"`.
-
-
-output may be guided by other command-line arguments, e.g. `"-o Outfile"`, and *Live Coding* is feasible.
-
-
-
-
-
-Although 'resul
-
-
-
-By default, this binary is written to standard out, but arguments such as `"-o Outfile"` may further guide *Assembly Output*.
-
-
-
-
-
-
-However, for performance reasons, we may define 'result' to 
-
-
-
-
-, or a binary generator - an effectful expression that yields `(Write Binary)` a number of times before returning an exit code.
-
-
-
-
-By default, we'll write the binary to standard output. However, there will be other arguments to guide output, e.g. `-o Outfile`. Although the result is non-interactive, the assembly system may be: depending on arguments, the assembler may even present a projectional editor and render interactive debug views while continuously updating Outfile.
-
-We can reasonably extend assemblies to define *folders* of outputs. Although we can indirectly model this via tarball or zipfile, efficient live coding would be complicated by the intermediate binary representation. To avoid complicating sem
-
-
-
-
-Even if we want more imports, it might be more convenient to model them via macros within a file or script that act based on Args.  
-
-Command-line macros may favor a short script (referencing the configured environment or a specialized file extension) that performs imports or includes based on arguments. So, 
-
-while sophisticated use is left to command-line macros (see *Configuration*). Though, command-line macros may favor expressing behavior in the arguments, returning a script that integrates modules based on arguments.
-
-The goal of the assembly module is (almost always) to specify a binary.
-
-I propose to express this as defining 'result' to either a binary value or an effectful expression that yields `(Write Binary)` a number of times before returning an exit code. For streaming binary output, the latter should be easier to manage. (Laziness can be finicky.)
-
- The user may redirect it. However, there will be other command-line arguments to adjust this behavior, e.g. `"-o OutFile"`. The assembler can feasibly support projectional editing, debugging, and live coding, e.g. updating OutFile when there are no obvious errors.
-
-
-*Note:* Essentially, an assembly combines properties of functions, objects, and modules: functions that receive 'env' and 'args' and return 'result'; objects subject to override and extension; modules supporting integration of multiple sources. Relevantly, we can import based on 'args'
-
-
-### History
-
-Pure lambdas, location-independent folders, and content-addressed remotes each simplify reproduction. However, flexible composition of multiple files is a confounding factor, as is support for arguments. Actual reproducibility requires reconstructing initial conditions. Doing so is difficult when those initial conditions are long forgotten or scattered across someone else's filesystem.
-
-Actual reproducibility requires maintaining a history by default. This has a cost, but we can do a lot to mitigate it.
-
-
-
-We can support users in maintaining the history, but 
-
-
-Further, this history would involve recording the necessary elements such as files and folders, and the redirects. 
-
-. We can ignore content-addressed remotes and just focus on the local files. When we first encounter a file, we might need to copy it, but subsequent operations may patch the file. 
-
-
-content-addressed remotes
-
- Moreover, a history that is easy to query, extract from, and share.
-
-
-The assembler could record its operations, building a 'history'. 
-
-
-
-The assembler can support reproducibility by recording and compressing the necessary elements, on the premise that most assembly operations are repeats with slightly different arguments or files. We could copy files and folders
-
-
-, and also compression things. We don't necessarily need to 
-
- However, in the general case, such records would be very expensive - copying files and folders, revisions and patches. It's very convenient if local files are also under DVCS *and* are recently committed. Then we need only need to record the current revision and the backup URLs.
-
-It should be possible to maintain a history if we insist that the patches and copies are small enough. We don't need to copy files and folders repeatedly, just on the first use. 
-
-e.g. one folder per entry, doing the necessary copies and patches and such. But we'd need to configure 
-
-A viable approach is for the assembler to maintain some configurable amount of history, with a configurable size-per-entry. We can warn users if a history entry would be too large.
-
-
-
- However, reproducibility still relies on ability to reconstruct initial conditions. The ability for `GLAM_CONF` and the assembler CLI to reference multiple files scattered across a filesystem is a confounding factor.
-
+In practice, this may require copying local files and maintaining a local DVCS repo to represent the history. Though, we'll also need a little attention on merging history for concurrent assembler processes. (I wonder if darcs would be a good fit here.)
 
 ## User-Defined Syntax
 
-User-defined syntax is a convenient approach to external DSLs and metaprogramming, and naturally extends to graphical programming. 
+User-defined syntax is a convenient approach to external DSLs and metaprogramming, and provides an opportunity for graphical programming.
 
 When loading a module, a front-end compiler is selected from the provided environment based on file extension, i.e. `Base.env.lang.[FileExt]` should evaluate to a language object that defines 'compile'. This is also the case for "g" files, but in that special case the assembler provides a built-in as a fallback. The only file that must be "g" is the user configuration.
 
@@ -504,6 +362,8 @@ Some design thoughts:
 - It is useful to support multi-pass parses. For example, a first pass might delimit the 'region' for another pass. Even if we drop the first pass result, this can be very useful for error isolation. 
 - Aside from source locations, the front-end compiler should be able to inject additional annotations on abstract nodes to support validation, visualization, editable projections, indexing, etc.. 
 - Using gensym, we can generate a unique abstract data type for the applicative per file. This is useful to control staging, i.e. it is useless to hold onto the abstract data.
+- Users should never directly see module Base or Self, and we should restrict module-level names to strings.
+  - Might also restrict object-level names to symbols.
 
 Expressing a compiler without being able to 'see' the binary seems possible in theory, but I'm not entirely convinced that we won't reintroduce the tracing problem via Eval. To gain confidence, I must try it first with the standard syntax. After all, we should be able to override and extend the standard syntax, too. Worst case, I'm back to the conventional approach.
 
@@ -570,12 +430,16 @@ For anonymous assertions, logging, embedded type annotations, etc. we might refe
 Tests can be expressed monadically with simple, useful effects:
 
 - Choice. Non-deterministic choice will support selecting test parameters, simulating race conditions, fuzz testing, etc.. We can choose from a list (discrete), or choose a rational number within given bounds (continuous). Choosing from an empty list will cancel a test.
-- Status. A description of test parameters, intermediate states, and outcomes. Test status should contain data that we might be interested in displaying as points within a graph. We can potentially animate tests by rendering evolving status.
+- Status. A serializable description of test parameters, summary of intermediate states, and outcomes. Test status should contain data that we might be interested in displaying within a graph. 
+  - It should be feasible to animate tests by rendering evolving status, forking on choice. Like starting with a single car on a racetrack, cloning on each decision, then rendering many crashes.
+  - The IDE should support user interaction to trim some branches, expand on others, to aid comprehension.
 - Log. A record of remarkable events during a test. Remarkable in the sense that logging is literally remarking on them.
 
-Tests may return pass, fail, indeterminate, or checkpoint. On checkpoint, the test is restarted with its current status. Status must be serializable (no functions, objects, or symbols). This is intended for long-running tests, enabling a failed test to be recorded for replay nearer to the failure. 
+Tests may return pass, fail, indeterminate, or checkpoint. On checkpoint, the test is directly restarted with its current status, thus externalizing a test loop. This enables us to record a long-running failed test nearer to the point of failure.
 
 A test runner is relatively easy to implement. But good heuristics for non-deterministic choice, focusing on branch coverage and edge conditions, are difficult. The assembler may use some simplistic heuristics to start, forcing developers be more cautious about presenting efficient choices.
+
+*Note:* We cannot afford non-deterministic choice for anonymous assertions because there is no effective way to replay them. Assertions will be simple, deterministic.
 
 ### Constraints
 
