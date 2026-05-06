@@ -39,7 +39,7 @@ Some existing languages align with some of my desiderata. For example, F\* or Va
 
 I propose to build upon a pure, untyped lambda calculus with lazy evaluation, extended with annotations and module-level gensym. I do not believe untyped lambda calculus or lazy evaluation require introduction. We model data, effects, and OO-style inheritance upon this foundation:
 
-- Data is *logically* Church or Scott encoded. Actual encoding is accelerated.
+- Data is *logically* Church or Scott encoded. Underlying representations are accelerated.
 - Monadic effects, via [Free-er Monads, More Extensible Effects](https://okmij.org/ftp/Haskell/extensible/more.pdf).
 - Inheritance, adapting [Prototypes: Object-Orientation, Functionally](http://fare.tunes.org/files/cs/poof.pdf).
 
@@ -47,72 +47,89 @@ Users never touch the raw lambdas. Instead, we Scott encode a tagged union to di
 
 The extensions are more structural than semantic:
 
-Annotations are essentially structured comments to support tooling. Use cases include logging, profiling, visualization, type checking, testing, tracing, acceleration, and memoization. But annotations must not be observable *within* the assembly.
+Annotations are structured comments to support tooling. Use cases include logging, profiling, visualization, type checking, testing, tracing, acceleration, and memoization. For extensibility reasons, annotations are aligned with namespaces instead of terms, i.e. we annotate names within modules or objects.
 
-Symbols are abstract data with equality checks. Unique symbols are useful for data abstraction, access control, and conflict avoidance. However, pure functions cannot locally construct globally-unique values. To mitigate this, the module system serves as a source of uniqueness: during import, modules may generate unique symbols.
+Symbols are abstract data with equality checks. Guaranteed-unique symbols are useful for data abstraction, access control, and conflict avoidance. However, pure functions cannot locally construct globally-unique values. To mitigate this, we borrow uniqueness from the module system: modules may declare unique symbols aligned with transitive dependency structure.
 
 ## Performance
 
 Performance of lambda calculus is mediocre by default, and bignum arithmetic certainly won't help. But performance can be significantly enhanced with guidance from annotations. This becomes relevant in context of intensive testing or metaprogramming. The most relevant patterns:
 
-* *Acceleration*: An annotation requests that a user-defined function is substituted by a specified built-in. The assembler performs ad hoc verification then replaces the function or emits a warning. Although we can accelerate individual functions such as matrix multiplication, the more general solution is to develop memory-safe DSLs that easily compile to CPU or GPGPU, then accelerate interpreters for those DSLs.
+* *Acceleration*: Annotate a user-defined function to be substituted by a built-in. We can accelerate matrix arithmetic or interpretation of memory-safe DSLs for programming a CPU or GPGPU.
 
-* *Parallelism*: An annotation indicates that a lazy thunk will be needed later. The assembler adds the thunk to a queue to be processed by a background worker thread. Depending on configuration, this can be extended to remote workers. (This pattern is called 'sparks' in Haskell.)
+* *Parallelism*: Annotate that a lazy thunk will be needed later, but evaluate in a background worker thread. Depending on configuration, this may extend to remote workers. Called 'sparks' in Haskell.
+  - We can also obtain parallelism from acceleration, e.g. SIMD.
 
-* *Caching*: An annotation suggests specific functions should be memoized to avoid rework. The annotation may provide further guidance on mechanism: persistent or ephemeral, cache size and replacement policy, coarse-grained lookup table versus fine-grained decision-tree traces. Depending on configuration, and leveraging PKI signatures and certificates, it is feasible to share remote cache with a trusted community.
+* *Caching*: Annotate that a function is memoized to avoid rework. We can feasibly support both ephemeral and persistent memoization. Depending on configuration, we can feasibly share persistent memoization with a community.
 
-Aside from these patterns, it is feasible to support annotation-guided just-in-time compilation of functions. Although, assembler functions are only used at assembly-time, this could offer significant performance benefits for testing. But probably not worth pursuing before bootstrapping the assembler.
+Aside from these patterns, it is feasible to support just-in-time compilation of functions, and annotation-guided optimization thereof. But I won't pursue that until post-bootstrap.
 
 ## Data
 
-The basic data types are numbers, lists, symbols, dicts, and functions. Data is immutable, i.e. to 'update' a dictionary returns a new dictionary with the update applied. This can be efficient due to structure sharing and clever encodings under the hood.
+The basic data types are numbers, lists, symbols, dicts, and functions. Symbols and functions are opaque, i.e. the underlying representation cannot be directly observed. Data is immutable, e.g. to 'update' a dictionary returns a new dictionary with the update applied. This can be efficient due to structure sharing and clever encodings under the hood.
 
 - Numbers include bignum integers and rationals, without implicit overflows or loss of precision. Exact arithmetic becomes intractable within a loop, and users may need to round numbers. (For high-performance number crunching, we'll rely on *acceleration*.)
 - Lists are used for all sequential structures. Large lists are represented by finger-tree ropes under the hood to efficiently support most operations. Binaries are lists of small integers (0..255) and optimized very heavily.
-- Symbols are abstract data that support only equality comparisons. Symbols can be constructed in two ways: modules may define guaranteed-unique symbols when imported, and composition of data *excluding* functions may be abstracted as a symbol.
+- Symbols are abstract data that support only equality comparisons. Symbols can be constructed in two ways: Modules may define unique, unforgeable symbols statically upon import. Any data supporting equality can be converted to a symbol.
+  - A useful pattern is to declare shared symbols from URLs, e.g. `true = symbol("glam-lang.org/2026/boolean/true")`.
+  - Underlying representation for a symbol may be 'interned' for efficient equality comparison.
 - Dictionaries are finite key-value lookups where the keys are transitively composed of basic data. Tagged unions are modeled as singleton dictionaries. Dictionaries do not support iteration over keys containing symbols, a simple basis for data abstraction.
-- Functions are, essentially, dynamically computed key-value lookups. Some computations may diverge. We cannot observe whether two functions are equal, but we can assert they are (via annotation).
+- Functions are, essentially, dynamically computed key-value lookups. Some computations may diverge. We cannot observe whether two functions are equal, but we can assert they are equal (via annotation).
 
 User-defined data types will mostly be modeled as tagged unions with declared unique symbols. By hiding the symbol, this effectively serves an abstract data type, enabling the module to control construction and observation.
 
+*Note:* Tentatively, we might support abstract *Objects* as a distinct abstraction from functions, especially with multiple inheritance. 
+
 ## Objects
 
-Pure functions can model stateless objects in terms of open recursion via latent fixpoint. A basic object model with mixin composition is `Dict -> Dict -> Dict` in roles `Base -> Self -> Instance`. Here, 'Base' represents the mixin target or host environment, and 'Self' the future fixpoint.
+Pure functions can model stateless objects in terms of open recursion via latent fixpoint. A basic object model with mixin composition is `Dict -> Dict -> Dict` in roles `Base -> Self -> Instance`. Here, 'Base' is a parent class, initially empty, and 'Self' is a future fixpoint.
 
         mix child parent = λbase. λself.
-           (child (parent base self) self)
-        fix f = let x = f x in x        -- lazy fixpoint
-        new spec env = fix (spec env)
+           let base' = parent base self in
+           child base' self
+        fix f = -- lazy fixpoint
+            let x = f x in x        
+        new obj = fix (obj Dict.empty) 
 
 Most observations on Base or Self prior to instantiation either diverge on fixpoint or compromise extensibility. Although fixpoint divergence is easy to detect and debug, an opportunity cost to extensibility is invisible and awkward to explain. So, it's best to design a syntax for constructing objects that avoids the pitfalls.
 
 A use case for objects is extensibility in context of mutually recursive definitions. For example, a stateless object may model a grammar. Methods, as dict values, may represent parser combinators for different cases (parsing integers, for example). The ability to update (extend, disable, etc.) a parse rule without rebuilding the entire grammar is convenient when developing variations on a language.
 
+### Singleton Instantiation
+
+For stateless objects, we don't need more than one object instance. Instead of presenting a `Dict -> Dict -> Dict` function, we can directly instantiate the dictionary while preserving the mixin under a special interface. 
+
+### Multiple Inheritance
+
+We can feasibly model multiple inheritance, where an object specification inherits from several others that may share ancestors. We can apply a linearization algorithm, ensuring each shared ancestor is mixed in only once and in a consistent order. Linearization requires an identifier to distinguish whether two specifications are the same, and a representation of the inheritance list. 
+
+We can maintain the identifier and inheritance list alongside the mixin within the instance specification interface. Ideally, the specification interface is concrete, such that we can 'dynamically' define new objects.
+
+### Interfaces and Access Control
+
+We can easily support hierarchical namespaces within both modules and objects. Further, we can support indexing by an expression. Viable syntax:
+
+        [IndexExpr] = base.[IndexExpr] with { foo = ... }
+        [IndexExpr].foo = 
+        [IndexExpr]:
+          foo = 
+
+I propose to model interfaces is indexing by unique symbols, i.e. such that we use a symbol expression (evaluated at module scope, no access to 'self'). We can support 'private' or 'protected' interfaces by simply controlling access to the symbol. We can also extract the interface if we want a specific 'view' of an object.
+
 ### Explicit Override
 
-To resist accidents, it's useful to syntactically distinguish between introducing a name and overriding a name. Doesn't need to be much, e.g. `=` vs. `:=` is probably sufficient. Will figure this out when I start detailing syntax.
+To resist accidents, it's very useful to syntactically distinguish between introducing and overriding a name. We could aim for a lightweight syntax like '=' vs. ':=', or something more visible and obvious like '(override) name = ...', or just 'override' or '@override'. 
 
-### Stateful Specification
+### Effectful Specification
 
-Mixins can easily model state-like operations, e.g. increment a 'counter' in Base while capturing the prior value.
+Mixins can easily model state-like updates, treating Base as a prior State.
 
-        λBase. λSelf. Base with { 
-            myid = Base.idct, 
-            idct = 1 + Base.idct 
+        λbase. λself. Base with { 
+            v = base.next, 
+            next = 1 + base.next 
         }
 
-In this case, the final 'Self.idct' would be the number of identifiers allocated. This pattern easily extends to building tables and other structures. However, it does take some discipline to use correctly when expressed directly in lambda calculus. This could be mitigated by something like writing object definitions within a 'staged state' monad.
-
-### Extended Objects
-
-We'll use basic objects at the module scope, i.e. modules as mixins. But we'll probably want a few more features for modeling objects in the general use case. Potential extensions:
-
-* *multiple inheritance* - Wrap basic mixins with tags, inheritance lists, and linearization algorithms. Linearization algorithm asserts that mixins with the same tag are equivalent, eliminates redundancy, and ensures a consistent merge order for shared mixins. 
-  - A front-end compiler can assign a unique symbol as the default tag.
-* *lazy instantiation* - Because objects are stateless, there is no need to instantiate more than once. Alongside those inheritance lists, we may include a lazy instantiation of the object's definition.
-* *access control and interfaces* - Symbolic keys cannot be iterated. Thus, we can use symbolic keys to control access and override for subsets of methods. It is syntactically awkward to use symbols per method, but per declared interface seems feasible.
-
-Ideally, we can provide a syntactic sugar that makes extended objects convenient to work with, but enabling users to explore alternative object models and further extensions.
+This pattern is useful for generating symbols, building lists, tables, or other intermediate structures as part of specifying an object. We can feasibly generalize to monadic construction of objects (see *Effects*), even program search (via backtracking Choice). 
 
 ## Effects
 
@@ -128,18 +145,18 @@ We can easily introduce some syntactic sugar:
 
         (sugar)         (monadic ops)
         a <- op1        op1 >>= \ a ->
-        op2             op2 >>
+        op2             op2 >>= \ () ->
         op3 a           op3 a
 
 We can specialize the monadic operators for our only monad. Our untyped lambda calculus doesn't offer a direct solution to type-indexed behavior, such as typeclasses, so this is convenient:
 
-        (Yield rq k1) >>= k2 = Yield rq (k1 >>> k2)
+        (Yield rq k1) >>= k2 = Yield rq (k1 >=> k2)
         (Return a) >>= k = k a
-        k1 >>> k2 = (>>= k2) . k1
+        k1 >=> k2 = (>>= k2) . k1
 
-Effectively, '>>=' captures the continuation into 'Yield'. Unfortunately, the Kleisli composition `>>>` is left-associative, i.e. `((((k1 >>> k2) >>> k3) >>> k4) >>> k5)`. Right-associative `(k1 >>> (k2 >>> (k3 >>> (k4 >>> k5))))` performance is vastly superior. Ideally, the assembler optimizes this, e.g. by acceleration of `>>>`.
+Effectively, '>>=' captures the continuation into 'Yield'. Unfortunately, the Kleisli composition `>=>` is left-associative, i.e. `((((k1 >=> k2) >=> k3) >=> k4) >=> k5)`. Right-associative `(k1 >=> (k2 >=> (k3 >=> (k4 >=> k5))))` performance is vastly superior. Ideally, the assembler optimizes this, e.g. by acceleration of `>=>`, similar to tail-call optimization.
 
-Behavior is embodied in the runner or handler. Almost any effect can be modeled, the primary exception being race conditions. A few examples:
+Behavior is embodied in the runner or handler. Almost any effect can be modeled, the primary exception being race conditions. Not all effects are fully 'compatible'. A few examples:
 
         -- a reader monad passes an implicit environment
         runEnv e (Yield Env k) = runEnv e (k e)
@@ -152,7 +169,7 @@ Behavior is embodied in the runner or handler. Almost any effect can be modeled,
         runState s (Return r) = (r,s)
 
         -- a list monad models lazy, ordered, non-deterministic choice
-        runChoice (Yield xs k) = List.flatMap (runChoice . k) xs
+        runChoice (Yield (Choice xs) k) = List.flatMap (runChoice . k) xs
         runChoice (Return r) = List.singleton r
 
         -- delimited continuations
@@ -160,7 +177,7 @@ Behavior is embodied in the runner or handler. Almost any effect can be modeled,
         runCont (Yield (Reset op) k) = runCont op >>= runCont . k
         runCont (Return r) = r
 
-It is possible to compose some effects as a 'monad transformer' stack. In this case, we could support explicit 'Lift' or just forward any unhandled requests. Example:
+It is feasible to compose effects via stack of 'monad transformers'. We can simply pass unrecognized effects up the stack, perhaps add some scoping rules.
 
         -- environment transformer with implicit Lift
         runEnvT e (Yield Env k) = runEnvT e (k e)
@@ -170,10 +187,15 @@ It is possible to compose some effects as a 'monad transformer' stack. In this c
         -- state transformer with explicit Lift
         runStateT s (Yield Get k) = runStateT s (k s)
         runStateT _ (Yield (Put s) k) = runStateT s (k ())
-        runStateT s (Yield (Lift rq) k) = Yield rq (runStateT s . k)
-        runStateT s (Return r) = (r,s)
+        runStateT s (Yield rq k) = Yield rq (runStateT s . k)
+        runStateT s (Return r) = Return (r,s)
 
-If all effects are handled, we can add a runPure to extract the final result.
+        -- scope effects at boundary
+        runScopeT (Yield (Outer rq) k) = Yield rq (runScopeT . k)
+        runScopeT (Yield _ k) = error "unrecognized effect in scope"
+        runScopeT r@(Return _) = r
+
+Monad transformers can often be composed with a trivial runPure.
 
         runPure (Return r) = r
         runPure (Yield rq k) = error "unhandled effect in runPure"
@@ -181,15 +203,15 @@ If all effects are handled, we can add a runPure to extract the final result.
         runEnv e = runPure . runEnvT e
         runState s = runPure . runStateT s
 
-However, this doesn't generalize nicely to all effects. For example, it is difficult to preserve laziness or support backtracking with a runChoiceT. Also, it doesn't compose conveniently with 'higher order' effects, e.g. in case of runCont and runStateT, in `(Lift (Reset op))`, the 'op' does not receive access to state. A practical solution is a standard, one-size-fits-most, imperative effects API - see *Standard Effects*.
+Unfortunately, monad transformers don't play nicely with higher-order effects. For example, a `runContT . runStateT s` would not include state in the higher-order `(Shift fn)` or `(Reset op)`. In practice, the best solution is to define a general-purpose *Monolithic Effects* handler, then support extension and composition of effects aligned with dimensions other than the 'call stack'.
 
-*Note:* It is not difficult to model an IO monad with access to the filesystem, network, etc.. However, designing for runtime interaction greatly amplifies concerns about performance and safety, and complicates reproducibility and caching. In context of assembly, we use monadic effects as a convenient basis for abstraction and program composition, but ultimately the handler is 'pure'.
+*Note:* It is not difficult to model an IO monad with access to filesystem, network, etc.. We will support limited IO when scripting an IDE for interactive development. However, the assembler is not intended to be a general-purpose runtime, and I hope to minimize 'runtime' concerns for both safety and performance.
 
-### Effectful Fixpoint
+### Monadic Fixpoint
 
 Haskell has *MonadFix* and a *RecursiveDo* syntactic sugar, enabling a result to be used before it is defined. In context of assembly, this would be convenient because it enables users to reference forward to labels for branches or jumps. We might encode this as `(Yield (Fix f) k)` where `f : a -> Eff rq a`. 
 
-To evaluate a Fix request requires lazy handling of a future Return value, passing the main result back into 'f' and handling state correctly. Ultimately, 'Fix' must be passed up the handler stack and correctly handled at every step until scoped by a 'runPure' or equivalent.
+To evaluate a Fix request requires lazy handling of a future Return value, passing the main result back into 'f' and handling state correctly. Ultimately, 'Fix' must be passed up the handler stack and correctly handled at every step until closed by a 'runPure' or equivalent.
 
         runStateT s (Yield (Fix f) k) = Yield (Fix f') k' where
             f' = runStateT s . f . fst
@@ -199,61 +221,88 @@ To evaluate a Fix request requires lazy handling of a future Return value, passi
 
 Fixpoint is not compatible with all effects. But it may be feasible to restrict troublesome effects within scope of 'Fix'.
 
-### Standard Effects
+### Monolithic Effects
 
-Instead of composing custom handlers, we can provide a general-purpose handler for procedural programming then build almost everything upon it. I believe four effects are sufficient for most use cases: environment, state, continuations, and fixpoint. Environment and state cover common dataflow patterns, while continuations support flexible control flow. Fixpoint is niche but nice for assembly. A viable handler:
+Instead of custom handlers per task, I propose to develop one general-purpose handler then rely on indexed state and continuations to build a library of extensible effects. We can also support 'fixpoint' for lazy futures, and non-deterministic choice for search. 
 
-        run e s = runFixCont True . runEnvStateT e s
+A viable general-purpose handler:
 
-        -- restricts Shift in scope of Fix (modulo Reset)
-        runFixCont b (Return r) = r
-        runFixCont b (Yield rq k) = match rq with
-            Shift fn ->
-                if b then runFixCont b (fn k) else
-                error "cannot Shift in current context"
-            Reset op -> runFixCont True op >>= runFixCont b . k
-            Fix f -> runFixCont b (k (fix (runFixCont False . f)))
-            _ -> error "unhandled request in runFixCont"
-
-        -- I assume 99% of requests are Get, Set, Env.
-        -- We'll recognize and wrap Fix, Shift, Reset.
-        runEnvStateT e s (Return r) = Return (r,s)
-        runEnvStateT e s (Yield rq k) = match rq with
-            Get -> runEnvStateT e s (k s)
-            (Set s') -> runEnvStateT e s' (k ())
-            Env -> runEnvStateT e s (k e)
-            (With e' op) ->
-                runEnvStateT e' s op >>= \ (r,s') -> 
-                runEnvStateT e s' (k r)
+        run s = runChoice . runContStateT [] s
+        
+        runContStateT cc s (Yield rq k) = match rq with
+            Get -> runContStateT cc s (k s)
+            (Set s') -> runContStateT cc s' (k ())
+            (Shift ix fn) -> match cc with
+                (ix',k'):cc' ->
+                    -- pop the associated Reset frame; 'fn' may restore it
+                    if (ix == ix') then runContStateT cc' s ((fn k) >>= k') else
+                    -- otherwise, preserve Reset frame within continuation
+                    runContStateT cc' s (Yield rq (\r -> Yield (Reset ix' (k r)) k')) 
+                [] -> error "unhandled shift in scope"
+            (Reset ix op) -> runContStateT ((ix,k):cc) s op
             (Fix f) -> Yield (Fix f') k' where
-                f' = runEnvStateT e s . f . fst
-                k' (r,s') = runEnvStateT e s' (k r)
-            (Shift fn) -> Yield (Shift fn') k' where
-                fn' = runEnvStateT e s . fn
-                k' (r,s') = runEnvStateT e s' (k r)
-            (Reset op) -> Yield (Reset op') k' where
-                op' = runEnvStateT e s op
-                k' (r,s') = runEnvStateT e s' (k r)
-            (Lift rq) -> Yield rq (runEnvStateT e s . k)
-            _ -> error "unhandled request in runEnvStateT"
+                f' = runContStateT [] s . f . fst
+                k' (r,s') = runContStateT cc s' (k r)
+            _ -> Yield rq (runContStateT cc s . k)
+        runContStateT ((_,k):cc) s (Return r) = runContStateT cc s (k r)
+        runContStateT [] s (Return r) = Return (r,s)
 
-For extensibility, we can model the environment as an *Object* and environment manipulations as *mixins*. And *state* should be modeled as a *dictionary*, serving as a key-value database or heap, using symbolic keys for access control. The ".g" syntax may provide syntactic sugar that assumes these conventions.
+        runChoice (Return r) = List.singleton r
+        runChoice (Yield rq k) = List.flatMap (runChoice . k) <| match rq with
+            (Choice xs) -> xs
+            (Fix f) -> fixChoice (runChoice . f)
+
+        fixChoice f = match (fix (f . head)) with
+            [] -> []
+            (x:_) -> x : fixChoice (tail . f)
+
+Unfortunately, fixpoint and continuations are not fully compatible. We mitigate this by restricting scope of Shift under Fix. Performance will also suffer if we have too many Choices under Fix.
+
+*Note:* We can easily model heap-like, dynamically allocated arenas within state.
+
+### Transactions
+
+The 'Choice' effect externalizes decisions. Although expressive, this makes it difficult to reason locally about performance. An alternative is to implement transactions as sequential operations by explicitly capturing and restoring state. This could be expressed as `try op onPass onFail`, equivalent to `op >>= onPass` if 'op' does not fail, `onFail` otherwise. It is feasible to implement 'try' within our monolithic handler. For example:
+
+        symbol FailScope
+        try op onPass onFail = 
+            eff Get >>= \ s ->
+            eff (Reset FailScope (op >>= Return . List.singleton)) >>= \ result ->
+            match result with
+              [r] -> onPass r
+              [] -> eff (Set s) >>= \ () -> onFail
+        fail = eff (Shift FailScope (const []))
+        eff rq = Yield rq Return
+        const c _ = c
+
+This assumes there are no outputs other than return value and final state. Otherwise, we'd need additional state to manage an 'undo' stack. But this condition does hold for the monolithic handler.
+
+### Threads
+
+Threads are useful for decomposing large tasks into interactive subtasks. I don't imagine they'll see much use in assembly programming, but it is possible to model cooperative threads or coroutines via continuations and state, with locks or semaphores for coordination. It is possible to switch threads upon every Yield, but to simplify local reasoning it's best to limit context switching to specific effects like 'pause' or awaiting a semaphore. We can also model a very simple and predictable scheduler, e.g. round robin.
+
+Continuations cover the per-thread stack, but we might also want to model thread-local storage that is swapped whenever we context switch between threads. For example, thread-local storage could maintain a notion of 'frames' for RAII-style patterns. Further, there may be a use case for explicit 'atomic' sections, where a thread cannot yield to external threads, but may yield to other threads spawned within the atomic section.
+
+TODO: model cooperative threads, mutexes, semaphores, thread-local storage, frames, atomic sections.
+
+### Commutative Effects
+
+Monads easily overspecify order. In context of parallel evaluation (via sparks or acceleration), users may benefit from buffering requests or heuristic scheduling based on analyzing pending requests in cooperative threads. However, unless we eventually pursue distributed evaluation of assemblies, we probably don't need to dive into modeling queues and CRDTs.
 
 ## Modules
 
-A module is *represented by* a file, and *represents* a basic mixin object.
+A module is represented by a file, and represents a mixin object. The assembler provides a built-in front-end compiler for ".g" files, but *User-Defined Syntax* is supported, with users defining a monadic front-end compilers aligned to file extensions, and the assembler bootstrapping upon override.
 
-To simplify architecture, file dependencies are constrained: a file may reference only local files within the same folder or subfolders (no parent-relative ("../") or absolute paths), or content-addressed remote files (by DVCS revision hash and filename). It's an error to load files or subfolders twice. To simplify tooling, local files and subfolders whose names start with "." are hidden from the module system.
+To simplify architecture, file dependencies are constrained: a file may reference only local files within the same folder or subfolders (no parent-relative ("../") or absolute paths), or content-addressed remote files (by DVCS revision hash and filename). File dependencies must form a directed acyclic graph. Files and subfolders whose names start with "." are also hidden from the module system.
 
-The assembler provides a built-in front-end compiler for ".g" files. However, the module system supports *User-Defined Syntax* aligned to file extensions, detailed later. The front-end compiler constructs a basic mixin object, i.e. `Dict -> Dict -> Dict` in roles `Base -> Self -> Instance` without multiple inheritance (see *Objects*). Front-end compilers logically support unique symbol generation via *Stateful Specification* of objects.
-
-Every module-level definition is modeled as a mixin. A module is integrated by 'including' it as another mixin. But there are a few forms:
+A module is integrated by 'including' it as a mixin. Any prior definitions or inclusions effectively model prior mixins. We can translate inclusion to a dictionary defined within the host environment. Thus, we could have a few import forms:
 
 * *include Module* - bind included module's Base to host's current Base namespace, sharing Self.
-* *include Module at m* - translate inclusion to a component dictionary 'm', i.e. included module Base links to host's Base.m, and the included module's Self is linked to the host's Self.m. 
-* *import Module as m* - useful sugar: introduces 'm' with `{ "env": Self.env }` (by default), then applies 'include Module at m'.
+* *include Module at m* - apply module to override component dictionary 'm', i.e. binds Base->Base.m, Self->Self.m, 
+* *import Module as m* - introduces 'm' with `{ "env": Self.env }` (by default), then applies 'include Module at m'.
+  - This treats 'env' as an implicit, read-only environment at the module layer, supporting adaptability. Extensions to 'env' apply only to hierarchical imports.
 
-The 'include at' and 'import as' forms are useful for lazy loading and access control. In the end, there is only one 'Self' for the entire system. This simplifies deep overrides across component dictionaries, and also directly overriding the dictionaries.
+The hierarchical 'include at' and 'import as' forms simplify lazy loading. In contrast, with toplevel 'include', it is often difficult to determine which modules introduce or override a definition without loading everything. Ultimately, there is only one 'Self'. This simplifies deep overrides and extensions, analogous to mutable definitions without actual mutation.
 
 ### Configuration
 
@@ -261,24 +310,24 @@ The assembler implicitly loads a configuration module based on the `GLAM_CONF` e
 
 The configuration serves several roles:
 
-- *Assembly environment*: define 'env'. This is passed to the assembly as if importing the assembly into the configuration, e.g. `{ "env": Config.env }`. This environment can provide default target information, system includes and shared libraries, etc. for adaptation.
-- *Command-line macros*: if the first command-line argument to the assembler does not start with '-', we apply 'cli', which should be a function of type `List of String -> List of String` that returns valid arguments or empty list.
-- *Development environment*: Define a loop for '-i' interactive mode. Filter outputs to standard error if non-interactive.
-- *Resource management*: ad hoc, e.g. specify GPGPUs available for acceleration, cache locations and replacement heuristcs, history management, shared proxy compilation and cache, search locations for content-addressed remotes, tune assembler JIT or GC heuristics, control expensive tests and checks (e.g. assertions, fuzzing).
+- *Assembly environment*: define 'env' as the Base argument for assembly modules. This environment can provide default target information, system includes and shared libraries, etc. for adaptation.
+- *Command-line macros*: define a rewrite for command-line arguments. Applied if (and only if) the first command-line argument does not start with '-'. Supports extensible user experience. 
+- *Development environment*: Define 'ide' loop body for '-i' interactive mode. Define 'refl' to intercept reflection tasks defined in the configuration or assembly. Handle log messages in batch mode. These influence the user experience. 
+- *Resource management*: may specify GPGPUs available for acceleration, cache locations and replacement heuristcs, history management, shared proxy compilation and cache, alternative search locations for content-addressed remotes, tune assembler JIT or GC heuristics, quotas for testing, etc..
 
-Configurations never directly control assembler output: An assembly may ignore your configured environment and substitute its own. Command-line macros may always be written out long form. Resources influence performance and error detection but not a valid binary result.
+For flexibility, `GLAM_CONF` may list multiple files (same OS-specific separator as the `PATH` variable). These files are applied as mixins, i.e. files earlier in the list override those later, left to right. If there is need, we could further extend this to 'inline' or 'remote' files via special URLs. A motivating use cases for listing multiple files are to separate resource management, project-specific, and user-specific tuning.
 
-To support project-specific overrides or sharing of a system configuration, `GLAM_CONF` may list multiple files (same OS-specific separator as the `PATH` variable). We apply these as mixins, each file overriding those listed later.
+Other environment variables do not directly influence configuration, but may be accessible in context of reflection and may influence assembler behavior (e.g. tuning JIT or GC). For portability reasons, the user configuration should have an opportunity to reflect and intervene on any features configured through environment variables.
 
 ### Assembly
 
 The assembler receives command-line arguments that express an assembly module as a list of mixins. Though, in practice, it's usually just one file or script. Relevant arguments:
 
 - `(-f|--file) FileName` - list a file to include; first file is included last, overriding those listed later. Depending on the configured environment, assembly isn't limited to ".g" files (see *User-Defined Syntax*).
-- `(-s|--script).FileExt Text` - behaves as a remote file with the given file extension and text. Scripts cannot import local files.
+- `(-s|--script).FileExt Text` - as remote file with given extension and text. Scripts cannot import local files, hence are location-independent. 
 - `-- List Of Args` - assembler defines 'args' before including files or scripts. Default is empty list, but caller may override with elements following the '--' separator.
 
-Aside from 'args', the assembly module is implicitly parameterized by the configured 'env'. The assembly module shall define 'result', representing the assembled product, i.e. a binary or folder.
+The namespace for an assembly starts with 'args' and 'env' from command line and configuration respectively. An assembly module shall define 'result', representing the assembled product, i.e. a binary or folder.
 
 ### Remotes
 
@@ -292,21 +341,21 @@ Remote files are content-addressed, typically at DVCS scope. This might be expre
 
 The file is uniquely identified and authenticated by revision hash and filename. The repo URLs support multiple backup search locations; this list may be rewritten by the user configuration. A tag or branch name is used only as a hint for efficient download, such as: `git clone -b Branch --single-branch URL`.
 
-Syntactically, remote files are awkward. They are not concise, and maintenance of revision hashes scattered or duplicated across multiple files is a hassle. The latter can be mitigated by centralizing remotes per repo or project. Regarding concision, I'll need a presentable multi-line import syntax, separate definition of locations, or both.
+Remote files are a little awkward for syntax and maintenance. We'll need a good multi-line syntax for remote imports, and the ability to use expressions or abstract remotes into a separate index file. Perhaps we model each import as a miniature object? 
 
 *Aside:* We aren't restricted to DVCS. Viable alternatives include download of secure-hashed zipfiles, or even individual source files. But my intuition is that DVCS will offer the best development and maintenance experience for content-addressed structure.
 
 ### Access Control
 
-Idiomatically:
+It is not difficult to model 'private' module-local interfaces and export control via gensym. However, for extensibility reasons, we should avoid annotating private definitions (see *Reasoning (Integration)*). For consistency of annotations, we may prefer to elide 'private' definitions entirely.
 
-        import ... as libfoo
-        env.foo = libfoo.api if defined, else libfoo
-        bar = ... env.foo.xyzzy ...
+An alternative approach to access control involves managing definitions accessible through 'env.\*'. As a simple convention, a module representing a shared library might define a public 'api.\*', which we then integrate into the environment:
 
-Modules don't have *export control*, per se. To support intuitions for 'include', and to maximize opportunity for extension and override, there are no 'private' definitions. But we do control the 'env.\*' environment available to imports. As a simple idiom, modules may define a dictionary 'api.\*' as a public API, then distribute only public definitions where feasible.
+        import "foo.g" as libfoo
+        env.foo = libfoo.api
+        libfoo.settings.x = 42
 
-*Note:* The assembler may know of this idiom and warn whenever it discovers a module that defines an unused, public 'api'.
+Providing shared libraries through the environment is analogous to 'installing' shared libraries into a filesystem. The host controls the version of libfoo, the environment visible to libfoo, and the opportunity to override configuration options such as 'libfoo.settings.\*' that aren't part of the public API. Most clients use 'env.foo.\*' as the public API.
 
 ## Assembler
 
@@ -320,18 +369,17 @@ By default, we expect a binary result and extract to standard output. However, t
 
 - *Expectation:* data type of result
   - `--binary` (default) - result is binary 
-    - simply a list of integers in 0..255
+    - list of integers in 0..255
   - `--folder` - result models folder as dict 
     - dict keys are file and folder names
     - dict values are binaries or folders
 - *Extraction:* where to put result
   - `--stdout` (default) - write binary to standard output
     - incompatible with folders and interactive development
-  - `--discard` - extract for testing; drop the data
-    - still accessible in interactive mode, e.g. HTTP request
   - `(-o|--out) Destination` - output to named file or folder
+  - `--discard` - no output, result is ignored
 
-Machine-code mnemonics are left to libraries and syntactic sugars. Assuming accelerators and user-defined syntax, we can adapt this 'binary' assembler to many targets: ray tracing, typesetting, websites, simulations, blueprints, etc.. 
+Machine-code mnemonics are left to libraries. Assuming accelerators and user-defined syntax, we can adapt this 'binary' assembler to many targets: ray tracing, typesetting, websites, simulations, blueprints, etc..
 
 ### Interaction
 
@@ -341,45 +389,41 @@ The assembler shall support interactive mode via simple command-line switch:
 
 - `--batch` (default) - evaluate and extract result once, return
 - `(-i|--interactive)` - maintain result, configurable interface
+  - discards result by default, but compatible with `-o`
 
 To avoid cluttering command-line arguments, and to keep the executable small, the assembler asks the user configuration to define an interaction loop. The loop may observe environment variables, assembler capabilities, and assembly definitions. Thus, with a few conventions, we can specialize the loop to an assembly or task.
 
-The assembler limits external effects:
+Interaction limits effects:
 
-- *Filesystem:* only '-f' and `GLAM_CONF` files, siblings, and subfolders are visible. No parent-relative ("../") or absolute filepaths. The assembler cannot update read-only files.
-- *Network:* listen on configured ports for TCP or Unix Domain Sockets connections. Cannot initiate arbitrary connections. There may be a few specialized operations, e.g. for local DVCS folders or content-addressed remotes. 
-- *TTY*: Standard input and output as implicit network connection. Standard error disabled. Supports REPL or TUI.
-- *GUI*: No native GUI. Supports browser-based GUI and other 'remote' GUI protocols.
+- *Filesystem:* Limited to files that contribute to assembly or configuration, plus associated files under ".glam/". Respects read-only restrictions. Remote files and scripts are always treated as read-only.
+- *Network:* Cannot initiate connections. Listens on configured TCP ports or Unix Domain Sockets. May introduce specialized operations to synchronize local filesystem sources with DVCS repos.
+- *TTY*: A standard input and output stream, modeled as an implicit network connection. Standard error is disabled.
+- *Env*: access to OS environment, runtime version info, and similar features.
+- *GUI*: tentative support for native GUI. Even without this, we can support GUI via Network or TTY.
 
-The interaction loop shall be expressed as an object that primarily defines a transactional 'step' method. This step runs repeatedly, subject to transaction-loop optimizations: optimistic concurrency on non-deterministic choice, incremental computing, await relevant update after abort. Updates to the user configuration may influence future steps. Effects are abstracted: effectful operations use constructors linked via object Base. 
-
-Interactive mode runs until voluntarily halted (via effects API) or externally killed (by OS).
+The interaction loop may be expressed as a transactional 'step' method. This step runs repeatedly, subject to transaction-loop optimizations: optimistic concurrency on choice, incremental computing, await relevant update after abort. Updates to the user configuration may influence future steps. Effects are abstracted: effectful operations use constructors linked via object Base. 
 
 ### Debugging
 
-Developers support debugging via annotations, e.g. types and tests, logs and profiles, tracing and blame. Effective debugging of assembly will inevitably depend on acceleration. With acceleration of an abstract machine, it is feasible to test machine code by emulation. With an SMT solver, it is feasible to test code via abstract interpretation.
+When developing a library, it is often convenient to test entire volumes of definitions instead of just 'result' and its transitive dependencies. I propose `--test Name` that may be listed more than once. We can name entire dictionaries of definitions, such as `--test env` or `--test api`, for bulk testing. Testing includes best-effort typechecking and transitive dependencies. We'll often `--discard` the result during testing, perhaps adding `--test result`.
 
-Although we do not require use of type annotations, we'll not discourage them. Enforcement is best effort, warning if an error is neither proven nor disproven. I hope to support a debuggable visualization of the typechecking process, and to support constraint-based heuristic analysis to isolate errors similar to [Cornell's SHErrLoc project](https://www.cs.cornell.edu/projects/SHErrLoc/).
+Tests may use non-deterministic choice to support fuzzing, property checking, and flexible analysis. In batch mode, we'll rely on configurable quotas and heuristics to determine whether we've done 'enough' testing. In interactive mode, tests may run indefinitely or based on user attention. These `--test` flags then determine an initial set of tests and user focus.
 
-Debugging is best performed in context of interactive development. Access to replay greatly simplifies some tracing and analysis methods. A GUI view simplifies attention, visualization, and comprehension. And because everything *except* non-deterministic choice in named tests is highly reproducible (unlike runtime errors) it is no problem to fire up the IDE for interactive debugging. 
+In batch mode, visualizations are filtered and rendered by a configurable method, then written to standard error. In interactive mode, we can potentially support interactive visualizations with progressive disclosure, dynamic views and queries, etc.. 
 
-In non-interactive mode, we'll print some messages to standard error in a relatively conventional manner. The configuration may provide some filters. Then we instead report a number of skipped messages by domain and severity. We can heuristically cache failed tests (name, checkpoint, sequence of choices) for replay in interactive mode.
-
-*Note:* In interactive mode, the IDE may disable standard error to support TUI, and the IDE may do whatever it wants with messages.
+With effective acceleration, tests may emulate hardware for assembly targets. But external testing of an assembly doesn't easily feedback into debugging. It may be possible to trace a coredump to the associated sources. Perhaps we can extract a 'folder' that includes  generated together with the executable. See *Reasoning* for some patterns for debugging.
 
 ### Live Programming
 
 Another process may continuously "run" an assembly result, watching for changes and integrating them. In context of executable machine code, this requires non-trivial setup, or at least restrictions on the function expressed by the machine code.
 
-Although the assembler does not implement live programming directly, it should at least ensure atomic updates. That is, instead of replacing files, it first writes a temporary file then uses 'rename' in Linux or 'ReplaceFile' in Windows. Readers in Windows should then open the file in FILE_SHARE_DELETE mode.
+Although the assembler does not implement live programming directly, it should at least ensure atomic updates. That is, instead of replacing files, it first writes a temporary file then uses 'rename' in Linux or 'ReplaceFile' in Windows. Readers in Windows should open the file in FILE_SHARE_DELETE mode to avoid blocking the writer.
 
-In case the remote process accesses results through a network protocol such as HTTP, we should also make it easy to access an effective summary of version info, e.g. an aggregate hash of the contributing local files. We might use the hash in an in ETAG.
-
-*Note:* If we discover writing to disk is a latency bottleneck, we can consider extending extraction modes with shared-memory double buffering or similar features. But profile first!
+The interactive mode assembler may also provide 'result' via HTTP requests, perhaps with an ETAG based on contributing sources.
 
 ### History
 
-Deterministic functions, location-independent folders, and content-addressed remote modules all contribute to reproducibility. But we still cannot reproduce the output if we cannot reproduce the initial conditions. To improve practical reproducibility, the assembler should automatically maintain a sufficient history to reproduce prior assemblies, ideally with structure sharing and effective pruning.
+Deterministic functions, location-independent folders, and content-addressed remote modules all contribute to reproducibility. But we still cannot reproduce the output if we cannot reproduce the initial conditions. To improve practical reproducibility, the assembler should automatically maintain a sufficient history to reproduce prior assemblies, ideally with structure sharing and effective pruning. 
 
 In practice, this may require copying local files and maintaining a local DVCS repo to represent the history. Though, we'll also need a little attention on merging history for concurrent assembler processes. (I wonder if darcs would be a good fit here.)
 
@@ -425,6 +469,12 @@ Some user-defined syntax may be graphical. And even for purely textual syntax, w
 
 TBD: This is non-trivial, and I don't have a solid handle on exactly how to approach it.
 
+### Language Versioning
+
+We may update front-end compilers with new features. When these updates are not backwards compatible, we may need to switch to an older version of the compiler for processing specific files. But this is awkward for the root ".g" language. For that case, we may benefit from an explicit language version selector near the top of each file, perhaps expressed as a pragma.
+
+In practice, we can always override the front-end compiler for remote files, and we can always edit local files. So, we probably don't need the pragma. But it seems like a convention that contributes to more-robust systems development.
+
 ## Reasoning
 
 What can we feasibly implement to support developers in reasoning about the assembly process and product?
@@ -443,88 +493,306 @@ What can we feasibly implement to support developers in reasoning about the asse
 
 * *Abstract Interpretation*: Given a representation of a program (e.g. machine code) we can implement an 'interpreter' using variables instead of data. Users add their own assumptions about this interpretation, then we check for conflicts. Essentially, we can mechanically implement a type system scoped to our target. Can feasibly integrate types via 'type interpreter' functions, and tests via constraint systems.
 
-I envision use of type annotations to catch obvious errors in the assembly process, abstract interpretation as our primary means to reason about the product, and testing in a more ad hoc role. Visualization should build on tests and integrate nicely with a projectional editor.
+Ideally, we can support these mechanisms without overly complicating the assembler executable. This suggests a common mechanism that provides users the tools to implement everything else. For this role, I propose reflection.
+
+### Reflection
+
+In the general case, reflection is troublesome for local reasoning and reproducibility. Reflection can easily break abstractions and access control, observe optimizations such as caching and partial evaluation, analyze resource consumption. It is also difficult to develop a stable reflection API up front. It is much more convenient to implement whatever's easy and useful, develop adapters for portability, allow inertia and de facto standardization to carry the system.
+
+We mitigate these concerns by restricting scope of reflection to reasoning annotations, the '-i' interaction-mode loop, and other configuration options. Then, although reflection may change or even break, assembly output remains unaffected. 
+
+Use cases:
+
+- Lazy testing or typechecking may await observation of thunks.
+- Visualizations and type checks may tap actual arguments and contexts.
+- Visualize locations, where things are defined and used.
+- Compare functions for referential or structural equivalence.
+- Support ad hoc abstract interpretation, static analysis, proofs.
+- Compile a monadic interactive mode GUI to JavaScript or WASM.
+- Visualize and manage cache, acceleration, sparks, distribution.
+
+It is convenient to express reflection effectfully. This enables a reflection API to maintain local contexts, abstract over graph structures, write logs, manage checkpoints, explore non-deterministic choices, and generally align with the assembly executable.
+
+If implemented well, reflection provides a singular mechanism and foundation upon which all other reasoning tools may be built. This also reduces the amount of logic that must be embedded within the assembler executable. Of course, it is okay for an assembler version to provide a built-in typechecker or whatever via extensible reflection API.
 
 ### Integration
 
-Some extensions are non-monotonic and may 'break' prior assumptions. Ideally, the same extensions that break assumptions can repair them. Extensions are aligned with the namespace via modeling modules as mixins. Thus, we should align types, tests, contracts, visualizations, etc. with the namespace. Further, in context of lazy loading and shared environments, we'll also want to evaluate only 'relevant' reasoning.
+In context of potential non-monotonic or 'breaking' changes, reasoning annotations should be represented in the namespace, providing an opportunity to override and repair broken types, tests, visualizations, etc.. That is, we reject 'anonymous' annotations. A minimum viable foundation: the monad for user-defined syntax shall provide an abstract mechanism to activate (and deactivate) definitions by name as reflection tasks. We may extend this to hierarchical activations and deactivations for modules and objects.
 
-In context of these forces, it seems types, tests, contracts, etc. should bind to definitions. It makes sense to name individual tests or contracts for both error reporting and fine-grained overrides, and it might prove useful to name 'overlays' for types, too.
+In context of lazy loading, it is convenient to support lazy testing. To support this, I propose a reflection API that asks the runtime to await a list of thunks, proceeding only when at least one thunk in that list is forced externally.
 
-We can feasibly integrate reasoning within extended user-defined objects, not just the module layer, insofar as those objects are specified in the module layer (instead of buried within another function). Ideally, the monad for user-defined syntax supports flexible bindings while structurally guaranteeing relationships to the namespace.
+Aside from conventional reflection operations, the assembler executable should support monadic fixpoint and non-deterministic choice. Non-deterministic choice provides a simple mechanism to explore a space, whether for testing or to independently handle reflection subtasks. Ideally, we support both continuous and discrete choice, i.e. rational and integral.
 
-### Tests
+For extensibility and portability, the user configuration has an opportunity to intervene by defining its own 'refl' handler for reflection tasks. This may represent adapter, filter, or other features.
 
-Testing samples behavior under a range of conditions. In context of fuzz testing and property testing, it is convenient to blur the lines between tests and theorems, enabling the assembler to make heuristic decisions about about what to test to maximize branch coverage.
-
-Useful properties:
-
-- constraint system, derive test parameters from assumed conditions
-  - abstract simulation of environment, e.g. race conditions
-- non-deterministic choice to *sample* test parameters, environment
-  - both discrete and continuous, i.e. integers and rationals
-  - assembler may use abstract interpretation to defer choice 
-- status and state, something we can visualize and animate
-  - bind to constraint system, use temporal logic for state?
-- returns a pass/fail judgement
-
-Monadic expression of tests seems well-aligned to these goals. Perhaps we express test parameters and expectations in context of the constraint model, then sample constraints as a non-deterministic choice. An assembler can feasibly perform whole-volume tests in some cases, but with tests we don't necessarily insist on a full proof.
-
-The assembler may perform tests randomly, but is expected to perform them heuristically. Of course, early heuristics might not be very good. Users are free to favor deterministic testing in these cases. The assembler may cache tests for regression testing, may save checkpoints to simplify replay of discovered errors, and can potentially support work sharing for tests between users via shared cache.
-
-In interactive mode, it is feasible to fuzz test indefinitely. On updates, some old tests may become 'stale' based on incremental computing. It might be useful to visualize stale tests together with new ones, perhaps distinguishing by color. In non-interactive mode, we'll want configurable, heuristic quotas for how much testing to perform.
-
-### Types
-
-The underlying lambda calculus is untyped, but we can express ad hoc type annotations. I imagine type annotations will be incomplete, partial, gradual. The assembler makes a 'best effort' to either verify or contradict type annotations ahead of evaluation. If types are neither proven nor disproven, the assembler emits a warning. 
-
-There are no 'dynamic' type checks during evaluation. Although feasible, dynamic typing has unpredictable performance implications and complicates type-level debugging. That said, dynamic checks may be useful for heuristically tracing blame.
-
-Under these constraints, what types can we express?
-
-- structural data types: numbers, lists, symbols, dicts, tagged unions. We can refine common number types such as rational, integer, or natural. Dictionaries and tagged unions may be 'open' to extension with new cases.
-- user-defined nominative types: via tagged unions with guaranteed-unique symbols. Ideally, we can express GADTs and dependent types, so we can express our assumptions even when we cannot fully check them.
-- substructural types and session types are feasible within limited scopes. Modeling them in effects handlers is probably the most relevant, e.g. to model channels typed with protocols. 
-
-We cannot directly express type-indexed behavior because type inference at the annotation layer does not influence program behavior. Indirectly, we could ensure that types are aligned with observable structure, such as symbols, which can be used in dispatch. 
-
-*Note:* Type checking in context of gradual types remains vague to me. My intuition is that these should clear up a lot once we start defining a language of type descriptions.
+*Note:* A front-end compiler may introduce specialized names like 'foo/type' under-the-hood, so long as the annotation is associated with a name. These names are not interpreted by the assembler, however.
 
 ### Constraints
 
-Constraint systems are a convenient mechanism for abstract interpretation. We can feasibly accelerate constraint systems with cvc5, Z3, or other solvers. Unfortunately, the accelerator cannot observe the *solution* because it's effectively non-deterministic. But we can use the sat/unsat judgement.
+Constraint systems are a convenient mechanism for abstract interpretation. We can feasibly accelerate constraint systems with cvc5, Z3, or other solvers. In the general case, the accelerator cannot observe only the sat/unsat judgement, the solution being non-deterministic. Fortunately, we can also provide access to the constraint solver as part of the reflection API. In this context, observing a solution is permitted, which is convenient for visualization.
 
-The DSL for constraints can be adapted almost directly from SMTLIB2. For variables, we can easily use `(Var x)`, where 'x' may be any valid dictionary key. We easily can control naming conflicts via module-level gensym and local naming strategies.
+Ideally, the DSL for constraints is adapted almost directly from SMTLIB2, albeit structured. For variables, we might use `(Var x)`, where 'x' is any valid dictionary key. Users provide their own naming schemes and allocators.
 
-It is relatively convenient to build a constraint system statefully within a monad, and occasionally 'Check' for sat/unsat. We can align constraints with abstract interpretation.
+I envision building a constraint system statefully as part of building an assembled program. We could check constraints before reaching the program endpoint. In other contexts, we might check constraints as part of modeling a dependent type system.
 
 ### Visualization
 
-A relevant question is how we express visualizations. Per *integration*, visualizations must align with definitions. We can feasibly bind named visualizations to definitions, but my intuition is that we'd be better off binding visualizations indirectly to *types*. This should simplify expression, composition, inference, and reuse of visualizations. In turn, this may benefit from a notion of extensible, user-defined types.
+In context of interactive mode, every 'update' to the program will reset relevant reflection tasks. In context of rich structures, we'll inevitably want some 'view' state for progressive disclosure. It's important to maintain a relatively stable visualization and view state across updates, hence view state must be separate from reflection tasks, yet indexed in a stable manner.
 
-To visualize a function, we can visualize the arguments and results and perhaps some intermediate representations during evaluation. In case of curried arguments, we'll want to tie invocations to both call site and origins of terms or definitions site, and support browsing from either location.
+In interactive mode, the configured interaction loop controls which elements are rendered. It may receive some means to query and filter views, to duplicate them, to manage view states, etc.. In batch mode, the configuration may provide a simplified mechanism to filter and render visualizations for standard error. Ideally, logging is still relatively stable to simplify comparisons of logs.
 
-Rendering should be extensible, e.g. support both 'text' console output and SVG. Some visualizations should be interactive, e.g. so we can rotate a 3D graph or apply progressive disclosure. We might model visualizations as dictionaries or objects that define recognized interfaces for common viewers.
+If a reflection API emits multiple visualizations, it may be convenient to support integration between them, i.e. adjusting a slider impacts multiple views in scope instead of just one view. This suggests something like a global 'view' state, albeit optionally allocating a local view identifier. Ideally, the user may view state, bookmark it, reset it, etc..
 
-### (Tentative) Theorems and Proofs
+Visualization is ultimately limited to what we can access through reflection. It is feasible to support reflection within evaluation of a view, enabling a more continuous view of reflection state alongside view state. If we ultimately support projectional editing through reflection APIs, visualization could directly bridge projectional editing.
 
-We might express theorems as tests with an explicit intention for exhaustive testing. We can feasibly annotate both theorems and tests with *proofs* to cover entire ranges more efficiently. The question, then, is what would a proof look like? Perhaps some hints for how to partition constraints, and strategies to skip concrete evaluation. I'll need to review what is feasible here.
+## Assembly Monad
 
-## Assembly Programming
+It is convenient to express assembly effectfully. Relevantly, monadic expression enables us to implicitly thread extensible context as we write machine-code mnemonics or binary outputs. An extensible context is useful for both reasoning, e.g. representing abstract machine states and developer assumptions, and code generation, e.g. allocation of registers. It also simplifies composition and staging. 
 
-Instead of machine-code mnemonics being data an assembler *interprets*, I propose to model them as monadic operations that the assembler *executes* (via user-defined handler). Aside from writing machine code and maintaining abstract representations of machine state (for abstract interpretation) we may support local declarations of .text, .bss, .data, or .rodata resources. Those resources could be content-addressed, i.e. if declared many times we get the same resource each time, leveraging unique symbols in case of mutable objects.
+The assembler never sees this monad. It must already be handled in evaluation of 'result'. But most assembly code may be written effectfully, simply assuming a suitable handler.
 
-Ideally, there is no need to forward-declare labels for jumps. This implies recursive 'do' notation (or mfix) and staging to defer a computation. 
+Some features the assembly monad and the threaded context could tackle:
 
-An intriguing possibility is to support declarative allocation of structures on the data stack and heap, similar to types. We could feasibly add fields to a struct based on usage within the assembly. These 'mem types' may be explicitly declared and derived per assembly, i.e. as staged monadic operations almost independent of lambda types.
+- allocation of static memory (bss, data, rodata, text)
+- content-addressing of read-only memory (rodata, text)
+- abstract interpretations of machine 'state', e.g. types, registers in use
+- allocation of registers
+- logically tracking data stack frames, offsets, avoiding unnecessary updates
+- heap or arena allocations, tracking logical heap and allocation 'effects'
+- OS integration, e.g. tracking signaling 'effects'
 
-Ideally, the bulk of an assembly is expressed using objects to support fine-grained overrides and mixins.
-
-*Aside:* Monadic expression is generally more robust and compositional than macros, yet similarly expressive. We are able to define higher-level mneumonics that are inlined.
+This monad is user-defined, thus we have freedom to extend it and explore alternatives. However, it isn't necessarily easy to adapt existing assembly libraries to leverage these extensions. Thus, it's best to achieve some de facto standardization early. 
 
 ## Standard Syntax
 
-This section proposes an initial syntax for ".g" files. Some desiderata:
+This section proposes the initial syntax for ".g" files. We'll be limited to minor changes, so I'll take some effort to make it good.
+
+### Names and Namespaces
+
+Will use the conventional alphanumeric encodings, i.e. `[a-zA-Z0-9_]*` with a few exceptions. Dotted paths support 'deep' access into hierarchical dictionaries. Convenient access to methods in object specifications also needs some attention. We can include dictionary indices as names or within names, e.g. `[IndexExpr] = ...` or `foo.[IndexExpr]`. 
+
+The language may include some keywords, e.g. 'import' and 'include', that are not defined by the user. Language extensibility is a concern: there may be a conflict with old code when we introduce new keywords. This is mitigated by user-defined syntax, i.e. the client of a module may manage syntax used to interpret a module. It may be further mitigated by 'pragma language' declarations.
+
+We may provide access to keywords like 'scope' for a dictionary representing names in scope, or 'prior' for a dictionary representing the base module namespace and perhaps 'module' referencing the module-level 'self'. The 'scope' may include keyword definitions like 'module' and 'prior'.
+
+### Lambdas
+
+Haskell-style `\ x y z -> Expr` is adequate, though not pretty. We could treat definitions as a special syntactic case, e.g. `name x y z = ...` rewrites to `name = \ x y z -> ...`. 
+
+We can support Haskell-style `let x = Expr1 and y = Expr2 in Expr` or `Expr where x = Expr1 and y = Expr2` syntactic forms that desugar to applied lambdas. Monadic desugaring may also need some attention.
+
+### Definitions
+
+I'd prefer to avoid bulky prefixes for introducing names, such as 'define name = '. Just directly support 'name =' or 'name x y z =' for an implicit lambda. We may have special forms for specifications and other structures, e.g. `class foo(bar, baz):`, or `symbols x, y, z`, avoiding '=' in these cases.
+
+Overrides must be declared, e.g. `overrides foo, bar, baz` as a declaration.
+
+No true 'private' definitions at module scope, but we can use '`_name`' as a simple convention, Python style. Defining 'api.\*' is better for distinguishing a library's public API, intended for the shared environment.
+
+### (Tentative) Built-in Definitions
+
+We'll need a few functions to work conveniently with lists, dictionaries, etc.. Most of these might use keywords or operators. But, if necessary, we may support compiler built-in definitions. Viable approaches: 
+
+- reserve `__name` for compiler-provided definitions
+- import of compiler built-in 'modules'
+
+I think it's probably best to support both opportunities, which merely requires reserving names that start with `__`. But I'd prefer to focus on the operators and keywords route.
+
+### Operators
+
+To keep it simple, operators are all defined by the front-end compiler. That is, there is no operator override except via user-defined syntax. In context of bootstrapping, it's important to ensure any user-defined operators aren't in the bootstrap path.
+
+### Symbol Generation
+
+
+
+### Object Specifications
+
+We could use a 'class' or 'spec' keyword. I do favor 'spec' for better connotations, but 'class' would be more familiar. We can also define 'interfaces' that objects implement. It might be useful to align syntax, e.g. `[interface]`, for symbolic indices.  
+
+The names 'self' and 'base' can be implicit parameters to the class or specification, such that 'self.foo' refers to the final definition of 'foo'. Names not accessed through 'self' or 'base' refer to the module layer. We can also provide access to 'class' or 'spec' as an interface.
+
+We may need special syntax to override specification definitions, unless I can still use '=' vs. ':=' in this role. 
+
+### Embedded Texts
+
+Proposed syntax:
+
+        "inline text"
+
+        """
+        " multi-line texts may include "quotes"
+        " start of each line is "SP
+          " vertical alignment recommended
+        " each line terminated by LF
+        "   even if host file uses CR or CRLF
+        """
+
+There are no escape characters and there is no built-in formatting. Instead, users must explicitly postprocess texts, perhaps passing 'scope' to access names. This keeps it simple and flexible at the cost of being slightly more verbose.
+
+### Namespace Capture
+
+For metaprogramming-like tasks, such as formatting strings, it's convenient to capture the current namespace as a first-class value. I propose 'scope' as a simple keyword for this role, returning a dictionary. In context of shadowing, this dictionary would contain only the final, shadowed form of a name.
+
+A relevant design challenge is how 'scope' should interact with syntactic sugar for monadic fixpoint. Efficient fixpoint requires minimizing scope of fixpoint. Perhaps we mitigate this by requiring explicit forward declarations for monadic fixpoint (e.g. 'future names' or 'declare names') instead of implicit fixpoints.
+
+### Embedded Numbers
+
+All numbers are modeled as exact rationals, no hidden size or precision limits.
+
+        0
+        1
+        -42
+        1/7
+        1.234
+        1.23e-7
+
+It is also convenient to support binary (0b) or hexadecimal (0x) natural numbers. 
+
+        0x1234fedc
+        0b10010001101001111111011011100
+
+Divide by zero diverges lazily, reporting an error when forced or observed. Modeling complex numbers, vectors, matrices, etc. is left to developers. Integers and base
+
+*Note:* Exact rational numbers are not suitable for high-performance number crunching. This may be mitigated by optimizing for e.g. rationals of form `M * 2^K` (for integers M and K), using a representation analogous to floating point under the hood. But if we need good performance, we'll need acceleration to leverage SIMD or GPGPU and fixed-width numeric encodings.
+
+### Pattern Matching
+
+I'd like to support flexible pattern matching, including user-defined constructors and other patterns.
+
+
+
+### User-Defined Types
+
+I would like to support lightweight declarations of type constructors and matching patterns.
+
+
+
+
+
+
+
+
+### Numbers and Arithmetic
+
+We'll support conventional numeric representations, including scientific notations, hexadecimal, and binary. We'll also support exact rational numbers via '/'.
+
+        1.234
+        1.234e-6
+        2/3
+        0b10111
+        0xFEDCBA9876543210
+
+We may accelerate conversions to and from binaries, and we'll support basic arithmetic (e.g. +-*/). Division by 0 is a lazy error, halting the assembler when observed.
+
+*Note:* There is no notion of word size or endianness for assembler-level arithmetic.
+
+### Pattern Matching
+
+### Rejecting Operator Overloading
+
+
+
+
+
+
+### Embedded Texts and Binaries
+
+I don't like escape characters in programs. Instead, we can embed some texts then explicitly postprocess them
+
+
+
+### Pointers (Tentative)
+
+We could support 'pointers' via desugaring 
+
+### Hierarchical Names
+
+We can support 'deep' edits to names in hierarchical dictionaries.
+
+        foo.bar.baz = BodyExpr
+
+It might be convenient to support something like namespaces.
+
+        @foo.bar
+        baz = BodyExpr
+
+        [foo.bar]
+        baz = BodyExpr
+
+This does require some way to reference 'root' names. I'll also want to reference names from within objects, which should be consistent. This suggests that the rules against shadowing would apply hierarchically.
+
+### Numbers and Arithmetic
+
+### Introduce vs. Override
+
+
+
+### Design Constraints and Considerations
+
+- No shadowing. Names used within a file and scope have only one meaning.
+  - Keywords may be used as names, but cannot also be used as keywords in the same file.
+  - Names via 'include' are initially invisible. As are methods inherited by an object.
+    - We could explicitly declare such names in scope before use to make them 'visible'.
+    - Visibility may be via 'using'.
+    - May support aliasing in front-end compiler, e.g. 'using x as y', to avoid conflicts.
+  - Users must distinguish introduction vs. override of words. 
+    - no more than one override per file or object, to preserve consistent meaning.
+- No user-defined operators, modulo updating user-defined syntax.
+  - In part because user-defined operators don't align nicely with imports.
+  - In part because operator overloading is easily confusing to users.
+- Ideally, pattern matching is extensible and composable.
+  - Consider model matching monadically? I.e. match then 'Return' a result or another monadic operation. 
+  - 
+- No escape characters. I really hate how those explode. Use explicit postprocessing instead.
+- Tests, types, visualizations, etc. are bound to names.
+
+
+
+### Data Embeddings
+
+Some design constraints and desiderata:
+
+- names have one meaning in visible scope
+  - i.e. no shadowing of visible toplevel names
+  - may shadow an unused toplevel name or keyword
+  - rule allows for extensible set of keywords
+  - may need to explicitly bring included names into scope
+- distinguish intro vs. override 
+  - modules, objects, standard effects
+  - perhaps also dictionary updates
+- operators have one meaning, globally
+  - no user-defined operators modulo user-defined front-end compilers
+  - ad hoc polymorphism across types only if meaning is consistent
+  - dotted paths need some attention here, objects vs. dicts? all dicts?
+- operators for flexible function compositions
+  - pipes in either direction `|>` or `<|`
+  - monad composition operator `>>=`
+- no escape characters, e.g. no '\22' or '\"' characters in strings
+  - well, '\22' could be used, but is just 3 chars until processed
+  - user-defined postprocessing of texts instead, convenient syntax
+- convenient multi-line and programmed texts
+  - perhaps via stream writer monad, or writing a stateful buffer
+  - target buffer could be indirect, abstracted via environment 
+  - should be easy to compose writers procedurally, hierarchically
+- clear 'sections' for error isolation
+  - can separate sections without parsing content
+  - e.g. based on indentation
+- symbol generation is always via static toplevel declared names
+  - not even appearance of generating symbols within a function
+  - first-class "objects" defined in functions have explicit tags 
+- can capture module namespace (self or base) as a dictionary
+- few basic arithmetic operators.
+- limited dependency on precedence for operators.
+
+- optimize syntax for naming things instead of arithmetic
+- effective dotted path and indexed update notations
+- dictionary composition (`d1 with d2`?)
+- monadic syntactic sugar, explicit 'do'
+  - RecursiveDo by default
+  - distinguish = and <-
+  - 
+- specialized monad for writing lists, multi-line texts? Tentative. 
 
 - vertical structure, avoids 'deep' indentation
 - clear sections, i.e. for error isolation or REPL-like output
