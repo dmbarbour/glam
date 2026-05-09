@@ -311,8 +311,8 @@ The assembler implicitly loads a configuration module based on the `GLAM_CONF` e
 The configuration serves several roles:
 
 - *Assembly environment*: define 'env' as the Base argument for assembly modules. This environment can provide default target information, system includes and shared libraries, etc. for adaptation.
-- *Command-line macros*: define a rewrite for command-line arguments. Applied if (and only if) the first command-line argument does not start with '-'. Supports extensible user experience. 
-- *Development environment*: Define 'ide' loop body for '-i' interactive mode. Define 'refl' to intercept reflection tasks defined in the configuration or assembly. Handle log messages in batch mode. These influence the user experience. 
+- *Command-line macros*: define a rewrite for command-line arguments. Applied if (and only if) the first command-line argument does not start with '-'. Supports extensible CLI 'language'.
+- *Development environment*: Define the loop for interactive mode. Define an adapter for reflection tasks. Filter and rewrite log messages for standard error in batch mode. Other user-experience tuning. 
 - *Resource management*: may specify GPGPUs available for acceleration, cache locations and replacement heuristcs, history management, shared proxy compilation and cache, alternative search locations for content-addressed remotes, tune assembler JIT or GC heuristics, quotas for testing, etc..
 
 For flexibility, `GLAM_CONF` may list multiple files (same OS-specific separator as the `PATH` variable). These files are applied as mixins, i.e. files earlier in the list override those later, left to right. If there is need, we could further extend this to 'inline' or 'remote' files via special URLs. A motivating use cases for listing multiple files are to separate resource management, project-specific, and user-specific tuning.
@@ -479,61 +479,57 @@ In practice, we can always override the front-end compiler for remote files, and
 
 What can we feasibly implement to support developers in reasoning about the assembly process and product?
 
-* *Types*: We can annotate assumptions about programs and data in a composable, machine-checkable way. It is feasible to reason about an executable binary's runtime behavior insofar as it is encoded into types. We may leverage 'type interpreter' functions that compute type annotations from data or AST embeddings, similar to GADTs. In context of gradual or partial type annotations, we must assume not every term is typed, and the assembler makes a best effort to prove or disprove types.
+* *Types*: We can describe assumptions about programs and data in a composable, machine-checkable way. This is directly useful for discovering and resisting bugs in the assembly metaprogramming. It's more difficult to specify anything meaningful about the assembly output, i.e. the generated program, though clever use of dependent types, phantom types, GADTs may help.
 
-* *Tests*: We can sample subprogram behavior under various conditions. With acceleration, it is feasible to emulate execution of machine code. Tests should support heuristic, non-deterministic choice to include fuzzing and property checking and race conditions, enabling the assembler to heuristically choose tests from a vast space for maximal branch coverage. Tests should be a convenient foundation for visualization of program behavior.
+* *Tests*: We can sample subprogram behavior under various conditions. We can simulate or emulate execution of machine code. With acceleration, emulation may even perform adequately. With non-deterministic choice, it is feasible to fuzz test indefinitely, simulate race conditions, check a wide variety of conditions. Heuristic non-deterministic choice together with abstract interpretation can effectively lift tests into constraint models.
 
-* *Contracts*: Contracts might describe a monadic subprogram's preconditions, postconditions, and invariant assumptions in a locally testable way, perhaps via assertions. A relevant challenge is how to effectively use contracts in context of staged metaprogramming of an executable binary.
+* *Contracts*: We can describe a monadic subprogram's stateful preconditions, postconditions, invariant assumptions. It is feasible to check these conditions, either directly (via handler) or indirectly, by integration with a type system. This isn't especially useful for verifying correct output, but it's a simple and direct approach to verifying programmer assumptions and isolating errors.
 
-* *Theorems*: The main difference between a theorem and a test is a 'forall' or 'there exists', and the need for abstract interpretation to support the proof. In practice, we may need explicit proofs or proof-hints to efficiently verify theorems. 
+* *Proofs*: Under Curry-Howard, types can be understood as theorems, and programs as proofs. But for sophisticated types, verifying types may involve expensive searches. Ideally, we can provide some hints to reduce the verification overheads, separate from the program itself but perhaps as part of a declaration.
 
-* *Visualization*: Start with logging and profiling, extend to graphical views of tests, progressive disclosure or search, etc.. I propose to model log messages as dicts or objects implementing multiple views. Plain text is one view, but we can feasibly render icons, interactive widgets, etc..
+* *Visualization*: We can support developers in viewing the assembly process, obtaining useful feedback. This includes text logs, interactive debuggers, and graphical outputs including tests and simulations. User-defined visualizations should be possible both within an assembly and generically via user configuration of interaction mode. Bonus points if visualization integrates smoothly with editable projections of source.
 
-* *Tracing*: Maintain metadata to trace outcomes (errors, data, etc.) back to contributing sources. There's a tradeoff between precision and performance. We can feasibly leverage reproducibility by replaying a computation under a few different tracer setups to obtain more precision.
+* *Tracing*: An assembler can maintain some metadata to trace outputs back to sources. However, there's a rather severe tradeoff between precision and performance. This can be mitigated by replay with greater precision or with an intersection of different mappings. Ideally, developers may also guide tracing via annotations.
 
-* *Abstract Interpretation*: Given a representation of a program (e.g. machine code) we can implement an 'interpreter' using variables instead of data. Users add their own assumptions about this interpretation, then we check for conflicts. Essentially, we can mechanically implement a type system scoped to our target. Can feasibly integrate types via 'type interpreter' functions, and tests via constraint systems.
+* *Profiling*: Feedback about where an assembler is spending its time is useful for identifying infinite loops and improving performance of the assembly process. It won't help much with output modulo profiling of emulations.
 
-Ideally, we can support these mechanisms without overly complicating the assembler executable. This suggests a common mechanism that provides users the tools to implement everything else. For this role, I propose reflection.
+* *Abstract Interpretation*: We can interpret machine code against an abstract representation of machine state. With reflection, we can do similarly for lambdas. We can include assumptions and test for contradiction or consistency. It is feasible to integrate a constraint model to perform the actual checks.
 
 ### Reflection
 
-In the general case, reflection is troublesome for local reasoning and reproducibility. Reflection can easily break abstractions and access control, observe optimizations such as caching and partial evaluation, analyze resource consumption. It is also difficult to develop a stable reflection API up front. It is much more convenient to implement whatever's easy and useful, develop adapters for portability, allow inertia and de facto standardization to carry the system.
+The logic required for reasoning, e.g. a type-checker with effective caching, is non-trivial. I would prefer to not represent or maintain this logic within the assembler executable. A viable alternative is to represent this logic within the module system, providing a reflection API for adequate access to assembler internals. The assembly and user configuration may define a set of reflection tasks.
 
-We mitigate these concerns by restricting scope of reflection to reasoning annotations, the '-i' interaction-mode loop, and other configuration options. Then, although reflection may change or even break, assembly output remains unaffected. 
+Reflection shall be expressed effectfully, the assembler executable implementing a monadic API. This supports local context per reflection task and awaiting events. The reflection API may be unstable, version-specific, albeit subject to de facto standardization and providing standard means to query assembler version info. A user configuration may further define a task adapter for portability.
 
-Use cases:
-
-- Lazy testing or typechecking may await observation of thunks.
-- Visualizations and type checks may tap actual arguments and contexts.
-- Visualize locations, where things are defined and used.
-- Compare functions for referential or structural equivalence.
-- Support ad hoc abstract interpretation, static analysis, proofs.
-- Compile a monadic interactive mode GUI to JavaScript or WASM.
-- Visualize and manage cache, acceleration, sparks, distribution.
-
-It is convenient to express reflection effectfully. This enables a reflection API to maintain local contexts, abstract over graph structures, write logs, manage checkpoints, explore non-deterministic choices, and generally align with the assembly executable.
-
-If implemented well, reflection provides a singular mechanism and foundation upon which all other reasoning tools may be built. This also reduces the amount of logic that must be embedded within the assembler executable. Of course, it is okay for an assembler version to provide a built-in typechecker or whatever via extensible reflection API.
+Constraints for a 'good' reflection API: In context of incremental compilation, the API should be cacheable. In context of interactive programming and debugging of reasoning, the API should be regenerable (restartable, replayable). In context of large systems, the API should be safe to run concurrently. I propose to rely on CALM principles - consistency as logical monotonicity - to ensure reasonable stability.
 
 ### Integration
 
-In context of potential non-monotonic or 'breaking' changes, reasoning annotations should be represented in the namespace, providing an opportunity to override and repair broken types, tests, visualizations, etc.. That is, we reject 'anonymous' annotations. A minimum viable foundation: the monad for user-defined syntax shall provide an abstract mechanism to activate (and deactivate) definitions by name as reflection tasks. We may extend this to hierarchical activations and deactivations for modules and objects.
+In context of breaking changes under overrides, we should also repair reasoning via overrides. Thus, reflection tasks should align with the namespace. It is not difficult to annotate a namespace. For example, we could recognize `type.name = TypeDesc` as representing the type of 'name'. To keep it simple, an assembler recognizes only reflection tasks, but reflection tasks may recognize user-defined conventions.
 
-In context of lazy loading, it is convenient to support lazy testing. To support this, I propose a reflection API that asks the runtime to await a list of thunks, proceeding only when at least one thunk in that list is forced externally.
+In context of lazy loading, we need lazy reflection. I propose to separate this as `refl.name = Trigger` and `name = Task`. By defining 'refl.name', we annotate associated 'name', declaring it to represent a reflection task. The separation also aligns nicely with hierarchical namespaces. Proposed initial triggers:
 
-Aside from conventional reflection operations, the assembler executable should support monadic fixpoint and non-deterministic choice. Non-deterministic choice provides a simple mechanism to explore a space, whether for testing or to independently handle reflection subtasks. Ideally, we support both continuous and discrete choice, i.e. rational and integral.
+- `Once (List of Name)` - trigger once if at least one name in the list is used. If the list is empty, trigger once when the module is loaded. Suitable for context-free tests, type checking, static assertions, etc..
+- `Used Name` - trigger where a name is used. Provides access to context of use, e.g. continuations and function arguments. Effective for expressing dynamic assertions or contracts, visualizing actual usage, profiling.
+- `Hierarchical` - expect 'name' to be a dictionary. Look for 'refl.\*' within that namespace when used. For hierarchical namespaces and object specifications.
 
-For extensibility and portability, the user configuration has an opportunity to intervene by defining its own 'refl' handler for reflection tasks. This may represent adapter, filter, or other features.
-
-*Note:* A front-end compiler may introduce specialized names like 'foo/type' under-the-hood, so long as the annotation is associated with a name. These names are not interpreted by the assembler, however.
+Triggers bind names, not underlying definitions or thunks. Thus, users can further control reflection via aliasing.
 
 ### Constraints
 
-Constraint systems are a convenient mechanism for abstract interpretation. We can feasibly accelerate constraint systems with cvc5, Z3, or other solvers. In the general case, the accelerator cannot observe only the sat/unsat judgement, the solution being non-deterministic. Fortunately, we can also provide access to the constraint solver as part of the reflection API. In this context, observing a solution is permitted, which is convenient for visualization.
+Constraint systems are a convenient mechanism for abstract interpretation. 
 
-Ideally, the DSL for constraints is adapted almost directly from SMTLIB2, albeit structured. For variables, we might use `(Var x)`, where 'x' is any valid dictionary key. Users provide their own naming schemes and allocators.
+We can feasibly accelerate sat/unsat judgements for constraint systems via cvc5, Z3, or other solvers. The DSL for constraints can be adapted from SMTLIB2. For variables, we might use `(Var x)`, where 'x' is any valid dictionary key, enabling users to develop their own naming schemas.
 
-I envision building a constraint system statefully as part of building an assembled program. We could check constraints before reaching the program endpoint. In other contexts, we might check constraints as part of modeling a dependent type system.
+But an accelerator cannot observe the discovered solution or unsatisfiable kernel. Those are effectively non-deterministic. Only the sat/unsat judgement is observable. A reflection API is less limited, capable of returning the discovered solution and other details, and even reporting which solver was used and how long it took.
+
+I envision building a constraint system statefully as part of building an assembled program. This could then be checked through reflection, or via acceleration depending on whether the judgement influences output or just pass/fail. 
+
+### Non-deterministic Choice
+
+We can easily provide APIs for the assembler to choose an integer (discrete) or rational (continuous). With attention to how these results are used in a test, this can provide a basis for heuristic search and fuzz testing. However, it is difficult to decide how much effort to spend exploring different branches, e.g. do we evaluate only once in batch mode? Up to a quota?
+
+In any case, it won't hurt much to add non-deterministic choice. Users can still write deterministic tests if they want..
 
 ### Visualization
 
@@ -543,7 +539,7 @@ In interactive mode, the configured interaction loop controls which elements are
 
 If a reflection API emits multiple visualizations, it may be convenient to support integration between them, i.e. adjusting a slider impacts multiple views in scope instead of just one view. This suggests something like a global 'view' state, albeit optionally allocating a local view identifier. Ideally, the user may view state, bookmark it, reset it, etc..
 
-Visualization is ultimately limited to what we can access through reflection. It is feasible to support reflection within evaluation of a view, enabling a more continuous view of reflection state alongside view state. If we ultimately support projectional editing through reflection APIs, visualization could directly bridge projectional editing.
+*Note:* Although reflection APIs should not directly be editing sources, a user-interactive visualization model may provide the additional capabilities to perform edits, bridging projectional editing.
 
 ## Assembly Monad
 
