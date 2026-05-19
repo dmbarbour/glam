@@ -154,39 +154,24 @@ Behavior is embodied in the runner or handler. Almost any effect can be modeled,
         runCont (Yield (Reset op) k) = runCont op >>= runCont . k
         runCont (Return r) = r
 
-It is feasible to compose effects via stack of 'monad transformers'. We can simply pass unrecognized effects up the stack, perhaps add some scoping rules.
+It feasible to compose some effects via stack of 'monad transformers'. We can implicitly pass unrecognized effects up the stack. Alternatively, we could require explicit Lift requests.
 
-        -- environment transformer with implicit Lift
+        -- environment transformer 
         runEnvT e (Yield Env k) = runEnvT e (k e)
         runEnvT e (Yield rq k) = Yield rq (runEnvT e . k)
         runEnvT _ r@(Return _) = r
 
-        -- state transformer with explicit Lift
+        -- state transformer 
         runStateT s (Yield Get k) = runStateT s (k s)
         runStateT _ (Yield (Put s) k) = runStateT s (k ())
         runStateT s (Yield rq k) = Yield rq (runStateT s . k)
         runStateT s (Return r) = Return (r,s)
 
-        -- scope effects at boundary
-        runScopeT (Yield (Outer rq) k) = Yield rq (runScopeT . k)
-        runScopeT (Yield _ k) = error "unrecognized effect in scope"
-        runScopeT r@(Return _) = r
-
-Monad transformers can often be composed with a trivial runPure.
-
-        runPure (Return r) = r
-        runPure (Yield rq k) = error "unhandled effect in runPure"
-
-        runEnv e = runPure . runEnvT e
-        runState s = runPure . runStateT s
-
-Unfortunately, monad transformers don't play nicely with higher-order effects. For example, a `runContT . runStateT s` would not include state in the higher-order `(Shift fn)` or `(Reset op)`. In practice, the best solution is to define a general-purpose *Monolithic Effects* handler, then support extension and composition of effects aligned with dimensions other than the 'call stack'.
-
-*Note:* It is not difficult to model an IO monad with access to filesystem, network, etc.. We will support limited IO when scripting an IDE for interactive development. However, the assembler is not intended to be a general-purpose runtime, and I hope to minimize 'runtime' concerns for both safety and performance.
+Unfortunately, monad transformers don't extend nicely to higher-order effects, i.e. where a request includes effectful operations. For example, if 'runStateT' encounters a `(Spawn threadOp)` request, state would not be accessible by threadOp. In practice, higher-order effects encourage a single, monolithic handler.
 
 ### Monadic Fixpoint
 
-Haskell has *MonadFix* and a *RecursiveDo* syntactic sugar, enabling a result to be used before it is defined. In context of assembly, this would be convenient because it enables users to reference forward to labels for branches or jumps. We might encode this as `(Yield (Fix f) k)` where `f : a -> Eff rq a`. 
+Haskell has *MonadFix* and a *RecursiveDo* syntactic sugar, enabling a result to be used before it is defined. In context of assembly, this would be convenient because it enables users to reference forward to labels for branches or jumps. We might encode this as `(Yield (Fix f) k)` where `f : a -> Eff rq a`.
 
 To evaluate a Fix request requires lazy handling of a future Return value, passing the main result back into 'f' and handling state correctly. Ultimately, 'Fix' must be passed up the handler stack and correctly handled at every step until closed by a 'runPure' or equivalent.
 
@@ -196,59 +181,83 @@ To evaluate a Fix request requires lazy handling of a future Return value, passi
 
         runPure (Yield (Fix f) k) = runPure (k (fix (runPure . f)))
 
-Fixpoint is not compatible with all effects. But it may be feasible to restrict troublesome effects within scope of 'Fix'.
-
-### Monolithic Effects
-
-Instead of custom handlers per task, I propose to develop one general-purpose handler then rely on indexed state and continuations to build a library of extensible effects. We can include 'fixpoint' for lazy futures, and non-deterministic choice for search. A viable general-purpose handler:
-
-        run s = runChoice . runContStateT [] s
-        
-        runContStateT cc s (Yield rq k) = match rq with
-            Get -> runContStateT cc s (k s)
-            (Set s') -> runContStateT cc s' (k ())
-            (Shift ix fn) -> match cc with
-                (ix',k'):cc' ->
-                    -- pop a matched Reset frame, 'fn' may restore it
-                    if (ix == ix') then runContStateT cc' s ((fn k) >>= k') else
-                    -- otherwise, rebuild Reset stack in continuation
-                    runContStateT cc' s (Yield rq (\r -> Yield (Reset ix' (k r)) k')) 
-                [] -> error "unhandled shift in scope"
-            (Reset ix op) -> runContStateT ((ix,k):cc) s op
-            (Fix f) -> Yield (Fix f') k' where
-                f' = runContStateT [] s . f . fst
-                k' (r,s') = runContStateT cc s' (k r)
-            _ -> Yield rq (runContStateT cc s . k)
-        runContStateT ((_,k):cc) s (Return r) = runContStateT cc s (k r)
-        runContStateT [] s (Return r) = Return (r,s)
-
-        runChoice (Return r) = List.singleton r
-        runChoice (Yield rq k) = List.flatMap (runChoice . k) <| match rq with
-            (Choice xs) -> xs
-            (Fix f) -> fixChoice (runChoice . f)
-
-        fixChoice f = match (fix (f . head)) with
-            [] -> []
-            (x:_) -> x : fixChoice (tail . f)
-
-Fixpoint and continuations are not fully compatible. We mitigate this by having Fix serve as an absolute boundary for Shift, i.e. you cannot Shift within Fix without a local Reset. Performance will suffer if we have too many Choices under Fix.
-
-It is feasible to model cooperative threads with a shared heap, mutexes and semaphores, and other conventional imperative features in terms of delimited continuations for threads and 'context switching' a hierarchical volume of state for the current thread. But I wouldn't recommend it in general. In practice, it's much simpler to reason about outcomes of single-threaded assembly, and to parallelize subcomputations in terms of lazy sparks instead of threads.
+Fixpoint is not compatible with all effects. But it is feasible to restrict some effects ins scope of 'Fix'.
 
 ### Effectful Pattern Matching
 
-Desugaring pattern matching to a Choice effect is a good fit: 
+I propose to desugar syntax for conditional behavior, such as pattern matching, into a choice effect. The choice effect supports deferred branching for cases sharing a common prefix, and empty choice expresses match failure or backtracking. A conventional `Pattern -> Outcome` syntax may desugar to `PatternEffect >>= \ vars -> Return Outcome` such that Pattern binds variables in scope of Outcome, and Return serves as a stage separator for further effects. The pattern syntax may also support `Pattern >> Return Outcome` as an intermediate stage, allowing for factoring multiple outcomes with a shared pattern prefix.
 
-- Final Return value is the match result.
-- The empty choice becomes match failure.
-- Branching corresponds to match cases.
-- Defer branching to share work prefixes.
+We should carefully distinguish global non-deterministic choice from local pattern branching. They have distinct intentions, connotations, use cases. With patterns, we predictably 'commit' to the first match, and choice is scoped syntactically. Fortunately, we don't need fully indexed choice because pattern matching is hierarchically structured. It seems adequate to support global 'Choice' and local 'Branch' as distinct constructors.
 
-In most programming languages, pattern matching resists refactoring. By explicitly modeling pattern matching as a choice effect, it is not difficult to integrate both Haskell-like view patterns and refactoring of entire volumes of `Pattern -> Outcome` pairs. Further, this provides an opportunity to integrate other effects, e.g. parser combinators are patterns that manage implicit state, or we could use effectful patterns with backtracking failure for conditionals or while loops, or effectively support while-case loops.
+An intriguing opportunity is to mix choice with other effects. For example, a pattern reads from a queue and matches only some read values. Ideally, such operations are reverted when the match fails, implicitly checkpointing state. Generic integration is feasible by introducing a `(Cond branchOps)` effect as a delimiter for the choice effect and backtracking.
 
-Purely functional pattern matching, like Haskell's 'match', can be implemented generically in terms of runChoice. Effectful choice requires more specialized integration, e.g. to capture and revert state. This can be mitigated by introducing an 'effect' for committed first choice, pushing integration of decision making to the handler. In practice, we should have clearly distinct syntax for effectful vs. pure pattern matching. Perhaps 'if try PatternOp then ...' or similar. 
+        -- a pure pattern matching handler
+        runBranch (Yield rq k) = match rq with
+            (Branch xs) -> List.flatMap (runBranch . k) xs
+            (Cond op) -> runBranch (k (runCond op))
+            (Fix f) -> runBranch (k (fixListFn (runBranch . f)))
+            _ -> error "unrecognized effect in pure runBranch"
+        runBranch (Return r) = [r]
 
-We should distinguish external non-deterministic choice from local pattern-matching first-choice. They represent different intentions and connotations. To keep it simple, I propose replacing 'Choice' with 'Try' to indicate local patterns.
+        runCond = head . runBranch
+
+        fixListFn f = match (fix (f . head)) with
+            x:_ -> x:(fixListFn (tail . f))
+            [] -> []
+
+We can use 'runCond' as our evaluator for pure pattern matching. But we'll need something more specialized for stateful effects within patterns. 
+
+*Aside:* It is feasible to further extend choice with search. By introducing effects to manage anticipated 'score' for a choice, a handler can heuristically reduce priority of a choice before fully computing it. 
+
+### Monolithic Extensible Effects
+
+The monad transformer stack does not extend nicely with higher-order effects such as 'Fix' or 'Cond'. They also have significant performance overhead based on stack depth. A viable alternative is a monolithic handler with extensible data and control flow via indexed state and delimited continuations. Developers then build effects upon this foundation. A viable handler:
+
+        run s = runChoice . runCST s
+
+        -- a continuations and state transformer
+        runCST s (Yield rq k) = match rq with
+            Get -> runCST s (k s)
+            (Set s') -> runCST s' (k [])
+            (Reset ix op) -> runCST s' op where
+                s' = s with { [CC] = ((ix,k):(s.[CC])) }
+            (Shift ix fn) -> match s.[CC] with
+                (ix',k'):cc' -> -- note: 'Shift' pops 'Reset'. 'fn' may add it again.
+                    let s' = s with { [CC] = cc' }
+                    if (ix == ix') then runCST s' ((fn k) >>= k') else
+                    runCST s' (Yield rq (\r -> Yield (Reset ix' (k r)) k'))
+                [] -> error "shift index not in scope"
+            (Cond op) -> runCST s ((onCond op) >>= k)
+            (Branch xs) -> runCST s ((onBranch xs) >>= k)
+            (Fix f) -> Yield (Fix f') k' where
+                cc = s.[CC]
+                f' ~(r',_) = runCST (s with { [CC] = [] }) (f r')
+                k' (r',s') = runCST (s' with { [CC] = cc }) (k r')
+            _ -> Yield rq (runStateT s . k)
+        runCST s (Return r) = match s.[CC] with
+            ((_,k):cc') -> runCST (s with { [CC] = cc' }) (k r)
+            [] -> Return (r,s)
+
+        -- wrappers for transactional, effectful pattern matching
+        -- we can support pure pattern matching even without this
+        onCond op = TBD -- commit to one branch (i.e. first match)
+        onBranch xs = TBD -- split or fail current branch
+
+        -- models non-deterministic choice
+        runChoice (Return r) = [r]
+        runChoice (Yield rq k) = List.flatMap (runChoice . k) <| match rq with
+            (Choice xs) -> xs
+            (Fix f) -> fixListFn (runChoice . f)
+
+Unfortunately, fixpoint and continuations are not fully compatible. We mitigate this above by having Fix serve as a boundary for Shift. Nonetheless, users must be careful regarding interaction between the two.
+
+### Concurrency
+
+It is feasible to model cooperative threads with a shared heap, mutexes and semaphores, in terms of continuation per thread and context switching state. However, we cannot observe race conditions (modulo reflection APIs, e.g. to observe status of lazy thunks). This hinders use of concurrency as an opportunity for parallelism. Ignoring performance, a remaining motive for concurrency is expression: decomposing large problems into interactive subtasks.
+
+Regarding context switching, it seems convenient to treat everything except a shared heap as thread-local state by default. That is, when we switch to a new thread, we migrate 's.heap' into the next thread's state. We then track other thread states within the heap. Relevantly, this would support thread-local delimited continuations - the Reset stack (`s.CC`).
+
+Despite the ultimately deterministic outcome (because no race conditions), concurrency remains relatively difficult to reason about locally. Insofar as we choose to model concurrency, I'd encourage modeling confluent systems such as Kahn process networks, linear promises, or interaction nets. With confluence, a scheduler influences performance and intermediate state but not final outcomes.
 
 ## Modules
 
@@ -525,11 +534,21 @@ This section proposes the initial syntax for ".g" files. We'll be limited to min
 
 ### Names and Namespaces
 
-Basic names use the standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]*`, excepting keywords. Namespaces are modeled as dictionaries. In this context, names are indexed as strings, i.e. `foo.bar == foo.["bar"]`. 
+Basic names may use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]*`. Namespaces are modeled as dictionaries. In this context, names are indexed as atoms, i.e. `foo.bar == foo.[:bar]`. By default, keywords and names containing double underscores `__` are reserved by the front-end compiler, with user definitions raising errors or warnings.
+
+### Atoms
+
+### Pattern Matching
+
+I want to desugar all pattern matching to monadic expressions, and I also want to support transactional backtracking conditionals by default. Support for 'what-if' pattern matching is simply very convenient.
 
 
- i.e. we can substitute an older version of a front-end compiler when parsing older code. We can also borrow C's convention, reserving the form `__name` for compiler-provided built-ins.
+Although we could support Haskell-style `match Expr with (Pattern -> Outcome)+` syntax, providing the pure handler, it's a little awkward to extend this syntax for effectful patterns, and it may be better to integrate the 'Expr' into the Pattern, allowing for more than one (e.g. as guards). I'm contemplating alternative syntax, e.g. based on unification or `Pattern = Expr` structures. We could feasibly integrate pattern matching into monads in general.
 
+
+### Keywords
+
+import, include, module, prior, overrides, scope,
 
 The language may include some keywords, e.g. 'import' and 'include', that are not defined by the user. Language extensibility is a concern: there may be a conflict with old code when we introduce new keywords. This is mitigated by user-defined syntax, i.e. the client of a module may manage syntax used to interpret a module. It may be further mitigated by 'pragma language' declarations.
 
