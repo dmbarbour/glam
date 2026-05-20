@@ -38,11 +38,11 @@ Some existing languages align with some of my desiderata. For example, F\* or Va
 
 ## Overview of Semantics
 
-I propose to build upon a pure, untyped lambda calculus with lazy evaluation. A few data types - lists, numbers, dicts - receive optimized representations and accelerated operations. We'll model monadic effects in terms of a [freer monad](https://okmij.org/ftp/Haskell/extensible/more.pdf), and object-oriented inheritance in terms of [open fixpoint](http://fare.tunes.org/files/cs/poof.pdf).
+I propose to build upon a pure, untyped lambda calculus with lazy evaluation and annotations. A few data types - lists, numbers, dicts - receive optimized representations and accelerated operations. We'll model monadic effects in terms of a [freer monad](https://okmij.org/ftp/Haskell/extensible/more.pdf), and object-oriented inheritance in terms of [open fixpoint](http://fare.tunes.org/files/cs/poof.pdf).
 
 The toplevel namespace is modeled in an object-oriented style, supporting inheritance and override of definitions and treating module 'include' like a mixin. This provides a foundation for open extension of assemblies and configurations.
 
-Although the lambda calculus is not typed, we can support gradual typing, testing, visualization, and other reasoning tasks. This will be expressed at the namespace layer via simple naming conventions. For example, an assembler may recognize 'foo\_type' as defining the type of 'foo', then attempt an ad hoc type check based on this. 
+Annotations do not influence evaluation but may influence performance, reasoning, visualization, projectional editing, and other tooling. Annotations are typically observed via effectful reflection APIs in context of annotated 'reflection tasks'.
 
 ## Performance
 
@@ -185,71 +185,97 @@ Fixpoint is not compatible with all effects. But it is feasible to restrict some
 
 ### Effectful Pattern Matching
 
-I propose to desugar syntax for conditional behavior, such as pattern matching, into a choice effect. The choice effect supports deferred branching for cases sharing a common prefix, and empty choice expresses match failure or backtracking. A conventional `Pattern -> Outcome` syntax may desugar to `PatternEffect >>= \ vars -> Return Outcome` such that Pattern binds variables in scope of Outcome, and Return serves as a stage separator for further effects. The pattern syntax may also support `Pattern >> Return Outcome` as an intermediate stage, allowing for factoring multiple outcomes with a shared pattern prefix.
+I propose to desugar syntax for conditional behavior, such as pattern matching, into a choice effect. The choice effect supports deferred branching for cases sharing a common prefix, and empty choice expresses match failure or backtracking. A conventional `Pattern -> Outcome` syntax may desugar to `PatternEffect >>= \ vars -> Return Outcome` such that Pattern binds variables in scope of Outcome, and Return serves as a stage separator for further effects. We can introduce an alternative separator where the Return is explicit, perhaps `Pattern >> Return Outcome`, such that the RHS may be an effectful expression expanding to multiple Outcomes. 
 
-We should carefully distinguish global non-deterministic choice from local pattern branching. They have distinct intentions, connotations, use cases. With patterns, we predictably 'commit' to the first match, and choice is scoped syntactically. Fortunately, we don't need fully indexed choice because pattern matching is hierarchically structured. It seems adequate to support global 'Choice' and local 'Branch' as distinct constructors.
+We should carefully distinguish global non-deterministic choice from local pattern branching. They have distinct intentions, connotations, use cases. With patterns, we predictably 'commit' to the first match, and choice is scoped syntactically. Fortunately, we don't need fully indexed choice because pattern matching is hierarchically structured. It seems adequate to support global 'Choice' and local 'Alt' as distinct constructors.
 
-An intriguing opportunity is to mix choice with other effects. For example, a pattern reads from a queue and matches only some read values. Ideally, such operations are reverted when the match fails, implicitly checkpointing state. Generic integration is feasible by introducing a `(Cond branchOps)` effect as a delimiter for the choice effect and backtracking.
+An intriguing opportunity is to mix choice with other effects. For example, a pattern reads from a queue and matches only some read values. Ideally, such operations are reverted when the match fails, implicitly checkpointing state. Generic integration is feasible by introducing a `(Cut altOps)` effect as a standard delimiter for backtracking of Alt branches.
 
         -- a pure pattern matching handler
-        runBranch (Yield rq k) = match rq with
-            (Branch xs) -> List.flatMap (runBranch . k) xs
-            (Cond op) -> runBranch (k (runCond op))
-            (Fix f) -> runBranch (k (fixListFn (runBranch . f)))
-            _ -> error "unrecognized effect in pure runBranch"
-        runBranch (Return r) = [r]
+        runAlt (Yield rq k) = match rq with
+            (Alt xs) -> List.flatMap (runAlt . k) xs
+            (Cut op) -> runAlt (k (runCut op))
+            (Fix f) -> runAlt (k (fixListFn (runAlt . f)))
+            _ -> error "unrecognized effect in pure runAlt"
+        runAlt (Return r) = [r]
 
-        runCond = head . runBranch
+        runCut = head . runAlt
 
         fixListFn f = match (fix (f . head)) with
             x:_ -> x:(fixListFn (tail . f))
             [] -> []
 
-We can use 'runCond' as our evaluator for pure pattern matching. But we'll need something more specialized for stateful effects within patterns. 
+We could use 'runCut' as an evaluator for pure pattern matching. A front-end compiler could easily support this as a built-in. But when we don't know whether a pattern is effectful, we could use the 'Cut' effect for  
 
 *Aside:* It is feasible to further extend choice with search. By introducing effects to manage anticipated 'score' for a choice, a handler can heuristically reduce priority of a choice before fully computing it. 
 
 ### Monolithic Extensible Effects
 
-The monad transformer stack does not extend nicely with higher-order effects such as 'Fix' or 'Cond'. They also have significant performance overhead based on stack depth. A viable alternative is a monolithic handler with extensible data and control flow via indexed state and delimited continuations. Developers then build effects upon this foundation. A viable handler:
+The monad transformer stack does not extend nicely with higher-order effects such as 'Fix' or 'Cut'. They also have significant performance overhead based on stack depth. A viable alternative is a monolithic handler with extensible data and control flow via indexed state and delimited continuations. Developers then build effects upon this foundation. A viable handler:
 
         run s = runChoice . runCST s
 
-        -- a continuations and state transformer
+        unique CC, CutScope, BT  
+
+        -- implements delimited continuations and state
         runCST s (Yield rq k) = match rq with
             Get -> runCST s (k s)
             (Set s') -> runCST s' (k [])
             (Reset ix op) -> runCST s' op where
                 s' = s with { [CC] = ((ix,k):(s.[CC])) }
             (Shift ix fn) -> match s.[CC] with
-                (ix',k'):cc' -> -- note: 'Shift' pops 'Reset'. 'fn' may add it again.
+                (ix',k'):cc' -> 
+                    -- 'Shift' pops matched 'Reset', 'fn' may reinsert
                     let s' = s with { [CC] = cc' }
                     if (ix == ix') then runCST s' ((fn k) >>= k') else
                     runCST s' (Yield rq (\r -> Yield (Reset ix' (k r)) k'))
                 [] -> error "shift index not in scope"
-            (Cond op) -> runCST s ((onCond op) >>= k)
-            (Branch xs) -> runCST s ((onBranch xs) >>= k)
+            (Alt xs) -> runCST s ((onAlt xs) >>= k)
+            (Cut op) -> runCST s ((onCut op) >>= k)
             (Fix f) -> Yield (Fix f') k' where
-                cc = s.[CC]
                 f' ~(r',_) = runCST (s with { [CC] = [] }) (f r')
-                k' (r',s') = runCST (s' with { [CC] = cc }) (k r')
+                k' (r',s') = runCST (s' with { [CC] = s.[CC] }) (k r')
             _ -> Yield rq (runStateT s . k)
         runCST s (Return r) = match s.[CC] with
             ((_,k):cc') -> runCST (s with { [CC] = cc' }) (k r)
             [] -> Return (r,s)
 
-        -- wrappers for transactional, effectful pattern matching
-        -- we can support pure pattern matching even without this
-        onCond op = TBD -- commit to one branch (i.e. first match)
-        onBranch xs = TBD -- split or fail current branch
+        yield rq = Yield rq Return
+        return = Return
+        shift ix fn = yield (Shift ix fn)
+        reset ix op = yield (Reset ix op)
+        shift_reset ix fn = shift ix (reset ix . fn)
 
-        -- models non-deterministic choice
+        onCut op = do
+            prev <- get [BT]
+            set [BT] (error "fail without alternative")
+            outcome <- reset CutScope op
+            set [BT] prev
+            return outcome
+        onAlt xs = match xs with
+            [] -> shift_reset CutScope <| \_-> get [BT] >>= id
+            (x:xs') -> match xs' with
+                [] -> return x
+                _ -> shift_reset CutScope <| \ k -> do
+                    saved_state <- get [] 
+                    set [BT] <| do 
+                        set [] saved_state 
+                        (onAlt xs') >>= k
+                    k x -- current branch
+
+        -- external 'non-deterministic' choice
         runChoice (Return r) = [r]
         runChoice (Yield rq k) = List.flatMap (runChoice . k) <| match rq with
             (Choice xs) -> xs
             (Fix f) -> fixListFn (runChoice . f)
 
-Unfortunately, fixpoint and continuations are not fully compatible. We mitigate this above by having Fix serve as a boundary for Shift. Nonetheless, users must be careful regarding interaction between the two.
+Unfortunately, fixpoint are not fully compatible with continuations. The handler above resolves this above by forbidding Shift across Fix scopes. But users must be aware of this limitation. (Or at least they'll become aware swiftly.) Backtracking conditional effects are more flexible, being modeled entirely in terms of state and continuations. Intriguingly, we can support branching and backtracking even at the toplevel.
+
+### Mutable Refs
+
+It is not difficult to model a shared heap and allocator via indexed state. Unfortunately, we cannot conveniently model an automatic garbage collector. Thus, we should explicitly 'drop' refs when we're done with them, or just accept that we'll leak some memory. In practice, it might be useful to model 'arenas', where we allocate arenas, then allocate references within arenas, then drop the entire arena when done. It's probably easier to track arenas than individual refs.
+
+It might be convenient to model refs as Haskell-like MVars, where absence of a value is a valid ref state. State doesn't need any memory to represent the empty MVar.
 
 ### Concurrency
 
@@ -398,9 +424,11 @@ In practice, this may require copying local files and maintaining a local DVCS r
 
 ## User-Defined Syntax
 
-When loading a module, a front-end compiler is selected from the provided environment based on file extension, i.e. `Base.env.lang.[FileExt]` should evaluate to an object or dict that defines 'compile'. This object may also define auxilliary methods for tooling or the interaction loop, e.g. syntax highlighting or a specialized language-server protocol. To normalize FileExt, we lower-case 'A-Z' and strip initial '.'. In case of ".g" files, the assembler provides a built-in as a fallback, but we favor a user-defined compiler.
+When loading a module, a front-end compiler is selected from the provided environment based on file extension, i.e. `Base.env.lang.[FileExt]` should evaluate to an dictionary (typically an object) that defines an effectful 'compile' operation. This dictionary may further define auxilliary methods for tooling, e.g. syntax highlighting, projectional editing, documentation and language tutorials. But 'compile' is the primary behavior.
 
-The 'compile' method is expressed effectfully, as a parser combinator. The effects are carefully designed to simplify tracing of errors back to sources, isolate parse errors, support edit suggestions.
+The assembler executable shall recognize a subset of file extensions including ".g", and provide built-in compilers when `Base.env.lang.[FileExt].compile` is undefined. The root user configuration file is limited by recognized file extensions. By overriding the Base language, we can also *bootstrap* the compiler (see below).
+
+The 'compile' method is expressed effectfully because some compile-time capabilities (e.g. importing modules, allocating unique atoms) are second-class. We can also integrate compilation with a parser combinator of some form, such that the assembly captures some knowledge of program structure for debugging and tracing.
 
 - Parser combinators are a great starting point. Parser combinators can implicitly track parse locations and describe what they 'expect' to see at any given step, providing effective feedback in case of syntax errors and metadata for tracing.
 - To simplify tracing, blame, error isolation, etc. the compiler must avoid directly observing parse results. Even parse errors must be abstracted. To enforce this, we return abstract data from parse operations by default, perhaps expressed via applicative functor. We must provide built-in combinators for optionals and loops.
@@ -411,6 +439,8 @@ The 'compile' method is expressed effectfully, as a parser combinator. The effec
 - Compiler keeps module dictionaries (Base, Self) abstract, user only accesses them indirectly. This simplifies monadic tracking of dependencies.
 
 Expressing a compiler without being able to 'see' the binary seems possible in theory, but I'm not entirely convinced that we won't reintroduce the tracing problem via Eval. To gain confidence, I must try it first with the standard syntax. After all, we should be able to override and extend the standard syntax, too. Worst case, I'm back to the conventional approach.
+
+*Note:* We'll normalize file extensions: lower-case ASCII, strip initial '.' characters. But there is no implicit composition. Thus, file "foo.TAR.GZ" would be compiled via `Base.env.lang.["tar.gz"].compile`, or import fails if no such compiler is defined. 
 
 ### Syntactic Bootstraps
 
@@ -428,21 +458,11 @@ A built-in compiler is simply treated as one more compiler in the bootstrap cycl
 
 ### Editable Projections
 
-Some user-defined syntax may be graphical. And even for purely textual syntax, we'll often want to integrate some visualizations or provide edit widgets like color pickers. Miscellaneous observations:
+It is possible to express editable projections via something like `Base.eng.lang.[FileExt].view`. However, that approach is coarse grained and very limiting.
 
-- We can only edit terms annotated with source locations, parser context, and an encoder that converts the parse result back into source (aka lenses or prisms). We can verify any edits for round-trip between parse and encode.
-- Some content is naturally read-only, e.g. content-addressed remote files, read-only local files. In these cases, we can still support navigation, views, etc.. and partially-editable views are feasible.
-- Support for navigation, progressive disclosure, etc. benefits from user-local or session state. 
-- It is convenient to treat a file that does not exist as equivalent to an empty file for purpose of imports and projections.
-- Ideally, we can obtain immediate feedback on edits by visualization of tests. This may require some integration of projections and tests.
+To support fine-grained editable projections, the front-end compiler will support annotation of terms. For example, a parsed integer might maintain enough metadata to both locate it in the original source file and edit it, with an associated codec translating an updated number into source text. This allows for editors to integrate where the term is used instead of only where defined. A subset of standard term annotations may be implicit, built into the parser combinator.
 
-TBD: This is non-trivial, and I don't have a solid handle on exactly how to approach it.
-
-### Language Versioning
-
-We may update front-end compilers with new features. When these updates are not backwards compatible, we may need to switch to an older version of the compiler for processing specific files. But this is awkward for the root ".g" language. For that case, we may benefit from an explicit language version selector near the top of each file, perhaps expressed as a pragma.
-
-In practice, we can always override the front-end compiler for remote files, and we can always edit local files. So, we probably don't need the pragma. But it seems like a convention that contributes to more-robust systems development.
+In general, we should support 'views' on individual terms that may be interactive, e.g. to view large graphs or tables we'll want progressive disclosure. It isn't feasible to predict all the demands for such up front, but we can make a best effort with ad hoc user values as annotations, examining and rendering annotated terms via reflection API.
 
 ## Reasoning
 
@@ -464,51 +484,39 @@ What can we feasibly implement to support developers in reasoning about the asse
 
 * *Abstract Interpretation*: We can interpret machine code against an abstract representation of machine state. With reflection, we can do similarly for lambdas. We can include assumptions and test for contradiction or consistency. It is feasible to integrate a constraint model to perform the actual checks.
 
-### Reflection
+### Reflection API
 
-The logic required for reasoning, e.g. a type-checker with effective caching, is non-trivial. I would prefer to not represent or maintain this logic within the assembler executable. A viable alternative is to represent this logic within the module system, providing a reflection API for adequate access to assembler internals. The assembly and user configuration may define a set of reflection tasks.
+The logic required for reasoning is non-trivial. I would prefer to not maintain this logic within the assembler executable. A viable alternative is to represent this logic within the module system. The assembler, then, needs only provide a reflection API to support reasoning, e.g. to peek at function representations, manage cache, observe dataflows, write logs. The logic for 'reflection tasks', such as typechecking, may be expressed as namespace annotations within each assembly or user configuration.
 
-Reflection shall be expressed effectfully, the assembler executable implementing a monadic API. This supports local context per reflection task and awaiting events. The reflection API may be unstable, version-specific, albeit subject to de facto standardization and providing standard means to query assembler version info. A user configuration may further define a task adapter for portability.
+It is convenient to express reflection effectfully, the assembler executable implementing a monadic reflection API. This API may be unstable, versioned with the assembler executable, albeit subject to de facto standardization. In general, reflection is non-deterministic and the API may provide shared state. Users must take responsibility for reproducibility or stability where it matters, such as typechecking. The reflection API shall not influence evaluation except through the reflection API. 
 
-Constraints for a 'good' reflection API: In context of incremental compilation, the API should be cacheable. In context of interactive programming and debugging of reasoning, the API should be regenerable (restartable, replayable). In context of large systems, the API should be safe to run concurrently. I propose to rely on CALM principles - consistency as logical monotonicity - to ensure reasonable stability.
+### Namespace Annotations
 
-### Integration
+In general, we can express annotations at the namespace scope via simple naming conventions. For example, given a name like 'foo', we could describe its type as 'foo\_type' or 'type.foo' or another convention that an assembler or a reflection task can easily recognize and process. Of these, I prefer the 'type.foo' convention. This ensures it's relatively easy to separate type descriptions from the module (e.g. as an interface), and it mitigates the need to analyze otherwise atomic names.
 
-In context of breaking changes under overrides, we should also repair reasoning via overrides. Thus, reflection tasks should align with the namespace. It is not difficult to annotate a namespace. For example, we could recognize `type.name = TypeDesc` as representing the type of 'name'. To keep it simple, an assembler recognizes only reflection tasks, but reflection tasks may recognize user-defined conventions.
+A significant benefit of namespace-layer annotations is that they're available for overrides. If we override definition of 'foo', we might want to also override 'type.foo' and the types for some clients of 'foo'. In the general case, namespace extensions may represent breaking changes, thus it's very convenient that reasoning updates are also expressed in the same extension. We'll generally avoid term-level annotations for this reason.
 
-In context of lazy loading, we need lazy reflection, i.e. reflection must be triggered by actual use of definitions. I propose to separate trigger and task as `refl.name = Trigger` and `name = Task`. By defining 'refl.name', we annotate associated 'name', effectively declaring it to represent a reflection task. The separation also aligns nicely with hierarchical namespaces. Proposed initial triggers:
+Not every namespace annotation need be associative like types. It's ultimately just recognizing ad hoc naming conventions.
 
-- `Once (List of Name)` - trigger once if at least one name in the list is used. If the list is empty, trigger once when the module is loaded. Suitable for context-free tests, type checking, static assertions, etc..
-- `Used Name` - trigger where a name is used. Provides access to context of use, e.g. continuations and function arguments. Effective for expressing dynamic assertions or contracts, visualizing actual usage, profiling.
-- `Hierarchical` - expect 'name' to be a dictionary. Look for 'refl.\*' within that namespace when used. For hierarchical namespaces and object specifications.
+### Reflection Tasks
 
-Triggers bind names, not underlying definitions or thunks. Thus, users may further control reflection via aliasing.
+I propose to express reflection tasks as something like `refl.taskname = ReflTask` namespace annotations. In context of lazy loading, the assembler will 'run' reflection tasks when the module is loaded, providing the reflection API. Some tasks may install callbacks or yield, awaiting trigger conditions. For example, we might analyze the type of a method only if that method is used.
 
-### Constraints
+I imagine the assembler executable will ignore annotations *except* for reflection tasks. For example, although we might express type annotations, the actual type checker may be a reflection task defined in the user configuration. 
 
-Constraint systems are a convenient mechanism for abstract interpretation. 
+### Constraint Systems
 
-We can feasibly accelerate sat/unsat judgements for constraint systems via cvc5, Z3, or other solvers. The DSL for constraints can be adapted from SMTLIB2. For variables, we might use `(Var x)`, where 'x' is any valid dictionary key, enabling users to develop their own naming schemas.
+In my vision, we attach the assembler executable to a constraint solver, such as cvc5 or Z3. We can adapt SMTLIB2 to a structured DSL for expressing constraints. It is feasible to access this constraint solver via acceleration or reflection. However, acceleration limits what we can observe: we can report sat/unsat, but not the discovered sat example or unsat kernel because discovery is implementation-dependent and non-deterministic. Reflection is a lot more flexible; the API may even support direct manipulation of the solver.
 
-But an accelerator cannot observe the discovered solution or unsatisfiable kernel. Those are effectively non-deterministic. Only the sat/unsat judgement is observable. A reflection API is less limited, capable of returning the discovered solution and other details, and even reporting which solver was used and how long it took.
+I imagine that, in practice, we'll mostly use reflection. We can defer the accelerator until we have a strong use case.
 
-I envision building a constraint system statefully as part of building an assembled program. This could then be checked through reflection, or via acceleration depending on whether the judgement influences output or just pass/fail. 
-
-### Non-deterministic Choice
-
-We can easily provide APIs for the assembler to choose an integer (discrete) or rational (continuous). With attention to how these results are used in a test, this can provide a basis for heuristic search and fuzz testing. However, it is difficult to decide how much effort to spend exploring different branches, e.g. do we evaluate only once in batch mode? Up to a quota?
-
-In any case, it won't hurt much to add non-deterministic choice. Users can still write deterministic tests if they want..
+Access to a constraint solver will be very useful for analyzing properties of the assembly program or assembled product.
 
 ### Visualization
 
-In context of interactive mode, every 'update' to the program will reset relevant reflection tasks. In context of rich structures, we'll inevitably want some 'view' state for progressive disclosure. It's important to maintain a relatively stable visualization and view state across updates, hence view state must be separate from reflection tasks, yet indexed in a stable manner.
+Reflection tasks may 'emit' views to be rendered as logs or presented to a user by the interaction loop. Depending on the reflection API, it may be necessary to explicitly deprecate and replace old views as sources are updated or other observed conditions change.
 
-In interactive mode, the configured interaction loop controls which elements are rendered. It may receive some means to query and filter views, to duplicate them, to manage view states, etc.. In batch mode, the configuration may provide a simplified mechanism to filter and render visualizations for standard error. Ideally, logging is still relatively stable to simplify comparisons of logs.
-
-If a reflection API emits multiple visualizations, it may be convenient to support integration between them, i.e. adjusting a slider impacts multiple views in scope instead of just one view. This suggests something like a global 'view' state, albeit optionally allocating a local view identifier. Ideally, the user may view state, bookmark it, reset it, etc..
-
-*Note:* Although reflection APIs should not directly be editing sources, a user-interactive visualization model may provide the additional capabilities to perform edits, bridging projectional editing.
+The reflection API does not provide effects to edit sources. That capability is left to the user interaction loop. But emitted visualizations may include interactive methods intended for execution within the user interaction loop. Thus, we can bridge the gap between visualization and projectional editing.
 
 ## Assembly Monad
 
@@ -528,13 +536,14 @@ Some features the assembly monad and the threaded context could tackle:
 
 This monad is user-defined, thus we have freedom to extend it and explore alternatives. However, it isn't necessarily easy to adapt existing assembly libraries to leverage these extensions. Thus, it's best to achieve some de facto standardization early. 
 
-## Standard Syntax
+## Initial Syntax
 
-This section proposes the initial syntax for ".g" files. We'll be limited to minor changes, so I'll take some effort to make it good.
+This section proposes a syntax for ".g" files.
 
 ### Names and Namespaces
 
-Basic names may use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]*`. Namespaces are modeled as dictionaries. In this context, names are indexed as atoms, i.e. `foo.bar == foo.[:bar]`. By default, keywords and names containing double underscores `__` are reserved by the front-end compiler, with user definitions raising errors or warnings.
+Basic names may use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]*`. Namespaces are modeled as dictionaries, names as atoms. A subset of names are reserved as keywords; this subset depends on a language version declaration. Names containing double underscores `__` are also reserved by the front-end compiler. 
+
 
 ### Atoms
 
