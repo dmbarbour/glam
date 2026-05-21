@@ -156,18 +156,18 @@ Behavior is embodied in the runner or handler. Almost any effect can be modeled,
 
 It feasible to compose some effects via stack of 'monad transformers'. We can implicitly pass unrecognized effects up the stack. Alternatively, we could require explicit Lift requests.
 
-        -- environment transformer 
+        -- environment transformer implicit lift
         runEnvT e (Yield Env k) = runEnvT e (k e)
         runEnvT e (Yield rq k) = Yield rq (runEnvT e . k)
         runEnvT _ r@(Return _) = r
 
-        -- state transformer 
+        -- state transformer explicit lift
         runStateT s (Yield Get k) = runStateT s (k s)
         runStateT _ (Yield (Put s) k) = runStateT s (k ())
-        runStateT s (Yield rq k) = Yield rq (runStateT s . k)
+        runStateT s (Yield (Lift rq) k) = Yield rq (runStateT s . k)
         runStateT s (Return r) = Return (r,s)
 
-Unfortunately, monad transformers don't extend nicely to higher-order effects, i.e. where a request includes effectful operations. For example, if 'runStateT' encounters a `(Spawn threadOp)` request, state would not be accessible by threadOp. In practice, higher-order effects encourage a single, monolithic handler.
+Unfortunately, monad transformers don't compose nicely in context of higher-order effects. For example, 'runStateT' above delimited continuations does not know that it should also thread state through '(Shift fn)' or '(Reset op)' effects. This forces us to specializes our handlers or create monolithic handlers. In practice, a monolithic handler with extensible state and control flow is a convenient solution.
 
 ### Monadic Fixpoint
 
@@ -209,11 +209,11 @@ We could use 'runCut' as an evaluator for pure pattern matching. A front-end com
 
 *Aside:* It is feasible to further extend choice with search. By introducing effects to manage anticipated 'score' for a choice, a handler can heuristically reduce priority of a choice before fully computing it. 
 
-### Monolithic Extensible Effects
+### Extensible Monolith
 
-The monad transformer stack does not extend nicely with higher-order effects such as 'Fix' or 'Cut'. They also have significant performance overhead based on stack depth. A viable alternative is a monolithic handler with extensible data and control flow via indexed state and delimited continuations. Developers then build effects upon this foundation. A viable handler:
+We can support extensible data flow via indexed state, and extensible control flow via indexed delimited continuations. Between the two, we can model almost any effect. We'll further handle a few effects such as 'Fix' and 'Cut' for generic integration. A starting point:
 
-        run s = runChoice . runCST s
+        run s op = runChoice (runCST s (Yield (Cut op) Return)) 
 
         unique CC, CutScope, BT  
 
@@ -248,7 +248,7 @@ The monad transformer stack does not extend nicely with higher-order effects suc
 
         onCut op = do
             prev <- get [BT]
-            set [BT] (error "fail without alternative")
+            set [BT] (error "failed without alternative")
             outcome <- reset CutScope op
             set [BT] prev
             return outcome
@@ -269,21 +269,17 @@ The monad transformer stack does not extend nicely with higher-order effects suc
             (Choice xs) -> xs
             (Fix f) -> fixListFn (runChoice . f)
 
-Unfortunately, fixpoint are not fully compatible with continuations. The handler above resolves this above by forbidding Shift across Fix scopes. But users must be aware of this limitation. (Or at least they'll become aware swiftly.) Backtracking conditional effects are more flexible, being modeled entirely in terms of state and continuations. Intriguingly, we can support branching and backtracking even at the toplevel.
+Unfortunately, fixpoint are not fully compatible with continuations. We resolve this above by forbidding Shift across Fix. Users must be aware of this limitation if they're using fixpoints a lot, or at least they'll become aware swiftly. Backtracking conditional effects are more flexible, being modeled entirely in terms of state and continuations. The implicit Cut (in 'run') simplifies further composition.
 
-### Mutable Refs
+### Dynamic State
 
-It is not difficult to model a shared heap and allocator via indexed state. Unfortunately, we cannot conveniently model an automatic garbage collector. Thus, we should explicitly 'drop' refs when we're done with them, or just accept that we'll leak some memory. In practice, it might be useful to model 'arenas', where we allocate arenas, then allocate references within arenas, then drop the entire arena when done. It's probably easier to track arenas than individual refs.
-
-It might be convenient to model refs as Haskell-like MVars, where absence of a value is a valid ref state. State doesn't need any memory to represent the empty MVar.
+We can easily model a shared heap and memory allocator within indexed state. Unfortunately, we cannot easily model automatic garbage collection at this layer. Thus, users must explicitly 'free' refs. Dangling refs are mitigated because there is no need to recycle addresses, and we can easily recognize a freed ref. For performance and robust memory management, it may be useful to organize refs into hierarchical arenas that can be freed collectively.
 
 ### Concurrency
 
-It is feasible to model cooperative threads with a shared heap, mutexes and semaphores, in terms of continuation per thread and context switching state. However, we cannot observe race conditions (modulo reflection APIs, e.g. to observe status of lazy thunks). This hinders use of concurrency as an opportunity for parallelism. Ignoring performance, a remaining motive for concurrency is expression: decomposing large problems into interactive subtasks.
+It is feasible to model cooperative threads in terms of continuation per thread and context switching state, e.g. sharing only 's.heap'. We can even model mutexes and semaphores (and deadlocks). However, modulo reflection APIs (e.g. to observe status of thunks), we cannot observe race conditions. Thus, although concurrency may be useful for decomposing large problems into interacting subtasks, it is not reliable as a basis for peformance. At best, we can spark some computations per thread.
 
-Regarding context switching, it seems convenient to treat everything except a shared heap as thread-local state by default. That is, when we switch to a new thread, we migrate 's.heap' into the next thread's state. We then track other thread states within the heap. Relevantly, this would support thread-local delimited continuations - the Reset stack (`s.CC`).
-
-Despite the ultimately deterministic outcome (because no race conditions), concurrency remains relatively difficult to reason about locally. Insofar as we choose to model concurrency, I'd encourage modeling confluent systems such as Kahn process networks, linear promises, or interaction nets. With confluence, a scheduler influences performance and intermediate state but not final outcomes.
+Concurrency tends to hinder *local reasoning* about behavior. Even with a deterministic outcome, predicting that outcome may require expansive knowledge of other threads and their schedule. This can be mitigated with careful design, e.g. communicating via queues or channels, promise pipelining instead of shared state, confluence to guarantee outcome is independent of schedule.
 
 ## Modules
 
@@ -424,45 +420,53 @@ In practice, this may require copying local files and maintaining a local DVCS r
 
 ## User-Defined Syntax
 
-When loading a module, a front-end compiler is selected from the provided environment based on file extension, i.e. `Base.env.lang.[FileExt]` should evaluate to an dictionary (typically an object) that defines an effectful 'compile' operation. This dictionary may further define auxilliary methods for tooling, e.g. syntax highlighting, projectional editing, documentation and language tutorials. But 'compile' is the primary behavior.
+When loading a module, a front-end compiler is selected from the provided environment based on file extension: `Base.env.lang.[FileExt].compile` should define an effectful method to process the program. Other methods within the 'language object' may support syntax highlighting, autoformatting, linting, language server protocol, docs and tutorials, and other ad hoc tooling. But the primary method is:
 
-The assembler executable shall recognize a subset of file extensions including ".g", and provide built-in compilers when `Base.env.lang.[FileExt].compile` is undefined. The root user configuration file is limited by recognized file extensions. By overriding the Base language, we can also *bootstrap* the compiler (see below).
+        compile : Binary -> Dict -> Dict -> Eff CT Dict
+            # in roles: Source -> Base -> Self -> Eff CT Instance
 
-The 'compile' method is expressed effectfully because some compile-time capabilities (e.g. importing modules, allocating unique atoms) are second-class. We can also integrate compilation with a parser combinator of some form, such that the assembly captures some knowledge of program structure for debugging and tracing.
+The compile-time (CT) effects are restricted for reasons of modularity, cacheability, and reproducibility. Also, this keeps the executable small, minimizing built-in logic. Developers of compilers are encouraged to build parser combinators and other expressive design patterns upon this foundation. CT effects include:
 
-- Parser combinators are a great starting point. Parser combinators can implicitly track parse locations and describe what they 'expect' to see at any given step, providing effective feedback in case of syntax errors and metadata for tracing.
-- To simplify tracing, blame, error isolation, etc. the compiler must avoid directly observing parse results. Even parse errors must be abstracted. To enforce this, we return abstract data from parse operations by default, perhaps expressed via applicative functor. We must provide built-in combinators for optionals and loops.
-- In context of error isolation, we cannot model monadic 'state' at compile time in general, but we could support a few special cases where state is easily 'forked' for parsing subcomponents, especially gensym: abstract, unique, unforgeable symbol generation.
-- We can feasibly support something like a 'writer' monad for tests, illustrations, editable projections, indexes, etc.. However, if we hope to preserve lazy loading, we must be careful about automatic composition of indices. Use of annotations may mitigate this.
-- To support syntax-driven effects without observing the syntax, we can introduce an eval effect that lifts a user expression into the front-end compiler. The result of eval is then abstracted. This effectively supports some forms of macros.
-- It is useful to support multi-pass parses. For example, a first pass might delimit the 'region' for another pass. Even if we drop the first pass result, this can be useful for error isolation.
-- Compiler keeps module dictionaries (Base, Self) abstract, user only accesses them indirectly. This simplifies monadic tracking of dependencies.
+- loading modules, sources
+- allocating unique atoms 
+- emitting term annotations
+- a few generics (fixpoint)
 
-Expressing a compiler without being able to 'see' the binary seems possible in theory, but I'm not entirely convinced that we won't reintroduce the tracing problem via Eval. To gain confidence, I must try it first with the standard syntax. After all, we should be able to override and extend the standard syntax, too. Worst case, I'm back to the conventional approach.
+Essentially, a front-end compiler effectfully expresses an anonymous namespace mixin (`Base -> Self -> Instance`) given source code.
 
-*Note:* We'll normalize file extensions: lower-case ASCII, strip initial '.' characters. But there is no implicit composition. Thus, file "foo.TAR.GZ" would be compiled via `Base.env.lang.["tar.gz"].compile`, or import fails if no such compiler is defined. 
+The assembler executable shall recognize a subset of file extensions, especially ".g", and provide built-in compilers. This is applied if (and only if) `Base.env.lang.[FileExt].compile` is undefined. The assembler further allows users to *bootstrap* a provided or built-in compiler by overriding `env.lang.[FileExt].compile` (see *Syntactic Bootstraps* below).
+
+*Aside:* Not all syntax represents a proper namespace. However, namespace mixins maintain the opportunity for extension and adaptation. In case of compiling a ".json" or ".txt" file, a simple convention may be to define 'result' as the primary output.
+
+*Note:* We'll moderately normalize file extensions: lower-case 'A-Z' and drop initial '.'. Multi-part file extensions are not decomposed. For example, to compile file "foo.TaR.gZ" we'll look for `Base.env.lang.["tar.gz"].compile`. 
 
 ### Syntactic Bootstraps
 
-If the final `Self.env.lang.[FileExt].compile` method is different from the Base version, the assembler attempts bootstrap. This involves recompiling with the Self version, repeating until fixpoint is reached.
+If the final `Self.env.lang.[FileExt].compile` method is different from the Base version, the assembler attempts bootstrap. This involves recompiling with the override version, repeating until fixpoint is reached (or a configured quota is exhausted). Pseudocode:
 
-        bootstrap(ext, base, binary, compiler) =
-            let m = compile(compiler, base, binary) 
-            let compiler' = 
-                m.env.lang.[ext].compile if defined
-                or builtin if ext is "g"
-            if(compiler == compiler') then m else
-            bootstrap(ext, args, compiler')
+        bootstrap fileExt binary base compile =
+            let result = runCompiler (Yield (Fix (compile binary base)) Return)
+            let compiler' = result.env.lang.[fileExt].compile <|> builtin for fileExt
+            if(compiler == compiler') then result else
+            bootstrap(fileExt, binary, base, compile')
 
-A built-in compiler is simply treated as one more compiler in the bootstrap cycle, equivalent only to itself. 
+A built-in compiler is simply treated as one compiler in the bootstrap cycle, equivalent only to itself. 
 
 ### Editable Projections
 
-It is possible to express editable projections via something like `Base.eng.lang.[FileExt].view`. However, that approach is coarse grained and very limiting.
+It is possible to express editable views of source texts via something like `Base.eng.lang.[FileExt].view`. This is a good starting point, at least. But it's coarse grained and very limiting.
 
 To support fine-grained editable projections, the front-end compiler will support annotation of terms. For example, a parsed integer might maintain enough metadata to both locate it in the original source file and edit it, with an associated codec translating an updated number into source text. This allows for editors to integrate where the term is used instead of only where defined. A subset of standard term annotations may be implicit, built into the parser combinator.
 
 In general, we should support 'views' on individual terms that may be interactive, e.g. to view large graphs or tables we'll want progressive disclosure. It isn't feasible to predict all the demands for such up front, but we can make a best effort with ad hoc user values as annotations, examining and rendering annotated terms via reflection API.
+
+### Macros
+
+Broadly speaking, a 'macro' is a compiler extension defined within the program namespace. By binding macros to the namespace, they are subject to refactoring and modularization. Macros still resist overrides because they must be available at compile-time, before module 'Self' is available. In general, we'll want a distinct syntax for defining and invoking macros, and we'll tag macro definitions with calling conventions such that compilers may recognize and support many 'types' of macros: pure `Text -> Text` rewrites, token or AST-layer variants, namespace mixins, compiler 'effects'.
+
+In practice, macros are much less useful in context of lazy evaluation, higher-order programming, and monadic effects. A remaining use case is internal DSLs, but even that role is fulfilled by user-defined syntax for external DSLs. External DSLs are frequently superior for purpose of tooling and training. Also, assuming an adequate syntax for multi-line texts, we usually won't need macros to model internal DSLs.
+
+I don't intend to encourage macro-based metaprogramming, but I also won't block it.
 
 ## Reasoning
 
@@ -536,16 +540,26 @@ Some features the assembly monad and the threaded context could tackle:
 
 This monad is user-defined, thus we have freedom to extend it and explore alternatives. However, it isn't necessarily easy to adapt existing assembly libraries to leverage these extensions. Thus, it's best to achieve some de facto standardization early. 
 
-## Initial Syntax
+## Syntax
 
-This section proposes a syntax for ".g" files.
+This section proposes a syntax for ".g" files, the initial syntax for glam systems. My intention is that the syntax should be pleasant to work with (at least for me), while still supporting the 'feel' of assembly code, and being readable. Pattern matching and conditional behavior need careful attention because I've been unsatisfied with how they're handled in most languages.
 
-### Names and Namespaces
+Some desiderata:
 
-Basic names may use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]*`. Namespaces are modeled as dictionaries, names as atoms. A subset of names are reserved as keywords; this subset depends on a language version declaration. Names containing double underscores `__` are also reserved by the front-end compiler. 
+- Haskell-style lambdas, but pattern matching is separated from lambdas and definitions. 
+- Syntactic support for controlling laziness: sequences, sparks. 
+- Files limited to printable ASCII. We might expand this later, but keeping it simple for now.
+- Lines may terminate with CR, LF, or CRLF. We'll implicitly translate line terminals to LF.
+- Line comments only, starting with '#' Python style.
+- We'll broadly organize code into logical lines or sections. 
 
+I anticipate that most code will be developed and maintained in this syntax, with user-defined syntax focused on areas where it offers significant benefits (DSLs, graphical programming, etc..).
 
-### Atoms
+### Names and Namespace
+
+Basic names may use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]*` with exceptions for numbers, keywords, etc.. Names starting with two underscores are also reserved by the compiler. Namespaces are modeled as dictionaries. Names shall be abstracted as atoms for purpose of indexing the namespace. A subset of names are reserved as keywords, depending on a language version declaration.
+
+### 
 
 ### Pattern Matching
 
