@@ -38,7 +38,7 @@ Some existing languages align with some of my desiderata. For example, F\* or Va
 
 ## Overview of Semantics
 
-I propose to build upon a pure, untyped lambda calculus with lazy evaluation and annotations. A few data types - lists, numbers, dicts - receive optimized representations and accelerated operations. We'll model monadic effects in terms of a [freer monad](https://okmij.org/ftp/Haskell/extensible/more.pdf), and object-oriented inheritance in terms of [open fixpoint](http://fare.tunes.org/files/cs/poof.pdf).
+I propose to build upon a pure, untyped lambda calculus with lazy evaluation and annotations. A few data types - lists, numbers, dicts - receive optimized representations and accelerated operations. Through syntax, we'll support object-oriented inheritance in terms of [open fixpoint](http://fare.tunes.org/files/cs/poof.pdf), and monadic effects in terms of a [freer monad](https://okmij.org/ftp/Haskell/extensible/more.pdf).
 
 The toplevel namespace is modeled in an object-oriented style, supporting inheritance and override of definitions and treating module 'include' like a mixin. This provides a foundation for open extension of assemblies and configurations.
 
@@ -70,7 +70,7 @@ Reflection APIs can bypass abstractions, e.g. to iterate a dictionary or render 
 
 ## Objects
 
-Objects are most useful for extension in context of mutually recursive definitions. For example, a grammar can be modeled as an object where each 'rule' is a parser combinator, enabling override of specific rules. We'll model objects at the module layer to support extension of the namespace.
+Objects are most useful for extension in context of mutually recursive structures. For example, a grammar can be modeled as an object where each 'rule' is a parser combinator, enabling override of specific rules. We'll model objects at the module layer to support extension of the namespace.
 
 Pure functions can model stateless objects in terms of open recursion via latent fixpoint. A basic object model with mixin composition is `Dict -> Dict -> Dict` in roles `Base -> Self -> Instance`. Here, 'Base' is a parent class, initially empty, and 'Self' is a future fixpoint.
 
@@ -85,13 +85,13 @@ It's best to design a syntax for constructing objects that avoids observing 'bas
 
 ### Singleton Instantiation
 
-For stateless objects, we don't need more than one object instance. Instead of presenting a `Dict -> Dict -> Dict` function, we can directly instantiate the dictionary while preserving the mixin under a special interface. In case we need it, we can implicitly add a field to contain the mixin function. 
+For stateless objects, we don't need more than one object instance. Instead of presenting a `Dict -> Dict -> Dict` function, we can directly instantiate the dictionary while preserving the mixin under a special interface. To support further overrides, we may implicitly define a 'class' interface that provides the original mixin.
 
 ### Multiple Inheritance
 
-We can feasibly model multiple inheritance, where an object specification inherits from several others that may share ancestors. We can apply a linearization algorithm, ensuring each shared ancestor is mixed in only once and in a consistent order. 
+We can feasibly model multiple inheritance, where an object inherits from several others that may share ancestors. We can apply a linearization algorithm, ensuring each shared ancestor is mixed in only once and in a consistent order. 
 
-Linearization requires an identifier to distinguish whether two specifications are the same. We could use a class name in this role, then assert the name is always used with the same meaning within a given inheritance graph. It should be feasible for users to 'dynamically' define objects and inheritance graphs.
+Linearization requires an identifier to distinguish whether two specifications are the same. We could use a class name in this role, then assert the name is always used with the same meaning within a given inheritance graph. In context of singleton instantiations, all the necessary information could be held under the 'class' interface within a dictionary.
 
 ### Explicit Override
 
@@ -154,20 +154,20 @@ Behavior is embodied in the runner or handler. Almost any effect can be modeled,
         runCont (Yield (Reset op) k) = runCont op >>= runCont . k
         runCont (Return r) = r
 
-It feasible to compose some effects via stack of 'monad transformers'. We can implicitly pass unrecognized effects up the stack. Alternatively, we could require explicit Lift requests.
+It feasible to compose some effects via stack of 'monad transformers'. We can implicitly pass unrecognized effects up the stack.
 
-        -- environment transformer implicit lift
+        -- environment transformer with implicit lift
         runEnvT e (Yield Env k) = runEnvT e (k e)
         runEnvT e (Yield rq k) = Yield rq (runEnvT e . k)
         runEnvT _ r@(Return _) = r
 
-        -- state transformer explicit lift
+        -- state transformer with explicit Lift
         runStateT s (Yield Get k) = runStateT s (k s)
         runStateT _ (Yield (Put s) k) = runStateT s (k ())
         runStateT s (Yield (Lift rq) k) = Yield rq (runStateT s . k)
         runStateT s (Return r) = Return (r,s)
 
-Unfortunately, monad transformers don't compose nicely in context of higher-order effects. For example, 'runStateT' above delimited continuations does not know that it should also thread state through '(Shift fn)' or '(Reset op)' effects. This forces us to specializes our handlers or create monolithic handlers. In practice, a monolithic handler with extensible state and control flow is a convenient solution.
+Unfortunately, monad transformers do not compose nicely in context of higher-order effects. For example, 'runStateT' would not know that it should thread state into 'fn' or 'op' in case of '(Shift fn)' or '(Reset op)' effects for delimited continuations. The best solution I've found is to support *Extensible Monoliths* (see below).
 
 ### Monadic Fixpoint
 
@@ -209,9 +209,9 @@ We could use 'runCut' as an evaluator for pure pattern matching. A front-end com
 
 *Aside:* It is feasible to further extend choice with search. By introducing effects to manage anticipated 'score' for a choice, a handler can heuristically reduce priority of a choice before fully computing it. 
 
-### Extensible Monolith
+### Flexible Monoliths
 
-We can support extensible data flow via indexed state, and extensible control flow via indexed delimited continuations. Between the two, we can model almost any effect. We'll further handle a few effects such as 'Fix' and 'Cut' for generic integration. A starting point:
+We can express extarbitrary data flow via indexed state, and arbitrary control flow via indexed, delimited continuations. Between these we can model almost any effect. But we'll also need a few 'generic' effects, e.g. Fix, Cut, and Alt for generic desugaring of do notation and effectful pattern matching. A viable one-size-fits-most handler:
 
         run s op = runChoice (runCST s (Yield (Cut op) Return)) 
 
@@ -270,6 +270,20 @@ We can support extensible data flow via indexed state, and extensible control fl
             (Fix f) -> fixListFn (runChoice . f)
 
 Unfortunately, fixpoint are not fully compatible with continuations. We resolve this above by forbidding Shift across Fix. Users must be aware of this limitation if they're using fixpoints a lot, or at least they'll become aware swiftly. Backtracking conditional effects are more flexible, being modeled entirely in terms of state and continuations. The implicit Cut (in 'run') simplifies further composition.
+
+### Extensible Monoliths
+
+Flexible monoliths enable users to define almost any effect in terms of Get, Set, Shift, and Reset. However, the effects themselves - the recognized requests - are not very extensible. We introduced three 'generic' effects above: Fix, Cond, Alt. Where there's three, we'll eventually, inevitably want another. But it's awkward to add an effect without redefining the handler. It's essentially a closed recursive loop with mutual recursion between higher-order effects.
+
+As described previously, *Objects* are the solution for extension in context of mutually recursive structures. 
+
+Instead of concrete requests - Get, Set, Shift, Reset, Fix, Cut, Alt, etc. - we can desugar requests as calls to object methods, desugar monadic expressions to a lambda (`\eff -> ...`) such that 'eff' represents a threaded environment of effects APIs. Further, 'eff' may provide methods abstracting 'Return' and '>>='. 
+
+Intriguingly, multiple inheritance gives us the extensible, stackable monad transformers we wanted in the first place. We assume 'eff.class.\*' provides access to a `Dict -> Dict -> Dict` mixin, plus class name and inheritance list for linearization and deduplication. We can easily apply a mixin to 'eff' in scope of a subprogram. Redundant mixins can be deduplicated, and most incompatible stacks can be detected early (based on violations of linearizability or explicit override).  
+
+We can start with the foundation above, defining things like `eff.set s = Yield (Set s) Return`. But desugaring may assume access to `eff.alt` and `eff.cut` so we don't need to awkwardly wrap `(Cut op)` then unwrap to invoke `onCut` and similar. We can directly bind the effect definitions. Later, we might eliminate 'Yield' for most requests, instead threading state directly. This would significantly improve performance in context of JIT.
+
+Ultimately, desugaring monads to object invocations is expressive, extensible, composable, and simple. Well, modulo the linearization algorithm. We could simply treat 'eff' as a keyword within do notations, analogous to treating 'self' as a keyword in class definitions. 
 
 ### Dynamic State
 
@@ -462,11 +476,11 @@ In general, we should support 'views' on individual terms that may be interactiv
 
 ### Macros
 
-Broadly speaking, a 'macro' is a compiler extension defined within the program namespace. By binding macros to the namespace, they are subject to refactoring and modularization. Macros still resist overrides because they must be available at compile-time, before module 'Self' is available. In general, we'll want a distinct syntax for defining and invoking macros, and we'll tag macro definitions with calling conventions such that compilers may recognize and support many 'types' of macros: pure `Text -> Text` rewrites, token or AST-layer variants, namespace mixins, compiler 'effects'.
+Macros support metaprogramming at the syntax layer. This may be expressed in terms of writing text, tokens, or AST structures. Syntax and front-end compilers may support macros via special operator for macro invocations and keywords for macro definitions. We must be careful to avoid accidental dependency on module 'Self' because macros are invoked before Self is determined.
 
-In practice, macros are much less useful in context of lazy evaluation, higher-order programming, and monadic effects. A remaining use case is internal DSLs, but even that role is fulfilled by user-defined syntax for external DSLs. External DSLs are frequently superior for purpose of tooling and training. Also, assuming an adequate syntax for multi-line texts, we usually won't need macros to model internal DSLs.
+However, many motives for macros are weakened in context of untyped higher-order programming, monadic effects, and lazy evaluation. User-defined syntax further covers potential use cases. Meanwhile, many costs of macros - added complexity and training, challenges for debugging and tooling, limited extensibility, etc. - are undiminished. The cost-benefit argument for macros becomes dubious. We'll support macros, but they won't be a primary focus of this project.
 
-I don't intend to encourage macro-based metaprogramming, but I also won't block it.
+It is convenient to express macro definitions effectfully. This enables gradual extension and deprecation of compiler-supported effects, flexible integration from writing texts to terms, de facto standardization of macro effects across compiler.
 
 ## Reasoning
 
@@ -669,11 +683,12 @@ Divide by zero diverges lazily, reporting an error when forced or observed. Mode
 
 *Note:* Exact rational numbers are not suitable for high-performance number crunching. This may be mitigated by optimizing for e.g. rationals of form `M * 2^K` (for integers M and K), using a representation analogous to floating point under the hood. But if we need good performance, we'll need acceleration to leverage SIMD or GPGPU and fixed-width numeric encodings.
 
-### Pattern Matching
 
-I'd like to support flexible pattern matching, including user-defined constructors and other patterns.
+### Macros
 
+Macros can be defined normally, or may even be a computed expression, so long as it can be computed at compile-time. It's mostly invocations that require special attention, distinguishing macros from normal function calls. I propose to borrow Rust's macro invocation syntax, e.g. `name!(Args)`, also permitting `name![...]` and `name!{...}`. This is more shouty than I'd prefer, but it's acceptable if we don't need macros frequently. 
 
+Macro definitions are expressed effectfully. We'll initially support only rewriting macro text, but we can expand from there, e.g. to access the compiler's tokenizer or AST, emit warnings or errors, update the namespace, etc.. There won't (initially) be any built-in syntax for concisely defining macros.
 
 ### User-Defined Types
 
