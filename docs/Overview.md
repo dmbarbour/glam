@@ -277,13 +277,13 @@ Flexible monoliths enable users to define almost any effect in terms of Get, Set
 
 As described previously, *Objects* are the solution for extension in context of mutually recursive structures. 
 
-Instead of concrete requests - Get, Set, Shift, Reset, Fix, Cut, Alt, etc. - we can desugar requests as calls to object methods, desugar monadic expressions to a lambda (`\eff -> ...`) such that 'eff' represents a threaded environment of effects APIs. Further, 'eff' may provide methods abstracting 'Return' and '>>='. 
+Instead of concrete requests - Get, Set, Shift, Reset, Fix, Cut, Alt, etc. - we can desugar requests as calls to object methods, desugar monadic expressions to a lambda (`\eff -> ...`) such that 'eff' represents a threaded environment of effects APIs. Further, 'eff' may provide methods abstracting 'Return' and '>>=', analogous to a Monad typeclass. 
 
 Intriguingly, multiple inheritance gives us the extensible, stackable monad transformers we wanted in the first place. We assume 'eff.class.\*' provides access to a `Dict -> Dict -> Dict` mixin, plus class name and inheritance list for linearization and deduplication. We can easily apply a mixin to 'eff' in scope of a subprogram. Redundant mixins can be deduplicated, and most incompatible stacks can be detected early (based on violations of linearizability or explicit override).  
 
-We can start with the foundation above, defining things like `eff.set s = Yield (Set s) Return`. But desugaring may assume access to `eff.alt` and `eff.cut` so we don't need to awkwardly wrap `(Cut op)` then unwrap to invoke `onCut` and similar. We can directly bind the effect definitions. Later, we might eliminate 'Yield' for most requests, instead threading state directly. This would significantly improve performance in context of JIT.
+We can start with the foundation above, defining things like `eff.set s = Yield (Set s) Return`. But desugaring may assume access to `eff.alt` and `eff.cut` so we don't need to awkwardly wrap `(Cut op)` then unwrap to invoke `onCut` and similar. We can directly bind the effect definitions. Later, we can eliminate 'Yield' for most requests, e.g. instead threading state directly. This would eventually improve performance in context of partial evaluation and JIT.
 
-Ultimately, desugaring monads to object invocations is expressive, extensible, composable, and simple. Well, modulo the linearization algorithm. We could simply treat 'eff' as a keyword within do notations, analogous to treating 'self' as a keyword in class definitions. 
+Ultimately, desugaring monads to object invocations is expressive, extensible, composable, and simple. Well, modulo the linearization algorithm. We could treat 'eff' as an implicit definition in context of do notations, analogous to treating 'self' as a keyword in class definitions. 
 
 ### Dynamic State
 
@@ -476,11 +476,11 @@ In general, we should support 'views' on individual terms that may be interactiv
 
 ### Macros
 
-Macros support metaprogramming at the syntax layer. This may be expressed in terms of writing text, tokens, or AST structures. Syntax and front-end compilers may support macros via special operator for macro invocations and keywords for macro definitions. We must be careful to avoid accidental dependency on module 'Self' because macros are invoked before Self is determined.
+Macros support metaprogramming at the syntax layer, often in terms of rewriting text, tokens, etc.. Macros may be defined within the normal program namespace for modularity. However, in context of lazy loading, a compiler must not peek at definitions to determine whether they are macros. Thus, macro invocations must be distinguished syntactically, i.e. by operator or special naming convention.
 
-However, many motives for macros are weakened in context of untyped higher-order programming, monadic effects, and lazy evaluation. User-defined syntax further covers potential use cases. Meanwhile, many costs of macros - added complexity and training, challenges for debugging and tooling, limited extensibility, etc. - are undiminished. The cost-benefit argument for macros becomes dubious. We'll support macros, but they won't be a primary focus of this project.
+It is convenient to express macros effectfully, especially regarding inputs and outputs. With compiler support, this enables each macro to operate at an appropriate level of abstraction, whether it's texts, tokens, or AST structures. Further, it ensures an opportunity for extension and adaptation: compilers may gradually (across versions) extend supported effects, and macros may query compiler versions or feature sets to adapt behavior.
 
-It is convenient to express macro definitions effectfully. This enables gradual extension and deprecation of compiler-supported effects, flexible integration from writing texts to terms, de facto standardization of macro effects across compiler.
+*Note:* Many conventional use cases for macros evaporate in context of higher-order programming, monadic effects, lazy evaluation, extensible modules, user-defined syntax, and staged assembly. But macros are still useful for embedded DSLs and namespace-level boilerplate.
 
 ## Reasoning
 
@@ -556,7 +556,7 @@ This monad is user-defined, thus we have freedom to extend it and explore altern
 
 ## Syntax
 
-This section proposes a syntax for ".g" files, the initial syntax for glam systems. My intention is that the syntax should be pleasant to work with (at least for me), while still supporting the 'feel' of assembly code, and being readable. Pattern matching and conditional behavior need careful attention because I've been unsatisfied with how they're handled in most languages.
+This section proposes an initial syntax for ".g" files. My goal is a syntax that I find pleasant to work with, and that supports whatever vibe I imagine is (or should be) the 'look and feel' of assembly programming (at least for the assembly fragments).
 
 Some desiderata:
 
@@ -571,9 +571,101 @@ I anticipate that most code will be developed and maintained in this syntax, wit
 
 ### Names and Namespace
 
-Basic names may use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]*` with exceptions for numbers, keywords, etc.. Names starting with two underscores are also reserved by the compiler. Namespaces are modeled as dictionaries. Names shall be abstracted as atoms for purpose of indexing the namespace. A subset of names are reserved as keywords, depending on a language version declaration.
+Basic names may use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]*` with exceptions for numbers, keywords, etc.. Names starting with two underscores are also reserved. Namespaces are modeled as dictionaries. Names are wrapped as atoms prior to dictionary insert or lookup.
 
-### 
+### Macros
+
+Proposed syntax for macro invocations:
+
+        @macro_name
+        @(MacroExpr)
+
+Names in macro invocations bind to current definitions instead of final overrides, i.e. to module 'Base' instead of 'Self'. In general, macros are evaluated before overrides are determined, thus macros must avoid accidental dependency on module 'Self'.
+
+Macros are expressed effectfully, with the front-end compiler handling each invocation. In typical usage, `@foo(Args)` is implemented by 'foo' asking the compiler to read '(Args)'. The inline `@(MacroExpr)` form supports functional parameterization, i.e. `@(baz 32)` assumes `baz : Integer -> Macro`.
+
+To simplify local reasoning, the front-end compiler constrains macro effects: 
+
+- preserve structure, e.g. balanced brackets, braces, parentheses 
+- confinement, no reading or writing outside syntactic structures
+- confluent, pipelined processing: read from right, write to left
+
+There is no special syntax for defining macros. Effects are sufficient to get started, though we must be careful about dependencies. Later, we can develop macros for defining macros, perhaps adapting `@macro_rules` from Rust.
+
+An important use case for macros is to support the assembly look and feel. For example, we can develop an `@arm64` macro for concisely writing assembly mnemonics. I'm reluctant to provide mnemonics as a built-in because the glam is not architecture specific. And although direct use of the namespace would work, it's difficult to make it concise.
+
+### Texts
+
+Proposed syntax:
+
+        "inline text"
+
+        """
+        " multi-line texts may include "quotes"
+        " each line starts with " followed by space
+        " lines are separated by LF (no final LF)
+        "   (even when host file uses CR or CRLF)
+        """
+
+Characters are limited to printable ASCII, and there are no escapes. Users are obviously free to postprocess texts, e.g. rewrite hexadecimal to binary. For large texts or binaries, the recommended practice is to move content into a separate file then load as a binary through the module system.
+
+### Numbers
+
+All numbers are modeled as exact rationals, no hidden size or precision limits. The intention here is that any loss of precision should belong to the developer, not to the assembler. Of course, if we ever want high-performance number crunching at assembly time, we'll be relying on accelerators. 
+
+        0
+        1
+        -42
+        1/7
+        1.234
+        1.23e-7
+
+We'll also support binary (0b) or hexadecimal (0x) natural numbers. Although there is no intrinsic notion of 'word' representations of numbers in the assembler, it comes up frequently in assembly results.
+
+        0x1234fedc
+        0b10010001101001111111011011100
+
+Divide by zero is modeled as an error that diverges lazily. Complex numbers, vectors, matrices, etc. are left to developers. 
+
+### Lists
+
+### Dicts
+
+### Functions
+
+Proposed syntax:
+
+        \ x y z -> Expr
+        name x y z = Expr
+        name x = \y z->Expr
+
+Essentially, we support Haskell-style lambda syntax, excepting that there is no pattern matching at this layer. Use of underscore in place of a variable name is permitted to indicate a variable is unused. A variable name starting with underscore may be used, but won't warn if unused.
+
+### Local Definitions
+
+Proposed syntaxes:
+
+        let x = Expr1
+            y = Expr2 
+        Expr3
+
+        Expr3 where 
+            x = Expr1 
+            y = Expr2
+
+Borrowing Haskell style syntax here. These essentially desugar to applied lambdas with local fixpoints as needed. As with lambdas, name shadowing is discouraged.
+
+### Partial Definitions and Named Holes
+
+It's often convenient to work with partially defined programs. This is even more so the case in context of interactive programming and projectional editing. It's convenient to support clear TBD locations in code in some way that readily supports search and replace.
+
+### Language Version Declaration
+
+A subset of names are reserved as keywords, depending on a language version declaration.
+
+### Comments
+
+Can we do better than text comments? A notion of visualizations, docs, tutorials?
 
 ### Pattern Matching
 
@@ -591,22 +683,12 @@ The language may include some keywords, e.g. 'import' and 'include', that are no
 
 We may provide access to keywords like 'scope' for a dictionary representing names in scope, or 'prior' for a dictionary representing the base module namespace and perhaps 'module' referencing the module-level 'self'. The 'scope' may include keyword definitions like 'module' and 'prior'.
 
-### Comments
-
-We'll use `#` for conventional line comments. Everything from `#` to end of line (LF, CR, CRLF) is treated as part of the comment. There is no separate syntax for multi-line comments, so bring an editor that supports commenting multiple lines at once.
-
 ### Language Version 
 
         ('lang'|'language') ('g0'|Alt) ('with' FeatureFlagsAndExtensions)?
 
 The first non-comment line in the ".g" file should be a language version declaration. This provides an opportunity to develop the syntax, e.g. introducing new keywords, while sharing the ".g" file extension and front-end compiler and ensuring stable outcomes. A front-end compiler does not need to recognize all language versions, but it should raise an error rather than attempt to parse a version it does not recognize.
 
-
-### Lambdas
-
-Haskell-style `\ x y z -> Expr` is adequate, though not pretty. We could treat definitions as a special syntactic case, e.g. `name x y z = ...` rewrites to `name = \ x y z -> ...`. 
-
-We can support Haskell-style `let x = Expr1 and y = Expr2 in Expr` or `Expr where x = Expr1 and y = Expr2` syntactic forms that desugar to applied lambdas. Monadic desugaring may also need some attention.
 
 ### Definitions
 
@@ -641,54 +723,12 @@ The names 'self' and 'base' can be implicit parameters to the class or specifica
 
 We may need special syntax to override specification definitions, unless I can still use '=' vs. ':=' in this role. 
 
-### Embedded Texts
-
-Proposed syntax:
-
-        "inline text"
-
-        """
-        " multi-line texts may include "quotes"
-        " start of each line is "SP
-          " vertical alignment recommended
-        " each line terminated by LF
-        "   even if host file uses CR or CRLF
-        """
-
-There are no escape characters and there is no built-in formatting. Instead, users must explicitly postprocess texts, perhaps passing 'scope' to access names. This keeps it simple and flexible at the cost of being slightly more verbose.
 
 ### Namespace Capture
 
 For metaprogramming-like tasks, such as formatting strings, it's convenient to capture the current namespace as a first-class value. I propose 'scope' as a simple keyword for this role, returning a dictionary. In context of shadowing, this dictionary would contain only the final, shadowed form of a name.
 
 A relevant design challenge is how 'scope' should interact with syntactic sugar for monadic fixpoint. Efficient fixpoint requires minimizing scope of fixpoint. Perhaps we mitigate this by requiring explicit forward declarations for monadic fixpoint (e.g. 'future names' or 'declare names') instead of implicit fixpoints.
-
-### Embedded Numbers
-
-All numbers are modeled as exact rationals, no hidden size or precision limits.
-
-        0
-        1
-        -42
-        1/7
-        1.234
-        1.23e-7
-
-It is also convenient to support binary (0b) or hexadecimal (0x) natural numbers. 
-
-        0x1234fedc
-        0b10010001101001111111011011100
-
-Divide by zero diverges lazily, reporting an error when forced or observed. Modeling complex numbers, vectors, matrices, etc. is left to developers. Integers and base
-
-*Note:* Exact rational numbers are not suitable for high-performance number crunching. This may be mitigated by optimizing for e.g. rationals of form `M * 2^K` (for integers M and K), using a representation analogous to floating point under the hood. But if we need good performance, we'll need acceleration to leverage SIMD or GPGPU and fixed-width numeric encodings.
-
-
-### Macros
-
-Macros can be defined normally, or may even be a computed expression, so long as it can be computed at compile-time. It's mostly invocations that require special attention, distinguishing macros from normal function calls. I propose to borrow Rust's macro invocation syntax, e.g. `name!(Args)`, also permitting `name![...]` and `name!{...}`. This is more shouty than I'd prefer, but it's acceptable if we don't need macros frequently. 
-
-Macro definitions are expressed effectfully. We'll initially support only rewriting macro text, but we can expand from there, e.g. to access the compiler's tokenizer or AST, emit warnings or errors, update the namespace, etc.. There won't (initially) be any built-in syntax for concisely defining macros.
 
 ### User-Defined Types
 
@@ -700,22 +740,6 @@ I would like to support lightweight declarations of type constructors and matchi
 
 
 
-
-### Numbers and Arithmetic
-
-We'll support conventional numeric representations, including scientific notations, hexadecimal, and binary. We'll also support exact rational numbers via '/'.
-
-        1.234
-        1.234e-6
-        2/3
-        0b10111
-        0xFEDCBA9876543210
-
-We may accelerate conversions to and from binaries, and we'll support basic arithmetic (e.g. +-*/). Division by 0 is a lazy error, halting the assembler when observed.
-
-*Note:* There is no notion of word size or endianness for assembler-level arithmetic.
-
-### Pattern Matching
 
 ### Rejecting Operator Overloading
 
