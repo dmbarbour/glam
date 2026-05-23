@@ -273,17 +273,11 @@ Unfortunately, fixpoint are not fully compatible with continuations. We resolve 
 
 ### Extensible Monoliths
 
-Flexible monoliths enable users to define almost any effect in terms of Get, Set, Shift, and Reset. However, the effects themselves - the recognized requests - are not very extensible. We introduced three 'generic' effects above: Fix, Cond, Alt. Where there's three, we'll eventually, inevitably want another. But it's awkward to add an effect without redefining the handler. It's essentially a closed recursive loop with mutual recursion between higher-order effects.
+With flexible monoliths, we can define almost any effect. But, as seen with Cut and Alt, there's an awkward distinction between defined effects and assumed effects. This interferes with generic programming and smooth extension of effects APIs.
 
-As described previously, *Objects* are the solution for extension in context of mutually recursive structures. 
+To eliminate this distinction, we abstract our constructors. Instead of concrete Get, Set, Cut, Alt, Shift, Reset, etc.. we'll implicitly thread a parameter representing access to the effectful environment, i.e. `\eff -> operation`. Our operation then invokes `eff.get`, `eff.set s`, etc..  We may further abstract Return, Yield, and '>>=' through eff. We don't need to expose Yield: it may be an opaque capability available only to a few externally handled effects.
 
-Instead of concrete requests - Get, Set, Shift, Reset, Fix, Cut, Alt, etc. - we can desugar requests as calls to object methods, desugar monadic expressions to a lambda (`\eff -> ...`) such that 'eff' represents a threaded environment of effects APIs. Further, 'eff' may provide methods abstracting 'Return' and '>>=', analogous to a Monad typeclass. 
-
-Intriguingly, multiple inheritance gives us the extensible, stackable monad transformers we wanted in the first place. We assume 'eff.class.\*' provides access to a `Dict -> Dict -> Dict` mixin, plus class name and inheritance list for linearization and deduplication. We can easily apply a mixin to 'eff' in scope of a subprogram. Redundant mixins can be deduplicated, and most incompatible stacks can be detected early (based on violations of linearizability or explicit override).  
-
-We can start with the foundation above, defining things like `eff.set s = Yield (Set s) Return`. But desugaring may assume access to `eff.alt` and `eff.cut` so we don't need to awkwardly wrap `(Cut op)` then unwrap to invoke `onCut` and similar. We can directly bind the effect definitions. Later, we can eliminate 'Yield' for most requests, e.g. instead threading state directly. This would eventually improve performance in context of partial evaluation and JIT.
-
-Ultimately, desugaring monads to object invocations is expressive, extensible, composable, and simple. Well, modulo the linearization algorithm. We could treat 'eff' as an implicit definition in context of do notations, analogous to treating 'self' as a keyword in class definitions. 
+It is useful to model eff as an object, i.e. a singleton instance with 'eff.class.\*'. This enables us to express extensions in terms of mixins or inheritance. It also simplifies extension in context of higher-order effects: the 'current' effects API is available at point of invocation (via object 'self'). Multiple inheritance reduces concerns about redundancy and ordering of extensions, due to a linearization algorithm deduplicating and merging extensions. We can detect incompatible extensions in case of linearization errors or accidental overrides.
 
 ### Dynamic State
 
@@ -552,7 +546,7 @@ Some features the assembly monad and the threaded context could tackle:
 - heap or arena allocations, tracking logical heap and allocation 'effects'
 - OS integration, e.g. tracking signaling 'effects'
 
-This monad is user-defined, thus we have freedom to extend it and explore alternatives. However, it isn't necessarily easy to adapt existing assembly libraries to leverage these extensions. Thus, it's best to achieve some de facto standardization early. 
+This monad is user-defined, thus we have freedom to extend it and explore alternatives. However, it isn't necessarily easy to adapt existing assembly libraries to leverage these extensions. Thus, it's best to achieve some de facto standardization early.
 
 ## Syntax
 
@@ -572,27 +566,6 @@ I anticipate that most code will be developed and maintained in this syntax, wit
 ### Names and Namespace
 
 Basic names may use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]*` with exceptions for numbers, keywords, etc.. Names starting with two underscores are also reserved. Namespaces are modeled as dictionaries. Names are wrapped as atoms prior to dictionary insert or lookup.
-
-### Macros
-
-Proposed syntax for macro invocations:
-
-        @macro_name
-        @(MacroExpr)
-
-Names in macro invocations bind to current definitions instead of final overrides, i.e. to module 'Base' instead of 'Self'. In general, macros are evaluated before overrides are determined, thus macros must avoid accidental dependency on module 'Self'.
-
-Macros are expressed effectfully, with the front-end compiler handling each invocation. In typical usage, `@foo(Args)` is implemented by 'foo' asking the compiler to read '(Args)'. The inline `@(MacroExpr)` form supports functional parameterization, i.e. `@(baz 32)` assumes `baz : Integer -> Macro`.
-
-To simplify local reasoning, the front-end compiler constrains macro effects: 
-
-- preserve structure, e.g. balanced brackets, braces, parentheses 
-- confinement, no reading or writing outside syntactic structures
-- confluent, pipelined processing: read from right, write to left
-
-There is no special syntax for defining macros. Effects are sufficient to get started, though we must be careful about dependencies. Later, we can develop macros for defining macros, perhaps adapting `@macro_rules` from Rust.
-
-An important use case for macros is to support the assembly look and feel. For example, we can develop an `@arm64` macro for concisely writing assembly mnemonics. I'm reluctant to provide mnemonics as a built-in because the glam is not architecture specific. And although direct use of the namespace would work, it's difficult to make it concise.
 
 ### Texts
 
@@ -658,6 +631,27 @@ Borrowing Haskell style syntax here. These essentially desugar to applied lambda
 ### Partial Definitions and Named Holes
 
 It's often convenient to work with partially defined programs. This is even more so the case in context of interactive programming and projectional editing. It's convenient to support clear TBD locations in code in some way that readily supports search and replace.
+
+### Macros
+
+Proposed syntax for macro invocations:
+
+        @macro_name
+        @(MacroExpr)
+
+Names in macro invocations bind to current definitions instead of final overrides, i.e. to module 'Base' instead of 'Self'. In general, macros are evaluated before overrides are determined, thus macros must avoid accidental dependency on module 'Self'.
+
+Macros are expressed effectfully, with the front-end compiler handling each invocation. In typical usage, `@foo(Args)` is implemented by 'foo' asking the compiler to read '(Args)'. The inline `@(MacroExpr)` form supports functional parameterization, i.e. `@(baz 32)` assumes `baz : Integer -> Macro`.
+
+To simplify local reasoning, the front-end compiler constrains macro effects: 
+
+- preserve structure, e.g. balanced brackets, braces, parentheses 
+- confinement, no reading or writing outside syntactic structures
+- confluent, pipelined processing: read from right, write to left
+
+There is no special syntax for defining macros. Effects are sufficient to get started, though we must be careful about dependencies. Later, we can develop macros for defining macros, perhaps adapting `@macro_rules` from Rust.
+
+*Note:* We might introduce macros such as `@arm64` for concise expression of assembly. 
 
 ### Language Version Declaration
 
@@ -856,7 +850,4 @@ Some design constraints and desiderata:
 - user-defined types and object interfaces
   - possible type-indexed behavior bound to named types?
 - objects may use explicit 'self' and 'base'?
-
-
-
 
