@@ -85,13 +85,13 @@ It's best to design a syntax for constructing objects that avoids observing 'bas
 
 ### Singleton Instantiation
 
-For stateless objects, we don't need more than one object instance. Instead of presenting a `Dict -> Dict -> Dict` function, we can directly instantiate the dictionary while preserving the mixin under a special interface. To support further overrides, we may implicitly define a 'class' interface that provides the original mixin.
+For stateless objects, we don't need more than one object instance. Instead of presenting a `Dict -> Dict -> Dict` function, we can directly instantiate the dictionary while preserving the mixin under a special interface. To support further overrides, we may implicitly define the 'Class' interface including the mixin.
 
 ### Multiple Inheritance
 
 We can feasibly model multiple inheritance, where an object inherits from several others that may share ancestors. We can apply a linearization algorithm, ensuring each shared ancestor is mixed in only once and in a consistent order. 
 
-Linearization requires an identifier to distinguish whether two specifications are the same. We could use a class name in this role, then assert the name is always used with the same meaning within a given inheritance graph. In context of singleton instantiations, all the necessary information could be held under the 'class' interface within a dictionary.
+Linearization requires an identifier to distinguish whether two specifications are the same. We could use a class name in this role, then assert the name is always used with the same meaning within a given inheritance graph. In context of singleton instantiations, all the necessary information could be held under the 'Class' interface within a dictionary.
 
 ### Explicit Override
 
@@ -271,13 +271,13 @@ We can express extarbitrary data flow via indexed state, and arbitrary control f
 
 Unfortunately, fixpoint are not fully compatible with continuations. We resolve this above by forbidding Shift across Fix. Users must be aware of this limitation if they're using fixpoints a lot, or at least they'll become aware swiftly. Backtracking conditional effects are more flexible, being modeled entirely in terms of state and continuations. The implicit Cut (in 'run') simplifies further composition.
 
-### Extensible Monoliths
+### Extensible Effects
 
 With flexible monoliths, we can define almost any effect. But, as seen with Cut and Alt, there's an awkward distinction between defined effects and assumed effects. This interferes with generic programming and smooth extension of effects APIs.
 
-To eliminate this distinction, we abstract our constructors. Instead of concrete Get, Set, Cut, Alt, Shift, Reset, etc.. we'll implicitly thread a parameter representing access to the effectful environment, i.e. `\eff -> operation`. Our operation then invokes `eff.get`, `eff.set s`, etc..  We may further abstract Return, Yield, and '>>=' through eff. We don't need to expose Yield: it may be an opaque capability available only to a few externally handled effects.
+To eliminate this distinction, we can abstract our constructors. Instead of concrete Get, Set, Cut, Alt, Shift, Reset, Fix, etc.. we'll implicitly thread an eff parameter such that we can invoke an abstract 'eff.Get' method. We can further extend this to abstract the monad constructors: Return and Seq (for >>=). We don't need to expose Yield, though it's implicit for any externally handled effects.
 
-It is useful to model eff as an object, i.e. a singleton instance with 'eff.class.\*'. This enables us to express extensions in terms of mixins or inheritance. It also simplifies extension in context of higher-order effects: the 'current' effects API is available at point of invocation (via object 'self'). Multiple inheritance reduces concerns about redundancy and ordering of extensions, due to a linearization algorithm deduplicating and merging extensions. We can detect incompatible extensions in case of linearization errors or accidental overrides.
+To enhance extensibility, we can model eff as a singleton instance object, i.e. such that 'eff.Class.\*' supports mixins and multiple inheritance. This is a lot more friendly to higher-order effects than monad transformer stacks: we can recognize higher order effects and capture relevant context (including eff 'self') at point of invocation without unwinding first. Further, multiple inheritance enables compatible effects to merge and deduplicate, and detection of incompatible extensions based on linearization errors or implicit override. We can be a little more sloppy about knowing which effects are in scope.
 
 ### Dynamic State
 
@@ -300,7 +300,8 @@ A module is integrated by 'including' it as a mixin. Any prior definitions or in
 * *include Module* - bind included module's Base to host's current Base namespace, sharing Self.
 * *include Module at m* - apply module to override component dictionary 'm', i.e. binds Base->Base.m, Self->Self.m, 
 * *import Module as m* - introduces 'm' with `{ "env": Self.env }` (by default), then applies 'include Module at m'.
-  - This treats 'env' as an implicit, read-only environment at the module layer, supporting adaptability. Extensions to 'env' apply only to hierarchical imports.
+  - This treats 'env' as an implicit, read-only environment at the module layer, supporting adaptability.
+  - Front-end compiler may freely introduce or override `__name` definitions for flexible integration.
 
 The hierarchical 'include at' and 'import as' forms simplify lazy loading. In contrast, with toplevel 'include', it is often difficult to determine which modules introduce or override a definition without loading everything. Ultimately, there is only one 'Self'. This simplifies deep overrides and extensions, analogous to mutable definitions without actual mutation.
 
@@ -310,7 +311,7 @@ The assembler implicitly loads a configuration module based on the `GLAM_CONF` e
 
 The configuration serves several roles:
 
-- *Assembly environment*: define 'env' as the Base argument for assembly modules. This environment can provide default target information, system includes and shared libraries, etc. for adaptation.
+- *Assembly environment*: The user configuration specifies a Base 'env' argument to the assembly. This environment can provide default host information, system includes, shared libraries, etc..
 - *Command-line macros*: define a rewrite for command-line arguments. Applied if (and only if) the first command-line argument does not start with '-'. Supports extensible CLI 'language'.
 - *Development environment*: Define the loop for interactive mode. Define an adapter for reflection tasks. Filter and rewrite log messages for standard error in batch mode. Other user-experience tuning. 
 - *Resource management*: may specify GPGPUs available for acceleration, cache locations and replacement heuristcs, history management, shared proxy compilation and cache, alternative search locations for content-addressed remotes, tune assembler JIT or GC heuristics, quotas for testing, etc..
@@ -325,9 +326,9 @@ The assembler receives command-line arguments that express an assembly module as
 
 - `(-f|--file) FileName` - list a file to include; first file is included last, overriding those listed later. Depending on the configured environment, assembly isn't limited to ".g" files (see *User-Defined Syntax*).
 - `(-s|--script).FileExt Text` - as remote file with given extension and text. Scripts cannot import local files, hence are location-independent. 
-- `-- List Of Args` - assembler defines 'args' before including files or scripts. Default is empty list, but caller may override with elements following the '--' separator.
+- `-- List Of Args` - if specified we define `__args` to given list of arguments at namespace scope, otherwise the empty list.
 
-The namespace for an assembly starts with 'args' and 'env' from command line and configuration respectively. An assembly module shall define 'result', representing the assembled product, i.e. a binary or folder.
+Essentially, the namespace for an assembly starts with `__args` and `env.*` from command line and configuration respectively. The primary output from an assembly is to define 'result' for extraction (see *Assembler* below). 
 
 ### Remotes
 
@@ -376,97 +377,92 @@ By default, we expect a binary result and extract to standard output. However, t
   - `--stdout` (default) - write binary to standard output
     - incompatible with folders and interactive development
   - `(-o|--out) Destination` - output to named file or folder
-  - `--discard` - no output, result is ignored
+  - `--discard` - no output, result ignored
 
-Machine-code mnemonics are left to libraries. Assuming accelerators and user-defined syntax, we can adapt this 'binary' assembler to many targets: ray tracing, typesetting, websites, simulations, blueprints, etc..
+Machine-code mnemonics are left to libraries. Effectively, we have a generic 'assembler' of binaries or filesystems.
+
+### Reflection
+
+The assembler shall recognize 'refl.\*' as defining reflection tasks within a module. In context of lazy loading, the assembler evaluates reflection tasks only for loaded modules. Defining reflection tasks enables them to be overridden or disabled via namespace extension. A motive for reflection is to keep the executable small by externalizing logic for typechecking, visualization, cache management, etc. into the module system.
+
+To keep it simple and small, this reflection API may be version specific. For portability, the user configuration may define an adapter. Some observations for a 'good' reflection API design:
+
+- Reflection shall not influence 'result'. In general, reflection tasks have read-only access to computations. The exception is interaction between reflection tasks, which may be supported via the reflection API.
+- In context of interactive programming, we'll often abort or replay reflection tasks. And even batch mode may evaluate many tasks concurrently. For consistency, favor idempotent, commutative interactions between reflection tasks, i.e. publish-subscribe, consistency as logical monotonicity (CALM), or conflict-free replicated data types (CRDTs).
+- Outputs for logging or visualization may benefit from some form of streaming tree-builder representation, i.e. a stream of 'edits' to a 'view' with eventual consistency guarantees, but enabling users to observe intermediate inconsistent states.
+- We frequently want to trigger reflection based on use of names, e.g. typecheck only if a names is used at least once, or observe arguments for assertions or visualizations. For consistent triggering, consider a staged API: first stage sets triggers, later stages or 'result' may activate. If we must observe arguments during first stage, replay is feasible.
+- For adaptability, provide access to runtime version info, OS environment variables, and `--refl Arg` options on command line just for the reflection API.
+
+These constrain API design without overly complicating it. In any case, a robust foundation will result in a lot more reproducibility even for the reflection tasks.
 
 ### Interaction
 
-Instead of repeatedly asking an assembler to evaluate a result, we can ask an assembler to repeatedly evaluate a result, i.e. external versus internal loops. The internal loop enables some optimizations, e.g. for incremental computing. But the main benefit is that the assembler process sticks around and is available for interrogation. Some useful possibilities: language server protocol, REPL, graphical debug views, progressive disclosure, editable projections, integrated development, etc..
+Instead of repeatedly asking an assembler to evaluate a result, we can ask an assembler to repeatedly evaluate a result, i.e. external versus internal loops. Although this simplifies in-memory caching, the primary benefit is that the process remains available for interrogation. This supports debugging and development.
 
-The assembler shall support interactive mode via simple command-line switch:
+The assembler executable shall support interactive mode via simple command-line switch:
 
-- `--batch` (default) - evaluate and extract result once, return
+- `--batch` (default) - evaluate and extract result then return
 - `(-i|--interactive)` - maintain result, configurable interface
   - discards result by default, but compatible with `-o`
 
 To avoid cluttering command-line arguments, and to keep the executable small, the assembler asks the user configuration to define an interaction loop. The loop may observe environment variables, assembler capabilities, and assembly definitions. Thus, with a few conventions, we can specialize the loop to an assembly or task.
 
-Interaction limits effects:
+The interaction model restricts effects:
 
-- *Filesystem:* Limited to files that contribute to assembly or configuration, plus associated files under ".glam/". Respects read-only restrictions. Remote files and scripts are always treated as read-only.
-- *Network:* Cannot initiate connections. Listens on configured TCP ports or Unix Domain Sockets. May introduce specialized operations to synchronize local filesystem sources with DVCS repos.
-- *TTY*: A standard input and output stream, modeled as an implicit network connection. Standard error is disabled.
-- *Env*: access to OS environment, runtime version info, and similar features.
-- *GUI*: tentative support for native GUI. Even without this, we can support GUI via Network or TTY.
+- *File:* Limited to folders that may contribute to the current assembly or user configuration. May extend to DVCS repos if we can trace updates to revision hashes in source. 
+- *Net:* Cannot take initiative. Accepts connections on configurable TCP ports and Unix domain sockets, e.g. to support HTTP or a remote drawing protocol.
+- *TTY*: Modeled as a default network connection. Interactive mode does not write to standard error. 
+- *Refl*: The same reflection API used for reflection tasks. 
 
-The interaction loop may be expressed as a transactional 'step' method. This step runs repeatedly, subject to transaction-loop optimizations: optimistic concurrency on choice, incremental computing, await relevant update after abort. Updates to the user configuration may influence future steps. Effects are abstracted: effectful operations use constructors linked via object Base. 
+The interaction loop itself is expressed as a transactional step method that runs repeatedly. Effects, such as network reads and writes, are 'committed' only when a step returns successfully. This enables the step method to be freely updated between transactions.
 
-### Debugging
+### Execution
 
-When developing a library, it is often convenient to test entire volumes of definitions instead of just 'result' and its transitive dependencies. I propose `--test Name` that may be listed more than once. We can name entire dictionaries of definitions, such as `--test env` or `--test api`, for bulk testing. Testing includes best-effort typechecking and transitive dependencies. We'll often `--discard` the result during testing, perhaps adding `--test result`.
+Although the assembler does not directly support execution of assembled code, I envision an auxilliary executable that monitors the filesystem and continuously integrates assembly results into a live system. Naturally, the code itself must be defined around this integration, e.g. a transaction loop application.
 
-Tests may use non-deterministic choice to support fuzzing, property checking, and flexible analysis. In batch mode, we'll rely on configurable quotas and heuristics to determine whether we've done 'enough' testing. In interactive mode, tests may run indefinitely or based on user attention. These `--test` flags then determine an initial set of tests and user focus.
-
-In batch mode, visualizations are filtered and rendered by a configurable method, then written to standard error. In interactive mode, we can potentially support interactive visualizations with progressive disclosure, dynamic views and queries, etc.. 
-
-With effective acceleration, tests may emulate hardware for assembly targets. But external testing of an assembly doesn't easily feedback into debugging. It may be possible to trace a coredump to the associated sources. Perhaps we can extract a 'folder' that includes  generated together with the executable. See *Reasoning* for some patterns for debugging.
-
-### Live Programming
-
-Another process may continuously "run" an assembly result, watching for changes and integrating them. In context of executable machine code, this requires non-trivial setup, or at least restrictions on the function expressed by the machine code.
-
-Although the assembler does not implement live programming directly, it should at least ensure atomic updates. That is, instead of replacing files, it first writes a temporary file then uses 'rename' in Linux or 'ReplaceFile' in Windows. Readers in Windows should open the file in FILE_SHARE_DELETE mode to avoid blocking the writer.
-
-The interactive mode assembler may also provide 'result' via HTTP requests, perhaps with an ETAG based on contributing sources.
-
-### History
-
-Deterministic functions, location-independent folders, and content-addressed remote modules all contribute to reproducibility. But we still cannot reproduce the output if we cannot reproduce the initial conditions. To improve practical reproducibility, the assembler should automatically maintain a sufficient history to reproduce prior assemblies, ideally with structure sharing and effective pruning. 
-
-In practice, this may require copying local files and maintaining a local DVCS repo to represent the history. Though, we'll also need a little attention on merging history for concurrent assembler processes. (I wonder if darcs would be a good fit here.)
+The assembler should support this use case indirectly, e.g. by ensuring atomic updates of code. In the filesystem, this may involve Linux rename or Windows ReplaceFile and FILE_SHARE_DELETE. Further, it can be useful to block output with obvious errors. This could be guided by configuration.
 
 ## User-Defined Syntax
 
-When loading a module, a front-end compiler is selected from the provided environment based on file extension: `Base.env.lang.[FileExt].compile` should define an effectful method to process the program. Other methods within the 'language object' may support syntax highlighting, autoformatting, linting, language server protocol, docs and tutorials, and other ad hoc tooling. But the primary method is:
+When loading a module, we'll first search the provided environment for a compiler: `Base.env.lang.[FileExt].compile`. If defined, we'll use this compiler, falling back to an assembler built-in or reporting an error. The assembler shall provide a built-in at least for file extension ".g", albeit not necessarily the oldest or newest versions. 
 
-        compile : Binary -> Dict -> Dict -> Eff CT Dict
-            # in roles: Source -> Base -> Self -> Eff CT Instance
+The 'compile' method shall be expressed effectfully. Effects shall include:
 
-The compile-time (CT) effects are restricted for reasons of modularity, cacheability, and reproducibility. Also, this keeps the executable small, minimizing built-in logic. Developers of compilers are encouraged to build parser combinators and other expressive design patterns upon this foundation. CT effects include:
+- generic state, shift/reset, fix, cut, alt
+- parser combinators to read source binary
+  - design for tracing, error isolation, laziness
+  - i.e. multi-phase and scoped parsing
+- load files as modules or binaries
+  - modules are always bound to namespace
+- generating unique atoms
+- access and update 'Base' namespace in state
+  - final 'Base' becomes 'Instance' namespace
+  - a no-op module thus has identity behavior
+- access final 'Self' namespace (non-stateful)
+- access built-in functions and term annotations
+- compile-time warnings, errors, recommendations
 
-- loading modules, sources
-- allocating unique atoms 
-- emitting term annotations
-- a few generics (fixpoint)
+One motive for effectful expression is extensibility: we can introduce effects as needed. But we should be careful about introducing effects that might compromise location independence, reproducibility, or backwards compatibility. Unlike the reflection API, this front-end compiler API should be very stable.
 
-Essentially, a front-end compiler effectfully expresses an anonymous namespace mixin (`Base -> Self -> Instance`) given source code.
+*More Notes:*
+- Any built-in languages should use the same API internally.
+- Normalize file extensions: lower-case A-Z, drop initial '.'
+- The language object may define more methods for tooling.
 
-The assembler executable shall recognize a subset of file extensions, especially ".g", and provide built-in compilers. This is applied if (and only if) `Base.env.lang.[FileExt].compile` is undefined. The assembler further allows users to *bootstrap* a provided or built-in compiler by overriding `env.lang.[FileExt].compile` (see *Syntactic Bootstraps* below).
+### Compiler Bootstrapping
 
-*Aside:* Not all syntax represents a proper namespace. However, namespace mixins maintain the opportunity for extension and adaptation. In case of compiling a ".json" or ".txt" file, a simple convention may be to define 'result' as the primary output.
-
-*Note:* We'll moderately normalize file extensions: lower-case 'A-Z' and drop initial '.'. Multi-part file extensions are not decomposed. For example, to compile file "foo.TaR.gZ" we'll look for `Base.env.lang.["tar.gz"].compile`. 
-
-### Syntactic Bootstraps
-
-If the final `Self.env.lang.[FileExt].compile` method is different from the Base version, the assembler attempts bootstrap. This involves recompiling with the override version, repeating until fixpoint is reached (or a configured quota is exhausted). Pseudocode:
+The assembler shall check whether `Self.env.lang.[FileExt].compile` is different from the initial compiler. If so, the assembler will perform a bootstrap process: recompile using the returned compiler, repeat until the compiler stabilizes. Pseudocode:
 
         bootstrap fileExt binary base compile =
             let result = runCompiler (Yield (Fix (compile binary base)) Return)
-            let compiler' = result.env.lang.[fileExt].compile <|> builtin for fileExt
-            if(compiler == compiler') then result else
+            let compile' = result.env.lang.[fileExt].compile if defined
+                           otherwise builtin for fileExt
+            if(compile == compile') then result else
             bootstrap(fileExt, binary, base, compile')
 
-A built-in compiler is simply treated as one compiler in the bootstrap cycle, equivalent only to itself. 
+The main motive for bootstrapping is reproducibility: stabilize the compiler, make it less dependent on context. There is also a role for extensibility. It can be difficult to integrate syntax extensions in scope of bootstrapping, but extensions to macro effects APIs are easier to integrate.
 
-### Editable Projections
-
-It is possible to express editable views of source texts via something like `Base.eng.lang.[FileExt].view`. This is a good starting point, at least. But it's coarse grained and very limiting.
-
-To support fine-grained editable projections, the front-end compiler will support annotation of terms. For example, a parsed integer might maintain enough metadata to both locate it in the original source file and edit it, with an associated codec translating an updated number into source text. This allows for editors to integrate where the term is used instead of only where defined. A subset of standard term annotations may be implicit, built into the parser combinator.
-
-In general, we should support 'views' on individual terms that may be interactive, e.g. to view large graphs or tables we'll want progressive disclosure. It isn't feasible to predict all the demands for such up front, but we can make a best effort with ad hoc user values as annotations, examining and rendering annotated terms via reflection API.
+*Note:* Above bootstraps only front-end compilers. I hope to eventually bootstrap the assembler executable, i.e. with a portable definition of the executable in the module system. But that's a long term concern.
 
 ### Macros
 
@@ -475,6 +471,14 @@ Macros support metaprogramming at the syntax layer, often in terms of rewriting 
 It is convenient to express macros effectfully, especially regarding inputs and outputs. With compiler support, this enables each macro to operate at an appropriate level of abstraction, whether it's texts, tokens, or AST structures. Further, it ensures an opportunity for extension and adaptation: compilers may gradually (across versions) extend supported effects, and macros may query compiler versions or feature sets to adapt behavior.
 
 *Note:* Many conventional use cases for macros evaporate in context of higher-order programming, monadic effects, lazy evaluation, extensible modules, user-defined syntax, and staged assembly. But macros are still useful for embedded DSLs and namespace-level boilerplate.
+
+### Editable Projections
+
+It is possible to express editable views of source texts via something like `Base.eng.lang.[FileExt].view`. This is a good starting point, at least. But it's coarse grained and very limiting.
+
+To support fine-grained editable projections, the front-end compiler will support annotation of terms. For example, a parsed integer might maintain enough metadata to both locate it in the original source file and edit it, with an associated codec translating an updated number into source text. This allows for editors to integrate where the term is used instead of only where defined. A subset of standard term annotations may be implicit, built into the parser combinator.
+
+In general, we should support 'views' on individual terms that may be interactive, e.g. to view large graphs or tables we'll want progressive disclosure. It isn't feasible to predict all the demands for such up front, but we can make a best effort with ad hoc user values as annotations, examining and rendering annotated terms via reflection API.
 
 ## Reasoning
 
@@ -530,23 +534,13 @@ Reflection tasks may 'emit' views to be rendered as logs or presented to a user 
 
 The reflection API does not provide effects to edit sources. That capability is left to the user interaction loop. But emitted visualizations may include interactive methods intended for execution within the user interaction loop. Thus, we can bridge the gap between visualization and projectional editing.
 
-## Assembly Monad
+## Monadic Assembly
 
-It is convenient to express assembly effectfully. Relevantly, monadic expression enables us to implicitly thread extensible context as we write machine-code mnemonics or binary outputs. An extensible context is useful for both reasoning, e.g. representing abstract machine states and developer assumptions, and code generation, e.g. allocation of registers. It also simplifies composition and staging. 
+It is convenient to express assembly code effectfully. Each assembly mnemonic becomes a monadic function that 'writes' machine code into state. The state may also aggregate declarations such as '.bss' and '.data' sections. We can compose operations into procedures that serve the role of conventional 'assembly macros' without actual macros.
 
-The assembler never sees this monad. It must already be handled in evaluation of 'result'. But most assembly code may be written effectfully, simply assuming a suitable handler.
+Beyond those basics, we might statefully track abstract machine state, i.e. so we know which registers are in use, for what, associated types for pointers. This metadata will simplify ad hoc reasoning about the assembly process or product, and it also supports more 'dynamic' assembly, e.g. allocating registers based on availability.
 
-Some features the assembly monad and the threaded context could tackle:
-
-- allocation of static memory (bss, data, rodata, text)
-- content-addressing of read-only memory (rodata, text)
-- abstract interpretations of machine 'state', e.g. types, registers in use
-- allocation of registers
-- logically tracking data stack frames, offsets, avoiding unnecessary updates
-- heap or arena allocations, tracking logical heap and allocation 'effects'
-- OS integration, e.g. tracking signaling 'effects'
-
-This monad is user-defined, thus we have freedom to extend it and explore alternatives. However, it isn't necessarily easy to adapt existing assembly libraries to leverage these extensions. Thus, it's best to achieve some de facto standardization early.
+Concise mnemonics are critical to the assembly programming vibe, IMO. To this end, I propose a lightweight syntactic sugar: expand '%mov' to 'eff.mov' in context of *Extensible Effects*. This enables assembly mnemonics to be modeled as mixins and cleanly separates the writer from expression of assembly code. Though, we must be careful about naming conflicts.
 
 ## Syntax
 
@@ -563,9 +557,20 @@ Some desiderata:
 
 I anticipate that most code will be developed and maintained in this syntax, with user-defined syntax focused on areas where it offers significant benefits (DSLs, graphical programming, etc..).
 
-### Names and Namespace
+### Names and Namespaces
 
-Basic names may use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]*` with exceptions for numbers, keywords, etc.. Names starting with two underscores are also reserved. Namespaces are modeled as dictionaries. Names are wrapped as atoms prior to dictionary insert or lookup.
+Basic names will use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]+` with a few exceptions for numbers, keywords, etc.. For extensibility, I propose to immediately reserve all English prepositions (and, or, but, when, as, with, etc.) and all names beginning with two underscores. Namespaces are modeled as dictionaries with atomic keys (i.e. we'll wrap names as atoms). We'll support dotted paths `x.y.z` for reaching deep into hierarchical dictionaries.
+
+Explicit override resists many accidental name or 'meaning' conflicts. It's an error to override a name that doesn't exist, and an error to introduce a name that already exists. A simple, concise, and viable approach is to syntactically distinguish introduction `name = Def` from override `name := NewDef`. In the latter case, we implicitly bind 'prior' to the previous definition.
+
+We'll forbid name shadowing at file scope. By 'file scope' I mean definitions within a file or introduced via 'include'. This really excludes only definitions introduced via modules-as-mixins patterns. We may also require explicit assumptions, e.g. a declaration of form `abstract Name(, Name)*`, to reference non-local names.
+
+To support the assembly programming vibe, I propose to desugar '%name' to 'eff.name'. This is more about look and feel than saving a few bytes (see *Monadic Assembly*).
+
+### Do Notation
+
+
+We can introduce a 'using M: Expr' syntax that essentially desugars to `\eff -> (Expr (mix M eff))`, i.e. applying a mixin to effects in scope. This provides a simple basis for extension of effects, and wrapping of effects if we're flexible about expression of objects, without explicit shadowing of 'eff'.
 
 ### Texts
 
@@ -580,7 +585,9 @@ Proposed syntax:
         "   (even when host file uses CR or CRLF)
         """
 
-Characters are limited to printable ASCII, and there are no escapes. Users are obviously free to postprocess texts, e.g. rewrite hexadecimal to binary. For large texts or binaries, the recommended practice is to move content into a separate file then load as a binary through the module system.
+There are no escape characters, i.e. all texts are 'raw' by default, and postprocessing is left to the user. Embedded texts are limited to printable ASCII. Users are encouraged to separate larger
+
+For large texts or binaries, the recommended practice is to move content into a separate file then load as a binary through the module system.
 
 ### Numbers
 
@@ -598,7 +605,7 @@ We'll also support binary (0b) or hexadecimal (0x) natural numbers. Although the
         0x1234fedc
         0b10010001101001111111011011100
 
-Divide by zero is modeled as an error that diverges lazily. Complex numbers, vectors, matrices, etc. are left to developers. 
+Arithmetic: we can provide the conventional operators, e.g. `+ * / -`. Divide by zero diverges lazily. I'm tempted to introduce some DSLs around math, but we'll leave that development to macros (for now).
 
 ### Lists
 
@@ -614,13 +621,19 @@ Proposed syntax:
 
 Essentially, we support Haskell-style lambda syntax, excepting that there is no pattern matching at this layer. Use of underscore in place of a variable name is permitted to indicate a variable is unused. A variable name starting with underscore may be used, but won't warn if unused.
 
+### Partial Functions
+
+As a rule, functions are partial, i.e. they may diverge for many inputs. 
+
+It's often convenient to work with partially defined programs. This is even more so the case in context of interactive programming and projectional editing. It's convenient to support clear TBD locations in code in some way that readily supports search and replace.
+
 ### Local Definitions
 
 Proposed syntaxes:
 
         let x = Expr1
             y = Expr2 
-        Expr3
+        in Expr3
 
         Expr3 where 
             x = Expr1 
@@ -628,16 +641,14 @@ Proposed syntaxes:
 
 Borrowing Haskell style syntax here. These essentially desugar to applied lambdas with local fixpoints as needed. As with lambdas, name shadowing is discouraged.
 
-### Partial Definitions and Named Holes
-
-It's often convenient to work with partially defined programs. This is even more so the case in context of interactive programming and projectional editing. It's convenient to support clear TBD locations in code in some way that readily supports search and replace.
+The 'where' form may prove a little awkward for capturing scope in macros. I'll need to consider it carefully. It might be simpler to model even local definitions as first-class namespaces.
 
 ### Macros
 
 Proposed syntax for macro invocations:
 
         @macro_name
-        @(MacroExpr)
+        @(MacroDef)
 
 Names in macro invocations bind to current definitions instead of final overrides, i.e. to module 'Base' instead of 'Self'. In general, macros are evaluated before overrides are determined, thus macros must avoid accidental dependency on module 'Self'.
 
@@ -649,13 +660,19 @@ To simplify local reasoning, the front-end compiler constrains macro effects:
 - confinement, no reading or writing outside syntactic structures
 - confluent, pipelined processing: read from right, write to left
 
-There is no special syntax for defining macros. Effects are sufficient to get started, though we must be careful about dependencies. Later, we can develop macros for defining macros, perhaps adapting `@macro_rules` from Rust.
+There is no special syntax for defining macros. We can get started with effects, though we must be careful about accidental bindings to module 'Self'. 
+
+Effectful expressions are sufficient to get started, though we must be careful about binding to module-leve
+
+Effects are sufficient to get started, though we must be careful about dependencies. Later, we can develop macros for defining macros, perhaps adapting `@macro_rules` from Rust.
 
 *Note:* We might introduce macros such as `@arm64` for concise expression of assembly. 
 
+
 ### Language Version Declaration
 
-A subset of names are reserved as keywords, depending on a language version declaration.
+A language version declaration enables a compiler to adapt to programs written in older versions of a language, or to detect early whether a program uses a more advanced version of the language than the compiler recognizes.
+
 
 ### Comments
 
@@ -710,12 +727,6 @@ To keep it simple, operators are all defined by the front-end compiler. That is,
 
 
 ### Object Specifications
-
-We could use a 'class' or 'spec' keyword. I do favor 'spec' for better connotations, but 'class' would be more familiar. 
-
-The names 'self' and 'base' can be implicit parameters to the class or specification, such that 'self.foo' refers to the final definition of 'foo'. Names not accessed through 'self' or 'base' refer to the module layer. We can also provide access to 'class' or 'spec' as an interface.
-
-We may need special syntax to override specification definitions, unless I can still use '=' vs. ':=' in this role. 
 
 
 ### Namespace Capture
