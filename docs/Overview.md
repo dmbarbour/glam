@@ -470,7 +470,7 @@ Macros support metaprogramming at the syntax layer, often in terms of rewriting 
 
 It is convenient to express macros effectfully, especially regarding inputs and outputs. With compiler support, this enables each macro to operate at an appropriate level of abstraction, whether it's texts, tokens, or AST structures. Further, it ensures an opportunity for extension and adaptation: compilers may gradually (across versions) extend supported effects, and macros may query compiler versions or feature sets to adapt behavior.
 
-*Note:* Many conventional use cases for macros evaporate in context of higher-order programming, monadic effects, lazy evaluation, extensible modules, user-defined syntax, and staged assembly. But macros are still useful for embedded DSLs and namespace-level boilerplate.
+*Note:* Many conventional use cases for macros evaporate in context of higher-order programming, monadic effects (especially delimited continuations), lazy evaluation, extensible modules, user-defined syntax, and staged assembly. Yet opportunities remain for embedded DSLs, Python-like decorators, and namespace boilerplate.
 
 ### Editable Projections
 
@@ -540,7 +540,7 @@ It is convenient to express assembly code effectfully. Each assembly mnemonic be
 
 Beyond those basics, we might statefully track abstract machine state, i.e. so we know which registers are in use, for what, associated types for pointers. This metadata will simplify ad hoc reasoning about the assembly process or product, and it also supports more 'dynamic' assembly, e.g. allocating registers based on availability.
 
-Concise mnemonics are critical to the assembly programming vibe, IMO. To this end, I propose a lightweight syntactic sugar: expand '%mov' to 'eff.mov' in context of *Extensible Effects*. This enables assembly mnemonics to be modeled as mixins and cleanly separates the writer from expression of assembly code. Though, we must be careful about naming conflicts.
+To support the assembly programming vibe, our syntax may support a Haskell-like do notation and desugar '%mov' to 'eff.mov' (for *Extensible Effects*). This supports a clear column of concise mnemonics, and cleanly separates expression of assembly fragments from the logic for writing it.
 
 ## Syntax
 
@@ -561,16 +561,23 @@ I anticipate that most code will be developed and maintained in this syntax, wit
 
 Basic names will use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]+` with a few exceptions for numbers, keywords, etc.. For extensibility, I propose to immediately reserve all English prepositions (and, or, but, when, as, with, etc.) and all names beginning with two underscores. Namespaces are modeled as dictionaries with atomic keys (i.e. we'll wrap names as atoms). We'll support dotted paths `x.y.z` for reaching deep into hierarchical dictionaries.
 
-Explicit override resists many accidental name or 'meaning' conflicts. It's an error to override a name that doesn't exist, and an error to introduce a name that already exists. A simple, concise, and viable approach is to syntactically distinguish introduction `name = Def` from override `name := NewDef`. In the latter case, we implicitly bind 'prior' to the previous definition.
+Explicit override resists many accidental name or 'meaning' conflicts. It's an error to override a name that doesn't exist, and an error to introduce a name that already exists. A simple, concise, and viable approach is to syntactically distinguish introduction `name = Def` from override `name := NewDef`. In the latter case, we can implicitly bind 'prior' to the previous definition. We'll treat 'prior' as a keyword.
 
-We'll forbid name shadowing at file scope. By 'file scope' I mean definitions within a file or introduced via 'include'. This really excludes only definitions introduced via modules-as-mixins patterns. We may also require explicit assumptions, e.g. a declaration of form `abstract Name(, Name)*`, to reference non-local names.
+In context of mixins, to resist accidents we'll insist on `abstract Name(, Name)*` declarations for names that should be defined by the time the mixin is applied, but are not defined within the mixin. We'll report an error if a name is used but undefined unless it has an 'abstract' declaration. Note that 'abstract' doesn't care about order of definitions: it could be provided via Base or Self. Only overrides care about order.
 
-To support the assembly programming vibe, I propose to desugar '%name' to 'eff.name'. This is more about look and feel than saving a few bytes (see *Monadic Assembly*).
+We'll generally forbid name shadowing at module scope, i.e. it's an error to shadow a name that is defined or abstracted within the current file, toplevel includes, or lexical scope. This error may be suppressed for specific cases. For example, it is suppressed for 'eff' in context of desugaring effects, but not necessarily for manual use of 'eff'.
+
+To support the assembly programming vibe, I propose to desugar '%name' to 'eff.name'. The idea is to push most assembly mnemonics into the effects API and express them concisely (see *Monadic Assembly*). But any effect may be referenced this way.
 
 ### Do Notation
 
+We can adapt Haskell's do notation almost directly. We'll desugar to `\eff -> ...` using `eff.Seq` and `eff.Return` in the right-hand side. We may treat 'eff' as a keyword, a special case for name shadowing. 
 
-We can introduce a 'using M: Expr' syntax that essentially desugars to `\eff -> (Expr (mix M eff))`, i.e. applying a mixin to effects in scope. This provides a simple basis for extension of effects, and wrapping of effects if we're flexible about expression of objects, without explicit shadowing of 'eff'.
+One difference regards fixpoint and RecursiveDo. Instead of implicit fixpoints, I propose explicit forward declarations of names to be resolved through fixpoint. This serves two purposes: First, it's a lot clearer to users what's happening. Second, it makes the scope of fixpoints more visible, which is relevant because there are awkward feature interactions between fixpoints and delimited continuations. Syntax for this could be `decl Name(, Name)*`.
+
+Another distinction regards pattern matching. We could feasibly support `Pattern <- Effect` or `Pattern = Expr` syntax such that the desugared form backtracks via `eff.Alt []` when a pattern fails to match. We can mix pattern matching flexibly with effectful operations.
+
+To support extensible effects, we may support `using M Expr` function, such that `using M op = \eff -> op (mix M eff)`. No need for dedicated syntax here.
 
 ### Texts
 
@@ -648,26 +655,15 @@ The 'where' form may prove a little awkward for capturing scope in macros. I'll 
 Proposed syntax for macro invocations:
 
         @macro_name
-        @(MacroDef)
+        @(MacroExpr)
 
-Names in macro invocations bind to current definitions instead of final overrides, i.e. to module 'Base' instead of 'Self'. In general, macros are evaluated before overrides are determined, thus macros must avoid accidental dependency on module 'Self'.
+The `@macro_name` form invokes the most recent definition, ignoring overrides. This should define an effectful operation. We'll run this in a compiler-provided handler. Syntax such as `@foo(Args)` is modeled in terms of `@foo` asking the compiler to parse parenthesized parameters. 
 
-Macros are expressed effectfully, with the front-end compiler handling each invocation. In typical usage, `@foo(Args)` is implemented by 'foo' asking the compiler to read '(Args)'. The inline `@(MacroExpr)` form supports functional parameterization, i.e. `@(baz 32)` assumes `baz : Integer -> Macro`.
+The `@(MacroExpr)` form invokes an anonymous macro definition. I don't have a practical use case in mind, just an intuition that macros are incomplete without it. Caveat: `@foo` and `@(foo)` are NOT equivalent. The former binds to module `Base.foo`, the latter to `Self.foo`. The latter is a problem because Self is not fully determined when macros are invoked. This isn't a unique problem: developers must be cautious about dependencies when defining macros in general.
 
-To simplify local reasoning, the front-end compiler constrains macro effects: 
+To support local reasoning, the compiler shall ensure macros preserve structure: balanced brackets, braces, and parentheses; also, confinement to a scope, such that `(@foo ...)` cannot escape those parentheses. To simplify interaction between macro invocations, macros parse forwards but never backwards.
 
-- preserve structure, e.g. balanced brackets, braces, parentheses 
-- confinement, no reading or writing outside syntactic structures
-- confluent, pipelined processing: read from right, write to left
-
-There is no special syntax for defining macros. We can get started with effects, though we must be careful about accidental bindings to module 'Self'. 
-
-Effectful expressions are sufficient to get started, though we must be careful about binding to module-leve
-
-Effects are sufficient to get started, though we must be careful about dependencies. Later, we can develop macros for defining macros, perhaps adapting `@macro_rules` from Rust.
-
-*Note:* We might introduce macros such as `@arm64` for concise expression of assembly. 
-
+There is no built-in syntax for defining macros. We can get started with manual definitions, then define macros for defining macros, perhaps adapting `@macro_rules` from Rust. 
 
 ### Language Version Declaration
 
