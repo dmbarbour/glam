@@ -38,11 +38,13 @@ Some existing languages align with some of my desiderata. For example, F\* or Va
 
 ## Overview of Semantics
 
-I propose to build upon a pure, untyped lambda calculus with lazy evaluation and annotations. A few data types - lists, numbers, dicts - receive optimized representations and accelerated operations. Through syntax, we'll support object-oriented inheritance in terms of [open fixpoint](http://fare.tunes.org/files/cs/poof.pdf), and monadic effects in terms of a [freer monad](https://okmij.org/ftp/Haskell/extensible/more.pdf).
+I propose to build upon a pure, untyped lambda calculus with lazy evaluation and annotations. 
+
+A few data types - lists, numbers, dicts - receive optimized representations and accelerated operations. Through syntax, we'll support object-oriented inheritance in terms of [open fixpoint](http://fare.tunes.org/files/cs/poof.pdf), and monadic effects in terms of a [freer monad](https://okmij.org/ftp/Haskell/extensible/more.pdf).
 
 The toplevel namespace is modeled in an object-oriented style, supporting inheritance and override of definitions and treating module 'include' like a mixin. This provides a foundation for open extension of assemblies and configurations.
 
-Annotations do not influence evaluation but may influence performance, reasoning, visualization, projectional editing, and other tooling. Annotations are typically observed via effectful reflection APIs in context of annotated 'reflection tasks'.
+Annotations are essentially active comments. They do not influence evaluation, but may affect performance, reasoning, visualization, projectional editing, and other tooling. 
 
 ## Performance
 
@@ -54,6 +56,8 @@ Performance of lambda calculus is mediocre by default, and bignum arithmetic won
 
 * *Caching*: Remember expensive computations to avoid rework. Persistent caching can support incremental compilation. A shared remote cache with PKI infrastructure can support direct downloads of binaries.
 
+* *Ephemerons*: Insist some dictionary keys also match referential equality. Report an error if the lookup key has the same value but different origin from the stored key (e.g. by thunk). Garbage collect associated data if origin key is collected.
+
 These performance features may be guided by annotations or built-ins functions.
 
 ## Data
@@ -62,7 +66,7 @@ The built-in data types are numbers, lists, dicts, atoms, and functions. All dat
 
 - Numbers are bignum integers and exact rationals. Rounding of numbers is left to users, but the underlying representation may optimize for floating-point style usage (e.g. base 2 or 10).
 - Lists are the one-size-fits-all sequential structure. Lists may be concretely represented by finger-tree ropes under the hood. Binaries are modeled as lists of small integers (0..255) and heavily optimized.
-- Dicts are key-value associative structures. Keys must be comparable with equality, i.e. excluding functions. Dictionaries do not directly support iteration over keys, though it isn't difficult to maintain lists of keys. Variants are encoded as singleton dictionaries.
+- Dicts are key-value associative structures. Keys must be comparable with equality, i.e. excluding functions. Dictionaries do not support iteration over keys. Variants are encoded as singleton dictionaries.
 - Atoms are abstract data with equality. Modules may introduce guaranteed-unique atoms, and we can construct atoms from any data with equality (excluding functions). The underlying representation of atoms is hashed or interned enabling fast equality and dict lookups. 
 - Functions are expressed in the lambda calculus.
 
@@ -72,7 +76,7 @@ Reflection APIs can bypass abstractions, e.g. to iterate a dictionary or render 
 
 Objects are most useful for extension in context of mutually recursive structures. For example, a grammar can be modeled as an object where each 'rule' is a parser combinator, enabling override of specific rules. We'll model objects at the module layer to support extension of the namespace.
 
-Pure functions can model stateless objects in terms of open recursion via latent fixpoint. A basic object model with mixin composition is `Dict -> Dict -> Dict` in roles `Base -> Self -> Instance`. Here, 'Base' is a parent class, initially empty, and 'Self' is a future fixpoint.
+Pure functions can model stateless objects in terms of open recursion via latent fixpoint. A basic object model with mixin composition is `Dict -> Dict -> Dict` in roles `Base -> Self -> Instance`. Here, 'Base' is a parent object, initially empty, and 'Self' is a future fixpoint.
 
         mix child parent = λbase. λself.
            let base' = parent base self in
@@ -83,19 +87,30 @@ Pure functions can model stateless objects in terms of open recursion via latent
 
 It's best to design a syntax for constructing objects that avoids observing 'base' or 'self' prior to instantiation. Otherwise, there's a good chance of datalock on 'fix'.
 
-### Singleton Instantiation
+### Singleton Instance
 
-For stateless objects, we don't need more than one object instance. Instead of presenting a `Dict -> Dict -> Dict` function, we can directly instantiate the dictionary while preserving the mixin under a special interface. To support further overrides, we may implicitly define the 'Class' interface including the mixin.
+For stateless objects, we don't need more than one object instance. Instead of presenting a `Dict -> Dict -> Dict` function, we can directly instantiate the dictionary while preserving the mixin under a special interface. To support further overrides, we define a 'Spec' interface that includes the mixin.
 
 ### Multiple Inheritance
 
 We can feasibly model multiple inheritance, where an object inherits from several others that may share ancestors. We can apply a linearization algorithm, ensuring each shared ancestor is mixed in only once and in a consistent order. 
 
-Linearization requires an identifier to distinguish whether two specifications are the same. We could use a class name in this role, then assert the name is always used with the same meaning within a given inheritance graph. In context of singleton instantiations, all the necessary information could be held under the 'Class' interface within a dictionary.
+Linearization requires an identifier to distinguish whether two specifications are the same. This should be paired with an assertion that specifications with same identifier are equivalent, such that the assumption can be verified based on structural or referential equality. In context of singleton instantiations, all the necessary information could be held under the 'Spec' interface within a dictionary.
 
 ### Explicit Override
 
-To resist accidents, it's very useful to syntactically distinguish between introducing and overriding a name. We could aim for a lightweight syntax like '=' vs. ':=', or something more visible and obvious like '(override) name = ...', or just 'override' or '@override'. 
+To resist ambiguity conflicts, it is useful to distinguish introducing and overriding a name. We can report an error if we override a name that is undefined or if we introduce a name that is already defined. The implicit assumption is that a name is introduced with some meaning or purpose, while overrides presumably preserve meaning and purpose. Syntactically, this distinction may be lightweight, e.g. '=' vs. ':='.
+
+### Structured Namespaces
+
+A flat object namespace easily grows cluttered. It is not difficult to organize names hierarchically. For example, we can easily apply a mixin at an index. 
+
+        apply_at idx mixin = λbase.λself. 
+            base with { 
+                [idx] = mixin base.[idx] self.[idx] 
+            }
+
+More sophisticated translations are possible, e.g. translating individual names. However, it is awkward to extend translations like this to multiple inheritance. It is feasible to develop a few specialized variants, assuming adequate developer control over the 'Spec' interface.
 
 ### Stateful Specification
 
@@ -275,19 +290,23 @@ Unfortunately, fixpoint are not fully compatible with continuations. We resolve 
 
 With flexible monoliths, we can define almost any effect. But, as seen with Cut and Alt, there's an awkward distinction between defined effects and assumed effects. This interferes with generic programming and smooth extension of effects APIs.
 
-To eliminate this distinction, we can abstract our constructors. Instead of concrete Get, Set, Cut, Alt, Shift, Reset, Fix, etc.. we'll implicitly thread an eff parameter such that we can invoke an abstract 'eff.Get' method. We can further extend this to abstract the monad constructors: Return and Seq (for >>=). We don't need to expose Yield, though it's implicit for any externally handled effects.
+To eliminate this distinction, we can abstract the effect constructors. This can be expressed in terms of threading an effects object such that we invoke 'effect.Cut' without knowing its implementation details. We can further abstract the monad structure, the 'Return' and '>>=' constructors. We don't need to expose Yield, though it would be implicit to any externally handled effects.
 
-To enhance extensibility, we can model eff as a singleton instance object, i.e. such that 'eff.Class.\*' supports mixins and multiple inheritance. This is a lot more friendly to higher-order effects than monad transformer stacks: we can recognize higher order effects and capture relevant context (including eff 'self') at point of invocation without unwinding first. Further, multiple inheritance enables compatible effects to merge and deduplicate, and detection of incompatible extensions based on linearization errors or implicit override. We can be a little more sloppy about knowing which effects are in scope.
+Assuming an 'effect.Spec.\*' interface, we can express extensions in terms of mixins and multiple inheritance. This simplifies extensions with higher-order effects. For contrast, monad transformers have difficulty with higher-order effects mostly because they unwind the stack and lose context before handling the effect. With an effects object, we begin handling the effect at point of invocation, and we have flexible access to current context via self.
 
-### Dynamic State
+With multiple inheritance, the linearization algorithm will deduplicate and merge extensions. Thus, developers may apply extensions without being overly concerned about redundancy or ordering. We can also identify structurally incompatible extensions based on linearization conflict or violation of explicit overrides. That doesn't cover all incompatibilities, but we can be confident that purpose is preserved.
 
-We can easily model a shared heap and memory allocator within indexed state. Unfortunately, we cannot easily model automatic garbage collection at this layer. Thus, users must explicitly 'free' refs. Dangling refs are mitigated because there is no need to recycle addresses, and we can easily recognize a freed ref. For performance and robust memory management, it may be useful to organize refs into hierarchical arenas that can be freed collectively.
+### Heap-like State
+
+We can model a heap and allocator given indexed state. Although we cannot directly model automatic garbage collection of the heap, we can indirectly support garbage collection with guidance from annotations (see *Ephemerons* performance pattern). Of course, users are also free to explicitly manage memory. It is useful to organize a heap into hierarchical arenas. This enables coarse-grained memory management (manual or GC) at whole-arena level as tasks are completed. 
 
 ### Concurrency
 
-It is feasible to model cooperative threads in terms of continuation per thread and context switching state, e.g. sharing only 's.heap'. We can even model mutexes and semaphores (and deadlocks). However, modulo reflection APIs (e.g. to observe status of thunks), we cannot observe race conditions. Thus, although concurrency may be useful for decomposing large problems into interacting subtasks, it is not reliable as a basis for peformance. At best, we can spark some computations per thread.
+We can model cooperative threads in terms of continuations and state. It is convenient to model all 'state' as thread-local except for an explicitly shared heap, thus context switch by moving the heap between thread states.
 
-Concurrency tends to hinder *local reasoning* about behavior. Even with a deterministic outcome, predicting that outcome may require expansive knowledge of other threads and their schedule. This can be mitigated with careful design, e.g. communicating via queues or channels, promise pipelining instead of shared state, confluence to guarantee outcome is independent of schedule.
+Caveat: Cooperative threads are useful for organizing computations, but not for performance. Without access to a reflection API, e.g. to observe which thunks are evaluated, we cannot observe race conditions. We'll logically just run one thread at a time. At best, we can arrange for parallelism by 'sparking' expensive pure computations before the thread sleeps.
+
+A relevant concern is that concurrency hinders local reasoning. Although a deterministic schedule makes it relatively easy to debug, it still requires tracing interactions across a codebase. This can be mitigated by designing for confluence, i.e. such that the schedule may influence intermediate states but does not affect final outcomes.
 
 ## Modules
 
@@ -298,10 +317,10 @@ To simplify architecture, file dependencies are constrained: a file may referenc
 A module is integrated by 'including' it as a mixin. Any prior definitions or inclusions effectively model prior mixins. We can translate inclusion to a dictionary defined within the host environment. Thus, we could have a few import forms:
 
 * *include Module* - bind included module's Base to host's current Base namespace, sharing Self.
-* *include Module at m* - apply module to override component dictionary 'm', i.e. binds Base->Base.m, Self->Self.m, 
+* *include Module at m* - apply module to override component dictionary 'm', binds Base.m, Self.m 
 * *import Module as m* - introduces 'm' with `{ "env": Self.env }` (by default), then applies 'include Module at m'.
   - This treats 'env' as an implicit, read-only environment at the module layer, supporting adaptability.
-  - Front-end compiler may freely introduce or override `__name` definitions for flexible integration.
+  - Front-end compiler may freely introduce `__name` definitions for flexible integration.
 
 The hierarchical 'include at' and 'import as' forms simplify lazy loading. In contrast, with toplevel 'include', it is often difficult to determine which modules introduce or override a definition without loading everything. Ultimately, there is only one 'Self'. This simplifies deep overrides and extensions, analogous to mutable definitions without actual mutation.
 
@@ -383,17 +402,11 @@ Machine-code mnemonics are left to libraries. Effectively, we have a generic 'as
 
 ### Reflection
 
-The assembler shall recognize 'refl.\*' as defining reflection tasks within a module. In context of lazy loading, the assembler evaluates reflection tasks only for loaded modules. Defining reflection tasks enables them to be overridden or disabled via namespace extension. A motive for reflection is to keep the executable small by externalizing logic for typechecking, visualization, cache management, etc. into the module system.
+The assembler assumes 'refl.\*' definitions represent reflection tasks. These are expressed effectfully. In context of lazy loading, the assembler runs these reflection tasks when a module is loaded.
 
-To keep it simple and small, this reflection API may be version specific. For portability, the user configuration may define an adapter. Some observations for a 'good' reflection API design:
+Ideally, the reflection API is smaller, simpler, and lower-level than a built-in typechecker. It provides capabilities for users to define their own typechecking, testing, even theorem proving. It may further support visualizations, editable projections, cache management, etc..
 
-- Reflection shall not influence 'result'. In general, reflection tasks have read-only access to computations. The exception is interaction between reflection tasks, which may be supported via the reflection API.
-- In context of interactive programming, we'll often abort or replay reflection tasks. And even batch mode may evaluate many tasks concurrently. For consistency, favor idempotent, commutative interactions between reflection tasks, i.e. publish-subscribe, consistency as logical monotonicity (CALM), or conflict-free replicated data types (CRDTs).
-- Outputs for logging or visualization may benefit from some form of streaming tree-builder representation, i.e. a stream of 'edits' to a 'view' with eventual consistency guarantees, but enabling users to observe intermediate inconsistent states.
-- We frequently want to trigger reflection based on use of names, e.g. typecheck only if a names is used at least once, or observe arguments for assertions or visualizations. For consistent triggering, consider a staged API: first stage sets triggers, later stages or 'result' may activate. If we must observe arguments during first stage, replay is feasible.
-- For adaptability, provide access to runtime version info, OS environment variables, and `--refl Arg` options on command line just for the reflection API.
-
-These constrain API design without overly complicating it. In any case, a robust foundation will result in a lot more reproducibility even for the reflection tasks.
+To keep the reflection API small, it is version-specific. The bloat of portability and policy is pushed to a configuration-defined adapter. For adaptability, the reflection API should provide access to: OS environment variables, `--refl Arg` command-line options, and assembler version info. 
 
 ### Interaction
 
@@ -510,7 +523,7 @@ It is convenient to express reflection effectfully, the assembler executable imp
 
 In general, we can express annotations at the namespace scope via simple naming conventions. For example, given a name like 'foo', we could describe its type as 'foo\_type' or 'type.foo' or another convention that an assembler or a reflection task can easily recognize and process. Of these, I prefer the 'type.foo' convention. This ensures it's relatively easy to separate type descriptions from the module (e.g. as an interface), and it mitigates the need to analyze otherwise atomic names.
 
-A significant benefit of namespace-layer annotations is that they're available for overrides. If we override definition of 'foo', we might want to also override 'type.foo' and the types for some clients of 'foo'. In the general case, namespace extensions may represent breaking changes, thus it's very convenient that reasoning updates are also expressed in the same extension. We'll generally avoid term-level annotations for this reason.
+A significant benefit of namespace-layer annotations is that they're available for overrides. If we override definition of 'foo', we might want to also override 'type.foo'. In turn, we may need to adjust types for some clients of 'foo'. Ideally, all of these repairs can be made non-invasively. Though, we're also free to edit original sources where it is convenient to do so (content-addressed modules mitigate many issues). 
 
 Not every namespace annotation need be associative like types. It's ultimately just recognizing ad hoc naming conventions.
 
@@ -536,11 +549,9 @@ The reflection API does not provide effects to edit sources. That capability is 
 
 ## Monadic Assembly
 
-It is convenient to express assembly code effectfully. Each assembly mnemonic becomes a monadic function that 'writes' machine code into state. The state may also aggregate declarations such as '.bss' and '.data' sections. We can compose operations into procedures that serve the role of conventional 'assembly macros' without actual macros.
+It is very convenient to express assembly effectfully. Each mnemonic becomes an operation that writes machine code to implicit state. Assembly macros become simple procedures. The state may also aggregate data declarations, e.g. '.bss' or '.data' sections. We can further extend state with compiler-like features, such as tracking which registers are in use. This could help with detecting conflicts or adapting assembly in context.
 
-Beyond those basics, we might statefully track abstract machine state, i.e. so we know which registers are in use, for what, associated types for pointers. This metadata will simplify ad hoc reasoning about the assembly process or product, and it also supports more 'dynamic' assembly, e.g. allocating registers based on availability.
-
-To support the assembly programming vibe, our syntax may support a Haskell-like do notation and desugar '%mov' to 'eff.mov' (for *Extensible Effects*). This supports a clear column of concise mnemonics, and cleanly separates expression of assembly fragments from the logic for writing it.
+In context of *Extensible Effects*, we can improve the aesthetic by expanding '%name' to the relevant `effect.name`. With a suitable setup and monadic do notation, users will be writing columns of concise mnemonics such as '%mov'. Aside from aesthetic benefits, abstraction of mnemonic operations provides an opportunity for flexible processing, e.g. we could build some extra metrics about the assembly, or automatically maintain an abstract interpretation of machine state. 
 
 ## Syntax
 
@@ -565,19 +576,18 @@ Explicit override resists many accidental name or 'meaning' conflicts. It's an e
 
 In context of mixins, to resist accidents we'll insist on `abstract Name(, Name)*` declarations for names that should be defined by the time the mixin is applied, but are not defined within the mixin. We'll report an error if a name is used but undefined unless it has an 'abstract' declaration. Note that 'abstract' doesn't care about order of definitions: it could be provided via Base or Self. Only overrides care about order.
 
-We'll generally forbid name shadowing at module scope, i.e. it's an error to shadow a name that is defined or abstracted within the current file, toplevel includes, or lexical scope. This error may be suppressed for specific cases. For example, it is suppressed for 'eff' in context of desugaring effects, but not necessarily for manual use of 'eff'.
-
-To support the assembly programming vibe, I propose to desugar '%name' to 'eff.name'. The idea is to push most assembly mnemonics into the effects API and express them concisely (see *Monadic Assembly*). But any effect may be referenced this way.
+We'll generally forbid name shadowing, i.e. it's an error to introduce a local or lambda variable matching a name in lexical scope. But there may be options to suppress this error for specific use cases or contexts.
 
 ### Do Notation
 
-We can adapt Haskell's do notation almost directly. We'll desugar to `\eff -> ...` using `eff.Seq` and `eff.Return` in the right-hand side. We may treat 'eff' as a keyword, a special case for name shadowing. 
+We can adapt Haskell's do notation almost directly. We'll desugar to a concrete *Extensible Effects* form, such as `\__eff -> __eff.Seq (__eff.Alt ops) id __eff`. Use of `__eff` (or another special name) may be reserved by the compiler and a special exception for name shadowing. We can trivially desugar '%name' to `__eff.name`. 
 
-One difference regards fixpoint and RecursiveDo. Instead of implicit fixpoints, I propose explicit forward declarations of names to be resolved through fixpoint. This serves two purposes: First, it's a lot clearer to users what's happening. Second, it makes the scope of fixpoints more visible, which is relevant because there are awkward feature interactions between fixpoints and delimited continuations. Syntax for this could be `decl Name(, Name)*`.
+A few notational tweaks:
 
-Another distinction regards pattern matching. We could feasibly support `Pattern <- Effect` or `Pattern = Expr` syntax such that the desugared form backtracks via `eff.Alt []` when a pattern fails to match. We can mix pattern matching flexibly with effectful operations.
+- Regarding MonadFix and RecursiveDo, I propose explicit forward declarations, e.g. `declare Name(, Name)*`. This makes fixpoint more visible and clarifies scope, relevant because fixpoint interferes with continuations.
+- Extend pattern matching to `Pattern = Expr` or `Pattern <- Op`. Invoke `%Alt []` if pattern fails. Potential branching for patterns that may be realized in more than one way (no implicit cut). 
 
-To support extensible effects, we may support `using M Expr` function, such that `using M op = \eff -> op (mix M eff)`. No need for dedicated syntax here.
+To support extensible effects, we could easily define `using ext op = \eff -> op (mix ext eff)`. In this case, 'op' would often involve a hierarchical do notation block, e.g. `using ext do ...`.
 
 ### Texts
 
@@ -592,13 +602,11 @@ Proposed syntax:
         "   (even when host file uses CR or CRLF)
         """
 
-There are no escape characters, i.e. all texts are 'raw' by default, and postprocessing is left to the user. Embedded texts are limited to printable ASCII. Users are encouraged to separate larger
-
-For large texts or binaries, the recommended practice is to move content into a separate file then load as a binary through the module system.
+There are no escape characters, i.e. all texts are 'raw' by default, and postprocessing is left to the user. Embedded texts are limited to printable ASCII, at least for now. Large or arbitrary texts and binaries are best provided as separate files.
 
 ### Numbers
 
-All numbers are modeled as exact rationals, no hidden size or precision limits. The intention here is that any loss of precision should belong to the developer, not to the assembler. Of course, if we ever want high-performance number crunching at assembly time, we'll be relying on accelerators. 
+All numbers are modeled as exact rationals, no hidden size or precision limits. The intention here is that any loss of precision should belong to the developer, not to the assembler. Of course, if we ever want high-performance number crunching at assembly time, we'll be relying on accelerators.
 
         0
         1
