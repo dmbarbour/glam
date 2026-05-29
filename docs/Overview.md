@@ -56,9 +56,9 @@ Performance of lambda calculus is mediocre by default, and bignum arithmetic won
 
 * *Caching*: Remember expensive computations to avoid rework. Persistent caching can support incremental compilation. A shared remote cache with PKI infrastructure can support direct downloads of binaries.
 
-* *Ephemerons*: Insist some dictionary keys also match referential equality. Report an error if the lookup key has the same value but different origin from the stored key (e.g. by thunk). Garbage collect associated data if origin key is collected.
+* *Ephemerons*: Insist some atoms are observably unique. Reject observation of the contrary, diverge instead. When used in dict keys, we can garbage collect associated data after unique atoms leave scope.
 
-These performance features may be guided by annotations or built-ins functions.
+These patterns are supported via annotations or built-ins functions.
 
 ## Data
 
@@ -298,7 +298,7 @@ With multiple inheritance, the linearization algorithm will deduplicate and merg
 
 ### Heap-like State
 
-We can model a heap and allocator given indexed state. Although we cannot directly model automatic garbage collection of the heap, we can indirectly support garbage collection with guidance from annotations (see *Ephemerons* performance pattern). Of course, users are also free to explicitly manage memory. It is useful to organize a heap into hierarchical arenas. This enables coarse-grained memory management (manual or GC) at whole-arena level as tasks are completed. 
+We can easily model a heap and allocator with indexed state. Further, by leveraging the *Ephemerons* performance pattern, we can extend garbage collection to the heap. That said, performance may benefit from explicit memory management, especially arena-based. 
 
 ### Concurrency
 
@@ -314,13 +314,12 @@ A module is represented by a file, and represents a mixin object. The assembler 
 
 To simplify architecture, file dependencies are constrained: a file may reference only local files within the same folder or subfolders (no parent-relative ("../") or absolute paths), or content-addressed remote files (by DVCS revision hash and filename). File dependencies must form a directed acyclic graph. Files and subfolders whose names start with "." are also hidden from the module system.
 
-A module is integrated by 'including' it as a mixin. Any prior definitions or inclusions effectively model prior mixins. We can translate inclusion to a dictionary defined within the host environment. Thus, we could have a few import forms:
+A module is integrated by 'including' it as a mixin. Any prior definitions or inclusions effectively model prior mixins. We can translate inclusions to a hierarchical element. Thus, I propose a few import forms:
 
 * *include Module* - bind included module's Base to host's current Base namespace, sharing Self.
 * *include Module at m* - apply module to override component dictionary 'm', binds Base.m, Self.m 
-* *import Module as m* - introduces 'm' with `{ "env": Self.env }` (by default), then applies 'include Module at m'.
+* *import Module as m* - introduce 'm' with `{ "env": Self.env }` by default, then apply 'include Module at m'.
   - This treats 'env' as an implicit, read-only environment at the module layer, supporting adaptability.
-  - Front-end compiler may freely introduce `__name` definitions for flexible integration.
 
 The hierarchical 'include at' and 'import as' forms simplify lazy loading. In contrast, with toplevel 'include', it is often difficult to determine which modules introduce or override a definition without loading everything. Ultimately, there is only one 'Self'. This simplifies deep overrides and extensions, analogous to mutable definitions without actual mutation.
 
@@ -328,26 +327,27 @@ The hierarchical 'include at' and 'import as' forms simplify lazy loading. In co
 
 The assembler implicitly loads a configuration module based on the `GLAM_CONF` environment variable or an OS-specific default, i.e. `"~/.config/glam/conf.g"` in Linux or `"%AppData%\glam\conf.g"` in Windows. A small, local user configuration typically extends a large, remote community or company configuration.
 
-The configuration serves several roles:
+The configuration defines various options under 'conf.\*' to guide the assembler. As a rule, configuration is expressed effectfully to simplify composition and admit future extensions. 
 
-- *Assembly environment*: The user configuration specifies a Base 'env' argument to the assembly. This environment can provide default host information, system includes, shared libraries, etc..
-- *Command-line macros*: define a rewrite for command-line arguments. Applied if (and only if) the first command-line argument does not start with '-'. Supports extensible CLI 'language'.
-- *Development environment*: Define the loop for interactive mode. Define an adapter for reflection tasks. Filter and rewrite log messages for standard error in batch mode. Other user-experience tuning. 
-- *Resource management*: may specify GPGPUs available for acceleration, cache locations and replacement heuristcs, history management, shared proxy compilation and cache, alternative search locations for content-addressed remotes, tune assembler JIT or GC heuristics, quotas for testing, etc..
+- *assembly environment*: `conf.env : Eff [Compile] ()` - determines initial (Base) environment for assembly. Modeled as compiling an empty, anonymous source file (per *User-Defined Syntax*). Default is to forward toplevel 'env'.
+- *command-line macros*: `conf.cli : Eff [Parse, Write] ()` - rewrites command-line arguments if (and only if) the first command-line argument does not start with '-'. Expressed as specialized parser combinator to integrate tab completions. Default is error.
+- *interactive development environment*: `conf.ide : Eff [Refl, Net, TTY, File] ()` - runs repeatedly as transactional step function in interactive mode. Supports live update.
+- *reflection task adapter*: `conf.refl : Eff [Refl] Refl'` - for portability and policy, applies only to reflection tasks (not IDE). Doubles as the 'first' reflection task. Returns a modified API. Default is to use provided API directly.
+- *resource management*: ad hoc options for GPGPUs, remote proxies for caching or compilation, JIT, etc.. We'll figure things out we go.
 
-For flexibility, `GLAM_CONF` may list multiple files (same OS-specific separator as the `PATH` variable). These files are applied as mixins, i.e. files earlier in the list override those later, left to right. If there is need, we could further extend this to 'inline' or 'remote' files via special URLs. A motivating use cases for listing multiple files are to separate resource management, project-specific, and user-specific tuning.
+For flexibility, `GLAM_CONF` may list several files using the OS-specific `PATH` separator. These files are logically 'included' as mixins, such that files listed earlier may override those listed later, left to right. We can feasibly split the configuration between OS-layer, project layer, and user layer. We may later extend this list to support remote URLs.
 
-Other environment variables do not directly influence configuration, but may be accessible in context of reflection and may influence assembler behavior (e.g. tuning JIT or GC). For portability reasons, the user configuration should have an opportunity to reflect and intervene on any features configured through environment variables.
+For reasons of reproducibility, we're careful about effects in 'conf.env' and 'conf.cli', as those may influence the assembly result. Most other configuration features will receive ad hoc access to the reflection API.
 
 ### Assembly
 
 The assembler receives command-line arguments that express an assembly module as a list of mixins. Though, in practice, it's usually just one file or script. Relevant arguments:
 
-- `(-f|--file) FileName` - list a file to include; first file is included last, overriding those listed later. Depending on the configured environment, assembly isn't limited to ".g" files (see *User-Defined Syntax*).
+- `(-f|--file) FileName` - list a file to include; files earlier in list override those later (left to right). Depending on the configured environment, assembly isn't limited to ".g" files (see *User-Defined Syntax*).
 - `(-s|--script).FileExt Text` - as remote file with given extension and text. Scripts cannot import local files, hence are location-independent. 
-- `-- List Of Args` - if specified we define `__args` to given list of arguments at namespace scope, otherwise the empty list.
+- `-- List Of Args` - the assembler will define `asm.args` as a list of strings prior to including files.
 
-Essentially, the namespace for an assembly starts with `__args` and `env.*` from command line and configuration respectively. The primary output from an assembly is to define 'result' for extraction (see *Assembler* below). 
+Typically, the namespace for an assembly starts with `asm.args` and `env.*` from command line and configuration respectively. The primary output from an assembly is to define `asm.result` for extraction (see *Assembler* below). 
 
 ### Remotes
 
@@ -382,7 +382,7 @@ Primary behavior and inputs are detailed in *Modularity*. Roughly:
 
 - load a configuration (`GLAM_CONF`) 
 - construct an assembly (`-f -s --`)
-- evaluate then extract the 'result'
+- evaluate then extract `asm.result`
 
 By default, we expect a binary result and extract to standard output. However, the assembler supports a few other filesystem-aligned options for extraction:
 
@@ -404,9 +404,11 @@ Machine-code mnemonics are left to libraries. Effectively, we have a generic 'as
 
 The assembler assumes 'refl.\*' definitions represent reflection tasks. These are expressed effectfully. In context of lazy loading, the assembler runs these reflection tasks when a module is loaded.
 
-Ideally, the reflection API is smaller, simpler, and lower-level than a built-in typechecker. It provides capabilities for users to define their own typechecking, testing, even theorem proving. It may further support visualizations, editable projections, cache management, etc..
+The reflection API should be smaller, simpler, and lower-level than a built-in typechecker. It should provide capabilities for users to define their own typechecking, testing, even theorem proving. The reflection API may further support visualization, editable projections, cache management, etc. - any auxilliary logic that is inconvenient to include within the executable. 
 
-To keep the reflection API small, it is version-specific. The bloat of portability and policy is pushed to a configuration-defined adapter. For adaptability, the reflection API should provide access to: OS environment variables, `--refl Arg` command-line options, and assembler version info. 
+To keep implementation small and simple, the reflection API is version-specific, specialized to an executable's representations and capabilities. The bloat of portability and policy is pushed to user-defined adapters. However, to simplify integration, we do make one concession: the Cut effect shall double as a hierarchical transaction scope. Transactions are implicitly aborted and retried when observed conditions change. A failed transaction implicitly waits for observed conditions to change, a flexible basis for concurrency control.
+
+In context of interactive programming, reflection tasks are frequently aborted and replayed. Developers should design tasks and API adapters around this, favoring publish-subscribe, conflict-free replicated datatypes (CRDTs), and other resilient architecture. But this is the sort of policy bloat that is externalized from the executable.
 
 ### Interaction
 
@@ -425,7 +427,7 @@ The interaction model restricts effects:
 - *File:* Limited to folders that may contribute to the current assembly or user configuration. May extend to DVCS repos if we can trace updates to revision hashes in source. 
 - *Net:* Cannot take initiative. Accepts connections on configurable TCP ports and Unix domain sockets, e.g. to support HTTP or a remote drawing protocol.
 - *TTY*: Modeled as a default network connection. Interactive mode does not write to standard error. 
-- *Refl*: The same reflection API used for reflection tasks. 
+- *Refl*: The full API available to reflection tasks.
 
 The interaction loop itself is expressed as a transactional step method that runs repeatedly. Effects, such as network reads and writes, are 'committed' only when a step returns successfully. This enables the step method to be freely updated between transactions.
 
