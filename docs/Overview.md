@@ -585,7 +585,7 @@ ASCII printable characters (0x21-0x7E) and whitespace (SP, CR, LF). The compiler
 
 ### Names and Namespaces
 
-Basic names will use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]+` with a few exceptions for numbers, keywords, etc.. For extensibility, I propose to immediately reserve all English prepositions (and, or, but, when, as, with, etc.) and all names beginning with two underscores. Namespaces are modeled as dictionaries with atomic keys (i.e. we'll wrap names as atoms). We'll support dotted paths `x.y.z` for reaching deep into hierarchical dictionaries.
+Basic names will use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]+` with a few exceptions for numbers, keywords, etc.. To mitigate compatibility issues with future language extensions, I propose to immediately reserve all common English prepositions and conjunctions (and, or, but, because, when, as, with, on, under, from, to, etc.) and all names starting with two underscores. Namespaces are modeled as dictionaries with atomic keys (i.e. we'll wrap names as atoms). We'll support dotted paths `x.y.z` for reaching deep into hierarchical dictionaries.
 
 Explicit override resists many accidental name or 'meaning' conflicts. It's an error to override a name that doesn't exist, and an error to introduce a name that already exists. A simple, concise, and viable approach is to syntactically distinguish introduction `name = Def` from override `name := NewDef`. In the latter case, we may implicitly bind 'prior' to the previous definition.
 
@@ -595,25 +595,24 @@ We'll generally forbid name shadowing, i.e. it's an error to introduce a local o
 
 ### Operators
 
-There are no user-defined operators. Users can work around this via macro DSLs or extending the compiler (via *User-Defined Syntax*). 
+There are currently no user-defined operators. Users can work around this via macro DSLs or compiler extensions (via *User-Defined Syntax*). We'll gradually introduce operators to fulfi
 
 ### Do Notation
 
-We can adapt Haskell's do notation almost directly. But I propose a few tweaks.
+We can adapt Haskell's do notation almost directly. But we'll desugar to a concrete representation. Something like:
 
-We'll explicitly use `\eff -> Body` in desugared notations. Thus, users may reference 'eff' directly, and we simply desugar '%name' to 'eff.name'. A consequence is that 'eff' is frequently shadowed, and is a necessary exception to rules against name shadowing. This is mitigated by context: implicit data and control flow is the essence of effects.
+        eff:(\eff -> Body)
 
-We'll support the '>>' and '>>=' operators. We'll use a dynamic check that the intermediate result is unit for '>>'.
+We tag operations with 'eff' to distinguish from regular functions and serve as a calling convention. The 'eff' parameter is stable: users may directly reference 'eff' within the 'do' body (no effect needed to use 'eff'), and we simply desugar `%name` to `eff.name` for lightweight access to individual operations. The name 'eff' is necessarily an exception to the name shadowing rule. To mitigate confusion, we might treat it as a keyword.
 
-        op >>= k = \eff -> eff.Seq (op eff) (\r -> k r eff)
-        op1 >> op2 = op1 >>=\()-> op2
+Monad composition operators include '>>=' (basic sequencing), '>>>' (Haskell's '>>') and '>=>' (Kleisli compositon). (I'm moving '>>' over to function composition, see *Pipes*).
 
-We can easily model a `using Extension do ...` function to extend the namespace, e.g. with `using M op = \eff -> op (M eff)`. But we'll want to ensure our parse rules for do notation capture this properly, otherwise we'll be forced to write `using Ext <| do ...`.  
+In the absence of types, the compiler shall inject dynamic checks that operations that don't catch a result return `()`. Users are free to explicitly ignore results via `_ <- op` or `op >>=\_-> ...`.
 
 Other tweaks:
 
-- Regarding MonadFix and RecursiveDo, I propose explicit forward declarations, e.g. `declare Name(, Name)*`. This makes fixpoint more visible and clarifies scope, relevant because fixpoint interferes with continuations.
-- Extend pattern matching to `Pattern = Expr` or `Pattern <- Op`. Fail (via `%Alt []`) if pattern fails. Potential branching for patterns that may be realized in more than one way (no implicit cut). 
+- Regarding MonadFix and RecursiveDo, I'd like explicit forward declarations, e.g. `declare Name(, Name)*`. This improves legibility IMO, and clarifies the scope where fixpoint may interfere with other effects (such as continuations).
+- Extend pattern matching to `Pattern = Expr` or `Pattern <- Op`. Either the match succeeds or the effects API should include `%Fail`. 
 
 ### Embedded Texts
 
@@ -642,8 +641,8 @@ Binaries are modeled as lists of small integers, 0..255. Texts are modeled as bi
 
 ### Numbers
 
-All numbers are modeled as exact rationals, no hidden size or precision limits. The intention here is that any loss of precision should belong to the developer, not to the assembler. Of course, if we ever want high-performance number crunching at assembly time, we'll be relying on accelerators.
-
+Numbers are modeled as exact rationals, no bounds on size or precision. This has rather severe performance implications, but should be a non-issue for most assembly tasks. Rationals of a few recognized forms (e.g. `N * 2^K` for small integers N, K) may use specialized representations. Insofar as high-performance number crunching becomes necessary, the general solution would involve accelerators.
+ 
         0
         1
         -42
@@ -666,23 +665,63 @@ I propose to use square brackets for lists.
         [1]
         [1,2,3]
 
-We'll use `++` to compose lists by appending them. There is no 'cons' operator, but we can express cons as `cons x xs = [x]++xs`. We can also use `[x]++xs` as a pattern match. Notably, we can add or match both end of the list easily, but we're only permitted one variable-length pattern.
+We'll use `++` to compose lists by appending them. There is no dedicated 'cons' operator in syntax, but we can express `cons x xs = [x]++xs` and this might desugar to an underlying 'cons' primitive. We may generally use `[x]++xs` in pattern matching. We can extend or match both ends of the list, but pattern matching is restricted to at most one variable-length fragment (e.g. `[x]++xs` or `xs++[x]` or `[x0,x1]++xs++[xn]`, but no `xs++ys` because that would match too many ways).
 
+Currently, there is no special syntax for list length, slicing lists, etc.. I've considered a few options, but I feel plain old functions are probably more accessible. Though, we'll certainly be relying on *accelerated* list functions. List representations under-the-hood may involve finger-tree ropes, and we might flatten lists into arrays based on annotations.
 
+### Tagged Data
 
-Regarding indexing and slicing of lists, I don't have a good idea for syntax at the moment. We'll just provide some built-in functions, e.g. `__list_len` and `__list_cut`, then let users build a list processing module.
+I propose ':' as the 'tag:Data' separator. In the common case, tags are names, and we'll implicitly capture the name as an atom. We may also use parenthetical expressions in tag position. In this case, the tag expression must evaluate to a valid dictionary key.
+
+        name:Expr
+        ('name):Expr
+        (Expr):Expr
+
+Tagged data also receives special attention in pattern matching:
+
+        name:Pattern
+        (Expr):Pattern
+
+Tagged data is modeled as a singleton dictionary. In pattern matching, we evaluate the tag Expr rather than match on it because dictionaries are not iterable.
+
+### Tuples
+
+Tuples are syntactically expressed as parenthetical lists of at least two elements: `(a,b)`, `(x,y,z)`, etc.. In general, we do not want to match or compose tuples as lists, at least not by accident. So, we'll trivially rewrite these as tagged data: `tuple:[a,b]`, `tuple:[x,y,z]`, etc..
+
+If users insist on a one-tuple or zero-tuple, that would be expressed as `tuple:[a]` or `tuple:[]`. 
+
+### Unit
+
+The unit value is syntactically expressed as empty parentheses: `()`. It trivially desugars to the atom `'unit`. We can also use `()` in pattern matching (where it still desugars to `'unit`).
+
+### Booleans
+
+We'll express Boolean values as atoms `'true` and `'false`. The compiler will also take `true` and `false` as keywords, equivalent to these associated atoms. 
+
+We'll support the conventional `if Cond then A else B` expression syntax where Cond is a pure expression that evaluates to a boolean. Anything result other than a boolean is an error.
+
+We'll support the conventional range of comparisons, e.g. `>`, `>=`, `<`, `=<`. These apply to numbers and lists of comparables (using lexicographic order). But instead of `==` we may favor favor `is` and `is not`. We'll also support 'and' 'or' conjunctions (instead of `&&` and `||`). We can apply 'not' as an operator on a boolean, though `is not` is interpreted as a composite keyword. We may support `is defined` and `is not defined` as special cases. I'll probably want to review Python's syntax here.
+
+That said, I do not like Booleans. We lose details about the condition that might be relevant to the cases. We cannot easily refactor a chains of cases. This syntax shall favor pattern matching and backtracking conditionals (via Alt, Cut, Fail) instead of Booleans.
+
+### Atoms
+
+Users may declare globally unique atoms in the module namespace:
+
+        atoms foo, bar, baz
+        atom xyzzy
+
+These are guaranteed to not be equal to any other atom. Users may also convert any name to an atom via simple `'` prefix, e.g. `'true` or `'unit`. This is essentially equivalent to `__atom "true"` and `__atom "unit"`. In practice, atoms are interned.
+
+To support the *Ephemerons* performance pattern, we'll further introduce a couple more builtins: `__scoped_unique : Atom -> Atom` and `__defer : T -> Any -> T`. It's an error to compare the scoped unique atom with any structurally equivalent atom that is not also referentially equivalent (including the argument to `__scoped_unique`). Use of `__defer` can help control scope of partial evaluation.
+
+In pattern matching, it's easy to match on named atoms like `'true`. Matching on toplevel names generally requires guard patterns, e.g. `a ? (a==foo)`. Fortunately, the main exception to this is also the main use case for unique atoms: tagged data and dictionaries. Here, we could just write `(foo):Pattern`. 
 
 ### Dicts
 
 I'm not satisfied with conventional syntax for dictionaries, but I also don't have much better ideas, or even a strong grasp of what I don't like. Not a happy place for me. But some thoughts: use of braces `{}` should be optional. I'm not convinced we should compose dictionaries directly like an override - it doesn't generalize nicely with hierarchical dictionaries. Limiting updates to patch one definition at a time may be better. Access to 'prior' is very convenient even without object 'self', essentially models a functional update (`\prior -> newval`), and we could feasibly reuse the '=' vs. ':=' distinction. 
 
 Deleting definitions is a little awkward. We could model this as `name := undefined`, treating 'undefined' as a special value (or 'default' value). We could also support a 'without' syntax.
-
-### Tuples
-
-Although we could directly model tuples as lists, e.g. a pair as `[1,2]`, I feel this does not capture user intentions. So I propose a simple variant wrapper: pair `(1,2)` desugars as `tuple:[1,2]`. The only syntax for singleton tuples is `tuple:[x]`, and I won't encourage its use.
-
-*Aside:* Although we could model unit `()` as the empty tuple, `tuple:[]`, I currently plan to just model it as an atom instead.
 
 ### Functions
 
@@ -694,19 +733,23 @@ I propose to adopt Haskell's `\` for lambdas. We may also support Haskell-style 
 
 It is tempting to integrate pattern matching into lambdas, but it seems awkward in context of extensible namespaces and overrides. At least for now, I'll model pattern matching separately from lambdas.
 
-### Directional Pipes
+### Pipes
 
 Borrowing F#'s syntax here:
 
         f <| arg = f arg
         arg |> f = f arg
 
-The '<|' form is mostly useful to avoid some parentheses, e.g. `f <| g h` is equivalent to `f (g h)`. The '|>' form is convenient as a form of forward function composition. 
-
 I propose to also support directional function composition:
 
-        f >>> g = \ h -> g (f h)
-        g <<< f = f >>> g
+        f >> g = \ h -> g (f h)     
+        g << f = f >> g
+
+Note that this means '>>' isn't used for monads. Instead, '<<' serves the role of '.' in Haskell, and '>>' is the forward pipe. We'll use '>>=' and '>=>' for functions, and insist
+
+
+The '<|' form is mostly useful to avoid some parentheses, e.g. `f <| g h` is equivalent to `f (g h)`. The '|>' form is convenient as a form of forward function composition. 
+
 
 Without typeclasses, these operators don't generalize to categories. But function composition is frequent enough. And we will also support Kleisli composition for monads, though perhaps only in the forwards direction:
 
