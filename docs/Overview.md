@@ -54,11 +54,11 @@ Performance of lambda calculus is mediocre by default, and bignum arithmetic won
 
 * *Parallelism*: Trigger a lazy computation early and evaluate in a background worker thread. This pattern is called 'sparks' in Haskell. We can also obtain some parallelism from acceleration.
 
-* *Caching*: Remember expensive computations to avoid rework. Persistent caching can support incremental compilation. A shared remote cache with PKI infrastructure can support direct downloads of binaries.
+* *Caching*: Remember expensive computations to avoid rework. Persistent caching can support incremental compilation. A shared remote cache with PKI infrastructure can support direct downloads of binaries. 
 
-* *Ephemerons*: Insist some atoms are observably unique. Reject observation of the contrary, diverge instead. When used in dict keys, we can garbage collect associated data after unique atoms leave scope.
-
-These patterns are supported via annotations or built-ins functions.
+* *Ephemerons*: Mark some atoms as scope-unique. Diverge upon comparison if the assertion proves untrue. Use marked atoms as dict keys. Garbage collect associated data when the marked atom is collected.
+  
+These patterns should be supported via annotations or built-ins functions.
 
 ## Data
 
@@ -66,11 +66,9 @@ The built-in data types are numbers, lists, dicts, atoms, and functions. All dat
 
 - Numbers are bignum integers and exact rationals. Rounding of numbers is left to users, but the underlying representation may optimize for floating-point style usage (e.g. base 2 or 10).
 - Lists are the one-size-fits-all sequential structure. Lists may be concretely represented by finger-tree ropes under the hood. Binaries are modeled as lists of small integers (0..255) and heavily optimized.
-- Dicts are key-value associative structures. Keys must be comparable with equality, i.e. excluding functions. Dictionaries do not support iteration over keys. Variants are encoded as singleton dictionaries.
-- Atoms are abstract data with equality. Modules may introduce guaranteed-unique atoms, and we can construct atoms from any data with equality (excluding functions). The underlying representation of atoms is hashed or interned enabling fast equality and dict lookups. 
-- Functions are expressed in the lambda calculus.
-
-Reflection APIs can bypass abstractions, e.g. to iterate a dictionary or render a function. But reflection APIs are not available for computation of the assembly result. 
+- Dicts are key-value associative structures. Keys must be comparable with equality, i.e. excluding functions. Dicts do not support iteration over keys. Tagged data is often encoded via singleton dicts.
+- Atoms are abstract data with equality. Modules may introduce guaranteed-unique atoms. We can construct atoms from any data with equality (i.e. excluding functions). The underlying representation of atoms may be hashed or interned for fast equality and dict lookups. 
+- Functions are expressed in the lambda calculus. 
 
 ## Objects
 
@@ -107,7 +105,7 @@ A flat object namespace easily grows cluttered. It is not difficult to organize 
 
         apply_at idx mixin = λbase.λself. 
             base with { 
-                [idx] = mixin base.[idx] self.[idx] 
+                (idx) = mixin base.(idx) self.(idx) 
             }
 
 More sophisticated translations are possible, e.g. translating individual names. However, it is awkward to extend translations like this to multiple inheritance. It is feasible to develop a few specialized variants, assuming adequate developer control over the 'Spec' interface.
@@ -122,6 +120,14 @@ Mixins can model state-like updates, treating Base as a previous state, Instance
         }
 
 This can provide a foundation for allocating unique identifiers or building tables. However, this pattern easily interferes with lazy loading of modules if we aren't careful about integration. Ideally, a front-end compiler would provide dedicated syntax for safe patterns.
+
+### Stateful Objects
+
+It is expensive to maintain object state in terms of stateful specifications. Each state update would extend a 'chain' of specifications, an append-only log of every object's history. For efficient state, we must flatten the log, i.e. eliminate intermediate states. To resolve this, we must maintain state separately from the mixin structure.
+
+One option is pass around something like a `(Spec, State)` pair. 
+
+Alternatively, we can support pass-by-ref: design objects to operate in an effectful context, allocate and assign `obj.HeapRef` upon instantiation, interact with the object only within context. We can freely mix stateful and stateless objects. We can leverage the *Ephemerons* pattern for automatic garbage collection of heap state. Essentially, we can support the popular OO programming style.
 
 ## Effects
 
@@ -208,7 +214,8 @@ An intriguing opportunity is to mix choice with other effects. For example, a pa
 
         -- a pure pattern matching handler
         runAlt (Yield rq k) = match rq with
-            (Alt xs) -> List.flatMap (runAlt . k) xs
+            Fail -> []
+            (Alt a b) -> List.flatMap (runAlt . k) [a,b]
             (Cut op) -> runAlt (k (runCut op))
             (Fix f) -> runAlt (k (fixListFn (runAlt . f)))
             _ -> error "unrecognized effect in pure runAlt"
@@ -237,22 +244,23 @@ We can express extarbitrary data flow via indexed state, and arbitrary control f
             Get -> runCST s (k s)
             (Set s') -> runCST s' (k [])
             (Reset ix op) -> runCST s' op where
-                s' = s with { [CC] = ((ix,k):(s.[CC])) }
-            (Shift ix fn) -> match s.[CC] with
+                s' = s with { (CC) = ((ix,k):(s.(CC))) }
+            (Shift ix fn) -> match s.(CC) with
                 (ix',k'):cc' -> 
                     -- 'Shift' pops matched 'Reset', 'fn' may reinsert
-                    let s' = s with { [CC] = cc' }
-                    if (ix == ix') then runCST s' ((fn k) >>= k') else
+                    let s' = s with { (CC) = cc' }
+                    if (ix is ix') then runCST s' ((fn k) >>= k') else
                     runCST s' (Yield rq (\r -> Yield (Reset ix' (k r)) k'))
                 [] -> error "shift index not in scope"
-            (Alt xs) -> runCST s ((onAlt xs) >>= k)
+            Fail -> runCST s (onFail >>= k)
+            (Alt a b) -> runCST s ((onAlt a b) >>= k)
             (Cut op) -> runCST s ((onCut op) >>= k)
             (Fix f) -> Yield (Fix f') k' where
-                f' ~(r',_) = runCST (s with { [CC] = [] }) (f r')
-                k' (r',s') = runCST (s' with { [CC] = s.[CC] }) (k r')
+                f' ~(r',_) = runCST (s with { (CC) = [] }) (f r')
+                k' (r',s') = runCST (s' with { (CC) = s.(CC) }) (k r')
             _ -> Yield rq (runStateT s . k)
-        runCST s (Return r) = match s.[CC] with
-            ((_,k):cc') -> runCST (s with { [CC] = cc' }) (k r)
+        runCST s (Return r) = match s.(CC) with
+            ((_,k):cc') -> runCST (s with { (CC) = cc' }) (k r)
             [] -> Return (r,s)
 
         yield rq = Yield rq Return
@@ -262,21 +270,17 @@ We can express extarbitrary data flow via indexed state, and arbitrary control f
         shift_reset ix fn = shift ix (reset ix . fn)
 
         onCut op = do
-            prev <- get [BT]
-            set [BT] (error "failed without alternative")
+            prev <- getref BT
+            setref BT (error "failed without alternative")
             outcome <- reset CutScope op
-            set [BT] prev
+            setref BT prev
             return outcome
-        onAlt xs = match xs with
-            [] -> shift_reset CutScope <| \_-> get [BT] >>= id
-            (x:xs') -> match xs' with
-                [] -> return x
-                _ -> shift_reset CutScope <| \ k -> do
-                    saved_state <- get [] 
-                    set [BT] <| do 
-                        set [] saved_state 
-                        (onAlt xs') >>= k
-                    k x -- current branch
+        onFail = shift_reset CutScope <| \_-> getref BT >>= id
+        onAlt a b = 
+            shift_reset CutScope <| \k-> do
+                cp <- get 
+                setref BT (set cp >> k b)
+                k a
 
         -- external 'non-deterministic' choice
         runChoice (Return r) = [r]
@@ -288,25 +292,29 @@ Unfortunately, fixpoint are not fully compatible with continuations. We resolve 
 
 ### Extensible Effects
 
-With flexible monoliths, we can define almost any effect. But, as seen with Cut and Alt, there's an awkward distinction between defined effects and assumed effects. This interferes with generic programming and smooth extension of effects APIs.
+With flexible monoliths, we can define almost any effect. But there's an awkward distinction between defined and assumed effects. This separation hinders generic programming. 
 
-To eliminate this distinction, we can abstract the effect constructors. This can be expressed in terms of threading an effects object such that we invoke 'effect.Cut' without knowing its implementation details. We can further abstract the monad structure, the 'Return' and '>>=' constructors. We don't need to expose Yield, though it would be implicit to any externally handled effects.
+To eliminate this distinction, we can abstract the effects environment, e.g. threading an 'effect' API, such that we're invoking 'effect.Op' instead of calling a separate definition that assumes a specific set of primitives. The caller never needs to know whether Op is a primitive or a definition. We can also abstract the monad structure, i.e. the 'Return' and '>>=' (Seq) constructors.
 
-Assuming an 'effect.Spec.\*' interface, we can express extensions in terms of mixins and multiple inheritance. This simplifies extensions with higher-order effects. For contrast, monad transformers have difficulty with higher-order effects mostly because they unwind the stack and lose context before handling the effect. With an effects object, we begin handling the effect at point of invocation, and we have flexible access to current context via self.
+Modeling 'effect' as an object with inheritance enables extensions as mixins. Compared to monad transformers, this also simplifies extension with higher-order effects because we can capture context - including API 'self' - at point of invocation instead of first unwinding a handler stack.
 
-With multiple inheritance, the linearization algorithm will deduplicate and merge extensions. Thus, developers may apply extensions without being overly concerned about redundancy or ordering. We can also identify structurally incompatible extensions based on linearization conflict or violation of explicit overrides. That doesn't cover all incompatibilities, but we can be confident that purpose is preserved.
+In context of multiple inheritance, a linearization algorithm will deduplicate and merge extensions. This relaxes constraints on stack order and local knowledge of usage contexts. Structurally-incompatible extensions are detected as linearization conflicts or ambiguity errors (via explicit overrides). This simplifies debugging and improves user confidence. 
 
-### Heap-like State
+### Optimistic Concurrency
 
-We can easily model a heap and allocator with indexed state. Further, by leveraging the *Ephemerons* performance pattern, we can extend garbage collection to the heap. That said, performance may benefit from explicit memory management, especially arena-based. 
+We can model cooperative threads in terms of continuations and state. Assume our cooperative threads run in isolation between explicit checkpoints. We can view this as transactional steps, with each checkpoint 'committing' any updates. It is possible to evaluate multiple threads in parallel, analyze for read-write conflicts, commit a non-conflicting subset of checkpoints then replay the remainder.
 
-### Concurrency
+A failed transaction is logically replayed until it succeeds, waiting for conditions to change, a basis for concurrency control. We may also introduce 'atomic' sections where checkpoints are suppressed.  
 
-We can model cooperative threads in terms of continuations and state. It is convenient to model all 'state' as thread-local except for an explicitly shared heap, thus context switch by moving the heap between thread states.
+A few concerns:
+- *Rework* - too much replay. A scheduler can mitigate rework heuristically based on conflict history. Users can avoid rework via design patterns, e.g. favoring queues or CRDTs. It is feasible to support partial rollbacks. Rework is easy to report and debug, yet something to design around.
+- *Starvation* - need to spread replays across threads, not kill the same ones every time. Even better if weighted by effort, i.e. better to replay inexpensive operations. Mitigated by metadata, e.g. counters and priorities.
+- *Determinism* - modulo reflection and race conditions, the scheduler awaits the slowest thread in each optimistic batch. This is an opportunity cost to keep cores busy. Users can mitigate via sparking 'will need' pure computations to keep cores busy between checkpoints. 
+- *Local Reasoning* - it's difficult to understand and debug interactions that are distributed across multiple threads. This is mitigated by explicit checkpoints and atomic sections. We can do better by designing for confluence, eventual consistency, such that the final outcome is independent of the schedule.
 
-Caveat: Cooperative threads are useful for organizing computations, but not for performance. Without access to a reflection API, e.g. to observe which thunks are evaluated, we cannot observe race conditions. We'll logically just run one thread at a time. At best, we can arrange for parallelism by 'sparking' expensive pure computations before the thread sleeps.
+I'm not convinced that modeling assembly as a deterministic multi-threaded process is a great idea. The local reasoning issue, especially, is a concern. Single-threaded with sparks is much easier to control and debug, and can still utilize all the CPUs. Nonetheless, I do want the option to be available.
 
-A relevant concern is that concurrency hinders local reasoning. Although a deterministic schedule makes it relatively easy to debug, it still requires tracing interactions across a codebase. This can be mitigated by designing for confluence, i.e. such that the schedule may influence intermediate states but does not affect final outcomes.
+But optimistic concurrency will serve as a foundation for reflection tasks and the configured IDE.
 
 ## Modules
 
@@ -406,7 +414,7 @@ The assembler assumes 'refl.\*' definitions represent reflection tasks. These ar
 
 The reflection API should be smaller, simpler, and lower-level than a built-in typechecker. It should provide capabilities for users to define their own typechecking, testing, even theorem proving. The reflection API may further support visualization, editable projections, cache management, etc. - any auxilliary logic that is inconvenient to include within the executable. 
 
-To keep implementation small and simple, the reflection API is version-specific, specialized to an executable's representations and capabilities. The bloat of portability and policy is pushed to user-defined adapters. However, to simplify integration, we do make one concession: the Cut effect shall double as a hierarchical transaction scope. Transactions are implicitly aborted and retried when observed conditions change. A failed transaction implicitly waits for observed conditions to change, a flexible basis for concurrency control.
+To keep implementation small and simple, the reflection API is version-specific, specialized to an executable's representations and capabilities. The bloat of portability and policy is pushed to user-defined adapters. However, to simplify robust integration, we do make one concession: transactions! See *Optimistic Concurrency*.
 
 In context of interactive programming, reflection tasks are frequently aborted and replayed. Developers should design tasks and API adapters around this, favoring publish-subscribe, conflict-free replicated datatypes (CRDTs), and other resilient architecture. But this is the sort of policy bloat that is externalized from the executable.
 
@@ -439,40 +447,45 @@ The assembler should support this use case indirectly, e.g. by ensuring atomic u
 
 ## User-Defined Syntax
 
-When loading a module, we'll first search the provided environment for a compiler: `Base.env.lang.[FileExt].compile`. If defined, we'll use this compiler, falling back to an assembler built-in or reporting an error. The assembler shall provide a built-in at least for file extension ".g", albeit not necessarily the oldest or newest versions. 
+When loading a module, we'll first search the provided environment for a compiler: `Base.env.lang.(FileExt).compile`. If defined, we'll use this compiler, falling back to an assembler built-in or reporting an error. The assembler shall provide a built-in at least for file extension ".g", albeit not necessarily the oldest or newest versions. 
 
 The 'compile' method shall be expressed effectfully. Effects shall include:
 
 - generic state, shift/reset, fix, cut, alt
 - parser combinators to read source binary
-  - design for tracing, error isolation, laziness
+  - design for tracing, isolation, laziness
   - i.e. multi-phase and scoped parsing
+  - simplicity is also a goal here
 - load files as modules or binaries
   - modules are always bound to namespace
-- generating unique atoms
+- generate unique atoms
 - access and update 'Base' namespace in state
   - final 'Base' becomes 'Instance' namespace
-  - a no-op module thus has identity behavior
-- access final 'Self' namespace (non-stateful)
-- access built-in functions and term annotations
-- compile-time warnings, errors, recommendations
+  - no-op module thus has identity behavior
+  - enforces explicit overrides
+- access final 'Self' namespace 
+- access built-in functions 
+- warnings, errors, recommendations
 
-One motive for effectful expression is extensibility: we can introduce effects as needed. But we should be careful about introducing effects that might compromise location independence, reproducibility, or backwards compatibility. Unlike the reflection API, this front-end compiler API should be very stable.
+I accept a fair bit of complexity in the compiler effects API because it's inevitable: the assembler must implement the ".g" syntax and support adequate debugging thereof, thus there is some arbitrary division between 'effects API' and 'the rest of the compiler'. By sharing common logic - especially parser combinators - we can support more-consistent debugging, projectional editing, and other tooling across front-end languages.
+
+For reasons of reproducibility and location-independence, the front-end compiler does not know what file it's compiling or where the module is loaded within the global namespace. But such metadata is available through reflection APIs.
 
 *More Notes:*
-- Any built-in languages should use the same API internally.
+- Built-in languages should use the same API internally.
 - Normalize file extensions: lower-case A-Z, drop initial '.'
+  - e.g. "foo.TaR.gZ" via `env.lang.("tar.gz").compile`
 - The language object may define more methods for tooling.
 
 ### Compiler Bootstrapping
 
-The assembler shall check whether `Self.env.lang.[FileExt].compile` is different from the initial compiler. If so, the assembler will perform a bootstrap process: recompile using the returned compiler, repeat until the compiler stabilizes. Pseudocode:
+The assembler shall check whether `Self.env.lang.(FileExt).compile` is different from the initial compiler. If so, the assembler will perform a bootstrap process: recompile using the returned compiler, repeat until the compiler stabilizes. Pseudocode:
 
         bootstrap fileExt binary base compile =
             let result = runCompiler (Yield (Fix (compile binary base)) Return)
-            let compile' = result.env.lang.[fileExt].compile if defined
+            let compile' = result.env.lang.(fileExt).compile if defined
                            otherwise builtin for fileExt
-            if(compile == compile') then result else
+            if(compile is compile') then result else
             bootstrap(fileExt, binary, base, compile')
 
 The main motive for bootstrapping is reproducibility: stabilize the compiler, make it less dependent on context. There is also a role for extensibility. It can be difficult to integrate syntax extensions in scope of bootstrapping, but extensions to macro effects APIs are easier to integrate.
@@ -485,11 +498,11 @@ Macros support metaprogramming at the syntax layer, often in terms of rewriting 
 
 It is convenient to express macros effectfully, especially regarding inputs and outputs. With compiler support, this enables each macro to operate at an appropriate level of abstraction, whether it's texts, tokens, or AST structures. Further, it ensures an opportunity for extension and adaptation: compilers may gradually (across versions) extend supported effects, and macros may query compiler versions or feature sets to adapt behavior.
 
-*Note:* Many conventional use cases for macros evaporate in context of higher-order programming, monadic effects (especially delimited continuations), lazy evaluation, extensible modules, user-defined syntax, and staged assembly. Yet opportunities remain for embedded DSLs, Python-like decorators, and namespace boilerplate.
+*Note:* Many conventional use cases for macros evaporate in context of higher-order programming, first-class effects, lazy evaluation, extensible modules, user-defined syntax, and staged assembly. But there are still use cases for embedded DSLs and namespace boilerplate.
 
 ### Editable Projections
 
-It is possible to express editable views of source texts via something like `Base.eng.lang.[FileExt].view`. This is a good starting point, at least. But it's coarse grained and very limiting.
+It is possible to express editable views of source texts via something like `Base.eng.lang.(FileExt).view`. This is a good starting point, at least. But it's coarse grained and very limiting.
 
 To support fine-grained editable projections, the front-end compiler will support annotation of terms. For example, a parsed integer might maintain enough metadata to both locate it in the original source file and edit it, with an associated codec translating an updated number into source text. This allows for editors to integrate where the term is used instead of only where defined. A subset of standard term annotations may be implicit, built into the parser combinator.
 
@@ -537,11 +550,9 @@ I imagine the assembler executable will ignore annotations *except* for reflecti
 
 ### Constraint Systems
 
-In my vision, we attach the assembler executable to a constraint solver, such as cvc5 or Z3. We can adapt SMTLIB2 to a structured DSL for expressing constraints. It is feasible to access this constraint solver via acceleration or reflection. However, acceleration limits what we can observe: we can report sat/unsat, but not the discovered sat example or unsat kernel because discovery is implementation-dependent and non-deterministic. Reflection is a lot more flexible; the API may even support direct manipulation of the solver.
+In my vision, we attach the assembler executable to a constraint solver, such as cvc5 or Z3. We can adapt SMTLIB2 to a structured DSL for expressing constraints. This constraint solver may be accessible via acceleration or reflection. In case of acceleration, the client cannot directly observe anything other than sat/unsat, though further details may be visible via reflection. A reflection API may offer much lower-level control over the solver.
 
-I imagine that, in practice, we'll mostly use reflection. We can defer the accelerator until we have a strong use case.
-
-Access to a constraint solver will be very useful for analyzing properties of the assembly program or assembled product.
+Perhaps we'll eventually reach a point where we can implement our own, deterministic solvers via accelerators. An external solver will always offer some performance benefits due to observing race conditions. But observing deterministic satisfaction parameters supports constraint-based metaprogramming.
 
 ### Visualization
 
@@ -557,41 +568,54 @@ In context of *Extensible Effects*, we can improve the aesthetic by expanding '%
 
 ## Syntax
 
-This section proposes an initial syntax for ".g" files. My goal is a syntax that I find pleasant to work with, and that supports whatever vibe I imagine is (or should be) the 'look and feel' of assembly programming (at least for the assembly fragments).
+This section proposes an initial syntax for ".g" files. Relevant goals include a syntax that I find pleasant to work with, and supporting the assembly programming vibe. 
 
 Some desiderata:
 
 - Haskell-style lambdas, but pattern matching is separated from lambdas and definitions. 
 - Syntactic support for controlling laziness: sequences, sparks. 
-- Files limited to printable ASCII. We might expand this later, but keeping it simple for now.
-- Lines may terminate with CR, LF, or CRLF. We'll implicitly translate line terminals to LF.
 - Line comments only, starting with '#' Python style.
 - We'll broadly organize code into logical lines or sections. 
 
 I anticipate that most code will be developed and maintained in this syntax, with user-defined syntax focused on areas where it offers significant benefits (DSLs, graphical programming, etc..).
 
+### Charset
+
+ASCII printable characters (0x21-0x7E) and whitespace (SP, CR, LF). The compiler shall recognize CR, LF, and CRLF as valid line endings, but also warn if line endings are not all the same. It is feasible to extend this to UTF-8, but I'm concerned about legibility. We'll limit ASCII-only for assembler-provided compilers.
+
 ### Names and Namespaces
 
 Basic names will use conventional, C-style standard alphanumeric encodings, i.e. `[a-zA-Z0-9_]+` with a few exceptions for numbers, keywords, etc.. For extensibility, I propose to immediately reserve all English prepositions (and, or, but, when, as, with, etc.) and all names beginning with two underscores. Namespaces are modeled as dictionaries with atomic keys (i.e. we'll wrap names as atoms). We'll support dotted paths `x.y.z` for reaching deep into hierarchical dictionaries.
 
-Explicit override resists many accidental name or 'meaning' conflicts. It's an error to override a name that doesn't exist, and an error to introduce a name that already exists. A simple, concise, and viable approach is to syntactically distinguish introduction `name = Def` from override `name := NewDef`. In the latter case, we can implicitly bind 'prior' to the previous definition. We'll treat 'prior' as a keyword.
+Explicit override resists many accidental name or 'meaning' conflicts. It's an error to override a name that doesn't exist, and an error to introduce a name that already exists. A simple, concise, and viable approach is to syntactically distinguish introduction `name = Def` from override `name := NewDef`. In the latter case, we may implicitly bind 'prior' to the previous definition.
 
-In context of mixins, to resist accidents we'll insist on `abstract Name(, Name)*` declarations for names that should be defined by the time the mixin is applied, but are not defined within the mixin. We'll report an error if a name is used but undefined unless it has an 'abstract' declaration. Note that 'abstract' doesn't care about order of definitions: it could be provided via Base or Self. Only overrides care about order.
+I propose `abstract Name(, Name)*` declarations for names that are assumed to exist by a mixin, yet not previously defined or declared (including via inheritance). This could feasibly be tested upon linearization, e.g. reporting a warning or error that we're instantiating an abstract object.
 
 We'll generally forbid name shadowing, i.e. it's an error to introduce a local or lambda variable matching a name in lexical scope. But there may be options to suppress this error for specific use cases or contexts.
 
+### Operators
+
+There are no user-defined operators. Users can work around this via macro DSLs or extending the compiler (via *User-Defined Syntax*). 
+
 ### Do Notation
 
-We can adapt Haskell's do notation almost directly. We'll desugar to a concrete *Extensible Effects* form, such as `\__eff -> __eff.Seq (__eff.Alt ops) id __eff`. Use of `__eff` (or another special name) may be reserved by the compiler and a special exception for name shadowing. We can trivially desugar '%name' to `__eff.name`. 
+We can adapt Haskell's do notation almost directly. But I propose a few tweaks.
 
-A few notational tweaks:
+We'll explicitly use `\eff -> Body` in desugared notations. Thus, users may reference 'eff' directly, and we simply desugar '%name' to 'eff.name'. A consequence is that 'eff' is frequently shadowed, and is a necessary exception to rules against name shadowing. This is mitigated by context: implicit data and control flow is the essence of effects.
+
+We'll support the '>>' and '>>=' operators. We'll use a dynamic check that the intermediate result is unit for '>>'.
+
+        op >>= k = \eff -> eff.Seq (op eff) (\r -> k r eff)
+        op1 >> op2 = op1 >>=\()-> op2
+
+We can easily model a `using Extension do ...` function to extend the namespace, e.g. with `using M op = \eff -> op (M eff)`. But we'll want to ensure our parse rules for do notation capture this properly, otherwise we'll be forced to write `using Ext <| do ...`.  
+
+Other tweaks:
 
 - Regarding MonadFix and RecursiveDo, I propose explicit forward declarations, e.g. `declare Name(, Name)*`. This makes fixpoint more visible and clarifies scope, relevant because fixpoint interferes with continuations.
-- Extend pattern matching to `Pattern = Expr` or `Pattern <- Op`. Invoke `%Alt []` if pattern fails. Potential branching for patterns that may be realized in more than one way (no implicit cut). 
+- Extend pattern matching to `Pattern = Expr` or `Pattern <- Op`. Fail (via `%Alt []`) if pattern fails. Potential branching for patterns that may be realized in more than one way (no implicit cut). 
 
-To support extensible effects, we could easily define `using ext op = \eff -> op (mix ext eff)`. In this case, 'op' would often involve a hierarchical do notation block, e.g. `using ext do ...`.
-
-### Texts
+### Embedded Texts
 
 Proposed syntax:
 
@@ -599,12 +623,22 @@ Proposed syntax:
 
         """
         " multi-line texts may include "quotes"
-        " each line starts with " followed by space
+        " each line starts with " followed by SP
         " lines are separated by LF (no final LF)
         "   (even when host file uses CR or CRLF)
         """
 
-There are no escape characters, i.e. all texts are 'raw' by default, and postprocessing is left to the user. Embedded texts are limited to printable ASCII, at least for now. Large or arbitrary texts and binaries are best provided as separate files.
+There are no escape characters, i.e. texts are 'raw' by default and postprocessing is left to the user. If users insist on embedding a binary, that might be expressed as something like:
+
+        """
+        " 74686572 65206973 206E6F20 68696464 
+        " 656E206D 65737361 67652C20 6A757374
+        " 20612073 696C6C79 20657861 6D706C65
+        """ |> hex2bin
+
+But users are encouraged to move large texts or binaries into separate files then load them through the module system. It is relatively awkward to *maintain* large texts or binaries within embedded texts. 
+
+Binaries are modeled as lists of small integers, 0..255. Texts are modeled as binaries.
 
 ### Numbers
 
@@ -617,32 +651,72 @@ All numbers are modeled as exact rationals, no hidden size or precision limits. 
         1.234
         1.23e-7
 
-We'll also support binary (0b) or hexadecimal (0x) natural numbers. Although there is no intrinsic notion of 'word' representations of numbers in the assembler, it comes up frequently in assembly results.
+We'll also support binary (0b) or hexadecimal (0x) natural numbers. Although there is no intrinsic notion of 'word' representations of numbers in the assembler, it will come up frequently enough in assembly output.
 
         0x1234fedc
         0b10010001101001111111011011100
 
-Arithmetic: we can provide the conventional operators, e.g. `+ * / -`. Divide by zero diverges lazily. I'm tempted to introduce some DSLs around math, but we'll leave that development to macros (for now).
+We'll support conventional arithmetic operators, e.g. `+ * / -`. Divide by zero diverges lazily. I'm tempted to introduce some DSLs around math, but we'll leave that development to macros (for now).
 
 ### Lists
 
+I propose to use square brackets for lists.
+
+        []
+        [1]
+        [1,2,3]
+
+We'll use `++` to compose lists by appending them. There is no 'cons' operator, but we can express cons as `cons x xs = [x]++xs`. We can also use `[x]++xs` as a pattern match. Notably, we can add or match both end of the list easily, but we're only permitted one variable-length pattern.
+
+
+
+Regarding indexing and slicing of lists, I don't have a good idea for syntax at the moment. We'll just provide some built-in functions, e.g. `__list_len` and `__list_cut`, then let users build a list processing module.
+
 ### Dicts
+
+I'm not satisfied with conventional syntax for dictionaries, but I also don't have much better ideas, or even a strong grasp of what I don't like. Not a happy place for me. But some thoughts: use of braces `{}` should be optional. I'm not convinced we should compose dictionaries directly like an override - it doesn't generalize nicely with hierarchical dictionaries. Limiting updates to patch one definition at a time may be better. Access to 'prior' is very convenient even without object 'self', essentially models a functional update (`\prior -> newval`), and we could feasibly reuse the '=' vs. ':=' distinction. 
+
+Deleting definitions is a little awkward. We could model this as `name := undefined`, treating 'undefined' as a special value (or 'default' value). We could also support a 'without' syntax.
+
+### Tuples
+
+Although we could directly model tuples as lists, e.g. a pair as `[1,2]`, I feel this does not capture user intentions. So I propose a simple variant wrapper: pair `(1,2)` desugars as `tuple:[1,2]`. The only syntax for singleton tuples is `tuple:[x]`, and I won't encourage its use.
+
+*Aside:* Although we could model unit `()` as the empty tuple, `tuple:[]`, I currently plan to just model it as an atom instead.
 
 ### Functions
 
-Proposed syntax:
+I propose to adopt Haskell's `\` for lambdas. We may also support Haskell-style `name args = ...` as a syntactic sugar.
 
         \ x y z -> Expr
-        name x y z = Expr
-        name x = \y z->Expr
+        \ x -> \ y -> \ z -> Expr
+        name x y = \ z -> Expr
 
-Essentially, we support Haskell-style lambda syntax, excepting that there is no pattern matching at this layer. Use of underscore in place of a variable name is permitted to indicate a variable is unused. A variable name starting with underscore may be used, but won't warn if unused.
+It is tempting to integrate pattern matching into lambdas, but it seems awkward in context of extensible namespaces and overrides. At least for now, I'll model pattern matching separately from lambdas.
 
-### Partial Functions
+### Directional Pipes
 
-As a rule, functions are partial, i.e. they may diverge for many inputs. 
+Borrowing F#'s syntax here:
 
-It's often convenient to work with partially defined programs. This is even more so the case in context of interactive programming and projectional editing. It's convenient to support clear TBD locations in code in some way that readily supports search and replace.
+        f <| arg = f arg
+        arg |> f = f arg
+
+The '<|' form is mostly useful to avoid some parentheses, e.g. `f <| g h` is equivalent to `f (g h)`. The '|>' form is convenient as a form of forward function composition. 
+
+I propose to also support directional function composition:
+
+        f >>> g = \ h -> g (f h)
+        g <<< f = f >>> g
+
+Without typeclasses, these operators don't generalize to categories. But function composition is frequent enough. And we will also support Kleisli composition for monads, though perhaps only in the forwards direction:
+
+        k1 >=> k2 = \r -> (k1 r) >>= k2
+
+*Note:* Like Haskell, the compiler generally supports `(>>>)` to capture binary operators as a first-class functions, also `(f >>>)` and `(>>> g)` as closures with positional arguments. 
+
+### Holes and Errors
+
+I propose a `TBD` keyword, indicating that a subprogram is incomplete, distinct from `error`. This might be accompanied by an annotation value to guide future update. Instead of a string, the associated value may be any value, something the reflection API is expected to observe.
 
 ### Local Definitions
 
@@ -656,9 +730,7 @@ Proposed syntaxes:
             x = Expr1 
             y = Expr2
 
-Borrowing Haskell style syntax here. These essentially desugar to applied lambdas with local fixpoints as needed. As with lambdas, name shadowing is discouraged.
-
-The 'where' form may prove a little awkward for capturing scope in macros. I'll need to consider it carefully. It might be simpler to model even local definitions as first-class namespaces.
+The 'where' form is a bit awkward in context of macros, but we could feasibly scope macros. Will need to consider this further.
 
 ### Macros
 
@@ -675,6 +747,10 @@ To support local reasoning, the compiler shall ensure macros preserve structure:
 
 There is no built-in syntax for defining macros. We can get started with manual definitions, then define macros for defining macros, perhaps adapting `@macro_rules` from Rust. 
 
+### Scope (Tentative)
+
+I'm contemplating a keyword 'scope' that would return a dictionary of all names in scope at that point - arguments, locals, etc.. Would be very convenient for working without macros. OTOH, it severely complicates interaction with macros. I'm not convinced it's a viable idea.
+
 ### Language Version Declaration
 
 A language version declaration enables a compiler to adapt to programs written in older versions of a language, or to detect early whether a program uses a more advanced version of the language than the compiler recognizes.
@@ -685,6 +761,8 @@ A language version declaration enables a compiler to adapt to programs written i
 Can we do better than text comments? A notion of visualizations, docs, tutorials?
 
 ### Pattern Matching
+
+View patterns permit more than one match, however.
 
 I want to desugar all pattern matching to monadic expressions, and I also want to support transactional backtracking conditionals by default. Support for 'what-if' pattern matching is simply very convenient.
 
