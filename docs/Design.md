@@ -335,7 +335,7 @@ The configuration defines various options under 'conf.\*' to guide the assembler
 
 - *assembly environment*: `conf.env : Eff [Compile] ()` - determines initial (Base) environment for assembly. Modeled as compiling an empty, anonymous source file (per *User-Defined Syntax*). Default is to forward toplevel 'env'.
 - *command-line macros*: `conf.cli : Eff [Parse, Write] ()` - rewrites command-line arguments if (and only if) the first command-line argument does not start with '-'. Expressed via parser combinators to support tab completion.
-- *interactive development environment*: `conf.ide : Eff [Refl, TTY, Net, File, GUI] ()` - see *Interaction* 
+- *interactive development*: `conf.ide : Eff [Refl, TTY, Net, File, GUI] ()` - see *Interaction* 
 - *batch-mode logger*: `conf.log : Eff [Refl, Log] ()` - potential user configuration for batch-mode visualization, may write to stderr and potentially local log files.
 - *resource management*: GPGPUs for acceleration, remote proxies for shared cache or compilation, constraint solvers, GC and JIT tuning, etc.. Figure things out we go.
 
@@ -422,13 +422,17 @@ The assembler executable shall support interactive mode via simple command-line 
 - `(-i|--interactive)` - configurable user interface, maintains result
   - `--discard` by default, but compatible with `-o`
 
-To avoid bloat, the assembler leaves definition to the user configuration, 'conf.ide'. The assembler provides an effects API supporting reflection, TTY, listen on TCP ports or unix sockets, write access to local source files, and perhaps a lightweight GUI. Interactive mode terminates upon return. 
+To avoid bloat, the assembler pushes interaction logic to the user configuration, running 'conf.ide' with a limited effects API. This API includes reflection and a few methods for user interaction, e.g. listening for TCP connections (or unix domain sockets) to support HTTP or RFB protocols as basis for GUI. Also: access TTY, and perhaps a few methods to edit sources. I hesitate to support native GUI, but I could be convinced by something sufficiently lightweight (e.g. Dear ImGUI).
 
-The reflection API does not provide direct access to the user. But, indirectly, reflection tasks may check for interactive mode, publish notifications where 'conf.ide' will find them, and receive feedback based on user input.
+Although reflection tasks do not directly interact with the user, they may query interactive mode and communicate with the IDE. The IDE may enable reflection tasks to notify users and perhaps even extend the IDE.
 
 ### Integration
 
 The assembler does not directly support execution of assembled code, but we should at least support atomic updates to results in the filesystem. I.e. use Linux rename or Windows ReplaceFile and FILE_SHARE_DELETE. Staging might be controlled via environment variable.
+
+### File Metadata
+
+Aside from primary outputs, we might want the assembler to automatically set permissions on files in case of `-o` destinations. It isn't be difficult to support `asm.file_meta` to declare permissions for associated files.
 
 ## User-Defined Syntax
 
