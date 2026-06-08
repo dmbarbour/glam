@@ -1,40 +1,76 @@
-# Glam Syntax
+# Base Syntax
 
-This document describes an initial syntax for ".g" files, and the motives for it. Design goals include a syntax that I find pleasant to work with, and that supports the assembly programming look and feel. 
+This document describes an initial syntax for ".g" files, and motives for it. Design goals include:
 
-This isn't a minimalist syntax, but it is generalist. There are no built-in assembly mnemonics for specific CPU architectures. A significant design challenge is how to support mnemonics via user-defined library or effects API while supporting the desired aesthetic, ideally without use of macro DSLs.
+- a syntax that I find pleasant to work with
+- supports an assembly programming look and feel
+- concise, vertical columns of assembly mnemonics
+- generalist, not specialized for targets or domains
+- an extraordinarily high abstraction ceiling
+
+## Language Version Declaration
+
+Reproducibility requires that the same sources produce the same outcome, but there is an implicit condition: an outcome is produced. This condition provides opportunity to update the language: we can introduce new operators without affecting existing code, or introduce new keywords accepting that we break existing code. User-defined syntax mitigates broken-code concerns: we can write a wrapper that injects an older version of `env.lang.["g"].compile`.
+
+A language version declaration makes versioning of the language more flexible and robust. We can fail fast at the declaration if we don't support the requested version. We can adjust 'meaning' of a keyword between versions. It's also a clear opportunity to declare compiler-recognized language extensions - fine-grained compared to full versioning, but also more verbose.
+
+Proposed syntax:
+
+        (lang|language) (BaseVer) (with Extensions)?
+        lang g0 with utf8
+
+The version declaration should be the first toplevel declaration in a ".g" file.
 
 ## Character Set
 
-We'll limit to printable ASCII and whitespace (0x21-0x7E, SP, CR, LF) for assembler-provided front-end compilers. I may extend to UTF-8, eventually.
+We'll start with printable ASCII and whitespace (0x21-0x7E, SP, CR, LF). It is not difficult to extend to UTF-8, though I'm concerned about legibility. We'll recognize CR, LF, and CRLF as line endings. The compiler shall emit a warning if the file uses inconsistent line endings.
+
+## Comments
+
+We'll support Python-style line comments, i.e. `#...` to end of line. Comments are treated as whitespace by the compiler and macros, but may be structured in context of external tooling (literate programming, projectional editing, extracting API docs, etc.). There is no syntax-layer support for multi-line comments, so just use a decent editor.
+
+## Code Structure
+
+The module toplevel consists of a sequence of 'declarations'. Each declaration starts a new line. If a declaration requires more than one line, any continuing lines (excepting blanks) must be indented by at least one space. This structure simplifies error isolation, local reasoning, and parallel processing.
+
+Each declaration starts with either a keyword (such as `import`, `spec`, or `unique`) or is a basic definition of form `name = Expr` or one of its variants (args in lhs, `:=`, `::=`, etc.). We'll favor basic definitions where feasible, thus keywords are mostly for special forms.
+
+Toplevel macro invocations, `@macro_name ...`, are scoped as declarations. The macro can *and must* read to the start of the next declaration (modulo whitespace). The toplevel macro may emit many toplevel declarations. Effectively, toplevel macros serve as user-defined keyword forms. 
+
+Aside from toplevel declarations, several special forms for `Expr` are also sensitive to whitespace and indentation by default. But, in these cases, users always have the option to use braces and semicolons instead of indentation and newlines.
 
 ## Keywords
 
-Keywords are distinguished from user definitions by prefix '.', e.g. `.keyword`. A tad ugly, but it fits the assembly aesthetic, is reasonably clear without syntax highlighting, and there's no risk of a new keyword breaking existing code.
+Keywords are names reserved by the compiler. Users may not define or shadow keywords, nor directly use them in dotted paths or tags. Users may construct atoms from keywords, e.g. `'if` and `'else`. 
+
+Recognized keywords may vary with language version declaration. By reserving candidate keywords we can avoid breaking code. I propose to reserve all keywords I introduce in this document, all English conjunctions and prepositions, and a handful of additional names. Will update this section later.
+
+## Names
+
+We accept a subset of C names, mostly restricting use of underscores. A viable regex:
+
+        NameFrag = [a-zA-Z][a-zA-Z0-9]*
+        Name = NameFrag('_'NameFrag)*
+
+Namespaces are hierarchical, modeled as dictionaries that may contain dictionaries. Hierarchical access or update is typically expressed as a dotted path, e.g. `foo.bar.baz`. When used as an index into a namespace, we translate each name to the corresponding atom `.['foo, 'bar, 'baz]`.
+
+In the general case, we support expression-indexed dotted-path names. This is expressed as `.(ListExpr)` or `.[...]` for a literal list. These indices are interpreted such that `.([1, 'two] ++ [3])` is equivalent to `.[1].two.[3]`. The empty path is permitted, e.g. `foo.[]` is equivalent to `foo`. 
+
+I propose `module` as a keyword referring to the current module's namespace. Thus, users can write `module.[42]` to access non-conventional names. (*Note:* The `.[42] = ...` form is accepted on the lhs, but use `module.[42]` for evaluation.)
 
 ## Operators
 
-Like keywords, operators are also compiler-defined. 
+Operators are compiler-defined binary infix functions. We'll support Haskell-style operator sections, such that `((>>= k) op)` is equivalent to `(op >>= k)`. 
 
-Operators represent functions of two arguments. We'll support Haskell-style closures, e.g. such that `((>>= k) op)`, `((>>=) op k)`, and `(op >>= k)` are all equivalent. There are no typeclasses, and I reject implicit conversions of data by built-in functions, but a little ad hoc polymorphism is permitted. Thus, operators support at most a few simple data types.
+To avoid unnecessary parentheses, we'll support precedence between most operators. To mitigate confusion, not every pair of operators will have valid precedence, e.g. cannot mix both `>>` and `<<` without parentheses. 
 
-To avoid unnecessary parentheses, we'll support precedence between most operators. To mitigate confusion, not every pair of operators will have valid precedence, e.g. cannot mix both `>>` and `<<` without parentheses. We'll definitely want to support associative operations like `f >> g >> h` or `x + y + z` without parentheses.
+There are no implicit conversions, e.g. in case of `2 + "3"` the result is an assembly-time type error (instead of `5` or `"23"`). But some ad hoc polymorphism may apply, e.g. `==` works for all dict key types, and `>` might support comparing numbers or comparing lists of comparables, but it's a type error to compare lists to numbers.
 
-*Note:* There are no implicit conversions. Users are free to leverage ad hoc polymorphism, but the built-in keywords and operators will expect one type and report errors.
+## Introductions and Overrides
 
-## Names and Namespaces
+We'll syntactically distinguish introductions vs. overrides. It's an error to introduce a name that already has a definition, or to override a name that does not have a prior definition. We use `name = Expr` for introductions, `name := Expr` for overrides, and `name ::= \ prior -> Expr` for overrides with convenient access to the previous definition.
 
-Names use a fairly conventional alphanumeric encoding, e.g. regex `'_'?[a-zA-Z][a-zA-Z0-9_]*`. 
-
-Namespaces are concretely represented as dictionaries. Names desugar into atoms, e.g. `name` is indexed as `'name` (also equivalent to `.["name"]:()`). In context of hierarchical namespaces, we use dotted paths, e.g. `foo.bar.baz`.
-
-In the general case, we support expression-indexed names. This is expressed as `.(ListExpr)` or `.[...]` for a literal list. These names are interpreted such that `.([1, 'two] ++ [3])` is equivalent to `.[1].two.[3]`. The empty path is permitted, e.g. `foo.[]` is equivalent to `foo`. Users are not encouraged to use expression-indexed names in the module toplevel.
-
-### Introductions and Overrides
-
-We'll syntactically distinguish introductions vs. overrides. It's an error to introduce a name that already has a definition, or to override a name that does not have a prior definition. We use `name = Expr` for introductions and `name := Expr` for overrides. In the latter case, `.prior` implicitly refers to the previous definition. 
-
-By default, module-scope names evaluate to final definitions, subject to overrides. But there are a few cases where we'll want to reference prior definitions. I propose `(.module_prior Expr)` and `(.module_final Expr)` to control bindings in scope. We essentially default to the `.module_final` scope.
+By default, module-scope names evaluate to final definitions, subject to overrides. To support access to previous definitions (outside scope of `::=`) I propose keywords `module_prior Expr` and `module_final Expr`. These evaluate names in `Expr` in the specified scope. The `module_prior` scope is definitions up to the current toplevel declaration. Use `module_prior module` to capture the entire previous namespace.
 
 ### Forbid Name Shadowing
 
@@ -44,40 +80,45 @@ In context of open recursion for inheritance and override, name shadowing would 
 
 Thus, as a rule, we'll forbid name shadowing. But only for static contexts: we forbid shadowing of names from an included module, but not for shadowing of names introduced by *including* a module. This may involve threading metadata through includes via the namespace. It isn't difficult to avoid name conflicts.
 
+*Aside:* Macros should receive compiler support to generate local vars without risk of shadowing.
+
 ### Abstract Definitions
 
 In context of modules as mixins, we may assume a name is introduced without defining it locally. However, to resist errors, it is convenient to report 'undefined' errors closer to the code that leaves names undefined. To support these cases, I propose a toplevel declaration:
 
-        .abstract Name(, Name)*
+        abstract Name(, Name)*
 
-This declaration is not required for names brought into scope (or declared abstract) via 'include'. The intuition we want for include is that we're including all relevant definitions and declarations, including `.abstract`. Hierarchical names are captured implicitly, i.e. if we `.abstract foo` we don't need `.abstract foo.bar`. For convenience, `.abstract env` is implicit.
+This declaration is not required for names brought into scope (or declared abstract) via 'include'. The intuition we want for include is that we're including all relevant definitions and declarations, including `abstract`. Hierarchical names are captured implicitly, i.e. if we `abstract foo` we don't need `abstract foo.bar`. For convenience, `abstract env` is implicit.
 
 The tracking of abstract definitions across includes is essentially just maintaining a set of dotted-path prefixes that we *don't* report 'undefined' errors about. 
 
 ### Aliasing (Tentative, Low Priority)
 
-We can write `baz = foo.bar.baz` as a definition. However, a definition isn't an alias. In context of macros, we'd need to write `baz = .module_prior foo.bar.baz` instead. We must be aware of the distinction between overriding `baz` and `foo.bar.baz`. 
+To work more conveniently with hierarchical definitions in context of inheritance and overrides, we can support logical aliasing by rewriting names before they're used. We can also define aliases to resist shadowing and ambiguity.
 
-We could support aliasing in terms of rewriting names. But we should be very careful about name shadowing and stability of names. As a minimum viable aliasing model, we could support declarations of form:
+        # form similar to
+        alias foo: bar.baz, qux as q
 
-        .alias baz = foo.bar.baz
+        # implicitly defines
+        baz = foo.bar.baz
+        q = foo.qux
+        .[AliasRules] ::= \ prior -> 
+            ... rewrite q to foo.qux, rewrite baz to foo.bar.baz
 
-This introduces a rewrite rule such that future references to `baz` expand to `foo.bar.baz`. To resist ambiguity errors, it's useful to also introduce a definition for `baz`. This could be a placeholder like `(.error "aliased")` or `foo.bar.baz` as a backup.
+        # later, based on AliasRules
+        baz := ...
+        # rewrites to
+        foo.bar.baz := ...
 
-When basic aliasing is working properly, we could feasibly introduce a syntax for bulk aliasing. Something like:
-
-        .using foo: bar.baz, q = qux
-            # logically expands to
-        .alias baz = foo.bar.baz
-        .alias q = foo.qux
-
-There are remaining design challenges, such as how aliasing should interact with includes and imports. 
+A concise syntax for bulk aliasing from hierarchical namespaces is very convenient for 'cherry picking'. We'll preserve alias rules across includes. We'll need careful attention to how alias rules compose hierarchically, but it should be feasible.
 
 ## Effects
 
-We'll almost directly adopt Haskell's do notation, `.do ...`. 
+We'll almost directly adopt Haskell's do notation, `do ...`. 
 
-Instead of desugaring to monadic operators, we'll desugar to a tagged function of form `eff:(\__api -> Body)`, where `__api` is guaranteed to not shadow anything. The `eff` tag helps distinguish effects from pure functions and doubles as a calling convention. Within the '.do' context, we'll desugar `%name` to `__api.name`. This generalizes, e.g. `%[Expr].op` to `__api.[Expr].op`, or `%[]` to capture the effects API. The compiler will essentially use `%Seq` to compose within Body.
+Instead of desugaring to monadic operators, we'll desugar to a tagged function of form `eff:(\__api -> Body)`, where `__api` is guaranteed to not shadow anything. The `eff` tag helps distinguish effects from pure functions and doubles as a calling convention. Within the 'do' context, we'll desugar `%name` to `__api.name`. This generalizes, e.g. `%[Expr].op` to `__api.[Expr].op`, or `%[]` to capture the effects API. The compiler will essentially use `%Seq` to compose within Body.
+
+*Note:* Alternatively, `.name` to `__api.name`. May need to experiment.
 
 We'll define several operators in these terms, e.g. `op >>= k = eff:(\api -> api.Seq op k)` and `>>>` if op returns unit. For convenience, I propose `.ret` as a built-in for `\x -> eff:(\api -> api.Return x)`. Other operators and keywords may support applicative styles, e.g. `<*>` and `<|>`, `.fail` and `.cut`, etc.. 
 
@@ -110,11 +151,13 @@ Pattern matching, in the general case of `.(TagList):Pattern`, would evaluate `T
 
 Atoms are data where the only useful observation is equality.
 
-Constructed atoms are useful for structured data. The unit value is a built-in atom, expressed and matched as `()`. Tagged unit data, i.e. `tag:()` or `.[TagExpr]:()`, serves as a constructed atom. Names are indexed as constructed atoms of form `.["name"]:()`. We provide syntax `'name` for capturing name indices: `tag:()` is equivalent to `.['tag]:()`, and we might favor `'eax` for naming a register in an mnemonic API.
+Constructed atoms are useful for structured data. The unit value is a built-in atom, expressed and matched as `()`. Tagged unit data, i.e. `tag:()` or `.[TagExpr]:()`, serves as a constructed atom. Names are indexed as constructed atoms of form `.["name"]:()`. We provide syntax `'name` for capturing name indices: `tag:()` is equivalent to `.['tag]:()`. We use this for booleans (`'t` and `'f`), and they're convenient for naming registers and such (`'eax`).
 
-Unique atoms are useful for access control and conflict avoidance. I propose a `.unique Foo, Bar, Baz` declaration at the module toplevel. These atoms derive uniqueness from the implicit path through a hierarchical module namespace, with just a little support from the assembler. Use cases include access control and conflict avoidance. 
+Aside from unit, the assembler provides to the front-end compiler an atom abstracting location in the hierarchical module namespace. This is useful as a seed to derive 'unique' atoms. I propose `.unique Foo, Bar, Baz` declarations to introduce unique atoms at the module toplevel. Unique atoms are useful for access control and conflict avoidance, but they must be used via indexed names, e.g. `.[Foo]:(...)`.
 
 Scope-unique atoms are useful for the ephemeron performance pattern. To support this, `.scope_unique : Atom -> Atom` returns the same atom annotated with unique metadata. When matching or comparing atoms with different metadata, we diverge with error. Thus, we never observe scope-uniqueness to be violated. When used as dict keys, we can collect associated data when metadata becomes unreachable.
+
+*Note:* It is feasible to introduce unique atoms (aligned with global namespace paths) without declaring them as names, but declaring them as names
 
 ## Dicts
 
@@ -123,7 +166,7 @@ For simple, literal dictionaries, I propose syntactic form `{ name1:Expr1, name2
 Dictionary updates are generally expressed using `.with` and `.without` special forms. These are applied much like infix operators, but the RHS isn't an expression:
 
         Dict .with 
-            x := prior + 42
+            x ::= \ old_x -> old_x + 42
             y := 10
             .[1] = "this is new"
 
@@ -211,22 +254,23 @@ I propose to adopt Haskell's use of `\` for lambdas.
         \ x y z -> Expr
         \ x -> \ y -> \ z -> Expr
 
-We'll also support Haskell-style `name args = ...` as a syntactic sugar..
+We'll also support Haskell-style `name args = ...` as a syntactic sugar. 
 
         name = \ x y z -> Expr
         name x y z = Expr
         name x y z := Expr
+        name x y z ::= \ prior -> Expr
+
+In the `::=` case, we'll insist `\ prior -> ...` remains the first argument on the right-hand side. 
 
 Unlike Haskell, there is no support for pattern matching in definitions or lambdas. 
 
 ## Partial Functions
 
-Functions may diverge in general, e.g. entering an infinite loop or dividing by zero. In practice, users will also experiment with incomplete implementations. We'll provide a little syntax for the cases where a user 
+        .error      recognized errors
+        .tbd        incomplete definitions
 
-        .error Expr         recognized errors
-        .tbd Expr           incomplete definitions
-
-The expressions are visible to the reflection API, along with context. The should be something an IDE or logger can render. A string is adequate, but I suggest a dictionary or object that provides multiple interfaces for flexible filtering and views. Of course, one of those interfaces could be 'text'. 
+These expressions always diverge when observed, but for different reasons - error or an incomplete definition. The reflection API may observe these errors together with full context (continuation, call stack, etc.). In practice, we'll often write `(.error Expr)` (or `(.tbd Expr)`) to provide extra context for visualization, treating `.error` as a function. 
 
 ## Pipes
 
@@ -242,23 +286,50 @@ I propose to also support directional function composition:
 
 ## Booleans
 
-I propose to encode boolean values true and false as atoms `'t` and `'f` respectively. There are no implicit conversions, no 'truthy' values.
-
-We can get started with conventional conditional expressions, e.g. `.if Cond .then Expr1 (.elif ...) .else Expr2`, and `Expr .when Cond .else Expr2`. These don't compose or refactor nicely, but they're adequate and familiar.
+I propose to encode boolean values true and false as concise atoms, `'t` and `'f` respectively. There are no implicit conversions, no 'truthy' values. We can support the conventional if/then/else (and elif) form, and perhaps an `Expr .when Cond .else Expr2` form. In context of pattern matching, we'll use boolean expressions for pattern guards.
 
 ## Modules
 
 Need a syntax for `.import`, `.include` 
 
+### Access Control
+
+There is no notion of module-private names or export control. Such a concept contradicts extensibility goals and conflicts with modules-as-mixins. However, we can easily invert this to distinguish public interfaces. We already use `conf.*` for the configuration, `asm.*` for the assembly, `env.*` for a threaded environment. We can similarly use `api.*` for a library's public interface. 
+
+        import "MyFooLib.g" as libfoo
+        env.foo = libfoo.api
+        alias libfoo.api: foo, bar, baz as qux
+        foo ::= \ old_foo -> ...
+        ...
+
+There are forms of access control between subprograms. This is supported via unique atoms.
+
 ## Conditional Code (Rejected)
 
-I've contemplated support for toplevel `.ifdef` and such, but I feel that conditional definitions complicate reasoning about the namespace even before I contemplate whether we're referring to past or future definitions. Best to stick with aggregate definitions via `name := .prior ++ [...]` or similar.
+I've contemplated support for toplevel `.ifdef` and such, but I feel that conditional definitions complicate reasoning about the namespace even before I contemplate whether we're referring to past or future definitions. Best to stick with aggregate definitions via `name ::= \ p -> p ++ [...]` or similar.
 
 ## Object Specs
 
+We can model naked mixins as `\base self -> base .with ...`. But for multiple inheritance and singleton instantiation, we'll need implicit unique identifiers from the module toplevel. Ideally, we can also eliminate the aforementioned mixin boilerplate, at least by default. Or perhaps we can separate the specification and instantiation from the mixin.
+
+
+Some challenges:
+- unique identifiers for specs for multiple inheritance
+- introducing vs. overriding specs
+- access to base and self, default names? explicit parameters?
+- overriding methods
+- semantics: is Spec interface introduced as final mixin or via Base? Leaning towards implicit final mixin before instantiation.
+
 ## Annotations
 
-I'd prefer to model most or all annotations at the namespace layer, where they are accessible for extension and repair.
+acceleration, sparks, sequencing, robust tail-call optimizations, logging, assertions, tracing
+
+A potential issue with logging and assertions is that we cannot 'repair' an anonymous assertion or log message. Perhaps we should 
+
+ to work with anonymous locations. But this can be mitigated by implicit tracing, since we can only observe these 
+
+
+
 
 
 
@@ -267,6 +338,7 @@ I'd prefer to model most or all annotations at the namespace layer, where they a
 - potential `.nb Expr` ? This would hinder override for 'repair' though. Perhaps better keep active comments to defined things.
 - line comments (//, #, -- ?)
 - disabling sections of code (`.DISABLE_START` and `.DISABLE_END` perhaps? or just leave to IDE).
+- potential logging
 
 ## Laziness and Sparks
 
