@@ -89,7 +89,7 @@ For stateless objects, we don't need more than one object instance. Instead of p
 
 We can feasibly model multiple inheritance, where an object inherits from several others that may share ancestors. We can apply a linearization algorithm, ensuring each shared ancestor is mixed in only once and in a consistent order. 
 
-Linearization requires an identifier to distinguish whether two specifications are the same. This should be paired with an assertion that specifications with same identifier are equivalent, such that the assumption can be verified based on structural or referential equality. In context of singleton instantiations, all the necessary information could be held under the 'Spec' interface within a dictionary.
+Linearization requires an identifier to distinguish whether two specifications are the same. This should be paired with an assertion that specifications with same identifier are equivalent, such that the assumption can be verified based on structural or referential equality. In context of singleton instantiations, all the necessary information could be held under the 'spec' interface within a dictionary.
 
 ### Explicit Override
 
@@ -104,7 +104,7 @@ A flat object namespace easily grows cluttered. It is not difficult to organize 
                 (idx) = mixin base.(idx) self.(idx) 
             }
 
-More sophisticated translations are possible, e.g. translating individual names. However, it is awkward to extend translations like this to multiple inheritance. It is feasible to develop a few specialized variants, assuming adequate developer control over the 'Spec' interface.
+More sophisticated translations are possible, e.g. translating individual names. However, it is awkward to extend translations like this to multiple inheritance. It is feasible to develop a few specialized variants, assuming adequate developer control over the 'spec' interface.
 
 ### Stateful Specification
 
@@ -271,15 +271,18 @@ Unfortunately, fixpoint is not fully compatible with continuations. The essentia
 
 ### Extensible Effects
 
-With flexible monoliths, we can define almost any effect. But there's an awkward distinction between defined and assumed effects. This separation hinders generic programming. 
+Instead of pattern-matching request constructors like 'Get' and 'Set', we could express requests as `\api -> api.get` and `\api -> api.set s`. This efficiently supports a large number of effects and abstracts which effects are 'primitive' in terms of yielding. We can further integrate `Return` and `>>=` through this API, perhaps using `api.seq` for `>>=`. Users may test which effects are available.
 
-To eliminate this distinction, we can abstract the effects environment, e.g. threading an 'effect' API, such that we're invoking 'effect.Op' instead of calling a separate definition that assumes a specific set of primitives. The caller never needs to know whether Op is a primitive or a definition. We can also abstract the monad structure, i.e. the 'Return' and '>>=' (Seq) constructors.
+I propose tag `eff:(\api -> ...)` to clearly distinguish effects from functions and serve as a calling convention of sorts.
 
-Modeling 'effect' as an object with inheritance enables extensions as mixins. Compared to monad transformers, this also simplifies extension with higher-order effects because we can capture context - including API 'self' - at point of invocation instead of first unwinding a handler stack.
+        op >>= k = eff:(\api -> api.seq op k)
+        return r = eff:(\api -> api.ret r)
+        a <|> b = eff:(\api -> api.alt a b)
+        using ext op = eff:(\api -> api.using ext op)
 
-In context of multiple inheritance, a linearization algorithm will deduplicate and merge extensions. This relaxes constraints on stack order and local knowledge of usage contexts. Structurally-incompatible extensions are detected as linearization conflicts or ambiguity errors (via explicit overrides). This simplifies debugging and improves user confidence. 
+Although this is flexible enough to support stateful APIs, I believe best practice should be subprogram-scoped extensions. Above, I propose a generic `using` method that applies extension `ext` in scope of `op`. To maximize extensibility, I propose to model `api` as an object and `ext` as a mixin. Multiple inheritance can automatically deduplicate and merge compatible features. We can detect structurally-incompatible extensions based on explicit overrides and linearization conflicts.
 
-*Note:* The actual implementation may still use the Flexible Monoliths 'run' or some variant. It's just fully abstracted.
+Applying `ext` directly to `api` would gives the client final say. In practice, the host will want to control which fields or effects the client can directly override. This can be supported by instead applying `ext` to a precursor for `api`, i.e. host provides initial Base, apply stack of client `ext`, host applies final mixin. Names 'introduced' by a final mixin would conflict with user definitions.
 
 ## Modules
 
@@ -377,7 +380,11 @@ Machine-code mnemonics are left to libraries. Effectively, we have a generic 'as
 
 ### Reflection Tasks
 
-A module may define effectful 'task.\*' operations to perform upon loading. The assembler runs these tasks concurrently upon loading a module, providing a reflection API. Use cases include testing, typechecking, visualization, and cache management. Reflection tasks do not directly influence assembly output, but they may raise warnings or errors.
+The assembler shall recognize 'refl.\*' tasks defined within the namespace. These tasks should be expressed effectfully, i.e. `eff:(\api -> ...)` where the 'api'  
+
+These are run lazily, contingent on at least one definition within the names
+
+to perform upon loading. The assembler runs these tasks concurrently upon loading a module, providing a reflection API. Use cases include testing, typechecking, visualization, and cache management. Reflection tasks do not directly influence assembly output, but they may raise warnings or errors.
 
 To keep implementation small and simple, the provided reflection API is version-specific, specialized to an executable's representations and capabilities. The bloat of portability and policy is pushed to user-defined adapters. Users can build transactions, queues, CRDTs, etc. upon shared state and a few atomic ops.
 
@@ -502,6 +509,6 @@ It is feasible to bridge the gap between logging, visualization, and projectiona
 
 ## Monadic Assembly
 
-It is very convenient to express assembly effectfully. Each mnemonic becomes an operation that writes machine code to implicit state. Assembly macros become simple procedures. The state may also aggregate data declarations, e.g. '.bss' or '.data' sections. We can further extend state with compiler-like features, such as tracking which registers are in use. This could help with detecting conflicts or adapting assembly in context.
+It is very convenient to express assembly effectfully. Each mnemonic becomes an operation that writes machine code to implicit state. Assembly macros become simple procedures. Aside from machine code, we may also declare 'bss' or 'data' sections. We could also track which registers are in use to resist against accidental smashing, or even track abstract types for stack and heap memory.
 
-In context of *Extensible Effects*, we can improve the aesthetic by expanding '%name' to the relevant `effect.name`. With a suitable setup and monadic do notation, users will be writing columns of concise mnemonics such as '%mov'. Aside from aesthetic benefits, abstraction of mnemonic operations provides an opportunity for flexible processing, e.g. we could build some extra metrics about the assembly, or automatically maintain an abstract interpretation of machine state. 
+With good syntactic sugar, monadic assembly can also be very lightweight. E.g. phrases such as `.movl 'eax ['ebx, 4]` might desugar as `eff:(\__api -> __api.movl 'eax ['ebx, 4])`, and do notations can support beautiful vertical columns of mnemonics. This mitigates boiler-plate pollution of the toplevel namespace for defining mnemonics, though we must be careful to avoid conflicts between mnemonics and other effects. It also cleanly separates the concerns of how we write machine code from where we express program logic.

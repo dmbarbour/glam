@@ -60,11 +60,9 @@ I propose `module` as a keyword referring to the current module's namespace. Thu
 
 Operators are essentially infix functions. We'll support Haskell-style operator sections, such that `((>>= k) op)` is equivalent to `(op >>= k)`. To avoid unnecessary parentheses, we'll support precedence between most operators. To mitigate confusion, not every pair of operators will have valid precedence, e.g. cannot mix both `>>` and `<<` without parentheses.
 
-We may support a few special non-binary forms, e.g. `(x < y =< z)` as shorthand for `((x < y) and (y =< z))`. I feel this is acceptable if I ensure consistency and that risk of confusion is mitigated. Consistency would require `(< =<)` operator sections, and risk of confusion can be mitigated by making it illegal to compare booleans (e.g. booleans as atoms `'t` and `'f`). 
+We may support a few special non-binary forms, e.g. `(x < y =< z)` as shorthand for `((x < y) and (y =< z))`. We'd also support `(< =<)` operator sections. Risk of confusion is mitigated because we cannot compare booleans for less-than or greater-than.
 
-Operators may support limited ad-hoc polymorphism. For example, `>` could compare two numbers, two lists, perhaps even two tuples. For lists and tuples, we could use a lexicographic comparison of the elements. But, as a rule, we should never implicitly convert arguments. Comparing a number to a list should simply diverge with an error. Also, ad-hoc polymorphism should preserve laws or intuitions in context of generic programming, e.g. don't use `+` to append lists because it does not preserve commutativity of `+` on numbers.
-
-*Note:* We could support Haskell-style infix names, i.e. 'a \`foo\` b'. But I'll probably leave this to compiler extensions.
+Operators may support limited ad-hoc polymorphism. For example, `>` could compare two numbers, two lists, two tuples. For lists and tuples, we use a lexicographic comparison of elements. Comparing a number to a list, or a list to a tuple, would simply diverge with an error. As a rule, ad-hoc polymorphism must preserve laws or intuitions, e.g. don't use `+` to append lists because it does not preserve commutativity of `+` on numbers.
 
 ## Introductions and Overrides
 
@@ -116,13 +114,9 @@ A concise syntax for bulk aliasing from hierarchical namespaces is very convenie
 
 We'll almost directly adopt Haskell's do notation, `do ...`. 
 
-Instead of desugaring to monadic operators, we'll desugar to a tagged function of form `eff:(\__api -> Body)`, where `__api` is guaranteed to not shadow anything. The `eff` tag helps distinguish effects from pure functions and doubles as a calling convention. 
+As a rule, we might also desugar `.name Args` to `eff:(\__api -> __api.name Args)`. Or perhaps `%name` if I feel `.name` is too confusing. But I'd prefer not to press that shift key unnecessarily. Note that such invocations cannot be curried, but users may write `\ z -> .name x y z`.
 
-Within the 'do' context, we'll essentially desugar anonymous `.name` to `__api.name`. This generalizes, e.g. `.[Expr].op` to `__api.[Expr].op`, or `.[]` to capture the effects API. Ideally, this is concise enough for abstracting assembly mnemonics as effects API operations, e.g. `.movl ...`. 
-
-We'll also generally define effects operators in terms of `eff:(...)`. For example: `op >>= k = eff:(\api -> api.Seq op k)`.
-
-I'm contemplating operators to support applicative style. We could make it more concise than Haskell's `<$>` and `<*>`. Perhaps something closer to `$` and `!`. (We're using `<<` where Haskell used `.`).
+I'm contemplating operators to support applicative style. Preferably more concise than Haskell's `<$>` and `<*>`. But it's a low priority.
 
 Regarding RecursiveDo, we'll likely benefit from forward declaration of fixpoint outputs. This improves visibility and mitigates issues like the conflict between fixpoint and continuations.
 
@@ -133,7 +127,7 @@ In context of lazy loading, macro invocations must be distinct from normal evalu
         @(Expr)
         @macro_name         short for @(ns_prior macro_name)
 
-The compiler lazily evaluates and interprets `Expr` at compile-time. If this evaluates to a function, the compiler parses an argument `Expr`, applies the function, then repeats. Thus, macros may be parameterized as normal functions of any arity. After all arguments are read, the macro should evaluate to a `eff:(\api -> Body)` effect. The compiler provides a localized effects API then runs the effect. 
+The compiler lazily evaluates and interprets `Expr` at compile-time. If this evaluates to a function, the compiler parses an argument `Expr`, applies the function, then repeats. Thus, macros may be parameterized as normal functions of any arity. After all arguments are read, the macro must evaluate to `eff:(\api -> Body)`. The compiler provides a localized effects API to run the effect. 
 
 The effects API provides parser combinators to read code, supporting macro DSLs, and emitters to write code. Reads and writes both have flexible levels of abstraction, e.g. we can work with raw text, ASTs, abstract expressions, etc.. 
 
@@ -163,7 +157,7 @@ Scope-unique atoms are useful for the ephemeron performance pattern. To support 
 
 ## Dicts
 
-For simple, literal dictionaries, I propose syntactic form `{ name1:Expr1, name2:Expr2, ... }`. This desugars to `{} with { name1 = Expr1, name2 = Expr2, ... }`, where `{}` is the empty dictionary and `=` represents namespace introduction. It also generalizes to dotted-path and expression-indexed names, e.g. `{ .[1]:"hello", foo.[2]:"world" }`.
+For simple, literal dictionaries, I propose syntactic form `{ name1:Expr1, name2:Expr2, ... }`. This desugars to `{} with { name1 = Expr1; name2 = Expr2; ... }`, where `{}` is the empty dictionary and `=` represents namespace introduction. It also generalizes to dotted-path and expression-indexed names, e.g. `{ .[1]:"hello", foo.[2]:"world" }`. For multi-line dicts, a leading comma is permitted (like lists) but we'd usually favor the `{} with ...` form.
 
 Dictionary updates are generally expressed using `with` and `without` special forms. These are applied much like infix operators, but the RHS isn't an expression:
 
@@ -232,13 +226,13 @@ Numbers are modeled as exact rationals with no bound on size or precision. Thus,
 
 ## Lists
 
-I propose to use square brackets and commas for literal lists.
+I propose to use square brackets and commas for inline lists.
 
         []
         [1]
         [1,2,3]
 
-For vertical structuring and line-based editing of large list literals, we'll admit a leading comma after a newline.
+Multi-line lists admit a leading comma, i.e. `[ LF, ...]` for more consistent line editing.
 
         [
         , 1
@@ -246,7 +240,11 @@ For vertical structuring and line-based editing of large list literals, we'll ad
         , 3
         ]
 
-We'll use `++` to compose lists by appending them. There is no dedicated 'cons' operator in syntax, but we can express `cons x xs = [x]++xs`. We may generally use `++` in pattern matching, limited to one variable-length list, e.g. `[x]++xs` or `xs++[x]` or `[x0,x1]++xs++[xn]`. 
+Though, do consider a writer effect to build large lists instead of a literal in these cases.
+
+We'll use `++` to compose lists by appending them. In contrast to Haskell's `x:xs`, there is no dedicated 'cons' operator, though we can define `cons x xs = [x]++xs`. One reason for this is symmetry: 
+
+We may generally use `++` in pattern matching, limited to one variable-length list, e.g. `[x]++xs` or `xs++[x]` or `[x0,x1]++xs++[xn]`. 
 
 There are no list comprehensions. We might change that with macros. Use of Alt+Fail effects to build lists is just as expressive, but a tad more verbose.
 
@@ -306,7 +304,7 @@ I propose to also support directional function composition:
 
 I propose to encode Boolean values, true and false, as the concise atoms, `'t` and `'f` respectively. There are no implicit conversions, no 'truthy' values. 
 
-I propose to use keywords `and, or, not` for boolean composition. IMO, `&&` and `||` begin to feel like line noise, and `!` should not be wasted on flipping a bit. We can support `and` and `or` as infix operators, still.
+I propose to use keywords `and, or, not` for boolean composition. (IMO, `&&` and `||` begin to feel like line noise, and `!` should not be wasted on flipping a bit.) We can treat `and` and `or` as infix operators.
 
 Although I have a vision for pattern matching, we'll support the conventional and familiar `if Cond then A else B` expressions, and also the `A if Cond else B` variant, which is more convenient in cases where we want to emphasize the operation over the condition. These are limited to pure boolean expressions. As a special case, in context of `do` notation, users may write `if Cond then A` or `A if Cond` without an `else` condition (defaults to return unit). 
 
