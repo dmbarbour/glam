@@ -6,22 +6,30 @@ This project is tentatively called 'glam' - general language assembly.
 
 - [Design Principles](./DesignPrinciples.md) - Guiding principles for the design. Summary:
   - absolute control - the guiding star for all design decisions is localizing control
+  - extensibility, stability, inverted access control - control in context of modularity
   - reproducibility, verifiability, scalability, comprehensibility - contribute to control
-  - flexibility, adaptivity, interactivity - enhance the programming experience
-- [Design](./Design.md) - underlying semantics. Summary:
+  - flexibility, adaptivity, interactivity - further enhance the programming experience
+- [Design](./Design.md) - Summary:
   - pure, untyped lambda calculus for metaprogramming of assembly
     - built-in numbers, lists, and dicts for convenience
-  - model objects via open fixpoint, module namespace as objects 
-  - model effects via free monads, effects APIs as abstract objects
-  - assembly mnemonics expressed effectfully, 'writing' a binary
-  - assembly 'result' is pure binary, interprets expressed effect
-  - folders as packages, content-addressed remotes (DVCS rev)
-  - concurrent reflection tasks for verifiability and interactivity
-    - more ad hoc, relaxes reproducibility, cannot affect result
-  - sources divided between assembly and configuration modules
-    - configuration influences result via 'env' arg for adaptability
-    - configuration also supports scalability and interactivity
-- [Syntax Design](./Syntax.md) - design of initial syntax for ".g" files.
+    - model objects via open fixpoint dictionaries
+    - model effects via free monads, object as API
+  - no app runtime; extract pure binary or dict folder
+    - but we do run reflection tasks and optional IDE
+    - focus of reflection or IDE is entirely inwards
+  - content-addressed, location-independent modules
+  - namespace as one big object; modules as mixins
+  - sources divided between assembly and configuration
+    - config provides 'env' to assembly for adaptability
+    - config also defines resources and the IDE process
+  - express assembly effectfully
+    - users 'write' mnemonics via abstract effects API
+    - can also 'write' section declarations (.bss, .data)
+    - procedures effectively serve as assembly macros
+    - highly extensible state and control flow
+- [Syntax Design](./Syntax.md) - design of initial syntax
+  - borrows a lot from Haskell, but untyped by default
+  - innovations on pattern matching, event continuations
 
 ## Assembler Executable
 

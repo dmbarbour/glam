@@ -29,15 +29,13 @@ We'll start with printable ASCII and whitespace (0x21-0x7E, SP, CR, LF). It is n
 
 We'll support Python-style line comments, i.e. `#...` to end of line. Comments are treated as whitespace by the compiler and macros, but may be structured in context of external tooling (literate programming, projectional editing, extracting API docs, etc.). There is no syntax-layer support for multi-line comments, so just use a decent editor.
 
-## Code Structure
+## Toplevel Structure
 
 The module toplevel consists of a sequence of 'declarations'. Each declaration starts a new line. If a declaration requires more than one line, any continuing lines (excepting blanks) must be indented by at least one space. This structure simplifies error isolation, local reasoning, and parallel processing.
 
 Each declaration starts with either a keyword (such as `import`, `spec`, or `unique`) or is a basic definition of form `name = Expr` or one of its variants (args in lhs, `:=`, `::=`, etc.). We'll favor basic definitions where feasible, thus keywords are mostly for special forms.
 
-Toplevel macro invocations, `@macro_name ...`, are scoped as declarations. The macro can *and must* read to the start of the next declaration (modulo whitespace). The toplevel macro may emit many toplevel declarations. Effectively, toplevel macros serve as user-defined keyword forms. 
-
-Aside from toplevel declarations, several special forms for `Expr` are also sensitive to whitespace and indentation by default. But, in these cases, users always have the option to use braces and semicolons instead of indentation and newlines.
+In context of errors, the errors can be reported but we can also make a best effort to proceed with errors. This might depend on configuration options or command-line arguments.
 
 ## Keywords
 
@@ -60,17 +58,19 @@ I propose `module` as a keyword referring to the current module's namespace. Thu
 
 ## Operators
 
-Operators are compiler-defined binary infix functions. We'll support Haskell-style operator sections, such that `((>>= k) op)` is equivalent to `(op >>= k)`. 
+Operators are essentially infix functions. We'll support Haskell-style operator sections, such that `((>>= k) op)` is equivalent to `(op >>= k)`. To avoid unnecessary parentheses, we'll support precedence between most operators. To mitigate confusion, not every pair of operators will have valid precedence, e.g. cannot mix both `>>` and `<<` without parentheses.
 
-To avoid unnecessary parentheses, we'll support precedence between most operators. To mitigate confusion, not every pair of operators will have valid precedence, e.g. cannot mix both `>>` and `<<` without parentheses. 
+We may support a few special non-binary forms, e.g. `(x < y =< z)` as shorthand for `((x < y) and (y =< z))`. I feel this is acceptable if I ensure consistency and that risk of confusion is mitigated. Consistency would require `(< =<)` operator sections, and risk of confusion can be mitigated by making it illegal to compare booleans (e.g. booleans as atoms `'t` and `'f`). 
 
-There are no implicit conversions, e.g. in case of `2 + "3"` the result is an assembly-time type error (instead of `5` or `"23"`). But some ad hoc polymorphism may apply, e.g. `==` works for all dict key types, and `>` might support comparing numbers or comparing lists of comparables, but it's a type error to compare lists to numbers.
+Operators may support limited ad-hoc polymorphism. For example, `>` could compare two numbers, two lists, perhaps even two tuples. For lists and tuples, we could use a lexicographic comparison of the elements. But, as a rule, we should never implicitly convert arguments. Comparing a number to a list should simply diverge with an error. Also, ad-hoc polymorphism should preserve laws or intuitions in context of generic programming, e.g. don't use `+` to append lists because it does not preserve commutativity of `+` on numbers.
+
+*Note:* We could support Haskell-style infix names, i.e. 'a \`foo\` b'. But I'll probably leave this to compiler extensions.
 
 ## Introductions and Overrides
 
 We'll syntactically distinguish introductions vs. overrides. It's an error to introduce a name that already has a definition, or to override a name that does not have a prior definition. We use `name = Expr` for introductions, `name := Expr` for overrides, and `name ::= \ prior -> Expr` for overrides with convenient access to the previous definition.
 
-By default, module-scope names evaluate to final definitions, subject to overrides. To support access to previous definitions (outside scope of `::=`) I propose keywords `module_prior Expr` and `module_final Expr`. These evaluate names in `Expr` in the specified scope. The `module_prior` scope is definitions up to the current toplevel declaration. Use `module_prior module` to capture the entire previous namespace.
+By default, module-scope names evaluate to final definitions, subject to overrides. To support access to previous definitions (outside scope of `::=`) I propose keywords `ns_prior Expr` and `ns_final Expr`. These evaluate names in `Expr` in the specified scope. The `ns_prior` scope is definitions up through the toplevel declaration. Use `ns_prior module` to capture the entire previous namespace.
 
 ### Forbid Name Shadowing
 
@@ -84,26 +84,26 @@ Thus, as a rule, we'll forbid name shadowing. But only for static contexts: we f
 
 ### Abstract Definitions
 
-In context of modules as mixins, we may assume a name is introduced without defining it locally. However, to resist errors, it is convenient to report 'undefined' errors closer to the code that leaves names undefined. To support these cases, I propose a toplevel declaration:
+In context of modules as mixins, we may assume some names are introduced by the module's client. However, it is convenient to report 'undefined' errors closer to the code that leaves names undefined. To support these cases, I propose a toplevel declaration:
 
         abstract Name(, Name)*
 
-This declaration is not required for names brought into scope (or declared abstract) via 'include'. The intuition we want for include is that we're including all relevant definitions and declarations, including `abstract`. Hierarchical names are captured implicitly, i.e. if we `abstract foo` we don't need `abstract foo.bar`. For convenience, `abstract env` is implicit.
+This declaration is not required for names brought into scope (or already declared abstract) via 'include'. The intuition we want for include is that integrates all toplevel declarations (modulo language version declaration). Also, hierarchical names are captured implicitly, i.e. `abstract foo` implies `abstract foo.bar`. As the standard case, `abstract env` is implicit.
 
-The tracking of abstract definitions across includes is essentially just maintaining a set of dotted-path prefixes that we *don't* report 'undefined' errors about. 
+The tracking of abstract definitions across is essentially just maintaining an extra set of prefixes for which we'll suppress 'undefined' errors. Should be easy to implement with just a little metadata hidden in the namespace.
 
 ### Aliasing (Tentative, Low Priority)
 
 To work more conveniently with hierarchical definitions in context of inheritance and overrides, we can support logical aliasing by rewriting names before they're used. We can also define aliases to resist shadowing and ambiguity.
 
         # form similar to
-        alias foo: bar.baz, qux as q
+        alias foo: bar.baz, qux as q,
 
         # implicitly defines
         baz = foo.bar.baz
         q = foo.qux
-        .[AliasRules] ::= \ prior -> 
-            ... rewrite q to foo.qux, rewrite baz to foo.bar.baz
+        CompilerInternals.AliasRules ::= \ prior -> 
+            ... rewrite q to foo.qux, baz to foo.bar.baz
 
         # later, based on AliasRules
         baz := ...
@@ -116,28 +116,32 @@ A concise syntax for bulk aliasing from hierarchical namespaces is very convenie
 
 We'll almost directly adopt Haskell's do notation, `do ...`. 
 
-Instead of desugaring to monadic operators, we'll desugar to a tagged function of form `eff:(\__api -> Body)`, where `__api` is guaranteed to not shadow anything. The `eff` tag helps distinguish effects from pure functions and doubles as a calling convention. Within the 'do' context, we'll desugar `%name` to `__api.name`. This generalizes, e.g. `%[Expr].op` to `__api.[Expr].op`, or `%[]` to capture the effects API. The compiler will essentially use `%Seq` to compose within Body.
+Instead of desugaring to monadic operators, we'll desugar to a tagged function of form `eff:(\__api -> Body)`, where `__api` is guaranteed to not shadow anything. The `eff` tag helps distinguish effects from pure functions and doubles as a calling convention. 
 
-*Note:* Alternatively, `.name` to `__api.name`. May need to experiment.
+Within the 'do' context, we'll essentially desugar anonymous `.name` to `__api.name`. This generalizes, e.g. `.[Expr].op` to `__api.[Expr].op`, or `.[]` to capture the effects API. Ideally, this is concise enough for abstracting assembly mnemonics as effects API operations, e.g. `.movl ...`. 
 
-We'll define several operators in these terms, e.g. `op >>= k = eff:(\api -> api.Seq op k)` and `>>>` if op returns unit. For convenience, I propose `.ret` as a built-in for `\x -> eff:(\api -> api.Return x)`. Other operators and keywords may support applicative styles, e.g. `<*>` and `<|>`, `.fail` and `.cut`, etc.. 
+We'll also generally define effects operators in terms of `eff:(...)`. For example: `op >>= k = eff:(\api -> api.Seq op k)`.
 
-I intend to diverge from Haskell regarding RecursiveDo, requiring explicit forward declaration of locals whose values are determined later. This improves visibility and mitigates issues like the conflict between fixpoint and continuations.
+I'm contemplating operators to support applicative style. We could make it more concise than Haskell's `<$>` and `<*>`. Perhaps something closer to `$` and `!`. (We're using `<<` where Haskell used `.`).
+
+Regarding RecursiveDo, we'll likely benefit from forward declaration of fixpoint outputs. This improves visibility and mitigates issues like the conflict between fixpoint and continuations.
 
 ## Macros
 
 In context of lazy loading, macro invocations must be distinct from normal evaluation. Proposed syntactic forms:
 
         @(Expr)
-        @macro_name         short for @(.module_prior macro_name)
+        @macro_name         short for @(ns_prior macro_name)
 
 The compiler lazily evaluates and interprets `Expr` at compile-time. If this evaluates to a function, the compiler parses an argument `Expr`, applies the function, then repeats. Thus, macros may be parameterized as normal functions of any arity. After all arguments are read, the macro should evaluate to a `eff:(\api -> Body)` effect. The compiler provides a localized effects API then runs the effect. 
 
-The effects API provides parser combinators to read code, supporting macro DSLs, and emitters to write code. Reads and writes both have flexible levels of abstraction, e.g. we can work with raw text, ASTs, abstract expressions, etc.. To isolate errors and simplify local reasoning, macros cannot escape their scope, and balance of brackets, braces, parentheses, etc. are preserved by both parsers and emitters. Without looking at its definition, we know `(@foo ...)` will read and write within those parentheses. Also, macros may also only read from their right-hand side.
+The effects API provides parser combinators to read code, supporting macro DSLs, and emitters to write code. Reads and writes both have flexible levels of abstraction, e.g. we can work with raw text, ASTs, abstract expressions, etc.. 
 
-A relevant concern is how macros interact, e.g. in context of `(@foo @bar ...)`. To keep it simple, I propose transactional semantics with a predictable schedule: each macro evaluates to completion in one step, and we always favor the earliest (i.e. leftmost, topmost) macro. This design still admits sophisticated interactions insofar as macros emit more macro invocations, but it ensures syntactic locality of such interactions.
+To isolate errors and simplify local reasoning, macros cannot escape their scope. Reads and emits will preserve balance of brackets, braces, parentheses, etc.. Without even looking at its definition, we know `(@foo ...)` must read and write within those parentheses. A toplevel macro is scoped to one declaration (based on indentation), but may expand to many declarations. 
 
-Aside from reading and writing code, macros may provide access to other compiler-provided effects, e.g. access to built-in functions or writing messages to a log.
+A relevant concern is how macros interact, e.g. in context of `(@foo @bar ...)`. For user comprehension, the optimal answer is that macros don't interact. Thus, each macro can be considered in isolation, and macros never observe another macro invocation. This can be implemented via restriction on the reader API. Similar restrictions exist for comments and imbalanced parentheses.
+
+Macros may also receive compiler-provided APIs to report errors and warnings. 
 
 ## Tagged Data
 
@@ -151,32 +155,30 @@ Pattern matching, in the general case of `.(TagList):Pattern`, would evaluate `T
 
 Atoms are data where the only useful observation is equality.
 
-Constructed atoms are useful for structured data. The unit value is a built-in atom, expressed and matched as `()`. Tagged unit data, i.e. `tag:()` or `.[TagExpr]:()`, serves as a constructed atom. Names are indexed as constructed atoms of form `.["name"]:()`. We provide syntax `'name` for capturing name indices: `tag:()` is equivalent to `.['tag]:()`. We use this for booleans (`'t` and `'f`), and they're convenient for naming registers and such (`'eax`).
+Symbolic atoms are useful for structured data. The unit value is a built-in symbolic atom, expressed and matched as `()`. Tagged unit data, i.e. `tag:()` or `.[TagExpr]:()`, serves as a symbolic atom. As shorthand, `'name` rewrites to `.["name"]:()`. Note that `'tag` and `tag:()` are not equivalent: the latter is equivalent to `.['tag]:()`. We'll use symbolic atoms for booleans (`'t` and `'f`), and they're also convenient for naming registers (`'eax`).
 
-Aside from unit, the assembler provides to the front-end compiler an atom abstracting location in the hierarchical module namespace. This is useful as a seed to derive 'unique' atoms. I propose `.unique Foo, Bar, Baz` declarations to introduce unique atoms at the module toplevel. Unique atoms are useful for access control and conflict avoidance, but they must be used via indexed names, e.g. `.[Foo]:(...)`.
+Unique atoms are useful for access control and conflict avoidance. A viable approach is `Foo = (abstract_global_path Foo)`. This leverages the global namespace as a stable source of identity (that does not compromise extensibility or reproducibility), and also defines `Foo` to resist accidental reuse. I propose a toplevel declaration `unique Foo, Bar, Baz` for bulk definitions of this form. *Aside:* `abstract_global_path` is verbose to discourage direct use.
 
-Scope-unique atoms are useful for the ephemeron performance pattern. To support this, `.scope_unique : Atom -> Atom` returns the same atom annotated with unique metadata. When matching or comparing atoms with different metadata, we diverge with error. Thus, we never observe scope-uniqueness to be violated. When used as dict keys, we can collect associated data when metadata becomes unreachable.
-
-*Note:* It is feasible to introduce unique atoms (aligned with global namespace paths) without declaring them as names, but declaring them as names
+Scope-unique atoms are useful for the ephemeron performance pattern. To support this pattern, `scope_unique : Atom -> Atom` returns the same atom annotated with unique metadata. If ever we compare the same atom with different metadata, we diverge instead, thus we never observe the violation of scope uniqueness. When used as dict keys, we can associate the data with a weakref of the metadata.
 
 ## Dicts
 
-For simple, literal dictionaries, I propose syntactic form `{ name1:Expr1, name2:Expr2, ... }`. This desugars to `{} .with { name1 = Expr1, name2 = Expr2, ... }`, where `{}` is the empty dictionary and `=` represents namespace introduction. It also generalizes to dotted-path and expression-indexed names, e.g. `{ .[1]:"hello", foo.[2]:"world" }`.
+For simple, literal dictionaries, I propose syntactic form `{ name1:Expr1, name2:Expr2, ... }`. This desugars to `{} with { name1 = Expr1, name2 = Expr2, ... }`, where `{}` is the empty dictionary and `=` represents namespace introduction. It also generalizes to dotted-path and expression-indexed names, e.g. `{ .[1]:"hello", foo.[2]:"world" }`.
 
-Dictionary updates are generally expressed using `.with` and `.without` special forms. These are applied much like infix operators, but the RHS isn't an expression:
+Dictionary updates are generally expressed using `with` and `without` special forms. These are applied much like infix operators, but the RHS isn't an expression:
 
-        Dict .with 
+        Dict with 
             x ::= \ old_x -> old_x + 42
             y := 10
             .[1] = "this is new"
 
-        Dict .without x, y, z
+        Dict without x, y, z
 
-The `.with` syntax enforces explicit overrides, i.e. it's an error to introduce a name that already exists or override a name that does not exist. The `.without` form removes listed names if they exist, but is not an error if the name does not exist. In case of dotted-path names, it also removes empty hierarchical dictionaries in the removed path prefix. Thus, in case of `{foo:{bar:42}} .without foo.bar` the result is `{}` instead of empty directory `{foo:{}}`. 
+The `with` syntax still distinguishes introductions and overrides. The `without` form removes listed names if they exist, but it is not an error to remove the name if it does not exist. In case of dotted-path names, it also removes empty hierarchical dictionaries in the removed path prefix. Thus, in case of `{foo:{bar:42}} without foo.bar` the result is `{}` instead of empty directory `{foo:{}}`. 
 
-Pattern matching on dictionaries uses the literal form with an optional remaining pattern, e.g. `{ .(Expr):(a,b,c), x:42, Pattern }`. We *evaluate* key expressions within the pattern, and we remove matched keys (via `.without`) before matching on the remaining pattern. The default remaining pattern is `{}`, requiring a complete match.
+Pattern matching on dictionaries uses the literal form with an optional remaining pattern, e.g. `{ .(Expr):(a,b,c), x:42, Pattern }`. We *evaluate* key expressions within the pattern, and we remove matched keys (via `without`) before matching on the remaining pattern. The default remaining pattern is `{}`, requiring a complete match.
 
-In the general case, users may want conditional behavior based on whether a dictionary contains a given field. This can be expressed in terms of pattern matching.
+In a few rare cases, notably tagged data and object instances, I want to prevent direct updates to a dictionary. For tagged data, users should simply construct a new value. For objects, users should update the specification (pre-fixpoint) instead of the instance, otherwise updates won't propagate properly. Mostly, this is about protecting user intuitions against surprises or accidents. I propose a `(dict_freeze DictExpr)` annotation that returns a 'frozen' dictionary, prohibiting updates via `with`, `without`. We can also introduce `(dict_thaw FrozenDictExpr)` to relax this constraint. 
 
 ## Embedded Texts
 
@@ -215,16 +217,18 @@ Number literals are using the same characters as names, albeit in such a way tha
         1000000
         1_000_000
 
-We use a prefix underscore to indicate negative numbers. This is part of the number literal, not a separate unary negation operator. Internal underscores (i.e. between digits) are ignored by the parser but may enhance legibility for humans. Decimal floating point or scientific notation can be encoded directly using an 'e' separator (or 'E', not case sensitive) for the exponent.
+We use a prefix underscore to indicate negative numbers. This is part of the number literal, not a separate unary negation operator. Internal underscores (between digits) are ignored by the parser, existing only to enhance legibility for humans. Decimal floating point or scientific notation can be encoded directly using an 'e' separator for the exponent.
 
         0xc0de
         0b10010_00110100_11111110_11011100
 
-We'll support hexadecimal (0x) and binary (0b) number literals, too (not case sensitive). These may be negative (e.g. `_0xff` is `_255`) though conventionally we'd only use this for natural numbers. 
+We'll support hexadecimal (0x) and binary (0b) number literals, too. We can feasibly provide some 'bitwise' operators or accelerated functions on natural numbers. Although numbers don't have a built-in notion of word size or encoding, it isn't difficult to impose one.
 
-We'll provide some arithmetic operators for numbers, e.g. `+ * / -`. Divide by zero will diverge lazily. We'll also support some comparisons, e.g. `> >= == =< <`. We might provide a few built-ins or accelerators for other common use cases.
+The compiler will provide a few useful operators - `+ * / -`. Common functions, such as rounding numbers, should be accelerated.
 
-Numbers are modeled as exact rationals with no bound on size or precision. Any loss of precision is under user control. This has severe performance implications, but they won't impact most assembly use cases. Where assembly-time number crunching performance is an issue, we'll develop accelerators. 
+Numbers are modeled as exact rationals with no bound on size or precision. Thus, any loss of precision is under user control. This has severe performance implications. If users ever need high-performance assembly-time number crunching, they'll be relying on accelerated evaluation of CPU or GPGPU DSLs instead of built-in arithmetic.
+
+*Note:* As a rule, use of characters in numbers is not case sensitive, e.g. we could write `0XC0DE` or `1.2E3`.
 
 ## Lists
 
@@ -234,9 +238,19 @@ I propose to use square brackets and commas for literal lists.
         [1]
         [1,2,3]
 
-We'll use `++` to compose lists by appending them. There is no dedicated 'cons' operator in syntax, but we can express `cons x xs = [x]++xs`. We may generally use `++` in pattern matching, limited to one variable-length list, e.g. `[x]+xs` or `xs+[x]` or `[x0,x1]+xs+[xn]`.
+For vertical structuring and line-based editing of large list literals, we'll admit a leading comma after a newline.
 
-Currently, there is no syntax for list length, slicing lists, etc.. We'll need accelerated functions in those roles.
+        [
+        , 1
+        , 2
+        , 3
+        ]
+
+We'll use `++` to compose lists by appending them. There is no dedicated 'cons' operator in syntax, but we can express `cons x xs = [x]++xs`. We may generally use `++` in pattern matching, limited to one variable-length list, e.g. `[x]++xs` or `xs++[x]` or `[x0,x1]++xs++[xn]`. 
+
+There are no list comprehensions. We might change that with macros. Use of Alt+Fail effects to build lists is just as expressive, but a tad more verbose.
+
+Aside from append and pattern matching, there are no primitives on lists. I propose to build everything else via user definitions and acceleration.
 
 ## Tuples
 
@@ -245,7 +259,11 @@ Currently, there is no syntax for list length, slicing lists, etc.. We'll need a
 
 A tuple is essentially a list with different connotations - fixed size, non-homogeneous - and distinct pattern matching. In practice, we'll usually access tuples via pattern matching, e.g. `(P1, P2, P3)` for a triple. We can feasibly accelerate short tuples to reduce the number of allocations. There is no dedicated syntax for tuples smaller than a pair, though users are free to manually write `tuple:[a]`. 
 
-Tuples are sometimes more convenient than small dictionaries. A relevant cost is extensibility. Tuples should mostly be used for either very stable structures or local intermediate representations.
+Tuples are sometimes more convenient than small dictionaries. But compared to dictionaries, tuples are much less extensible. Tuples should mostly be used for either very stable structures or local intermediate representations.
+
+## Relational Style? Use Macros.
+
+It is feasible to use extensions to build tables, e.g. `tbl_foo ::= \p -> p++[...]`. I'd like to support relational style, but I'm not convinced it's worth a dedicated syntax at this time. Let's try out some macro DSLs in this role.
 
 ## Functions
 
@@ -267,10 +285,10 @@ Unlike Haskell, there is no support for pattern matching in definitions or lambd
 
 ## Partial Functions
 
-        .error      recognized errors
-        .tbd        incomplete definitions
+        error      recognized errors
+        TBD        incomplete definitions
 
-These expressions always diverge when observed, but for different reasons - error or an incomplete definition. The reflection API may observe these errors together with full context (continuation, call stack, etc.). In practice, we'll often write `(.error Expr)` (or `(.tbd Expr)`) to provide extra context for visualization, treating `.error` as a function. 
+These expressions always diverge when observed, but for different reasons - error or an incomplete definition. The reflection API may observe these errors together with full context (continuation, call stack, etc.). In practice, we'll often write `(error Expr)` (or `(TBD Expr)`) to provide extra context, treating `error` as a missing function. But the argument isn't required. 
 
 ## Pipes
 
@@ -286,11 +304,15 @@ I propose to also support directional function composition:
 
 ## Booleans
 
-I propose to encode boolean values true and false as concise atoms, `'t` and `'f` respectively. There are no implicit conversions, no 'truthy' values. We can support the conventional if/then/else (and elif) form, and perhaps an `Expr .when Cond .else Expr2` form. In context of pattern matching, we'll use boolean expressions for pattern guards.
+I propose to encode Boolean values, true and false, as the concise atoms, `'t` and `'f` respectively. There are no implicit conversions, no 'truthy' values. 
+
+I propose to use keywords `and, or, not` for boolean composition. IMO, `&&` and `||` begin to feel like line noise, and `!` should not be wasted on flipping a bit. We can support `and` and `or` as infix operators, still.
+
+Although I have a vision for pattern matching, we'll support the conventional and familiar `if Cond then A else B` expressions, and also the `A if Cond else B` variant, which is more convenient in cases where we want to emphasize the operation over the condition. These are limited to pure boolean expressions. As a special case, in context of `do` notation, users may write `if Cond then A` or `A if Cond` without an `else` condition (defaults to return unit). 
 
 ## Modules
 
-Need a syntax for `.import`, `.include` 
+Need syntax for `import`, `include` 
 
 ### Access Control
 
@@ -309,6 +331,8 @@ There are forms of access control between subprograms. This is supported via uni
 I've contemplated support for toplevel `.ifdef` and such, but I feel that conditional definitions complicate reasoning about the namespace even before I contemplate whether we're referring to past or future definitions. Best to stick with aggregate definitions via `name ::= \ p -> p ++ [...]` or similar.
 
 ## Object Specs
+
+To support 'override' of specifications, it might be useful to break them into several toplevel definitions. E.g. a unique declaration for the identity, a mixin definition, and the instance definition. Each with a distinct suffix. We could also bind a refl task to each instance, lifting the internal refl task. Users then mostly interact with the instance, but override the mixin. 
 
 We can model naked mixins as `\base self -> base .with ...`. But for multiple inheritance and singleton instantiation, we'll need implicit unique identifiers from the module toplevel. Ideally, we can also eliminate the aforementioned mixin boilerplate, at least by default. Or perhaps we can separate the specification and instantiation from the mixin.
 
@@ -370,3 +394,12 @@ Some design constraints and desiderata:
 - user-defined types and object interfaces
   - possible type-indexed behavior bound to named types?
 
+## Logging (Tentative)
+
+I'm not convinced we should support logging directly from functions. The main issue is that we lose a lot of ability to override logging behavior. This could be mitigated by some standard per-module logging overrides, e.g. a filter-map for log messages based on call stacks. 
+
+But this gets pretty messy. Perhaps leave support for logging to macros or explicit reflection tasks for now. We can pick a syntax if this stabilizes and we feel we can do better than macros.
+
+## Assertions (Tentative)
+
+Anonymous assertions risk breaking code in ways that are difficult to repair through extensions. OTOH, they're convenient. I propose to approach assertions much like logging, e.g. disable per module or per function.

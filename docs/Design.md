@@ -229,62 +229,45 @@ We could use 'runCut' as an evaluator for pure pattern matching. A front-end com
 
 ### Flexible Monoliths
 
-We can express extarbitrary data flow via indexed state, and arbitrary control flow via indexed, delimited continuations. Between these we can model almost any effect. But we'll also need a few 'generic' effects, e.g. Fix, Cut, and Alt for generic desugaring of do notation and effectful pattern matching. A viable one-size-fits-most handler:
+We can express extarbitrary data flow via indexed state, and arbitrary control flow via indexed, delimited continuations. Between these we can model almost any effect. But we'll also need a few 'generic' effects, e.g. Fix, Cut, and Alt for generic desugaring of do notation and effectful pattern matching. A viable one-size-fits-most handler for pure computations:
 
-        run s op = runChoice (runCST s (Yield (Cut op) Return)) 
+        unique CC, BT  
 
-        unique CC, CutScope, BT  
-
-        -- implements delimited continuations and state
-        runCST s (Yield rq k) = match rq with
-            Get -> runCST s (k s)
-            (Set s') -> runCST s' (k [])
-            (Reset ix op) -> runCST s' op where
-                s' = s with { (CC) = ((ix,k):(s.(CC))) }
-            (Shift ix fn) -> match s.(CC) with
+        -- A monolith of four generic effects: 
+        --   Continuations (Shift, Reset)
+        --   Alternative (Cut, Fail, Alt)
+        --   State (Get, Set)
+        --   Fixpoint (Fix)
+        -- Result is list of outcomes as `(r,s')` pairs.
+        run s (Yield rq k) = match rq with
+            Get -> run s (k s)
+            (Set s') -> run s' (k ())
+            (Alt a b) -> a' ++ b'
+                a' = run s (a >>= k)
+                b' = run s (b >>= k)
+            (Cut op) -> match (run s op) with
+                (r,s'):_ -> run s' (k r)
+                [] -> [] -- promote failure
+            Fail -> []
+            (Reset ix op) -> run s' op where
+                s' = s with { .[CC] = ((ix,k):(s.[CC])) }
+            (Shift ix fn) -> match s.[CC] with
                 (ix',k'):cc' -> 
                     -- 'Shift' pops matched 'Reset', 'fn' may reinsert
-                    let s' = s with { (CC) = cc' }
-                    if (ix is ix') then runCST s' ((fn k) >>= k') else
-                    runCST s' (Yield rq (\r -> Yield (Reset ix' (k r)) k'))
+                    let s' = s with { .[CC] := cc' }
+                    if (ix is ix') then run s' ((fn k) >>= k') else
+                    run s' (Yield rq (\r -> Yield (Reset ix' (k r)) k'))
                 [] -> error "shift index not in scope"
-            Fail -> runCST s (onFail >>= k)
-            (Alt a b) -> runCST s ((onAlt a b) >>= k)
-            (Cut op) -> runCST s ((onCut op) >>= k)
-            (Fix f) -> Yield (Fix f') k' where
-                f' ~(r',_) = runCST (s with { (CC) = [] }) (f r')
-                k' (r',s') = runCST (s' with { (CC) = s.(CC) }) (k r')
-            _ -> Yield rq (runStateT s . k)
-        runCST s (Return r) = match s.(CC) with
-            ((_,k):cc') -> runCST (s with { (CC) = cc' }) (k r)
-            [] -> Return (r,s)
+            (Fix f) -> List.flatMap cont rs' where
+                rs' = fixListFn (run (s with { .[CC] := [] }) . f) 
+                cont (r,s') = run (s' with { .[CC] := s.[CC] }) (k r)
+        run s (Return r) = match s.[CC] with
+            ((_,k):cc') -> run (s with { .[CC] := cc' }) (k r)
+            [] -> [(r,s)]
 
-        yield rq = Yield rq Return
-        return = Return
-        shift ix fn = yield (Shift ix fn)
-        reset ix op = yield (Reset ix op)
-        shift_reset ix fn = shift ix (reset ix . fn)
+Unfortunately, fixpoint is not fully compatible with continuations. The essential issue is the continuation may be invoked any number of times, but we're only permitted exactly one fixpoint value. We can shift where reset is scoped within the fixpoint. We can support Alt and Fix together, i.e. exactly one fixpoint future per alt choice.
 
-        onCut op = do
-            prev <- getref BT
-            setref BT (error "failed without alternative")
-            outcome <- reset CutScope op
-            setref BT prev
-            return outcome
-        onFail = shift_reset CutScope <| \_-> getref BT >>= id
-        onAlt a b = 
-            shift_reset CutScope <| \k-> do
-                cp <- get 
-                setref BT (set cp >> k b)
-                k a
-
-        -- external 'non-deterministic' choice
-        runChoice (Return r) = [r]
-        runChoice (Yield rq k) = List.flatMap (runChoice . k) <| match rq with
-            (Choice xs) -> xs
-            (Fix f) -> fixListFn (runChoice . f)
-
-Unfortunately, fixpoint are not fully compatible with continuations. We resolve this above by forbidding Shift across Fix. Users must be aware of this limitation if they're using fixpoints a lot, or at least they'll become aware swiftly. Backtracking conditional effects are more flexible, being modeled entirely in terms of state and continuations. The implicit Cut (in 'run') simplifies further composition.
+*Note:* A transformer variation of 'run' is feasible. We'd likely want to lift Alt, Cut, Fail, and Fix, while rewriting the higher-order effects. But *Extensible Effects* offers a better direction.
 
 ### Extensible Effects
 
@@ -296,21 +279,7 @@ Modeling 'effect' as an object with inheritance enables extensions as mixins. Co
 
 In context of multiple inheritance, a linearization algorithm will deduplicate and merge extensions. This relaxes constraints on stack order and local knowledge of usage contexts. Structurally-incompatible extensions are detected as linearization conflicts or ambiguity errors (via explicit overrides). This simplifies debugging and improves user confidence. 
 
-### Optimistic Concurrency
-
-We can model cooperative threads in terms of continuations and state. Assume our cooperative threads run in isolation between explicit checkpoints. We can view this as transactional steps, with each checkpoint 'committing' any updates. It is possible to evaluate multiple threads in parallel, analyze for read-write conflicts, commit a non-conflicting subset of checkpoints then replay the remainder.
-
-A failed transaction is logically replayed until it succeeds, waiting for conditions to change, a basis for concurrency control. We may also introduce 'atomic' sections where checkpoints are suppressed.  
-
-A few concerns:
-- *Rework* - too much replay. A scheduler can mitigate rework heuristically based on conflict history. Users can avoid rework via design patterns, e.g. favoring queues or CRDTs. It is feasible to support partial rollbacks. Rework is easy to report and debug, yet something to design around.
-- *Starvation* - need to spread replays across threads, not kill the same ones every time. Even better if weighted by effort, i.e. better to replay inexpensive operations. Mitigated by metadata, e.g. counters and priorities.
-- *Determinism* - modulo reflection and race conditions, the scheduler awaits the slowest thread in each optimistic batch. This is an opportunity cost to keep cores busy. Users can mitigate via sparking 'will need' pure computations to keep cores busy between checkpoints. 
-- *Local Reasoning* - it's difficult to understand and debug interactions that are distributed across multiple threads. This is mitigated by explicit checkpoints and atomic sections. We can do better by designing for confluence, eventual consistency, such that the final outcome is independent of the schedule.
-
-I'm not convinced that modeling assembly as a deterministic multi-threaded process is a great idea. The local reasoning issue, especially, is a concern. Single-threaded with sparks is much easier to control and debug, and can still utilize all the CPUs. Nonetheless, I do want the option to be available.
-
-But optimistic concurrency will serve as a foundation for reflection tasks and the configured IDE.
+*Note:* The actual implementation may still use the Flexible Monoliths 'run' or some variant. It's just fully abstracted.
 
 ## Modules
 
@@ -410,7 +379,7 @@ Machine-code mnemonics are left to libraries. Effectively, we have a generic 'as
 
 A module may define effectful 'task.\*' operations to perform upon loading. The assembler runs these tasks concurrently upon loading a module, providing a reflection API. Use cases include testing, typechecking, visualization, and cache management. Reflection tasks do not directly influence assembly output, but they may raise warnings or errors.
 
-To keep implementation small and simple, the provided reflection API is version-specific, specialized to an executable's representations and capabilities. The bloat of portability and policy is pushed to user-defined adapters.
+To keep implementation small and simple, the provided reflection API is version-specific, specialized to an executable's representations and capabilities. The bloat of portability and policy is pushed to user-defined adapters. Users can build transactions, queues, CRDTs, etc. upon shared state and a few atomic ops.
 
 ### Interaction
 
@@ -422,9 +391,9 @@ The assembler executable shall support interactive mode via simple command-line 
 - `(-i|--interactive)` - configurable user interface, maintains result
   - `--discard` by default, but compatible with `-o`
 
-To avoid bloat, the assembler pushes interaction logic to the user configuration, running 'conf.ide' with a limited effects API. This API includes reflection and a few methods for user interaction, e.g. listening for TCP connections (or unix domain sockets) to support HTTP or RFB protocols as basis for GUI. Also: access TTY, and perhaps a few methods to edit sources. I hesitate to support native GUI, but I could be convinced by something sufficiently lightweight (e.g. Dear ImGUI).
+To avoid bloat, the assembler pushes interaction logic to the user configuration, running 'conf.ide' with a limited effects API. This API includes reflection and a few methods for user interaction, e.g. listening for TCP connections (or unix domain sockets) to support HTTP and other protocols. Also: access TTY, a few methods to edit sources. I hesitate to support native GUI, but I may try if the API is extremely lightweight (perhaps Dear ImGUI).
 
-Although reflection tasks do not directly interact with the user, they may query interactive mode and communicate with the IDE. The IDE may enable reflection tasks to notify users and perhaps even extend the IDE.
+Although reflection tasks do not directly interact with the user, they may interact with the IDE. Thus, we might use reflection tasks to notify or even extend the IDE.
 
 ### Integration
 
@@ -509,7 +478,7 @@ What can we feasibly implement to support developers in reasoning about the asse
 
 * *Proofs*: Under Curry-Howard, types can be understood as theorems, and programs as proofs. But for sophisticated types, verifying types may involve expensive searches. Ideally, we can provide some hints to reduce the verification overheads, separate from the program itself but perhaps as part of a declaration.
 
-* *Visualization*: We can support developers in viewing the assembly process, obtaining useful feedback. This includes text logs, interactive debuggers, and graphical outputs including tests and simulations. User-defined visualizations should be possible both within an assembly and generically via user configuration of interaction mode. Bonus points if visualization integrates smoothly with editable projections of source.
+* *Visualization*: We can support developers in viewing and understanding the assembly process, auxilliary processes such as typechecking, testing, or theorem proving, and the outcomes of these various processes. We can draw user attention where it's needed. Ideally, we can support interactive visualization, with progressive disclosure and support the user in understanding problems. Bonus points if interactive visualization integrates smoothly with editable projection.
 
 * *Tracing*: An assembler can maintain some metadata to trace outputs back to sources. However, there's a rather severe tradeoff between precision and performance. This can be mitigated by replay with greater precision or with an intersection of different mappings. Ideally, developers may also guide tracing via annotations.
 
@@ -525,7 +494,7 @@ The logic required for reasoning is non-trivial, and I'd prefer to keep it separ
 
 Many forms of reasoning benefit from a high-performance constraint solver. I'd prefer to keep this separate from the assembler executable, but we could feasibly configure access to a constraint or SMT solver, whether remote or via dynamic linking. Access to this solver can be provided through the reflection API.
 
-### Visualization
+### Logging and Visualization
 
 Reflection tasks won't directly interact with the user. Indirectly, they may interact with 'conf.ide', which interacts with the user. See *Interaction*. Instead of logging strings, I suggest logging 'objects' that support multiple views, including progressive disclosure and such. Of course, a 'text' view may be a common one. 
 
