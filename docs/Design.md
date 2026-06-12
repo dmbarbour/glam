@@ -277,7 +277,7 @@ I propose tag `eff:(\api -> ...)` to clearly distinguish effects from functions 
 
         op >>= k = eff:(\api -> api.seq op k)
         return r = eff:(\api -> api.ret r)
-        a <|> b = eff:(\api -> api.alt a b)
+        a <+> b = eff:(\api -> api.alt a b)
         using ext op = eff:(\api -> api.using ext op)
 
 Although this is flexible enough to support stateful APIs, I believe best practice should be subprogram-scoped extensions. Above, I propose a generic `using` method that applies extension `ext` in scope of `op`. To maximize extensibility, I propose to model `api` as an object and `ext` as a mixin. Multiple inheritance can automatically deduplicate and merge compatible features. We can detect structurally-incompatible extensions based on explicit overrides and linearization conflicts.

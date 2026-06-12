@@ -112,13 +112,17 @@ A concise syntax for bulk aliasing from hierarchical namespaces is very convenie
 
 ## Effects
 
-We'll almost directly adopt Haskell's do notation, `do ...`. 
+We'll almost directly adopt Haskell's do notation. 
 
-As a rule, we might also desugar `.name Args` to `eff:(\__api -> __api.name Args)`. Or perhaps `%name` if I feel `.name` is too confusing. But I'd prefer not to press that shift key unnecessarily. Note that such invocations cannot be curried, but users may write `\ z -> .name x y z`.
+I propose a variation for RecursiveDo: forward declaration of fixpoint names. In part for visibility and clarity, in part because fixpoint scopes shift. To express forward declarations, we could use a keyword such as `expect x, y, z`.
 
-I'm contemplating operators to support applicative style. Preferably more concise than Haskell's `<$>` and `<*>`. But it's a low priority.
+To support concise effects without polluting the namespace, I also propose to evaluate `.name Args` to `eff:(\__api -> __api.name Args)`. To make this work nicely with curried arguments, we can extend the implicit whitespace 'apply' to also support effects. This isn't difficult, just needs a little ad-hoc polymorphism: `eff:(f) x = eff:(\api -> f api x)`.
 
-Regarding RecursiveDo, we'll likely benefit from forward declaration of fixpoint outputs. This improves visibility and mitigates issues like the conflict between fixpoint and continuations.
+Haskell has applicative style via `<*>` and `<$>` that is convenient for some use cases. I'm contemplating similar operators, but it isn't clear to me whether I can make them more concise. Will probably defer these for now, though.
+
+*Aside:* I've been contemplating concise access to indexed state. Use of `.get ['foo]` and `.set ['foo] 42` is probably adequate. 
+
+*Tentative:* I like the idea of explicitly modeling conventional "stack frames" with early returns (via shift-reset), frame-local variables (via state), deferred operations (invoked in reverse order on frame exit). We could feasibly provide some syntax around this. We'd also need explicit tailcalls that pop the frame for recursion. Perhaps explore what can be done here then develop some syntax extensions. Maybe a `proc` keyword?
 
 ## Macros
 
@@ -127,11 +131,9 @@ In context of lazy loading, macro invocations must be distinct from normal evalu
         @(Expr)
         @macro_name         short for @(ns_prior macro_name)
 
-The compiler lazily evaluates and interprets `Expr` at compile-time. If this evaluates to a function, the compiler parses an argument `Expr`, applies the function, then repeats. Thus, macros may be parameterized as normal functions of any arity. After all arguments are read, the macro must evaluate to `eff:(\api -> Body)`. The compiler provides a localized effects API to run the effect. 
+The compiler lazily evaluates `Expr` at compile-time to an effect or function. A function is interpreted as an effect that reads one expression then applies it as an argument. An effect is more flexible, capable of reading and emitting code through a compiler-provided API. Reads and writes shall support flexible levels of abstraction, e.g. source text, ASTs, abstract data embeddings, etc..
 
-The effects API provides parser combinators to read code, supporting macro DSLs, and emitters to write code. Reads and writes both have flexible levels of abstraction, e.g. we can work with raw text, ASTs, abstract expressions, etc.. 
-
-To isolate errors and simplify local reasoning, macros cannot escape their scope. Reads and emits will preserve balance of brackets, braces, parentheses, etc.. Without even looking at its definition, we know `(@foo ...)` must read and write within those parentheses. A toplevel macro is scoped to one declaration (based on indentation), but may expand to many declarations. 
+To isolate errors and simplify local reasoning, reads and emits will preserve balance of brackets, braces, parentheses, indentation, etc.. Without even looking at its definition, we know `(@foo ...)` cannot read or write outside those parentheses. A toplevel macro is scoped to one declaration (based on indentation), but may emit many declarations. 
 
 A relevant concern is how macros interact, e.g. in context of `(@foo @bar ...)`. For user comprehension, the optimal answer is that macros don't interact. Thus, each macro can be considered in isolation, and macros never observe another macro invocation. This can be implemented via restriction on the reader API. Similar restrictions exist for comments and imbalanced parentheses.
 
