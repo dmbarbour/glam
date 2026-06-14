@@ -303,13 +303,13 @@ The hierarchical 'include at' and 'import as' forms simplify lazy loading. In co
 
 The assembler implicitly loads a configuration module based on the `GLAM_CONF` environment variable or an OS-specific default, i.e. `"~/.config/glam/conf.g"` in Linux or `"%AppData%\glam\conf.g"` in Windows. A small, local user configuration typically extends a large, remote community or company configuration.
 
-The configuration defines various options under 'conf.\*' to guide the assembler. As a rule, configuration is expressed effectfully to simplify extension and composition. 
+The configuration defines various options under 'conf.\*' to guide the assembler. As a rule, configuration is expressed effectfully to simplify extension. 
 
-- *assembly environment*: `conf.env : Eff [Compile] ()` - determines initial (Base) environment for assembly. Modeled as compiling an empty, anonymous source file (per *User-Defined Syntax*). Default is to forward toplevel 'env'.
-- *command-line macros*: `conf.cli : Eff [Parse, Write] ()` - rewrites command-line arguments if (and only if) the first command-line argument does not start with '-'. Expressed via parser combinators to support tab completion.
-- *interactive development*: `conf.ide : Eff [Refl, TTY, Net, File, GUI] ()` - see *Interaction* 
-- *batch-mode logger*: `conf.log : Eff [Refl, Log] ()` - potential user configuration for batch-mode visualization, may write to stderr and potentially local log files.
-- *resource management*: GPGPUs for acceleration, remote proxies for shared cache or compilation, constraint solvers, GC and JIT tuning, etc.. Figure things out we go.
+- *assembly environment*: `conf.env : Eff [] Dict` - determines 'env' parameter to assembly, usually a dictionary. Default is an empty dict.
+- *command-line macros*: `conf.cli : Eff [Read, Write] ()` - rewrites command-line arguments if (and only if) the first command-line argument does not start with '-'. The reader uses parser-combinators designed to simplify tab completion.
+- *logger*: `conf.log : Eff [Refl, Read, Write] ()` - for batch mode, reads from log queue and writes to standard error. Modeled as a transform on the default log stream. Capable of forwarding, filtering, merging, rearranging, and rewriting messages. 
+- *interactive development*: `conf.ide : Eff [Refl, TTY, Net, *] ()` - for interactive mode, supports user interaction through TTY and network access (including unix domain sockets). Network access is passive (cannot initiate connections). May extend to editing files and GUI. There is no default interactive mode. 
+- *resource management*: as needed - the assembler may require ad hoc configuration for JIT and GC tuning, access to processors for acceleration, remote proxies for distributed compilation or shared work caching, PKI certs and keys access DVCS or to sign works, etc.. 
 
 For flexibility, `GLAM_CONF` may list several files using the OS-specific `PATH` separator. These files are logically 'included' as mixins, such that files listed earlier may override those listed later, left to right. We can feasibly split the configuration between OS-layer, project layer, and user layer. We may later extend this list to support remote URLs.
 
@@ -380,13 +380,13 @@ Machine-code mnemonics are left to libraries. Effectively, we have a generic 'as
 
 ### Reflection Tasks
 
-The assembler shall recognize 'refl.\*' tasks defined within the namespace. These tasks should be expressed effectfully, i.e. `eff:(\api -> ...)` where the 'api'  
+The assembler shall recognize 'refl.\*' tasks defined within the namespace. These tasks are expressed effectfully, i.e. `eff:(\api -> ...)`. To keep implementation small and simple, the provided reflection API is version-specific, specialized to an executable's representations and capabilities. The bloat of portability and policy is pushed to user-defined adapters. To ensure reproducibility of the assembly result, the reflection API shall not influence normal computations beyond performance or halting early on error.
 
-These are run lazily, contingent on at least one definition within the names
+The reflection API should provide sufficient access to support user-defined typechecking, testing, visualization, theorem proving, quotas, cache control, garbage collector profiling, etc.. 
 
-to perform upon loading. The assembler runs these tasks concurrently upon loading a module, providing a reflection API. Use cases include testing, typechecking, visualization, and cache management. Reflection tasks do not directly influence assembly output, but they may raise warnings or errors.
+In context of lazy loading, we trigger reflection tasks in `foo.refl.*` only when at least one `foo.*` name is used. To observe computations, reflection tasks may 'subscribe' to names in scope. To provide a robust opportunity for subscriptions, I propose a staged API. We run the first stage of `foo.refl.*` tasks to completion before using any `foo.*` names.
 
-To keep implementation small and simple, the provided reflection API is version-specific, specialized to an executable's representations and capabilities. The bloat of portability and policy is pushed to user-defined adapters. Users can build transactions, queues, CRDTs, etc. upon shared state and a few atomic ops.
+In general reflection tasks run concurrently and may interact via shared state. The API shall support hierarchical transactions aligned with alt/cut/fail effect. We can introduce a 'commit' effect as a non-scoped 'cut'. A transaction that aborts due to read-write conflict is retried. A transaction that fails (all alternatives fail) implicitly waits for conditions to change. Transactions do complicate the API a bit, but we can avoid separate APIs for concurrency control or explicit state subscriptions.
 
 ### Interaction
 
@@ -398,7 +398,7 @@ The assembler executable shall support interactive mode via simple command-line 
 - `(-i|--interactive)` - configurable user interface, maintains result
   - `--discard` by default, but compatible with `-o`
 
-To avoid bloat, the assembler pushes interaction logic to the user configuration, running 'conf.ide' with a limited effects API. This API includes reflection and a few methods for user interaction, e.g. listening for TCP connections (or unix domain sockets) to support HTTP and other protocols. Also: access TTY, a few methods to edit sources. I hesitate to support native GUI, but I may try if the API is extremely lightweight (perhaps Dear ImGUI).
+To avoid bloat, the assembler pushes interaction logic to the user configuration, running 'conf.ide' with a limited effects API. This API includes reflection and a few methods for user interaction, e.g. listening for TCP connections (or unix domain sockets) to support HTTP and other protocols. Also: access TTY, a few methods to edit sources. I hesitate to support native GUI, but I may try if the API is extremely lightweight (Dear ImGUI?).
 
 Although reflection tasks do not directly interact with the user, they may interact with the IDE. Thus, we might use reflection tasks to notify or even extend the IDE.
 
@@ -499,13 +499,9 @@ The logic required for reasoning is non-trivial, and I'd prefer to keep it separ
 
 ### Constraint Solver
 
-Many forms of reasoning benefit from a high-performance constraint solver. I'd prefer to keep this separate from the assembler executable, but we could feasibly configure access to a constraint or SMT solver, whether remote or via dynamic linking. Access to this solver can be provided through the reflection API.
+Many forms of reasoning benefit from a high-performance constraint solver. I'd prefer to keep this separate from the assembler executable, but we could feasibly configure access to a constraint or SMT solver, whether remote or via dynamic linking. Access to this solver can initially be provided through the reflection API. Ideally, we eventually accelerate a constraint solver within the normal assembly instead of relying on external solvers. This would make solutions more accessible for metaprogramming of the assembly,.
 
-### Logging and Visualization
-
-Reflection tasks won't directly interact with the user. Indirectly, they may interact with 'conf.ide', which interacts with the user. See *Interaction*. Instead of logging strings, I suggest logging 'objects' that support multiple views, including progressive disclosure and such. Of course, a 'text' view may be a common one. 
-
-It is feasible to bridge the gap between logging, visualization, and projectional editing insofar as the reflection API can trace values to relevant sources.
+I suggest abstracting the DSL for constraint solvers as a monadic effects API. 
 
 ## Monadic Assembly
 

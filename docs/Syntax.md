@@ -120,7 +120,7 @@ To support concise effects without polluting the namespace, I also propose to ev
 
 Haskell has applicative style via `<*>` and `<$>` that is convenient for some use cases. I'm contemplating similar operators, but it isn't clear to me whether I can make them more concise. Will probably defer these for now, though.
 
-*Aside:* I've been contemplating concise access to indexed state. Use of `.get ['foo]` and `.set ['foo] 42` is probably adequate. 
+*Aside:* I've been contemplating concise access to indexed state. Use of `.get ['foo]` and `.set ['foo] 42` is adequate but awkward. Perhaps support `%name` as quoting a name into a path.
 
 *Tentative:* I like the idea of explicitly modeling conventional "stack frames" with early returns (via shift-reset), frame-local variables (via state), deferred operations (invoked in reverse order on frame exit). We could feasibly provide some syntax around this. We'd also need explicit tailcalls that pop the frame for recursion. Perhaps explore what can be done here then develop some syntax extensions. Maybe a `proc` keyword?
 
@@ -159,9 +159,9 @@ Scope-unique atoms are useful for the ephemeron performance pattern. To support 
 
 ## Dicts
 
-For simple, literal dictionaries, I propose syntactic form `{ name1:Expr1, name2:Expr2, ... }`. This desugars to `{} with { name1 = Expr1; name2 = Expr2; ... }`, where `{}` is the empty dictionary and `=` represents namespace introduction. It also generalizes to dotted-path and expression-indexed names, e.g. `{ .[1]:"hello", foo.[2]:"world" }`. For multi-line dicts, a leading comma is permitted (like lists) but we'd usually favor the `{} with ...` form.
+For simple, literal dictionaries, I propose syntactic form `{ name1:Expr1, name2:Expr2, ... }`. This is equivalent to `{} with ...` introducing each name in order. It generalizes to dotted-path and expression-indexed names, e.g. `{ .[1]:"hello", foo.[2]:"world" }`. For multi-line dicts, a leading comma is permitted (like lists) but we'd often favor the `{} with ...` form.
 
-Dictionary updates are generally expressed using `with` and `without` special forms. These are applied much like infix operators, but the RHS isn't an expression:
+Dictionary updates are generally expressed using `with` and `without` special forms. These are applied much like infix operators, but the RHS of `with` uses the same syntax as the module namespace. All LHS names are localized to the dictionary.
 
         Dict with 
             x ::= \ old_x -> old_x + 42
@@ -174,7 +174,7 @@ The `with` syntax still distinguishes introductions and overrides. The `without`
 
 Pattern matching on dictionaries uses the literal form with an optional remaining pattern, e.g. `{ .(Expr):(a,b,c), x:42, Pattern }`. We *evaluate* key expressions within the pattern, and we remove matched keys (via `without`) before matching on the remaining pattern. The default remaining pattern is `{}`, requiring a complete match.
 
-In a few rare cases, notably tagged data and object instances, I want to prevent direct updates to a dictionary. For tagged data, users should simply construct a new value. For objects, users should update the specification (pre-fixpoint) instead of the instance, otherwise updates won't propagate properly. Mostly, this is about protecting user intuitions against surprises or accidents. I propose a `(dict_freeze DictExpr)` annotation that returns a 'frozen' dictionary, prohibiting updates via `with`, `without`. We can also introduce `(dict_thaw FrozenDictExpr)` to relax this constraint. 
+In a few cases, it is useful to guard against accidental updates to dictionaries. I propose a `dict_freeze : Dict -> Dict` annotation and corresponding `dict_thaw`. Here freeze causes updates to a dictionary, e.g. via `with` or `without`, to instead diverge with an error. The compiler will implicitly freeze tagged data and object instances.
 
 ## Embedded Texts
 
@@ -234,7 +234,7 @@ I propose to use square brackets and commas for inline lists.
         [1]
         [1,2,3]
 
-Multi-line lists admit a leading comma, i.e. `[ LF, ...]` for more consistent line editing.
+Multi-line lists admit a leading comma for consistent line editing.
 
         [
         , 1
@@ -242,22 +242,18 @@ Multi-line lists admit a leading comma, i.e. `[ LF, ...]` for more consistent li
         , 3
         ]
 
-Though, do consider a writer effect to build large lists instead of a literal in these cases.
+We'll use `++` to compose lists by appending them. In contrast to Haskell's `x:xs`, there is no dedicated 'cons' operator, though we can define `cons x xs = [x]++xs`. One motive for this is symmetry: lists are typically implemented as finger-tree ropes, so we can work efficiently at either end (and split or append in log-time). We may generally use `++` in pattern matching, limited to one variable-length list, e.g. `[x]++xs` or `xs++[x]` or `[x0,x1]++xs++[xn]`. 
 
-We'll use `++` to compose lists by appending them. In contrast to Haskell's `x:xs`, there is no dedicated 'cons' operator, though we can define `cons x xs = [x]++xs`. One reason for this is symmetry: 
+Aside from append and pattern matching, everything else is user definitions and acceleration.
 
-We may generally use `++` in pattern matching, limited to one variable-length list, e.g. `[x]++xs` or `xs++[x]` or `[x0,x1]++xs++[xn]`. 
-
-There are no list comprehensions. We might change that with macros. Use of Alt+Fail effects to build lists is just as expressive, but a tad more verbose.
-
-Aside from append and pattern matching, there are no primitives on lists. I propose to build everything else via user definitions and acceleration.
+For large lists, literals are not a great solution. They are awkward to abstract, refactor, extend, or compose. Instead, consider a writer or alternative/choice effect to generate the list. Even better, use an object spec to express component elements. 
 
 ## Tuples
 
         (a,b)       tuple:[a,b]
         (x,y,z)     tuple:[a,b,c]
 
-A tuple is essentially a list with different connotations - fixed size, non-homogeneous - and distinct pattern matching. In practice, we'll usually access tuples via pattern matching, e.g. `(P1, P2, P3)` for a triple. We can feasibly accelerate short tuples to reduce the number of allocations. There is no dedicated syntax for tuples smaller than a pair, though users are free to manually write `tuple:[a]`. 
+A tuple is essentially a list with different connotations - fixed size, non-homogeneous - and distinct pattern matching. In practice, we'll usually access tuples via pattern matching, e.g. `(P1, P2, P3)` for a triple. There is no dedicated syntax for tuples smaller than a pair or leading commas, but users are free to write `tuple:[...]` for cases not covered. The assembler may accelerate short tuples to eliminate extraneous allocations. 
 
 Tuples are sometimes more convenient than small dictionaries. But compared to dictionaries, tuples are much less extensible. Tuples should mostly be used for either very stable structures or local intermediate representations.
 
@@ -312,7 +308,7 @@ Although I have a vision for pattern matching, we'll support the conventional an
 
 ## Modules
 
-Need syntax for `import`, `include` 
+Need a syntax for `import`, `include` 
 
 ### Access Control
 
