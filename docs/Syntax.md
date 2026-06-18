@@ -55,9 +55,9 @@ Namespaces are modeled as hierarchical dictionaries, accessed via dotted path, e
 
 In the general case, we also support expression-indexed paths using `.(ListExpr)` or `.[...]` for a literal list. These indices are interpreted such that `.([1, 'two] ++ [3])` is equivalent to `.[1].two.[3]`. The empty list is permitted, e.g. `foo.[]` is equivalent to `foo`, and `foo.[ ].bar` permits spaces, newlines, and comments mid-path.
 
-As a special form, `.Path` expressions bind to an abstract effects API, e.g. `.foo.bar` to `eff:(\api -> api.foo.bar)`. This provides concise, convenient access to extensible effects (see *Effects*). 
+Best practice is to avoid expression-indexed paths in the toplevel namespace, but it's available as an escape hatch for integration. Users can write `.[Idx] = Def` at the module toplevel. To reference this name, users write `module.[Idx]`, where `module` is a keyword aliasing a toplevel namespace.
 
-Best practice is to avoid expression-indexed paths at the toplevel namespace, but it's available as an escape hatch. To resist confusion with effects, `.(...)` and `.[...]` are forbidden as initial path components at the toplevel namespace. Instead, users write `module.[Idx] = ...` in LHS or evaluate `module.[Idx]` as an expression, where `module` is a keyword aliasing the toplevel namespace. 
+As an expression `.Path` binds to an abstract effects API, e.g. `.op` as `eff:(\api -> api.op)` (see *Effects*).
 
 ## Operators
 
@@ -71,8 +71,8 @@ Operators may support limited ad-hoc polymorphism. For example, `>` could compar
 
 Application is essentially expressed as a whitespace 'operator', i.e. `f x` applies `f` to `x`. Usually, we apply pure functions. But in context of ad hoc polymorphism, we might extend application to effects and objects:
 
-- Application of effects, `eff:(f) x = eff:(\api -> f api x)`, greatly simplifies lightweight effects APIs, i.e. because the compiler doesn't need to know how many arguments an effect accepts, just how many are given. 
-- Application of objects, perhaps recognized by 'spec' and 'args', may apply a mixin extending a list of arguments, i.e. `args ::= \ prior -> prior ++ [new_arg]`. This provides a basis for var-args.
+- Application of effects, `eff:(f) x = eff:(\api -> f api x)`, simplifies the lightweight effects APIs. We can curry arguments, and the compiler doesn't need to know arity. 
+- Application of objects, recognized by 'spec' and 'args', might apply a mixin to extend a list, i.e. `args ::= \ prior -> prior ++ [new_arg]`. Supports var-args.
 
 Functions, effects, and objects are likely all we need, but it is feasible to extend application further.
 
@@ -110,7 +110,7 @@ This declaration is not required for names brought into scope (or already declar
 
 The tracking of abstract definitions across is essentially just maintaining an extra set of prefixes for which we'll suppress 'undefined' errors. Should be easy to implement with just a little metadata hidden in the namespace.
 
-## Aliasing (Tentative, Leaning No)
+## Aliasing (Tentative, Defer, Leaning No)
 
 Support for aliasing can potentially improve the user experience for working with hierarchical namespaces, cherry-picking the elements needed. A viable approach:
 
@@ -118,23 +118,18 @@ Support for aliasing can potentially improve the user experience for working wit
         alias foo: bar.baz, qux as q,
 
         # desugars to
-        baz = foo.bar.baz
+        baz = foo.bar.baz # or error
         q = foo.qux
-        module.[alias:'baz] = '.foo.bar.baz
-        module.[alias:'q] = '.foo.qux
+        alias_rules.baz = '.foo.bar.baz
+        alias_rules.q = '.foo.qux
 
-        # later, based on alias
-        baz := ...
-        # rewrites to
-        foo.bar.baz := ...
+Based on alias_rules, we could update `baz := ...` and this would rewrite to update `foo.bar.baz := ...`. Similarly, we can use `ns_prior baz` to refer to `ns_prior foo.bar.baz` instead of the actual definition of `baz`.
 
-The objection to aliasing is that it complicates implementation and comprehension, and requires its own escape hatches. For consistency, we must extend aliasing to pattern matching and object specs. I'm not convinced these tradeoffs are worthy or a good fit for the assembly vibe. Let's first see how far we can effectively flatten the namespace between `.name` effects and toplevel includes.
+The main issue with aliasing is that it complicates things. Indirection has a cost on comprehension, and it's difficult to maintain consistency or convenience across cases such as pattern matching and object specifications. It also seems we can mitigate need by other means: leverage `.op` effects, include a prelude, namespace macros. I'm not convinced the tradeoff will be worthy.
 
 ### Final Definitions 
 
-In a few rare cases, it is useful to guard against accidental updates to definitions. For example, when specifying an object, it's usually an error to update the object instance instead of the object specification. Thus, we might mark the instance as final. 
-
-A relevant question is how to express this constraint without hurting extensibility. Clients must be able to force an update regardless. A proposed solution is that to mark `foo` as final, define `module.[final:'foo] = ns_prior foo`. This convention may be recognized by reflection task, which compares each final `foo` with `.[final:'foo]` then reports an appropriate warning or error.
+In some cases, it is useful to guard against accidental updates to definitions. The most obvious example is to block accidental updates to an object instance because users should be updating the specification instead. We could express this by defining `final_foo = ns_prior foo` then using a reflection task to verify `foo` and `final_foo` are the same.
 
 ## Effects
 
@@ -142,7 +137,7 @@ We'll almost directly adopt Haskell's do notation.
 
 I propose a variation for RecursiveDo: forward declaration of fixpoint names. In part for visibility and clarity, in part because fixpoint scopes shift. To express forward declarations, we could use a keyword such as `expect x, y, z`.
 
-To support concise effects without polluting the toplevel namespace, I propose to evaluate `.name` to `eff:(\api -> api.name)` and implicitly support application of effects: `eff:(f) x = eff:(\api -> f api x)`. The application rule supports `.name x y <| z` without the compiler knowing arity in advance.
+To support concise, convenient effects without polluting the toplevel namespace, I propose to desugar `.name` to `eff:(\api -> api.name)` and support application of effects: `eff:(f) x = eff:(\api -> f api x)`. The application rule supports flexible arguments, e.g. `.name x y <| z`, without local knowledge of arity. 
 
 Haskell has applicative style via `<*>` and `<$>` that is convenient for some use cases. We could provide similar operators, though I hope to be more concise. Will probably defer these for now.
 
@@ -320,10 +315,12 @@ Unlike Haskell, there is no support for pattern matching in definitions or lambd
 
 ## Partial Functions
 
-        error      recognized errors
-        TBD        incomplete definitions
+We can simply use some term annotations for partial functions.
 
-These expressions always diverge when observed, but for different reasons - error or an incomplete definition. The reflection API may observe these errors together with full context (continuation, call stack, etc.). In practice, we'll often write `(error Expr)` (or `(TBD Expr)`) to provide extra context, treating `error` as a missing function. But the argument isn't required.
+        anno 'error Expr        recognized errors
+        anno 'tbd Expr          incomplete definitions
+
+In these cases, the `Expr` should be a placeholder result. Although we'll report the error, it can be useful to proceed with an erroneous result to support visualization of downstream errors.
 
 ## Pipes
 
@@ -347,7 +344,7 @@ Although I have a vision for pattern matching, we'll support the conventional an
 
 ## Type Annotations (Defer)
 
-For now, we won't have any built-in syntax for types, just leave this to macros and reflection. But the general idea is to use `module.[type:'foo]` to define the type of `foo`. Type systems and type checkers will ultimately be user-defined reflection tasks.
+For now, we won't have any built-in syntax for types, just leave this to macros and reflection. But the general idea is to use `foo_type` as the type of `foo`, then separately use a reflection task to verify consistency. Type systems and type checkers are ultimately user-defined reflection tasks.
 
 ## Modules
 
@@ -369,19 +366,18 @@ There are forms of access control between subprograms. This is supported via uni
 
 ## Object Specs
 
-We'll provide some convenient syntax for specifying objects. Unfortunately, it's a little awkward to override the specification as a whole. I propose instead that the syntax for specifications implicitly introduces `module.[spec:'foo]` and `foo` as the instance, implicitly introducing `foo.spec = module.[spec:'foo]` as a final mixin. We'll implicitly finalize `foo` to encourage updating the spec instead. 
+We'll provide some convenient syntax for specifying objects. Unfortunately, it's a little awkward to override the specification as a whole. I propose instead that the syntax for specifications implicitly introduces `foo_spec` and `foo`. We implicitly introduce `foo.spec = foo_spec` as an implicit final mixin. We may add `final_foo = ns_prior foo` and associated tasks to guard against accidentally updating instance instead of spec.
 
-It's convenient to model this as a multi-level syntactic sugar: spec expands to spec definitions (mixin, inheritance list, etc.) and instantiation, instantation expands to linearization and finalization, etc..
+The specification will need only a few elements, names tbd:
 
+- mixin with defs
+- inheritance list
+- unique identifier
 
-To support 'override' of specifications, it might be useful to break them into several toplevel definitions. E.g. a unique declaration for the identity, a mixin definition, and the instance definition. Each with a distinct suffix. We could also bind a refl task to each instance, lifting the internal refl task. Users then mostly interact with the instance, but override the mixin. 
-
-We can model naked mixins as `\base self -> base .with ...`. But for multiple inheritance and singleton instantiation, we'll need implicit unique identifiers from the module toplevel. Ideally, we can also eliminate the aforementioned mixin boilerplate, at least by default. Or perhaps we can separate the specification and instantiation from the mixin.
-
+We can introduce some syntax for efficiently extending (overriding) a prior specification, but it's awkward to extend this to the inheritance graph. Users can override spec components, including inheritance lists, via `foo_spec.* := ...`.  
 
 Some challenges:
 - unique identifiers for specs for multiple inheritance
-- introducing vs. overriding specs
 - access to base and self, default names? explicit parameters?
 - overriding methods
 - semantics: is Spec interface introduced as final mixin or via Base? Leaning towards implicit final mixin before instantiation.
@@ -390,7 +386,7 @@ Some challenges:
 
 We can broadly have two kinds of annotations: 
 
-- Namespace annotations by associative naming conventions such as `.[type:'foo]` or `.[final:'foo]` are open to extension, but limited to annotation of names. These would mostly be implemented via reflection tasks. The front-end compiler could install an associated reflection task for each feature.
+- Namespace annotations by associative naming conventions such as `foo_type` or `final_foo` are open to extension, but limited to annotation of names. These would mostly be implemented via reflection tasks. The front-end compiler could install an associated reflection task for each feature.
 - Term annotations by keyword, e.g. `anno AnnoExpr TermExpr`, where `AnnoExpr` is recognized by the assembler. Unrecognized or unsupported annotations shall result in warnings. Term annotations shall logically return the same term, but may modify representations for performance or debugging. Extension is troublesome, but users can mitigate.
 
 I hesitate to support term annotations at all, due to the extensibility concern. But it's more convenient for many use cases, and the extensibility issue isn't too bad if we carefully control the scope of term annotations. Examples of term annotations:
