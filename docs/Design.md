@@ -307,8 +307,8 @@ The configuration defines various options under 'conf.\*' to guide the assembler
 
 - *assembly environment*: `conf.env : Eff [] Dict` - determines 'env' parameter to assembly, usually a dictionary. Default is an empty dict.
 - *command-line macros*: `conf.cli : Eff [ReadArg, WriteArg] ()` - rewrites command-line arguments if (and only if) the first command-line argument does not start with '-'. The reader uses parser-combinators designed to simplify tab completion.
-- *logger*: `conf.log : Eff [Refl, ReadLog, WriteLog] ()` - for batch mode, reads from log queue and writes to standard error. Modeled as a transform on the default log stream. Capable of forwarding, filtering, merging, rearranging, and rewriting messages. 
-- *interactive development*: `conf.ide : Eff [Refl, ReadLog, TTY, Net, *] ()` - for interactive mode, supports user interaction through TTY and network access (including unix domain sockets). Network access is passive (cannot initiate connections). May extend to editing files, live coding, and GUI. There is no default interactive mode.
+- *logger*: `conf.log : Eff [Refl, Log] ()` - reads and writes log queue, i.e. rewrites the default log stream. May forward, filter, merge, summarize, rearrange, rewrite, and inject messages. In interactive mode, runs after `conf.ide` returns.
+- *interactive development*: `conf.ide : Eff [Refl, Log, TTY, Net, File, *] ()` - for interactive mode, supports user interaction via TTY and network access (listen on TCP or unix domain sockets). May extend to editing files, live coding, and GUI. 
 - *resource management*: as needed - the assembler may require ad hoc configuration for JIT and GC tuning, access to processors for acceleration, remote proxies for distributed compilation or shared work caching, PKI certs and keys access DVCS or to sign works, etc.. 
 
 For flexibility, `GLAM_CONF` may list several files using the OS-specific `PATH` separator. These files are logically 'included' as mixins, such that files listed earlier may override those listed later, left to right. We can feasibly split the configuration between OS-layer, project layer, and user layer. We may later extend this list to support remote URLs.
@@ -378,23 +378,25 @@ By default, we expect a binary result and extract to standard output. However, b
 
 Machine-code mnemonics are left to libraries. Effectively, we have a generic 'assembler' of binaries or filesystems.
 
-### Reflection Tasks
+### Reflection
 
-The assembler shall recognize 'refl.\*' tasks defined within the namespace. These tasks are expressed effectfully, i.e. `eff:(\api -> ...)`. The reflection API should enable user-defined testing, typechecking, visualization, theorem proving, quotas, cache control, GC and JIT tuning, etc.. To ensure reproducibility, reflection is 'read-only' towards pure computations, influencing performance but not outcomes.
+Reflection is expressed effectfully, i.e. `eff:(\api -> ...)`. Reflection may be triggered by annotations and is also accessible to the configured logger and IDE. To keep implementation small and simple, the reflection API is version-specific, specialized to an executable's representations and capabilities. Most bloat of portability and policy is pushed to user-defined adapters.
 
-To keep implementation small and simple, the reflection API is version-specific, specialized to an executable's representations and capabilities. The bloat of portability and policy is pushed to user-defined adapters. For security reasons, resources are mediated by the configuration, e.g. user attention via `conf.log` or `conf.ide`. 
+In general, reflection tasks run concurrently and interact through shared state. To tame this, I favor software transactional memory (STM). The API may implement STM directly (e.g. aligned to scoped 'cut'), or provide an adequate foundation for adapters to do so. That includes awaiting changes to observed conditions to retry.
 
-Reflection tasks may interact concurrently, via shared state. To control concurrency, I envision hierarchical transactions aligned with scoped cuts and explicit checkpoints. Logically retrying failed transactions serves as a robust foundation for reactive systems, implicitly waiting for changes in observed state.
+Reflection tasks interact with users indirectly via configured logger or IDE. This ensures an opportunity to manage attention. But it is convenient to push much logic into reflection tasks, perhaps providing ad hoc APIs via `env.ide.*` or `env.log.*`. The reflection API may support limited persistence, e.g. based on environment variables and user configuration.
 
-In context of lazy loading, we trigger `foo.refl.*` reflection tasks when a `foo.*` name is first used, for dictionary `foo` in the global namespace. This includes object specifications or instances. To support subscriptions, it is useful to model staged tasks: assembler runs the first 'stage' to completion, ensuring opportunity to subscribe to `foo.*` names before they're used externally.
+Reflection very easily conflicts with reproducibility, but this is acceptable assuming it doesn't affect assembly 'result'. Thus, an important constraint is that the reflection API shall not observably influence pure computations. This still admits troublesome non-observable influence, e.g. non-deterministic divergence or deadlock, but users can debug or disable reflection without affecting 'result'.
+
+*Note:* For extensibility, it is convenient to bind reflection tasks to definitions, e.g. `refl.*` within a namespace. But this is ultimately left to front-end compilers. The compiler may use anonymous annotations to trigger defined reflection tasks before returning the namespace for a module or object instance.
 
 ### Logging
 
-We can provide a lightweight means for users to 'emit' log messages during evaluation. Messages may have any value type. But, for extensibility, a typical message is a dict or object defining a 'text' field among others - severity (e.g. info, warning, error), domain (for filtering), perhaps 'http' for interactive views. The assembler implicitly wraps this with context such as a timestamp and continuation or call stack. 
+We can support lightweight annotation to emit log messages during evaluation. Messages may have any value type. But, for extensibility, a typical message is a dict or object defining a 'text' field among others - severity (e.g. info, warning, error), domain (for filtering), perhaps 'http' for interactive views. The assembler implicitly wraps this with context such as a timestamp and continuation or call stack. 
 
-The assembler provides a simple default logger that rewrites messages for standard error. Users may define `conf.log` to rewrite the log stream. In interactive mode, logging to standard error is paused (for TUI) and `conf.ide` has the opportunity to read and render log messages. But we'll return to batch mode when `conf.ide` terminates.
+The assembler provides a simple default logger that rewrites messages to standard error. Users may define `conf.log` to rewrite the log stream. In interactive mode, logging is paused and `conf.ide` has the opportunity to read and render log messages, and also rewrite the log stream as seen by the future `conf.log`. We'll return to batch mode after `conf.ide` terminates.
 
-The logger and IDE both receive full access to the reflection API. Hence, the logger may also interact with reflection tasks, and potentially with some persistent state (e.g. via `.glam/refl/*` files). 
+The logging API may support limited persistence, e.g. based on environment variables like `GLAM_LOGS` or the user configuration. This shouldn't be full access to the filesystem, but enough to migrate details into separate files, support some graphics, perhaps generate a browseable hyperlinked document. Unlike reflection or caching persistence, this would typically be a fresh set per run.
 
 ### Interaction
 
@@ -499,7 +501,9 @@ What can we feasibly implement to support developers in reasoning about the asse
 
 ### Reflection
 
-The logic required for reasoning is non-trivial, and I'd prefer to keep it separate from the assembly executable. The proposed alternative is that the assembler provides a low-level reflection API and runs user-defined reflection tasks. Front-end compilers may further contribute, e.g. by exporting intermediate representations.
+The logic required for reasoning is non-trivial, and I'd prefer to keep it separate from the assembly executable. The proposed alternative is that the assembler provides a low-level reflection API and runs ad hoc, user-defined reflection tasks. The reflection API should bypass abstraction barriers, such that users can inspect lambdas and dictionaries and perform ad hoc proofs. Reflection can also support visualization by interacting with a logger or IDE.
+
+Front-end compilers may further contribute to reflection by exporting intermediate representations.
 
 ### Constraint Solver
 

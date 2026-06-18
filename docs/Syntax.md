@@ -27,7 +27,7 @@ We'll start with printable ASCII and whitespace (0x21-0x7E, SP, CR, LF). It is n
 
 ## Comments
 
-We'll support Python-style line comments, i.e. `#...` to end of line. Comments are treated as whitespace by the compiler and macros, but may be structured in context of external tooling (literate programming, projectional editing, extracting API docs, etc.). There is no syntax-layer support for multi-line comments, so just use a decent editor with vertical cursor selections.
+We'll support Python-style line comments, i.e. `#...` to end of line. There are no multi-line comments. An editor with vertical selection is recommended if users intend to comment out large sections of code. Comments are treated as whitespace by compiler and macros, but may be structured for purpose of external tooling (literate programming, projectional editing, extracting API docs, etc.).
 
 ## Toplevel Structure
 
@@ -39,7 +39,7 @@ In context of errors, the errors can be reported but we can also make a best eff
 
 ## Keywords
 
-Keywords are names reserved by the compiler. Users may not define or shadow keywords, nor directly use them in dotted paths or tags. Users may freely construct atoms from keywords, e.g. `'if` and `'else`. 
+Keywords are names reserved by the compiler. Users may not define or shadow keywords, nor directly use them in dotted paths or tags. Users may freely construct atoms from keywords, e.g. `'if` and `'else`, and indirectly use these in paths or tags, e.g. `['if]:Cond`. 
 
 Recognized keywords may vary with language version declaration. By reserving candidate keywords we can avoid breaking code. I propose to reserve all keywords I introduce in this document, all English conjunctions and prepositions, and a handful of additional names. Will update this section later.
 
@@ -57,7 +57,7 @@ In the general case, we also support expression-indexed paths using `.(ListExpr)
 
 Best practice is to avoid expression-indexed paths in the toplevel namespace, but it's available as an escape hatch for integration. Users can write `.[Idx] = Def` at the module toplevel. To reference this name, users write `module.[Idx]`, where `module` is a keyword aliasing a toplevel namespace.
 
-As an expression `.Path` binds to an abstract effects API, e.g. `.op` as `eff:(\api -> api.op)` (see *Effects*).
+As an expression, a prefix '.' binds an abstract effects API, e.g. `.op` as `eff:(\api -> api.op)` (see *Effects*).
 
 ## Operators
 
@@ -384,21 +384,23 @@ Some challenges:
 
 ## Annotations
 
-We can broadly have two kinds of annotations: 
+We broadly have two kinds of annotations: 
 
-- Namespace annotations by associative naming conventions such as `foo_type` or `final_foo` are open to extension, but limited to annotation of names. These would mostly be implemented via reflection tasks. The front-end compiler could install an associated reflection task for each feature.
+- Namespace annotations by associative naming conventions such as `foo_type` or `final_foo` are open to extension, but limited to annotation of names. These are implemented via reflection tasks. The front-end compiler could install an associated reflection task for each feature.
 - Term annotations by keyword, e.g. `anno AnnoExpr TermExpr`, where `AnnoExpr` is recognized by the assembler. Unrecognized or unsupported annotations shall result in warnings. Term annotations shall logically return the same term, but may modify representations for performance or debugging. Extension is troublesome, but users can mitigate.
 
-I hesitate to support term annotations at all, due to the extensibility concern. But it's more convenient for many use cases, and the extensibility issue isn't too bad if we carefully control the scope of term annotations. Examples of term annotations:
+Reflection tasks can be expressed anonymously as term annotations (`anno (refl:Task) Term` - run Task then return Term), but anonymous tasks are difficult to disable or extend. In practice, users define or declare reflection tasks, perhaps in `refl.*`, then the compiler arranges for them to run after all overrides are determined.
+
+Aside from reflection tasks, we'll use term annotations for:
 
 - accelerated functions, JIT hints, cache hints
 - laziness control (e.g. Haskell-style seq and par)
 - scope_unique for ephemeral atoms
-- logging and tracing for visualization
-- profiling? unsure, perhaps better as a reflection task
+- logging, tracing, visualization
+- profiling? 
+  - may need distinct attention to effects
+  - especially in context of alt and shift/reset
 - assertions, keep conditional checks optional
-
-It seems convenient to support `anno refl:Effect` to run anonymous reflection tasks during another computation. The reflection effect could receive access to the continuation. This would enable user-defined visualizations and breakpoints.
 
 *Note:* I originally was planning keywords for most annotations, but on review I believe just one keyword is better for clarity and extensibility. Users are encouraged to define wrapper functions for annotations.
 
