@@ -273,12 +273,9 @@ Unfortunately, fixpoint is not fully compatible with continuations. The essentia
 
 Instead of pattern-matching request constructors like 'Get' and 'Set', we could express requests as `\api -> api.get` and `\api -> api.set s`. This efficiently supports a large number of effects and abstracts which effects are 'primitive' in terms of yielding. We can further integrate `Return` and `>>=` through this API, perhaps using `api.seq` for `>>=`. Users may test which effects are available.
 
-I propose tag `eff:(\api -> ...)` to clearly distinguish effects from functions and serve as a calling convention of sorts.
+I propose tag `eff:(\api -> ...)` to clearly distinguish effects from functions. It also doubles as a calling convention of sorts, so we could later mix effects models. 
 
-        op >>= k = eff:(\api -> api.seq op k)
-        return r = eff:(\api -> api.ret r)
-        a <+> b = eff:(\api -> api.alt a b)
-        using ext op = eff:(\api -> api.using ext op)
+        op >>= k = eff:(\api -> api.seq op k).
 
 Although this is flexible enough to support stateful APIs, I believe best practice should be subprogram-scoped extensions. Above, I propose a generic `using` method that applies extension `ext` in scope of `op`. To maximize extensibility, I propose to model `api` as an object and `ext` as a mixin. Multiple inheritance can automatically deduplicate and merge compatible features. We can detect structurally-incompatible extensions based on explicit overrides and linearization conflicts.
 
@@ -296,6 +293,7 @@ A module is integrated by 'including' it as a mixin. Any prior definitions or in
 * *include Module at m* - apply module to override component dictionary 'm', binds Base.m, Self.m 
 * *import Module as m* - introduce 'm' with `{ "env": Self.env }` by default, then apply 'include Module at m'.
   - This treats 'env' as an implicit, read-only environment at the module layer, supporting adaptability.
+* *source Module as m* - load the raw file binary, does not apply compiler  
 
 The hierarchical 'include at' and 'import as' forms simplify lazy loading. In contrast, with toplevel 'include', it is often difficult to determine which modules introduce or override a definition without loading everything. Ultimately, there is only one 'Self'. This simplifies deep overrides and extensions, analogous to mutable definitions without actual mutation.
 
@@ -308,7 +306,7 @@ The configuration defines various options under 'conf.\*' to guide the assembler
 - *assembly environment*: `conf.env : Eff [] Dict` - determines 'env' parameter to assembly, usually a dictionary. Default is an empty dict.
 - *command-line macros*: `conf.cli : Eff [ReadArg, WriteArg] ()` - rewrites command-line arguments if (and only if) the first command-line argument does not start with '-'. The reader uses parser-combinators designed to simplify tab completion.
 - *logger*: `conf.log : Eff [Refl, Log] ()` - reads and writes log queue, i.e. rewrites the default log stream. May forward, filter, merge, summarize, rearrange, rewrite, and inject messages. In interactive mode, runs after `conf.ide` returns.
-- *interactive development*: `conf.ide : Eff [Refl, Log, TTY, Net, File, *] ()` - for interactive mode, supports user interaction via TTY and network access (listen on TCP or unix domain sockets). May extend to editing files, live coding, and GUI. 
+- *interactive development*: `conf.ide : Eff [Refl, Log, TTY, Net, File, GUI] ()` - for interactive mode, supports user interaction via TTY and network access (listen on TCP or unix domain sockets). May extend to editing files, live updates, native GUI. 
 - *resource management*: as needed - the assembler may require ad hoc configuration for JIT and GC tuning, access to processors for acceleration, remote proxies for distributed compilation or shared work caching, PKI certs and keys access DVCS or to sign works, etc.. 
 
 For flexibility, `GLAM_CONF` may list several files using the OS-specific `PATH` separator. These files are logically 'included' as mixins, such that files listed earlier may override those listed later, left to right. We can feasibly split the configuration between OS-layer, project layer, and user layer. We may later extend this list to support remote URLs.
@@ -465,15 +463,13 @@ The main motive for bootstrapping is reproducibility: stabilize the compiler, ma
 
 ### Macros
 
-Macros support metaprogramming at the syntax layer, often in terms of rewriting text, tokens, etc.. Macros may be defined within the normal program namespace for modularity. However, in context of lazy loading, a compiler must not peek at definitions to determine whether they are macros. Thus, macro invocations must be distinguished syntactically, i.e. by operator or special naming convention.
+Macros support metaprogramming at the syntax layer, often in terms of rewriting text, tokens, etc.. Macros may be defined within the normal module namespace for modularity. In context of lazy loading, macro invocations must be distinguished syntactically.
 
-It is convenient to express macros effectfully, especially regarding inputs and outputs. With compiler support, this enables each macro to operate at an appropriate level of abstraction, whether it's texts, tokens, or AST structures. Further, it ensures an opportunity for extension and adaptation: compilers may gradually (across versions) extend supported effects, and macros may query compiler versions or feature sets to adapt behavior.
-
-*Note:* Many conventional use cases for macros evaporate in context of higher-order programming, first-class effects, lazy evaluation, extensible modules, user-defined syntax, and staged assembly. But there are still use cases for embedded DSLs and namespace boilerplate.
+It is convenient to express macros effectfully, with 'read' and 'write' effects at flexible levels of abstraction. The compiler can restrict effects to protect scope, e.g. ensuring balanced braces, brackets, and parentheses, while still providing enough flexibility for macro DSLs.
 
 ### Editable Projections
 
-It is possible to express editable views of source texts via auxilliary methods in the language object, e.g. `.env.lang.[FileExt].view`. This is a good starting point, at least. But it's coarse grained and very limiting.
+It is possible to express editable views of source texts via auxilliary methods in the language object, e.g. `env.lang.[FileExt].view`. This is a good starting point, at least. But it's coarse grained and very limiting.
 
 To support fine-grained editable projections, the front-end compiler will support annotation of terms. For example, a parsed integer might maintain enough metadata to both locate it in the original source file and edit it, with an associated codec translating an updated number into source text. This allows for editors to integrate where the term is used instead of only where defined. A subset of standard term annotations may be implicit, built into the parser combinator.
 
@@ -511,8 +507,56 @@ Many forms of reasoning benefit from a high-performance constraint solver. I'd p
 
 I propose to express the constraint system DSL as an abstract effects API. Users don't see the 'AST' for variables or constraint rules. Instead, they effectfully assemble one and may maintain some extra context as part of doing so.
 
-## Monadic Assembly
+## Direct-Style Assembly
 
-It is very convenient to express assembly effectfully. Each mnemonic becomes an operation that writes machine code to implicit state. Assembly macros become simple procedures. Aside from machine code, we may also declare 'bss' or 'data' sections. We could also track which registers are in use to resist against accidental smashing, or even track abstract types for stack and heap memory.
+To support direct-style assembly, we express assembly mnemonics as writer effects with a concise API. To support a concise API without polluting the toplevel namespace, I assume a syntactic sugar translating `.op Args` to `eff:(\api -> api.op Args)`. For aesthetics, I assume a Haskell-like do notation that also accepts results on RHS, i.e. `action -> result`.
 
-With good syntactic sugar, monadic assembly can also be very lightweight. E.g. phrases such as `.movl 'eax ['ebx, 4]` might desugar as `eff:(\__api -> __api.movl 'eax ['ebx, 4])`, and do notations can support beautiful vertical columns of mnemonics. This mitigates boiler-plate pollution of the toplevel namespace for defining mnemonics, though we must be careful to avoid conflicts between mnemonics and other effects. It also cleanly separates the concerns of how we write machine code from where we express program logic.
+        writeln msg = do
+            .rodata (msg ++ [10])       -> msg_loc
+            .movl 'rdi 1
+            .movl 'rsi msg_loc
+            .movl 'rdx (1 + len msg)
+            .syscall
+
+        exit = do
+            .movl 'rax 60
+            .xor 'rdi 'rdi
+            .syscall
+
+        main = do
+            .global "_start"
+            writeln "Hello, World!"
+            exit
+
+        asm.result = mkelf main
+
+In direct style, users may freely mix writing code and static layout (e.g. `.rodata` and `.globl`). It is left to the effect 'runner', in this case `mkelf`, to provide the API, build the state, and write contents into different sections as needed.
+
+How does this compare to conventional assembly languages? 
+
+We gain minor benefits modeling assembly macros as robust, first-class procedures. We can easily leverage state to support 'singletons', allocating reusable subroutines or resources exactly once. We could swap runners to perform peephole optimizations or build an abstract interpretation of machine state. Host-language extensibility, reproducibility, modularity, reflection, and interaction should enhance the programming experience.
+
+These are good things. But my goal isn't just a better conventional assembly. 
+
+## Orchestrated Assembly
+
+Direct-style assembly doesn't help with non-sequential control flow or resource management. I hope to support much more flexible composition. But, critically, I must do so without damaging the assembly-programming vibe. To me, this suggests an intermediate orchestration language.
+
+In contrast to compilation, orchestration composes fragments of code, or constructors thereof, without actually *looking at* those fragments. At most, it might look at associated metadata. For example, each fragment may abstractly describe some obligations it requires, and others it fulfills. In context of assembly, such obligations might include free use of certain registers, access to data of symbolic type-state in specific or variable registers, etc.. An orchestration language could then search available components to fulfill obligations, and reject some options because they're incompatible.
+
+Koru language is a source of inspiration here. I'm not convinced that Koru is exactly what I'm looking for, but it's very close. 
+
+Useful concepts for orchestration:
+
+- branched continuations: a fragment may have many 'outcomes', which aren't necessarily the same as return values. For each outcome, the assembly fragment could be parameterized by a continuation fragment.
+- interactive coroutines: a fragment may require intermediate obligations or generate intermediate outcomes. Session types are very useful for this sort of structure, enabling an orchestrator to weave fragments concurrently. 
+- taps or join points: the orchestration language could enable some code to 'watch' other code for certain events. This would get a little tricky if we have many different things watching code, i.e. needing commutativity or consistent order. 
+- constraint systems: the orchestration language could generally support a constraint model. This allows for holistic agreements across fragments of code when they don't care about the details.
+- multi-agent grammars: we could feasibly express orchestrations as grammars that recognize and generate many 'sentences' (or trees, graphs). This enables flexible 'overlay' to unify and refine generated sentences. More flexible than a constraint system, but also more difficult to compute efficiently.
+
+I believe a good orchestration model could make assembly programming accessible across many more problem domains. Of course, the more logic we push into the orchestration layer, the less 'assembly-like' our program becomes. But it's still a very distinct vibe from compiling code into assembly (though some fragment constructors might essentially be compilers). The important bit is to ensure users always hold the levers of control, even if they don't care to always use them. Users can remove or rewrite problematic fragments.
+
+I suggest objects as the foundation for orchestration, i.e. each fragment is an object, and the whole assembly is a similar object, such that we can effectively extend, compose, and orchestrate our orchestration logic.
+
+
+
