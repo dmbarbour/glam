@@ -10,16 +10,16 @@ This document describes an initial syntax for ".g" files, and motives for it. De
 
 ## Language Version Declaration
 
-Reproducibility requires that the same sources produce the same outcome, but there is an implicit condition: an outcome is produced.
-
-A language version declaration makes versioning of the language more flexible and robust in context of reproducibility. We can fail fast at the declaration if we don't support the requested version. We can adjust 'meaning' of a keyword between versions. It's also a clear opportunity to declare compiler-recognized language extensions - fine-grained compared to full versioning, but more verbose.
+Reproducibility requires that the same sources produce the same outcome, but there is an implicit condition: an outcome is produced. A language version declaration simplifies reproducibility because the compiler can fail fast, refusing to produce any outcome rather than a result that drifts as the compiler is updated.
 
 Proposed syntax:
 
         (lang|language) (BaseVer) (with Extensions)?
-        lang g0 with utf8
+        language g0 with utf8
 
-The version declaration should be the first toplevel declaration in a ".g" file.
+The version declaration should be the first toplevel declaration in a ".g" file. The BaseVer is a recognized string for a package of features, while extensions modify that package.
+
+In practice, if a compiler halts on language version, we must be using different executable or configuration (if configuration defines `conf.env.lang.["g"].compile`) from development conditions. Users can resolve this by reproducing the executable (e.g. via nix) or by defining compatible compilers in the module system.
 
 ## Character Set
 
@@ -39,9 +39,25 @@ In context of errors, the errors can be reported but we can also make a best eff
 
 ## Keywords
 
-Keywords are names reserved by the compiler. Users may not define or shadow keywords, nor directly use them in dotted paths or tags. Users may freely construct atoms from keywords, e.g. `'if` and `'else`, but most other uses are restricted.
+Keywords are names reserved by the compiler. Keywords cannot be directly used as names, but an exception is made for atoms. For example, assuming keyword `import`, users may define `.['import] = ...` or reference `module.['import]`. This supports ad hoc integration in context of user-defined syntax. 
 
-Recognized keywords may vary with language version declaration. By reserving candidate keywords we can avoid breaking code. I propose to reserve all keywords I introduce in this document, all English conjunctions and prepositions, and a handful of additional names. Will update this section later.
+Recognized keywords vary with language version declaration, including language extensions. Although we should not introduce keywords without an update to version declarations, a language version may freely reserve keywords without specifying them immediately.
+
+Proposed keywords:
+
+        import, include, load_file                  modularity
+        abstract, shadow, final                     name control
+        unique, abstract_global_path                special atoms
+        with, without                               dict update
+        do                                          effects
+        extend, override                            declaration modifiers
+
+I'm still considering whether to support booleans at all. But potential keywords here:
+
+        if, then, else, elif                        basic conditionals
+        and, or, not, is                            comparisons
+
+We'll also reserve a few variant forms of each, e.g. 'imports', 'load_files', 'shadows' and 'shadowing', etc..
 
 ## Names and Paths
 
@@ -58,8 +74,8 @@ In the general case, we also support expression-indexed paths using `.(ListExpr)
 Best practice is to avoid expression-indexed paths in module or object namespaces, but it's available as an escape hatch for integration. Users may define `.[Idx] = Def` at the module toplevel. Later access to this name requires `module.[Idx]`. Users may understand `module` as a keyword that aliases the module toplevel namespace.
 
 Special cases: 
-- `.path` evaluates to `eff:(\api -> api.path)` to support lightweight effects. See *Effects.*
-- `^path` refers to the host namespace in context of hierarchical specifications. See *Objects.*
+- `.path` desugars to `eff:(\api -> api.path)` to support lightweight effects. See *Effects.*
+- `^path` refers to host namespace in context of hierarchical specifications. See *Objects.*
 
 ### Introductions and Overrides
 
@@ -75,23 +91,29 @@ To localize errors, and to simplify analysis of name shadowing, names in use sha
 
         abstract Name(, Name)*
 
-Essentially, these declarations build a list of toplevel names that that compilers won't complain about being undefined locally. We don't bother with granularity below the toplevel name. 
+Essentially, these declarations build a list of toplevel names that that compilers won't complain about being undefined locally. We don't bother with granularity below the toplevel name.
 
-*Note:* As the standard case for external definitions, `abstract env` is implicit.
+To share abstract declarations across includes, we'll represent them in our namespace. A simple integration is to define `.[abstract:'Name] = ()` as a flag, if the name is not already defined. The compiler is free to erase this when the name is later introduced. The compiler may introduce `abstract env` implicitly.
 
 ### Final Definitions 
 
-In some cases, it is useful to guard against accidental updates to definitions. The most obvious example is to block accidental updates to an object instance because users should be updating the specification instead. We could express this by defining `final_foo = _foo` at some point, then later a reflection task verifies `foo` and `final_foo` are the same.
+In some cases, it is useful to guard against accidental updates to definitions. The most obvious example is to block accidental updates to an object instance because users should be updating the specification instead. But it's important to preserve the ability to update definitions regardless. To this end, we might use a pattern such as defining `.[final:'foo'] = _foo` then assigning a reflection task to scan definitions and perform comparisons.
+
+We could introduce a syntactic form for this:
+
+        finalize Name(, Name)*
+
+But I'm uncertain it's worthwhile. Might be better to leave it to macros.
 
 ### Forbidden Shadows
 
 Name shadowing, where a function argument or local variable accidentally masks another name defined or declared in lexical scope, is a common source of subtle bugs. Humans are a lot more flexible about referential context than a lambda calculus, thus easily overlook the error when reading code. To resist this bug, we'll warn on name shadowing by default.
 
-It is feasible to introduce a special form to admit shadowing, such as `shadow name(, name)* in Expr`. But I'm not convinced this is a good idea. We can explore shadowing further via language extensions.
+It is feasible to introduce a special form to admit shadowing, such as `shadow Name(, Name)* in Expr`. But I'm not convinced this is a good idea. We can explore shadowing further via language extensions.
 
 ### Unused Names
 
-As a general rule, the compiler will warn for unused locals. Use of `_` in place of a variable name indicates data is explicitly dropped. It is tempting to support `_name` for naming local variables that may be accessed (as `name`) or dropped. OTOH, a simple `skip (foo,bar) baz` (where `skip _ x = x`) seems adequate. I'll defer support for `_name` in this role because I feel it may be a bit confusing.
+As a general rule, the compiler will warn for unused locals. Use of `_` in place of a variable name indicates data is explicitly dropped. It is tempting to support `_name` for naming local variables that may be accessed (as `name`) or dropped. OTOH, a simple `skip (foo,bar) baz` where `skip _ x = x` is adequate.
 
 ## Operators
 
@@ -130,7 +152,6 @@ I favor the above form. We could put labels on the left, but we'd need semicolon
          ;                .movl 'eax ['ebx, 4]
          ;                ...
 
-
 Haskell has applicative style via `<*>` and `<$>` that is convenient for some use cases. We could provide similar operators, though I hope to be more concise. Will probably defer these for now.
 
 *Aside:* We can feasibly model 'stack frames' upon a foundation of shift-reset (for early return) and state (for local vars, deferred ops). Explicit use of stack frames would enable more-conventional procedural programming. But it isn't clear whether this would benefit from dedicated keywords. Perhaps `.frame/.defer/.fexit` is adequate. Maybe add a frame 'tail-call' variant.
@@ -139,7 +160,7 @@ Haskell has applicative style via `<*>` and `<$>` that is convenient for some us
 
 In context of lazy loading, macro invocations must be distinct from normal evaluation. Proposed syntactic forms:
 
-        @(Expr)
+        @(Expr)             general form
         @macro_name         short for @(_module.macro_name)
 
 The preferred form is `@macro_name`, which assumes macros are defined only in the toplevel namespace. But the `@(Expr)` form is more general. The compiler lazily evaluates `Expr` at compile-time. This shall return an effect of form `eff:(\api -> ...)`. The compiler provides a monadic API to read and write code at flexible levels of abstraction. Modules are typically parameterized in terms of the macro effectfully reading its body, e.g. `@foo arg1 arg2`. This supports macro DSLs in the general case.
@@ -165,7 +186,7 @@ The unit value is a built-in atom, expressed and matched as `()`. Tagged unit da
 
 For access control and conflict avoidance, we can (with a little support from the assembler) leverage the global namespace as a stable source of unique atoms. A viable approach is `Foo = abstract_global_path Foo`. Here `abstract_global_path` returns an atom based on the final location of `Foo` in the module system, and defining `Foo` resists accidental reuse (i.e. 'allocating' the name). I propose a toplevel declaration `unique Foo, Bar, Baz` for bulk definitions of this form. *Aside:* `abstract_global_path` is intentionally verbose to encourage the `unique` form.
 
-Scope-unique atoms are useful for the ephemeron performance pattern. To support this pattern, we can introduce a term annotation, e.g. `(anno 'scope_unique) : Atom -> Atom` returns the same atom except annotated with unique metadata. If ever we compare the same atom with different metadata, we diverge instead, thus we never observe the violation of scope uniqueness. When used as dict keys, we can associate the data with a weakref of the metadata.
+Scope-unique atoms are useful for the ephemeron performance pattern. To support this pattern, we can introduce a term annotation, `'scope_unique`, that wraps a given atom with unique metadata. If ever we compare the same atom with different metadata, we diverge instead, thus never observing the violation of scope uniqueness. When used as dict keys, we associate data to a weakref of that metadata.
 
 ## Dicts
 
@@ -270,7 +291,7 @@ We can introduce a few term annotations to manage representations, e.g. flatteni
 
 *Aside:* For very large lists, literals are not the best expression. They are awkward to abstract, refactor, extend, or compose. Instead, consider a writer or alternative/choice effect to generate the list. Even better, use an object spec to express component elements. 
 
-*Note:* It is possible to use quoted paths to build lists. As an expression, `'.[x0,x1].(xs).[xn]` is equivalent to `[x0,x1] ++ xs ++ [xn]`. There is a distinction in context of pattern matching: a quoted path is evaluated then matched exactly.
+*Note:* It is possible to use quoted paths to build lists. As an expression, `'.[x0,x1].(xs).[xn]` evaluates similarly to `[x0,x1] ++ xs ++ [xn]`. But the compiler may raise an error if a quoted path doesn't support `==`, and in context of pattern matching we implicitly evaluate the quoted path then compare via `==`.
 
 ## Tuples
 
@@ -319,8 +340,8 @@ Unlike Haskell, there is no support for pattern matching on lambda or definition
 
 We can simply use some term annotations for partial functions.
 
-        anno 'error Expr        recognized errors
-        anno 'tbd Expr          incomplete definitions
+        ~['error] Expr        recognized errors
+        ~['tbd] Expr          incomplete definitions
 
 In these cases, `Expr` may indicate the nature of the error or future intentions for a TBD. 
 
@@ -355,7 +376,11 @@ Although I have a vision for pattern matching, we'll support the conventional an
 
 ## Type Annotations (Defer)
 
-For now, we won't have any built-in syntax for types, just leave this to macros and reflection. But the general idea is to use `foo_type` as the type of `foo`, then separately use a reflection task to verify consistency. Type systems and type checkers are ultimately user-defined reflection tasks.
+For now, we won't have any built-in syntax for types, just leave this to macros and reflection. But the general idea is to define `.[type:'foo]` for a subset of toplevel names `foo`.
+
+It is feasible to support term-level type annotations, e.g. `~[type:TypeDesc] Term`. 
+
+But the general idea is to use `foo_type` as the type of `foo`, then separately use a reflection task to verify consistency. Type systems and type checkers are ultimately user-defined reflection tasks.
 
 ## Modules
 
@@ -377,12 +402,9 @@ There are forms of access control between subprograms. This is supported via uni
 
 ## Object Specs
 
-For concision, names within an object are implicitly local, i.e. `foo` refers to object `self.foo` and `_foo` to object `base.foo`. Instead, users pay extra to reference names in the module or host scopes, e.g. `module.name` or `^name`. Note that `^name` is required even when the object does not shadow `name`. 
+For concision, names within an object are implicitly local, i.e. `foo` refers to object `self.foo` and `_foo` to object `base.foo`, and we don't actually use `self` or `base` at all. Instead, users pay a little extra to reference names in the module or host scope, e.g. `module.name` or `^name`. 
 
-*Aside:* Users may compose `^^^_name` to refer to the host's host's host's base `name`, but it's recommended to stick with at most one `^name` and avoid composing with `_name`. 
-
-This design encourages a more 'complete' object namespaces, integrating content from module scope. 
-
+*Aside:* Users may compose `^^^_name` to refer to the host's host's host's base `name`, but it's recommended to stick with at most one `^name` and avoid reference to `^_name`. 
 
 I'd like to avoid verbose names within specs, including `self.*`. Instead, we might invert names, make access to the module scope more expensive, e.g. requiring `module.name` or perhaps a generic `^name` or `~name` to access the host in a hierarchical specifications. The internal name then does not need a prefix, and we can use `foo` or `_foo` within a spec to concisely refer to `self.foo` and `base.foo` respectively.
 
@@ -404,16 +426,18 @@ Some challenges:
 
 ## Annotations
 
+Namespace annotations will typically use forms such as `.[type:'foo] = ...` implicitly associated with `foo`. This is a little awkward to work with directly, so the assumption is we'll have macros or built-in syntax
+
 We broadly have two kinds of annotations: 
 
 - Namespace annotations by associative naming conventions such as `foo_type` or `final_foo` are open to extension, but limited to annotation of names. These are generally implemented via reflection tasks. The front-end compiler could install an associated reflection task for each feature.
-- Term annotations as a 'flavored' identity function, e.g. `anno Anno Term`. The assembler evaluates and recognizes `Anno`, does something (perhaps with `Term`), then returns `Term`. Observable behavior of `Term` must be invariant, but annotations may influence representations (e.g. list to array, accelerate function) and forbid some observations.
+- Term annotations as a 'flavored' identity function, via `~[Anno(,Anno)*] Term`. The assembler evaluates and recognizes `Anno`, does something (perhaps with `Term`), then returns `Term`. Observable behavior of `Term` must be invariant, but annotations may influence representations (e.g. list to array, accelerate function) and forbid some observations.
 
 Users may define reflection tasks in `refl.*` within a namespace or object instance. Named reflection tasks are convenient because we can easily debug or disable by name, which aligns with extensibility goals. The compiler shall arrange for these tasks to run at an appropriate time, i.e. after overrides, but before definitions are accessed. This may involve assembler support via term annotations.
 
 Anonymous reflection tasks are expressed as term annotations. Relevantly, the assembler shall recognize `eff:(\api -> ...)` as an effectful annotation, and the provided API shall support both reflection and a few annotation-specific features such as loading term, continuation, call-stack, or applying more annotations to `Term`.
 
-Effectful annotations are convenient because we can write `anno (.log Message) Term` and have it be meaningful. It's very extensible even without tags other than `eff`. But we might support other tags where convenient, e.g. for acceleration or error values.
+Effectful annotations are convenient because we can write `~[.log Message] Term` and have it be meaningful. It's very extensible even without tags other than `eff`. But we might support other tags where convenient, e.g. for acceleration or error values.
 
 ## Pattern Matching
 

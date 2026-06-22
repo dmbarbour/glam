@@ -509,7 +509,7 @@ I propose to express the constraint system DSL as an abstract effects API. Users
 
 ## Direct-Style Assembly
 
-To support direct-style assembly, we express assembly mnemonics as writer effects with a concise API. To support a concise API without polluting the toplevel namespace, I assume a syntactic sugar translating `.op Args` to `eff:(\api -> api.op Args)`. For aesthetics, I assume a Haskell-like do notation that also accepts results on RHS, i.e. `action -> result`.
+To support direct-style assembly, we express assembly mnemonics as writer effects with a concise API. To support a concise API without polluting the toplevel namespace, I assume a syntactic sugar translating `.op Args` to `eff:(\api -> api.op Args)`. This isn't *necessarily* our final writer: in the general case, we might assume a staged writer with abstract layout and labels. For aesthetics, I assume a Haskell-like do notation that also accepts results on RHS, i.e. `action -> result`, so we can keep operations neatly aligned.
 
         writeln msg = do
             .rodata (msg ++ [10])       -> msg_loc
@@ -530,33 +530,37 @@ To support direct-style assembly, we express assembly mnemonics as writer effect
 
         asm.result = mkelf main
 
-In direct style, users may freely mix writing code and static layout (e.g. `.rodata` and `.globl`). It is left to the effect 'runner', in this case `mkelf`, to provide the API, build the state, and write contents into different sections as needed.
+In direct style, users may freely mix writing code and static layout (e.g. `.rodata` and `.globl`). It is left to an effect runner - in this case, `mkelf` - to provide the API (defining `.movl`, `.rodata`, etc.), build state, and write contents into different sections as needed.
 
-How does this compare to conventional assembly languages? 
+Expression of assembly in this style does not offer much advantage over conventional assembly languages. But our host language is highly extensible. Some features are a natural extensions to the direct style:
 
-We gain minor benefits modeling assembly macros as robust, first-class procedures. We can easily leverage state to support 'singletons', allocating reusable subroutines or resources exactly once. We could swap runners to perform peephole optimizations or build an abstract interpretation of machine state. Host-language extensibility, reproducibility, modularity, reflection, and interaction should enhance the programming experience.
+- Explicitly model subroutines, `.rodata`, and similar structures as *singletons*. Leverage state to ensure singletons are 'written' exactly once, on demand. This reduces need to define resources ahead of time then reference them by label. Analogous to templated code. Easily extends to content-addressed sharing, assuming position-independent code.
+- Maintain more context, e.g. registers in use, basic structure of memory, units on numbers, obligations for resource management. We can extend writer effects like `.movl` to manage some of this, but most would be manual. We can leverage this state to detect conflicts, allocate registers, automate cleanup, etc..
 
-These are good things. But my goal isn't just a better conventional assembly. 
+Direct-style assembly has a strong pressure towards sequential composition between sequential writers, sequential program counter, and sequential call-return subroutines. We cannot do anything about the last two, but it is feasible to support programmers in expressing interactive coroutines, generators, and other components.
+
+The weakness of direct-style assembly is that non-sequential composition is tedious and error-prone. This can be resolved by a layer of indirection. But we must be cautious to preserve the assembly vibe, absolute control. To me, this suggests an orchestration layer.
 
 ## Orchestrated Assembly
 
-Direct-style assembly doesn't help with non-sequential control flow or resource management. I hope to support much more flexible composition. But, critically, I must do so without damaging the assembly-programming vibe. To me, this suggests an intermediate orchestration language.
+What features do I want from an orchestration layer? Brainstorming:
 
-In contrast to compilation, orchestration composes fragments of code, or constructors thereof, without actually *looking at* those fragments. At most, it might look at associated metadata. For example, each fragment may abstractly describe some obligations it requires, and others it fulfills. In context of assembly, such obligations might include free use of certain registers, access to data of symbolic type-state in specific or variable registers, etc.. An orchestration language could then search available components to fulfill obligations, and reject some options because they're incompatible.
+- Lightweight validation: doesn't look at assembly, but ensures composition is correct based on user-specified metadata.
+- Resource management: composition can track resources, enforce substructure (linear, ordered (stacks), session types). 
+- Flexible affordances: implicitly build a catalog of components, e.g. a table, not limited to integration by name.
+- Program search: backtracking (alt, fail, cut), weighted search, generate where programmer doesn't care about details.
+  - Note: we must be careful that this doesn't sacrifice control; no 'anonymous' search, need stable IDs for refinement.
+  - May extend to constraint programming, but not before we can accelerate an SMT solver.
+- Branch continuations: compose control flow directly instead of building enums then branching on them. 
+  - Subroutines might be parameterized by a static array of return addrs instead of a single address on the stack.
+- Coroutines or sessions: merge some components 'concurrently' via structured interleave of operations.
+  - Some form of 'currying' where partial compositions may be incomplete.
+- Event taps or join points (AOP): users can extend components to integrate independent logic, e.g. for runtime logging. 
+  - Taps should be named for override in a consistent manner, otherwise non-commutativity becomes a concern.
+- Multi-target output: Components may have multiple implementations, including multiple targets. When all components support a target, we can output to that target. We could feasibly emit the same 'app' to x86 and WASM. 
 
-Koru language is a source of inspiration here. I'm not convinced that Koru is exactly what I'm looking for, but it's very close. 
+A good orchestration model has potential to make assembly programming usable across more problem domains. Program search can support declarative assembly. I believe we can preserve the assembly vibe assuming we have named handles to guide, refine, or replace search. That may need to be enforced syntactically. Lightweight validation can eliminate a lot of errors and provides some extra context for search. Event taps can make the resulting system more accessible.
 
-Useful concepts for orchestration:
+I propose to model components as objects. We can extend objects with multiple fields to guide orchestation and multiple target emitters. They're also relatively easy to extend in general. Final emitters would still be direct-style, but the effects API may be extended with orchestration context (and perhaps scoped control over orchestration).
 
-- branched continuations: a fragment may have many 'outcomes', which aren't necessarily the same as return values. For each outcome, the assembly fragment could be parameterized by a continuation fragment.
-- interactive coroutines: a fragment may require intermediate obligations or generate intermediate outcomes. Session types are very useful for this sort of structure, enabling an orchestrator to weave fragments concurrently. 
-- taps or join points: the orchestration language could enable some code to 'watch' other code for certain events. This would get a little tricky if we have many different things watching code, i.e. needing commutativity or consistent order. 
-- constraint systems: the orchestration language could generally support a constraint model. This allows for holistic agreements across fragments of code when they don't care about the details.
-- multi-agent grammars: we could feasibly express orchestrations as grammars that recognize and generate many 'sentences' (or trees, graphs). This enables flexible 'overlay' to unify and refine generated sentences. More flexible than a constraint system, but also more difficult to compute efficiently.
-
-I believe a good orchestration model could make assembly programming accessible across many more problem domains. Of course, the more logic we push into the orchestration layer, the less 'assembly-like' our program becomes. But it's still a very distinct vibe from compiling code into assembly (though some fragment constructors might essentially be compilers). The important bit is to ensure users always hold the levers of control, even if they don't care to always use them. Users can remove or rewrite problematic fragments.
-
-I suggest objects as the foundation for orchestration, i.e. each fragment is an object, and the whole assembly is a similar object, such that we can effectively extend, compose, and orchestrate our orchestration logic.
-
-
-
+*Note:* Koru language is a source of inspiration here, especially for branch continuations and taps, potentially for syntax. It's also a good proof of concept for some features.
