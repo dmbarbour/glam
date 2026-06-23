@@ -51,6 +51,7 @@ Proposed keywords:
         with, without                               dict update
         do                                          effects
         extend, override                            declaration modifiers
+        anno                                        term annotations
 
 I'm still considering whether to support booleans at all. But potential keywords here:
 
@@ -93,17 +94,13 @@ To localize errors, and to simplify analysis of name shadowing, names in use sha
 
 Essentially, these declarations build a list of toplevel names that that compilers won't complain about being undefined locally. We don't bother with granularity below the toplevel name.
 
-To share abstract declarations across includes, we'll represent them in our namespace. A simple integration is to define `.[abstract:'Name] = ()` as a flag, if the name is not already defined. The compiler is free to erase this when the name is later introduced. The compiler may introduce `abstract env` implicitly.
+To share abstract declarations across includes, we'll represent them in our namespace. This might simply be defined in `meta.abstract_names` or similar. The compiler may introduce `abstract env` implicitly.
 
 ### Final Definitions 
 
-In some cases, it is useful to guard against accidental updates to definitions. The most obvious example is to block accidental updates to an object instance because users should be updating the specification instead. But it's important to preserve the ability to update definitions regardless. To this end, we might use a pattern such as defining `.[final:'foo'] = _foo` then assigning a reflection task to scan definitions and perform comparisons.
+In some cases, it is useful to guard against accidental updates to definitions. The most obvious example is to block accidental updates to an object instance because users should be updating the specification instead. But it's important to preserve the ability to update definitions regardless. 
 
-We could introduce a syntactic form for this:
-
-        finalize Name(, Name)*
-
-But I'm uncertain it's worthwhile. Might be better to leave it to macros.
+To this end, we might use a pattern such as defining `final_of.foo = _foo` then assigning a reflection task to scan definitions and perform comparisons. We could introduce a syntactic form for it, but it might not be worthwhile.
 
 ### Forbidden Shadows
 
@@ -114,6 +111,20 @@ It is feasible to introduce a special form to admit shadowing, such as `shadow N
 ### Unused Names
 
 As a general rule, the compiler will warn for unused locals. Use of `_` in place of a variable name indicates data is explicitly dropped. It is tempting to support `_name` for naming local variables that may be accessed (as `name`) or dropped. OTOH, a simple `skip (foo,bar) baz` where `skip _ x = x` is adequate.
+
+### Associated Names
+
+Given a name `foo`, we can associate it with arbitrary properties: `type_of.foo`, `spec_of.foo`, `final_of.foo`,`view_of.foo`, `usage_of.foo`. Each hierarchical namespace maintains their own associative names. 
+
+The assembler is unaware of this convention. The compiler may support a few examples. It's left entirely to metaprogramming, reflection, and the interactive development environment. For example, type checking will generally involve a reflection task.
+
+### Module Metadata
+
+The front-end compiler might generally maintain metadata in `meta.*`. This would include features such as a list or index of introduced names, a set of abstract names, etc.. Macros may also contribute. This is for module-level intrinsic properties that are essentially 'owned' by the compiler or extension-like macros.
+
+### Reflection Tasks
+
+The compiler shall arrange to automatically run `refl.*` definitions as reflection tasks when a name from a module (or hierarchical namespace) is first used. This is awkward to express using term annotations (due to interaction with open fixpoint), but it's easily expressed as a compiler effect.
 
 ## Operators
 
@@ -145,13 +156,6 @@ Aesthetically, this should support a direct assembly programming style where we 
             .movl 'eax ['ebx, 4]
             ...
 
-I favor the above form. We could put labels on the left, but we'd need semicolons to break up indentation, for example:
-
-        my_loop = do
-         ;  loop_start <- .label
-         ;                .movl 'eax ['ebx, 4]
-         ;                ...
-
 Haskell has applicative style via `<*>` and `<$>` that is convenient for some use cases. We could provide similar operators, though I hope to be more concise. Will probably defer these for now.
 
 *Aside:* We can feasibly model 'stack frames' upon a foundation of shift-reset (for early return) and state (for local vars, deferred ops). Explicit use of stack frames would enable more-conventional procedural programming. But it isn't clear whether this would benefit from dedicated keywords. Perhaps `.frame/.defer/.fexit` is adequate. Maybe add a frame 'tail-call' variant.
@@ -160,12 +164,24 @@ Haskell has applicative style via `<*>` and `<$>` that is convenient for some us
 
 In context of lazy loading, macro invocations must be distinct from normal evaluation. Proposed syntactic forms:
 
-        @(Expr)             general form
-        @macro_name         short for @(_module.macro_name)
+        @(Expr)                 general form
+        @macro_name             short for @(_module.macro_name)
 
-The preferred form is `@macro_name`, which assumes macros are defined only in the toplevel namespace. But the `@(Expr)` form is more general. The compiler lazily evaluates `Expr` at compile-time. This shall return an effect of form `eff:(\api -> ...)`. The compiler provides a monadic API to read and write code at flexible levels of abstraction. Modules are typically parameterized in terms of the macro effectfully reading its body, e.g. `@foo arg1 arg2`. This supports macro DSLs in the general case.
+The preferred form is `@macro_name`, but the `@(Expr)` form is more general. The compiler lazily evaluates `Expr` at compile-time. This should return an effect of form `eff:(\api -> ...)`. The compiler provides a monadic API to read and write code at flexible levels of abstraction. Modules are typically parameterized in terms of the macro effectfully reading its body, e.g. `@foo arg1 arg2`. This supports macro DSLs in the general case.
 
 To simplify local reasoning and isolate errors, the macro effects API shall protect scope, i.e. balance of brackets, braces, parentheses, etc.. Macros logically read from their right and write to their left, never reading their own writes. Macros cannot read other macro invocations, e.g. in `(@foo @bar ...)`, `@foo` may block on a reader until `@bar` is processed. A toplevel macro is scoped to reading one toplevel declaration (based on indentation), but may write many declarations.
+
+## Annotations
+
+        anno : Annotation -> Term -> Term
+
+To express term annotations, I propose keyword `anno`, referring to a built-in function that applies an annotation in context of a term, then returns the term. Annotations are not observable modulo reflection, but may guide performance, debugging, and other use cases. 
+
+The assembler recognizes effectful annotations, of form `eff:(\api -> ...)`. The assembler provides the reflection API, runs the operation to completion, then returns the given term. Depending on the API, the effect may have limited access to term and continuation, e.g. to surgically apply more annotations. If the effect diverges, so does the `anno` expression.
+
+The compiler or assembler may recognize other annotations such as `accel:'.list.split`. In general, the assembler shall warn for unrecognized annotations. Ideally, anything we want to express with annotations is also supported through the effects API.
+
+*Note:* We could make annotations more concise. But I'll want to see actual code in practice to decide whether this is a notation worth optimizing.  
 
 ## Tagged Data
 
@@ -340,8 +356,8 @@ Unlike Haskell, there is no support for pattern matching on lambda or definition
 
 We can simply use some term annotations for partial functions.
 
-        ~['error] Expr        recognized errors
-        ~['tbd] Expr          incomplete definitions
+        anno 'error Expr        recognized errors
+        anno 'tbd   Expr        incomplete definitions
 
 In these cases, `Expr` may indicate the nature of the error or future intentions for a TBD. 
 
@@ -359,12 +375,8 @@ I propose to also support directional function composition:
 
 Ideally, we arrange precedences such that we can write stuff like:
 
-        .op1 >>= f >> g >> .op2 >>= h >> .pure
-        .op1 >>= (f >> g >> .op2) >>= (h >> .pure)
-
-## Koru-Style Events
-
-The Koru language is entirely designed around metaprogramming, and I believe its best ideas can be adopted here.
+        .op1 >>= f >> g >> .op2 >>= h >> .r
+        .op1 >>= (f >> g >> .op2) >>= (h >> .r)
 
 ## Booleans
 
@@ -374,13 +386,6 @@ I propose to use keywords `and, or, not` for boolean composition. (IMO, `&&` and
 
 Although I have a vision for pattern matching, we'll support the conventional and familiar `if Cond then A else B` expressions, and also the `A if Cond else B` variant, which is more convenient in cases where we want to emphasize the operation over the condition. These are limited to pure boolean expressions. As a special case, in context of `do` notation, users may write `if Cond then A` or `A if Cond` without an `else` condition (defaults to return unit). 
 
-## Type Annotations (Defer)
-
-For now, we won't have any built-in syntax for types, just leave this to macros and reflection. But the general idea is to define `.[type:'foo]` for a subset of toplevel names `foo`.
-
-It is feasible to support term-level type annotations, e.g. `~[type:TypeDesc] Term`. 
-
-But the general idea is to use `foo_type` as the type of `foo`, then separately use a reflection task to verify consistency. Type systems and type checkers are ultimately user-defined reflection tasks.
 
 ## Modules
 
@@ -423,21 +428,6 @@ Some challenges:
 - access to base and self, default names? explicit parameters?
 - overriding methods
 - semantics: is Spec interface introduced as final mixin or via Base? Leaning towards implicit final mixin before instantiation.
-
-## Annotations
-
-Namespace annotations will typically use forms such as `.[type:'foo] = ...` implicitly associated with `foo`. This is a little awkward to work with directly, so the assumption is we'll have macros or built-in syntax
-
-We broadly have two kinds of annotations: 
-
-- Namespace annotations by associative naming conventions such as `foo_type` or `final_foo` are open to extension, but limited to annotation of names. These are generally implemented via reflection tasks. The front-end compiler could install an associated reflection task for each feature.
-- Term annotations as a 'flavored' identity function, via `~[Anno(,Anno)*] Term`. The assembler evaluates and recognizes `Anno`, does something (perhaps with `Term`), then returns `Term`. Observable behavior of `Term` must be invariant, but annotations may influence representations (e.g. list to array, accelerate function) and forbid some observations.
-
-Users may define reflection tasks in `refl.*` within a namespace or object instance. Named reflection tasks are convenient because we can easily debug or disable by name, which aligns with extensibility goals. The compiler shall arrange for these tasks to run at an appropriate time, i.e. after overrides, but before definitions are accessed. This may involve assembler support via term annotations.
-
-Anonymous reflection tasks are expressed as term annotations. Relevantly, the assembler shall recognize `eff:(\api -> ...)` as an effectful annotation, and the provided API shall support both reflection and a few annotation-specific features such as loading term, continuation, call-stack, or applying more annotations to `Term`.
-
-Effectful annotations are convenient because we can write `~[.log Message] Term` and have it be meaningful. It's very extensible even without tags other than `eff`. But we might support other tags where convenient, e.g. for acceleration or error values.
 
 ## Pattern Matching
 

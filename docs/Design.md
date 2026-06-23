@@ -271,7 +271,7 @@ Unfortunately, fixpoint is not fully compatible with continuations. The essentia
 
 ### Extensible Effects
 
-Instead of pattern-matching request constructors like 'Get' and 'Set', we could express requests as `\api -> api.get` and `\api -> api.set s`. This efficiently supports a large number of effects and abstracts which effects are 'primitive' in terms of yielding. We can further integrate `Return` and `>>=` through this API, perhaps using `api.seq` for `>>=`. Users may test which effects are available.
+Instead of pattern-matching request constructors like 'Get' and 'Set', we could express requests as `\api -> api.get` and `\api -> api.set s`. This efficiently supports a large number of effects and abstracts which effects are 'primitive' in terms of yielding. We can further integrate `Return` and `>>=` through this API, perhaps using `api.seq` for `>>=`, and `api.r` for return/result. Users may test which effects are available.
 
 I propose tag `eff:(\api -> ...)` to clearly distinguish effects from functions. It also doubles as a calling convention of sorts, so we could later mix effects models. 
 
@@ -305,7 +305,7 @@ The configuration defines various options under 'conf.\*' to guide the assembler
 
 - *assembly environment*: `conf.env : Eff [] Dict` - determines 'env' parameter to assembly, usually a dictionary. Default is an empty dict.
 - *command-line macros*: `conf.cli : Eff [ReadArg, WriteArg] ()` - rewrites command-line arguments if (and only if) the first command-line argument does not start with '-'. The reader uses parser-combinators designed to simplify tab completion.
-- *logger*: `conf.log : Eff [Refl, Log] ()` - reads and writes log queue, i.e. rewrites the default log stream. May forward, filter, merge, summarize, rearrange, rewrite, and inject messages. In interactive mode, runs after `conf.ide` returns.
+- *logger*: `conf.log : Eff [Refl, Log] ()` - reads and writes log queue, i.e. rewrites the default log stream. May forward, filter, merge, summarize, rearrange, rewrite, and inject messages. 
 - *interactive development*: `conf.ide : Eff [Refl, Log, TTY, Net, File, GUI] ()` - for interactive mode, supports user interaction via TTY and network access (listen on TCP or unix domain sockets). May extend to editing files, live updates, native GUI. 
 - *resource management*: as needed - the assembler may require ad hoc configuration for JIT and GC tuning, access to processors for acceleration, remote proxies for distributed compilation or shared work caching, PKI certs and keys access DVCS or to sign works, etc.. 
 
@@ -378,37 +378,37 @@ Machine-code mnemonics are left to libraries. Effectively, we have a generic 'as
 
 ### Reflection
 
-Reflection is expressed effectfully, i.e. `eff:(\api -> ...)`. Reflection may be triggered by annotations and is also accessible to the configured logger and IDE. To keep implementation small and simple, the reflection API is version-specific, specialized to an executable's representations and capabilities. Most bloat of portability and policy is pushed to user-defined adapters.
+Reflection is expressed effectfully, i.e. `eff:(\api -> ...)`. To keep implementation small and simple, the reflection API is version-specific, specialized to the assembler executable's representations and capabilities. Most bloat of portability and policy is pushed to user-defined adapters.
 
-In general, reflection tasks run concurrently and interact through shared state. To tame this, I favor software transactional memory (STM). The API may implement STM directly (e.g. aligned to scoped 'cut'), or provide an adequate foundation for adapters to do so. That includes awaiting changes to observed conditions to retry.
+Reflection may be triggered by compilers (`refl.*`), configurations (`conf.log` and `conf.ide`), or anonymous term annotations (`anno (.log Msg) Term`). In the general case, reflection tasks run concurrently and interact through shared state. To control concurrency, the reflection API shall support software-transactional memory (STM), with transaction per scoped 'cut'. A failed transaction is implicitly retried when observed conditions change.
 
-Reflection tasks interact with users indirectly via configured logger or IDE. This ensures an opportunity to manage attention. But it is convenient to push much logic into reflection tasks, perhaps providing ad hoc APIs via `env.ide.*` or `env.log.*`. The reflection API may support limited persistence, e.g. based on environment variables and user configuration.
-
-Reflection very easily conflicts with reproducibility, but this is acceptable assuming it doesn't affect assembly 'result'. Thus, an important constraint is that the reflection API shall not observably influence pure computations. This still admits troublesome non-observable influence, e.g. non-deterministic divergence or deadlock, but users can debug or disable reflection without affecting 'result'.
-
-*Note:* For extensibility, it is convenient to bind reflection tasks to definitions, e.g. `refl.*` within a namespace. But this is ultimately left to front-end compilers. The compiler may use anonymous annotations to trigger defined reflection tasks before returning the namespace for a module or object instance.
+Reflection is not reproducible. Between resource and scheduling variability, caching, timestamps, user interactions, etc. it's infeasible to reproduce the exact same log messages. It's left to users to ensure a reflection-based typechecker is confluent and doesn't depend on timestamps. A critical constraint on the reflection API is that it shall not observably influence pure computations. Thus, assembly 'result' remains robustly reproducible.
 
 ### Logging
 
-We can support lightweight annotation to emit log messages during evaluation. Messages may have any value type. But, for extensibility, a typical message is a dict or object defining a 'text' field among others - severity (e.g. info, warning, error), domain (for filtering), perhaps 'http' for interactive views. The assembler implicitly wraps this with context such as a timestamp and continuation or call stack. 
+The assembler implements a simple logging pipeline.
 
-The assembler provides a simple default logger that rewrites messages to standard error. Users may define `conf.log` to rewrite the log stream. In interactive mode, logging is paused and `conf.ide` has the opportunity to read and render log messages, and also rewrite the log stream as seen by the future `conf.log`. We'll return to batch mode after `conf.ide` terminates.
+        refl >> conf.log >> conf.ide >> fmap conf.show >> stderr
 
-The logging API may support limited persistence, e.g. based on environment variables like `GLAM_LOGS` or the user configuration. This shouldn't be full access to the filesystem, but enough to migrate details into separate files, support some graphics, perhaps generate a browseable hyperlinked document. Unlike reflection or caching persistence, this would typically be a fresh set per run.
+Reflection API can emit log messages, but cannot read them. If `conf.log` is defined, it may freely rewrite the stream. If `conf.ide` is defined, it sees the stream after it's been modified by `conf.log`, e.g. to render log messages to a webpage, or to block messages while running a TUI. We format messages via `conf.show : Message -> Text`, then write to standard error. The default `conf.show` recognizes structured messages of form `{ msg:{ text:Text, severity:Enum, ...}, ...}`.
+
+If `conf.log` or `conf.ide` are undefined or terminate early, they're implicitly replaced by pass-through. 
 
 ### Interaction
 
-Batch mode is the default. But users may ask to run the assembler in interactive mode via simple command-line switch:
+Interactive mode is enabled by command-line switch:
 
 - `--batch` (default) - evaluate and extract result then return
 - `(-i|--interactive)` - configurable user interface, maintains result
   - `--discard` by default, but compatible with `-o`
 
-Interactive mode enables users to interrogate the system via reflection APIs. User interaction is defined in `conf.ide` and should at least support TTY (e.g. REPL or TUI) and passive network (listen-only on TCP or unix domain sockets). It should be feasible to support GUI indirectly via HTTP or RFB protocols. For the full IDE experience, the API may further support interactive programming (rebuild when sources change), projectional editing (render and edit source files), and a lighweight native GUI. As with the reflection API, a goal is to keep implementation small and simple.
+When interactive mode is enabled, the assembler will run `conf.ide`, and continues running until `conf.ide` terminates. Aside from the reflection API, the IDE has receives to logging (downstream of `conf.log`) and user interaction via TTY (REPL, TUI) and network (listen on TCP or unix domain sockets). For the full IDE experience, the API may further support projectional editing (render and edit source files), interactive programming (rebuild when sources change), and a lighweight native GUI. Though, we might favor GUI via HTTP or RFB.
+
+As with the reflection API, a goal is to keep implementation small and simple. So the API should be near-minimal. 
 
 ### Integration
 
-The assembler does not directly support execution of assembled code, but we should at least support atomic updates to results in the filesystem. I.e. use Linux rename or Windows ReplaceFile and FILE_SHARE_DELETE. Staging might be controlled via environment variable. Atomicity of network access via `conf.ide` is also encouraged.
+The assembler does not directly support execution of assembled code, but we should at least support atomic updates to results in the filesystem. I.e. use Linux rename or Windows ReplaceFile and FILE_SHARE_DELETE. Staging might be controlled via environment variable. Atomicity of network access via `conf.ide` is encouraged.
 
 ### File Metadata
 
@@ -536,6 +536,7 @@ Expression of assembly in this style does not offer much advantage over conventi
 
 - Explicitly model subroutines, `.rodata`, and similar structures as *singletons*. Leverage state to ensure singletons are 'written' exactly once, on demand. This reduces need to define resources ahead of time then reference them by label. Analogous to templated code. Easily extends to content-addressed sharing, assuming position-independent code.
 - Maintain more context, e.g. registers in use, basic structure of memory, units on numbers, obligations for resource management. We can extend writer effects like `.movl` to manage some of this, but most would be manual. We can leverage this state to detect conflicts, allocate registers, automate cleanup, etc..
+- Backtracking, based on context. We can use alt/fail/cut effects and simply undo our writes when we don't like the outcomes. This supports lightweight program search, though we must be careful to not lose control of the search. It might be useful to bind each search to a definition for easy override.
 
 Direct-style assembly has a strong pressure towards sequential composition between sequential writers, sequential program counter, and sequential call-return subroutines. We cannot do anything about the last two, but it is feasible to support programmers in expressing interactive coroutines, generators, and other components.
 
@@ -545,12 +546,10 @@ The weakness of direct-style assembly is that non-sequential composition is tedi
 
 What features do I want from an orchestration layer? Brainstorming:
 
-- Lightweight validation: doesn't look at assembly, but ensures composition is correct based on user-specified metadata.
-- Resource management: composition can track resources, enforce substructure (linear, ordered (stacks), session types). 
+- Lightweight validation: ensures composition is correct up to user-specified metadata.
+- Resource management: composition can track resources, enforce substructure (linear, ordered (stacks), session types).
+  - Deferred register allocations, opt-in and permitting user overrides, could simplify composition and performance. 
 - Flexible affordances: implicitly build a catalog of components, e.g. a table, not limited to integration by name.
-- Program search: backtracking (alt, fail, cut), weighted search, generate where programmer doesn't care about details.
-  - Note: we must be careful that this doesn't sacrifice control; no 'anonymous' search, need stable IDs for refinement.
-  - May extend to constraint programming, but not before we can accelerate an SMT solver.
 - Branch continuations: compose control flow directly instead of building enums then branching on them. 
   - Subroutines might be parameterized by a static array of return addrs instead of a single address on the stack.
 - Coroutines or sessions: merge some components 'concurrently' via structured interleave of operations.
@@ -558,9 +557,10 @@ What features do I want from an orchestration layer? Brainstorming:
 - Event taps or join points (AOP): users can extend components to integrate independent logic, e.g. for runtime logging. 
   - Taps should be named for override in a consistent manner, otherwise non-commutativity becomes a concern.
 - Multi-target output: Components may have multiple implementations, including multiple targets. When all components support a target, we can output to that target. We could feasibly emit the same 'app' to x86 and WASM. 
+- Ideally, scalable extension to concurrent (multi-core, multi-processor, multi-node, etc.) orchestration.
 
 A good orchestration model has potential to make assembly programming usable across more problem domains. Program search can support declarative assembly. I believe we can preserve the assembly vibe assuming we have named handles to guide, refine, or replace search. That may need to be enforced syntactically. Lightweight validation can eliminate a lot of errors and provides some extra context for search. Event taps can make the resulting system more accessible.
 
-I propose to model components as objects. We can extend objects with multiple fields to guide orchestation and multiple target emitters. They're also relatively easy to extend in general. Final emitters would still be direct-style, but the effects API may be extended with orchestration context (and perhaps scoped control over orchestration).
+I propose to model components as objects. We can extend objects with multiple fields to guide orchestation and multiple target emitters. They're also relatively easy to extend in general. Final emitters would still be direct-style, but the effects API may be extended with orchestration context (and perhaps scoped control over orchestration). If enough components define 'undo', we could feasibly compute precise transactions (exactly what to save and restore) at runtime.
 
 *Note:* Koru language is a source of inspiration here, especially for branch continuations and taps, potentially for syntax. It's also a good proof of concept for some features.
