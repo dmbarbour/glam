@@ -39,26 +39,25 @@ In context of errors, the errors can be reported but we can also make a best eff
 
 ## Keywords
 
-Keywords are names reserved by the compiler. Keywords cannot be directly used as names, but an exception is made for atoms. For example, assuming keyword `import`, users may define `.['import] = ...` or reference `module.['import]`. This supports ad hoc integration in context of user-defined syntax. 
-
-Recognized keywords vary with language version declaration, including language extensions. Although we should not introduce keywords without an update to version declarations, a language version may freely reserve keywords without specifying them immediately.
+Keywords are names reserved by the compiler. Users are not permitted to define or use keywords directly as names. An exception is made for atoms. For example, given keyword `import`, users may define `.['import] = ...` or reference `module.['import]. The set of keywords may vary with the language version declaration.
 
 Proposed keywords:
 
-        import, include, load_file                  modularity
-        abstract, shadow, final                     name control
+        import                                      modules
+        module, abstract, shadow                    namespace
+        anno                                        annotations
         unique, abstract_global_path                special atoms
         with, without                               dict update
         do                                          effects
-        extend, override                            declaration modifiers
-        anno                                        term annotations
+        object, extend, extends                     objects
+
+        TBD:
+        orchestration, pattern matching, conditionals
 
 I'm still considering whether to support booleans at all. But potential keywords here:
 
         if, then, else, elif                        basic conditionals
         and, or, not, is                            comparisons
-
-We'll also reserve a few variant forms of each, e.g. 'imports', 'load_files', 'shadows' and 'shadowing', etc..
 
 ## Names and Paths
 
@@ -114,9 +113,7 @@ As a general rule, the compiler will warn for unused locals. Use of `_` in place
 
 ### Associated Names
 
-Given a name `foo`, we can associate it with arbitrary properties: `type_of.foo`, `spec_of.foo`, `final_of.foo`,`view_of.foo`, `usage_of.foo`. Each hierarchical namespace maintains their own associative names. 
-
-The assembler is unaware of this convention. The compiler may support a few examples. It's left entirely to metaprogramming, reflection, and the interactive development environment. For example, type checking will generally involve a reflection task.
+In many cases, we'll want to associate one name with another. The proposed convention is a dict named with an `_of` suffix. For example, given a name `foo`, we can also reference `type_of.foo` or `spec_of.foo`. The assembler ignores associated names, and I anticipate users mostly work with such names indirectly.
 
 ### Module Metadata
 
@@ -124,7 +121,7 @@ The front-end compiler might generally maintain metadata in `meta.*`. This would
 
 ### Reflection Tasks
 
-The compiler shall arrange to automatically run `refl.*` definitions as reflection tasks when a name from a module (or hierarchical namespace) is first used. This is awkward to express using term annotations (due to interaction with open fixpoint), but it's easily expressed as a compiler effect.
+The compiler will arrange to automatically run `refl.*` definitions as reflection tasks. The assembler doesn't interpret `refl.*` implicitly, so this arrangement must be expressed as a compile-time effect or (very awkwardly) a term annotation. 
 
 ## Operators
 
@@ -158,8 +155,6 @@ Aesthetically, this should support a direct assembly programming style where we 
 
 Haskell has applicative style via `<*>` and `<$>` that is convenient for some use cases. We could provide similar operators, though I hope to be more concise. Will probably defer these for now.
 
-*Aside:* We can feasibly model 'stack frames' upon a foundation of shift-reset (for early return) and state (for local vars, deferred ops). Explicit use of stack frames would enable more-conventional procedural programming. But it isn't clear whether this would benefit from dedicated keywords. Perhaps `.frame/.defer/.fexit` is adequate. Maybe add a frame 'tail-call' variant.
-
 ## Macros
 
 In context of lazy loading, macro invocations must be distinct from normal evaluation. Proposed syntactic forms:
@@ -179,9 +174,7 @@ To express term annotations, I propose keyword `anno`, referring to a built-in f
 
 The assembler recognizes effectful annotations, of form `eff:(\api -> ...)`. The assembler provides the reflection API, runs the operation to completion, then returns the given term. Depending on the API, the effect may have limited access to term and continuation, e.g. to surgically apply more annotations. If the effect diverges, so does the `anno` expression.
 
-The compiler or assembler may recognize other annotations such as `accel:'.list.split`. In general, the assembler shall warn for unrecognized annotations. Ideally, anything we want to express with annotations is also supported through the effects API.
-
-*Note:* We could make annotations more concise. But I'll want to see actual code in practice to decide whether this is a notation worth optimizing.  
+The assembler (or compiler) may recognize other ad hoc annotations such as `accel:'.list.split`. To avoid silent degradation of performance or reasoning, the assembler shall warn about unrecognized annotations. For convenient composition, there shall be an effect to apply more annotations to the term.
 
 ## Tagged Data
 
@@ -314,15 +307,15 @@ We can introduce a few term annotations to manage representations, e.g. flatteni
         (a,b)       tuple:[a,b]
         (x,y,z)     tuple:[a,b,c]
 
-A tuple is essentially a list with different connotations - fixed size, non-homogeneous - and distinct pattern matching. In practice, we'll usually access tuples via pattern matching, e.g. `(P1, P2, P3)` for a triple. *Note:* the tuple syntax does not support leading commas or tuples smaller than a pair. For any such cases, favor `tuple:ListExpr` instead.
+A tuple is essentially list with different connotations. Lists tend to be variable-size but homogeneous. Tuples tend to be fixed-size but non-homogeneous. We append lists, but we tend to simply construct or match on tuples inline. There is no dedicated syntax for empty or singleton tuples, but users are always free to use the `tuple:[a]` syntax.
 
-Tuples are sometimes more convenient than small dictionaries, mostly due to concision. Unfortunately, compared to dictionaries, tuples are much less extensible. Consequently, tuples should be used only where they represent stable types or local intermediate representations. This is mitigated by ad hoc polymorphism: it is feasible to continue supporting `(X,Y,Z)` during a transition to `{x:X, y:Y, z:Z, ...}`.
+Tuples are concise, but they negatively impact extensibility and scalability. This is mitigated by ad hoc polymorphism, e.g. we can easily match both `(X,Y,Z)` and `{x:X, y:Y, z:Z}` within a context. But, in practice, it's best to use tuples only for private intermediate representations or stable public interfaces.
 
 ## Tables and Databases? Defer.
 
 I'm interested in supporting relational systems. A table might be expressed as a list of tuples paired with a header. A database is essentially a collection of tables and computed views. We could model a base database as a dict of tables, and the computed views as a mixin.
 
-I'm uncertain what syntax to support here. But it's something we can explore easily with macros. 
+I don't intend to commit to a syntax anytime soon, but we can explore options with macros or declared language extensions. 
 
         @table.create Cities
             name: text, primary_key
@@ -331,8 +324,6 @@ I'm uncertain what syntax to support here. But it's something we can explore eas
         @table.insert Cities
             "San Francisco" 37.7 -122.4
             ...
-
-Anyhow, I'll put this off for now. Perhaps macros will prove sufficient in practice.
 
 ## Functions
 
@@ -356,8 +347,9 @@ Unlike Haskell, there is no support for pattern matching on lambda or definition
 
 We can simply use some term annotations for partial functions.
 
-        anno 'error Expr        recognized errors
-        anno 'tbd   Expr        incomplete definitions
+        anno 'error         Expr        recognized errors
+        anno 'tbd           Expr        incomplete definitions
+        anno 'deprecated    Expr        transitional code
 
 In these cases, `Expr` may indicate the nature of the error or future intentions for a TBD. 
 
@@ -386,10 +378,30 @@ I propose to use keywords `and, or, not` for boolean composition. (IMO, `&&` and
 
 Although I have a vision for pattern matching, we'll support the conventional and familiar `if Cond then A else B` expressions, and also the `A if Cond else B` variant, which is more convenient in cases where we want to emphasize the operation over the condition. These are limited to pure boolean expressions. As a special case, in context of `do` notation, users may write `if Cond then A` or `A if Cond` without an `else` condition (defaults to return unit). 
 
-
 ## Modules
 
-Need a syntax for `import`, `include`, `source`
+I've decided to consolidate module access into 'import', with the various cases indicated by a few extra words.
+
+        import "Foo.g"                      # without 'as' or 'at' is mixin on toplevel namespace
+        import "Bar.g" as b                 # 'as' for default introduction or 'at' for a mixin
+        import "BigText.txt" binary as t    # introduces t as a binary
+
+        import "Qux.g" as q from {
+            , rev:Text                      # content hash of containing folder
+            , search:[
+                , tag:Text                  # tag or branch name for precise cloning
+                , url:Text                  # a remote lookup, uses most recent tag
+                , url:Text
+                ]
+            }
+
+        import 'default from {
+            , default:"src/main.g"
+            , rev:Text
+            , ...
+            }
+
+Remote modules are indicated by a `from` expression, typically a dict literal. The `rev` field is required, ensuring we uniquely identify a remote file and its transitive dependencies. Search hints are optional but recommended. We may use an atom instead of a string if the `from` location defines it. It is possible to build an index of modules within the module system. 
 
 ### Access Control
 
@@ -403,31 +415,64 @@ There is no notion of export control. Such a concept contradicts extensibility g
 
 There are forms of access control between subprograms. This is supported via unique atoms.
 
-## Pattern Matching
+## Objects
 
-## Object Specs
+For concision, names within object methods are localized by default, i.e. `foo` instead of `self.foo`, and `_foo` instead of `base.foo`. Instead, we pay extra to refer to the lexical host via `module.name` or `^name`. The latter extends to hierarchical objects, e.g. `^^^method` refers three levels up. Analogous to keyword `module`, `object` (or `_object`) as an expression refers to the object namespace as a whole, i.e. so we can reference `object.[42]`.
 
-For concision, names within an object are implicitly local, i.e. `foo` refers to object `self.foo` and `_foo` to object `base.foo`, and we don't actually use `self` or `base` at all. Instead, users pay a little extra to reference names in the module or host scope, e.g. `module.name` or `^name`. 
+A minimal object syntax can be quite compact. I propose:
 
-*Aside:* Users may compose `^^^_name` to refer to the host's host's host's base `name`, but it's recommended to stick with at most one `^name` and avoid reference to `^_name`. 
+        object foo extends bar, baz with
+            def1 = ...
+            def2 := ...
 
-I'd like to avoid verbose names within specs, including `self.*`. Instead, we might invert names, make access to the module scope more expensive, e.g. requiring `module.name` or perhaps a generic `^name` or `~name` to access the host in a hierarchical specifications. The internal name then does not need a prefix, and we can use `foo` or `_foo` within a spec to concisely refer to `self.foo` and `base.foo` respectively.
+The compiler will introduce `spec_of.foo` then define `foo` in terms of instantiating the spec, implicitly introducing `foo.meta.spec = spec_of.foo` as a final override. The `extends` section is optional, and enables multiple inheritance. Minimum viable object spec is just three elements:
 
-We'll provide some convenient syntax for specifying objects. Unfortunately, it's a little awkward to override the specification as a whole. I propose instead that the syntax for specifications implicitly introduces `foo_spec` and `foo`. We implicitly introduce `foo.spec = foo_spec` as an implicit final mixin. We can finalize the instance to guard against accidental updates.
+        defs        mixin, i.e. \base self -> ...
+        deps        list of object specifications
+        uid         unique atom for linearization
 
-The specification will need only a few elements, names tbd:
+We'll use the common C3 algorithm for multiple inheritance (MI), using `uid` to distinguish specifications. The linearization algorithm shall verify via reflection that `uid` is associated uniquely with one specification in scope.
 
-- mixin with defs
-- inheritance list
-- unique identifier
+To modify an object's definitions, I introduce a related declaration:
 
-We can introduce some syntax for efficiently extending (overriding) a prior specification, but it's awkward to extend this to the inheritance graph. Users can override spec components, including inheritance lists, via `foo_spec.* := ...`.  
+        extend object foo with
+            ...
 
-Some challenges:
-- unique identifiers for specs for multiple inheritance
-- access to base and self, default names? explicit parameters?
-- overriding methods
-- semantics: is Spec interface introduced as final mixin or via Base? Leaning towards implicit final mixin before instantiation.
+Note that this doesn't touch dependencies. Modifying object dependencies should by very rare in practice, but users may override  `spec_of.foo.deps := ...` or the full specification.
+
+Object namespaces admit many toplevel declarations. Imports are an exception, but features that desugar to definitions are accepted, e.g. `unique`, `abstract`, and `object`. The compiler shall support `refl.*` tasks per object, ideally arranging them to run lazily when the object is used. In context of reflection, objects may define a `type_of.def1` and other associated definitions.
+
+## Orchestration
+
+### Brainstorming
+
+I propose to model orchestration components as objects. The user applies a bundle of continuations and effects parameters via overrides. It may be useful to include defaults in some cases, e.g. define some continuations or effects in terms of others, and declare a minimal specifications of overrides (similar to Haskell typeclasses). The component is also situated, sequentially, within some context. Multiple results - emitters - are defined contingent on overrides and env.
+
+The static context is determined at assembly-time. It describes features such as runtime locations where a subprogram looks for inputs.  Usefully, it may include first-class effects, making some effects available to continuations. We could use such effects to express open loops without explicit recursion. 
+
+Instead of just a handful of values, it might prove convenient to model static context as something closer to tacit programming environment in its own right.
+
+It is easiest to model information as flowing *forward*, aligned with sequential composition. But it is very useful to model some information as flowing in other directions. A minimum viable foundation is single-assignment variables, with assignment tracked as a linear obligation. We could introduce a notion of 'tentative' assignments for auto-commit when dropped. We can assign vars with a 'future' effect that may read and wait on other vars, extending to futures and promises.
+
+We should generally be able to 'splat' a dict of effects or continuations as parameters when invoking things.
+
+We might wrap these objects, e.g. with `proc:Object`, to resist accidents. I'm currently leaning towards use of `proc` as the primary naming convention for orchestration of runtime procedures and processes.
+
+### Syntax 
+
+We could feasibly borrow from Koru here, e.g. using `~` everywhere and `!` or `|` for bindings. 
+
+- declare a proc
+- define basic emitters
+  - access to env, eff, cont
+- define flow emitters
+- invoke the proc
+  - splat a subset of args
+
+I currently use `|>` for functions, but we could readily overload it for `proc` objects. 
+
+
+
 
 ## Pattern Matching
 
@@ -438,6 +483,3 @@ I want to desugar all pattern matching to monadic expressions, and I also want t
 
 Although we could support Haskell-style `match Expr with (Pattern -> Outcome)+` syntax, providing the pure handler, it's a little awkward to extend this syntax for effectful patterns, and it may be better to integrate the 'Expr' into the Pattern, allowing for more than one (e.g. as guards). I'm contemplating alternative syntax, e.g. based on unification or `Pattern = Expr` structures. We could feasibly integrate pattern matching into monads in general.
 
-## User-Defined Types?
-
-I would like to support lightweight declarations of type constructors and matching patterns.

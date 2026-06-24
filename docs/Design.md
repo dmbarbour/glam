@@ -289,13 +289,12 @@ To simplify architecture, file dependencies are constrained: a file may referenc
 
 A module is integrated by 'including' it as a mixin. Any prior definitions or inclusions effectively model prior mixins. We can translate inclusions to a hierarchical element. Thus, I propose a few import forms:
 
-* *include Module* - bind included module's Base to host's current Base namespace, sharing Self.
-* *include Module at m* - apply module to override component dictionary 'm', binds Base.m, Self.m 
-* *import Module as m* - introduce 'm' with `{ "env": Self.env }` by default, then apply 'include Module at m'.
-  - This treats 'env' as an implicit, read-only environment at the module layer, supporting adaptability.
-* *source Module as m* - load the raw file binary, does not apply compiler  
+- `import ...` - include-like mixins; module rewrites host `Base`, shares `Self`.
+- `import ... at m` - mixin applied to `m`, binds to host `Base.m`, and `Self.m`.
+- `import ... as m` - intro default `m = { env: Self.env }` then `import ... at m`.
+- `import ... binary as b`, introduces a binary, does not inspect or compile file. 
 
-The hierarchical 'include at' and 'import as' forms simplify lazy loading. In contrast, with toplevel 'include', it is often difficult to determine which modules introduce or override a definition without loading everything. Ultimately, there is only one 'Self'. This simplifies deep overrides and extensions, analogous to mutable definitions without actual mutation.
+Hierarchical imports (the 'as' and 'at' forms) are compatible with lazy loading. Note that we do not close the fixpoint for hierarchical imports, thus hierarchical definitions remain open to extension.
 
 ### Configuration
 
@@ -384,6 +383,8 @@ Reflection may be triggered by compilers (`refl.*`), configurations (`conf.log` 
 
 Reflection is not reproducible. Between resource and scheduling variability, caching, timestamps, user interactions, etc. it's infeasible to reproduce the exact same log messages. It's left to users to ensure a reflection-based typechecker is confluent and doesn't depend on timestamps. A critical constraint on the reflection API is that it shall not observably influence pure computations. Thus, assembly 'result' remains robustly reproducible.
 
+*Note:* Depending on API, reflection can control reflection. For example, we could provide methods to lazily rewrite annotations in a term, or disable reflection for a hierarchical namespace.
+
 ### Logging
 
 The assembler implements a simple logging pipeline.
@@ -412,7 +413,7 @@ The assembler does not directly support execution of assembled code, but we shou
 
 ### File Metadata
 
-Aside from primary outputs, we might want the assembler to automatically set permissions on files in case of `-o` destinations. It isn't be difficult to support `asm.fs_meta` to declare permissions for associated files.
+Aside from primary outputs, we might want the assembler to automatically set permissions on files in case of `-o` destinations. It isn't be difficult to support `asm.file_meta` to declare permissions for a subset of generated files.
 
 ## User-Defined Syntax
 
@@ -463,17 +464,17 @@ The main motive for bootstrapping is reproducibility: stabilize the compiler, ma
 
 ### Macros
 
-Macros support metaprogramming at the syntax layer, often in terms of rewriting text, tokens, etc.. Macros may be defined within the normal module namespace for modularity. In context of lazy loading, macro invocations must be distinguished syntactically.
+Macros support metaprogramming at the syntax layer, often in terms of rewriting text, tokens, etc.. It is convenient to express macros effectfully, with 'read' and 'write' effects at flexible levels of abstraction. The compiler can restrict effects to protect scope, e.g. ensuring balanced braces, brackets, and parentheses, while still providing enough flexibility for macro DSLs.
 
-It is convenient to express macros effectfully, with 'read' and 'write' effects at flexible levels of abstraction. The compiler can restrict effects to protect scope, e.g. ensuring balanced braces, brackets, and parentheses, while still providing enough flexibility for macro DSLs.
+Macros may be defined within the normal namespace, but macro invocations must be distinguished syntactically. For the ".g" syntax, we'll use `@macro_name` for macro calls. If we had to look at definitions to determine which names are macros, that would interfere with lazy loading.
 
 ### Editable Projections
 
 It is possible to express editable views of source texts via auxilliary methods in the language object, e.g. `env.lang.[FileExt].view`. This is a good starting point, at least. But it's coarse grained and very limiting.
 
-To support fine-grained editable projections, the front-end compiler will support annotation of terms. For example, a parsed integer might maintain enough metadata to both locate it in the original source file and edit it, with an associated codec translating an updated number into source text. This allows for editors to integrate where the term is used instead of only where defined. A subset of standard term annotations may be implicit, built into the parser combinator.
+To support fine-grained editable projections, it's useful to trace terms back to contributing sources. For example, a parsed integer may carry hidden metadata regarding the original source location, and even a codec. This metadata is visible via the reflection API. In theory, `conf.ide` can render a widget that ties back to original sources and supports editing thereof. 
 
-In general, we should support 'views' on individual terms that may be interactive, e.g. to view large graphs or tables we'll want progressive disclosure. It isn't feasible to predict all the demands for such up front, but we can make a best effort with ad hoc user values as annotations, examining and rendering annotated terms via reflection API.
+But effective support for editable projections will benefit from careful design of our parser combinators.
 
 ## Reasoning
 
@@ -532,35 +533,58 @@ To support direct-style assembly, we express assembly mnemonics as writer effect
 
 In direct style, users may freely mix writing code and static layout (e.g. `.rodata` and `.globl`). It is left to an effect runner - in this case, `mkelf` - to provide the API (defining `.movl`, `.rodata`, etc.), build state, and write contents into different sections as needed.
 
-Expression of assembly in this style does not offer much advantage over conventional assembly languages. But our host language is highly extensible. Some features are a natural extensions to the direct style:
+Expression of assembly in this style does not offer much advantage over conventional assembly languages. But first-class assembly emitters are more robust than conventional assembly macros, and our host language is highly extensible. Some features are a simple extensions to the direct style:
 
-- Explicitly model subroutines, `.rodata`, and similar structures as *singletons*. Leverage state to ensure singletons are 'written' exactly once, on demand. This reduces need to define resources ahead of time then reference them by label. Analogous to templated code. Easily extends to content-addressed sharing, assuming position-independent code.
-- Maintain more context, e.g. registers in use, basic structure of memory, units on numbers, obligations for resource management. We can extend writer effects like `.movl` to manage some of this, but most would be manual. We can leverage this state to detect conflicts, allocate registers, automate cleanup, etc..
-- Backtracking, based on context. We can use alt/fail/cut effects and simply undo our writes when we don't like the outcomes. This supports lightweight program search, though we must be careful to not lose control of the search. It might be useful to bind each search to a definition for easy override.
+- Express subroutines, `.rodata`, and similar structures as *singletons*. Leverage state to ensure singletons are 'written' exactly once, on demand. This reduces need to define resources ahead of time then reference them by label. Analogous to templated code. Easily extends to content-addressed sharing, assuming position-independent code.
+- Maintain more context, e.g. registers in use, basic structure of memory, units on numbers, assumptions and obligations for resource management. We can extend writer effects like `.movl` to manage some of this, but most would be manual. We can leverage this state to detect conflicts, allocate registers, automate cleanup, etc..
+- Program search, based on context. We can use alt/fail/cut effects and simply undo our writes when we don't like the outcomes. This supports lightweight program search. However, we must be careful to never lose control of search. This suggests binding each search to a stable identifier, which in turn requires syntactic support.
 
-Direct-style assembly has a strong pressure towards sequential composition between sequential writers, sequential program counter, and sequential call-return subroutines. We cannot do anything about the last two, but it is feasible to support programmers in expressing interactive coroutines, generators, and other components.
-
-The weakness of direct-style assembly is that non-sequential composition is tedious and error-prone. This can be resolved by a layer of indirection. But we must be cautious to preserve the assembly vibe, absolute control. To me, this suggests an orchestration layer.
+Direct-style assembly imposes a strong pressure towards sequential composition: sequential mnemonic writers, sequential program counter, sequential call-return. However, even for code that runs sequentially, we'll often benefit from a flexible decomposition of behavior. For example, in producer-consumer patterns, it is convenient to define producers and consumers independently then fuse them into a single assembly. To resolve this, I propose an assembly-time orchestration model.
 
 ## Orchestrated Assembly
 
-What features do I want from an orchestration layer? Brainstorming:
+My goal is flexible composition, decomposition, and modularization of behavior without undermining the assembly vibe. That is, users must retain the low-level control of direct-style assembly, but we can admit a more flexible integration. Where a conventional compiler abstracts over assembly, an orchestrated assembly takes assembly emitters as its base nodes but helps with code fusion and integration of labels.
 
-- Lightweight validation: ensures composition is correct up to user-specified metadata.
-- Resource management: composition can track resources, enforce substructure (linear, ordered (stacks), session types).
-  - Deferred register allocations, opt-in and permitting user overrides, could simplify composition and performance. 
-- Flexible affordances: implicitly build a catalog of components, e.g. a table, not limited to integration by name.
-- Branch continuations: compose control flow directly instead of building enums then branching on them. 
-  - Subroutines might be parameterized by a static array of return addrs instead of a single address on the stack.
-- Coroutines or sessions: merge some components 'concurrently' via structured interleave of operations.
-  - Some form of 'currying' where partial compositions may be incomplete.
-- Event taps or join points (AOP): users can extend components to integrate independent logic, e.g. for runtime logging. 
-  - Taps should be named for override in a consistent manner, otherwise non-commutativity becomes a concern.
-- Multi-target output: Components may have multiple implementations, including multiple targets. When all components support a target, we can output to that target. We could feasibly emit the same 'app' to x86 and WASM. 
-- Ideally, scalable extension to concurrent (multi-core, multi-processor, multi-node, etc.) orchestration.
+Some design considerations:
+- Assembly or code fragments are inline by default. Use of subroutines is explicit in the base nodes.
+- Orchestrator is independent of the assembly target. We can reuse orchestration for multiple backends.
+  - e.g. x86 vs. WASM vs. LLVM vs. generated C code.
+  - different resources per backend, but should share some conceptual intentions.
+- Base components are objects. Emitters are one 'interface' for object. Orchestration another. 
+  - i.e. users can easily add emitters for new backends, or override existing emitters.
+  - we can flexibly extend the orchestrator to look at more object fields.
+- Orchestration 'flow' can be viewed as one more 'emitter'. Other flows are specializations.
+  - e.g. Component describes both x86 and flow. If generating WASM, we pick flow emitters.
+  - fractal structure, orchestration is just one way to express an assembly fragment.
+- Model emitters as hierarchical objects within the component. 
+  - attributes to select emitters instead of by name, e.g. target, weighted priority, constraints
+  - ad hoc target-specific metadata to further filter choices, e.g. preconditions, postconditions
+  - potential utility extensions, e.g. 'checkpoint' and 'undo' methods for transactional systems
+- Branch continuations, i.e. static arrowized `a :+: b` types and `left f >>> right g` compositions.
+  - Components don't close branches aggressively. Instead, extend them contextually.
+  - We can explicitly merge branches when conditions are compatible.
+  - Branches uniquely identified by names, but perhaps also extensible by metadata.
+- Parallel continuations, i.e. static arrowized `a :*: b` types and `first f >>> second g` composition.
+  - This would enable shifting of assembly ops, i.e. move all `first f` ops ahead of `second g` ops.
+  - It also admits interweaving of assembly ops, i.e. do some of `f` then some of `g`, at step boundaries.
+- Interactive sessions, i.e. consider mixing data + holes, i.e. `!a :*: ?b`, in static structures.
+  - can model holes via single-assignment variables with linear obligations
+  - could extend with 'tentative' assignments to admit auto-resolution 
+  - assign holes with an 'effect' that can read holes, extends to constraint systems
+- Higher-order interactive components as effects.
+  - Client can provide static 'effects' to components that may be invoked by them.
+  - Those effects may receive effects in turn.
+  - Open loops may be expressed as component effect provided to (some) user effects.
+- Taps or aspect-oriented join points. 
+  - Inject a prefix flow at any component, branch continuation, effect invocation, etc..
+  - Support injection by name, but also by search attributes. 
+  - Semantic taps only, should not modify the lower-level emitters.
+- Adaptive components, i.e. emitters receive controlled access to host context.
+- Lightweight validation at orchestration layer based on component and emitter metadata.
 
-A good orchestration model has potential to make assembly programming usable across more problem domains. Program search can support declarative assembly. I believe we can preserve the assembly vibe assuming we have named handles to guide, refine, or replace search. That may need to be enforced syntactically. Lightweight validation can eliminate a lot of errors and provides some extra context for search. Event taps can make the resulting system more accessible.
+There are a lot of features above, but it should simmer down to a relatively tight syntax, mostly about distinguishing continuations or named branches, higher-order components, etc.. Koru language is a good place to start for syntax that fits with my goals of avoiding deep indentation and naming all the things for overrides.
 
-I propose to model components as objects. We can extend objects with multiple fields to guide orchestation and multiple target emitters. They're also relatively easy to extend in general. Final emitters would still be direct-style, but the effects API may be extended with orchestration context (and perhaps scoped control over orchestration). If enough components define 'undo', we could feasibly compute precise transactions (exactly what to save and restore) at runtime.
+I imagine several pain points remain when composing assembly, e.g. regarding fine-grained register management. This can be mitigated by adaptive components, locally automating some register management. It might prove more performant to go global with register management, e.g. extend x86 with virtual registers, explicitly define register allocation and optimize use of registers. But that reduces local user control. Perhaps a goldilocks solution is virtual registers with explicit shuffle points, where we remap explicit subsets of virtual and real registers. We can make those shuffle points adaptive.
 
-*Note:* Koru language is a source of inspiration here, especially for branch continuations and taps, potentially for syntax. It's also a good proof of concept for some features.
+Ideally, orchestration should extend beyond a single-target assembly program to account for 'concurrent' or 'distributed' resources and heterogeneous systems. This will require a lot more support for resource management, e.g. modeling flexible transfer of behavior or ownership between systems, integration with FPGAs.
+
