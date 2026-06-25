@@ -44,12 +44,13 @@ Keywords are names reserved by the compiler. Users are not permitted to define o
 Proposed keywords:
 
         import                                      modules
-        module, abstract, shadow                    namespace
+        module, abstract, shadow, using             namespace
         anno                                        annotations
         unique, abstract_global_path                special atoms
         with, without                               dict update
         do                                          effects
         object, extend, extends                     objects
+        object_from_spec, object_named              anonymous objects
 
         TBD:
         orchestration, pattern matching, conditionals
@@ -71,17 +72,18 @@ Namespaces are modeled as hierarchical dictionaries, accessed via dotted path, e
 
 In the general case, we also support expression-indexed paths using `.(ListExpr)` or `.[...]` for a literal list. These indices are interpreted such that `.([1, 'two] ++ [3])` is equivalent to `.[1].two.[3]`. The empty list is permitted, e.g. `foo.[]` is equivalent to `foo`, and `foo.[ ].bar` admits spaces, newlines, and comments in names if needed.
 
-Best practice is to avoid expression-indexed paths in module or object namespaces, but it's available as an escape hatch for integration. Users may define `.[Idx] = Def` at the module toplevel. Later access to this name requires `module.[Idx]`. Users may understand `module` as a keyword that aliases the module toplevel namespace.
+Best practice is to avoid expression-indexed paths in module or object namespaces, but it's available as an escape hatch for integration. Users may define `.[Idx] = Def` at the module toplevel. Later access to this name requires `module.[Idx]`. Users may understand `module` as a keyword that aliases the module toplevel namespace. `object` serves a similar role for the current object, or aliases to `module` at the toplevel scope.
 
 Special cases: 
 - `.path` desugars to `eff:(\api -> api.path)` to support lightweight effects. See *Effects.*
 - `^path` refers to host namespace in context of hierarchical specifications. See *Objects.*
+  - `^(Expr)` evaluates expression in host namespace
 
 ### Introductions and Overrides
 
 When defining names, we'll distinguish introductions versus overrides. An introduction `name = Expr`. An override uses `name := Expr` or `name ::= \ prior -> Expr`. It is an error to introduce a name that is already defined, or to override a name that isn't already defined. This resists ambiguity issues, i.e. a name is introduced with some intention or purpose, and overrides should preserve purpose.
 
-In context of overrides, it is often necessary to reference the prior definition. The `::=` form supports access to prior definitions without repeating names. But for the more general case, I propose a `_` prefix on names, i.e. `_foo` refers to the prior definition of `foo`. Similarly, use of `_module` refers to prior module namespace.
+In context of overrides, it is often necessary to reference the prior definition. The `::=` form supports access to prior definitions without repeating names. But for the more general case, I propose a `_` prefix on names, i.e. `_foo` refers to the prior definition of `foo`. Similarly, use of `_module` refers to prior module namespace, or `_object` to the prior object namespace.
 
 *Note:* Deleting definitions isn't recommended or syntactically supported. Better to allocate a fresh, hierarchical module or object namespace then build monotonically. But if users insist `.[] ::= \ prior -> prior without foo` would do the trick. 
 
@@ -113,7 +115,7 @@ As a general rule, the compiler will warn for unused locals. Use of `_` in place
 
 ### Associated Names
 
-In many cases, we'll want to associate one name with another. The proposed convention is a dict named with an `_of` suffix. For example, given a name `foo`, we can also reference `type_of.foo` or `spec_of.foo`. The assembler ignores associated names, and I anticipate users mostly work with such names indirectly.
+In many cases, we'll want to associate one name with another. The proposed convention is a dict named with an `_of` suffix. For example, given a name `foo`, we can also reference `type_of.foo`. The assembler ignores associated names, and I anticipate users mostly work with such names indirectly.
 
 ### Module Metadata
 
@@ -122,6 +124,17 @@ The front-end compiler might generally maintain metadata in `meta.*`. This would
 ### Reflection Tasks
 
 The compiler will arrange to automatically run `refl.*` definitions as reflection tasks. The assembler doesn't interpret `refl.*` implicitly, so this arrangement must be expressed as a compile-time effect or (very awkwardly) a term annotation. 
+
+### Using Scopes
+
+        using Dict Expr
+
+The `using Dict Expr` syntax binds names in `Expr` to `Dict` by default. Users can escape this via `^name` or `^(Expr)`. Of course, `module.name` or `using module Expr` also work as escapes. Notes:
+
+- `object` locally refers to the `Dict`
+- `Dict` doesn't have prior definitions
+
+The main use case for `using` is to manage namespaces without polluting them. Of course, this only helps if escapes are rare in scope.
 
 ## Operators
 
@@ -162,9 +175,19 @@ In context of lazy loading, macro invocations must be distinct from normal evalu
         @(Expr)                 general form
         @macro_name             short for @(_module.macro_name)
 
-The preferred form is `@macro_name`, but the `@(Expr)` form is more general. The compiler lazily evaluates `Expr` at compile-time. This should return an effect of form `eff:(\api -> ...)`. The compiler provides a monadic API to read and write code at flexible levels of abstraction. Modules are typically parameterized in terms of the macro effectfully reading its body, e.g. `@foo arg1 arg2`. This supports macro DSLs in the general case.
+The `@macro_name` form is preferred, but `@(Expr)` form is more general. `Expr` must evaluate to an effect. The compiler provides an effects API to read and write source at flexible levels of abstraction (text or AST). Macros are parameterized in terms of effectfully reading their parameters, e.g. in `@foo arg1 arg2` we expect `@foo` to read its arguments.
 
-To simplify local reasoning and isolate errors, the macro effects API shall protect scope, i.e. balance of brackets, braces, parentheses, etc.. Macros logically read from their right and write to their left, never reading their own writes. Macros cannot read other macro invocations, e.g. in `(@foo @bar ...)`, `@foo` may block on a reader until `@bar` is processed. A toplevel macro is scoped to reading one toplevel declaration (based on indentation), but may write many declarations.
+There are several structural constraints enforced by the API: 
+
+- macros cannot escape their scope (brackets, braces, parentheses, indentation)
+- macros cannot read other macro invocations (instead, awaits macro output)
+- macros cannot read comments or count whitespace (whitespace is stretchy)
+
+These are enforced by restrictions on readers and writers, e.g. all reads on parentheses are balanced pairs, and the `#` and `@` characters are processed before macros see them. To avoid complications, reading embedded data such as numbers or texts is always abstracted. Conversely, a macro may write lazy data as abstract embedded data.
+
+There is no dedicated syntax for defining macros. To reduce need for `_name` forms, users may define macros within objects. With a decent choice of naming conventions, this won't hurt aesthetics, e.g. `@table.create` or `@macro.rules`. Of course, users are always free to extract, e.g. `foo = _MyMacroUtils.foo`. Later, meta-macros like `@macro.rules` may enable users to robustly define macros without intermediate objects.
+
+*Aside:* Most conventional use cases for macros evaporate between lazy evaluation and first-class effects, but we still benefit from embedded DSLs or abstracting namespace boilerplate.
 
 ## Annotations
 
@@ -325,6 +348,8 @@ I don't intend to commit to a syntax anytime soon, but we can explore options wi
             "San Francisco" 37.7 -122.4
             ...
 
+Each table would be an object with extensible metadata. Inserts would be expressed in terms of overrides.
+
 ## Functions
 
 I propose to adopt Haskell's use of `\` for lambdas.
@@ -384,7 +409,7 @@ I've decided to consolidate module access into 'import', with the various cases 
 
         import "Foo.g"                      # without 'as' or 'at' is mixin on toplevel namespace
         import "Bar.g" as b                 # 'as' for default introduction or 'at' for a mixin
-        import "BigText.txt" binary as t    # introduces t as a binary
+        import "BigText.txt" binary as t    # introduces t as a binary, i.e. does not compile t
 
         import "Qux.g" as q from {
             , rev:Text                      # content hash of containing folder
@@ -395,52 +420,56 @@ I've decided to consolidate module access into 'import', with the various cases 
                 ]
             }
 
-        import 'default from {
-            , default:"src/main.g"
-            , rev:Text
-            , ...
-            }
-
-Remote modules are indicated by a `from` expression, typically a dict literal. The `rev` field is required, ensuring we uniquely identify a remote file and its transitive dependencies. Search hints are optional but recommended. We may use an atom instead of a string if the `from` location defines it. It is possible to build an index of modules within the module system. 
+I imagine that, in most use cases, imports will use literal expressions. In theory, it should be feasible to build an index of remote modules for adaptive integration.
 
 ### Access Control
 
-There is no notion of export control. Such a concept contradicts extensibility goals and conflicts with modules-as-mixins. However, we can easily invert this to distinguish public interfaces. We already use `conf.*` for the configuration, `asm.*` for the assembly, `env.*` for a threaded environment. We can similarly use `api.*` for a library's public interface. If this were an application language, perhaps `app.*` for application methods. 
+There is no notion of export control. That concept conflicts with my extensibility goals and with modules-as-mixins. However, we can easily invert this to explicitly distinguish public interfaces. For example, libraries may define a public `api.*` intended for integration into `env.*`. 
 
         import "MyFooLib.g" as libfoo
         env.foo = libfoo.api
-        alias libfoo.api: foo, bar, baz as qux
-        foo ::= \ old_foo -> ...
-        ...
+        libfoo.internal_method := ...
 
-There are forms of access control between subprograms. This is supported via unique atoms.
+Controlling what subprograms observe is useful for local reasoning. It starts with hiding a few definitions, but 
 
 ## Objects
 
-For concision, names within object methods are localized by default, i.e. `foo` instead of `self.foo`, and `_foo` instead of `base.foo`. Instead, we pay extra to refer to the lexical host via `module.name` or `^name`. The latter extends to hierarchical objects, e.g. `^^^method` refers three levels up. Analogous to keyword `module`, `object` (or `_object`) as an expression refers to the object namespace as a whole, i.e. so we can reference `object.[42]`.
-
-A minimal object syntax can be quite compact. I propose:
+Object syntax can and should be compact by default. I propose:
 
         object foo extends bar, baz with
             def1 = ...
             def2 := ...
 
-The compiler will introduce `spec_of.foo` then define `foo` in terms of instantiating the spec, implicitly introducing `foo.meta.spec = spec_of.foo` as a final override. The `extends` section is optional, and enables multiple inheritance. Minimum viable object spec is just three elements:
+        # desugars as
+        foo = object_named (abstract_global_path foo) extends bar, baz with 
+            def1 = ...
+            def2 := ...
+        
+        # evaluates as
+        foo = object_from_spec {
+            , name:(abstract_global_path foo)
+            , deps:[bar.spec, baz.spec]
+            , defs:\_object object -> _object with
+                def1 = ...
+                def2 := ...
+            }
 
-        defs        mixin, i.e. \base self -> ...
-        deps        list of object specifications
-        uid         unique atom for linearization
+To improve concision, expressions within objects are localized. That is, we bind `foo` as `object.foo` and `_foo` as `_object.foo`, where `object` is a keyword referencing the local object namespace, analogous to `module`. Users instead pay a small syntactic tax to access the host scope via `^foo`, `^(Expr)`, or use of `module`. Use of `^` composes, e.g. `^^^method` escapes three lexical levels. But it's best to keep syntax shallow.
 
-We'll use the common C3 algorithm for multiple inheritance (MI), using `uid` to distinguish specifications. The linearization algorithm shall verify via reflection that `uid` is associated uniquely with one specification in scope.
+Both `extends` and `with` sections are both optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). In general, `spec.name` may be any value with equality, e.g. `"foo"`. For toplevel object declarations, we use `abstract_global_path` to ensure globally unique names, but it's sufficient that names are locally unique across transitive `spec.deps`.
 
-To modify an object's definitions, I introduce a related declaration:
+To instantiate the object, the compiler applies the C3 linearization algorithm to deduplicate and merge components. The compiler uses `spec.name` to distinguish specifications, and also asserts (via reflective term annotation) that `spec.name` is unique in scope. After specifications are ordered, we apply `spec.defs` to an empty base `{}` then finally introduce `spec` as an implicit final mixin. For convenience, the compiler exposes the instantiation function via keyword `object_from_spec`, but it isn't anything special.
 
-        extend object foo with
-            ...
+Users may extend object definitions in-place:
 
-Note that this doesn't touch dependencies. Modifying object dependencies should by very rare in practice, but users may override  `spec_of.foo.deps := ...` or the full specification.
+        extend foo with
+            def1 := ...
 
-Object namespaces admit many toplevel declarations. Imports are an exception, but features that desugar to definitions are accepted, e.g. `unique`, `abstract`, and `object`. The compiler shall support `refl.*` tasks per object, ideally arranging them to run lazily when the object is used. In context of reflection, objects may define a `type_of.def1` and other associated definitions.
+This logically extracts and updates the specification then rebuilds the object. Updating definitions can be useful to fix a bug or add some new interfaces or similar. There is no dedicated syntax to update object deps because I struggle to find a nice syntax or good use case. If necessary, users are free to manually override the object, e.g. `foo ::= \ prior -> object_from_spec <| prior.spec with { deps = ... }`. 
+
+Objects support most toplevel declarations. Notable exceptions include `unique` and `import`. Objects do support hierarchical `object` declarations. In this case, names are generated based on host `spec.name` and path.
+
+*Note:* It's almost certainly an error to update an object directly, e.g. `foo.def1 := ...` instead of `extend foo with { def1 := ... }`. To resist accidents, `object_from_spec` shall implicitly `anno 'freeze` the object dict, forbidding direct updates (`with, without`). Users are free to `anno 'thaw` the dict to admit dict updates.
 
 ## Orchestration
 
@@ -454,7 +483,11 @@ Instead of just a handful of values, it might prove convenient to model static c
 
 It is easiest to model information as flowing *forward*, aligned with sequential composition. But it is very useful to model some information as flowing in other directions. A minimum viable foundation is single-assignment variables, with assignment tracked as a linear obligation. We could introduce a notion of 'tentative' assignments for auto-commit when dropped. We can assign vars with a 'future' effect that may read and wait on other vars, extending to futures and promises.
 
+
+
 We should generally be able to 'splat' a dict of effects or continuations as parameters when invoking things.
+
+
 
 We might wrap these objects, e.g. with `proc:Object`, to resist accidents. I'm currently leaning towards use of `proc` as the primary naming convention for orchestration of runtime procedures and processes.
 
@@ -469,10 +502,7 @@ We could feasibly borrow from Koru here, e.g. using `~` everywhere and `!` or `|
 - invoke the proc
   - splat a subset of args
 
-I currently use `|>` for functions, but we could readily overload it for `proc` objects. 
-
-
-
+I currently use `|>` for functions, but we could readily overload it for `proc` objects. Not convinced it's a good idea without some extra scope, though.
 
 ## Pattern Matching
 

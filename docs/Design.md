@@ -269,30 +269,49 @@ Unfortunately, fixpoint is not fully compatible with continuations. The essentia
 
 *Note:* A transformer variation of 'run' is feasible. We'd likely want to lift Alt, Cut, Fail, and Fix, while rewriting the higher-order effects. But *Extensible Effects* offers a better direction.
 
+### Abstract Effects API
+
+Instead of pattern-matching request constructors like 'Get' and 'Set', we may express requests as `eff:(\api -> api.get)` and `eff:(\api -> api.set s)`. This supports any number of effects and abstracts which effects are 'primitive' in the sense of yielding to a handler. To complete this, we further abstract `Return` and `>>=` into our API, e.g. `op >>= k = eff:(\api -> api.seq op k)`.
+
+Without local knowledge of arity, it's a little awkward to use `eff:(...)`. This could be mitigated with some ad hoc polymorphism, i.e. such that `eff:(f) x = eff:(\api -> f api x)`. This behavior can be supported by front-end compilers.
+
+*Notes:* Not every value in `api` needs to be an effect, and there is no guarantee that `api` is stable from step to step. But users may assume monad laws are respected, e.g. `(return r >>= k) = (k r)`.
+
 ### Extensible Effects
 
-Instead of pattern-matching request constructors like 'Get' and 'Set', we could express requests as `\api -> api.get` and `\api -> api.set s`. This efficiently supports a large number of effects and abstracts which effects are 'primitive' in terms of yielding. We can further integrate `Return` and `>>=` through this API, perhaps using `api.seq` for `>>=`, and `api.r` for return/result. Users may test which effects are available.
+With `eff:(\api -> ...)`, the effect is abstract but not extensible. We cannot add metadata. There are no handles to override or tune behavior. The only affordances are to curry arguments or run the effect. With extensible effects, we can feasibly support composition in more dimensions. 
 
-I propose tag `eff:(\api -> ...)` to clearly distinguish effects from functions. It also doubles as a calling convention of sorts, so we could later mix effects models. 
+Extensibility is the purview of objects. To support extensible effects, `eff:Object` is a good start. Some observations:
 
-        op >>= k = eff:(\api -> api.seq op k).
+- I still want that `eff:` tag as a calling convention, i.e. so I'm not guessing at role. 
+- With ad-hoc polymorphism, feasible to mix `eff:(\api -> ...)` with `eff:Object`.
+  - This allows for lightweight effects in common cases, use objects selectively.
+  - Also simplifies getting started, don't need to immediately support objects.
+- Proposed object structure: `op.*` as primary interface (avoid polluting toplevel).
+  - `op.run` - the main event, an effect (of type `eff:(...)`)
+  - `op.args` - var-args list, append on curry
+  - `op.kwarg.*` - (tentative) special syntax for named args, also `op.kwarg_list`
+  - `op.branch.*` - (tentative) named branch continuations, also `op.branch_list`
+  - `op.effect.*` - (tentative) named callback effects, also `op.effect_list`
+  - branch and effect may use Koru-style invocation to compose effects vertically.
+- Note `api` is not bound before `op.run`; `eff:Object` is 'free', `api` is 'linear' 
+- Use mixins and inheritance of effects as basis for composition.
 
-Although this is flexible enough to support stateful APIs, I believe best practice should be subprogram-scoped extensions. Above, I propose a generic `using` method that applies extension `ext` in scope of `op`. To maximize extensibility, I propose to model `api` as an object and `ext` as a mixin. Multiple inheritance can automatically deduplicate and merge compatible features. We can detect structurally-incompatible extensions based on explicit overrides and linearization conflicts.
-
-Applying `ext` directly to `api` would gives the client final say. In practice, the host will want to control which fields or effects the client can directly override. This can be supported by instead applying `ext` to a precursor for `api`, i.e. host provides initial Base, apply stack of client `ext`, host applies final mixin. Names 'introduced' by a final mixin would conflict with user definitions.
+The main observation here is that we now can easily introduce new 'composition' or 'invocation' types to these effects through `op`, in addition to ad hoc overrides of helper methods and such. We can also add plenty of metadata, e.g. some documentation, arity, perhaps some type info, perhaps even reflection tasks.
 
 ## Modules
 
-A module is represented by a file, and represents a mixin object. The assembler provides a built-in front-end compiler for ".g" files, but *User-Defined Syntax* is supported, with users defining a monadic front-end compilers aligned to file extensions, and the assembler bootstrapping upon override.
+A module is represented by a file and represents an object extension. The assembler provides a built-in front-end compiler for ".g" files, but *User-Defined Syntax* is supported, with users defining a monadic front-end compilers aligned to file extensions, and the assembler bootstrapping upon override.
 
 To simplify architecture, file dependencies are constrained: a file may reference only local files within the same folder or subfolders (no parent-relative ("../") or absolute paths), or content-addressed remote files (by DVCS revision hash and filename). File dependencies must form a directed acyclic graph. Files and subfolders whose names start with "." are also hidden from the module system.
 
-A module is integrated by 'including' it as a mixin. Any prior definitions or inclusions effectively model prior mixins. We can translate inclusions to a hierarchical element. Thus, I propose a few import forms:
+A module is integrated by 'including' its definitions as a mixin. Any prior definitions or inclusions effectively model prior mixins. We can translate inclusions to a hierarchical element. Thus, I propose a few import forms:
 
 - `import ...` - include-like mixins; module rewrites host `Base`, shares `Self`.
+- `import ... as m` - introduces `m` with defaults then applies `import ... at m` 
+  - Default is `m = {env:Self.env}` for adaptability and user-defined syntax.
 - `import ... at m` - mixin applied to `m`, binds to host `Base.m`, and `Self.m`.
-- `import ... as m` - intro default `m = { env: Self.env }` then `import ... at m`.
-- `import ... binary as b`, introduces a binary, does not inspect or compile file. 
+- `import ... binary as b`, introduces a raw file binary, does not compile 
 
 Hierarchical imports (the 'as' and 'at' forms) are compatible with lazy loading. Note that we do not close the fixpoint for hierarchical imports, thus hierarchical definitions remain open to extension.
 
@@ -510,38 +529,62 @@ I propose to express the constraint system DSL as an abstract effects API. Users
 
 ## Direct-Style Assembly
 
-To support direct-style assembly, we express assembly mnemonics as writer effects with a concise API. To support a concise API without polluting the toplevel namespace, I assume a syntactic sugar translating `.op Args` to `eff:(\api -> api.op Args)`. This isn't *necessarily* our final writer: in the general case, we might assume a staged writer with abstract layout and labels. For aesthetics, I assume a Haskell-like do notation that also accepts results on RHS, i.e. `action -> result`, so we can keep operations neatly aligned.
+To support direct-style assembly, we express assembly mnemonics as writer effects with a concise API. Logically, we're 'writing' an assembly representation, and higher-order effects serve the role of conventional assembly macros. For aesthetics, assume a 'do' notation that accepts `action -> result` to capture return values.
 
         writeln msg = do
-            .rodata (msg ++ [10])       -> msg_loc
-            .movl 'rdi 1
-            .movl 'rsi msg_loc
-            .movl 'rdx (1 + len msg)
-            .syscall
+            rodata (msg ++ [10])       -> msg_loc
+            movl 'rdi 1
+            movl 'rsi msg_loc
+            movl 'rdx (1 + len msg)
+            syscall
 
         exit = do
-            .movl 'rax 60
-            .xor 'rdi 'rdi
-            .syscall
+            movl 'rax 60
+            xor 'rdi 'rdi
+            syscall
 
         main = do
-            .global "_start"
+            global "_start"
             writeln "Hello, World!"
             exit
 
         asm.result = mkelf main
 
-In direct style, users may freely mix writing code and static layout (e.g. `.rodata` and `.globl`). It is left to an effect runner - in this case, `mkelf` - to provide the API (defining `.movl`, `.rodata`, etc.), build state, and write contents into different sections as needed.
+Direct-style assembly has a strong pressure towards sequential composition. It isn't difficult to abstract structured procedural code locally, e.g. generating assembly for conditional behavior and loops. But non-local coordination would benefit from a flexible composition layer. 
 
-Expression of assembly in this style does not offer much advantage over conventional assembly languages. But first-class assembly emitters are more robust than conventional assembly macros, and our host language is highly extensible. Some features are a simple extensions to the direct style:
+Useful extensions that preserve direct style:
 
-- Express subroutines, `.rodata`, and similar structures as *singletons*. Leverage state to ensure singletons are 'written' exactly once, on demand. This reduces need to define resources ahead of time then reference them by label. Analogous to templated code. Easily extends to content-addressed sharing, assuming position-independent code.
-- Maintain more context, e.g. registers in use, basic structure of memory, units on numbers, assumptions and obligations for resource management. We can extend writer effects like `.movl` to manage some of this, but most would be manual. We can leverage this state to detect conflicts, allocate registers, automate cleanup, etc..
-- Program search, based on context. We can use alt/fail/cut effects and simply undo our writes when we don't like the outcomes. This supports lightweight program search. However, we must be careful to never lose control of search. This suggests binding each search to a stable identifier, which in turn requires syntactic support.
+- *singletons* - leverage state to ensure certain things (e.g. subroutines, static data) are written only once, when first referenced. In case of read-only structures, content-addressing can avoid duplicates.
+- *context* - leverage state to maintain an abstract interpretation of machine state and user assumptions. Leverage this context for visualization, validation, and backtracking program search.
+- *promises* - single-assignment variables provide a lightweight approach to non-local coordination. Though, any *monotonic* approach will do. We can leverage shift-reset to 'wait' on a promise.
 
-Direct-style assembly imposes a strong pressure towards sequential composition: sequential mnemonic writers, sequential program counter, sequential call-return. However, even for code that runs sequentially, we'll often benefit from a flexible decomposition of behavior. For example, in producer-consumer patterns, it is convenient to define producers and consumers independently then fuse them into a single assembly. To resolve this, I propose an assembly-time orchestration model.
+*Aside:* A challenge with assembly is to avoid polluting the toplevel namespace. This could be supported via defining assembly within objects (inherit from `x86` for example), or via lightweight effects APIs (so `.movl args` expands to `eff:(\api -> api.movl args)`).
 
-## Orchestrated Assembly
+## Structured Assembly
+
+Ideas to extend composition beyond what direct-style can easily afford.
+
+### Branch Continuations
+
+### Open Loops
+
+### Obligations
+
+### Constraint
+
+## Distributed Assembly
+
+Ideally, we can effectively assemble concurrent, distributed, heterogeneous systems, and any deployment code. That's my scalability goal at play. Direct-style assembly won't get us there. We'll need a more flexible concept of composition, but without undermining the assembly vibe.
+
+Some ideas:
+
+- We'll need a notion of composition across heterogeneous systems, perhaps adapting different parts of an assembly to different targets.
+- Deployment, the code to send the code, may need to be an explicit part of our model. 
+- 
+
+
+
+
 
 My goal is flexible composition, decomposition, and modularization of behavior without undermining the assembly vibe. That is, users must retain the low-level control of direct-style assembly, but we can admit a more flexible integration. Where a conventional compiler abstracts over assembly, an orchestrated assembly takes assembly emitters as its base nodes but helps with code fusion and integration of labels.
 
