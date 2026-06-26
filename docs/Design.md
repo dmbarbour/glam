@@ -83,13 +83,19 @@ It's best to design a syntax for constructing objects that avoids observing 'bas
 
 ### Singleton Instance
 
-For stateless objects, we don't need more than one object instance. Instead of presenting a `Dict -> Dict -> Dict` function, we can directly instantiate the dictionary while preserving the mixin under a special interface. To support further overrides, we define a 'Spec' interface that includes the mixin.
+Instead of a `Dict -> Dict -> Dict` structure, we can model objects as a `Dict` that defines `spec` and other fields. The `spec` would include the mixin and perhaps some metadata - a unique ID and inheritance list - to support multiple inheritance. Users can access the instantiated version of the object and still support extension and override via `spec`.
+
+With singleton instance, we might use annotations to 'freeze' the Dict to prevent accidental update, because updates should use the extension mechanism instead.
 
 ### Multiple Inheritance
 
-We can feasibly model multiple inheritance, where an object inherits from several others that may share ancestors. We can apply a linearization algorithm, ensuring each shared ancestor is mixed in only once and in a consistent order. 
+We can model multiple inheritance, where an object inherits from several others that may share ancestors. We apply a linearization algorithm (such as C3) to ensure each shared ancestor is mixed-in only once and in a consistent order.
 
-Linearization requires an identifier to distinguish whether two specifications are the same. This should be paired with an assertion that specifications with same identifier are equivalent, such that the assumption can be verified based on structural or referential equality. In context of singleton instantiations, all the necessary information could be held under the 'spec' interface within a dictionary.
+Linearization requires an identifier to distinguish when two specifications are the same. In practice, we can use arbitrary values in this role, e.g. "A" and "B", but also assert (with reflection and referential equality) that no identifier is shared by two different specifications in scope of linearization.
+
+The metadata required for multiple inheritance is easily included in object `spec` from singleton instance. 
+
+*Note:* I do not recommend use of spec names for 'is-a' purposes. The alignment between inheritance and types is weak.
 
 ### Explicit Override
 
@@ -119,11 +125,19 @@ This can provide a foundation for allocating unique identifiers or building tabl
 
 ### Stateful Objects
 
-It is expensive to maintain object state in terms of stateful specifications. Each state update would extend a 'chain' of specifications, an append-only log of every object's history. For efficient state, we must flatten the log, i.e. eliminate intermediate states. To resolve this, we must maintain state separately from the mixin structure.
+We can model conventional heap-based objects. Objects include an allocated reference into a shared 'heap'. Methods are modeled effectfully, with implicit access to the heap. Objects may be freely shared in scope of the heap. The heap may simply be a dict value with a 'next' allocator. Thus, we can also model an 'image': a collection of 'public' objects paired with a heap. We can copy or fork images. 
 
-One option is pass around something like a `(Spec, State)` pair. 
+I don't have a strong use case for stateful objects in this project, but they're easy to model.
 
-Alternatively, we can support pass-by-ref: design objects to operate in an effectful context, allocate and assign `obj.HeapRef` upon instantiation, interact with the object only within context. We can freely mix stateful and stateless objects. We can leverage the *Ephemerons* pattern for automatic garbage collection of heap state. Essentially, we can support the popular OO programming style.
+### Method Objects
+
+We can model lambdas as objects. To 'apply' an object as a function, we introduce or override 'arg', then we read 'result'. The result may be another method object or lambda, supporting curried arguments. 
+
+We're paying non-trivial overhead to rebuild the object before extracting 'result'. What we gain is an opportunity: The object may have flexible metadata, documentation, or visualizations built-in. The object may offer tuning parameters that may be adjusted, or keyword arguments with defaults. We can inherit from the object to tune these behaviors.
+
+Mutually-interdependent methods benefit from a 'host' object. This is also true for method objects. Hence, this is an obvious use case for hierarchical objects.
+
+Multimethods should be a use case of method objects. Instead of global multimethod tables, each multimethod would maintain its own local tables, with users extending it via mixins. We can 'inherit' from a generic multimethod template that provides the common dispatch logic, perhaps with a few heuristic tuning parameters.
 
 ## Effects
 
@@ -271,33 +285,15 @@ Unfortunately, fixpoint is not fully compatible with continuations. The essentia
 
 ### Abstract Effects API
 
-Instead of pattern-matching request constructors like 'Get' and 'Set', we may express requests as `eff:(\api -> api.get)` and `eff:(\api -> api.set s)`. This supports any number of effects and abstracts which effects are 'primitive' in the sense of yielding to a handler. To complete this, we further abstract `Return` and `>>=` into our API, e.g. `op >>= k = eff:(\api -> api.seq op k)`.
+Instead of pattern-matching request constructors like 'Get' and 'Set', we might express requests as `eff:(\api -> api.get)` and `eff:(\api -> api.set s)`. This supports any number of effects and abstracts which effects are 'primitive' in the sense of yielding to a handler. To complete this, we further abstract `Return` and `>>=` into our API, e.g. `op >>= k = eff:(\api -> api.seq op k)`.
 
-Without local knowledge of arity, it's a little awkward to use `eff:(...)`. This could be mitigated with some ad hoc polymorphism, i.e. such that `eff:(f) x = eff:(\api -> f api x)`. This behavior can be supported by front-end compilers.
+For concision, a front-end compiler could desugar `.op` to `eff:(\api -> api.op)` and apply effects via `(eff:fn) x = eff:(\api -> fn api x)`. This supports concise, lightweight effects without tediously wrapping them in tags, functions, or intermediate definitions, e.g. `op >>= k = .seq op k`.
 
-*Notes:* Not every value in `api` needs to be an effect, and there is no guarantee that `api` is stable from step to step. But users may assume monad laws are respected, e.g. `(return r >>= k) = (k r)`.
+*Notes:* Not every value in `api` needs to be an effect, i.e. we ca and there is no guarantee that `api` is stable from step to step. But users may assume monad laws are respected, e.g. `(return r >>= k) = (k r)`.
 
 ### Extensible Effects
 
-With `eff:(\api -> ...)`, the effect is abstract but not extensible. We cannot add metadata. There are no handles to override or tune behavior. The only affordances are to curry arguments or run the effect. With extensible effects, we can feasibly support composition in more dimensions. 
-
-Extensibility is the purview of objects. To support extensible effects, `eff:Object` is a good start. Some observations:
-
-- I still want that `eff:` tag as a calling convention, i.e. so I'm not guessing at role. 
-- With ad-hoc polymorphism, feasible to mix `eff:(\api -> ...)` with `eff:Object`.
-  - This allows for lightweight effects in common cases, use objects selectively.
-  - Also simplifies getting started, don't need to immediately support objects.
-- Proposed object structure: `op.*` as primary interface (avoid polluting toplevel).
-  - `op.run` - the main event, an effect (of type `eff:(...)`)
-  - `op.args` - var-args list, append on curry
-  - `op.kwarg.*` - (tentative) special syntax for named args, also `op.kwarg_list`
-  - `op.branch.*` - (tentative) named branch continuations, also `op.branch_list`
-  - `op.effect.*` - (tentative) named callback effects, also `op.effect_list`
-  - branch and effect may use Koru-style invocation to compose effects vertically.
-- Note `api` is not bound before `op.run`; `eff:Object` is 'free', `api` is 'linear' 
-- Use mixins and inheritance of effects as basis for composition.
-
-The main observation here is that we now can easily introduce new 'composition' or 'invocation' types to these effects through `op`, in addition to ad hoc overrides of helper methods and such. We can also add plenty of metadata, e.g. some documentation, arity, perhaps some type info, perhaps even reflection tasks.
+We can build extensible effects upon method objects (MO). Two forms, `MO` and `eff:MO`, may be mixed freely and manipulated when available. The former should return `eff:(...)` after receiving one or more arguments. The latter anticipates `api` as the first argument, but the currying rule for effects still applies.
 
 ## Modules
 
@@ -531,20 +527,20 @@ I propose to express the constraint system DSL as an abstract effects API. Users
 
 To support direct-style assembly, we express assembly mnemonics as writer effects with a concise API. Logically, we're 'writing' an assembly representation, and higher-order effects serve the role of conventional assembly macros. For aesthetics, assume a 'do' notation that accepts `action -> result` to capture return values.
 
-        writeln msg = do
+        writeln msg = using x86 do
             rodata (msg ++ [10])       -> msg_loc
             movl 'rdi 1
             movl 'rsi msg_loc
             movl 'rdx (1 + len msg)
             syscall
 
-        exit = do
+        exit = using x86 do
             movl 'rax 60
             xor 'rdi 'rdi
             syscall
 
         main = do
-            global "_start"
+            x86.global "_start"
             writeln "Hello, World!"
             exit
 
@@ -562,7 +558,7 @@ Useful extensions that preserve direct style:
 
 ## Structured Assembly
 
-Ideas to extend composition beyond what direct-style can easily afford.
+Ideas to extend composition beyond what direct-style can easily afford. We should be able to support most of these via method objects.
 
 ### Branch Continuations
 

@@ -47,10 +47,10 @@ Proposed keywords:
         module, abstract, shadow, using             namespace
         anno                                        annotations
         unique, abstract_global_path                special atoms
-        with, without                               dict update
+        with, without                               dict updates
         do                                          effects
         object, extend, extends                     objects
-        object_from_spec, object_named              anonymous objects
+        object_from_spec                            anonymous objects
 
         TBD:
         orchestration, pattern matching, conditionals
@@ -107,7 +107,7 @@ To this end, we might use a pattern such as defining `final_of.foo = _foo` then 
 
 Name shadowing, where a function argument or local variable accidentally masks another name defined or declared in lexical scope, is a common source of subtle bugs. Humans are a lot more flexible about referential context than a lambda calculus, thus easily overlook the error when reading code. To resist this bug, we'll warn on name shadowing by default.
 
-It is feasible to introduce a special form to admit shadowing, such as `shadow Name(, Name)* in Expr`. But I'm not convinced this is a good idea. We can explore shadowing further via language extensions.
+As a special case, we shadow *all* the names in `using` or `object` scopes. Instead, users write `^name` to escape the shadowing context. I hope this sort of bulk shadowing will be structurally clear, easier for users to track. 
 
 ### Unused Names
 
@@ -148,16 +148,17 @@ Operators may support limited ad-hoc polymorphism. For example, `>` could compar
 
 ## Application
 
-Application is essentially expressed as a whitespace 'operator', i.e. `f x` applies `f` to `x`. Usually, we apply pure functions. But in context of ad hoc polymorphism, we might extend application to effects and objects:
+Application is essentially expressed as a whitespace 'operator', i.e. `f x` applies `f` to `x`. It's the compiler that has final say on how application is interpreted. I propose to support three forms of application:
 
-- Application of effects, `(eff:f) x = eff:(\api -> f api x)`, simplifies integration of lightweight effects APIs, enabling curried arguments and reducing local knowledge of arity.
-- Application of objects, recognized by 'spec' and 'args', might apply a mixin to extend a list, i.e. `args ::= \ prior -> prior ++ [new_arg]`. Supports var-args.
+- lambdas, lazy, built-in, evaluate by substitution.
+- objects, `{spec:..., _}`. inject `arg`, extract `result`.
+- effects, `(eff:fn) x = eff:(\api -> fn api x)` (defer `api`)
 
-Functions, effects, and objects are likely all we need, but it is feasible to extend application further.
+We'll generally model advanced features (multimethods, keywords, observability, etc.) via 'objects'. 
 
 ## Effects
 
-We'll almost directly adopt Haskell's do notation. For aesthetic reasons, we'll support both `var <- op` and `op -> var`. Semicolons can serve as virtual line separators as needed. To support concise, convenient effects without polluting the toplevel namespace, we'll desugar `.name` to `eff:(\api -> api.name)` and define application to work with effects: `(eff:f) x = eff:(\api -> f api x)`. RecursiveDo is implicit and benefits from forbidden shadowing.
+We'll almost directly adopt Haskell's do notation. For aesthetic reasons, we'll support both `var <- op` and `op -> var`. Semicolons can serve as virtual line separators as needed. To support concise, convenient effects without polluting the toplevel namespace, I propose to desugar `.name` to `eff:(\api -> api.name)` and define application to work with effects: `(eff:f) x = eff:(\api -> f api x)`. 
 
 Aesthetically, this should support a direct assembly programming style where we have a column of operations on the left and the occasional label tabbed out to the right. 
 
@@ -436,16 +437,17 @@ Controlling what subprograms observe is useful for local reasoning. It starts wi
 
 Object syntax can and should be compact by default. I propose:
 
+        # declaration
         object foo extends bar, baz with
             def1 = ...
             def2 := ...
 
-        # desugars as
-        foo = object_named (abstract_global_path foo) extends bar, baz with 
+        # desugars as expression
+        foo = object (abstract_global_path foo) extends bar, baz with 
             def1 = ...
             def2 := ...
         
-        # evaluates as
+        # roughly evaluates as
         foo = object_from_spec {
             , name:(abstract_global_path foo)
             , deps:[bar.spec, baz.spec]
@@ -456,53 +458,32 @@ Object syntax can and should be compact by default. I propose:
 
 To improve concision, expressions within objects are localized. That is, we bind `foo` as `object.foo` and `_foo` as `_object.foo`, where `object` is a keyword referencing the local object namespace, analogous to `module`. Users instead pay a small syntactic tax to access the host scope via `^foo`, `^(Expr)`, or use of `module`. Use of `^` composes, e.g. `^^^method` escapes three lexical levels. But it's best to keep syntax shallow.
 
-Both `extends` and `with` sections are both optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). In general, `spec.name` may be any value with equality, e.g. `"foo"`. For toplevel object declarations, we use `abstract_global_path` to ensure globally unique names, but it's sufficient that names are locally unique across transitive `spec.deps`.
+The `extends` and `with` sections are both optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). In general, `spec.name` may be any value with equality, e.g. `"foo"`. Toplevel object declarations use `abstract_global_path` to ensure globally unique names, but it's sufficient that we don't reuse a name for two different specs across transitive deps.
 
-To instantiate the object, the compiler applies the C3 linearization algorithm to deduplicate and merge components. The compiler uses `spec.name` to distinguish specifications, and also asserts (via reflective term annotation) that `spec.name` is unique in scope. After specifications are ordered, we apply `spec.defs` to an empty base `{}` then finally introduce `spec` as an implicit final mixin. For convenience, the compiler exposes the instantiation function via keyword `object_from_spec`, but it isn't anything special.
+To instantiate the object, the compiler applies the C3 linearization algorithm to deduplicate and merge components. The compiler uses `spec.name` to distinguish specifications, and asserts (via reflective term annotation) that `spec.name` is not used for two different specs in linearization scope. After specifications are ordered, we apply `spec.defs` to an empty base `{}` then finally introduce `spec` as an implicit final mixin. The compiler exposes the instantiation function via keyword `object_from_spec`, but it isn't anything special.
 
-Users may extend object definitions in-place:
+We also have asyntax `extend Object with ...`, which is analogous to `Dict with ...` but instead updates the specification then re-instantiates the object. As with the `object ...` this also may be used both as declaration and expression. 
 
         extend foo with
             def1 := ...
 
-This logically extracts and updates the specification then rebuilds the object. Updating definitions can be useful to fix a bug or add some new interfaces or similar. There is no dedicated syntax to update object deps because I struggle to find a nice syntax or good use case. If necessary, users are free to manually override the object, e.g. `foo ::= \ prior -> object_from_spec <| prior.spec with { deps = ... }`. 
+        # desugars as
+        foo := extend _foo with 
+            def1 := ...
+
+In contrast to `object Name ...`, the `extend Object with` variant updates `spec.defs` then lazily rebuilds the object. There is no dedicated syntax for updating `spec.name` or `spec.deps`, and I struggle to think of a non-contrived use case. But, if necessary, users have the option to manually edit specifications and rebuild, e.g. `foo ::= \ prior -> prior.spec |> edit_spec |> object_from_spec`. 
 
 Objects support most toplevel declarations. Notable exceptions include `unique` and `import`. Objects do support hierarchical `object` declarations. In this case, names are generated based on host `spec.name` and path.
 
-*Note:* It's almost certainly an error to update an object directly, e.g. `foo.def1 := ...` instead of `extend foo with { def1 := ... }`. To resist accidents, `object_from_spec` shall implicitly `anno 'freeze` the object dict, forbidding direct updates (`with, without`). Users are free to `anno 'thaw` the dict to admit dict updates.
+*Note:* It's usually an error to update an object as a dict, e.g. `foo.def1 := ...` instead of `extend foo with { def1 := ... }`. To resist accidents, `object_from_spec` shall implicitly `anno 'freeze` the returned dict. Unless users explicitly `anno 'thaw` the dict, regular dict updates diverge with error.
+
+*Note:* If using objects statically, e.g. for macros or toplevel imports, either avoid inheritance or bind it to prior forms, e.g. `object foo extends _bar, _baz`. Otherwise, `_foo.op` generally refers to *future* extensions of `bar` or `baz`. 
+
+### Multimethods (Defer)
+
+I'd like to support multimethods, but I'll just leave it to macros over method objects for now. 
 
 ## Orchestration
-
-### Brainstorming
-
-I propose to model orchestration components as objects. The user applies a bundle of continuations and effects parameters via overrides. It may be useful to include defaults in some cases, e.g. define some continuations or effects in terms of others, and declare a minimal specifications of overrides (similar to Haskell typeclasses). The component is also situated, sequentially, within some context. Multiple results - emitters - are defined contingent on overrides and env.
-
-The static context is determined at assembly-time. It describes features such as runtime locations where a subprogram looks for inputs.  Usefully, it may include first-class effects, making some effects available to continuations. We could use such effects to express open loops without explicit recursion. 
-
-Instead of just a handful of values, it might prove convenient to model static context as something closer to tacit programming environment in its own right.
-
-It is easiest to model information as flowing *forward*, aligned with sequential composition. But it is very useful to model some information as flowing in other directions. A minimum viable foundation is single-assignment variables, with assignment tracked as a linear obligation. We could introduce a notion of 'tentative' assignments for auto-commit when dropped. We can assign vars with a 'future' effect that may read and wait on other vars, extending to futures and promises.
-
-
-
-We should generally be able to 'splat' a dict of effects or continuations as parameters when invoking things.
-
-
-
-We might wrap these objects, e.g. with `proc:Object`, to resist accidents. I'm currently leaning towards use of `proc` as the primary naming convention for orchestration of runtime procedures and processes.
-
-### Syntax 
-
-We could feasibly borrow from Koru here, e.g. using `~` everywhere and `!` or `|` for bindings. 
-
-- declare a proc
-- define basic emitters
-  - access to env, eff, cont
-- define flow emitters
-- invoke the proc
-  - splat a subset of args
-
-I currently use `|>` for functions, but we could readily overload it for `proc` objects. Not convinced it's a good idea without some extra scope, though.
 
 ## Pattern Matching
 
