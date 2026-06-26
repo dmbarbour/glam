@@ -131,13 +131,17 @@ I don't have a strong use case for stateful objects in this project, but they're
 
 ### Method Objects
 
-We can model lambdas as objects. To 'apply' an object as a function, we introduce or override 'arg', then we read 'result'. The result may be another method object or lambda, supporting curried arguments. 
+        {apply:f,_} x = f x
 
-We're paying non-trivial overhead to rebuild the object before extracting 'result'. What we gain is an opportunity: The object may have flexible metadata, documentation, or visualizations built-in. The object may offer tuning parameters that may be adjusted, or keyword arguments with defaults. We can inherit from the object to tune these behaviors.
+With a little support from assembler or front-end compiler, users can transparently apply dicts or objects as functions. The object form supports extensible functions, i.e. with overrides influencing 'apply' behavior. For example, users could expose tuning parameters or even deep implementation details.
 
-Mutually-interdependent methods benefit from a 'host' object. This is also true for method objects. Hence, this is an obvious use case for hierarchical objects.
+It is convenient to organize mutually-interdependent methods into a host object. This is a clear use case for hierarchical objects.
 
-Multimethods should be a use case of method objects. Instead of global multimethod tables, each multimethod would maintain its own local tables, with users extending it via mixins. We can 'inherit' from a generic multimethod template that provides the common dispatch logic, perhaps with a few heuristic tuning parameters.
+Abstract method objects require clients to introduce some definitions via override. This pattern is useful for static integration, analogous to boxes-and-wires programming styles. The 'wires' are definitions representing continuations, callbacks, channels, etc.. The 'boxes' become hierarchical objects that inherit from abstract methods. The resulting effect may *also* be an abstract 'box', with some 'wires' left undefined. This enables a robust form of program composition.
+
+Multimethods are also a use case for method objects. A multimethod inherits from a generic template that defines heuristic dispatch functions. Clients extend the multimethod, adding dispatch cases to a table with suitable metadata. Those cases may be abstract or tunable method objects to support a final integration with the multimethod. 
+
+Yet another use case is var-args. For example, we could arrange for `apply` to simply return the current object with a mixin applied, or construct a new object but transferring aggregated state. We could maintain a `result` from step to step, such that at any (or every) step the user may fetch `result`.
 
 ## Effects
 
@@ -287,13 +291,15 @@ Unfortunately, fixpoint is not fully compatible with continuations. The essentia
 
 Instead of pattern-matching request constructors like 'Get' and 'Set', we might express requests as `eff:(\api -> api.get)` and `eff:(\api -> api.set s)`. This supports any number of effects and abstracts which effects are 'primitive' in the sense of yielding to a handler. To complete this, we further abstract `Return` and `>>=` into our API, e.g. `op >>= k = eff:(\api -> api.seq op k)`.
 
-For concision, a front-end compiler could desugar `.op` to `eff:(\api -> api.op)` and apply effects via `(eff:fn) x = eff:(\api -> fn api x)`. This supports concise, lightweight effects without tediously wrapping them in tags, functions, or intermediate definitions, e.g. `op >>= k = .seq op k`.
+For concision, a front-end compiler could desugar `.op` to `eff:(\api -> api.op)` and apply effects via `(eff:f) x = eff:(\api -> f api x)`. This supports concise, lightweight effects without tediously wrapping them in tags, functions, or intermediate definitions, e.g. `op >>= k = .seq op k`.
 
 *Notes:* Not every value in `api` needs to be an effect, i.e. we ca and there is no guarantee that `api` is stable from step to step. But users may assume monad laws are respected, e.g. `(return r >>= k) = (k r)`.
 
 ### Extensible Effects
 
-We can build extensible effects upon method objects (MO). Two forms, `MO` and `eff:MO`, may be mixed freely and manipulated when available. The former should return `eff:(...)` after receiving one or more arguments. The latter anticipates `api` as the first argument, but the currying rule for effects still applies.
+For effects that accept arguments, we can generally leverage method objects to extend behavior, i.e. `{apply:f, _}`. Unfortunately, that doesn't work for nullary effects, and I'd hate to force a `()` argument. Instead, for purpose of running effects, we shall recognize `{eff:_, _}`. We won't curry arguments for anything but the singleton `eff:f` case, but users may combine `{eff:_, apply:_, _}` to express an effect that is runnable as-is yet optionally accepts more arguments (i.e. a variation on var-args).
+
+*Note:* We'll generally treat the RHS of `eff:_` as opaque.
 
 ## Modules
 
@@ -479,7 +485,7 @@ The main motive for bootstrapping is reproducibility: stabilize the compiler, ma
 
 ### Macros
 
-Macros support metaprogramming at the syntax layer, often in terms of rewriting text, tokens, etc.. It is convenient to express macros effectfully, with 'read' and 'write' effects at flexible levels of abstraction. The compiler can restrict effects to protect scope, e.g. ensuring balanced braces, brackets, and parentheses, while still providing enough flexibility for macro DSLs.
+Macros support metaprogramming at the syntax layer, often in terms of rewriting text, tokens, etc.. It is convenient to express macros effectfully, with 'read' and 'write' effects at flexible levels of abstraction. The compiler can restrict effects to protect scope, e.g. ensuring balanced braces, brackets, and parentheses, while providing enough flexibility for macro DSLs.
 
 Macros may be defined within the normal namespace, but macro invocations must be distinguished syntactically. For the ".g" syntax, we'll use `@macro_name` for macro calls. If we had to look at definitions to determine which names are macros, that would interfere with lazy loading.
 
@@ -548,82 +554,35 @@ To support direct-style assembly, we express assembly mnemonics as writer effect
 
 Direct-style assembly has a strong pressure towards sequential composition. It isn't difficult to abstract structured procedural code locally, e.g. generating assembly for conditional behavior and loops. But non-local coordination would benefit from a flexible composition layer. 
 
-Useful extensions that preserve direct style:
+A good question is what extensions we can introduce without damaging the 'vibe' of direct-style assembly. Direct-style is write-mostly, i.e. we aren't directly reading state or branching on it. We want to keep most code close to the assembly, too.
 
-- *singletons* - leverage state to ensure certain things (e.g. subroutines, static data) are written only once, when first referenced. In case of read-only structures, content-addressing can avoid duplicates.
-- *context* - leverage state to maintain an abstract interpretation of machine state and user assumptions. Leverage this context for visualization, validation, and backtracking program search.
-- *promises* - single-assignment variables provide a lightweight approach to non-local coordination. Though, any *monotonic* approach will do. We can leverage shift-reset to 'wait' on a promise.
+Some ideas for fitting extensions:
 
-*Aside:* A challenge with assembly is to avoid polluting the toplevel namespace. This could be supported via defining assembly within objects (inherit from `x86` for example), or via lightweight effects APIs (so `.movl args` expands to `eff:(\api -> api.movl args)`).
+- *declared singletons* - generate subroutines or static resources once, on demand, instead of preparing them ahead of time. Analogous to working with templated code.
+- *abstract interpretation* - arrange for our basic effects such as `movl` to track register usage and abstract memory layout. Use for reasoning and program search.
+- *obligations* - track abstract resources and tasks in state, e.g. to free a pointer or drop a stack frame or update a bit flag. Mark them off when done. Verify things happen in order if an order is specified. I.e. enforced user comments.
+- *program search* - support the alt/cut/fail effects. Users don't check assumptions, but 'write' them and maybe it fails. We could also support weighted search, writing preferences. 
+
+*Aside:* Above, I use `using x86` to avoid polluting the toplevel namespace, but a viable alternative is to leverage lightweight effects, e.g. `.movl 'rax 60`, pushing the assembly mnemonics directly into the effects API.
 
 ## Structured Assembly
 
-Ideas to extend composition beyond what direct-style can easily afford. We should be able to support most of these via method objects.
+Leverage hierarchical objects and abstract method objects as basis for structured assembly.
 
 ### Branch Continuations
 
 ### Open Loops
 
+### Loop Fusion
+
+### Session Types
+
+### Futures and Promises
+
+### Parallel Continuations
+Dividing state, or 'reserving' it? coroutines?
+
+
 ### Obligations
 
 ### Constraint
-
-## Distributed Assembly
-
-Ideally, we can effectively assemble concurrent, distributed, heterogeneous systems, and any deployment code. That's my scalability goal at play. Direct-style assembly won't get us there. We'll need a more flexible concept of composition, but without undermining the assembly vibe.
-
-Some ideas:
-
-- We'll need a notion of composition across heterogeneous systems, perhaps adapting different parts of an assembly to different targets.
-- Deployment, the code to send the code, may need to be an explicit part of our model. 
-- 
-
-
-
-
-
-My goal is flexible composition, decomposition, and modularization of behavior without undermining the assembly vibe. That is, users must retain the low-level control of direct-style assembly, but we can admit a more flexible integration. Where a conventional compiler abstracts over assembly, an orchestrated assembly takes assembly emitters as its base nodes but helps with code fusion and integration of labels.
-
-Some design considerations:
-- Assembly or code fragments are inline by default. Use of subroutines is explicit in the base nodes.
-- Orchestrator is independent of the assembly target. We can reuse orchestration for multiple backends.
-  - e.g. x86 vs. WASM vs. LLVM vs. generated C code.
-  - different resources per backend, but should share some conceptual intentions.
-- Base components are objects. Emitters are one 'interface' for object. Orchestration another. 
-  - i.e. users can easily add emitters for new backends, or override existing emitters.
-  - we can flexibly extend the orchestrator to look at more object fields.
-- Orchestration 'flow' can be viewed as one more 'emitter'. Other flows are specializations.
-  - e.g. Component describes both x86 and flow. If generating WASM, we pick flow emitters.
-  - fractal structure, orchestration is just one way to express an assembly fragment.
-- Model emitters as hierarchical objects within the component. 
-  - attributes to select emitters instead of by name, e.g. target, weighted priority, constraints
-  - ad hoc target-specific metadata to further filter choices, e.g. preconditions, postconditions
-  - potential utility extensions, e.g. 'checkpoint' and 'undo' methods for transactional systems
-- Branch continuations, i.e. static arrowized `a :+: b` types and `left f >>> right g` compositions.
-  - Components don't close branches aggressively. Instead, extend them contextually.
-  - We can explicitly merge branches when conditions are compatible.
-  - Branches uniquely identified by names, but perhaps also extensible by metadata.
-- Parallel continuations, i.e. static arrowized `a :*: b` types and `first f >>> second g` composition.
-  - This would enable shifting of assembly ops, i.e. move all `first f` ops ahead of `second g` ops.
-  - It also admits interweaving of assembly ops, i.e. do some of `f` then some of `g`, at step boundaries.
-- Interactive sessions, i.e. consider mixing data + holes, i.e. `!a :*: ?b`, in static structures.
-  - can model holes via single-assignment variables with linear obligations
-  - could extend with 'tentative' assignments to admit auto-resolution 
-  - assign holes with an 'effect' that can read holes, extends to constraint systems
-- Higher-order interactive components as effects.
-  - Client can provide static 'effects' to components that may be invoked by them.
-  - Those effects may receive effects in turn.
-  - Open loops may be expressed as component effect provided to (some) user effects.
-- Taps or aspect-oriented join points. 
-  - Inject a prefix flow at any component, branch continuation, effect invocation, etc..
-  - Support injection by name, but also by search attributes. 
-  - Semantic taps only, should not modify the lower-level emitters.
-- Adaptive components, i.e. emitters receive controlled access to host context.
-- Lightweight validation at orchestration layer based on component and emitter metadata.
-
-There are a lot of features above, but it should simmer down to a relatively tight syntax, mostly about distinguishing continuations or named branches, higher-order components, etc.. Koru language is a good place to start for syntax that fits with my goals of avoiding deep indentation and naming all the things for overrides.
-
-I imagine several pain points remain when composing assembly, e.g. regarding fine-grained register management. This can be mitigated by adaptive components, locally automating some register management. It might prove more performant to go global with register management, e.g. extend x86 with virtual registers, explicitly define register allocation and optimize use of registers. But that reduces local user control. Perhaps a goldilocks solution is virtual registers with explicit shuffle points, where we remap explicit subsets of virtual and real registers. We can make those shuffle points adaptive.
-
-Ideally, orchestration should extend beyond a single-target assembly program to account for 'concurrent' or 'distributed' resources and heterogeneous systems. This will require a lot more support for resource management, e.g. modeling flexible transfer of behavior or ownership between systems, integration with FPGAs.
-

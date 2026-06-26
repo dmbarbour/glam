@@ -150,9 +150,9 @@ Operators may support limited ad-hoc polymorphism. For example, `>` could compar
 
 Application is essentially expressed as a whitespace 'operator', i.e. `f x` applies `f` to `x`. It's the compiler that has final say on how application is interpreted. I propose to support three forms of application:
 
-- lambdas, lazy, built-in, evaluate by substitution.
-- objects, `{spec:..., _}`. inject `arg`, extract `result`.
-- effects, `(eff:fn) x = eff:(\api -> fn api x)` (defer `api`)
+- lambda functions, lazy, built-in, evaluate by substitution.
+- method objects, `{apply:f,_} x = f x`
+- lightweight effects, `(eff:f) x = eff:(\api -> f api x)` 
 
 We'll generally model advanced features (multimethods, keywords, observability, etc.) via 'objects'. 
 
@@ -186,7 +186,7 @@ There are several structural constraints enforced by the API:
 
 These are enforced by restrictions on readers and writers, e.g. all reads on parentheses are balanced pairs, and the `#` and `@` characters are processed before macros see them. To avoid complications, reading embedded data such as numbers or texts is always abstracted. Conversely, a macro may write lazy data as abstract embedded data.
 
-There is no dedicated syntax for defining macros. To reduce need for `_name` forms, users may define macros within objects. With a decent choice of naming conventions, this won't hurt aesthetics, e.g. `@table.create` or `@macro.rules`. Of course, users are always free to extract, e.g. `foo = _MyMacroUtils.foo`. Later, meta-macros like `@macro.rules` may enable users to robustly define macros without intermediate objects.
+There is no dedicated syntax for defining macros. It is convenient to define macros within objects: we need `_names` for inheritance and extraction, but we can use normal `name` internally to the object. With careful naming, we can also support an acceptable aesthetics without extraction, e.g. `@table.create`. Eventually, `@macro.rules` might help users define macros directly.
 
 *Aside:* Most conventional use cases for macros evaporate between lazy evaluation and first-class effects, but we still benefit from embedded DSLs or abstracting namespace boilerplate.
 
@@ -479,13 +479,9 @@ Objects support most toplevel declarations. Notable exceptions include `unique` 
 
 *Note:* If using objects statically, e.g. for macros or toplevel imports, either avoid inheritance or bind it to prior forms, e.g. `object foo extends _bar, _baz`. Otherwise, `_foo.op` generally refers to *future* extensions of `bar` or `baz`. 
 
-### Multimethods (Defer)
-
-I'd like to support multimethods, but I'll just leave it to macros over method objects for now. 
-
-## Orchestration
-
 ## Pattern Matching
+
+
 
 View patterns permit more than one match, however.
 
