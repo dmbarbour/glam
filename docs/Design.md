@@ -139,9 +139,7 @@ It is convenient to organize mutually-interdependent methods into a host object.
 
 Abstract method objects require clients to introduce some definitions via override. This pattern is useful for static integration, analogous to boxes-and-wires programming styles. The 'wires' are definitions representing continuations, callbacks, channels, etc.. The 'boxes' become hierarchical objects that inherit from abstract methods. The resulting effect may *also* be an abstract 'box', with some 'wires' left undefined. This enables a robust form of program composition.
 
-Multimethods are also a use case for method objects. A multimethod inherits from a generic template that defines heuristic dispatch functions. Clients extend the multimethod, adding dispatch cases to a table with suitable metadata. Those cases may be abstract or tunable method objects to support a final integration with the multimethod. 
-
-Yet another use case is var-args. For example, we could arrange for `apply` to simply return the current object with a mixin applied, or construct a new object but transferring aggregated state. We could maintain a `result` from step to step, such that at any (or every) step the user may fetch `result`.
+Multimethods are also a use case for method objects. A multimethod inherits from a generic template that defines heuristic dispatch functions. Clients extend the multimethod, adding dispatch cases to a table with suitable metadata. Those cases may be abstract or tunable method objects to support a final integration with the multimethod.
 
 ## Effects
 
@@ -297,7 +295,7 @@ For concision, a front-end compiler could desugar `.op` to `eff:(\api -> api.op)
 
 ### Extensible Effects
 
-For effects that accept arguments, we can generally leverage method objects to extend behavior, i.e. `{apply:f, _}`. Unfortunately, that doesn't work for nullary effects, and I'd hate to force a `()` argument. Instead, for purpose of running effects, we shall recognize `{eff:_, _}`. We won't curry arguments for anything but the singleton `eff:f` case, but users may combine `{eff:_, apply:_, _}` to express an effect that is runnable as-is yet optionally accepts more arguments (i.e. a variation on var-args).
+For effects that accept arguments, we can generally leverage method objects to extend behavior, i.e. `{apply:f, _}`. Unfortunately, that doesn't work for nullary effects, and I'd hate to force a `()` argument. Instead, for purpose of running effects, handlers shall recognize `{eff:_, _}`, not limited to singletons. (More generally, handlers may support or favor alternatives to the `eff` calling convention.) We won't curry arguments for anything but the singleton `eff:f` case, but users may combine `{eff:_, apply:_, _}` to express an effect that is runnable as-is yet optionally accepts more arguments (a form of var-args).
 
 *Note:* We'll generally treat the RHS of `eff:_` as opaque.
 
@@ -483,12 +481,6 @@ The main motive for bootstrapping is reproducibility: stabilize the compiler, ma
 
 *Note:* Above bootstraps only front-end compilers. I hope to eventually bootstrap the assembler executable, i.e. with a portable definition of the executable in the module system. But that's a long term concern.
 
-### Macros
-
-Macros support metaprogramming at the syntax layer, often in terms of rewriting text, tokens, etc.. It is convenient to express macros effectfully, with 'read' and 'write' effects at flexible levels of abstraction. The compiler can restrict effects to protect scope, e.g. ensuring balanced braces, brackets, and parentheses, while providing enough flexibility for macro DSLs.
-
-Macros may be defined within the normal namespace, but macro invocations must be distinguished syntactically. For the ".g" syntax, we'll use `@macro_name` for macro calls. If we had to look at definitions to determine which names are macros, that would interfere with lazy loading.
-
 ### Editable Projections
 
 It is possible to express editable views of source texts via auxilliary methods in the language object, e.g. `env.lang.[FileExt].view`. This is a good starting point, at least. But it's coarse grained and very limiting.
@@ -496,6 +488,10 @@ It is possible to express editable views of source texts via auxilliary methods 
 To support fine-grained editable projections, it's useful to trace terms back to contributing sources. For example, a parsed integer may carry hidden metadata regarding the original source location, and even a codec. This metadata is visible via the reflection API. In theory, `conf.ide` can render a widget that ties back to original sources and supports editing thereof. 
 
 But effective support for editable projections will benefit from careful design of our parser combinators.
+
+### Macros
+
+Compilers may support macros. Macros enable metaprogramming at the syntax layer in terms of rewriting text, tokens, ASTs, etc.. It is convenient to express macros effectfully, i.e. with 'read' and 'write' effects at flexible levels of abstraction. To simplify local reasoning, the compiler may restrict the scope of macros, e.g. ensuring balanced reads and writes of parentheses.
 
 ## Reasoning
 
@@ -525,16 +521,16 @@ Front-end compilers may further contribute to reflection by exporting intermedia
 
 ### Constraint Solver
 
-Many forms of reasoning benefit from a high-performance constraint solver. I'd prefer to keep this separate from the assembler executable, but we could feasibly configure access to a constraint or SMT solver, whether remote or via dynamic linking. Access to this solver can initially be provided through the reflection API. Ideally, we eventually accelerate a constraint solver within the normal assembly instead of relying on external solvers. This would make solutions more accessible for metaprogramming of the assembly.
+Many forms of reasoning benefit from a high-performance constraint solver. To support this, we can attach the assembler to an external constraint solver, perhaps configurable, then expose it to the reflection API.
 
-I propose to express the constraint system DSL as an abstract effects API. Users don't see the 'AST' for variables or constraint rules. Instead, they effectfully assemble one and may maintain some extra context as part of doing so.
+Eventually, we may want a constraint solver to influence the assembly. This is a greater challenge because we're limited by deterministic acceleration. But it should be feasible to develop an adequate constraint solver for many use cases. 
 
 ## Direct-Style Assembly
 
-To support direct-style assembly, we express assembly mnemonics as writer effects with a concise API. Logically, we're 'writing' an assembly representation, and higher-order effects serve the role of conventional assembly macros. For aesthetics, assume a 'do' notation that accepts `action -> result` to capture return values.
+To support direct-style assembly, we express assembly mnemonics as writer effects with a concise API. Logically, we're writing an assembly representation, and higher-order effects serve the role of conventional assembly macros. For aesthetics, assume a do notation that accepts `action -> result` to capture return values.
 
         writeln msg = using x86 do
-            rodata (msg ++ [10])       -> msg_loc
+            .rodata (msg ++ [10])       -> msg_loc
             movl 'rdi 1
             movl 'rsi msg_loc
             movl 'rdx (1 + len msg)
@@ -546,43 +542,50 @@ To support direct-style assembly, we express assembly mnemonics as writer effect
             syscall
 
         main = do
-            x86.global "_start"
+            .global "_start"
             writeln "Hello, World!"
             exit
 
         asm.result = mkelf main
 
-Direct-style assembly has a strong pressure towards sequential composition. It isn't difficult to abstract structured procedural code locally, e.g. generating assembly for conditional behavior and loops. But non-local coordination would benefit from a flexible composition layer. 
+A characteristic of 'direct-style' assembly, the heart of its vibe IMO, is that it's locally write-only. Users aren't reading contexts to make decisions. Insofar as we pursue direct-style as our foundation, we should build a set of effects that returns unit values or opaque references. Extensions befitting direct-style assembly:
 
-A good question is what extensions we can introduce without damaging the 'vibe' of direct-style assembly. Direct-style is write-mostly, i.e. we aren't directly reading state or branching on it. We want to keep most code close to the assembly, too.
+- *singletons*: Declare that some resources are written only once, e.g. based on a shared name or content addressing. This allows us to write singletons on demand.
+- *write cursors*: When target code branches, instead of writing then implicitly 'closing' a branch, open a write cursor for the new branch (perhaps declaring it to continue after the end of the current one). Then write a label into the new cursor, pull it into the current one for the jump, and feel free to bounce between writing both cursors. This is analogous to a static ArrowChoice composition.
+  - We can also open heterogeneous write cursors for bss, rodata, data, stack frames, etc.. Perhaps write cursors have some user-provided typestate. 
+- *abstract interpretation*: Maintain an abstract representation of machine state and user assumptions, so we can detect conflicts. Carry this metadata with each label, so we can ensure consistent contexts on branches or jumps. 
+- *program search*: When conflicts are detected between conditions and assumptions, have alternatives as backups. Potential extensions to weighted search, integrating preferences. 
+- *constraint models*: we can build a constraint system as a form of global agreements within an assembly. We do not reading solver values while writing the assembly, but we can arrange for them to influence the next stage of assembly.
+- *obligations*: Write down what you're planning to do, some constraints on order of events, and write when you're done. The assembler can verify all obligations are fulfilled or report which ones are missed. Some features, such as write cursors or promises, may come with implict obligations.
 
-Some ideas for fitting extensions:
+There's a reasonable case to be made for some coordination effects, e.g. first-class queues for communication between subtasks shouldn't severely detract from the direct-style experience. Ultimately, direct-style is a stylistic choice, not a mandate, and users fully control effects.
 
-- *declared singletons* - generate subroutines or static resources once, on demand, instead of preparing them ahead of time. Analogous to working with templated code.
-- *abstract interpretation* - arrange for our basic effects such as `movl` to track register usage and abstract memory layout. Use for reasoning and program search.
-- *obligations* - track abstract resources and tasks in state, e.g. to free a pointer or drop a stack frame or update a bit flag. Mark them off when done. Verify things happen in order if an order is specified. I.e. enforced user comments.
-- *program search* - support the alt/cut/fail effects. Users don't check assumptions, but 'write' them and maybe it fails. We could also support weighted search, writing preferences. 
+*Aside:* Above, I use `using x86` to avoid polluting the toplevel namespace, but a viable alternative is to leverage lightweight effects, e.g. `.movl 'rax 60`, pushing the assembly mnemonics directly into the effects API. Of course, this would require something like a `mkelf_x86` variant.
 
-*Aside:* Above, I use `using x86` to avoid polluting the toplevel namespace, but a viable alternative is to leverage lightweight effects, e.g. `.movl 'rax 60`, pushing the assembly mnemonics directly into the effects API.
+## Big Ideas
 
-## Structured Assembly
+### Structured Assembly
 
-Leverage hierarchical objects and abstract method objects as basis for structured assembly.
+User-defined syntax makes it easy to define higher-level languages within the assembly system. Of course, even LLVM is higher-level than assembly. Working at a high level has potential advantages, e.g. it is difficult to analyze a process network for deadlock at the level of assembly code, and it is much easier to port a process network. 
 
-### Branch Continuations
+But I'd like to explore another direction: how might we go about expressing that process network or features of similar sophistication directly in assembly? We'll need pretty good support for modeling queues, building up the packet type, etc.. We could feasibly use session types as obligations.
 
-### Open Loops
+Most procedural language structures don't need much attention. Basic conditionals and loops are barely a step above assembly. But interesting targets include:
 
-### Loop Fusion
+- coroutines
+- process networks
+- pattern matching
+- transactions
 
-### Session Types
+We can also look at large-scale structures, such overlay networks with heterogeneous architectures, and code or configurations for deployment. 
 
-### Futures and Promises
+### Proof-Carrying Code
 
-### Parallel Continuations
-Dividing state, or 'reserving' it? coroutines?
+It is possible to express theorems on assembly, e.g. in terms of preconditions, postconditions, invariants. Expected conditions at specific control-flow steps, assuming those preconditions. And it is possible to express proofs of these theorems. It would be very convenient if we can bundle theorems and proofs together with the machine code. A separate file is acceptable.
 
+We cannot be relying on reflection to write the proofs into the generated result, but reflection could help users write proof tactics into the assembly. That is, we use an interactive mode attached to a separate SMT solver to help users edit and receive feedback about a proof. With good tactics, the proof should adjust to moderate changes in code.
 
-### Obligations
+Eventually, with accelerated solvers, we could push more to assembly-time. But even then, for fast builds we'd probably want to develop proof tactics.
 
-### Constraint
+Well, this is all a pipe dream at the moment. Will need to see what's actually feasible. The VALE project from F* language is a good place to look.
+
