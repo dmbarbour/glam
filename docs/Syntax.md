@@ -51,7 +51,7 @@ Proposed keywords:
         do                                          effects
         let, in, where                              locals
 
-        object, extend, extends, self               objects
+        object, extend, extends, self, mixin        objects
         object_from_spec                            anonymous objects
 
         TBD:
@@ -619,7 +619,7 @@ We also have asyntax `extend Object with ...`, which is analogous to `Dict with 
         extend foo with
             def1 := ...
 
-In contrast to `object Name ...`, the `extend Object with` variant updates `spec.defs` then lazily rebuilds the object. There is no dedicated syntax for updating `spec.name` or `spec.deps`, and I struggle to think of a use case, but users always have access to `foo ::= \ prior -> prior.spec |> edit_spec |> object_from_spec`. 
+In contrast to `object Name ...`, the `extend Object with` variant updates `spec.defs` then lazily rebuilds the object. There is no expression form for this, but see *Mixin Composition* and *Lightweight Extension* below. There is no dedicated syntax for updating `spec.name` or `spec.deps`, and I struggle to think of a use case, but users always have access to `foo ::= \ prior -> prior.spec |> edit_spec |> object_from_spec`. 
 
 Objects support most toplevel declarations. Notable exceptions include `unique` and `import`. Objects do support hierarchical object declarations. In this case, names are generated based on host `spec.name` and path.
 
@@ -651,7 +651,7 @@ A known weakness is that all definition updates from anonymous objects apply *af
 
 ### Explicit Scope
 
-The default scope rule with `self` and `^` is awkward in some contexts. To mitigate this, I propose an optional `as Name` modifier. When this modifier is applied, default scope is disabled, and the object is referenced only through the given name.
+The default scope rule with `self` and `^` is awkward in some contexts, especially mixins. To mitigate this, I propose an optional `as Name` modifier. When this modifier is applied, default scope is disabled, and the object is referenced only through the given name.
 
         object Name (as Name)? (extends ObjList)? (with Body)?              # object declaration
         extend Name (as Name)? with Body                                    # extend declaration
@@ -675,23 +675,27 @@ In this context, `foo.A == 6`. Note that we do not need `^a` to reference the gl
 
 ### Lightweight Extensions
 
-Perhaps we could adopt something close to Koru's syntax:
+Proposed syntactic sugar for extending objects and mixins.
 
         ~Object Body
+        Object &> mixin Body
         Object &> object _ as _ with Body
 
         ~Object as Name Body
+        Object &> mixin as Name Body
         Object &> object _ as Name with Body
 
-This saves some keystrokes and reduces some line noise. The `as Name` option may be aligned vertically with `Body` if desired. With lightweight extensions syntax, we can roughly support Koru-style composition, i.e. using method objects and mixins to pass continuations or callbacks.
-
-        foo x y = op1 x >>= op2 y >>= ~op3 
-            A a = op4 x >>=\_-> op5 a >>= ~op6
-                B := ...  
-                C c = ...
-            D ::= \ prior -> ...
+This saves some keystrokes and reduces some line noise. As another point towards concision, the compiler does not insist on `abstract` declarations for mixins. The `as Name` option may be aligned vertically with the `Body`.
 
 ## Conditionals
+
+It's easy to copy what other languages have done for conditionals, but I'm not too happy with what they've done.
+
+Some thoughts:
+
+- `match` syntax can be adopted from Haskell. I might also want an uncut `match*` version that returns a pure list of matches.
+- Basic `if then else` syntax is useful. We can also have an `if let Pattern = ...` variant. 
+- I'll probably want a `try then else` syntax, both with and without a default cut. Maybe `try*` for the branching version.  
 
 ### Booleans
 
@@ -731,3 +735,16 @@ As with Haskell, we don't need keywords to support loops. Normal functions will 
             _ -> Action s0 >>= \ s1 -> untilDone s1 Action 
 
 In the more general case, mutually recursive loops with tail calls can effectively represent state machines. I recommend such loops are modeled as method objects (instead of `let` groups or toplevel definitions). This makes it easier to extend and reuse the loop. Usefully, we can also expose continuations for overrides (per *Open Continuations*).
+
+## Open Continuations
+
+With the *Lightweight Extensions* syntax for objects, we can support Koru-style event continuations. That is, we define some effects as abstract method objects that expect users to override continuations, callbacks, or tuning parameters via mixin. The resulting syntax might look a bit like this:
+
+        foo x y = op1 x >>= op2 y >>= ~op3 
+            A a = op4 x >>=\_-> op5 a >>= ~op6
+                as op
+                B := ... op.F ... 
+                C c = ...
+            D ::= \ prior -> ...
+
+*Aside:* I'm eliding Koru's feature of distinguishing continuations and callbacks (effects) by prefixes `|` and `!`.  
