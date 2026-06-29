@@ -525,7 +525,9 @@ Many forms of reasoning benefit from a high-performance constraint solver. To su
 
 Eventually, we may want a constraint solver to influence the assembly. This is a greater challenge because we're limited by deterministic acceleration. But it should be feasible to develop an adequate constraint solver for many use cases. 
 
-## Direct-Style Assembly
+## Assembly Programming
+
+### Direct-Style Assembly
 
 To support direct-style assembly, we express assembly mnemonics as writer effects with a concise API. Logically, we're writing an assembly representation, and higher-order effects serve the role of conventional assembly macros. For aesthetics, assume a do notation that accepts `action -> result` to capture return values.
 
@@ -551,41 +553,38 @@ To support direct-style assembly, we express assembly mnemonics as writer effect
 A characteristic of 'direct-style' assembly, the heart of its vibe IMO, is that it's locally write-only. Users aren't reading contexts to make decisions. Insofar as we pursue direct-style as our foundation, we should build a set of effects that returns unit values or opaque references. Extensions befitting direct-style assembly:
 
 - *singletons*: Declare that some resources are written only once, e.g. based on a shared name or content addressing. This allows us to write singletons on demand.
-- *write cursors*: When target code branches, instead of writing then implicitly 'closing' a branch, open a write cursor for the new branch (perhaps declaring it to continue after the end of the current one). Then write a label into the new cursor, pull it into the current one for the jump, and feel free to bounce between writing both cursors. This is analogous to a static ArrowChoice composition.
-  - We can also open heterogeneous write cursors for bss, rodata, data, stack frames, etc.. Perhaps write cursors have some user-provided typestate. 
+- *write cursors*: Track references to multiple write 'sections' with layout constraints (e.g. B starts where A ends). Grow and logically link sections iteratively. Heterogeneous cursors for bss, rodata, data, stack frames, etc..
 - *abstract interpretation*: Maintain an abstract representation of machine state and user assumptions, so we can detect conflicts. Carry this metadata with each label, so we can ensure consistent contexts on branches or jumps. 
 - *program search*: When conflicts are detected between conditions and assumptions, have alternatives as backups. Potential extensions to weighted search, integrating preferences. 
 - *constraint models*: we can build a constraint system as a form of global agreements within an assembly. We do not reading solver values while writing the assembly, but we can arrange for them to influence the next stage of assembly.
-- *obligations*: Write down what you're planning to do, some constraints on order of events, and write when you're done. The assembler can verify all obligations are fulfilled or report which ones are missed. Some features, such as write cursors or promises, may come with implict obligations.
+- *obligations*: Write down what you're planning to do, some constraints on order of events, and write when you're done. Likely per cursor. These may be opaque to assembler, but support human discipline.
 
 There's a reasonable case to be made for some coordination effects, e.g. first-class queues for communication between subtasks shouldn't severely detract from the direct-style experience. Ultimately, direct-style is a stylistic choice, not a mandate, and users fully control effects.
 
 *Aside:* Above, I use `using x86` to avoid polluting the toplevel namespace, but a viable alternative is to leverage lightweight effects, e.g. `.movl 'rax 60`, pushing the assembly mnemonics directly into the effects API. Of course, this would require something like a `mkelf_x86` variant.
 
-## Big Ideas
-
 ### Structured Assembly
 
-User-defined syntax makes it easy to define higher-level languages within the assembly system. Of course, even LLVM is higher-level than assembly. Working at a high level has potential advantages, e.g. it is difficult to analyze a process network for deadlock at the level of assembly code, and it is much easier to port a process network. 
+Direct-style assembly with most CPU machine code naturally covers all procedural structures (while/then, if/then/else, etc.). Those are trivial to model. But we could contemplate support for more-sophisticated structures. Such as:
 
-But I'd like to explore another direction: how might we go about expressing that process network or features of similar sophistication directly in assembly? We'll need pretty good support for modeling queues, building up the packet type, etc.. We could feasibly use session types as obligations.
+- Harel state charts
+- Coroutines
+- Kahn process networks
+- static-buffer transactions
 
-Most procedural language structures don't need much attention. Basic conditionals and loops are barely a step above assembly. But interesting targets include:
+I'd like to focus initially on real-time and bounded-memory systems. But that's just my own focus.
 
-- coroutines
-- process networks
-- pattern matching
-- transactions
+## Proof-Carrying Code
 
-We can also look at large-scale structures, such overlay networks with heterogeneous architectures, and code or configurations for deployment. 
+It is possible to express theorems on assembly or machine code, e.g. in terms of preconditions, postconditions, invariants. Useful properties to examine included bounded-time, bounded-space, memory safety. It should be possible to build proofs of these theorems that are much easier to check than they were to discover, then bundle them with the code, perhaps as a separate file.
 
-### Proof-Carrying Code
+Although we cannot rely on reflection to emit proofs, we can use reflection and the IDE to help discover and inject proofs (or proof tactics). Most relevantly, the reflection API may provide access to an SMT solver, and the IDE may support edit suggestions from the reflection API. Thus, assisted theorem proving is possible. As we accelerate constraint solvers, proof tactics may become more adaptive.
 
-It is possible to express theorems on assembly, e.g. in terms of preconditions, postconditions, invariants. Expected conditions at specific control-flow steps, assuming those preconditions. And it is possible to express proofs of these theorems. It would be very convenient if we can bundle theorems and proofs together with the machine code. A separate file is acceptable.
+I use the word 'possible' because I'm not confident to say 'feasible'. The VALE project (Verified Assembly Language for Everest) demonstrates theorem proving at the assembly level, but not at great scale, and not with extensibility or adaptability. There is significant risk of proofs becoming an anchor.
 
-We cannot be relying on reflection to write the proofs into the generated result, but reflection could help users write proof tactics into the assembly. That is, we use an interactive mode attached to a separate SMT solver to help users edit and receive feedback about a proof. With good tactics, the proof should adjust to moderate changes in code.
+## Concurrency
 
-Eventually, with accelerated solvers, we could push more to assembly-time. But even then, for fast builds we'd probably want to develop proof tactics.
+Indexed shift-reset effects provides a foundation for flexible control-flow. We can use this to model assembly-time cooperative multi-threading. It is feasible to spawn subtasks, await events, etc.. Regarding state, I suggest a simple convention: all state is thread-local except a shared heap. Upon context switching, thread-local state paired with the continuation, but the heap is passed to the next thread.
 
-Well, this is all a pipe dream at the moment. Will need to see what's actually feasible. The VALE project from F* language is a good place to look.
+Ideally, the exact details of the thread schedule should be irrelevant. Thus, APIs for interaction between threads should be designed around confluence and consistency as logical monotonicity (CALM). For example: linear channels, broadcast channels, constraints, CRDTs. In the absence of linear types, we can design robust APIs around thread-local references explicit operations to transfer objects.
 

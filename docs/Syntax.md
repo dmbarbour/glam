@@ -1,12 +1,12 @@
 # Initial Syntax
 
-This document describes an initial syntax for ".g" files, and motives for it. Design goals include:
+This document describes an initial syntax for ".g" files, and design motives for it. Design goals include:
 
 - a syntax that I find pleasant to work with
 - supports an assembly programming look and feel
 - concise, vertical columns of assembly mnemonics
 - generalist, not specialized for targets or domains
-- an extraordinarily high abstraction ceiling
+- extraordinarily high abstraction ceiling
 
 ## Language Version Declaration
 
@@ -47,21 +47,16 @@ Proposed keywords:
         module, abstract, using                     namespace
         anno                                        annotations
         unique, abstract_global_path                special atoms
-        with, without                               dict updates
+        with, without                               dict 
         do                                          effects
         let, in, where                              locals
 
         object, extend, extends, self, mixin        objects
         object_from_spec                            anonymous objects
 
-        TBD:
-        conditionals, pattern matching
-
-I'm still considering whether to support booleans at all. But potential keywords here:
-
-        if, then, else, try                         basic conditionals
-        and, or, not, is                            comparisons
-        has
+        if, then, elif, else                        basic conditionals
+        match, try, when                            advanced conditionals
+        and, or, not                                comparisons
 
 
 ## Names and Paths
@@ -178,7 +173,7 @@ Aesthetically, this should support a direct assembly programming style where we 
             .movl 'eax ['ebx, 4]
             ...
 
-Aside from 'do' notation, we'll support the `>>=` composition, perhaps `>=>` Kleisli composition. 
+Aside from do notation, we'll support the `>>=` composition and `>=>` Kleisli composition, and `=>>` for dropping a unit result.
 
 ### Standard Effects
 
@@ -329,7 +324,9 @@ Tagged data is convenient for modeling extensible variants and detecting assembl
         :tag Data
         :[TagExpr] Data
 
-Tagged data is modeled as a singleton dictionary. That is, `tag:Data` is equivalent to `{ tag:Data }` in most contexts. An important exception is updates: tagged data is implicitly frozen, i.e. `anno 'freeze { tag:Data }`. This freeze forbids dict updates (`with`, `without`, `tagged_data.foo = ...`, etc.) unless the dict is thawed (via `anno 'thaw`).
+Tagged data is modeled as a singleton dictionary. That is, `tag:Data` is equivalent to `{ tag:Data }` in most contexts. An important exception is updates: tagged data is implicitly frozen, i.e. `anno 'freeze { tag:Data }`. This freeze forbids dict updates (`with`, `without`, `tagged_data.foo = ...`, etc.) unless the dict is thawed (via `anno 'thaw`). 
+
+Unlike dictionaries, dotted paths are not supported for tags. You can write `foo:bar:baz:Data` or ` { foo:(bar:baz:Data) }` or `{ foo.bar:(baz:Data) }` and so on, and these are all the same value, but with different freeze annotations. 
 
 Constructed tags are expressed using `[Expr]:Data`. Although this uses the list form, it's limited to a singleton list. The motive for square brackets is consistency with dotted paths, i.e. `(foo:Data).foo = Data` and `([Expr]:Data).[Expr] = Data)`. 
 
@@ -363,7 +360,7 @@ But users will likely prefer multi-line 'with' forms:
             name1 = Expr2
             name2 = Expr2
 
-Expression-indexed names need some special attention. Users are free to write `{ [0]:"Hello", [1]:"World" }`. In the definitional form, this becomes `{} with { .[0] = "Hello"; .[1] = "World" }` usually multi-line.  
+Expression-indexed names need some special attention. Users are free to write `{ [0]:"Hello", [1]:"World" }`. In the definitional form, this becomes `{} with { .[0] = "Hello"; .[1] = "World" }` usually multi-line (where braces are unnecessary). 
 
 Dictionary updates are generally expressed using `with` and `without` special forms. These are applied much like infix operators, but the RHS of `with` uses the similar syntax as the module namespace. One difference is we can use expression-indexed paths directly. 
 
@@ -389,7 +386,8 @@ Proposed syntax:
         "
         "  """  <- three quotes followed by newline
         "  " <- one SP before text; optional for empty lines
-        "  # comment lines are permitted and erased
+        "
+        "  # comment and blank lines are permitted and erased
         "  " lines are *separated* by LF, i.e.
         "  "   - no implicit final LF
         "  "   - LF even if source uses CR or CRLF
@@ -503,7 +501,6 @@ The above form is awkward, tedious, and error prone. Tables would benefit from d
           .r    42    53    f1
           .r    54    72    f2
 
-
 ## Functions
 
 I propose to adopt Haskell's use of `\` for lambdas.
@@ -610,7 +607,7 @@ Object syntax can and should be compact by default. I propose:
 
 To improve concision, expressions within objects are localized. That is, we bind `foo` as `self.foo` and `_foo` as `_self.foo`, where `self` is a keyword referencing the local object namespace, analogous to `module`. Users instead pay a small syntactic tax to access the host scope via `^name`, `^(Expr)`, or use of `module`. Use of `^` composes, e.g. `^^^method` escapes three lexical levels. But it's best to keep syntax shallow.
 
-The `extends` and `with` sections are both optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). In general, `spec.name` may be any value with equality, e.g. `"foo"`. Toplevel object declarations use `abstract_global_path` to ensure globally unique names, but it's sufficient that we don't reuse a name for two different specs across transitive deps.
+The `extends` and `with` sections are optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). If provided, they cannot be empty. In general, `spec.name` may be any value with equality, e.g. `"foo"`. Toplevel object declarations use `abstract_global_path` to ensure globally unique names, but it's sufficient that we don't reuse a name for two different specs across transitive deps.
 
 To instantiate the object, the compiler applies a linearization algorithm (C3?) to deduplicate and merge components. The compiler uses `spec.name` to distinguish specifications, and asserts (via reflective term annotation) that `spec.name` is not used for two different specs in linearization scope. After specifications are ordered, we apply `spec.defs` to an empty base `{}` then finally introduce `spec` as an implicit final mixin. For consistency and convenience, the compiler exposes an instantiation function via keyword `object_from_spec`, but it isn't anything special.
 
@@ -618,6 +615,8 @@ We also have asyntax `extend Object with ...`, which is analogous to `Dict with 
 
         extend foo with
             def1 := ...
+
+        extend Name (as Name)? with Body
 
 In contrast to `object Name ...`, the `extend Object with` variant updates `spec.defs` then lazily rebuilds the object. There is no expression form for this, but see *Mixin Composition* and *Lightweight Extension* below. There is no dedicated syntax for updating `spec.name` or `spec.deps`, and I struggle to think of a use case, but users always have access to `foo ::= \ prior -> prior.spec |> edit_spec |> object_from_spec`. 
 
@@ -651,11 +650,11 @@ A known weakness is that all definition updates from anonymous objects apply *af
 
 ### Explicit Scope
 
-The default scope rule with `self` and `^` is awkward in some contexts, especially mixins. To mitigate this, I propose an optional `as Name` modifier. When this modifier is applied, default scope is disabled, and the object is referenced only through the given name.
+The default scope rule with `self` and `^` is awkward in some contexts, especially mixins. To mitigate this, an optional `as Name` modifier is supported for any object with a `with` section. 
 
         object Name (as Name)? (extends ObjList)? (with Body)?              # object declaration
-        extend Name (as Name)? with Body                                    # extend declaration
         object (NameExpr|_) (as Name)? (extends ListExpr)? (with Body)?     # object expression
+        extend Name (as Name)? with Body                                    # extend declaration
 
 For example:
 
@@ -671,55 +670,181 @@ For example:
 
 In this context, `foo.A == 6`. Note that we do not need `^a` to reference the global `a`, but now we use `f.B` to reference the local `B`. To reference prior definitions, we'd use `_f.B` instead. 
 
-*Note:* The name in `as Name` is a local, e.g. use of `as _` is also permitted.
+*Note:* The name in `as Name` is a local, e.g. use of `as _` is also permitted, or `as _o` to supporess an unused locals warning.
 
 ### Lightweight Extensions
 
-Proposed syntactic sugar for extending objects and mixins.
+I propose keyword `mixin` for lightweight expression of anonymous mixins.
 
-        ~Object Body
+        mixin Body
+        object _ as _ with Body
+
+        mixin as Name Body
+        object _ as Name with Body
+
+This saves a few keystrokes and reduces some line noise. Further, the compiler shall not insist on `abstract` declarations for mixins, but may derive them. Also, the `as Name` option may be aligned vertically with the `Body`. 
+
+Naturally, we'll apply our mixin upon defining it. It is feasible to embed a mixin on the RHS of a pipe.
+
+        foo = op1 >>= op2 >>= op3 &> mixin
+            as op
+            A := 42
+            B := op4 >>= op.eff >>= op6 &> mixin
+                C c = op7 &> mixin 
+                    ...
+
+We could tighten this further by compressing `&> mixin`. Current best idea is:
+
+        &Object Body
         Object &> mixin Body
-        Object &> object _ as _ with Body
 
-        ~Object as Name Body
+        &Object as Name Body
         Object &> mixin as Name Body
-        Object &> object _ as Name with Body
 
-This saves some keystrokes and reduces some line noise. As another point towards concision, the compiler does not insist on `abstract` declarations for mixins. The `as Name` option may be aligned vertically with the `Body`.
+This again shaves off a few horizontal characters and some line noise. The resulting syntax feels clean to me:
+
+        foo = op1 >>= op2 >>= &op3 as o
+            A := _o.A + 42 
+            B = op4 >>= op5 >>= &op6
+                C c := &op7 
+                    ...
+
+Lightweight extensions provide a convenient foundation for tuning parameters, keyword arguments with defaults, continuation-passing style, etc.. See *Open Continuations*.
+
+## Booleans
+
+I propose to model booleans as simple atoms.
+
+        't      true
+        'f      false
+
+There are no truthy values, e.g. empty list is not falsy. We can support `and, or, not` as keywords, with `and` and `or` acting as infix operators. (I don't like `&&` and `||`.)
 
 ## Conditionals
 
-It's easy to copy what other languages have done for conditionals, but I'm not too happy with what they've done.
+Two big ideas for conditionals.
 
-Some thoughts:
+- *refactoring* - conventionally, it's difficult to refactor the middle of a long conditional sequence into separate procedures. We can factor the conditional expressions or results, but the sequence itself is troublesome. To support this, I introduce a tentative `then?`  (and `-?>` alt for `->` in `match`). Instead of committing to the outcome, the RHS in these cases may `.fail` and backtrack, or explicitly `.r Result`.
+- *backtracking* - in an effectful context, users may observe and interact with state to make a decision. Unlike most languages, we'll backtrack the interactions if the path is not selected. Thus, we can experiment with what-ifs. This is expressed via `try`. 
 
-- `match` syntax can be adopted from Haskell. I might also want an uncut `match*` version that returns a pure list of matches.
-- Basic `if then else` syntax is useful. We can also have an `if let Pattern = ...` variant. 
-- I'll probably want a `try then else` syntax, both with and without a default cut. Maybe `try*` for the branching version.  
+### If Then Else
 
-### Booleans
+Flexible alignment; the compiler will simply report an error if there's any ambiguity in context. Boolean conditions are `'t` and `'f`, nothing else. 
 
-I propose to model booleans as simple atoms `'t` and `'f`, corresponding to true and false respectively. There are no 'truthy' values, i.e. we do not interpret an empty list as false and a non-empty list as true. That said, I don't encourage use of booleans. Working with them is awkward and lossy. Pattern matching should be the first choice.
+        if Cond then A else B
 
-I propose to use keywords `and, or, not` for boolean composition. (IMO, `&&` and `||` begin to feel like line noise, and `!` should not be wasted on flipping a bit.) We can treat `and` and `or` as infix operators.
+        if C1 then
+          A
+        else
+          B
 
-Although I have a vision for pattern matching, we'll support the conventional and familiar `if Cond then A else B` expressions, and also the `A if Cond else B` variant, which is more convenient in cases where we want to emphasize the operation over the condition. These are limited to pure boolean expressions. As a special case, in context of `do` notation, users may write `if Cond then A` or `A if Cond` without an `else` condition (defaults to return unit). 
+        if C then A else
+        B
+
+We'll also support the reordered syntax popularized in Python. 
+
+        E1 if Cond else E2
+
+Users may write `elif` in place of `else if`. It always has the same meaning. 
+
+We'll support `if let` as a special form.
+
+        if let Pattern = Expr (when Cond) then ...
+
+On a successful match, this exposes any local pattern vars to the then branch.
+
+Users may write `then?` to indicate tentative commitment. The compiler will run the tentative-then branch in a local handler, effects are just `.seq, .r, .alt, .fail, .cut`. If this fails, we'll return the `else` result regardless.
+
+        if C then? .r A else B      # same as if C then A else B
+        if C then? .fail else B     # always returns B
+
+This enables users to factor out conditions more flexibly. 
+
+        # before extraction
+        if C1 and C2 then 
+          A 
+        elif C1 and C3 then
+          B
+        else 
+          C
+        
+        # after extraction
+        if C1 then?
+          if C2 then
+            .r A
+          elif C3 then
+            .r B
+          else 
+            .fail
+        else
+          C
+
+This doesn't make extraction convenient, but it's possible. I'll need to consider how to improve this syntactically. In context of pattern matching, we'll similarly use `-?>` to support refactoring.
+
+### Try
+
+Users may express `try` behaviors within effectful contexts.
+
+        try Operation then
+          Result1
+        else
+          Result2
+
+We'll run `Operation` in the host environment. If `Operation` fails, any operations performed are backtracked and we select `Result2`. Otherwise, all local variables visible at the end of `Operation` are made visible to `Result1`. After a `Result` is selected, it is run as a separate host-level effect outside backtracking scope. This roughly desugars to:
+
+        .cut (.alt A B) >>= \x->x where
+            A = do { Operation; .r Result1 }
+            B = .r Result2
+
+The tricky bit is making Operation variables visible to `Result1`
+
+        try Operation then?
+            if vars look ok then 
+                .r Result1
+            else .fail
+        else 
+            Result2
+
+The `try` notation also supports tentative `then?`. This doesn't have access to host effects, but it may perform further filtering based on observing variables from `Operation` and failing in some cases. If `Operation` had branched, we might examine several branches. But note this filtering is something we could just as easily move *into* `Operation`, so it isn't necessary, just consistent and sometimes convenient.
+
+### Match
+
+I'll directly adopt a lot of Haskell's syntax for `match` and its multi-line form. It's the feature of Haskell's syntax that I enjoy the most. The main difference is that, to support refactoring like `then?` branches, we'll introduce a tentative arrow `Pattern -?> .r Result`.
 
 ### Pattern Matching
 
-Some thoughts:
-- 
+Pattern matching is primarily via `match` and `if let`. It is also available to do notations, where a failed match will evaluate to `.fail`. Unlike Haskell, pattern matching isn't supported in function arguments.
 
+The basic types are matched using visual indicators:
 
-Pattern matching starts fairly simple
+        ()                          # unit
+        Pattern as Name             # capture pattern target as a local
 
+        {}                          # empty dict
+        {d}                         # test for dict type
+        {foo.bar.baz:Pattern, _}    # deep refs
+        {(Expr):Pattern, _}         # eval path expr, extract, try Pattern 
+        {(Expr as Name):_,_}        # we can also capture path or tag exprs
+        tag:Pattern                 # will also match singleton dicts
+        [TagExpr]:Pattern           # eval Expr, extract, match Pattern
 
-View patterns permit more than one match, however.
+        []                          # empty list
+        [x]++_xs                    # we can use append notation in patterns
+        _xs++[x]                      
+        [x0]++xs++[xN]
 
-I want to desugar all pattern matching to monadic expressions, and I also want to support transactional backtracking conditionals by default. Support for 'what-if' pattern matching is simply very convenient.
+        (Function -> Pattern)       # view patterns are ambiturners
+        (Pattern <- Function)
 
+        \fn                         # applicables (eff:_ | {apply:_,_} | \.fn)
+        \.fn                        # match lambdas only
 
-Although we could support Haskell-style `match Expr with (Pattern -> Outcome)+` syntax, providing the pure handler, it's a little awkward to extend this syntax for effectful patterns, and it may be better to integrate the 'Expr' into the Pattern, allowing for more than one (e.g. as guards). I'm contemplating alternative syntax, e.g. based on unification or `Pattern = Expr` structures. We could feasibly integrate pattern matching into monads in general.
+Notes:
+- List patterns are limited to at most one variable-sized element. We can match at either or both ends.
+- View patterns use the same structure as a tentative then/arrow, e.g. return `.fail` or `.r View`
+  - View patterns may branch via `.alt`. Basic patterns never branch; this is the escape hatch. 
+- Tag or dict path expressions are *evaluated* in context and used as keys. Only the RHS data is a pattern. 
+- We'll `anno 'thaw` a full-match dict pattern, i.e. so it isn't an error to match tagged data as `{tag:Pattern}`.
 
 ## Loops
 
@@ -738,13 +863,10 @@ In the more general case, mutually recursive loops with tail calls can effective
 
 ## Open Continuations
 
-With the *Lightweight Extensions* syntax for objects, we can support Koru-style event continuations. That is, we define some effects as abstract method objects that expect users to override continuations, callbacks, or tuning parameters via mixin. The resulting syntax might look a bit like this:
+With the *Lightweight Extensions* syntax for objects, we can support continuation-passing style via extension of abstract method objects. This is another way of passing parameters, more extensible and flexible than lambda arguments. Moreover, it shifts some parameters from horizontal to vertical layout, and avoids some redundancy of reference. The resulting syntax might look a bit like this:
 
-        foo x y = op1 x >>= op2 y >>= ~op3 
-            A a = op4 x >>=\_-> op5 a >>= ~op6
-                as op
+        foo x y = op1 x >>= op2 y >>= &op3 
+            A a = op4 x >>=\_-> op5 a >>= &op6 as op
                 B := ... op.F ... 
                 C c = ...
-            D ::= \ prior -> ...
-
-*Aside:* I'm eliding Koru's feature of distinguishing continuations and callbacks (effects) by prefixes `|` and `!`.  
+            D ::= \ prior -> prior + 42
