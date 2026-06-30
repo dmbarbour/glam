@@ -39,7 +39,7 @@ In context of errors, the errors can be reported but we can also make a best eff
 
 ## Keywords
 
-Keywords are names reserved by the compiler. Users are not permitted to define or use keywords directly as names. An exception is made for atoms. For example, given keyword `import`, users may define `.['import] = ...` or reference `module.['import]. The set of keywords may vary with the language version declaration.
+Keywords are names reserved by the compiler. Users are not permitted to define or use keywords directly as names. An exception is made for atoms. For example, given keyword `import`, users may define `.['import] = ...` or reference `module.['import]`. The set of keywords may vary with the language version declaration.
 
 Proposed keywords:
 
@@ -55,9 +55,10 @@ Proposed keywords:
         object_from_spec                            anonymous objects
 
         if, then, elif, else                        basic conditionals
-        match, try, when                            advanced conditionals
+        match, try, when, try_match                 advanced conditionals
         and, or, not                                comparisons
 
+Keywords implicitly reserve `_keyword`, but it's only meaningful in a few special cases.
 
 ## Names and Paths
 
@@ -71,11 +72,11 @@ Namespaces are modeled as hierarchical dictionaries, accessed via dotted path, e
 
 In the general case, we also support expression-indexed paths using `.(ListExpr)` or `.[...]` for a literal list. These indices are interpreted such that `.([1, 'two] ++ [3])` is equivalent to `.[1].two.[3]`. The empty list is permitted, e.g. `foo.[]` is equivalent to `foo`, and `foo.[ ].bar` admits spaces, newlines, and comments in names if needed.
 
-Best practice is to avoid expression-indexed paths in module or object namespaces, but it's available as an escape hatch for integration. Users may define `.[Idx] = Def` at the module toplevel. Later access to this name requires `module.[Idx]`. Users may understand `module` as a keyword that aliases the module toplevel namespace, and `self` as the current namespace. At the toplevel scope, `self` and `module` are the same.
+Best practice is to avoid expression-indexed paths in module or object namespaces, but it's available as an escape hatch for integration. Users may define `.[Idx] = Def` at the module toplevel. Later access to this name requires `module.[Idx]`. Users may understand `module` as a keyword that aliases the module toplevel namespace, and `self` as the current namespace. At the toplevel scope, `self` and `module` are equivalent.
 
 Special cases: 
 - `.path` desugars to `eff:(\api -> api.path)` to support lightweight effects. See *Effects.*
-- `^name` (or `^(Expr)`) binds to host scope in context of objects. See *Objects.*
+- `^name` (and `^(Expr)`) binds to host scope in context of objects. See *Objects.*
 
 ### Introductions and Overrides
 
@@ -109,7 +110,7 @@ To this end, we might use a pattern such as defining `final_of.foo = _foo`. Assi
 
 Name shadowing, where a function argument or local variable accidentally masks another name defined or declared in lexical scope, is a common source of subtle bugs. Humans are a lot more flexible about referential context than a lambda calculus, thus easily overlook the error when reading code. To resist this bug, we'll warn on name shadowing by default.
 
-As a special case, we shadow *all* the names in `using` or `self` scopes. Instead, users write `^name` to escape the shadowing context. I hope this sort of bulk shadowing will be structurally clear, easier for users to track. 
+As a special case, we shadow *all* the names by default in `object` or `using` scopes. Instead, users write `^name` to escape the shadowing context. This sort of bulk shadowing seems easier for users to track. 
 
 ### Unused Locals
 
@@ -138,10 +139,10 @@ The compiler will arrange to automatically run `refl.*` definitions as reflectio
         using Dict in Expr
         using Dict do Body      # short for `using Expr in do Body`
 
-Evaluates `Expr` in context of a temporary object. Within that scope, `self` is equivalent to `Dict`, `_self` is equivalent to `{}`, and `^name` or `^(Expr)` can escape the scope, same as working within other objects. Note that `Dict` doesn't need to be a valid object; whether it defines `spec` is not considered at all.
+Evaluates `Expr` in context of a temporary object. Within that scope, `self` is equivalent to `Dict`, `_self` is equivalent to `{}`. Users escape the scope just as they do for objects, via `^name` (or `^(Expr)`). *Note:* `Dict` doesn't need to be a valid object. 
 
-The main use case for `using` is to manage namespaces without polluting them. Not recommended for subexpressions that would require many escapes, but there are plenty of workarounds.
-
+The main use case for `using` is to manage namespaces without polluting them. Not suitable for subexpressions that require many escapes.
+ 
 ## Operators
 
 Operators are essentially infix functions. We'll support Haskell-style operator sections, such that `((>>= k) op)` is equivalent to `(op >>= k)`. To avoid unnecessary parentheses, we'll support precedence between most operators. To mitigate confusion, not every pair of operators will have valid precedence, e.g. cannot mix both `>>` and `<<` without parentheses.
@@ -456,9 +457,9 @@ We'll use `++` to compose lists by appending them. In contrast to Haskell's `x:x
 
 We can introduce a few term annotations to manage representations, e.g. flattening a list into an array. We'll rely on accelerated functions on lists, too.
 
-*Aside:* For very large lists, literals are not the best expression. They are awkward to abstract, refactor, extend, or compose. Instead, consider a writer or alternative/choice effect to generate the list. Even better, use an object spec to express component elements. 
-
-*Note:* It is possible to use quoted paths to build lists. As an expression, `'.[x0,x1].(xs).[xn]` evaluates similarly to `[x0,x1] ++ xs ++ [xn]`. But the compiler may raise an error if a quoted path doesn't support `==`, and in context of pattern matching we implicitly evaluate the quoted path then compare via `==`.
+*Notes:* 
+- optional values are represented as `[A]` vs. `[]`
+- favor effects to construct big lists, never literals
 
 ## Tuples
 
@@ -630,11 +631,15 @@ Objects support most toplevel declarations. Notable exceptions include `unique` 
 
 An anonymous object has no name, i.e. `spec.name` is intentionally left undefined. Users may express anonymous objects by use of `_` in name position, e.g. `object _ extends foo, bar with ...` (or minimally, just `object _`). Anonymous objects must not appear within `spec.deps`, otherwise `object_from_spec` will report an error. Hence, anonymous objects do not participate in multiple inheritance. They may participate in mixin composition.
 
+### Abstract Objects
+
+As a special case, if users write `_object` instead of `object`, only `anno 'freeze {spec:Spec}` is returned. Users may instantiate it later via `object_from_spec foo.spec`, or use the object in inheritance. This applies to both object declarations and expressions. 
+
 ### Mixin Composition
 
 Introducing operator `&>` (and its mirror `<&`). These operators compose two objects and return an anonymous object. We generally view this as `Obj &> Mixin` such that we 'apply' the mixin to the 'object' (consistent with `|>` and `!>`).
 
-        toAnon o = if (o.spec has 'name) then object _ extends o else o
+        toAnon o = if (o.spec has name) then _object _ extends o else o
 
         O &> M = object_from_spec mixed_spec where
             AO = (toAnon O).spec
@@ -677,12 +682,12 @@ In this context, `foo.A == 6`. Note that we do not need `^a` to reference the gl
 I propose keyword `mixin` for lightweight expression of anonymous mixins.
 
         mixin Body
-        object _ as _ with Body
+        _object _ as _ with Body
 
         mixin as Name Body
-        object _ as Name with Body
+        _object _ as Name with Body
 
-This saves a few keystrokes and reduces some line noise. Further, the compiler shall not insist on `abstract` declarations for mixins, but may derive them. Also, the `as Name` option may be aligned vertically with the `Body`. 
+This saves a few keystrokes and reduces some line noise. The `as Name` option may be aligned vertically with the `Body`. 
 
 Naturally, we'll apply our mixin upon defining it. It is feasible to embed a mixin on the RHS of a pipe.
 
@@ -720,16 +725,18 @@ I propose to model booleans as simple atoms.
 
 There are no truthy values, e.g. empty list is not falsy. We can support `and, or, not` as keywords, with `and` and `or` acting as infix operators. (I don't like `&&` and `||`.)
 
+We'll support comparisons on numbers `> >= == <> =< <`. Support for `==` and `<>` extend to all equatable values (all values not containing lambdas). 
+
+For dictionaries, we'll add a `Dict has Path`, e.g. `{foo.bar:()} has foo.bar`.
+
 ## Conditionals
 
-Two big ideas for conditionals.
+Big ideas for conditionals.
 
-- *refactoring* - conventionally, it's difficult to refactor the middle of a long conditional sequence into separate procedures. We can factor the conditional expressions or results, but the sequence itself is troublesome. To support this, I introduce a tentative `then?`  (and `-?>` alt for `->` in `match`). Instead of committing to the outcome, the RHS in these cases may `.fail` and backtrack, or explicitly `.r Result`.
-- *backtracking* - in an effectful context, users may observe and interact with state to make a decision. Unlike most languages, we'll backtrack the interactions if the path is not selected. Thus, we can experiment with what-ifs. This is expressed via `try`. 
+- *refactoring* - tentative `then?` or `-?>` allows rhs to use effectful rep for conditional behavior, e.g. `.r A` or `.fail`.  This simplifies refactoring. 
+- *backtracking* - `try Effect then ...` will run `Effect` assuming context with `.alt, .cut, .fail`. If it fails, we select `else` branch, otherwise the `then` branch.
 
 ### If Then Else
-
-Flexible alignment; the compiler will simply report an error if there's any ambiguity in context. Boolean conditions are `'t` and `'f`, nothing else. 
 
         if Cond then A else B
 
@@ -741,110 +748,157 @@ Flexible alignment; the compiler will simply report an error if there's any ambi
         if C then A else
         B
 
-We'll also support the reordered syntax popularized in Python. 
+        # in general, desugars as
+        match when
+            GuardClause -> ThenBranch
+            _ -> ElseBranch
+
+We'll also support the variation popularized in Python.
 
         E1 if Cond else E2
 
 Users may write `elif` in place of `else if`. It always has the same meaning. 
 
-We'll support `if let` as a special form.
+Although I write `Cond` above, we'll support any non-branching guard clause from `match when ...`, thus we implicitly also support the popular 'if let' via pattern guards. 
 
-        if let Pattern = Expr (when Cond) then ...
+        if Pattern <- Expr when Cond then A else B
 
-On a successful match, this exposes any local pattern vars to the then branch.
+### Tentative Commitment
 
-Users may write `then?` to indicate tentative commitment. The compiler will run the tentative-then branch in a local handler, effects are just `.seq, .r, .alt, .fail, .cut`. If this fails, we'll return the `else` result regardless.
+Users may write `then?` to indicate tentative commitment. In context of `if` a `then?` body is expressed as a effect with access to `.alt/.fail/.cut/.seq/.r` and is evaluated with a local compiler-provided handler.
 
-        if C then? .r A else B      # same as if C then A else B
-        if C then? .fail else B     # always returns B
+        if C then? .r A else B          # same as if C then A else B
+        if C then? .fail else B         # always returns B
 
 This enables users to factor out conditions more flexibly. 
 
-        # before extraction
-        if C1 and C2 then 
-          A 
-        elif C1 and C3 then
-          B
-        else 
-          C
-        
-        # after extraction
-        if C1 then?
-          if C2 then
-            .r A
-          elif C3 then
-            .r B
-          else 
-            .fail
-        else
-          C
+        # snip chunk from middle
+        if C1 then E1
+        elif C2 then E2
+        elif C3 then E3
+        elif C4 then E4
+        else E5
 
-This doesn't make extraction convenient, but it's possible. I'll need to consider how to improve this syntactically. In context of pattern matching, we'll similarly use `-?>` to support refactoring.
+        if C1 then E1
+        elif 't then?
+            # can now move this
+            if C2 then .r E2
+            elif C3 then .r E3
+            else .fail
+        elif C4 then E4
+        else E5
+
+Refactoring isn't convenient or pretty, but it is possible. 
+
+*Note:* The analog for `match` is `-?>`. 
 
 ### Try
 
-Users may express `try` behaviors within effectful contexts.
+Users may express `try` behaviors within effectful contexts assuming `.alt/.cut/.fail`. 
 
+        # unit effect
         try Operation then
           Result1
         else
           Result2
-
-We'll run `Operation` in the host environment. If `Operation` fails, any operations performed are backtracked and we select `Result2`. Otherwise, all local variables visible at the end of `Operation` are made visible to `Result1`. After a `Result` is selected, it is run as a separate host-level effect outside backtracking scope. This roughly desugars to:
-
-        .cut (.alt A B) >>= \x->x where
-            A = do { Operation; .r Result1 }
-            B = .r Result2
-
-The tricky bit is making Operation variables visible to `Result1`
-
-        try Operation then?
-            if vars look ok then 
-                .r Result1
-            else .fail
-        else 
+        
+        # effect with result
+        try Operation -> Pattern (when ...) then
+            Result1
+        else
             Result2
 
-The `try` notation also supports tentative `then?`. This doesn't have access to host effects, but it may perform further filtering based on observing variables from `Operation` and failing in some cases. If `Operation` had branched, we might examine several branches. But note this filtering is something we could just as easily move *into* `Operation`, so it isn't necessary, just consistent and sometimes convenient.
+        # in general desugars to
+        try_match when
+            GuardClause -> ThenBranch
+            _ -> ElseBranch
+
+        # roughly implements as:
+        .cut (.alt TryThen Else) >>= \x.x
+
+Any non-branching guard clause for `try_match when` is permitted here. Thus, `Operation` may be a boolean, pattern guard, effect, or all three separated by `when` clauses. Regardless, the selected branch is executed in the host, which is an important difference: `if` is a general expression, `try` always describes an effect.
+
+Assuming effectful `Operation`, it may fail or return a result. On failure, we backtrack. If the result is anything other than unit, users *must* capture it via `(Operation -> Pattern)` (or explicitly ignore via `(Op -> _)`), otherwise we'll report an error: it is always an error to drop data implicitly. 
+
+We can use `try` with tentative `then?`. The `then` body receives full access to host effects, running under the implicit `.cut` from `try`. It should ultimately return the decided effect or fail.
 
 ### Match
 
-I'll directly adopt a lot of Haskell's syntax for `match` and its multi-line form. It's the feature of Haskell's syntax that I enjoy the most. The main difference is that, to support refactoring like `then?` branches, we'll introduce a tentative arrow `Pattern -?> .r Result`.
+I'll adopt a lot of Haskell's syntax for `match` and its multi-line form. It's the feature of Haskell's syntax that I enjoy the most.
+
+Some differences:
+
+- Analogous to tentative `then?`, we introduce tentative arrow `-?>`
+- Guard clauses are indicated by `when`. 
+  - Either one clause inline, or many with vertical alignment.
+    - May also use braces and semicolons for multi-element inline.
+  - use `match when` to skip pattern match, jump directly to guard clauses
+- `try_match` is to `match` as `try` is to `if`: 
+  - host effects in guard clauses (`{eff:(_), _}`) or tentative `-?>`
+  - final result must also be an effect
+
+Example structure:
+
+        match when                  # guard only
+          Cond1 ->                  
+          (Pattern <- Expr) when    # pattern guards
+            Cond2a ->
+            Cond2b ->
+
+        try_match when
+          Op1 ->
+          Cond2 ->
+          (Op3 -> Pattern) when
+            (Pattern <- Expr) when Cond -> ...
+
+The core pattern matching form:
+
+        match Expr with
+            Pattern1 -> 
+            Pattern2 when ... -> 
+            ...
+
+Logically desugars to `match when` form:
+
+        let e = Expr in
+        match when
+            (Pattern1 <- e) ->
+            (Pattern2 <- e) when ... ->
+            ...
 
 ### Pattern Matching
 
 Pattern matching is primarily via `match` and `if let`. It is also available to do notations, where a failed match will evaluate to `.fail`. Unlike Haskell, pattern matching isn't supported in function arguments.
 
-The basic types are matched using visual indicators:
-
+        Name                        # match anything (as a local name)
         ()                          # unit
+        (Pattern)                   # you can parenthesize patterns
+        (Pattern,Pattern)           # eqv. to tuple:(Pattern,Pattern) (also triples, etc.)
         Pattern as Name             # capture pattern target as a local
 
         {}                          # empty dict
-        {d}                         # test for dict type
+        {d}                         # match dicts and tagged data
         {foo.bar.baz:Pattern, _}    # deep refs
-        {(Expr):Pattern, _}         # eval path expr, extract, try Pattern 
-        {(Expr as Name):_,_}        # we can also capture path or tag exprs
+        {(Expr):Pattern, _}         # eval path expr, extract, match Pattern 
         tag:Pattern                 # will also match singleton dicts
         [TagExpr]:Pattern           # eval Expr, extract, match Pattern
 
         []                          # empty list
+        [a,b,c]                     # list of three items
         [x]++_xs                    # we can use append notation in patterns
         _xs++[x]                      
         [x0]++xs++[xN]
 
-        (Function -> Pattern)       # view patterns are ambiturners
-        (Pattern <- Function)
+        (Applicable -> Pattern)     # view pattern must be parenthesized
 
-        \fn                         # applicables (eff:_ | {apply:_,_} | \.fn)
-        \.fn                        # match lambdas only
+        \Name                       # match applicables (\.fn, eff:_, {apply:_,_})
+        \.Name                      # match lambdas only
 
 Notes:
-- List patterns are limited to at most one variable-sized element. We can match at either or both ends.
-- View patterns use the same structure as a tentative then/arrow, e.g. return `.fail` or `.r View`
-  - View patterns may branch via `.alt`. Basic patterns never branch; this is the escape hatch. 
+- List patterns limited to at most one variable-size element. 
+- View patterns use the same structure as a tentative then/arrow, i.e. return optional value. 
 - Tag or dict path expressions are *evaluated* in context and used as keys. Only the RHS data is a pattern. 
-- We'll `anno 'thaw` a full-match dict pattern, i.e. so it isn't an error to match tagged data as `{tag:Pattern}`.
+- `anno 'freeze` won't block full matches on a dict. (Implicit `anno 'thaw` as special case.)
 
 ## Loops
 
