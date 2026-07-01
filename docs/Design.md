@@ -32,39 +32,34 @@ These present significant design challenges. I'll generally prioritize system-le
 
 ## Overview of Semantics
 
-I propose to build upon a pure, untyped lambda calculus with lazy evaluation and annotations.
+The toplevel semantics is a lazy, untyped lambda calculus, but this builds upon [interaction nets (inets)](https://en.wikipedia.org/wiki/Interaction_nets). That is, we admit arbitrary inets *within* functions, but the module namespace consists of closed terms. Inets simplify laziness, parallelism, fixpoint, and fusion.
 
-A few data types - lists, numbers, dicts - receive optimized representations and accelerated operations. Through syntax, we'll support object-oriented inheritance in terms of [open fixpoint](http://fare.tunes.org/files/cs/poof.pdf), and monadic effects in terms of a [freer monad](https://okmij.org/ftp/Haskell/extensible/more.pdf). The toplevel namespace is modeled in an object-oriented style, thus supports overrides as a foundation for extensibility.
+A few data types - e.g. lists, numbers, dicts - have built-in representations and operators. We'll support object-oriented programming in terms of [mixins with deferred fixpoint](http://fare.tunes.org/files/cs/poof.pdf), and monadic effects in terms of a [freer monad](https://okmij.org/ftp/Haskell/extensible/more.pdf). The toplevel namespace is modeled in an object-oriented style, thus supports overrides as a foundation for extensibility.
 
-Annotations are essentially active comments. They do not influence evaluation, but may affect performance, reasoning, visualization, projectional editing, and other tooling. 
+Aside from behavioral semantics, we'll introduce a notion of *annotations* as an 'active' comment. Annotations shall not observably influence evaluation, but they may block further evaluation: divergence is not observable. We'll leverage annotations to support performance, reasoning, debugging, projectional editing, and other tooling. An error value would be modeled by annotation.
 
 ## Performance
 
-Performance of lambda calculus is mediocre by default, and bignum arithmetic won't help. Performance can be significantly enhanced with a little guidance. Some relevant patterns:
+In contrast to HVM, this system is not designed for direct execution on GPGPU. There is too much interference from arbitrary-precision rational numbers, ad hoc annotations, huge lists and dicts. But we can easily parallelize across many CPUs, even distributed nodes. And there are a few performance opportunities with a little guidance from annotations:
 
-* *Acceleration*: Substitute a definition with a built-in. Choose built-ins that enable flexible computation, e.g. an accelerated abstract machine that can be recompiled to run on a CPU or GPGPU.
+* *Acceleration*: substitute performance-critical functions. For example, a function representing an abstract CPU, TPU, or GPGPU emulator can be substituted by a built-in that compiles IL code for actual hardware. Acceleration is high-risk for correctness, maintenance, portability, bloat. But carefully chosen accelerators are also extremely high-reward.
 
-* *Parallelism*: Trigger a lazy computation early and evaluate in a background worker thread. This pattern is called 'sparks' in Haskell. We can also obtain some parallelism from acceleration.
+* *Caching*: remember expensive computations. When encountered again, substitute result instead of replaying computations. Persistent caching provides our basis for incremental assembly. A remote proxy cache can feasibly share work within a community.
 
-* *Caching*: Remember expensive computations to avoid rework. Persistent caching can support incremental compilation. A shared remote cache with PKI infrastructure can support direct downloads of binaries. 
+* *Ephemerons*: mark some atoms as scope-unique. Diverge if this would be observed to be untrue. When used as dict keys, we can now garbage-collect associated data when associated metadata is collected. Useful when modeling a 'heap'.
 
-* *Ephemerons*: Mark some atoms as scope-unique. Diverge upon comparison if the assertion proves untrue. Use marked atoms as dict keys. Garbage collect associated data when the marked atom is collected.
-  
-These patterns should be supported via annotations or built-ins functions.
+Of course, this section is about assembly-time performance: speed and scalability of builds and tests. Performance of generated machine code is left entirely to the user.
 
 ## Data
 
 The built-in data types are numbers, lists, dicts, and functions. All data is immutable, i.e. you cannot update a list or dict, but you can construct a new list or dict in terms of updating an existing one.
 
-- Numbers are bignum integers and exact rationals. Rounding of numbers is left to users, but the underlying representation may optimize for floating-point style usage (e.g. base 2 or 10).
-- Lists are the one-size-fits-all sequential data structure. Lists may be concretely represented by finger-tree ropes under the hood. Binaries are modeled as lists of small integers (0..255) and heavily optimized.
-- Dicts are finite key-value associative structures. Keys must be comparable with equality, i.e. no functions. Relevant:
-  - Dicts do not support iteration over keys. Enables key hash, data abstraction, ephemerons.
-  - Tagged data is modeled as a singleton dictionary and annotated to keep it as a singleton.
-  - Unique atoms are modeled as tagged data with abstract tags. Only observation is equality.
-- Functions are expressed in the lambda calculus.
+- Numbers are exact rationals. Any loss from rounding numbers is under explicit control of the user.  
+- Lists are a one-size-fits-all sequential data structure. Concretely represented by finger-tree ropes under the hood, supporting append at either, compact binaries, array-like flattening. 
+- Dicts are finite key-value associative structures. Keys must be comparable with equality, i.e. no functions. There is no iteration over keys. Tagged data as a singleton dict.
+- Functions are frequently expressed as lambdas, but are generally modeled as closed-term inets with the same interface as lambdas. As closed terms, functions are first-class data.
 
-These basic data types are implicitly tagged, i.e. users may express conditional behavior based on whether a value is a number or a function. But in many cases, users will want to further tag data to distinguish purpose. The assembler should optimize for common cases, such as use of atoms as keys in dicts or tagged data.
+All basic data types are implicitly tagged, i.e. users can distinguish a function from a number in context of pattern matching. Users can further tag data to support a dynamic type feel.
 
 ## Objects
 
@@ -149,7 +144,7 @@ Even without a runtime, effects are convenient for implicit dataflow, backtracki
             | Yield (rq x) (x -> Eff rq a)
             | Return a
 
-We can model a free-er effects monads as either *yielding* a request, continuation pair or *returning* a final result. In case of yield, the expected response type depends on the request. Of course, in context of untyped lambda calculus, enforcement may be limited.
+We can model a free-er effects monads as either *yielding* a request, continuation pair or *returning* a final result. In case of yield, the expected response type depends on the request.
 
 We can easily introduce some syntactic sugar:
 
@@ -158,7 +153,7 @@ We can easily introduce some syntactic sugar:
         op2             op2 >>= \ () ->
         op3 a           op3 a
 
-We can specialize the monadic operators for our only monad. Our untyped lambda calculus doesn't offer a direct solution to type-indexed behavior, such as typeclasses, so this is convenient:
+There are no typeclasses. We can specialize the monadic operators for our only monad. 
 
         (Yield rq k1) >>= k2 = Yield rq (k1 >=> k2)
         (Return a) >>= k = k a
@@ -293,6 +288,23 @@ For concision, a front-end compiler could desugar `.op` to `eff:(\api -> api.op)
 
 *Notes:* Not every value in `api` needs to be an effect, i.e. we ca and there is no guarantee that `api` is stable from step to step. But users may assume monad laws are respected, e.g. `(return r >>= k) = (k r)`.
 
+### Standard Effects
+
+It is very convenient to assume a standard effects API for generic extensions. Proposed:
+
+- `.r Result` - pass result to next step
+- `.seq op k` - equivalent to `op >>= k`
+- `.alt A B` - run `A`; on fail, backtrack then run `B`
+- `.fail` - failure for `.alt`, does not continue
+- `.cut op` - scope for `.alt`, selects first success
+- `.fix fn` - `fn` receives result as input but hides `.reset` scope
+- `.get Path` - copy data from state (default unit)
+- `.set Path Val` - overwrite data in state
+- `.reset Key op` - scope for delimited continuations
+- `.shift Key fn` - exits corresponding `.reset` with continuation 
+
+The `Path` type is a list of keys, corresponding to a hierarchical dictionary. The empty list represents the toplevel dictionary. Some contexts may recognize other path types, e.g.lenses as editable views. We generally assume that state is non-linear. 
+
 ### Extensible Effects
 
 For effects that accept arguments, we can generally leverage method objects to extend behavior, i.e. `{apply:f, _}`. Unfortunately, that doesn't work for nullary effects, and I'd hate to force a `()` argument. Instead, for purpose of running effects, handlers shall recognize `{eff:_, _}`, not limited to singletons. (More generally, handlers may support or favor alternatives to the `eff` calling convention.) We won't curry arguments for anything but the singleton `eff:f` case, but users may combine `{eff:_, apply:_, _}` to express an effect that is runnable as-is yet optionally accepts more arguments (a form of var-args).
@@ -396,7 +408,7 @@ Machine-code mnemonics are left to libraries. Effectively, we have a generic 'as
 
 ### Reflection
 
-Reflection is expressed effectfully, i.e. `eff:(\api -> ...)`. To keep implementation small and simple, the reflection API is version-specific, specialized to the assembler executable's representations and capabilities. Most bloat of portability and policy is pushed to user-defined adapters.
+Reflection is expressed effectfully, i.e. `eff:(\api -> ...)`. To keep implementation small and simple, the reflection API is version-specific beyond the *Standard Effects*, specialized to the assembler executable's representations and capabilities. Most bloat of portability and policy is pushed to user-defined adapters.
 
 Reflection may be triggered by compilers (`refl.*`), configurations (`conf.log` and `conf.ide`), or anonymous term annotations (`anno (.log Msg) Term`). In the general case, reflection tasks run concurrently and interact through shared state. To control concurrency, the reflection API shall support software-transactional memory (STM), with transaction per scoped 'cut'. A failed transaction is implicitly retried when observed conditions change.
 
@@ -511,11 +523,11 @@ What can we feasibly implement to support developers in reasoning about the asse
 
 * *Profiling*: Feedback about where an assembler is spending its time is useful for identifying infinite loops and improving performance of the assembly process. It won't help much with output modulo profiling of emulations.
 
-* *Abstract Interpretation*: We can interpret machine code against an abstract representation of machine state. With reflection, we can do similarly for lambdas. We can include assumptions and test for contradiction or consistency. It is feasible to integrate a constraint model to perform the actual checks.
+* *Abstract Interpretation*: We can interpret machine code against an abstract representation of machine state. With reflection, we can do similarly for functions. We can include assumptions and test for contradiction or consistency. It is feasible to integrate a constraint model to perform the actual checks.
 
 ### Reflection
 
-The logic required for reasoning is non-trivial, and I'd prefer to keep it separate from the assembly executable. The proposed alternative is that the assembler provides a low-level reflection API and runs ad hoc, user-defined reflection tasks. The reflection API should bypass abstraction barriers, such that users can inspect lambdas and dictionaries and perform ad hoc proofs. Reflection can also support visualization by interacting with a logger or IDE.
+The logic required for reasoning is non-trivial, and I'd prefer to keep it separate from the assembly executable. The proposed alternative is that the assembler provides a low-level reflection API and runs ad hoc, user-defined reflection tasks. The reflection API should bypass abstraction barriers, such that users can inspect functions and dictionaries and perform ad hoc proofs. Reflection can also support visualization by interacting with a logger or IDE.
 
 Front-end compilers may further contribute to reflection by exporting intermediate representations.
 
@@ -525,7 +537,7 @@ Many forms of reasoning benefit from a high-performance constraint solver. To su
 
 Eventually, we may want a constraint solver to influence the assembly. This is a greater challenge because we're limited by deterministic acceleration. But it should be feasible to develop an adequate constraint solver for many use cases. 
 
-## Assembly Programming
+## Programming
 
 ### Direct-Style Assembly
 
@@ -574,7 +586,7 @@ Direct-style assembly with most CPU machine code naturally covers all procedural
 
 I'd like to focus initially on real-time and bounded-memory systems. But that's just my own focus.
 
-## Proof-Carrying Code
+### Proof-Carrying Code
 
 It is possible to express theorems on assembly or machine code, e.g. in terms of preconditions, postconditions, invariants. Useful properties to examine included bounded-time, bounded-space, memory safety. It should be possible to build proofs of these theorems that are much easier to check than they were to discover, then bundle them with the code, perhaps as a separate file.
 
@@ -582,9 +594,39 @@ Although we cannot rely on reflection to emit proofs, we can use reflection and 
 
 I use the word 'possible' because I'm not confident to say 'feasible'. The VALE project (Verified Assembly Language for Everest) demonstrates theorem proving at the assembly level, but not at great scale, and not with extensibility or adaptability. There is significant risk of proofs becoming an anchor.
 
-## Concurrency
+### Interaction Nets
 
-Indexed shift-reset effects provides a foundation for flexible control-flow. We can use this to model assembly-time cooperative multi-threading. It is feasible to spawn subtasks, await events, etc.. Regarding state, I suggest a simple convention: all state is thread-local except a shared heap. Upon context switching, thread-local state paired with the continuation, but the heap is passed to the next thread.
+Although users may develop a front-end syntax for inets, I propose to primarily *assemble* inets. The assembler shall provide a built-in function that runs the effectful inet builder and returns a function. The primary motive to define an inet is performance: inets are graph-structured instead of tree-structured, which enables a more-direct routing of information within a sophisticated function.
 
-Ideally, the exact details of the thread schedule should be irrelevant. Thus, APIs for interaction between threads should be designed around confluence and consistency as logical monotonicity (CALM). For example: linear channels, broadcast channels, constraints, CRDTs. In the absence of linear types, we can design robust APIs around thread-local references explicit operations to transfer objects.
+Desiderata include a stable API for reproducibility, lightweight analysis that the network is well-formed, debuggability, and that the API is easy to read and comprehend. 
 
+Design sketch: 
+- Two initial ports: `\ arg result -> do ...`. 
+  - consequence of implicit lambda interface
+  - principal ap port is function interface
+- Nodes are constructed returning lists of ports.
+  - List head is the principal port. 
+  - `.fan 6 -> [x0, x1, x2, x3, x4, x5, x6]` 
+- Wires are constructed, taking a pair of ports.
+  - `.wire x0 arg_port` (commutative)
+- Every port must be wired exactly once.
+- Full *Standard Effects* for generics.
+
+We do not need many node constructors. I propose:
+
+- `.con -> [ap, arg, result]` - constructor of lambdas, shared
+  - also used for applying lambdas, i.e. wire ap to ap
+- `.fan N -> [x0,...,xN]` - duplicator, unique instances
+  - `.fan 0 -> [e0]` - eraser, drops data
+  - `.fan 1 -> [x0,x1]` - a linear tunnel
+  - annihilates with self, commutes with con or other fans
+- `.ref Data -> [d]` - lazy reference to external data
+  - integrate dicts, lists, functions, annotations, etc..
+
+*Note:* This isn't (necessarily) all node types the assembler uses internally, just those it exposes for constructing a network. Anything else should be intermediate representations.
+
+### Concurrent Assembly
+
+We can model multi-threading in terms of shift-reset, transferring ownership of a 'heap' between threads upon each context switch. When a threads update different parts of the heap, it is feasible to evaluate multiple threads in parallel. Explicit use of interaction nets can feasibly model futures and promises more directly.
+
+Although outcomes are deterministic, we'll also want them to be *stable* across most changes in code. Ideally, the assembly outcome should be entirely independent of heuristic thread scheduling decisions. This suggests designing around CALM and confluence: futures and promises, linear channels, broadcast channels, constraint systems, CRDTs.

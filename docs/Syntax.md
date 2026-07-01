@@ -58,6 +58,8 @@ Proposed keywords:
         match, try, when, try_match                 advanced conditionals
         and, or, not                                comparisons
 
+        interaction_net                             lowest-level semantics
+
 Keywords implicitly reserve `_keyword`, but it's only meaningful in a few special cases.
 
 ## Names and Paths
@@ -108,7 +110,7 @@ To this end, we might use a pattern such as defining `final_of.foo = _foo`. Assi
 
 ### Forbidden Shadows
 
-Name shadowing, where a function argument or local variable accidentally masks another name defined or declared in lexical scope, is a common source of subtle bugs. Humans are a lot more flexible about referential context than a lambda calculus, thus easily overlook the error when reading code. To resist this bug, we'll warn on name shadowing by default.
+Name shadowing, where a function argument or local variable accidentally masks another name defined or declared in lexical scope, is a common source of subtle bugs. Humans are a lot more flexible about referential context than our compiler, thus easily overlook the error when reading code. To resist this bug, we'll warn on name shadowing by default.
 
 As a special case, we shadow *all* the names by default in `object` or `using` scopes. Instead, users write `^name` to escape the shadowing context. This sort of bulk shadowing seems easier for users to track. 
 
@@ -157,7 +159,7 @@ Operators may support limited ad-hoc polymorphism. For example, `>` could compar
 
 Application is essentially expressed as a special whitespace 'operator', i.e. `f x` applies `f` to `x`. The compiler supports some ad hoc polymorphism for application:
 
-- lambda functions, lazy, built-in, evaluate by substitution.
+- actual functions, obviously
 - method objects, `{apply:f,_} x = f x`
 - lightweight effects, `(eff:f) x = eff:(\api -> f api x)` 
 
@@ -725,7 +727,7 @@ I propose to model booleans as simple atoms.
 
 There are no truthy values, e.g. empty list is not falsy. We can support `and, or, not` as keywords, with `and` and `or` acting as infix operators. (I don't like `&&` and `||`.)
 
-We'll support comparisons on numbers `> >= == <> =< <`. Support for `==` and `<>` extend to all equatable values (all values not containing lambdas). 
+We'll support comparisons on numbers `> >= == <> =< <`. Support for `==` and `<>` extend to all equatable values (all values not containing functions). 
 
 For dictionaries, we'll add a `Dict has Path`, e.g. `{foo.bar:()} has foo.bar`.
 
@@ -892,13 +894,17 @@ Pattern matching is primarily via `match` and `if let`. It is also available to 
         (Applicable -> Pattern)     # view pattern must be parenthesized
 
         \Name                       # match applicables (\.fn, eff:_, {apply:_,_})
-        \.Name                      # match lambdas only
+        \.Name                      # match functions only
 
 Notes:
 - List patterns limited to at most one variable-size element. 
 - View patterns use the same structure as a tentative then/arrow, i.e. return optional value. 
 - Tag or dict path expressions are *evaluated* in context and used as keys. Only the RHS data is a pattern. 
 - `anno 'freeze` won't block full matches on a dict. (Implicit `anno 'thaw` as special case.)
+
+## Interaction Nets (inets)
+
+Eventually, we might want a front-end syntax for constructing inets. But at the moment, we'll simply provide an `interaction_net` keyword that receives as an argument an effect that builds the inet. 
 
 ## Loops
 
@@ -917,10 +923,11 @@ In the more general case, mutually recursive loops with tail calls can effective
 
 ## Open Continuations
 
-With the *Lightweight Extensions* syntax for objects, we can support continuation-passing style via extension of abstract method objects. This is another way of passing parameters, more extensible and flexible than lambda arguments. Moreover, it shifts some parameters from horizontal to vertical layout, and avoids some redundancy of reference. The resulting syntax might look a bit like this:
+With the *Lightweight Extensions* syntax for objects, we can support continuation-passing style via extension of abstract method objects. This is another way of passing parameters, more extensible and flexible than function arguments. Moreover, it shifts some parameters from horizontal to vertical layout, and avoids some redundancy of reference. The resulting syntax might look a bit like this:
 
         foo x y = op1 x >>= op2 y >>= &op3 
             A a = op4 x >>=\_-> op5 a >>= &op6 as op
                 B := ... op.F ... 
                 C c = ...
             D ::= \ prior -> prior + 42
+
