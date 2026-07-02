@@ -32,23 +32,25 @@ These present significant design challenges. I'll generally prioritize system-le
 
 ## Overview of Semantics
 
-The toplevel semantics is a lazy, untyped lambda calculus, but this builds upon [interaction nets (inets)](https://en.wikipedia.org/wiki/Interaction_nets). That is, we admit arbitrary inets *within* functions, but the module namespace consists of closed terms. Inets simplify laziness, parallelism, fixpoint, and fusion.
+Toplevel semantics is a lazy, untyped lambda calculus. For performance, users may express some functions via [interaction nets]https://en.wikipedia.org/wiki/Interaction_nets). A few data types - lists, numbers, dicts - have built-in representations and operators. 
 
-A few data types - e.g. lists, numbers, dicts - have built-in representations and operators. We'll support object-oriented programming in terms of [mixins with deferred fixpoint](http://fare.tunes.org/files/cs/poof.pdf), and monadic effects in terms of a [freer monad](https://okmij.org/ftp/Haskell/extensible/more.pdf). The toplevel namespace is modeled in an object-oriented style, thus supports overrides as a foundation for extensibility.
+We'll model object-oriented programming in terms of [open fixpoints](http://fare.tunes.org/files/cs/poof.pdf), and monadic effects in terms of a [freer monad](https://okmij.org/ftp/Haskell/extensible/more.pdf). The toplevel namespace is modeled in an object-oriented style, thus supports overrides as a foundation for extensibility.
 
-Aside from behavioral semantics, we'll introduce a notion of *annotations* as an 'active' comment. Annotations shall not observably influence evaluation, but they may block further evaluation: divergence is not observable. We'll leverage annotations to support performance, reasoning, debugging, projectional editing, and other tooling. An error value would be modeled by annotation.
+Aside from behavioral semantics, we introduce a notion of *annotations* as an 'active' comment. Annotations shall not observably influence evaluation, but may block evaluation: divergence is not observable. Annotations support performance, debugging, reasoning, editing, and other tooling.
 
 ## Performance
 
-In contrast to HVM, this system is not designed for direct execution on GPGPU. There is too much interference from arbitrary-precision rational numbers, ad hoc annotations, huge lists and dicts. But we can easily parallelize across many CPUs, even distributed nodes. And there are a few performance opportunities with a little guidance from annotations:
+This section describes our approach to assembly-time performance: speed and scalability of builds and tests. Performance of assembled machine code is left entirely to the user, as is the nature of an assembler.
 
-* *Acceleration*: substitute performance-critical functions. For example, a function representing an abstract CPU, TPU, or GPGPU emulator can be substituted by a built-in that compiles IL code for actual hardware. Acceleration is high-risk for correctness, maintenance, portability, bloat. But carefully chosen accelerators are also extremely high-reward.
+* *Laziness* - Default evaluation strategy is laziness, i.e. evaluate only what contributes. Users can express a huge namespace but we'll download and extrat only what is needed. Annotations may tune the strategy, e.g. to sequence or spark (parallelize) evaluation.
 
-* *Caching*: remember expensive computations. When encountered again, substitute result instead of replaying computations. Persistent caching provides our basis for incremental assembly. A remote proxy cache can feasibly share work within a community.
+* *Caching*: annotations ask assembler to memorize some expensive computations. When encountered again, substitute result instead of replaying full computations. Persistent caching provides our basis for incremental assembly. A remote proxy cache (with a little PKI) can potentially share work within a community.
 
-* *Ephemerons*: mark some atoms as scope-unique. Diverge if this would be observed to be untrue. When used as dict keys, we can now garbage-collect associated data when associated metadata is collected. Useful when modeling a 'heap'.
+* *Parallelism* - Interaction nets naturally express fine-grained parallel dataflows. Users may also use annotations to 'spark' computations in anticipation of future need. But SIMD, GPGPU, etc. parallelism depend on *Acceleration*.
 
-Of course, this section is about assembly-time performance: speed and scalability of builds and tests. Performance of generated machine code is left entirely to the user.
+* *Acceleration*: annotations ask assembler to substitute a performance-critical reference function with a built-in. For example, a function representing an abstract CPU, TPU, or GPGPU emulator can be substituted by a built-in that compiles code for actual hardware. Acceleration is high-risk, high-reward. Risks are correctness, maintenance, portability, bloat. Rewards are extending assembly or effective testing (e.g. hardware emulation) to new problem domains.
+
+* *Ephemerons*: use annotations to mark atoms as scope-unique. Equality checks diverge upon observing identical atoms with different marks. When used as dict keys, we can use a weakref, enabling garbage collection of a dict modeling a 'heap'.
 
 ## Data
 
@@ -311,6 +313,38 @@ For effects that accept arguments, we can generally leverage method objects to e
 
 *Note:* We'll generally treat the RHS of `eff:_` as opaque.
 
+## Interaction Nets
+
+In contrast to lambda calculus, interaction nets are graph-structured instead of tree-structured, and symmetric instead of directional. This simplfies fine-grained, flexible dataflow and supports backpropagation without fixpoint. In this project, interaction nets are scoped to expressions and capture data at a returned port.
+
+    # identity function as inet
+    interaction_net do
+        .con -> [ap, arg, result]
+        .wire arg result
+        .r ap
+
+Effects API: 
+
+- Node constructors introduce lists of ports. Principal port is list head.
+  - `.con -> [ap, arg, result]` - constructor of functions
+    - rules: join `.con`, call function `.data`, commute `.fan`
+  - `.fan N -> [x0, x1, x2, ..., xN]` - dataflow, unique instances
+    - `.fan 0 -> [e]` - explicitly drop data
+    - `.fan 1 -> [lhs,rhs]` - a tunnel for non-local composition 
+    - rules: join self (same instance), commute other nodes
+  - `.data Expr -> [d]` - external functions, lists, dicts, numbers
+    - rules: data-data is stuck, a type error!
+- Wires consume ports. Each ports must be wired exactly once.
+  - `.wire A B` - commutative
+  - return port is wired implicitly
+- *Standard Effects* to support bookkeeping and backtracking.
+
+Lambdas calculus becomes a design pattern or convention: 
+- lambda is `.con` that binds `arg` *into* `result`
+- application is `.con` that provides `arg`, extracts `result`
+
+In the general case, there is no distinction between argument and result. With a suitable syntax, we could express interactive processes with session types as another approach to effects. But our initial ".g" syntax favors lambdas, and we'll initially use interaction nets as a performance tool for difficult dataflows.
+
 ## Modules
 
 A module is represented by a file and represents an object extension. The assembler provides a built-in front-end compiler for ".g" files, but *User-Defined Syntax* is supported, with users defining a monadic front-end compilers aligned to file extensions, and the assembler bootstrapping upon override.
@@ -420,11 +454,11 @@ Reflection is not reproducible. Between resource and scheduling variability, cac
 
 The assembler implements a simple logging pipeline.
 
-        refl >> conf.log >> conf.ide >> fmap conf.show >> stderr
+        refl stream >> conf.log >> conf.ide >> fmap conf.log_format >> stderr
 
-Reflection API can emit log messages, but cannot read them. If `conf.log` is defined, it may freely rewrite the stream. If `conf.ide` is defined, it sees the stream after it's been modified by `conf.log`, e.g. to render log messages to a webpage, or to block messages while running a TUI. We format messages via `conf.show : Message -> Text`, then write to standard error. The default `conf.show` recognizes structured messages of form `{ msg:{ text:Text, severity:Enum, ...}, ...}`.
+Reflection API can emit log messages, but cannot read them. If `conf.log` is defined, it may freely rewrite the stream. If `conf.ide` is defined, it sees the stream after it's been modified by `conf.log`, e.g. to render log messages to a webpage, or to block messages while running a TUI. We format messages via `conf.log_format : Message -> Text` or an assembly-specific default, then write to standard error.
 
-If `conf.log` or `conf.ide` are undefined or terminate early, they're implicitly replaced by pass-through. 
+If `conf.log` or `conf.ide` are undefined or return early, they're logically replaced by pass-through. 
 
 ### Interaction
 
@@ -450,33 +484,23 @@ Aside from primary outputs, we might want the assembler to automatically set per
 
 When loading a module, we'll first search the provided environment for a compiler: `Base.env.lang.[FileExt].compile`. If defined, we'll use this compiler, falling back to an assembler built-in or reporting an error. The assembler shall provide a built-in at least for file extension ".g", albeit not necessarily the oldest or newest versions. 
 
-The 'compile' method shall be expressed effectfully. Effects shall include:
+The 'compile' method shall be expressed effectfully. Effects include:
 
-- generic state, shift/reset, fix, cut, alt
 - parser combinators to read source binary
-  - design for tracing, isolation, laziness
+  - designed for tracing, isolation, laziness
   - i.e. multi-phase and scoped parsing
-  - simplicity is also a goal here
-- load files as modules or binaries
-  - modules are always bound to namespace
-- generate unique atoms
-- access and update 'Base' namespace in state
-  - final 'Base' becomes 'Instance' namespace
-  - no-op module thus has identity behavior
-  - enforces explicit overrides
-- access final 'Self' namespace 
-- access built-in functions 
-- warnings, errors, recommendations
+- import integration, files as modules or binaries
+  - modules are always pathed in toplevel namespace
+  - this simplifies override of modules
+- access to the past and future namespace
+- access to some primitive built-in definitions
+- *Standard Effects* 
 
-I accept a fair bit of complexity in the compiler effects API because it's inevitable: the assembler must implement the ".g" syntax and support adequate debugging thereof, thus there is some arbitrary division between 'effects API' and 'the rest of the compiler'. By sharing common logic - especially parser combinators - we can support more-consistent debugging, projectional editing, and other tooling across front-end languages.
+The assembler should not privilege the built-in ".g" compiler or others. It is best to build upon the same API that will be provided for user-defined syntax.
 
-For reasons of reproducibility and location-independence, the front-end compiler does not know what file it's compiling or where the module is loaded within the global namespace. But such metadata is available through reflection APIs.
+For reasons of reproducibility and location-independence, the front-end compiler cannot see what file it's compiling or where a module is loaded within the global namespace. But such data implicitly annotates parse results and is visible through the reflection API.
 
-*More Notes:*
-- Built-in languages should use the same API internally.
-- Normalize file extensions: lower-case A-Z, drop initial '.'
-  - e.g. "foo.TaR.gZ" via `env.lang.["tar.gz"].compile`
-- The language object may define more methods for tooling.
+*Note:* File extensions are implicitly lower-cased (A-Z only), e.g. `"foo.Tar.Gz"` is processed by `env.lang.["tar.gz"].compile`.
 
 ### Compiler Bootstrapping
 
@@ -533,9 +557,9 @@ Front-end compilers may further contribute to reflection by exporting intermedia
 
 ### Constraint Solver
 
-Many forms of reasoning benefit from a high-performance constraint solver. To support this, we can attach the assembler to an external constraint solver, perhaps configurable, then expose it to the reflection API.
+Many forms of reasoning benefit from a high-performance constraint solver. To support this, we can attach the assembler to an external SMT solver such as Z3 or cvc5, perhaps configurable. We can expose this via reflection API. Although the reflection API cannot directly modify code, it could provide recommended edits for the IDE to apply. Thus, we can leverage the constraint solver for assisted theorem proving or programming.
 
-Eventually, we may want a constraint solver to influence the assembly. This is a greater challenge because we're limited by deterministic acceleration. But it should be feasible to develop an adequate constraint solver for many use cases. 
+Long term, with acceleration, it should be feasible to implement constraint solvers fully within the assembly. This would enable the assembler itself to perform more of the search.
 
 ## Programming
 
@@ -565,15 +589,15 @@ To support direct-style assembly, we express assembly mnemonics as writer effect
 A characteristic of 'direct-style' assembly, the heart of its vibe IMO, is that it's locally write-only. Users aren't reading contexts to make decisions. Insofar as we pursue direct-style as our foundation, we should build a set of effects that returns unit values or opaque references. Extensions befitting direct-style assembly:
 
 - *singletons*: Declare that some resources are written only once, e.g. based on a shared name or content addressing. This allows us to write singletons on demand.
-- *write cursors*: Track references to multiple write 'sections' with layout constraints (e.g. B starts where A ends). Grow and logically link sections iteratively. Heterogeneous cursors for bss, rodata, data, stack frames, etc..
+- *write cursors*: Track references to multiple write 'sections' with layout constraints (e.g. B starts where A ends). Grow and logically link sections across multiple steps. Heterogeneous cursors for bss, rodata, stack frames, etc..
 - *abstract interpretation*: Maintain an abstract representation of machine state and user assumptions, so we can detect conflicts. Carry this metadata with each label, so we can ensure consistent contexts on branches or jumps. 
 - *program search*: When conflicts are detected between conditions and assumptions, have alternatives as backups. Potential extensions to weighted search, integrating preferences. 
-- *constraint models*: we can build a constraint system as a form of global agreements within an assembly. We do not reading solver values while writing the assembly, but we can arrange for them to influence the next stage of assembly.
 - *obligations*: Write down what you're planning to do, some constraints on order of events, and write when you're done. Likely per cursor. These may be opaque to assembler, but support human discipline.
+- *constraint models*: lightweight constraint system as a form of global agreements within an assembly. We do not reading solver values while writing the assembly, but we can arrange for them to influence the next stage of assembly.
 
 There's a reasonable case to be made for some coordination effects, e.g. first-class queues for communication between subtasks shouldn't severely detract from the direct-style experience. Ultimately, direct-style is a stylistic choice, not a mandate, and users fully control effects.
 
-*Aside:* Above, I use `using x86` to avoid polluting the toplevel namespace, but a viable alternative is to leverage lightweight effects, e.g. `.movl 'rax 60`, pushing the assembly mnemonics directly into the effects API. Of course, this would require something like a `mkelf_x86` variant.
+*Aside:* Above, I use `using x86` to avoid polluting the toplevel namespace, but a viable alternative is to leverage lightweight effects, e.g. `.movl 'rax 60`, pushing the assembly mnemonics directly into the effects API. Of course, this implies something like a `mkelf_x86` variant to provide the API.
 
 ### Structured Assembly
 
@@ -593,37 +617,6 @@ It is possible to express theorems on assembly or machine code, e.g. in terms of
 Although we cannot rely on reflection to emit proofs, we can use reflection and the IDE to help discover and inject proofs (or proof tactics). Most relevantly, the reflection API may provide access to an SMT solver, and the IDE may support edit suggestions from the reflection API. Thus, assisted theorem proving is possible. As we accelerate constraint solvers, proof tactics may become more adaptive.
 
 I use the word 'possible' because I'm not confident to say 'feasible'. The VALE project (Verified Assembly Language for Everest) demonstrates theorem proving at the assembly level, but not at great scale, and not with extensibility or adaptability. There is significant risk of proofs becoming an anchor.
-
-### Interaction Nets
-
-Although users may develop a front-end syntax for inets, I propose to primarily *assemble* inets. The assembler shall provide a built-in function that runs the effectful inet builder and returns a function. The primary motive to define an inet is performance: inets are graph-structured instead of tree-structured, which enables a more-direct routing of information within a sophisticated function.
-
-Desiderata include a stable API for reproducibility, lightweight analysis that the network is well-formed, debuggability, and that the API is easy to read and comprehend. 
-
-Design sketch: 
-- Two initial ports: `\ arg result -> do ...`. 
-  - consequence of implicit lambda interface
-  - principal ap port is function interface
-- Nodes are constructed returning lists of ports.
-  - List head is the principal port. 
-  - `.fan 6 -> [x0, x1, x2, x3, x4, x5, x6]` 
-- Wires are constructed, taking a pair of ports.
-  - `.wire x0 arg_port` (commutative)
-- Every port must be wired exactly once.
-- Full *Standard Effects* for generics.
-
-We do not need many node constructors. I propose:
-
-- `.con -> [ap, arg, result]` - constructor of lambdas, shared
-  - also used for applying lambdas, i.e. wire ap to ap
-- `.fan N -> [x0,...,xN]` - duplicator, unique instances
-  - `.fan 0 -> [e0]` - eraser, drops data
-  - `.fan 1 -> [x0,x1]` - a linear tunnel
-  - annihilates with self, commutes with con or other fans
-- `.ref Data -> [d]` - lazy reference to external data
-  - integrate dicts, lists, functions, annotations, etc..
-
-*Note:* This isn't (necessarily) all node types the assembler uses internally, just those it exposes for constructing a network. Anything else should be intermediate representations.
 
 ### Concurrent Assembly
 

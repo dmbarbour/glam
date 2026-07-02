@@ -50,6 +50,7 @@ Proposed keywords:
         with, without                               dict 
         do                                          effects
         let, in, where                              locals
+        interaction_net                             flexible dataflow
 
         object, extend, extends, self, mixin        objects
         object_from_spec                            anonymous objects
@@ -57,8 +58,6 @@ Proposed keywords:
         if, then, elif, else                        basic conditionals
         match, try, when, try_match                 advanced conditionals
         and, or, not                                comparisons
-
-        interaction_net                             lowest-level semantics
 
 Keywords implicitly reserve `_keyword`, but it's only meaningful in a few special cases.
 
@@ -159,11 +158,11 @@ Operators may support limited ad-hoc polymorphism. For example, `>` could compar
 
 Application is essentially expressed as a special whitespace 'operator', i.e. `f x` applies `f` to `x`. The compiler supports some ad hoc polymorphism for application:
 
-- actual functions, obviously
+- functions via lambda or interaction net
 - method objects, `{apply:f,_} x = f x`
-- lightweight effects, `(eff:f) x = eff:(\api -> f api x)` 
+- lightweight effects, `(eff:f) x = eff:(\api -> f api x)`
 
-We'll generally model advanced features (multimethods, keywords, observability, etc.) via 'objects'. 
+This is a compiler feature: it does not implicitly extend to other languages or definition of interaction nets. We'll generally model advanced features (multimethods, keyword args, hooks for observability, etc.) via method objects. 
 
 ## Effects
 
@@ -177,22 +176,6 @@ Aesthetically, this should support a direct assembly programming style where we 
             ...
 
 Aside from do notation, we'll support the `>>=` composition and `>=>` Kleisli composition, and `=>>` for dropping a unit result.
-
-### Standard Effects
-
-Effect names aren't keywords per se, but the compiler will assume several names for its do notation and operators. 
-
-- `.seq, .r` - corresponds to `>>=` and `return`
-- `.alt, .fail, .cut` - pattern matching, try
-- `.fix` - recursive do
-
-At the moment, the compiler doesn't touch state or delimited continuations. But as a convention, we might reserve:
-
-- `.set, .get, .put, .take` - for indexed state
-  - fail on get/set/take a path that doesn't exist, or put a path that does exist
-  - in transactional contexts we can track precisely which paths are observed
-  - empty path applies to whole state; can also take/put the whole state
-- `.shift, .reset` - indexed continuations
 
 ### Recursive Do
 
@@ -506,7 +489,11 @@ The above form is awkward, tedious, and error prone. Tables would benefit from d
 
 ## Functions
 
-I propose to adopt Haskell's use of `\` for lambdas.
+There are two ways to express functions: lambdas and interaction nets.
+
+### Lambdas
+
+We'll adopt Haskell's use of `\` for lambdas.
 
         \ x y z -> Expr
         \ x -> \ y -> \ z -> Expr
@@ -520,7 +507,11 @@ We'll also support Haskell-style `name args = ...` as a syntactic sugar.
 
 Unlike Haskell, there is no support for pattern matching on lambda or definition arguments. 
 
-## Partial Functions
+### Interaction Nets
+
+Interaction nets are expressed effectfully. Keyword `interaction_net` provides access to an assembler built-in function for constructing interaction nets. Effects API is detailed in the *Design* doc. Interaction nets aren't limited to returning functions, but functions are the only way to reuse an interaction net.
+
+## Errors
 
 We can use annotations to indicate known errors or issues.
 
@@ -559,15 +550,25 @@ Modules are integrated through 'import' declarations. Everything module-related 
         import "Bar.g" as b                 # 'as' for default introduction or 'at' for a mixin
         import "BigText.txt" as binary t    # introduces t as a binary, i.e. does not compile t
         import "Qux.g" as q from {
-            , rev:Text                      # content hash of containing folder
+            , rev:Text                      # content or revision hash of containing folder
             , search:[
-                , tag:Text                  # tag or branch name for precise cloning
-                , url:Text                  # a remote lookup, uses most recent tag
-                , url:Text
+                , tag:Text                  # tag or branch for shallow download
+                , url:Text                  # URL source
+                , url:Text                  # backup source (same tag)
                 ]
             }
 
-In the vast majority of use cases, literal expressions are sufficient.
+For remote files, users may move the filename into the `from` expression:
+
+        import as q from {
+            , file: "Qux.g"
+            , rev:Text
+            , search:[...]
+            }
+
+This form is mostly intended computed `from` expressions. I imagine users will stick to literals most of the time. 
+
+*Note:* Importing the same module many times results in many distinct instances. This can be useful if experimenting with different overrides or adaptations. But shared libraries are more efficient: assume definitions are in `env.*`, let client import once.
 
 ### Access Control
 
@@ -700,23 +701,6 @@ Naturally, we'll apply our mixin upon defining it. It is feasible to embed a mix
                 C c = op7 &> mixin 
                     ...
 
-We could tighten this further by compressing `&> mixin`. Current best idea is:
-
-        &Object Body
-        Object &> mixin Body
-
-        &Object as Name Body
-        Object &> mixin as Name Body
-
-This again shaves off a few horizontal characters and some line noise. The resulting syntax feels clean to me:
-
-        foo = op1 >>= op2 >>= &op3 as o
-            A := _o.A + 42 
-            B = op4 >>= op5 >>= &op6
-                C c := &op7 
-                    ...
-
-Lightweight extensions provide a convenient foundation for tuning parameters, keyword arguments with defaults, continuation-passing style, etc.. See *Open Continuations*.
 
 ## Booleans
 
@@ -728,8 +712,6 @@ I propose to model booleans as simple atoms.
 There are no truthy values, e.g. empty list is not falsy. We can support `and, or, not` as keywords, with `and` and `or` acting as infix operators. (I don't like `&&` and `||`.)
 
 We'll support comparisons on numbers `> >= == <> =< <`. Support for `==` and `<>` extend to all equatable values (all values not containing functions). 
-
-For dictionaries, we'll add a `Dict has Path`, e.g. `{foo.bar:()} has foo.bar`.
 
 ## Conditionals
 
@@ -765,9 +747,9 @@ Although I write `Cond` above, we'll support any non-branching guard clause from
 
         if Pattern <- Expr when Cond then A else B
 
-### Tentative Commitment
+### Tentative Choice
 
-Users may write `then?` to indicate tentative commitment. In context of `if` a `then?` body is expressed as a effect with access to `.alt/.fail/.cut/.seq/.r` and is evaluated with a local compiler-provided handler.
+Users may write `then?` to indicate tentative commitment. This is evaluated with an effectful handler. In context of `if` we have access only to the stateless subset of standard effects: `.alt/.cut/.fail/.seq/.r/.fix`. Of these, we'll mostly use `.r` and `.fail`. 
 
         if C then? .r A else B          # same as if C then A else B
         if C then? .fail else B         # always returns B
@@ -790,13 +772,13 @@ This enables users to factor out conditions more flexibly.
         elif C4 then E4
         else E5
 
-Refactoring isn't convenient or pretty, but it is possible. 
+Refactoring isn't convenient or pretty, but it's at least structurally possible. 
 
 *Note:* The analog for `match` is `-?>`. 
 
 ### Try
 
-Users may express `try` behaviors within effectful contexts assuming `.alt/.cut/.fail`. 
+Users may express `try` behaviors within effectful contexts (with at least `.cut/.alt/.fail/.r/.seq`). 
 
         # unit effect
         try Operation then
@@ -882,7 +864,8 @@ Pattern matching is primarily via `match` and `if let`. It is also available to 
         {d}                         # match dicts and tagged data
         {foo.bar.baz:Pattern, _}    # deep refs
         {(Expr):Pattern, _}         # eval path expr, extract, match Pattern 
-        tag:Pattern                 # will also match singleton dicts
+
+        tag:Pattern                 # same as {tag:Pattern}
         [TagExpr]:Pattern           # eval Expr, extract, match Pattern
 
         []                          # empty list
@@ -890,21 +873,26 @@ Pattern matching is primarily via `match` and `if let`. It is also available to 
         [x]++_xs                    # we can use append notation in patterns
         _xs++[x]                      
         [x0]++xs++[xN]
+        # as++bs                    # ILLEGAL - at most one variable-length sublist
 
-        (Applicable -> Pattern)     # view pattern must be parenthesized
+        (Applicable -> Pattern)     # view patterns must be parenthesized
 
         \Name                       # match applicables (\.fn, eff:_, {apply:_,_})
-        \.Name                      # match functions only
+        \.Name                      # match lambda or interaction net functions
 
-Notes:
-- List patterns limited to at most one variable-size element. 
-- View patterns use the same structure as a tentative then/arrow, i.e. return optional value. 
-- Tag or dict path expressions are *evaluated* in context and used as keys. Only the RHS data is a pattern. 
-- `anno 'freeze` won't block full matches on a dict. (Implicit `anno 'thaw` as special case.)
+*Note:* In theory, a front-end compiler can share work across related patterns. In practice, that's a low priority. Users have access to multi-level guard clauses in case they don't trust the compiler on this.
 
-## Interaction Nets (inets)
+*Note:* In context of `anno 'freeze`, we admit complete dict matches on a frozen dict, i.e. where remaining pattern is `{}`, but any other remaining pattern will have an error value unless users explicitly `anno 'thaw` the dict. When working with objects, favor `_` as the remaining pattern. 
 
-Eventually, we might want a front-end syntax for constructing inets. But at the moment, we'll simply provide an `interaction_net` keyword that receives as an argument an effect that builds the inet. 
+### View Patterns
+
+View patterns are expressed in a pattern context as:
+
+        (Viewer -> Pattern)
+
+In general, `Viewer` is any applicable that, given an value, tentatively returns a view. We then apply `Pattern` to the returned view instead of the original value. The viewer has access to the same effects as `then?` or `-?>` in context, including full host effects for `try` variants. 
+
+*Note:* View patterns are essentially an approach to refactoring *patterns*. In contrast, `then?` and `-?>` are approaches to refactoring *conditional structures*.
 
 ## Loops
 
@@ -925,9 +913,10 @@ In the more general case, mutually recursive loops with tail calls can effective
 
 With the *Lightweight Extensions* syntax for objects, we can support continuation-passing style via extension of abstract method objects. This is another way of passing parameters, more extensible and flexible than function arguments. Moreover, it shifts some parameters from horizontal to vertical layout, and avoids some redundancy of reference. The resulting syntax might look a bit like this:
 
-        foo x y = op1 x >>= op2 y >>= &op3 
-            A a = op4 x >>=\_-> op5 a >>= &op6 as op
+        foo x y = op1 x >>= op2 y >>= op3 &> mixin 
+            A a = op4 x >>=\_-> op5 a >>= op6 &> mixin as op
                 B := ... op.F ... 
                 C c = ...
             D ::= \ prior -> prior + 42
+
 
