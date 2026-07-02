@@ -52,12 +52,12 @@ Proposed keywords:
         let, in, where                              locals
         interaction_net                             flexible dataflow
 
-        object, extend, extends, self, mixin        objects
+        object, extend, extends, self               objects
         object_from_spec                            anonymous objects
 
         if, then, elif, else                        basic conditionals
         match, try, when, try_match                 advanced conditionals
-        and, or, not                                comparisons
+        and, or, not, has                           comparisons
 
 Keywords implicitly reserve `_keyword`, but it's only meaningful in a few special cases.
 
@@ -166,12 +166,11 @@ This is a compiler feature: it does not implicitly extend to other languages or 
 
 ## Effects
 
-We'll almost directly adopt Haskell's do notation. For aesthetic reasons, we'll support both `var <- op` and `op -> var`. Semicolons can serve as virtual line separators as needed. To support concise, convenient effects without polluting the toplevel namespace, I propose to desugar `.name` to `eff:(\api -> api.name)` and define application to work with effects: `(eff:f) x = eff:(\api -> f api x)`. 
+We'll adopt Haskell's do notation. For aesthetic reasons, we'll support both `Pattern <- op` and `op -> Pattern`. The latter is a lot more convenient for vertical columns of assembly mnemonics. We support `Pattern = Expr` (no `let`). Pattern matching either captures locals or evaluates to `.fail`. 
 
-Aesthetically, this should support a direct assembly programming style where we have a column of operations on the left and the occasional label tabbed out to the right. 
+Lightweight effects are supported: we desugar `.name` to `eff:(\api -> api.name)`, and we support application `(eff:f) x = eff:(\api -> f api x)`. This enables us to work with APIs concisely without redefining things:
 
         my_loop = do
-            .label                      -> loop_start
             .movl 'eax ['ebx, 4]
             ...
 
@@ -179,7 +178,7 @@ Aside from do notation, we'll support the `>>=` composition and `>=>` Kleisli co
 
 ### Recursive Do
 
-Use of fixpoint within do notation is not implicit. It's problematic for it to be implicit because it easily conflicts with shift-reset and features that build upon it. Instead, we'll forward-declare the names we need. We already have a keyword for a similar role in scope of modules and objects: `abstract Name(, Name)*`. We can reuse that for do notation.
+Use of fixpoint within do notation is not implicit. It's problematic for it to be implicit because it easily conflicts with shift-reset and features that build upon it. Instead, we'll forward-declare the names we need via `abstract`.
 
         do
             abstract foo
@@ -193,33 +192,24 @@ The compiler will leverage `.fix` to capture the name. Haskell already does this
 
 I propose `!>` and `<!` to support applicative style programming. These correspond to Haskell's `<**>` and `<*>` respectively. I despise Haskell's choice of syntax here. Note that `!>` and `<!` correspond to `|>` and `<|` for pure functions. 
 
-        (!>) : Eff a -> Eff (a -> b) -> Eff b   
-        (<!) : Eff (a -> b) -> Eff b -> Eff b
+        (!>) : Eff a -> Eff (a -> b) -> Eff b   # right associative
+        (<!) : Eff (a -> b) -> Eff a -> Eff b   # left associative
 
-We always 'run' these effects from left to right. 
+We always 'run' these effects from left to right, preserving order. 
 
 Because `.r` is concise, users can directly write `.r f <! op1 <! op2`. No need for a `<$>` equivalent.
 
 ### Alternatives
 
-Direct use of `.alt` is a little awkward. We can introduce an inline operator for this, e.g. `<|>`. In practice, it's probably more convenient to just fork a list of operations.
+        (<|>) = .alt   # right associative
 
-        (<|>) = .alt
+Direct use of `.alt` is a little awkward. We can introduce an inline operator for this, e.g. `<|>`. In practice, we might be better off with users defining a few utility functions, e.g. to search a list.
 
-        foo = fork [
-          , op1
-          , op2
-          , op3
-          ]
-
-        fork L = match L with
-          [x] ++ xs -> match xs with
-            [] -> x
-            [y] -> .alt x y
-            _ -> .alt x (fork xs)
-          # fail only if initial list is empty
-          [] -> .fail   
-
+        search L = match L with
+            [x]++xs -> match xs with
+                [] -> .r x
+                _ -> .alt (.r x) (search xs)
+            [] -> .fail
 
 ## Macros
 
@@ -294,7 +284,7 @@ We'll support Haskell-style locals.
           Name3 = This is a very long definition and it
             continues on the next line past the name
 
-Pattern matching is permitted in Name position in a few contexts, e.g. do notation and if-let form. See *Pattern Matching* for details. 
+Aside from `let` and `where`, locals can be introduced by pattern matching. See *Conditionals*.
 
 ## Tagged Data
 
@@ -330,7 +320,7 @@ Scope-unique atoms are useful for the ephemeron performance pattern. To support 
 
 ## Dicts
 
-In expression context, `{}` constructs the empty dictionary, and `{ name1:Expr1, name2:Expr2, ...}` expresses a literal dictionary. We'll translate the literal form to a sequence of definitional steps, preserving order e.g. `{} with { name1 = Expr1; name2 = Expr2 }`. Order becomes relevant when we generalize names to dotted paths due to default introductions, e.g. `{ foo:{}, foo.baz:1 }` is okay, but the reverse order would be an error because `foo.baz` implicitly introduces `foo` and override would lose information.
+In expression contexts, `{}` is the empty dictionary, and `{ name1:Expr1, name2:Expr2, ...}` expresses a literal dictionary. We translate the literal form to a sequence of definitional steps, preserving order e.g. `{} with { name1 = Expr1; name2 = Expr2 }`. Order becomes relevant due to default introductions, e.g. `{ foo:{}, foo.baz:1 }` is okay, but the reverse would be an error.
 
 Multi-line literal dictionaries accept a leading comma for convenient line-editing, consistent with lists:
 
@@ -340,26 +330,28 @@ Multi-line literal dictionaries accept a leading comma for convenient line-editi
         ...
         }
 
-But users will likely prefer multi-line 'with' forms:
+Users will likely prefer multi-line 'with' forms:
 
         {} with
             name1 = Expr2
             name2 = Expr2
 
-Expression-indexed names need some special attention. Users are free to write `{ [0]:"Hello", [1]:"World" }`. In the definitional form, this becomes `{} with { .[0] = "Hello"; .[1] = "World" }` usually multi-line (where braces are unnecessary). 
+Expression-indexed names need some special attention. Users are free to write `{ [0]:"Hello", [1]:"World" }`. In the definitional form, this becomes `{} with { .[0] = "Hello"; .[1] = "World" }` usually multi-line (where braces are unnecessary).
 
-Dictionary updates are generally expressed using `with` and `without` special forms. These are applied much like infix operators, but the RHS of `with` uses the similar syntax as the module namespace. One difference is we can use expression-indexed paths directly. 
+Dictionary updates are generally expressed using `with` and `without` special forms. In the general case, it can be annoying to define the dictionary to a local separately, so we also support an `as Name with ...` form. These are applied much like infix operators, but the RHS of `with` uses the similar syntax as the module namespace. One difference is we can use expression-indexed paths directly. 
 
-        Dict with 
-            x ::= \ old_x -> old_x + 42
+        Dict as d with
+            x := _d.x + 42              # note `_d` as prior def
             y := 10
             .[1] = "this is new"
 
         Dict without x, y, z
 
-The `with` syntax still distinguishes introductions and overrides. The `without` form removes listed names if they exist, but it is not an error to remove an undefined name. In case of removing dotted paths, it implicitly removes empty hierarchical dictionaries. For example, `{foo:{bar:42}} without foo.bar` evaluates to `{}` instead of `{foo:{}}`.
+The `with` syntax distinguishes introductions and overrides. The `with` and `as with` syntax is also used for objects, discussed later. But there are some points to be aware of: you cannot add a `spec` to a dictionary (it's an error) because `spec` is how the compiler distinguishes dictionaries from objects. For consistency, dictionary updates in the `as d with ...` always use `_d` to refer to prior definitions, and cannot refer to final `d`. (In contrast, `let d = Dict in d with ...` treats `d` as a normal local var.)
 
-Pattern matching on dictionaries uses the literal form with an optional remaining pattern, e.g. `{ (ListExpr):(a,b,c), x:42, Pattern }`. We *evaluate* key expressions, match the referenced items, remove the matched keys, then match the remaining pattern. The default remaining pattern is `{}`, i.e. requiring a complete match.
+The `without` form removes listed paths if they exist, but it is not an error to remove an undefined name. In case of removing dotted paths, it implicitly removes empty hierarchical dictionaries. For example, `{foo:{bar:42}} without foo.bar` evaluates to `{}` instead of `{foo:{}}`.
+
+Pattern matching on dictionaries uses the literal form with an optional remaining pattern, e.g. `{ (ListExpr):(a,b,c), x:42, Pattern }`. We *evaluate* key expressions, match the referenced items, remove the matched keys, then match the remaining `Pattern`. The default remaining pattern is `{}`, requiring a complete match.
 
 ## Embedded Texts
 
@@ -411,16 +403,18 @@ Number literals are using the same characters as names, albeit in such a way tha
         1000000
         1_000_000
 
-We use a prefix underscore to indicate negative numbers. This is part of the number literal, not a separate operator. Internal underscores between digits (i.e. digit on both sides) are ignored by the parser, existing only to enhance legibility for humans. Decimal floating point or scientific notation can be encoded directly using an 'e' separator for the exponent.
+We use a prefix underscore to indicate negative numbers. This is part of the number literal, not a separate operator. Internal underscores between digits (i.e. digit on both sides) existing only to enhance legibility for humans. Decimal floating point or scientific notation can be encoded directly using an 'e' separator for the exponent.
 
         0xc0de
         0b10010_00110100_11111110_11011100
 
 We'll support hexadecimal (0x) and binary (0b) number literals, too. We can feasibly provide some 'bitwise' operators or accelerated functions on natural numbers. Although numbers don't have a built-in notion of word size or encoding, it isn't difficult to impose one.
 
-The compiler will provide a few useful operators - `+ * / -`. Common functions, such as rounding numbers, should be accelerated.
+The compiler will provide a few useful operators - `+ * / -`. Most other ops will be user-defined and accelerated.
 
 Numbers are modeled as exact rationals with no bound on size or precision. Thus, any loss of precision is under user control. This has severe performance implications. If users ever need high-performance assembly-time number crunching, they'll be relying on accelerated evaluation of CPU or GPGPU DSLs instead of built-in arithmetic.
+
+*Aside:* We should model any non-trivial math libraries via embedded DSLs. This enables us to evaluate at assembly-time, interpret abstractly, or generate machine code.
 
 ## Lists
 
@@ -654,7 +648,7 @@ Introducing operator `&>` (and its mirror `<&`). These operators compose two obj
 
         M <& O = O &> M
 
-A known weakness is that all definition updates from anonymous objects apply *after* all definition updates from named objects. This may result in some non-intuitive behavior, e.g. when we apply named mixins to anonymous objects and the actual order of overrides is flipped. Also, anonymous definitions are never deduplicated. A consequence is that mixins are safest for introducing names rather than overriding them.
+A known weakness is that all definition updates from anonymous objects apply *after* all definition updates from named objects. This easily results in non-intuitive behavior regarding order of overrides. To mitigate, I propose to warn when users apply a named mixin to an anonymous object.
 
 ### Explicit Scope
 
@@ -682,36 +676,38 @@ In this context, `foo.A == 6`. Note that we do not need `^a` to reference the gl
 
 ### Lightweight Extensions
 
-I propose keyword `mixin` for lightweight expression of anonymous mixins.
+The `with` and `as with` syntax for dict updates also works for objects, and is essentially equivalent to an anonymous mixin:
 
-        mixin Body
-        _object _ as _ with Body
+        Object with Body
+        Object &> _object _ as _ with Body
 
-        mixin as Name Body
-        _object _ as Name with Body
+        Object as Name with Body
+        Object &> _object _ as Name with Body
 
-This saves a few keystrokes and reduces some line noise. The `as Name` option may be aligned vertically with the `Body`. 
+This supports lightweight extensions
 
-Naturally, we'll apply our mixin upon defining it. It is feasible to embed a mixin on the RHS of a pipe.
-
-        foo = op1 >>= op2 >>= op3 &> mixin
-            as op
+        foo = op1 >>= op2 >>= op3 with 
             A := 42
-            B := op4 >>= op.eff >>= op6 &> mixin
-                C c = op7 &> mixin 
-                    ...
-
+            B := op4 >>= op5 >>= op6 as o with
+                C c = op7 ...
+            where
+            op1 = ...
 
 ## Booleans
 
-I propose to model booleans as simple atoms.
+We model booleans as simple atoms.
 
         't      true
         'f      false
 
-There are no truthy values, e.g. empty list is not falsy. We can support `and, or, not` as keywords, with `and` and `or` acting as infix operators. (I don't like `&&` and `||`.)
+There are no truthy values, e.g. empty list is not false or true, and seeing one where we expect a boolean is just a type error. We'll support `and, or, not` as keywords with conventional behavior, i.e. `and` does not evaluate second clause if first is `'f`. The `and` and `or` keywords are infix, i.e. `'t and 'f`. Keywords as operators. They even support operator sections.
 
-We'll support comparisons on numbers `> >= == <> =< <`. Support for `==` and `<>` extend to all equatable values (all values not containing functions). 
+We'll support comparisons for numbers and (lexicographically) lists of comparables: `> >= == <> =< <`. There is no comparison between lists and numbers, though, e.g. `42 < "hello"` is simply a type error. Support for `==` and `<>` (our 'not equal') is more flexible, extending to equatable values, i.e. values that do not contain functions.
+
+        Dict has Path
+        foo has bar.baz
+
+For convenience and aesthetics, I also introduce a `has` keyword, which returns whether `Dict.Path` would return a value or not.
 
 ## Conditionals
 
@@ -722,39 +718,67 @@ Big ideas for conditionals.
 
 ### If Then Else
 
-        if Cond then A else B
-
-        if C1 then
-          A
-        else
-          B
-
-        if C then A else
-        B
+        # basic forms
+        if C then A else B
+        A if C else B
 
         # in general, desugars as
         match when
-            GuardClause -> ThenBranch
-            _ -> ElseBranch
+            C -> A
+            _ -> B
 
-We'll also support the variation popularized in Python.
+        # elif is short for else if
+        if C1 then 
+          E1 
+        elif C2 then 
+          E2 
+        else E3
 
-        E1 if Cond else E2
+Note that `C` is not specified as a boolean expression. Instead, it's a non-branching guard clause, i.e. any sequence of `Guard (when Guard)*`. This includes access to pattern guards.
 
-Users may write `elif` in place of `else if`. It always has the same meaning. 
+        if Pattern = Expr (when ...) then A else B
 
-Although I write `Cond` above, we'll support any non-branching guard clause from `match when ...`, thus we implicitly also support the popular 'if let' via pattern guards. 
+This can be convenient when very limited pattern matching is needed. 
 
-        if Pattern <- Expr when Cond then A else B
+In general, `C` may be any non-branching guard clause, i.e. `Guard (when Guard)*`. This includes pattern guards and effects guards. Thus, we can support lightweight pattern matching via `if`.
+
+        if Pattern = Expr (when ...) then A else B
+
+Users may write `elif` as sugar for `else if`.
+
+### Try
+
+The `try` syntax is the effectful variation on `if`. This assumes the host supports at least the standard `.cut/.alt/.fail/.r/.seq` effects. 
+
+        try Operation then
+          Result1
+        else
+          Result2
+
+        # desugars as
+        try_match when
+            Operation -> Result1
+            _ -> Result2
+
+        # roughly implements as:
+        .cut (.alt (Operation =>> .r Result1) (.r Result2)) >>= \x.x
+
+We can also capture the result of an operation. Like do notation, both `Op -> Pattern` and `Pattern <- Op` are accepted. More generally, any non-branching guard clause is accepted, i.e. `Guard (when Guard)*`. This includes boolean conditions and guard patterns `Pattern = Expr`. 
+
+        # effect with result
+        try Operation -> Pattern (when ...) then
+            Result1
+        else
+            Result2
 
 ### Tentative Choice
-
-Users may write `then?` to indicate tentative commitment. This is evaluated with an effectful handler. In context of `if` we have access only to the stateless subset of standard effects: `.alt/.cut/.fail/.seq/.r/.fix`. Of these, we'll mostly use `.r` and `.fail`. 
 
         if C then? .r A else B          # same as if C then A else B
         if C then? .fail else B         # always returns B
 
-This enables users to factor out conditions more flexibly. 
+Users may write `then?` in `if/try` syntax to indicate tentative choice, or `-?>` in `match/try_match` syntax. This provides an opportunity to backtrack via `.fail`, but also requires explicit success via `.r Result`. For pure `if/match`, these effects are compiler-provided. For impure `try/try_match` these effects are directly hosted.
+
+The motive for tentative choice is to support refactoring of conditional structures:
 
         # snip chunk from middle
         if C1 then E1
@@ -772,89 +796,65 @@ This enables users to factor out conditions more flexibly.
         elif C4 then E4
         else E5
 
-Refactoring isn't convenient or pretty, but it's at least structurally possible. 
+Refactoring isn't convenient or pretty, but now it's at least structurally possible. 
 
-*Note:* The analog for `match` is `-?>`. 
+### If and Match as Try Forms
 
-### Try
+The compiler essentially implements `if/match` in terms of providing a local effects handler then performing `try/try_match` instead. This compiler-provided handler supports very few effects: `.cut/.alt/.fail/.r/.seq`. Importantly, it's stateless because I want to protect user intuitions of explicit dataflow in the pure evaluation context.
 
-Users may express `try` behaviors within effectful contexts (with at least `.cut/.alt/.fail/.r/.seq`). 
-
-        # unit effect
-        try Operation then
-          Result1
-        else
-          Result2
-        
-        # effect with result
-        try Operation -> Pattern (when ...) then
-            Result1
-        else
-            Result2
-
-        # in general desugars to
-        try_match when
-            GuardClause -> ThenBranch
-            _ -> ElseBranch
-
-        # roughly implements as:
-        .cut (.alt TryThen Else) >>= \x.x
-
-Any non-branching guard clause for `try_match when` is permitted here. Thus, `Operation` may be a boolean, pattern guard, effect, or all three separated by `when` clauses. Regardless, the selected branch is executed in the host, which is an important difference: `if` is a general expression, `try` always describes an effect.
-
-Assuming effectful `Operation`, it may fail or return a result. On failure, we backtrack. If the result is anything other than unit, users *must* capture it via `(Operation -> Pattern)` (or explicitly ignore via `(Op -> _)`), otherwise we'll report an error: it is always an error to drop data implicitly. 
-
-We can use `try` with tentative `then?`. The `then` body receives full access to host effects, running under the implicit `.cut` from `try`. It should ultimately return the decided effect or fail.
+These effects are visible to tentative choice, effectful guard clauses, and view patterns.
 
 ### Match
 
-I'll adopt a lot of Haskell's syntax for `match` and its multi-line form. It's the feature of Haskell's syntax that I enjoy the most.
-
-Some differences:
-
-- Analogous to tentative `then?`, we introduce tentative arrow `-?>`
-- Guard clauses are indicated by `when`. 
-  - Either one clause inline, or many with vertical alignment.
-    - May also use braces and semicolons for multi-element inline.
-  - use `match when` to skip pattern match, jump directly to guard clauses
-- `try_match` is to `match` as `try` is to `if`: 
-  - host effects in guard clauses (`{eff:(_), _}`) or tentative `-?>`
-  - final result must also be an effect
-
-Example structure:
-
-        match when                  # guard only
-          Cond1 ->                  
-          (Pattern <- Expr) when    # pattern guards
-            Cond2a ->
-            Cond2b ->
-
-        try_match when
-          Op1 ->
-          Cond2 ->
-          (Op3 -> Pattern) when
-            (Pattern <- Expr) when Cond -> ...
-
-The core pattern matching form:
+I borrow a lot of inspiration from Haskell's syntax for `match` and effectful `try_match`. Common use cases are basically the same.
 
         match Expr with
-            Pattern1 -> 
-            Pattern2 when ... -> 
-            ...
+            Pattern1 -> Result1
+            Pattern2 -> Result2 
+            _ -> Result3
 
-Logically desugars to `match when` form:
+We also support branching guard clauses. I use `when` to separate these. Branching guards require multiple lines (or ugly `when { ... }` syntax with semicolons) and consistent indentation. 
 
-        let e = Expr in
+        match Expr with
+            P1 when C1 -> R1        # basic
+            P2 when                 # multiline
+                C2_a -> R2_a
+                C2_b -> R2_b
+            P3 when                 
+                C3_a when           # multi-level
+                    C3_a_a -> R3_a_a
+                    C3_a_b -> R3_a_b
+                C3_b -> R3_b
+
+Users may elide the pattern via `match when`, moving straight to guard clauses.
+
         match when
-            (Pattern1 <- e) ->
-            (Pattern2 <- e) when ... ->
-            ...
+            C1 -> R1
+            C2 when 
+                C2_a -> R2_a 
+                C2_b -> R2_b
+
+Tentative choice is expressed using `-?>`.
+
+*Note:* Syntax for `try_match` is the same, only context is different.
+
+### Guard Clauses
+
+Several forms of guard clauses:
+
+- `BoolExpr` - evaluates to `'t` or `'f`, fail on `'f`
+- `Pattern = Expr` - binds local vars in Pattern or fails
+- `OpExpr` - evaluates to `{eff:(_),_}`, executes
+  - error if returns a non-unit result
+- `OpExpr -> Pattern` or `Pattern <- OpExpr` binds return value
+
+Clauses may be separated by `when`. 
 
 ### Pattern Matching
 
-Pattern matching is primarily via `match` and `if let`. It is also available to do notations, where a failed match will evaluate to `.fail`. Unlike Haskell, pattern matching isn't supported in function arguments.
+Patterns appear in many locations: `match` syntax, guard clauses, and do notation. 
 
-        Name                        # match anything (as a local name)
+        Name                        # bind as local name (permits '_' and '_Name' too)
         ()                          # unit
         (Pattern)                   # you can parenthesize patterns
         (Pattern,Pattern)           # eqv. to tuple:(Pattern,Pattern) (also triples, etc.)
@@ -867,32 +867,45 @@ Pattern matching is primarily via `match` and `if let`. It is also available to 
 
         tag:Pattern                 # same as {tag:Pattern}
         [TagExpr]:Pattern           # eval Expr, extract, match Pattern
+        'name                       # same as ["name"]:()
 
         []                          # empty list
         [a,b,c]                     # list of three items
         [x]++_xs                    # we can use append notation in patterns
         _xs++[x]                      
         [x0]++xs++[xN]
-        # as++bs                    # ILLEGAL - at most one variable-length sublist
+        #lhs++rhs                   # ILLEGAL - at most one variable-length list
+
+        "foo"                       # match text
+        "foo"++xs                   # texts are just lists
 
         (Applicable -> Pattern)     # view patterns must be parenthesized
+        (Pattern <- Applicable)     # view patterns are symmetric
 
-        \Name                       # match applicables (\.fn, eff:_, {apply:_,_})
-        \.Name                      # match lambda or interaction net functions
+        42                          # match exact number
+        _1.23
+        1/6                         # exact rationals supported
+        .N                          # natural numbers
+        .Z                          # integers
+        .Q                          # rational numbers
 
-*Note:* In theory, a front-end compiler can share work across related patterns. In practice, that's a low priority. Users have access to multi-level guard clauses in case they don't trust the compiler on this.
+        .ap                         # match applicables ((fn _), eff:_, {apply:_,_})
+        .fn                         # match primitive functions only
 
-*Note:* In context of `anno 'freeze`, we admit complete dict matches on a frozen dict, i.e. where remaining pattern is `{}`, but any other remaining pattern will have an error value unless users explicitly `anno 'thaw` the dict. When working with objects, favor `_` as the remaining pattern. 
+In patterns, `.op` is essentially a named pattern provided by the compiler. This is loosely analogous to `.op` in expressions representing a named effect provided by the handler. Note this just performs the match; you'd need `(.N as n)` to grab the value.  
+
+*Note:* In context of `anno 'freeze`, `without` isn't permitted. In such cases, dropping the remaining pattern with `_` is best. But if the remaining pattern is `{}`, i.e. a complete match, we'll implicitly thaw the dict to verify.
 
 ### View Patterns
 
 View patterns are expressed in a pattern context as:
 
-        (Viewer -> Pattern)
+        (Viewer -> Pattern)     # or equivalently
+        (Pattern <- Viewer)
 
 In general, `Viewer` is any applicable that, given an value, tentatively returns a view. We then apply `Pattern` to the returned view instead of the original value. The viewer has access to the same effects as `then?` or `-?>` in context, including full host effects for `try` variants. 
 
-*Note:* View patterns are essentially an approach to refactoring *patterns*. In contrast, `then?` and `-?>` are approaches to refactoring *conditional structures*.
+*Note:* View patterns are an approach to refactoring *patterns*. In contrast, `then?` and `-?>` are approaches to refactoring *conditional structures*.
 
 ## Loops
 
@@ -913,10 +926,11 @@ In the more general case, mutually recursive loops with tail calls can effective
 
 With the *Lightweight Extensions* syntax for objects, we can support continuation-passing style via extension of abstract method objects. This is another way of passing parameters, more extensible and flexible than function arguments. Moreover, it shifts some parameters from horizontal to vertical layout, and avoids some redundancy of reference. The resulting syntax might look a bit like this:
 
-        foo x y = op1 x >>= op2 y >>= op3 &> mixin 
-            A a = op4 x >>=\_-> op5 a >>= op6 &> mixin as op
+        foo x y = op1 x >>= op2 y >>= op3 with
+            A a = op4 x >>=\_-> op5 a >>= op6 as op with
                 B := ... op.F ... 
                 C c = ...
             D ::= \ prior -> prior + 42
 
+I'm uncertain how useful this 'style' will be, but Koru language seems to use its variation thereof effectively. 
 

@@ -300,12 +300,12 @@ It is very convenient to assume a standard effects API for generic extensions. P
 - `.fail` - failure for `.alt`, does not continue
 - `.cut op` - scope for `.alt`, selects first success
 - `.fix fn` - `fn` receives result as input but hides `.reset` scope
-- `.get Path` - copy data from state (default unit)
-- `.set Path Val` - overwrite data in state
+- `.get Path` - copy data from state; default value is unit
+- `.set Path Val` - overwrite data in state; set unit to remove key
 - `.reset Key op` - scope for delimited continuations
 - `.shift Key fn` - exits corresponding `.reset` with continuation 
 
-The `Path` type is a list of keys, corresponding to a hierarchical dictionary. The empty list represents the toplevel dictionary. Some contexts may recognize other path types, e.g.lenses as editable views. We generally assume that state is non-linear. 
+The `Path` type for `.get/.set` is a list of keys, assuming state is a hierarchical dictionary. The empty list represents the toplevel dictionary. Some contexts may recognize other `Path` types, e.g. lenses or opaque keys.
 
 ### Extensible Effects
 
@@ -494,13 +494,13 @@ The 'compile' method shall be expressed effectfully. Effects include:
   - this simplifies override of modules
 - access to the past and future namespace
 - access to some primitive built-in definitions
-- *Standard Effects* 
+- *Standard Effects* for convenience
 
 The assembler should not privilege the built-in ".g" compiler or others. It is best to build upon the same API that will be provided for user-defined syntax.
 
 For reasons of reproducibility and location-independence, the front-end compiler cannot see what file it's compiling or where a module is loaded within the global namespace. But such data implicitly annotates parse results and is visible through the reflection API.
 
-*Note:* File extensions are implicitly lower-cased (A-Z only), e.g. `"foo.Tar.Gz"` is processed by `env.lang.["tar.gz"].compile`.
+*Note:* File extensions are normalized as lower-cased for A-Z, e.g. `"foo.Tar.Gz"` is processed by `env.lang.["tar.gz"].compile`.
 
 ### Compiler Bootstrapping
 
@@ -606,9 +606,8 @@ Direct-style assembly with most CPU machine code naturally covers all procedural
 - Harel state charts
 - Coroutines
 - Kahn process networks
-- static-buffer transactions
-
-I'd like to focus initially on real-time and bounded-memory systems. But that's just my own focus.
+- Optimistic transactions
+- Incremental computing
 
 ### Proof-Carrying Code
 
