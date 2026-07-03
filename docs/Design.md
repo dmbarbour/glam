@@ -307,6 +307,12 @@ It is very convenient to assume a standard effects API for generic extensions. P
 
 The `Path` type for `.get/.set` is a list of keys, assuming state is a hierarchical dictionary. The empty list represents the toplevel dictionary. Some contexts may recognize other `Path` types, e.g. lenses or opaque keys.
 
+Tentative, deferred:
+
+- `.scope Mixin Op` - apply an update or mixin to `api` in scope of `Op`
+- `.score Value` - for soft searches of `.alt` paths, preferences
+- *constraints* - useful across most problem domains 
+
 ### Extensible Effects
 
 For effects that accept arguments, we can generally leverage method objects to extend behavior, i.e. `{apply:f, _}`. Unfortunately, that doesn't work for nullary effects, and I'd hate to force a `()` argument. Instead, for purpose of running effects, handlers shall recognize `{eff:_, _}`, not limited to singletons. (More generally, handlers may support or favor alternatives to the `eff` calling convention.) We won't curry arguments for anything but the singleton `eff:f` case, but users may combine `{eff:_, apply:_, _}` to express an effect that is runnable as-is yet optionally accepts more arguments (a form of var-args).
@@ -318,32 +324,56 @@ For effects that accept arguments, we can generally leverage method objects to e
 In contrast to lambda calculus, interaction nets are graph-structured instead of tree-structured, and symmetric instead of directional. This simplfies fine-grained, flexible dataflow and supports backpropagation without fixpoint. In this project, interaction nets are scoped to expressions and capture data at a returned port.
 
     # identity function as inet
-    interaction_net do
-        .con -> [ap, arg, result]
+    __inet do
+        .bind -> [ap, arg, result]
         .wire arg result
         .r ap
 
 Effects API: 
 
-- Node constructors introduce lists of ports. Principal port is list head.
-  - `.con -> [ap, arg, result]` - constructor of functions
-    - rules: join `.con`, call function `.data`, commute `.fan`
-  - `.fan N -> [x0, x1, x2, ..., xN]` - dataflow, unique instances
-    - `.fan 0 -> [e]` - explicitly drop data
-    - `.fan 1 -> [lhs,rhs]` - a tunnel for non-local composition 
-    - rules: join self (same instance), commute other nodes
-  - `.data Expr -> [d]` - external functions, lists, dicts, numbers
-    - rules: data-data is stuck, a type error!
-- Wires consume ports. Each ports must be wired exactly once.
-  - `.wire A B` - commutative
-  - return port is wired implicitly
-- *Standard Effects* to support bookkeeping and backtracking.
+- Node constructors introduce ports. Principal port is head.
+  - `.bind -> [ap, arg, result]` - constructor of functions
+  - `.copy N -> [x0, x1, x2, ..., xN]` - dataflow, unique instances
+    - `.copy 0 -> [e]` - explicitly drops data
+    - `.copy 1 -> [lhs,rhs]` - tunnel for non-local composition 
+  - `.data Expr -> [d]` - functions, lists, dicts, numbers
+    - `Expr` is copied logically (refct or GC)
+- Wires consume ports. Each port must be wired exactly once.
+  - `.wire A B` - commutative (`.wire B A` is equivalent)
+  - return port wired implicitly
+- *Standard Effects* to support bookkeeping and backtracking
 
-Lambdas calculus becomes a design pattern or convention: 
-- lambda is `.con` that binds `arg` *into* `result`
-- application is `.con` that provides `arg`, extracts `result`
+Nodes interact only when principal ports connect.
+- bind-bind: join
+- bind-copy: dup
+- bind-data: call function, stuck otherwise
+- copy-data: dup
+- copy-copy: join self (same instance), dup otherwise
+- data-data: stuck
+- rules are commutative, e.g. copy-bind is bind-copy
+- assembler may use intermediate nodes under-the-hood
 
-In the general case, there is no distinction between argument and result. With a suitable syntax, we could express interactive processes with session types as another approach to effects. But our initial ".g" syntax favors lambdas, and we'll initially use interaction nets as a performance tool for difficult dataflows.
+Rules:
+- join: 
+  - annihilate nodes
+  - connect auxilliaries positionally
+- dup: 
+  - copy node to opposite auxilliaries
+  - wire auxilliaries to copies positionally
+- call: 
+  - reconstruct function inet in caller inet
+    - *note:* unique `.copy` instances per call
+    - ideal: lazily normalize and reconstruct
+  - connect the bind-bind principal ports 
+- stuck: a type error! report and debug
+
+Lambda calculus becomes a design pattern within interaction nets:
+- lambda as `.bind` that copies and wires `arg` *into* `result`
+- application as `.bind` that provides `arg`, extracts `result`
+
+For interaction nets in general, there is no arg-result distinction. Data flows in both directions similar to session types. Users can feasibly define functions based on session types, but the ".g" syntax strongly favors lambdas and won't offer any help. Initially, we'll mostly use interaction nets as a performance tool for difficult dataflows within lambda bodies, preserving the lambda interface.
+
+*Aside:* These aren't necessarily the nodes the assembler uses under-the-hood, just initial constructors for them.
 
 ## Modules
 
@@ -356,6 +386,7 @@ A module is integrated by 'including' its definitions as a mixin. Any prior defi
 - `import ...` - include-like mixins; module rewrites host `Base`, shares `Self`.
 - `import ... as m` - introduces `m` with defaults then applies `import ... at m` 
   - Default is `m = {env:Self.env}` for adaptability and user-defined syntax.
+    - `env` is usually an *object*, not a plain dict, with updates via mixin.
 - `import ... at m` - mixin applied to `m`, binds to host `Base.m`, and `Self.m`.
 - `import ... binary as b`, introduces a raw file binary, does not compile 
 
@@ -365,27 +396,29 @@ Hierarchical imports (the 'as' and 'at' forms) are compatible with lazy loading.
 
 The assembler implicitly loads a configuration module based on the `GLAM_CONF` environment variable or an OS-specific default, i.e. `"~/.config/glam/conf.g"` in Linux or `"%AppData%\glam\conf.g"` in Windows. A small, local user configuration typically extends a large, remote community or company configuration.
 
-The configuration defines various options under 'conf.\*' to guide the assembler. As a rule, configuration is expressed effectfully to simplify extension. 
+All options are defined under `conf.*`, which serves as the 'public interface' for a configuration. Most configuration options are ad hoc and assembler specific, but `conf.env` is an exception for reasons of reproducibility: it can influence assembly result, thus shall not depend on assembler version.
 
-- *assembly environment*: `conf.env : Eff [] Dict` - determines 'env' parameter to assembly, usually a dictionary. Default is an empty dict.
-- *command-line macros*: `conf.cli : Eff [ReadArg, WriteArg] ()` - rewrites command-line arguments if (and only if) the first command-line argument does not start with '-'. The reader uses parser-combinators designed to simplify tab completion.
-- *logger*: `conf.log : Eff [Refl, Log] ()` - reads and writes log queue, i.e. rewrites the default log stream. May forward, filter, merge, summarize, rearrange, rewrite, and inject messages. 
-- *interactive development*: `conf.ide : Eff [Refl, Log, TTY, Net, File, GUI] ()` - for interactive mode, supports user interaction via TTY and network access (listen on TCP or unix domain sockets). May extend to editing files, live updates, native GUI. 
-- *resource management*: as needed - the assembler may require ad hoc configuration for JIT and GC tuning, access to processors for acceleration, remote proxies for distributed compilation or shared work caching, PKI certs and keys access DVCS or to sign works, etc.. 
+- *assembly environment*: `conf.env : Object` - determines `env` parameter to assembly. It is convenient to model this as an *object* for flexible extension by the assembly. Default is empty object.
+- *command-line macros*: `conf.cli : Eff [ParseArgs, WriteArg] ()` - rewrites command-line arguments if (and only if) the first command-line argument does not start with '-'. The reader uses parser-combinators designed to simplify tab completion.
+- *logger*: `conf.log : Eff [Refl, Log] ()` - can read log and write standard error, active in batch mode only. If undefined or terminates early, default logger takes over.
+- *interactive development*: `conf.ide : Eff [Refl, Log, TTY, Net, File, GUI] ()` - runs in interactive mode, supports user interaction via TTY, limited network access, lightweight GUI. Limited ability to edit files and rebuild assembly. 
+- *resource management*: as needed - the assembler may require ad hoc configuration for JIT and GC tuning, access to processors for acceleration, data persistence and constraint solver for reflection, remote proxies for distributed compilation or shared work caching, PKI certs and keys access DVCS or to sign works, etc.. 
 
-For flexibility, `GLAM_CONF` may list several files using the OS-specific `PATH` separator. These files are logically 'included' as mixins, such that files listed earlier may override those listed later, left to right. We can feasibly split the configuration between OS-layer, project layer, and user layer. We may later extend this list to support remote URLs.
+For flexibility, `GLAM_CONF` may list several files using the OS-specific `PATH` separator. These files are logically applied as mixins, such that files listed earlier may override those listed later, left to right. We can feasibly split the configuration between OS-layer, project layer, and user layer. We may later extend this list to support remote URLs.
 
-For reasons of reproducibility, we're careful about effects in 'conf.env' and 'conf.cli', as those may influence the assembly result. Most other configuration features will receive ad hoc access to the reflection API.
+The configuration namespace is initially empty except `env`, an empty object. 
 
 ### Assembly
 
-The assembler receives command-line arguments that express an assembly module as a list of mixins. Though, in practice, it's usually just one file or script. Relevant arguments:
+An assembly is expressed as a list of file and scripts on the command line. These are logically imported into an anonymous assembly module, such that first in list has final overrides. Often, it's just one file.
 
-- `(-f|--file) FileName` - list a file to include; files earlier in list override those later (left to right). Depending on the configured environment, assembly isn't limited to ".g" files (see *User-Defined Syntax*).
+Command line options:
+
+- `(-f|--file) FileName` - list a file to include; files earlier in list override those later. 
 - `(-s|--script).FileExt Text` - as remote file with given extension and text. Scripts cannot import local files, hence are location-independent. 
-- `-- List Of Args` - the assembler shall define `asm.args` as a list of strings prior to including files.
+- `-- List Of Args` - the assembler defines `asm.args` as a list of strings prior to including files.
 
-Typically, the namespace for an assembly starts with `asm.args` and `env.*` from command line and configuration respectively. The primary output is `asm.result` for extraction (see *Assembler* below). 
+Inputs are `asm.args` from the command line and `env` from the user configuration. Depending on the configured environment, assembly isn't limited to ".g" files (see *User-Defined Syntax*). The primary output is `asm.result`, which should represent a binary or filesystem folder. See *Assembler* below. 
 
 ### Remotes
 
@@ -452,13 +485,7 @@ Reflection is not reproducible. Between resource and scheduling variability, cac
 
 ### Logging
 
-The assembler implements a simple logging pipeline.
-
-        refl stream >> conf.log >> conf.ide >> fmap conf.log_format >> stderr
-
-Reflection API can emit log messages, but cannot read them. If `conf.log` is defined, it may freely rewrite the stream. If `conf.ide` is defined, it sees the stream after it's been modified by `conf.log`, e.g. to render log messages to a webpage, or to block messages while running a TUI. We format messages via `conf.log_format : Message -> Text` or an assembly-specific default, then write to standard error.
-
-If `conf.log` or `conf.ide` are undefined or return early, they're logically replaced by pass-through. 
+We can emit log messages via annotations or reflection API. Each message should be implicitly tagged with metadata visible only to reflection, e.g. timestamp and continuation, then delivered on its way. There should be some default behavior to write log to standard error in batch mode, with `conf.log` reading the log and writing to standard error. In interactive mode, `conf.ide` displaces the logger and has more freedom to render messages through other media.
 
 ### Interaction
 
@@ -468,9 +495,7 @@ Interactive mode is enabled by command-line switch:
 - `(-i|--interactive)` - configurable user interface, maintains result
   - `--discard` by default, but compatible with `-o`
 
-When interactive mode is enabled, the assembler will run `conf.ide`, and continues running until `conf.ide` terminates. Aside from the reflection API, the IDE has receives to logging (downstream of `conf.log`) and user interaction via TTY (REPL, TUI) and network (listen on TCP or unix domain sockets). For the full IDE experience, the API may further support projectional editing (render and edit source files), interactive programming (rebuild when sources change), and a lighweight native GUI. Though, we might favor GUI via HTTP or RFB.
-
-As with the reflection API, a goal is to keep implementation small and simple. So the API should be near-minimal. 
+When interactive mode is enabled, the assembler will run `conf.ide`, and continues running until `conf.ide` terminates. Aside from the reflection API, the IDE has access to logging (downstream of `conf.log`) and user interaction via TTY (REPL, TUI) and network (listen on TCP or unix domain sockets). A lightweight GUI is feasible, e.g. Rust's egui or Dear ImGUI. Just enough filesystem access to update sources.
 
 ### Integration
 
@@ -478,11 +503,11 @@ The assembler does not directly support execution of assembled code, but we shou
 
 ### File Metadata
 
-Aside from primary outputs, we might want the assembler to automatically set permissions on files in case of `-o` destinations. It isn't be difficult to support `asm.file_meta` to declare permissions for a subset of generated files.
+Aside from primary outputs, we might want the assembler to automatically set permissions on files in case of `-o` destinations. It doesn't seem difficult to support `asm.file_meta` to declare permissions for a subset of generated files.
 
 ## User-Defined Syntax
 
-When loading a module, we'll first search the provided environment for a compiler: `Base.env.lang.[FileExt].compile`. If defined, we'll use this compiler, falling back to an assembler built-in or reporting an error. The assembler shall provide a built-in at least for file extension ".g", albeit not necessarily the oldest or newest versions. 
+When loading a module, we'll first search the provided environment for a compiler: `_env.lang.[FileExt].compile`. If defined, we'll use this compiler, falling back to an assembler built-in or reporting an error. The assembler shall provide a built-in at least for file extension ".g", albeit not necessarily the oldest or newest versions. 
 
 The 'compile' method shall be expressed effectfully. Effects include:
 
@@ -504,7 +529,7 @@ For reasons of reproducibility and location-independence, the front-end compiler
 
 ### Compiler Bootstrapping
 
-The assembler shall check whether `Self.env.lang.[FileExt].compile` is different from the initial compiler. If so, the assembler will perform a bootstrap process: recompile using the returned compiler, repeat until the compiler stabilizes. Pseudocode:
+The assembler shall check whether the final `env.lang.[FileExt].compile` is different from the initial compiler. If so, the assembler will perform a bootstrap process: recompile using the returned compiler, repeat until the compiler stabilizes. Pseudocode:
 
         bootstrap fileExt binary base compile =
             let result = runCompiler (Yield (Fix (compile binary base)) Return)
@@ -557,7 +582,7 @@ Front-end compilers may further contribute to reflection by exporting intermedia
 
 ### Constraint Solver
 
-Many forms of reasoning benefit from a high-performance constraint solver. To support this, we can attach the assembler to an external SMT solver such as Z3 or cvc5, perhaps configurable. We can expose this via reflection API. Although the reflection API cannot directly modify code, it could provide recommended edits for the IDE to apply. Thus, we can leverage the constraint solver for assisted theorem proving or programming.
+Many forms of reasoning benefit from a high-performance constraint solver. To support this, we can attach the assembler's reflection API to an external SMT solver such as Z3 or cvc5. Although reflection API cannot directly modify code, it can provide recommended edits for an IDE to apply. Thus, we can leverage the constraint solver for assisted theorem proving or programming.
 
 Long term, with acceleration, it should be feasible to implement constraint solvers fully within the assembly. This would enable the assembler itself to perform more of the search.
 
@@ -601,13 +626,24 @@ There's a reasonable case to be made for some coordination effects, e.g. first-c
 
 ### Structured Assembly
 
-Direct-style assembly with most CPU machine code naturally covers all procedural structures (while/then, if/then/else, etc.). Those are trivial to model. But we could contemplate support for more-sophisticated structures. Such as:
+Direct-style assembly with most CPU machine code naturally covers all procedural structures (while/then, if/then/else, etc.). Those are trivial to model. But I'm especially interested in approaches to making assembly-level programming scale more directly to asynchronous and concurrent interactions, and eventually to distributed and heterogeneous systems.
 
-- Harel state charts
 - Coroutines
 - Kahn process networks
+- Temporal-spatial logics
+- Harel state charts
 - Optimistic transactions
 - Incremental computing
+
+Transaction loops, where we repeatedly run an atomic, isolated transaction - optimized via replication on choice, incremental computing, and distribution - is of special interest to me. It's easy to replace the transaction we're running, providing a robust foundation for live systems. 
+
+### Multi-Level Libraries
+
+When expressing domain knowledge, we should aim to do so in an extensible and substrate-independent manner: objects for extensibility, DSLs for substrate-independence. For example, a system of equations should be expressed as an object where definitions are in an calculus DSL. Combat choreography for video-game cinematics should be an object with an animations DSL, such that users can 'override' parts of the animation and have changes and constraints propagate. 
+
+There are many ways to express DSLs, but I strongly recommend effectful DSLs. Start with *Standard Effects* to support generic bookkeeping and backtracking. Then introduce domain-specific effects with flexible, confluent write order, e.g. write cursors. Flexible write order simplifies targeting the DSL from languages that organize concepts differently.
+
+Essentially, machine code is just one DSL in a tower.
 
 ### Proof-Carrying Code
 
@@ -617,7 +653,7 @@ Although we cannot rely on reflection to emit proofs, we can use reflection and 
 
 I use the word 'possible' because I'm not confident to say 'feasible'. The VALE project (Verified Assembly Language for Everest) demonstrates theorem proving at the assembly level, but not at great scale, and not with extensibility or adaptability. There is significant risk of proofs becoming an anchor.
 
-### Concurrent Assembly
+## Concurrent Assembly
 
 We can model multi-threading in terms of shift-reset, transferring ownership of a 'heap' between threads upon each context switch. When a threads update different parts of the heap, it is feasible to evaluate multiple threads in parallel. Explicit use of interaction nets can feasibly model futures and promises more directly.
 

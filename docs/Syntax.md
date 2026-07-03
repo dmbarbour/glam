@@ -39,27 +39,24 @@ In context of errors, the errors can be reported but we can also make a best eff
 
 ## Keywords
 
-Keywords are names reserved by the compiler. Users are not permitted to define or use keywords directly as names. An exception is made for atoms. For example, given keyword `import`, users may define `.['import] = ...` or reference `module.['import]`. The set of keywords may vary with the language version declaration.
+Keywords are names reserved by the compiler to support special forms. Users are not permitted to define or use keywords directly as names. An exception is made for atoms. For example, although `import` is a keyword, users may define `.['import] = ...` or reference `module.['import]`.
 
 Proposed keywords:
 
         import, as                                  modules
         module, abstract, using                     namespace
-        anno                                        annotations
         unique, abstract_global_path                special atoms
         with, without                               dict 
         do                                          effects
         let, in, where                              locals
-        interaction_net                             flexible dataflow
 
         object, extend, extends, self               objects
-        object_from_spec                            anonymous objects
 
         if, then, elif, else                        basic conditionals
         match, try, when, try_match                 advanced conditionals
         and, or, not, has                           comparisons
 
-Keywords implicitly reserve `_keyword`, but it's only meaningful in a few special cases.
+The set of recognized keywords may vary per module based on language version declaration.
 
 ## Names and Paths
 
@@ -73,11 +70,7 @@ Namespaces are modeled as hierarchical dictionaries, accessed via dotted path, e
 
 In the general case, we also support expression-indexed paths using `.(ListExpr)` or `.[...]` for a literal list. These indices are interpreted such that `.([1, 'two] ++ [3])` is equivalent to `.[1].two.[3]`. The empty list is permitted, e.g. `foo.[]` is equivalent to `foo`, and `foo.[ ].bar` admits spaces, newlines, and comments in names if needed.
 
-Best practice is to avoid expression-indexed paths in module or object namespaces, but it's available as an escape hatch for integration. Users may define `.[Idx] = Def` at the module toplevel. Later access to this name requires `module.[Idx]`. Users may understand `module` as a keyword that aliases the module toplevel namespace, and `self` as the current namespace. At the toplevel scope, `self` and `module` are equivalent.
-
-Special cases: 
-- `.path` desugars to `eff:(\api -> api.path)` to support lightweight effects. See *Effects.*
-- `^name` (and `^(Expr)`) binds to host scope in context of objects. See *Objects.*
+Best practice is to avoid expression-indexed paths in module or object namespaces, but it's available as an escape hatch for integration. Users may define `.[Idx] = Def` at the module toplevel. Later access to this name requires `module.[Idx]`. Users may understand `module` as a keyword that aliases the module toplevel namespace.
 
 ### Introductions and Overrides
 
@@ -97,39 +90,39 @@ Essentially, these declarations build a list of toplevel names that that compile
 
 To share abstract declarations across includes, we'll represent them in our namespace. This might simply be defined in `meta.abstract_names` or similar. The compiler may introduce `abstract env` implicitly.
 
-### Associated Names
+### Associated Names (Convention)
 
 In many cases, we'll want to associate one name with another. The proposed convention is a dict named with an `_of` suffix. For example, given a name `foo`, we can also reference `type_of.foo`. The assembler ignores associated names, and I anticipate users mostly work with such names indirectly.
 
-### Final Definitions 
+### Final Definitions (Convention)
 
 In some cases, it is useful to guard against accidental updates to definitions. The most obvious example is to block accidental updates to an object instance because users should be updating the specification instead. But it's important to preserve the ability to update definitions regardless. 
 
-To this end, we might use a pattern such as defining `final_of.foo = _foo`. Assign a reflection task to verify. 
+To this end, we might use a pattern such as defining `final_of.foo = _foo`. We can assign a reflection task to verify.
 
 ### Forbidden Shadows
 
 Name shadowing, where a function argument or local variable accidentally masks another name defined or declared in lexical scope, is a common source of subtle bugs. Humans are a lot more flexible about referential context than our compiler, thus easily overlook the error when reading code. To resist this bug, we'll warn on name shadowing by default.
 
-As a special case, we shadow *all* the names by default in `object` or `using` scopes. Instead, users write `^name` to escape the shadowing context. This sort of bulk shadowing seems easier for users to track. 
+As a special case, we shadow *all* names in `object` or `using` scopes. Instead, users write `^name` to escape. I'm hoping this will be clearer and more concise than permitting shadowing on a fine-grained basis.
 
 ### Unused Locals
 
 An unused local, e.g. a lambda or let var, will report a warning, but this may be suppressed by use of `_name` when introducing the local.
 
         # assume foo undefined, bar defined
-        let  foo = 42 in foo    # ok, 
-        let  foo = 42 in bar    # error (unused foo!)
+        let  foo = 42 in foo    # ok (basic use case) 
+        let  foo = 42 in bar    # warns (unused foo!)
         let _foo = 42 in foo    # ok (no '_' in rhs!)
         let _foo = 42 in bar    # ok (error suppressed)
 
-Motives for the `_foo` form include TBD code or if it's unclear whether macros will use names. Users may also write just `_` if they know a value won't be used, e.g. `skip _ y = y`. This is much less useful in context of `let _ = 42 in bar`, but still valid.
+Motives for the `_foo` form include TBD code or if it's unclear whether macros will use names. 
+
+Users may also write just `_` if they know a value won't be used, e.g. `skip _ y = y`. This is much less useful in context of `let _ = 42 in bar`, but still valid.
 
 ### Module Metadata
 
-The compiler will generally maintain metadata in `meta.*`. For example, maintaining a list or index of introduced names, a collection of abstract names, or a reverse-lookup index on names. This is also available to users, e.g. so macros can support similar features or as an interaction surface with the compiler. 
-
-It's convenient for 'include'-style imports that compiler state is threaded, so just shove everything into `meta.*`. Avoid hidden state in the compiler.
+In some cases, compilers need to thread some state through toplevel imports, e.g. to track names declared `abstract`. To support this, the compiler will store such metadata under `meta.*` within the module. This is also visible to users, e.g. macros can support similar features or as an interaction surface with the compiler. Alternatively, we could use a name that is difficult to write. But it seems better to just be open about it.
 
 ### Reflection Tasks
 
@@ -143,7 +136,20 @@ The compiler will arrange to automatically run `refl.*` definitions as reflectio
 Evaluates `Expr` in context of a temporary object. Within that scope, `self` is equivalent to `Dict`, `_self` is equivalent to `{}`. Users escape the scope just as they do for objects, via `^name` (or `^(Expr)`). *Note:* `Dict` doesn't need to be a valid object. 
 
 The main use case for `using` is to manage namespaces without polluting them. Not suitable for subexpressions that require many escapes.
- 
+
+## Built-in Definitions
+
+Built-ins are expressed as names preceded by two underscores, i.e. `__name`, as an expression. This evaluates to a compiler-provided definition. The definitions should be stable, but may vary with language version declaration.
+
+Some use cases:
+
+        __anno                                      annotations
+        __instance                                  objects
+        __inet                                      dataflow
+        __floor                                     arithmetic
+
+Built-ins are ugly, but they don't interfere with the user's namespace, and users can easily wrap them. Thus, I don't feel pressure to avoid them. The main requirement is that they're stable for reproducibility.
+
 ## Operators
 
 Operators are essentially infix functions. We'll support Haskell-style operator sections, such that `((>>= k) op)` is equivalent to `(op >>= k)`. To avoid unnecessary parentheses, we'll support precedence between most operators. To mitigate confusion, not every pair of operators will have valid precedence, e.g. cannot mix both `>>` and `<<` without parentheses.
@@ -235,13 +241,13 @@ There is no dedicated syntax for defining macros. It is convenient to define mac
 
 ## Annotations
 
-        anno : Annotation -> Term -> Term
+We'll express annotations as a built-in function.
 
-To express term annotations, I propose keyword `anno`, referring to a built-in function that applies an annotation in context of a term, then returns the term. Annotations are not observable modulo reflection, but may guide performance, debugging, and other use cases. 
+        __anno : Annotation -> Term -> Term
 
-The assembler recognizes effectful annotations, of form `eff:(\api -> ...)`. The assembler provides the reflection API, runs the operation to completion, then returns the given term. Depending on the API, the effect may have limited access to term and continuation, e.g. to surgically apply more annotations. If the effect diverges, so does the `anno` expression.
+Annotations are not observable within the computation, but may guide performance, debugging, and other use cases. To avoid silent degradation of performance or reasoning, the assembler shall warn about unrecognized annotations. 
 
-The assembler (or compiler) may recognize other ad hoc annotations such as `accel:'.list.split`. To avoid silent degradation of performance or reasoning, the assembler shall warn about unrecognized annotations. For convenient composition, there shall be an effect to apply more annotations to the term.
+Effectful annotations of form `eff:(\api -> ...)` should receive access to the reflection API. The assembler will run it before returning the associated term. The reflection API should receive relevant context, e.g. associated term and continuation.
 
 ## Local Definitions
 
@@ -300,7 +306,7 @@ Tagged data is convenient for modeling extensible variants and detecting assembl
         :tag Data
         :[TagExpr] Data
 
-Tagged data is modeled as a singleton dictionary. That is, `tag:Data` is equivalent to `{ tag:Data }` in most contexts. An important exception is updates: tagged data is implicitly frozen, i.e. `anno 'freeze { tag:Data }`. This freeze forbids dict updates (`with`, `without`, `tagged_data.foo = ...`, etc.) unless the dict is thawed (via `anno 'thaw`). 
+Tagged data is modeled as a singleton dictionary. That is, `tag:Data` is equivalent to `{ tag:Data }` in most contexts. An important exception is updates: tagged data is implicitly frozen, i.e. `__anno 'freeze { tag:Data }`. This freeze forbids dict updates (`with`, `without`, `tagged_data.foo = ...`, etc.) unless the dict is thawed (via `__anno 'thaw`). 
 
 Unlike dictionaries, dotted paths are not supported for tags. You can write `foo:bar:baz:Data` or ` { foo:(bar:baz:Data) }` or `{ foo.bar:(baz:Data) }` and so on, and these are all the same value, but with different freeze annotations. 
 
@@ -316,7 +322,7 @@ The unit value `()` is a built-in atom. Tagged unit data, i.e. `tag:()` or `[Tag
 
 For access control and conflict avoidance, we can (with a little support from the assembler) leverage the global namespace as a stable source of unique atoms. A viable approach is `Foo = abstract_global_path Foo`. Here `abstract_global_path` returns an atom based on the final location of `Foo` in the module system, and defining `Foo` resists accidental reuse (i.e. 'allocating' the name). I propose a toplevel declaration `unique Foo, Bar, Baz` for bulk definitions of this form. *Aside:* `abstract_global_path` is intentionally verbose to encourage the `unique` form.
 
-Scope-unique atoms are useful for the ephemeron performance pattern. To support this pattern, we can introduce a term annotation, `'scope_unique`, that wraps a given atom with unique metadata. If ever we compare the same atom with different metadata, we diverge instead, thus never observing the violation of scope uniqueness. When used as dict keys, we associate data to a weakref of that metadata.
+Scope-unique atoms are useful for the ephemeron performance pattern. To support this pattern, we can introduce a term annotation, `__anno 'scope_unique`, that wraps a given atom with unique metadata. If ever we compare the same atom with different metadata, we diverge instead, thus never observing the violation of scope uniqueness. When used as dict keys, we associate data to a weakref of that metadata.
 
 ## Dicts
 
@@ -343,11 +349,12 @@ Dictionary updates are generally expressed using `with` and `without` special fo
         Dict as d with
             x := _d.x + 42              # note `_d` as prior def
             y := 10
+            z ::= \ prior -> prior + 1
             .[1] = "this is new"
 
         Dict without x, y, z
 
-The `with` syntax distinguishes introductions and overrides. The `with` and `as with` syntax is also used for objects, discussed later. But there are some points to be aware of: you cannot add a `spec` to a dictionary (it's an error) because `spec` is how the compiler distinguishes dictionaries from objects. For consistency, dictionary updates in the `as d with ...` always use `_d` to refer to prior definitions, and cannot refer to final `d`. (In contrast, `let d = Dict in d with ...` treats `d` as a normal local var.)
+The `with` syntax distinguishes introductions and overrides just as the toplevel namespace does. The `with` and `as with` syntax is also used for objects, discussed later. But there are some points to be aware of: you cannot add a `spec` to a dictionary (it's an error) because `spec` is how the compiler distinguishes dictionaries from objects. For consistency, dictionary updates in the `as d with ...` always use `_d` to refer to prior definitions, and cannot refer to final `d`. (In contrast, `let d = Dict in d with ...` treats `d` as a normal local var.)
 
 The `without` form removes listed paths if they exist, but it is not an error to remove an undefined name. In case of removing dotted paths, it implicitly removes empty hierarchical dictionaries. For example, `{foo:{bar:42}} without foo.bar` evaluates to `{}` instead of `{foo:{}}`.
 
@@ -410,7 +417,7 @@ We use a prefix underscore to indicate negative numbers. This is part of the num
 
 We'll support hexadecimal (0x) and binary (0b) number literals, too. We can feasibly provide some 'bitwise' operators or accelerated functions on natural numbers. Although numbers don't have a built-in notion of word size or encoding, it isn't difficult to impose one.
 
-The compiler will provide a few useful operators - `+ * / -`. Most other ops will be user-defined and accelerated.
+The compiler will provide a few useful operators - `+ * / -`, and several built-in functions, e.g. `__floor`, to work with numbers. 
 
 Numbers are modeled as exact rationals with no bound on size or precision. Thus, any loss of precision is under user control. This has severe performance implications. If users ever need high-performance assembly-time number crunching, they'll be relying on accelerated evaluation of CPU or GPGPU DSLs instead of built-in arithmetic.
 
@@ -503,15 +510,15 @@ Unlike Haskell, there is no support for pattern matching on lambda or definition
 
 ### Interaction Nets
 
-Interaction nets are expressed effectfully. Keyword `interaction_net` provides access to an assembler built-in function for constructing interaction nets. Effects API is detailed in the *Design* doc. Interaction nets aren't limited to returning functions, but functions are the only way to reuse an interaction net.
+Interaction nets are expressed effectfully and constructed via assembler-provided built-in `__inet`. Effects API is detailed in the *Design* doc. Defining reusable functions reduces rework, i.e. we normalize the function body only once.
 
 ## Errors
 
 We can use annotations to indicate known errors or issues.
 
-        anno 'error         Expr        recognized errors
-        anno 'TBD           Expr        incomplete definitions
-        anno 'deprecated    Expr        transitional code
+        __anno 'error         Expr        recognized errors
+        __anno 'TBD           Expr        incomplete definitions
+        __anno 'deprecated    Expr        transitional code
 
 In these cases, `Expr` may indicate the nature of the error or future intentions for a TBD. For deprecated code, it should be valid, but we'll report a warning.
 
@@ -552,15 +559,15 @@ Modules are integrated through 'import' declarations. Everything module-related 
                 ]
             }
 
-For remote files, users may move the filename into the `from` expression:
+Users may move remote filenames into the `from` expression:
 
         import as q from {
-            , file: "Qux.g"
+            , file:"Qux.g"
             , rev:Text
             , search:[...]
             }
 
-This form is mostly intended computed `from` expressions. I imagine users will stick to literals most of the time. 
+This simplifies working with computed `from` expressions. 
 
 *Note:* Importing the same module many times results in many distinct instances. This can be useful if experimenting with different overrides or adaptations. But shared libraries are more efficient: assume definitions are in `env.*`, let client import once.
 
@@ -589,7 +596,7 @@ Object syntax can and should be compact by default. I propose:
             def2 := ...
         
         # roughly evaluates as
-        foo = object_from_spec {
+        foo = __instance {
             , name:(abstract_global_path foo)
             , deps:[bar.spec, baz.spec]
             , defs:\_self self -> _self with  
@@ -607,30 +614,30 @@ To improve concision, expressions within objects are localized. That is, we bind
 
 The `extends` and `with` sections are optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). If provided, they cannot be empty. In general, `spec.name` may be any value with equality, e.g. `"foo"`. Toplevel object declarations use `abstract_global_path` to ensure globally unique names, but it's sufficient that we don't reuse a name for two different specs across transitive deps.
 
-To instantiate the object, the compiler applies a linearization algorithm (C3?) to deduplicate and merge components. The compiler uses `spec.name` to distinguish specifications, and asserts (via reflective term annotation) that `spec.name` is not used for two different specs in linearization scope. After specifications are ordered, we apply `spec.defs` to an empty base `{}` then finally introduce `spec` as an implicit final mixin. For consistency and convenience, the compiler exposes an instantiation function via keyword `object_from_spec`, but it isn't anything special.
+To instantiate the object, the compiler applies a linearization algorithm (C3?) to deduplicate and merge components. The compiler uses `spec.name` to distinguish specifications, and asserts (via reflective term annotation) that `spec.name` is not used for two different specs in linearization scope. After specifications are ordered, we apply `spec.defs` to an empty base `{}` then finally introduce `spec` as an implicit final mixin. For consistency and convenience, the compiler exposes an instantiation function via built-in `__instance`.
 
-We also have asyntax `extend Object with ...`, which is analogous to `Dict with ...` but instead updates the specification then re-instantiates the object. As with the `object ...` this also may be used both as declaration and expression. 
+We also have asyntax `extend Object with ...`, which is analogous to `Dict with ...` but instead updates the specification then re-instantiates the object, preserving name. As with the `object ...` this also may be used both as declaration and expression. 
 
         extend foo with
             def1 := ...
 
         extend Name (as Name)? with Body
 
-In contrast to `object Name ...`, the `extend Object with` variant updates `spec.defs` then lazily rebuilds the object. There is no expression form for this, but see *Mixin Composition* and *Lightweight Extension* below. There is no dedicated syntax for updating `spec.name` or `spec.deps`, and I struggle to think of a use case, but users always have access to `foo ::= \ prior -> prior.spec |> edit_spec |> object_from_spec`. 
+In contrast to `object Name ...`, the `extend Object with` variant updates `spec.defs` then lazily rebuilds the object. There is no expression form for this, but see *Mixin Composition* and *Lightweight Extension* below. There is no dedicated syntax for updating `spec.name` or `spec.deps`, and I struggle to think of a use case, but users always have access to `foo := _foo.spec |> edit_spec |> __instance`. 
 
 Objects support most toplevel declarations. Notable exceptions include `unique` and `import`. Objects do support hierarchical object declarations. In this case, names are generated based on host `spec.name` and path.
 
-*Note:* It's usually an error to update an object as a dict, e.g. `foo.def1 := ...` instead of `extend foo with { def1 := ... }`. To resist accidents, `object_from_spec` shall implicitly `anno 'freeze` the returned dict. Unless users explicitly `anno 'thaw` the dict, regular dict updates diverge with error.
+*Note:* It's usually an error to update an object as a dict, e.g. `foo.def1 := ...` instead of `extend foo with { def1 := ... }`. To resist accidents, `__instance` shall implicitly `__anno 'freeze` the returned dict. Unless users explicitly `__anno 'thaw` the dict, regular dict updates diverge with error.
 
 *Note:* If using objects statically, e.g. for macros or toplevel imports, either avoid inheritance or bind it to prior forms, e.g. `object foo extends _bar, _baz`. Otherwise, `_foo.op` generally refers to *future* extensions of `bar` or `baz`. 
 
 ### Anonymous Objects
 
-An anonymous object has no name, i.e. `spec.name` is intentionally left undefined. Users may express anonymous objects by use of `_` in name position, e.g. `object _ extends foo, bar with ...` (or minimally, just `object _`). Anonymous objects must not appear within `spec.deps`, otherwise `object_from_spec` will report an error. Hence, anonymous objects do not participate in multiple inheritance. They may participate in mixin composition.
+An anonymous object has no name, i.e. `spec.name` is intentionally left undefined. Users may express anonymous objects by use of `_` in name position, e.g. `object _ extends foo, bar with ...` (or minimally, just `object _`). Anonymous objects must not appear within `spec.deps`, otherwise `__instance` will report an error. Hence, anonymous objects do not participate in multiple inheritance. They may participate in mixin composition.
 
 ### Abstract Objects
 
-As a special case, if users write `_object` instead of `object`, only `anno 'freeze {spec:Spec}` is returned. Users may instantiate it later via `object_from_spec foo.spec`, or use the object in inheritance. This applies to both object declarations and expressions. 
+As a special case, if users write `_object` instead of `object`, only `__anno 'freeze {spec:Spec}` is returned. Users may instantiate it later via `__instance foo.spec`, or use the object in inheritance. This applies to both object declarations and expressions. 
 
 ### Mixin Composition
 
@@ -638,7 +645,7 @@ Introducing operator `&>` (and its mirror `<&`). These operators compose two obj
 
         toAnon o = if (o.spec has name) then _object _ extends o else o
 
-        O &> M = object_from_spec mixed_spec where
+        O &> M = __instance mixed_spec where
             AO = (toAnon O).spec
             AM = (toAnon M).spec
             mixed_spec = spec:{ deps: mixed_deps, defs:mixed_defs }
@@ -671,8 +678,6 @@ For example:
             B = f.C + b
 
 In this context, `foo.A == 6`. Note that we do not need `^a` to reference the global `a`, but now we use `f.B` to reference the local `B`. To reference prior definitions, we'd use `_f.B` instead. 
-
-*Note:* The name in `as Name` is a local, e.g. use of `as _` is also permitted, or `as _o` to supporess an unused locals warning.
 
 ### Lightweight Extensions
 
@@ -800,7 +805,9 @@ Refactoring isn't convenient or pretty, but now it's at least structurally possi
 
 ### If and Match as Try Forms
 
-The compiler essentially implements `if/match` in terms of providing a local effects handler then performing `try/try_match` instead. This compiler-provided handler supports very few effects: `.cut/.alt/.fail/.r/.seq`. Importantly, it's stateless because I want to protect user intuitions of explicit dataflow in the pure evaluation context.
+For consistency, the compiler shall implement `if/match` by providing a local effects handler then evaluating `try/try_match` within that context. This compiler-provided handler supports minimal effects: `.cut/.alt/.fail/.r/.seq`. I don't want any stateful effects because I want to preserve the explicit dataflows of pure evaluation.
+
+Importantly, it's stateless because I want to protect user intuitions of explicit dataflow in the pure evaluation context.
 
 These effects are visible to tentative choice, effectful guard clauses, and view patterns.
 
@@ -844,11 +851,12 @@ Several forms of guard clauses:
 
 - `BoolExpr` - evaluates to `'t` or `'f`, fail on `'f`
 - `Pattern = Expr` - binds local vars in Pattern or fails
+  - can view this as `Pattern <- .r Expr`
 - `OpExpr` - evaluates to `{eff:(_),_}`, executes
   - error if returns a non-unit result
 - `OpExpr -> Pattern` or `Pattern <- OpExpr` binds return value
 
-Clauses may be separated by `when`. 
+Guard clauses are second-class, but compose via `when`. 
 
 ### Pattern Matching
 
@@ -879,31 +887,25 @@ Patterns appear in many locations: `match` syntax, guard clauses, and do notatio
         "foo"                       # match text
         "foo"++xs                   # texts are just lists
 
-        (Applicable -> Pattern)     # view patterns must be parenthesized
-        (Pattern <- Applicable)     # view patterns are symmetric
-
         42                          # match exact number
         _1.23
         1/6                         # exact rationals supported
-        .N                          # natural numbers
-        .Z                          # integers
-        .Q                          # rational numbers
 
-        .ap                         # match applicables ((fn _), eff:_, {apply:_,_})
-        .fn                         # match primitive functions only
+        (Applicable -> Pattern)     # view patterns must be parenthesized
+        (Pattern <- Applicable)     # both directions are supported
 
-In patterns, `.op` is essentially a named pattern provided by the compiler. This is loosely analogous to `.op` in expressions representing a named effect provided by the handler. Note this just performs the match; you'd need `(.N as n)` to grab the value.  
+Aside from constant numbers, we'll mostly recognize numbers through view patterns. I'm considering patterns such as `(n > 0)` or `(0 < n < 100)`, but it's a little awkward to manage the nitty details such as whether `n` is integral within the same pattern.
 
-*Note:* In context of `anno 'freeze`, `without` isn't permitted. In such cases, dropping the remaining pattern with `_` is best. But if the remaining pattern is `{}`, i.e. a complete match, we'll implicitly thaw the dict to verify.
+*Note:* In context of `__anno 'freeze`, `without` isn't permitted. In such cases, dropping the remaining pattern with `_` is best. But if the remaining pattern is `{}`, i.e. a complete match, we'll implicitly thaw the dict to verify.
 
 ### View Patterns
 
-View patterns are expressed in a pattern context as:
+View patterns are expressed within a pattern context as:
 
         (Viewer -> Pattern)     # or equivalently
         (Pattern <- Viewer)
 
-In general, `Viewer` is any applicable that, given an value, tentatively returns a view. We then apply `Pattern` to the returned view instead of the original value. The viewer has access to the same effects as `then?` or `-?>` in context, including full host effects for `try` variants. 
+The primary difference between a view pattern and effectful guard clause is that, in the pattern context, we have an input: the item we're translating into a view.
 
 *Note:* View patterns are an approach to refactoring *patterns*. In contrast, `then?` and `-?>` are approaches to refactoring *conditional structures*.
 
