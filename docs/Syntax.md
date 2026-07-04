@@ -17,7 +17,7 @@ Proposed syntax:
         (lang|language) (BaseVer) (with Extensions)?
         language g0 with utf8
 
-The version declaration should be the first toplevel declaration in a ".g" file. The BaseVer is a recognized string for a package of features, while extensions modify that package.
+The version declaration should be the first toplevel declaration in a ".g" file. The BaseVer is a recognized string for a package of features. Extensions may modify that package, but the parser for extensions may also depend on BaseVer.
 
 In practice, if a compiler halts on language version, we must be using different executable or configuration (if configuration defines `conf.env.lang.["g"].compile`) from development conditions. Users can resolve this by reproducing the executable (e.g. via nix) or by defining compatible compilers in the module system.
 
@@ -70,7 +70,7 @@ Namespaces are modeled as hierarchical dictionaries, accessed via dotted path, e
 
 In the general case, we also support expression-indexed paths using `.(ListExpr)` or `.[...]` for a literal list. These indices are interpreted such that `.([1, 'two] ++ [3])` is equivalent to `.[1].two.[3]`. The empty list is permitted, e.g. `foo.[]` is equivalent to `foo`, and `foo.[ ].bar` admits spaces, newlines, and comments in names if needed.
 
-Best practice is to avoid expression-indexed paths in module or object namespaces, but it's available as an escape hatch for integration. Users may define `.[Idx] = Def` at the module toplevel. Later access to this name requires `module.[Idx]`. Users may understand `module` as a keyword that aliases the module toplevel namespace.
+Best practice is to avoid expression-indexed paths in module or object namespaces, but it's available as an escape hatch for integration. Users may define `.[Idx] = Def` at the module toplevel. Later access to this name requires `module.[Idx]`. Users may understand `module` as a keyword that aliases the module toplevel namespace, and `self` as the current object namespace (`self` aliases `module` at toplevel to simplify macros).
 
 ### Introductions and Overrides
 
@@ -104,7 +104,7 @@ To this end, we might use a pattern such as defining `final_of.foo = _foo`. We c
 
 Name shadowing, where a function argument or local variable accidentally masks another name defined or declared in lexical scope, is a common source of subtle bugs. Humans are a lot more flexible about referential context than our compiler, thus easily overlook the error when reading code. To resist this bug, we'll warn on name shadowing by default.
 
-As a special case, we shadow *all* names in `object` or `using` scopes. Instead, users write `^name` to escape. I'm hoping this will be clearer and more concise than permitting shadowing on a fine-grained basis.
+There are a few special scopes such as `object` or `using` where we shadow *all* the names. In these cases, users must write `^name` (or `^(Expr)`) to escape the scope. But there is no fine-grained shadowing.
 
 ### Unused Locals
 
@@ -137,18 +137,16 @@ Evaluates `Expr` in context of a temporary object. Within that scope, `self` is 
 
 The main use case for `using` is to manage namespaces without polluting them. Not suitable for subexpressions that require many escapes.
 
-## Built-in Definitions
+### Built-in Definitions
 
-Built-ins are expressed as names preceded by two underscores, i.e. `__name`, as an expression. This evaluates to a compiler-provided definition. The definitions should be stable, but may vary with language version declaration.
+Built-ins are compiler-provided definitions referenced via `__name`, a name preceded by two underscores. They evaluate as normal expressions. For reproducibility, built-ins require similar stability as keywords, varying only with language version declaration. Use cases:
 
-Some use cases:
+        __anno              annotations
+        __instance          objects
+        __inet              dataflow
+        __floor             arithmetic
 
-        __anno                                      annotations
-        __instance                                  objects
-        __inet                                      dataflow
-        __floor                                     arithmetic
-
-Built-ins are ugly, but they don't interfere with the user's namespace, and users can easily wrap them. Thus, I don't feel pressure to avoid them. The main requirement is that they're stable for reproducibility.
+I'm not fond of the aesthetic, but it's a lot easier to introduce built-ins than to introduce keywords, and it's clear where the definition is coming from.
 
 ## Operators
 
@@ -224,7 +222,7 @@ In context of lazy loading, the compiler must *know* when a macro is being calle
         @(Expr)                 general form
         @macro_name             short for @(_module.macro_name)
 
-The `@macro_name` form is preferred, but `@(Expr)` form is more general. `Expr` must evaluate to an effect. The compiler provides an effects API to read and write source at flexible levels of abstraction (text or AST). Macros are parameterized in terms of effectfully reading their parameters, e.g. in `@foo arg1 arg2` we expect `@foo` to read its arguments.
+The `@macro_name` form is preferred for user-defined macros, but `@(Expr)` form is more general. `Expr` must evaluate as an effect. The compiler provides an effects API to read and write source at flexible levels of abstraction (text or AST). Macros are parameterized in terms of effectfully reading their parameters, e.g. in `@foo arg1 arg2` we expect `@foo` to read its arguments.
 
 There are several structural constraints enforced by the API: 
 
@@ -294,39 +292,35 @@ Aside from `let` and `where`, locals can be introduced by pattern matching. See 
 
 ## Tagged Data
 
-Tagged data is convenient for modeling extensible variants and detecting assembly-time type errors.
+Tagged data is modeled as singleton dictionaries. In these cases, braces may be omitted.
 
-        # literal form
-        # no whitespace around ':'
-        tag:Data
-        [TagExpr]:Data
+        tag:Data            # same as { tag:Data }
+        :tag                # same as (\ Data -> tag:Data)
 
-        # function form
-        # :tag = \Data -> tag:Data
-        :tag Data
-        :[TagExpr] Data
+This extends to computing singleton paths, further eliding the '.' prefix.
 
-Tagged data is modeled as a singleton dictionary. That is, `tag:Data` is equivalent to `{ tag:Data }` in most contexts. An important exception is updates: tagged data is implicitly frozen, i.e. `__anno 'freeze { tag:Data }`. This freeze forbids dict updates (`with`, `without`, `tagged_data.foo = ...`, etc.) unless the dict is thawed (via `__anno 'thaw`). 
+        [TagExpr]:Data      # same as { .[TagExpr]:Data }
+        :[TagExpr]          # same as (\ Data -> [TagExpr]:Data )
 
-Unlike dictionaries, dotted paths are not supported for tags. You can write `foo:bar:baz:Data` or ` { foo:(bar:baz:Data) }` or `{ foo.bar:(baz:Data) }` and so on, and these are all the same value, but with different freeze annotations. 
-
-Constructed tags are expressed using `[Expr]:Data`. Although this uses the list form, it's limited to a singleton list. The motive for square brackets is consistency with dotted paths, i.e. `(foo:Data).foo = Data` and `([Expr]:Data).[Expr] = Data)`. 
-
-*Note:* Syntactically, tagged data binds tighter than application, e.g. `fn foo:bar baz` is equivalent to `fn (foo:bar) baz` instead of `fn foo:(bar baz)`.
+Tagged data is essentially just a syntactic convenience. 
 
 ## Atoms
 
 Atoms are data where the only useful observation is equality.
 
-The unit value `()` is a built-in atom. Tagged unit data, i.e. `tag:()` or `[TagExpr]:()`, serves as a symbolic atom. As shorthand, `'name` rewrites to `["name"]:()`. Note that `'tag` and `tag:()` are distinct atoms: `["tag"]:()` vs. `['tag]:()`. Atoms are convenient for expressing small enums, e.g. `'t` and `'f` for booleans, or `'eax` for registers.
+The unit value `()` is a built-in atom. `'name` is sugar for a tagged unit value, `["name"]:()`. Tagged unit data effectively serves as an atom because we cannot observe `"name"`, we can only test whether it is present. Note that `'tag` and `tag:()` are distinct: the latter is equivalent to `['tag]:()`. 
 
-For access control and conflict avoidance, we can (with a little support from the assembler) leverage the global namespace as a stable source of unique atoms. A viable approach is `Foo = abstract_global_path Foo`. Here `abstract_global_path` returns an atom based on the final location of `Foo` in the module system, and defining `Foo` resists accidental reuse (i.e. 'allocating' the name). I propose a toplevel declaration `unique Foo, Bar, Baz` for bulk definitions of this form. *Aside:* `abstract_global_path` is intentionally verbose to encourage the `unique` form.
+Atoms are convenient for expressing small enums, e.g. `'t` and `'f` for booleans, or `'eax` for registers.
 
 Scope-unique atoms are useful for the ephemeron performance pattern. To support this pattern, we can introduce a term annotation, `__anno 'scope_unique`, that wraps a given atom with unique metadata. If ever we compare the same atom with different metadata, we diverge instead, thus never observing the violation of scope uniqueness. When used as dict keys, we associate data to a weakref of that metadata.
 
+For access control and conflict avoidance, we can leverage the namespace as a stable source of unique atoms. A viable approach is `Foo = abstract_global_path Foo`, borrowing `spec.name` (which must be defined) as a source of uniqueness. To resist accidental reuse, I propose a toplevel declaration `unique Foo, Bar, Baz` to 'introduce' such definitions, i.e. so we see an error if a name is reused. In the general case, we cannot guarantee `spec.name` is globally unique, but we can apply scope-unique annotations to detect accidental conflicts.
+
 ## Dicts
 
-In expression contexts, `{}` is the empty dictionary, and `{ name1:Expr1, name2:Expr2, ...}` expresses a literal dictionary. We translate the literal form to a sequence of definitional steps, preserving order e.g. `{} with { name1 = Expr1; name2 = Expr2 }`. Order becomes relevant due to default introductions, e.g. `{ foo:{}, foo.baz:1 }` is okay, but the reverse would be an error.
+In expression contexts, `{}` is the empty dictionary, and `{ Path1:Expr1, Path2:Expr2, ...}` expresses a literal dictionary. Note that computed paths require the `.` prefix, e.g. `{ .[0]:A, .[1]:B }`.
+
+Within a dictionary, `{}` serves as the 'undefined' value. For example, `{foo:{}}` is equivalent to `{}`. Only a finite subset of dictionary elements may be defined. In general, we can compose dictionaries: `{ D1, D2, D3 }` is a hierarchical union of three dictionaries. For example: `{{foo:{bar:0}}, {foo:{baz:1}}}` evaluates as `{foo:{bar:0, baz:1}}`. However, it is an error the dictionaries share any defined elements.
 
 Multi-line literal dictionaries accept a leading comma for convenient line-editing, consistent with lists:
 
@@ -336,29 +330,34 @@ Multi-line literal dictionaries accept a leading comma for convenient line-editi
         ...
         }
 
-Users will likely prefer multi-line 'with' forms:
+Dictionaries have access to a `with` syntax for definition-style updates. This supports explicit overrides. The `as with` variant also supports mutually recursive definitions.
 
         {} with
             name1 = Expr2
             name2 = Expr2
 
-Expression-indexed names need some special attention. Users are free to write `{ [0]:"Hello", [1]:"World" }`. In the definitional form, this becomes `{} with { .[0] = "Hello"; .[1] = "World" }` usually multi-line (where braces are unnecessary).
+        Dict as d with  
+            x := _d.x + 1   # prior d.x
+            y =  d.x + a    # final d.x
 
-Dictionary updates are generally expressed using `with` and `without` special forms. In the general case, it can be annoying to define the dictionary to a local separately, so we also support an `as Name with ...` form. These are applied much like infix operators, but the RHS of `with` uses the similar syntax as the module namespace. One difference is we can use expression-indexed paths directly. 
+We can also use `Dict as self with Body` for the full 
 
-        Dict as d with
-            x := _d.x + 42              # note `_d` as prior def
-            y := 10
-            z ::= \ prior -> prior + 1
-            .[1] = "this is new"
+        Dict as self with
+            x := _x + 1
+            y = x + ^a
+
+The compiler reserves key `spec` to distinguish dictionaries and objects. It's an error for dictionary literals or `with` syntax to define `spec`. Objects expose final `o.spec` but never prior `_o.spec`. The `with` syntax handles objects differently, updating spec then rebuilding lazily.
+
+We also have a special form to remove elements:
 
         Dict without x, y, z
+        Object without spec, x, y, z
 
-The `with` syntax distinguishes introductions and overrides just as the toplevel namespace does. The `with` and `as with` syntax is also used for objects, discussed later. But there are some points to be aware of: you cannot add a `spec` to a dictionary (it's an error) because `spec` is how the compiler distinguishes dictionaries from objects. For consistency, dictionary updates in the `as d with ...` always use `_d` to refer to prior definitions, and cannot refer to final `d`. (In contrast, `let d = Dict in d with ...` treats `d` as a normal local var.)
+We can also remove elements via update to `{}`, but the `without` form has two advantages: we don't need to consider whether `x` is already defined (explicit overrides), and `without` is the ony way to remove `spec`, thereby converting object to dictionary.
 
-The `without` form removes listed paths if they exist, but it is not an error to remove an undefined name. In case of removing dotted paths, it implicitly removes empty hierarchical dictionaries. For example, `{foo:{bar:42}} without foo.bar` evaluates to `{}` instead of `{foo:{}}`.
+Pattern matching on dictionaries generally have the form `{Path1:Pattern1, Path2:Pattern2, RemainingPattern }`. There is at most one remaining pattern, default `{}` thus requiring a full match. Users may write `{:x,:y,:z}` as shorthand for `{x:x, y:y, z:z}`. 
 
-Pattern matching on dictionaries uses the literal form with an optional remaining pattern, e.g. `{ (ListExpr):(a,b,c), x:42, Pattern }`. We *evaluate* key expressions, match the referenced items, remove the matched keys, then match the remaining `Pattern`. The default remaining pattern is `{}`, requiring a complete match.
+*Aside:* We'll provide 'primitive' update methods via built-ins, e.g. `__dict_get k d`, `__dict_set k v d`. These can bypass syntactic guardrails for explicit overrides, `spec`, etc..
 
 ## Embedded Texts
 
@@ -510,7 +509,7 @@ Unlike Haskell, there is no support for pattern matching on lambda or definition
 
 ### Interaction Nets
 
-Interaction nets are expressed effectfully and constructed via assembler-provided built-in `__inet`. Effects API is detailed in the *Design* doc. Defining reusable functions reduces rework, i.e. we normalize the function body only once.
+Interaction nets are expressed effectfully and constructed via assembler-provided built-in `__inet`. Effects API is detailed in the *Design* doc. Eventually, we might want a macro DSL or user-defined syntax to support direct expression of inets. 
 
 ## Errors
 
@@ -543,12 +542,13 @@ We'll generally forbid mixing right-pipes and left-pipes without explicit parent
 
 ## Modules
 
-Modules are integrated through 'import' declarations. Everything module-related is consolidated into one declaration. Imports may only appear as toplevel declarations.
+Everything module-related is consolidated under keyword `import`. From the compiler's perspective, import of local or content-addressed sources is essentially a macro.
 
         import Expr (as (binary)? Name)? (from Expr)?
 
         import "Foo.g"                      # without 'as' or 'at' is mixin on toplevel namespace
-        import "Bar.g" as b                 # 'as' for default introduction or 'at' for a mixin
+        import "Bar.g" as b                 # 'as' for default introduction 
+        import "Baz.g" at b                 # 'at' to extend the existing 'b'
         import "BigText.txt" as binary t    # introduces t as a binary, i.e. does not compile t
         import "Qux.g" as q from {
             , rev:Text                      # content or revision hash of containing folder
@@ -559,17 +559,32 @@ Modules are integrated through 'import' declarations. Everything module-related 
                 ]
             }
 
-Users may move remote filenames into the `from` expression:
-
-        import as q from {
-            , file:"Qux.g"
+        import from {
+            , file:"Qux.g"                  # move source into `from` (for computed locations)
             , rev:Text
             , search:[...]
             }
 
-This simplifies working with computed `from` expressions. 
+The default introduction is:
 
-*Note:* Importing the same module many times results in many distinct instances. This can be useful if experimenting with different overrides or adaptations. But shared libraries are more efficient: assume definitions are in `env.*`, let client import once.
+        import "Bar.g" as b
+
+        # desugars to:
+        object b with
+            object env extends ^env
+        import "Bar.g" at b
+
+        # latter becomes
+        extend b with
+            import "Bar.g"
+
+There is no distinct expression form for 'import', but users can easily 'import' from within an 'object' expression.
+
+        foo = object 'foo with { import "Foo.g" }
+
+In general, `spec.name` - in this case, `'foo` - becomes the seed for `unique` and `abstract_global_path`. There is some risk of collisions that users should mitigate manually. The recommendation is to just use toplevel imports!
+
+*Note:* Shared libraries are modeled in terms of passing definitions through `env.*` instead of via `import`. But a little caching can mitigate rework when importing a module many times.
 
 ### Access Control
 
@@ -614,52 +629,53 @@ To improve concision, expressions within objects are localized. That is, we bind
 
 The `extends` and `with` sections are optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). If provided, they cannot be empty. In general, `spec.name` may be any value with equality, e.g. `"foo"`. Toplevel object declarations use `abstract_global_path` to ensure globally unique names, but it's sufficient that we don't reuse a name for two different specs across transitive deps.
 
-To instantiate the object, the compiler applies a linearization algorithm (C3?) to deduplicate and merge components. The compiler uses `spec.name` to distinguish specifications, and asserts (via reflective term annotation) that `spec.name` is not used for two different specs in linearization scope. After specifications are ordered, we apply `spec.defs` to an empty base `{}` then finally introduce `spec` as an implicit final mixin. For consistency and convenience, the compiler exposes an instantiation function via built-in `__instance`.
+To instantiate the object, the compiler applies a linearization algorithm (C3?) to deduplicate and merge components. The compiler uses `spec.name` to distinguish specifications, and asserts (via reflective term annotation) that `spec.name` is not used for two different specs in linearization scope. After specifications are ordered, we apply `spec.defs` to an empty base `{}` then finally introduce `spec` as an implicit final mixin. 
 
-We also have asyntax `extend Object with ...`, which is analogous to `Dict with ...` but instead updates the specification then re-instantiates the object, preserving name. As with the `object ...` this also may be used both as declaration and expression. 
+For consistency and convenience, the compiler exposes an instantiation function via built-in `__instance`, which attempts to build an object from any specification.
 
         extend foo with
             def1 := ...
 
-        extend Name (as Name)? with Body
+        extend Name (as Name)? with Body        # declaration
 
-In contrast to `object Name ...`, the `extend Object with` variant updates `spec.defs` then lazily rebuilds the object. There is no expression form for this, but see *Mixin Composition* and *Lightweight Extension* below. There is no dedicated syntax for updating `spec.name` or `spec.deps`, and I struggle to think of a use case, but users always have access to `foo := _foo.spec |> edit_spec |> __instance`. 
+We also have syntax `extend Object with ...`, which updates the specification then re-instantiates the object, preserving name and deps. This is declaration-only because it's usually a bad idea to preserve name while forking identity. Users can always bypass restrictions via `__instance`. But see *Anonymous Extension* below.
 
-Objects support most toplevel declarations. Notable exceptions include `unique` and `import`. Objects do support hierarchical object declarations. In this case, names are generated based on host `spec.name` and path.
-
-*Note:* It's usually an error to update an object as a dict, e.g. `foo.def1 := ...` instead of `extend foo with { def1 := ... }`. To resist accidents, `__instance` shall implicitly `__anno 'freeze` the returned dict. Unless users explicitly `__anno 'thaw` the dict, regular dict updates diverge with error.
-
-*Note:* If using objects statically, e.g. for macros or toplevel imports, either avoid inheritance or bind it to prior forms, e.g. `object foo extends _bar, _baz`. Otherwise, `_foo.op` generally refers to *future* extensions of `bar` or `baz`. 
+*Note:* For objects mostly used in prior form, inherit in prior form. For example, if using `_foo.op`, define `object foo extends _bar, _baz`. Otherwise, `_foo.op` generally refers to *future* versions of `bar` or `baz`. This is relevant for macros and a few other cases.
 
 ### Anonymous Objects
 
-An anonymous object has no name, i.e. `spec.name` is intentionally left undefined. Users may express anonymous objects by use of `_` in name position, e.g. `object _ extends foo, bar with ...` (or minimally, just `object _`). Anonymous objects must not appear within `spec.deps`, otherwise `__instance` will report an error. Hence, anonymous objects do not participate in multiple inheritance. They may participate in mixin composition.
+An anonymous object has no name, i.e. `spec.name` is intentionally left undefined. Users may express anonymous objects via `_` in name position, e.g. `object _ extends foo, bar with ...` (or minimally, just `object _`). Anonymous objects must not appear within `spec.deps`, otherwise `__instance` will report an error. Hence, anonymous objects do not participate in multiple inheritance. They may participate in mixin composition.
+
+*Note:* In `object (NameExpr|_) ...`, it's an error if `NameExpr` evaluates to `{}`. We'll insist anonymous objects are explicitly indicated by `_`. 
 
 ### Abstract Objects
 
-As a special case, if users write `_object` instead of `object`, only `__anno 'freeze {spec:Spec}` is returned. Users may instantiate it later via `__instance foo.spec`, or use the object in inheritance. This applies to both object declarations and expressions. 
+An abstract object has a full specification but the rest of the body missing, i.e. a singleton `spec:{name, defs, deps}`. This is be expressed via `abstract object ...`, as declaration or expression.
 
 ### Mixin Composition
 
 Introducing operator `&>` (and its mirror `<&`). These operators compose two objects and return an anonymous object. We generally view this as `Obj &> Mixin` such that we 'apply' the mixin to the 'object' (consistent with `|>` and `!>`).
 
-        toAnon o = if (o.spec has name) then _object _ extends o else o
+        toAnon o = 
+            if (o.spec has name) then 
+                abstract object _ extends o 
+            else o
 
         O &> M = __instance mixed_spec where
             AO = (toAnon O).spec
             AM = (toAnon M).spec
-            mixed_spec = spec:{ deps: mixed_deps, defs:mixed_defs }
+            mixed_spec = { deps: mixed_deps, defs:mixed_defs }
             mixed_deps = AM.deps ++ AO.deps
             mixed_defs = mix AM.defs AO.defs
             mix c p = \ b s -> c (p b s) s
 
         M <& O = O &> M
 
-A known weakness is that all definition updates from anonymous objects apply *after* all definition updates from named objects. This easily results in non-intuitive behavior regarding order of overrides. To mitigate, I propose to warn when users apply a named mixin to an anonymous object.
+A known weakness is that all definition updates from anonymous objects apply *after* all definition updates from named objects. This easily results in non-intuitive behavior regarding order of overrides. To mitigate, we'll warn if users apply named mixins to  anonymous objects. This ensures 'anonymous' is always at the end of the chain. 
 
 ### Explicit Scope
 
-The default scope rule with `self` and `^` is awkward in some contexts, especially mixins. To mitigate this, an optional `as Name` modifier is supported for any object with a `with` section. 
+We also support an `as Name` modifier for object declarations and expressions. The default for `object` is `as self`, which is why we have the default local names and `^` escapes. In some contexts, it is more convenient to use a local name so we don't need escapes.
 
         object Name (as Name)? (extends ObjList)? (with Body)?              # object declaration
         object (NameExpr|_) (as Name)? (extends ListExpr)? (with Body)?     # object expression
@@ -679,15 +695,15 @@ For example:
 
 In this context, `foo.A == 6`. Note that we do not need `^a` to reference the global `a`, but now we use `f.B` to reference the local `B`. To reference prior definitions, we'd use `_f.B` instead. 
 
-### Lightweight Extensions
+### Anonymous Extension
 
 The `with` and `as with` syntax for dict updates also works for objects, and is essentially equivalent to an anonymous mixin:
 
         Object with Body
-        Object &> _object _ as _ with Body
+        Object &> abstract object _ as _ with Body
 
         Object as Name with Body
-        Object &> _object _ as Name with Body
+        Object &> abstract object _ as Name with Body
 
 This supports lightweight extensions
 
@@ -695,8 +711,13 @@ This supports lightweight extensions
             A := 42
             B := op4 >>= op5 >>= op6 as o with
                 C c = op7 ...
-            where
+          where
             op1 = ...
+
+        foo = op1 >>= op2 >>= op3a where
+            op3a = op3 with
+                ...
+    
 
 ## Booleans
 
@@ -709,10 +730,10 @@ There are no truthy values, e.g. empty list is not false or true, and seeing one
 
 We'll support comparisons for numbers and (lexicographically) lists of comparables: `> >= == <> =< <`. There is no comparison between lists and numbers, though, e.g. `42 < "hello"` is simply a type error. Support for `==` and `<>` (our 'not equal') is more flexible, extending to equatable values, i.e. values that do not contain functions.
 
-        Dict has Path
+        Dict has Path           # same as Dict.Path <> {}
         foo has bar.baz
 
-For convenience and aesthetics, I also introduce a `has` keyword, which returns whether `Dict.Path` would return a value or not.
+For convenience and aesthetics, I also introduce a `has` keyword. 
 
 ## Conditionals
 
@@ -805,11 +826,7 @@ Refactoring isn't convenient or pretty, but now it's at least structurally possi
 
 ### If and Match as Try Forms
 
-For consistency, the compiler shall implement `if/match` by providing a local effects handler then evaluating `try/try_match` within that context. This compiler-provided handler supports minimal effects: `.cut/.alt/.fail/.r/.seq`. I don't want any stateful effects because I want to preserve the explicit dataflows of pure evaluation.
-
-Importantly, it's stateless because I want to protect user intuitions of explicit dataflow in the pure evaluation context.
-
-These effects are visible to tentative choice, effectful guard clauses, and view patterns.
+For consistency, the compiler shall implement `if/match` by providing a local effects handler then evaluating as `try/try_match`. The compiler-provided handler shall support the stateless subset of standard effects, i.e. `.cut/.alt/.fail/.fix/.r/.seq`. 
 
 ### Match
 
@@ -849,14 +866,17 @@ Tentative choice is expressed using `-?>`.
 
 Several forms of guard clauses:
 
-- `BoolExpr` - evaluates to `'t` or `'f`, fail on `'f`
-- `Pattern = Expr` - binds local vars in Pattern or fails
-  - can view this as `Pattern <- .r Expr`
-- `OpExpr` - evaluates to `{eff:(_),_}`, executes
-  - error if returns a non-unit result
-- `OpExpr -> Pattern` or `Pattern <- OpExpr` binds return value
+- `BoolExpr` - evaluate `'t` or `'f`, reject `'f`
+- `Pattern = Expr` - bind Pattern or reject match
+- `Effect` - evaluates to `{eff:(_),_}`, executes
+  - reject on `.fail`
+  - accept on `.r ()` 
+  - error on `.r Other`
+- `Effect -> Pattern` or `Pattern <- Effect` 
+  - reject on `.fail`
+  - accept `.r Result when Pattern = Result`
 
-Guard clauses are second-class, but compose via `when`. 
+This supports both booleans and effects via ad hoc polymorphism, but note that we do not *mix* effects into a boolean expression. 
 
 ### Pattern Matching
 
@@ -864,50 +884,51 @@ Patterns appear in many locations: `match` syntax, guard clauses, and do notatio
 
         Name                        # bind as local name (permits '_' and '_Name' too)
         ()                          # unit
-        (Pattern)                   # you can parenthesize patterns
-        (Pattern,Pattern)           # eqv. to tuple:(Pattern,Pattern) (also triples, etc.)
+        (Pattern)                   # scopes pattern
         Pattern as Name             # capture pattern target as a local
 
         {}                          # empty dict
-        {d}                         # match dicts and tagged data
+        {d}                         # any dict
+        {:x,:y,:z}                  # same as {x:x, y:y, z:z}
         {foo.bar.baz:Pattern, _}    # deep refs
-        {(Expr):Pattern, _}         # eval path expr, extract, match Pattern 
+        {.(Expr):Pattern, _}        # eval list-path expr, extract, match Pattern
 
         tag:Pattern                 # same as {tag:Pattern}
-        [TagExpr]:Pattern           # eval Expr, extract, match Pattern
-        'name                       # same as ["name"]:()
+        :tag                        # same as tag:tag
+        [TagExpr]:Pattern           # same as {.[TagExpr]:Pattern}
+        'name                       # a constant, same as ["name"]:()
 
         []                          # empty list
         [a,b,c]                     # list of three items
-        [x]++_xs                    # we can use append notation in patterns
-        _xs++[x]                      
+        [x]++xs                     # we can use append notation in patterns
+        xs++[x]                      
         [x0]++xs++[xN]
-        #lhs++rhs                   # ILLEGAL - at most one variable-length list
+        # lhs++rhs                  # ILLEGAL - limit one variable sublist
 
         "foo"                       # match text
         "foo"++xs                   # texts are just lists
 
+        (P1,P2,...,PN)              # same as tuple:[P1,P2,...,PN]
+
         42                          # match exact number
         _1.23
         1/6                         # exact rationals supported
+        (Name > 0)                  # half-range patterns
+        (0 < Name =< 100)           # full-range patterns
 
-        (Applicable -> Pattern)     # view patterns must be parenthesized
-        (Pattern <- Applicable)     # both directions are supported
-
-Aside from constant numbers, we'll mostly recognize numbers through view patterns. I'm considering patterns such as `(n > 0)` or `(0 < n < 100)`, but it's a little awkward to manage the nitty details such as whether `n` is integral within the same pattern.
-
-*Note:* In context of `__anno 'freeze`, `without` isn't permitted. In such cases, dropping the remaining pattern with `_` is best. But if the remaining pattern is `{}`, i.e. a complete match, we'll implicitly thaw the dict to verify.
+        (Applicable -> Pattern)     # view patterns *must* be parenthesized
+        (Pattern <- Applicable)     # both directions supported
 
 ### View Patterns
 
-View patterns are expressed within a pattern context as:
+View patterns enable us to spill patterns into the rest of the namespace. For example, if we want to insist a number is a nat, we could write `(Nat -> (n < 100))` instead of `(0 =< n < 100) when (n == __floor n)` or similar. View patterns are expressed within a pattern context as:
 
         (Viewer -> Pattern)     # or equivalently
         (Pattern <- Viewer)
 
-The primary difference between a view pattern and effectful guard clause is that, in the pattern context, we have an input: the item we're translating into a view.
+The primary difference between a view pattern and effectful guard clause is that, in the pattern context, we have an input other than the effectful environment. The viewer has access to the *same* effects as the guard clauses and tentative choice.
 
-*Note:* View patterns are an approach to refactoring *patterns*. In contrast, `then?` and `-?>` are approaches to refactoring *conditional structures*.
+*Note:* View patterns are an approach to refactoring *patterns*. In contrast, tentative choice is supports refactoring *conditional structures*. In practice, it's usually more convenient to refactor patterns. 
 
 ## Loops
 
@@ -926,7 +947,7 @@ In the more general case, mutually recursive loops with tail calls can effective
 
 ## Open Continuations
 
-With the *Lightweight Extensions* syntax for objects, we can support continuation-passing style via extension of abstract method objects. This is another way of passing parameters, more extensible and flexible than function arguments. Moreover, it shifts some parameters from horizontal to vertical layout, and avoids some redundancy of reference. The resulting syntax might look a bit like this:
+Assuming the *Anonymous Extensions* syntax for objects, we can support continuation-passing style via extension of abstract method objects. This is another way of passing parameters, more extensible and flexible than function arguments. Moreover, it shifts some parameters from horizontal to vertical layout, and avoids some redundancy of reference. The resulting syntax might look a bit like this:
 
         foo x y = op1 x >>= op2 y >>= op3 with
             A a = op4 x >>=\_-> op5 a >>= op6 as op with
@@ -934,5 +955,5 @@ With the *Lightweight Extensions* syntax for objects, we can support continuatio
                 C c = ...
             D ::= \ prior -> prior + 42
 
-I'm uncertain how useful this 'style' will be, but Koru language seems to use its variation thereof effectively. 
+I'm uncertain how useful this 'style' will be, but Koru language is essentially built around a restricted subset of this form of composition.
 

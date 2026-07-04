@@ -58,8 +58,8 @@ The built-in data types are numbers, lists, dicts, and functions. All data is im
 
 - Numbers are exact rationals. Any loss from rounding numbers is under explicit control of the user.  
 - Lists are a one-size-fits-all sequential data structure. Concretely represented by finger-tree ropes under the hood, supporting append at either, compact binaries, array-like flattening. 
-- Dicts are finite key-value associative structures. Keys must be comparable with equality, i.e. no functions. There is no iteration over keys. Tagged data as a singleton dict.
-- Functions are frequently expressed as lambdas, but are generally modeled as closed-term inets with the same interface as lambdas. As closed terms, functions are first-class data.
+- Dicts are finite key-value associative structures. Keys must be equatable, i.e. excluding functions. There is no iteration over keys. Tagged data is modeled as a singleton dict.
+- Functions are frequently expressed as lambdas, but are closed-term inets under-the-hood.
 
 All basic data types are implicitly tagged, i.e. users can distinguish a function from a number in context of pattern matching. Users can further tag data to support a dynamic type feel.
 
@@ -300,8 +300,8 @@ It is very convenient to assume a standard effects API for generic extensions. P
 - `.fail` - failure for `.alt`, does not continue
 - `.cut op` - scope for `.alt`, selects first success
 - `.fix fn` - `fn` receives result as input but hides `.reset` scope
-- `.get Path` - copy data from state; default value is unit
-- `.set Path Val` - overwrite data in state; set unit to remove key
+- `.get Path` - copy data from state; default is empty dict `{}`
+- `.set Path Val` - overwrite data in state; set `{}` to erase key
 - `.reset Key op` - scope for delimited continuations
 - `.shift Key fn` - exits corresponding `.reset` with continuation 
 
@@ -311,7 +311,7 @@ Tentative, deferred:
 
 - `.scope Mixin Op` - apply an update or mixin to `api` in scope of `Op`
 - `.score Value` - for soft searches of `.alt` paths, preferences
-- *constraints* - useful across most problem domains 
+- *constraints* - for reasoning and search across problem domains 
 
 ### Extensible Effects
 
@@ -377,7 +377,7 @@ For interaction nets in general, there is no arg-result distinction. Data flows 
 
 ## Modules
 
-A module is represented by a file and represents an object extension. The assembler provides a built-in front-end compiler for ".g" files, but *User-Defined Syntax* is supported, with users defining a monadic front-end compilers aligned to file extensions, and the assembler bootstrapping upon override.
+Each module is represented by a file that represents a mixin and extends a hosted module object. The assembler provides a built-in front-end compiler for ".g" files, but *User-Defined Syntax* is supported, with users defining a monadic front-end compilers aligned to file extensions, and the assembler bootstrapping upon override.
 
 To simplify architecture, file dependencies are constrained: a file may reference only local files within the same folder or subfolders (no parent-relative ("../") or absolute paths), or content-addressed remote files (by DVCS revision hash and filename). File dependencies must form a directed acyclic graph. Files and subfolders whose names start with "." are also hidden from the module system.
 
@@ -385,28 +385,41 @@ A module is integrated by 'including' its definitions as a mixin. Any prior defi
 
 - `import ...` - include-like mixins; module rewrites host `Base`, shares `Self`.
 - `import ... as m` - introduces `m` with defaults then applies `import ... at m` 
-  - Default is `m = {env:Self.env}` for adaptability and user-defined syntax.
-    - `env` is usually an *object*, not a plain dict, with updates via mixin.
 - `import ... at m` - mixin applied to `m`, binds to host `Base.m`, and `Self.m`.
-- `import ... binary as b`, introduces a raw file binary, does not compile 
+- `import ... as binary b`, introduces a raw file binary, does not compile 
 
-Hierarchical imports (the 'as' and 'at' forms) are compatible with lazy loading. Note that we do not close the fixpoint for hierarchical imports, thus hierarchical definitions remain open to extension.
+Hierarchical imports (the 'as' and 'at' forms) are compatible with lazy loading. Note that we do not close the fixpoint for hierarchical imports, thus hierarchical definitions remain open to extension. 
+
+### Module Objects
+
+We model modules as objects. In context of ".g" syntax, the default `as m` introduction is simply:
+
+        import M as m 
+
+        # desugars to
+        object m with                   # every module is an object
+            object env extends ^env     # inherit parent environment
+        import M at m
+
+        # and latter is effectively 
+        extend m with
+            import M
+
+Toplevel modules are similar. An important consequence is that modules do have access to their own `spec` (though `_spec` is hidden). Also, the `spec.name` serves as the seed for `unique` or `abstract_global_path`.
 
 ### Configuration
 
 The assembler implicitly loads a configuration module based on the `GLAM_CONF` environment variable or an OS-specific default, i.e. `"~/.config/glam/conf.g"` in Linux or `"%AppData%\glam\conf.g"` in Windows. A small, local user configuration typically extends a large, remote community or company configuration.
 
-All options are defined under `conf.*`, which serves as the 'public interface' for a configuration. Most configuration options are ad hoc and assembler specific, but `conf.env` is an exception for reasons of reproducibility: it can influence assembly result, thus shall not depend on assembler version.
+The initial configuration namespace consists of an empty `env` object. The configuration is expected to define options under `conf.*`, especially `conf.env` which is passed to the assembly. Other than `conf.env`, which impacts reproducibility, other options might be expressed effectfully with ad hoc assembler-provided effects. 
 
 - *assembly environment*: `conf.env : Object` - determines `env` parameter to assembly. It is convenient to model this as an *object* for flexible extension by the assembly. Default is empty object.
-- *command-line macros*: `conf.cli : Eff [ParseArgs, WriteArg] ()` - rewrites command-line arguments if (and only if) the first command-line argument does not start with '-'. The reader uses parser-combinators designed to simplify tab completion.
+- *command-line macros*: `conf.cli : Eff [Refl, ParseArgs, WriteArg] ()` - rewrites command-line arguments if (and only if) the first command-line argument does not start with '-'. The reader uses parser-combinators designed to simplify tab completion.
 - *logger*: `conf.log : Eff [Refl, Log] ()` - can read log and write standard error, active in batch mode only. If undefined or terminates early, default logger takes over.
 - *interactive development*: `conf.ide : Eff [Refl, Log, TTY, Net, File, GUI] ()` - runs in interactive mode, supports user interaction via TTY, limited network access, lightweight GUI. Limited ability to edit files and rebuild assembly. 
 - *resource management*: as needed - the assembler may require ad hoc configuration for JIT and GC tuning, access to processors for acceleration, data persistence and constraint solver for reflection, remote proxies for distributed compilation or shared work caching, PKI certs and keys access DVCS or to sign works, etc.. 
 
 For flexibility, `GLAM_CONF` may list several files using the OS-specific `PATH` separator. These files are logically applied as mixins, such that files listed earlier may override those listed later, left to right. We can feasibly split the configuration between OS-layer, project layer, and user layer. We may later extend this list to support remote URLs.
-
-The configuration namespace is initially empty except `env`, an empty object. 
 
 ### Assembly
 
@@ -418,7 +431,7 @@ Command line options:
 - `(-s|--script).FileExt Text` - as remote file with given extension and text. Scripts cannot import local files, hence are location-independent. 
 - `-- List Of Args` - the assembler defines `asm.args` as a list of strings prior to including files.
 
-Inputs are `asm.args` from the command line and `env` from the user configuration. Depending on the configured environment, assembly isn't limited to ".g" files (see *User-Defined Syntax*). The primary output is `asm.result`, which should represent a binary or filesystem folder. See *Assembler* below. 
+Inputs are `asm.args` from the command line and `env` from the user configuration. Depending on the configured environment, i.e. presence of `env.lang.[FileExt].compile`, assembly isn't limited to ".g" files (see *User-Defined Syntax*). The primary output is `asm.result`, which should represent a binary or filesystem folder. See *Assembler* below. 
 
 ### Remotes
 
@@ -637,13 +650,13 @@ Direct-style assembly with most CPU machine code naturally covers all procedural
 
 Transaction loops, where we repeatedly run an atomic, isolated transaction - optimized via replication on choice, incremental computing, and distribution - is of special interest to me. It's easy to replace the transaction we're running, providing a robust foundation for live systems. 
 
-### Multi-Level Libraries
+### Multi-Level Languages (Policy)
 
-When expressing domain knowledge, we should aim to do so in an extensible and substrate-independent manner: objects for extensibility, DSLs for substrate-independence. For example, a system of equations should be expressed as an object where definitions are in an calculus DSL. Combat choreography for video-game cinematics should be an object with an animations DSL, such that users can 'override' parts of the animation and have changes and constraints propagate. 
+When expressing domain knowledge, we should aim to do so in an extensible and substrate-independent manner: objects for extensibility, DSLs for substrate-independence. For example, a system of equations should be expressed as an object with definitions in an calculus DSL. Users can tweak the equations and extract the knowledge. Combat choreography for video-game cinematics should be an object with an animations DSL, such that users can override parts of the animation and extract to a system of equations or other model.
 
-There are many ways to express DSLs, but I strongly recommend effectful DSLs. Start with *Standard Effects* to support generic bookkeeping and backtracking. Then introduce domain-specific effects with flexible, confluent write order, e.g. write cursors. Flexible write order simplifies targeting the DSL from languages that organize concepts differently.
+Effectful DSLs, i.e. DSL as effects API, are convenient. While extracting code, we can rely on generic effects for bookkeeping and backtracking. Constraint systems enable flexible program search across problem domains. We can easily introduce intermediate representations with *singletons* and *write cursors* to mitigate scatter-gather challenges.
 
-Essentially, machine code is just one DSL in a tower.
+Essentially, we can model each language as an assembly target instead of a syntax. Separately, we can develop user-defined syntax or macro DSLs to conveniently express behavior.
 
 ### Proof-Carrying Code
 
