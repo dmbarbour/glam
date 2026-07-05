@@ -309,8 +309,9 @@ The `Path` type for `.get/.set` is a list of keys, assuming state is a hierarchi
 
 Tentative, deferred:
 
-- `.scope Mixin Op` - apply an update or mixin to `api` in scope of `Op`
+- `.scope Mixin Op` - apply mixin to `api` in scope of `Op`
 - `.score Value` - for soft searches of `.alt` paths, preferences
+- `.commit` - drop `.alt` paths except this one, scoped by `.cut`
 - *constraints* - for reasoning and search across problem domains 
 
 ### Extensible Effects
@@ -321,10 +322,10 @@ For effects that accept arguments, we can generally leverage method objects to e
 
 ## Interaction Nets
 
-In contrast to lambda calculus, interaction nets are graph-structured instead of tree-structured, and symmetric instead of directional. This simplfies fine-grained, flexible dataflow and supports backpropagation without fixpoint. In this project, interaction nets are scoped to expressions and capture data at a returned port.
+In contrast to lambda calculus, interaction nets are graph-structured instead of tree-structured, and symmetric instead of directional. This simplfies fine-grained, flexible dataflow and supports backpropagation without fixpoint. In this project, interaction nets are scoped to expressions, exposing only one port.
 
     # identity function as inet
-    __inet do
+    interaction_net do
         .bind -> [ap, arg, result]
         .wire arg result
         .r ap
@@ -358,7 +359,7 @@ Rules:
   - annihilate nodes
   - connect auxilliaries positionally
 - dup: 
-  - copy node to opposite auxilliaries
+  - copy node to each auxilliary opposite
   - wire auxilliaries to copies positionally
 - call: 
   - reconstruct function inet in caller inet
@@ -379,7 +380,7 @@ For interaction nets in general, there is no arg-result distinction. Data flows 
 
 Each module is represented by a file that represents a mixin and extends a hosted module object. The assembler provides a built-in front-end compiler for ".g" files, but *User-Defined Syntax* is supported, with users defining a monadic front-end compilers aligned to file extensions, and the assembler bootstrapping upon override.
 
-To simplify architecture, file dependencies are constrained: a file may reference only local files within the same folder or subfolders (no parent-relative ("../") or absolute paths), or content-addressed remote files (by DVCS revision hash and filename). File dependencies must form a directed acyclic graph. Files and subfolders whose names start with "." are also hidden from the module system.
+To simplify architecture, file dependencies are constrained: a file may only reference local files or subfolders or content-addressed remote files. Because parent-relative and absolute filepaths are forbidden, every folder becomes a stand-alone package, easily shared and edited. We'll express content addressing in terms of a DVCS revision hash for the containing folder, ensuring remote dependencies are transitively immutable. 
 
 A module is integrated by 'including' its definitions as a mixin. Any prior definitions or inclusions effectively model prior mixins. We can translate inclusions to a hierarchical element. Thus, I propose a few import forms:
 

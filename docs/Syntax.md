@@ -39,22 +39,21 @@ In context of errors, the errors can be reported but we can also make a best eff
 
 ## Keywords
 
-Keywords are names reserved by the compiler to support special forms. Users are not permitted to define or use keywords directly as names. An exception is made for atoms. For example, although `import` is a keyword, users may define `.['import] = ...` or reference `module.['import]`.
+Keywords are names reserved by the compiler to support special forms or aesthetics. Users are not permitted to define or use keywords directly as names. An exception is made for atoms. For example, although `import` is a keyword, users may define `.['import] = ...` or reference `module.['import]`.
 
 Proposed keywords:
 
         import, as                                  modules
         module, abstract, using                     namespace
-        unique, abstract_global_path                special atoms
+        unique, abstract_path                       access
         with, without                               dict 
         do                                          effects
         let, in, where                              locals
+        object, extend(s), self                     objects
 
-        object, extend, extends, self               objects
-
-        if, then, elif, else                        basic conditionals
+        if, then, else                              basic conditionals
         match, try, when, try_match                 advanced conditionals
-        and, or, not, has                           comparisons
+        and, or
 
 The set of recognized keywords may vary per module based on language version declaration.
 
@@ -137,24 +136,13 @@ Evaluates `Expr` in context of a temporary object. Within that scope, `self` is 
 
 The main use case for `using` is to manage namespaces without polluting them. Not suitable for subexpressions that require many escapes.
 
-### Built-in Definitions
-
-Built-ins are compiler-provided definitions referenced via `__name`, a name preceded by two underscores. They evaluate as normal expressions. For reproducibility, built-ins require similar stability as keywords, varying only with language version declaration. Use cases:
-
-        __anno              annotations
-        __instance          objects
-        __inet              dataflow
-        __floor             arithmetic
-
-I'm not fond of the aesthetic, but it's a lot easier to introduce built-ins than to introduce keywords, and it's clear where the definition is coming from.
-
 ## Operators
 
 Operators are essentially infix functions. We'll support Haskell-style operator sections, such that `((>>= k) op)` is equivalent to `(op >>= k)`. To avoid unnecessary parentheses, we'll support precedence between most operators. To mitigate confusion, not every pair of operators will have valid precedence, e.g. cannot mix both `>>` and `<<` without parentheses.
 
 We may support a few special non-binary forms, e.g. `(x < y =< z)` as shorthand for `((x < y) and (y =< z))`. We'd also support `(< =<)` operator sections. Risk of confusion is mitigated because we cannot compare booleans for less-than or greater-than.
 
-Operators may support limited ad-hoc polymorphism. For example, `>` could compare two numbers, two lists, two tuples. For lists and tuples, we use a lexicographic comparison of elements. Comparing a number to a list, or a list to a tuple, would simply diverge with an error. As a rule, ad-hoc polymorphism must preserve laws or intuitions, e.g. don't use `+` to append lists because it does not preserve commutativity of `+` on numbers.
+Operators may support limited ad-hoc polymorphism. For example, `>` will only compare two numbers, two lists, or two tuples. For lists and tuples, we use a lexicographic comparison of elements. Comparing a number to a list, or even a list to a tuple, would simply diverge with an error. As a rule, ad-hoc polymorphism must preserve laws or intuitions, e.g. don't use `+` to append lists because it does not preserve commutativity of `+` on numbers.
 
 *Tentative:* Minimal operator precedence, mostly for associative structure. Require parentheses everywhere else.
 
@@ -203,18 +191,6 @@ We always 'run' these effects from left to right, preserving order.
 
 Because `.r` is concise, users can directly write `.r f <! op1 <! op2`. No need for a `<$>` equivalent.
 
-### Alternatives
-
-        (<|>) = .alt   # right associative
-
-Direct use of `.alt` is a little awkward. We can introduce an inline operator for this, e.g. `<|>`. In practice, we might be better off with users defining a few utility functions, e.g. to search a list.
-
-        search L = match L with
-            [x]++xs -> match xs with
-                [] -> .r x
-                _ -> .alt (.r x) (search xs)
-            [] -> .fail
-
 ## Macros
 
 In context of lazy loading, the compiler must *know* when a macro is being called. Two approaches: declare macros, e.g. a set of macros in `meta.*`, or a distinct invocation syntax. I favor the latter because it also lets readers locally recognize special forms. Proposed syntactic forms:
@@ -239,9 +215,10 @@ There is no dedicated syntax for defining macros. It is convenient to define mac
 
 ## Annotations
 
-We'll express annotations as a built-in function.
+We'll express annotations as a builtin function.
 
-        __anno : Annotation -> Term -> Term
+        import 'anno
+        anno : Annotation -> Term -> Term
 
 Annotations are not observable within the computation, but may guide performance, debugging, and other use cases. To avoid silent degradation of performance or reasoning, the assembler shall warn about unrecognized annotations. 
 
@@ -308,13 +285,11 @@ Tagged data is essentially just a syntactic convenience.
 
 Atoms are data where the only useful observation is equality.
 
-The unit value `()` is a built-in atom. `'name` is sugar for a tagged unit value, `["name"]:()`. Tagged unit data effectively serves as an atom because we cannot observe `"name"`, we can only test whether it is present. Note that `'tag` and `tag:()` are distinct: the latter is equivalent to `['tag]:()`. 
+The unit value `()` is a built-in atom. `'name` is sugar for a tagged unit value, `["name"]:()`. Tagged unit data effectively serves as an atom because we cannot observe `"name"`, we can only test whether it is present. Note that `'tag` and `tag:()` are distinct: the latter is equivalent to `['tag]:()`. Atoms of the `'eax` form are convenient for expressing small enums.
 
-Atoms are convenient for expressing small enums, e.g. `'t` and `'f` for booleans, or `'eax` for registers.
+Scope-unique atoms are useful for the ephemeron performance pattern. To support this pattern, we can introduce a term annotation, `anno 'scope_unique`, that wraps a given atom with unique metadata. If ever we compare the same atom with different metadata, we diverge instead, thus never observing the violation of scope uniqueness. When used as dict keys, we associate data to a weakref of that metadata.
 
-Scope-unique atoms are useful for the ephemeron performance pattern. To support this pattern, we can introduce a term annotation, `__anno 'scope_unique`, that wraps a given atom with unique metadata. If ever we compare the same atom with different metadata, we diverge instead, thus never observing the violation of scope uniqueness. When used as dict keys, we associate data to a weakref of that metadata.
-
-For access control and conflict avoidance, we can leverage the namespace as a stable source of unique atoms. A viable approach is `Foo = abstract_global_path Foo`, borrowing `spec.name` (which must be defined) as a source of uniqueness. To resist accidental reuse, I propose a toplevel declaration `unique Foo, Bar, Baz` to 'introduce' such definitions, i.e. so we see an error if a name is reused. In the general case, we cannot guarantee `spec.name` is globally unique, but we can apply scope-unique annotations to detect accidental conflicts.
+For access control and conflict avoidance, we can leverage the namespace as a stable source of unique atoms. A viable approach is `Foo = anno 'scope_unique (abstract_path Foo)`, borrowing `spec.name` as a seed for uniqueness. To resist accidental reuse, I propose a toplevel declaration `unique Foo, Bar, Baz` to 'introduce' such definitions, i.e. we see an error when the name is reused. In case `spec.name` is not globally unique, we also annotate scope-uniqueness, so we see an error upon observing conflict.
 
 ## Dicts
 
@@ -357,7 +332,7 @@ We can also remove elements via update to `{}`, but the `without` form has two a
 
 Pattern matching on dictionaries generally have the form `{Path1:Pattern1, Path2:Pattern2, RemainingPattern }`. There is at most one remaining pattern, default `{}` thus requiring a full match. Users may write `{:x,:y,:z}` as shorthand for `{x:x, y:y, z:z}`. 
 
-*Aside:* We'll provide 'primitive' update methods via built-ins, e.g. `__dict_get k d`, `__dict_set k v d`. These can bypass syntactic guardrails for explicit overrides, `spec`, etc..
+*Aside:* Users can bypass syntactic guardrails via prelude of dict methods.
 
 ## Embedded Texts
 
@@ -416,7 +391,7 @@ We use a prefix underscore to indicate negative numbers. This is part of the num
 
 We'll support hexadecimal (0x) and binary (0b) number literals, too. We can feasibly provide some 'bitwise' operators or accelerated functions on natural numbers. Although numbers don't have a built-in notion of word size or encoding, it isn't difficult to impose one.
 
-The compiler will provide a few useful operators - `+ * / -`, and several built-in functions, e.g. `__floor`, to work with numbers. 
+The compiler will provide a few useful operators - `+ * / -` and a prelude to work with numbers.
 
 Numbers are modeled as exact rationals with no bound on size or precision. Thus, any loss of precision is under user control. This has severe performance implications. If users ever need high-performance assembly-time number crunching, they'll be relying on accelerated evaluation of CPU or GPGPU DSLs instead of built-in arithmetic.
 
@@ -509,15 +484,15 @@ Unlike Haskell, there is no support for pattern matching on lambda or definition
 
 ### Interaction Nets
 
-Interaction nets are expressed effectfully and constructed via assembler-provided built-in `__inet`. Effects API is detailed in the *Design* doc. Eventually, we might want a macro DSL or user-defined syntax to support direct expression of inets. 
+Interaction nets are expressed effectfully and constructed via builtin `interaction_net`. Effects API is detailed in the *Design* doc. Eventually, we may want a macro DSL or user-defined syntax to support direct expression of inets. 
 
 ## Errors
 
 We can use annotations to indicate known errors or issues.
 
-        __anno 'error         Expr        recognized errors
-        __anno 'TBD           Expr        incomplete definitions
-        __anno 'deprecated    Expr        transitional code
+        anno 'error         recognized errors
+        anno 'TBD           incomplete definitions
+        anno 'deprecated    transitional code
 
 In these cases, `Expr` may indicate the nature of the error or future intentions for a TBD. For deprecated code, it should be valid, but we'll report a warning.
 
@@ -542,15 +517,31 @@ We'll generally forbid mixing right-pipes and left-pipes without explicit parent
 
 ## Modules
 
-Everything module-related is consolidated under keyword `import`. From the compiler's perspective, import of local or content-addressed sources is essentially a macro.
+Module-related operations are consolidated under keyword `import`. 
 
-        import Expr (as (binary)? Name)? (from Expr)?
+An invalid import, e.g. due to missing source or compiler, is an error. 
 
-        import "Foo.g"                      # without 'as' or 'at' is mixin on toplevel namespace
-        import "Bar.g" as b                 # 'as' for default introduction 
-        import "Baz.g" at b                 # 'at' to extend the existing 'b'
-        import "BigText.txt" as binary t    # introduces t as a binary, i.e. does not compile t
-        import "Qux.g" as q from {
+### Local Modules
+
+Users may import from other files within the same folder or subfolders.
+
+        import LocalRef ((as|at) Name)?
+
+        import "Foo.g"          # integrate with current namespace 
+        import "Bar.g" as b     # 'as' for default introduction 
+        import "Baz.g" at b     # 'at' to extend the existing 'b'
+        import "A/B/C.g"        # access to subfolders
+
+Note that `LocalRef` is not an expression in general. We do not evaluate local module references because every import should be locally determined and locally meaningful to the author.
+
+### Remote Modules
+
+We can import from a remote source. In this case, the LocalRef is elided, and the file path is moved into a `from` expression. In the general case, we can support an index of remote locations. 
+
+        import ((as|at) Name)? from Expr
+
+        import as q from {
+            , file:"Qux.g"                  # relative filename within the folder
             , rev:Text                      # content or revision hash of containing folder
             , search:[
                 , tag:Text                  # tag or branch for shallow download
@@ -559,32 +550,25 @@ Everything module-related is consolidated under keyword `import`. From the compi
                 ]
             }
 
-        import from {
-            , file:"Qux.g"                  # move source into `from` (for computed locations)
-            , rev:Text
-            , search:[...]
-            }
+### Binary Resources
 
-The default introduction is:
+Sometimes, we just want the raw data. This is expressed via `import as binary Name`. 
 
-        import "Bar.g" as b
+        import "FilePath.txt" as binary my_file
+        import as binary remote_file from ...
 
-        # desugars to:
-        object b with
-            object env extends ^env
-        import "Bar.g" at b
+To reduce risk of errors, `binary` is not accepted as an import destination. It isn't a keyword in general, just in this specific context. 
 
-        # latter becomes
-        extend b with
-            import "Bar.g"
+### Builtins
 
-There is no distinct expression form for 'import', but users can easily 'import' from within an 'object' expression.
+The compiler provides built-in definitions via built-in modules. These are essentially local modules, but the naming convention uses atoms instead of filepaths.
 
-        foo = object 'foo with { import "Foo.g" }
+        import 'prelude as p
+        import 'trig as t
 
-In general, `spec.name` - in this case, `'foo` - becomes the seed for `unique` and `abstract_global_path`. There is some risk of collisions that users should mitigate manually. The recommendation is to just use toplevel imports!
+For reproducibility, built-in definitions must be stable. But that only applies to builtins already observed in use. There is some flexibility to introduce new built-ins without affecting existing code.
 
-*Note:* Shared libraries are modeled in terms of passing definitions through `env.*` instead of via `import`. But a little caching can mitigate rework when importing a module many times.
+*Note:* As a rule, builtins are favored over keywords for anything that can be expressed as a normal function or value. Keywords are needed for special forms or aesthetics, not for functions.
 
 ### Access Control
 
@@ -606,13 +590,13 @@ Object syntax can and should be compact by default. I propose:
             def2 := ...
 
         # desugars as expression
-        foo = object (abstract_global_path foo) extends [bar, baz] with 
+        foo = object (abstract_path foo) extends [bar, baz] with 
             def1 = ...
             def2 := ...
         
         # roughly evaluates as
         foo = __instance {
-            , name:(abstract_global_path foo)
+            , name:(abstract_path foo)
             , deps:[bar.spec, baz.spec]
             , defs:\_self self -> _self with  
                 def1 = ...
@@ -627,7 +611,7 @@ Object syntax can and should be compact by default. I propose:
 
 To improve concision, expressions within objects are localized. That is, we bind `foo` as `self.foo` and `_foo` as `_self.foo`, where `self` is a keyword referencing the local object namespace, analogous to `module`. Users instead pay a small syntactic tax to access the host scope via `^name`, `^(Expr)`, or use of `module`. Use of `^` composes, e.g. `^^^method` escapes three lexical levels. But it's best to keep syntax shallow.
 
-The `extends` and `with` sections are optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). If provided, they cannot be empty. In general, `spec.name` may be any value with equality, e.g. `"foo"`. Toplevel object declarations use `abstract_global_path` to ensure globally unique names, but it's sufficient that we don't reuse a name for two different specs across transitive deps.
+The `extends` and `with` sections are optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). If provided, they cannot be empty. In general, `spec.name` may be any value with equality, e.g. `"foo"`. Toplevel object declarations use `abstract_path` to ensure globally unique names, but it's sufficient that we don't reuse a name for two different specs across transitive deps.
 
 To instantiate the object, the compiler applies a linearization algorithm (C3?) to deduplicate and merge components. The compiler uses `spec.name` to distinguish specifications, and asserts (via reflective term annotation) that `spec.name` is not used for two different specs in linearization scope. After specifications are ordered, we apply `spec.defs` to an empty base `{}` then finally introduce `spec` as an implicit final mixin. 
 
@@ -717,32 +701,21 @@ This supports lightweight extensions
         foo = op1 >>= op2 >>= op3a where
             op3a = op3 with
                 ...
-    
-
-## Booleans
-
-We model booleans as simple atoms.
-
-        't      true
-        'f      false
-
-There are no truthy values, e.g. empty list is not false or true, and seeing one where we expect a boolean is just a type error. We'll support `and, or, not` as keywords with conventional behavior, i.e. `and` does not evaluate second clause if first is `'f`. The `and` and `or` keywords are infix, i.e. `'t and 'f`. Keywords as operators. They even support operator sections.
-
-We'll support comparisons for numbers and (lexicographically) lists of comparables: `> >= == <> =< <`. There is no comparison between lists and numbers, though, e.g. `42 < "hello"` is simply a type error. Support for `==` and `<>` (our 'not equal') is more flexible, extending to equatable values, i.e. values that do not contain functions.
-
-        Dict has Path           # same as Dict.Path <> {}
-        foo has bar.baz
-
-For convenience and aesthetics, I also introduce a `has` keyword. 
 
 ## Conditionals
 
-Big ideas for conditionals.
+I propose to model conditional behavior as effectful and backtracking, i.e. in terms of `.alt/.fail/.cut`. 
 
-- *refactoring* - tentative `then?` or `-?>` allows rhs to use effectful rep for conditional behavior, e.g. `.r A` or `.fail`.  This simplifies refactoring. 
-- *backtracking* - `try Effect then ...` will run `Effect` assuming context with `.alt, .cut, .fail`. If it fails, we select `else` branch, otherwise the `then` branch.
+Boolean expressions become pass/fail effects, i.e. `.r ()` and `.fail`. This impacts all boolean operators, e.g. `(3 > 4)` evaluates as `.fail`, `or` is modeled via `.alt`, `and` via `.seq`. Negation can be expressed via staged effect:
+
+        not C = .alt (C =>> .r .fail) (.r (.r ())) >>= \ op -> op
+        could C = not (not C)
+
+In this case, `could` will run `C` to prove it works, backtrack, then continue running. With just `.alt/.cut/.fail` there is no way to exfiltrate details about the success, other than the observation that it would have passed. 
 
 ### If Then Else
+
+I support `if/then/else` for reasons of familiarity and convenience. We'll desugar as a match form.
 
         # basic forms
         if C then A else B
@@ -753,138 +726,100 @@ Big ideas for conditionals.
             C -> A
             _ -> B
 
-        # elif is short for else if
-        if C1 then 
-          E1 
-        elif C2 then 
-          E2 
-        else E3
+Note that conditions are not expressions. Instead, they're guard clauses, i.e. a sequence of `Guard (and Guard)*`. Relevantly, this admits pattern guards, which are often convenient, and effects guards, which can express branching conditions.
 
-Note that `C` is not specified as a boolean expression. Instead, it's a non-branching guard clause, i.e. any sequence of `Guard (when Guard)*`. This includes access to pattern guards.
+        if Pattern = Expr and a > b then A else B
 
-        if Pattern = Expr (when ...) then A else B
+Users are encouraged to switch to the `match` form rather than chaining `else if` many times.
 
-This can be convenient when very limited pattern matching is needed. 
+### Try Variants
 
-In general, `C` may be any non-branching guard clause, i.e. `Guard (when Guard)*`. This includes pattern guards and effects guards. Thus, we can support lightweight pattern matching via `if`.
-
-        if Pattern = Expr (when ...) then A else B
-
-Users may write `elif` as sugar for `else if`.
-
-### Try
-
-The `try` syntax is the effectful variation on `if`. This assumes the host supports at least the standard `.cut/.alt/.fail/.r/.seq` effects. 
-
-        try Operation then
-          Result1
-        else
-          Result2
-
-        # desugars as
-        try_match when
-            Operation -> Result1
-            _ -> Result2
-
-        # roughly implements as:
-        .cut (.alt (Operation =>> .r Result1) (.r Result2)) >>= \x.x
-
-We can also capture the result of an operation. Like do notation, both `Op -> Pattern` and `Pattern <- Op` are accepted. More generally, any non-branching guard clause is accepted, i.e. `Guard (when Guard)*`. This includes boolean conditions and guard patterns `Pattern = Expr`. 
-
-        # effect with result
-        try Operation -> Pattern (when ...) then
-            Result1
-        else
-            Result2
+I propose to support a 'pure' `if/then/else` or `match` syntax in terms of the compiler providing a local effects handler implementing the stateless subset of standard effects (`.alt/.fail/.cut/.r/.seq/.fix`). Effectful variants `try/then/else` and `try_match` instead run in the host environment. They're invalid outside of an effectful context, but more flexible within it.
 
 ### Tentative Choice
+
+Instead of confidently returning a result, we can extend the conditional into the result via `then?` (or `-?>` for `match`). 
 
         if C then? .r A else B          # same as if C then A else B
         if C then? .fail else B         # always returns B
 
-Users may write `then?` in `if/try` syntax to indicate tentative choice, or `-?>` in `match/try_match` syntax. This provides an opportunity to backtrack via `.fail`, but also requires explicit success via `.r Result`. For pure `if/match`, these effects are compiler-provided. For impure `try/try_match` these effects are directly hosted.
-
-The motive for tentative choice is to support refactoring of conditional structures:
+The motive for this is to support refactoring of conditional *structures*. Not just patterns, but actually factoring chunks from the middle of a conditional pattern.
 
         # snip chunk from middle
         if C1 then E1
-        elif C2 then E2
-        elif C3 then E3
-        elif C4 then E4
+        else if C2 then E2
+        else if C3 then E3
+        else if C4 then E4
         else E5
 
         if C1 then E1
-        elif 't then?
+        else if _ then?
             # can now move this
             if C2 then .r E2
-            elif C3 then .r E3
+            else if C3 then .r E3
             else .fail
-        elif C4 then E4
+        else if C4 then E4
         else E5
 
-Refactoring isn't convenient or pretty, but now it's at least structurally possible. 
-
-### If and Match as Try Forms
-
-For consistency, the compiler shall implement `if/match` by providing a local effects handler then evaluating as `try/try_match`. The compiler-provided handler shall support the stateless subset of standard effects, i.e. `.cut/.alt/.fail/.fix/.r/.seq`. 
+The `then?` branch has access to the same effects as guard conditions, and must explicitly return the branch result or fail. This isn't convenient: we manually wrap `E2` and `E3` (with `.r`) and add `.fail` on the `else` branch. But it is possible, and it generalizes. 
 
 ### Match
 
-I borrow a lot of inspiration from Haskell's syntax for `match` and effectful `try_match`. Common use cases are basically the same.
+I borrow a lot of inspiration from Haskell's syntax for `match`. Common use cases are basically the same.
 
         match Expr with
             Pattern1 -> Result1
             Pattern2 -> Result2 
             _ -> Result3
 
-We also support branching guard clauses. I use `when` to separate these. Branching guards require multiple lines (or ugly `when { ... }` syntax with semicolons) and consistent indentation. 
+We also support branching guard clauses. We use `when` to separate the pattern from the a branching clause. base case, we have only one branch. But we'll need another `when` for hierarchical branching.
 
         match Expr with
             P1 when C1 -> R1        # basic
             P2 when                 # multiline
                 C2_a -> R2_a
                 C2_b -> R2_b
-            P3 when                 
+            P3 when
                 C3_a when           # multi-level
                     C3_a_a -> R3_a_a
                     C3_a_b -> R3_a_b
                 C3_b -> R3_b
 
-Users may elide the pattern via `match when`, moving straight to guard clauses.
+If users don't need the pattern, they may just write `match when` instead. 
 
         match when
             C1 -> R1
-            C2 when 
-                C2_a -> R2_a 
-                C2_b -> R2_b
+            C2 when
+                C2a -> R2a
+                C2b -> R2b
 
 Tentative choice is expressed using `-?>`.
-
-*Note:* Syntax for `try_match` is the same, only context is different.
 
 ### Guard Clauses
 
 Several forms of guard clauses:
 
-- `BoolExpr` - evaluate `'t` or `'f`, reject `'f`
 - `Pattern = Expr` - bind Pattern or reject match
 - `Effect` - evaluates to `{eff:(_),_}`, executes
   - reject on `.fail`
   - accept on `.r ()` 
-  - error on `.r Other`
+  - error on `.r Other` (implicit data loss)
 - `Effect -> Pattern` or `Pattern <- Effect` 
   - reject on `.fail`
   - accept `.r Result when Pattern = Result`
+- `_` - no-op pass, eqv. to `.r ()`
+
+Guard clauses compose sequentially via 'and': `Guard (and Guard)*`. 
 
 This supports both booleans and effects via ad hoc polymorphism, but note that we do not *mix* effects into a boolean expression. 
 
 ### Pattern Matching
 
-Patterns appear in many locations: `match` syntax, guard clauses, and do notation. 
+Patterns offer a concise way of extracting data from similar structure.
 
         Name                        # bind as local name (permits '_' and '_Name' too)
         ()                          # unit
-        (Pattern)                   # scopes pattern
+        (Pattern)                   # scoped pattern
         Pattern as Name             # capture pattern target as a local
 
         {}                          # empty dict
@@ -913,26 +848,50 @@ Patterns appear in many locations: `match` syntax, guard clauses, and do notatio
         42                          # match exact number
         _1.23
         1/6                         # exact rationals supported
-        (Name > 0)                  # half-range patterns
-        (0 < Name =< 100)           # full-range patterns
 
-        (Applicable -> Pattern)     # view patterns *must* be parenthesized
-        (Pattern <- Applicable)     # both directions supported
+        (View -> Pattern)           # view patterns *must* be parenthesized
+        (Pattern <- View)           
+        (Predicate Pattern)         # predicate patterns (special view)
+        (Pattern when Guard)        # local guards (to control order)
 
 ### View Patterns
 
-View patterns enable us to spill patterns into the rest of the namespace. For example, if we want to insist a number is a nat, we could write `(Nat -> (n < 100))` instead of `(0 =< n < 100) when (n == __floor n)` or similar. View patterns are expressed within a pattern context as:
+View patterns enable us to spill patterns into the rest of the namespace. For example, if we want to insist a number is a nat, we could write `(Nat n < 100)` instead of `(0 =< n < 100) when (n == __floor n)` or similar. View patterns are expressed within a pattern context as:
 
-        (Viewer -> Pattern)     # or equivalently
-        (Pattern <- Viewer)
+        (View -> Pattern)     # or equivalently
+        (Pattern <- View)
 
 The primary difference between a view pattern and effectful guard clause is that, in the pattern context, we have an input other than the effectful environment. The viewer has access to the *same* effects as the guard clauses and tentative choice.
 
+As a rule, view patterns apply before the pattern is matched. If users need a different order, use a guard.
 *Note:* View patterns are an approach to refactoring *patterns*. In contrast, tentative choice is supports refactoring *conditional structures*. In practice, it's usually more convenient to refactor patterns. 
+
+### Predicate Pattern
+
+Predicate patterns are a specialized case of view patterns. The predicate is pass/fail. The value captured is not a computed view, but the original input. In most cases, the pattern is a name.
+
+        (Pred Pattern)          # recognized by whitespace as op
+
+        # examples
+        (Nat n)                 # check if Nat, capture n
+        (Prime n)
+        (UTF8 text)
+        (Prefix "foo-" text)    # only last arg is pattern
+
+        # as a view pattern
+        (p2v Pred -> Pattern)
+            where p2v p x = do { p x; .r x }
+
+Consistent with view patterns, we forward the argument to the inner pattern only on pass, i.e. the predicate runs first. If users want to run the predicate after the match, use `(Pattern as tmp when Pred tmp)` instead. 
 
 ## Loops
 
-As with Haskell, we don't need keywords to support loops. Normal functions will do. Some useful simple loops:
+As with Haskell, we don't need keywords to support loops. Using *objects*, we can do even better, states in the loop object as method objects that we 'wire' together by overriding 'continuations'. But simple loops should be normal functions. Examples:
+
+        # loop until step failure, backtrack final step
+        untilFail Action s0 = .cut (.alt RunLoop EndLoop) >>= \ op -> op where
+            RunLoop = Action s0 >>= \ s1 -> .r (untilFail Action s1)
+            EndLoop = .r (.r s0)
 
         # foreach [1,2,3] \item-> do Body
         foreach L Action = match L with
@@ -943,7 +902,7 @@ As with Haskell, we don't need keywords to support loops. Normal functions will 
             done:R -> .r R
             _ -> Action s0 >>= \ s1 -> untilDone s1 Action 
 
-In the more general case, mutually recursive loops with tail calls can effectively represent state machines. I recommend such loops are modeled as method objects (instead of `let` groups or toplevel definitions). This makes it easier to extend and reuse the loop. Usefully, we can also expose continuations for overrides (per *Open Continuations*).
+At least for now, I'll defer keywords for loops. But there are at least a few motives for syntax-supported loops: user familiarity, and tighter integration with pattern matching. Perhaps more if we could make loop objects syntactically convenient to work with. Will review later.
 
 ## Open Continuations
 
