@@ -387,9 +387,9 @@ A module is integrated by 'including' its definitions as a mixin. Any prior defi
 - `import ...` - include-like mixins; module rewrites host `Base`, shares `Self`.
 - `import ... as m` - introduces `m` with defaults then applies `import ... at m` 
 - `import ... at m` - mixin applied to `m`, binds to host `Base.m`, and `Self.m`.
-- `import ... as binary b`, introduces a raw file binary, does not compile 
+- `import ... binary as b`, introduces a raw file binary, does not compile 
 
-Hierarchical imports (the 'as' and 'at' forms) are compatible with lazy loading. Note that we do not close the fixpoint for hierarchical imports, thus hierarchical definitions remain open to extension. 
+Hierarchical imports are compatible with lazy loading.
 
 ### Module Objects
 

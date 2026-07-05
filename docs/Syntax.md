@@ -366,7 +366,7 @@ Texts concretely translate to binaries, using ASCII encoding (or utf8 under some
 
 In practice, it is terribly inconvenient to maintain large embedded texts, much less embedded binaries. Instead, leverage the module system to import file binaries:
 
-        import "MyFile.md" as binary my_file
+        import "MyFile.md" binary as my_file
 
 This enables users to use conventional tools to edit and maintain the text.
 
@@ -438,7 +438,7 @@ One way to maintain tables is to simply import from a database in a file:
         import "MyData.db" as my_db
 
         # alternatively, postprocess
-        import "MyData.sqlite" as binary my_sql
+        import "MyData.sqlite" binary as my_sql
         my_sql ::= lazy_sqlite  # in place rewrite
 
 Consequently, we don't need embedded tables for embedded data. 
@@ -517,47 +517,38 @@ We'll generally forbid mixing right-pipes and left-pipes without explicit parent
 
 ## Modules
 
-Module-related operations are consolidated under keyword `import`. 
+Modules are primarily accessed by `import` declarations.
 
-An invalid import, e.g. due to missing source or compiler, is an error. 
+        import ModuleRef (binary)? ((as|at) Name)? (from RemoteRef)?
 
 ### Local Modules
 
-Users may import from other files within the same folder or subfolders.
-
-        import LocalRef ((as|at) Name)?
+We optimize for loading local files:
 
         import "Foo.g"          # integrate with current namespace 
         import "Bar.g" as b     # 'as' for default introduction 
         import "Baz.g" at b     # 'at' to extend the existing 'b'
         import "A/B/C.g"        # access to subfolders
 
-Note that `LocalRef` is not an expression in general. We do not evaluate local module references because every import should be locally determined and locally meaningful to the author.
-
 ### Remote Modules
 
-We can import from a remote source. In this case, the LocalRef is elided, and the file path is moved into a `from` expression. In the general case, we can support an index of remote locations. 
+Remote modules are indicated by a 'from' field with a revision hash.
 
-        import ((as|at) Name)? from Expr
-
-        import as q from {
-            , file:"Qux.g"                  # relative filename within the folder
-            , rev:Text                      # content or revision hash of containing folder
+        import "Qux.g" as q from {
+            , rev:Text          # hash of folder content or revision history
             , search:[
-                , tag:Text                  # tag or branch for shallow download
-                , url:Text                  # URL source
-                , url:Text                  # backup source (same tag)
-                ]
+                , tag:Text      # to help filter downloads
+                , url:Text      # main search
+                , url:Text      # backups
+                ] 
             }
 
 ### Binary Resources
 
-Sometimes, we just want the raw data. This is expressed via `import as binary Name`. 
+Sometimes we just want the raw data. 
 
-        import "FilePath.txt" as binary my_file
-        import as binary remote_file from ...
-
-To reduce risk of errors, `binary` is not accepted as an import destination. It isn't a keyword in general, just in this specific context. 
+        import ModuleRef binary as Name (from RemoteRef)?
+        import "MyData.csv" binary as csv
 
 ### Builtins
 
@@ -566,9 +557,7 @@ The compiler provides built-in definitions via built-in modules. These are essen
         import 'prelude as p
         import 'trig as t
 
-For reproducibility, built-in definitions must be stable. But that only applies to builtins already observed in use. There is some flexibility to introduce new built-ins without affecting existing code.
-
-*Note:* As a rule, builtins are favored over keywords for anything that can be expressed as a normal function or value. Keywords are needed for special forms or aesthetics, not for functions.
+For reproducibility, built-in definitions must be stable. But we can introduce new builtins a lot more easily than keywords. Builtins should be favored over keywords for anything that can be expressed as a normal function or value. 
 
 ### Access Control
 
