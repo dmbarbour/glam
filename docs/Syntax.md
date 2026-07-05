@@ -45,7 +45,7 @@ Proposed keywords:
 
         import, as                                  modules
         module, abstract, using                     namespace
-        unique, abstract_path                       access
+        unique, abstract_global_path                access
         with, without                               dict 
         do                                          effects
         let, in, where                              locals
@@ -289,7 +289,7 @@ The unit value `()` is a built-in atom. `'name` is sugar for a tagged unit value
 
 Scope-unique atoms are useful for the ephemeron performance pattern. To support this pattern, we can introduce a term annotation, `anno 'scope_unique`, that wraps a given atom with unique metadata. If ever we compare the same atom with different metadata, we diverge instead, thus never observing the violation of scope uniqueness. When used as dict keys, we associate data to a weakref of that metadata.
 
-For access control and conflict avoidance, we can leverage the namespace as a stable source of unique atoms. A viable approach is `Foo = anno 'scope_unique (abstract_path Foo)`, borrowing `spec.name` as a seed for uniqueness. To resist accidental reuse, I propose a toplevel declaration `unique Foo, Bar, Baz` to 'introduce' such definitions, i.e. we see an error when the name is reused. In case `spec.name` is not globally unique, we also annotate scope-uniqueness, so we see an error upon observing conflict.
+For access control and conflict avoidance, we can leverage the namespace as a stable source of unique atoms. A viable approach is `Foo = anno 'scope_unique (abstract_global_path Foo)`. Toplevel-only declaration `unique Foo, Bar, Baz` introduce such definitions, resisting accidental reuse. This leverages the module system namespace as a source of identity.
 
 ## Dicts
 
@@ -331,8 +331,6 @@ We also have a special form to remove elements:
 We can also remove elements via update to `{}`, but the `without` form has two advantages: we don't need to consider whether `x` is already defined (explicit overrides), and `without` is the ony way to remove `spec`, thereby converting object to dictionary.
 
 Pattern matching on dictionaries generally have the form `{Path1:Pattern1, Path2:Pattern2, RemainingPattern }`. There is at most one remaining pattern, default `{}` thus requiring a full match. Users may write `{:x,:y,:z}` as shorthand for `{x:x, y:y, z:z}`. 
-
-*Aside:* Users can bypass syntactic guardrails via prelude of dict methods.
 
 ## Embedded Texts
 
@@ -517,24 +515,30 @@ We'll generally forbid mixing right-pipes and left-pipes without explicit parent
 
 ## Modules
 
-Modules are primarily accessed by `import` declarations.
+Modules are loaded through toplevel-only declarations:
 
-        import ModuleRef (binary)? ((as|at) Name)? (from RemoteRef)?
+        import LocalRef ((as|at) Name)?
+        import ((as|at) Name)? from RemoteRef
 
-### Local Modules
+This structure is intended to resist accidental mixing of local and remote refs in metaprogramming.
 
-We optimize for loading local files:
+### Local
+
+Local filepaths are relative to the current file.
 
         import "Foo.g"          # integrate with current namespace 
         import "Bar.g" as b     # 'as' for default introduction 
         import "Baz.g" at b     # 'at' to extend the existing 'b'
         import "A/B/C.g"        # access to subfolders
 
-### Remote Modules
+*Note:* Parent-relative (`"../"`) and absolute paths are not permitted. Nor are files or subfolders whose names start with ".". 
 
-Remote modules are indicated by a 'from' field with a revision hash.
+### Remote
 
-        import "Qux.g" as q from {
+Remote modules include a reference, a folder revision hash, and search hints for where to find that folder (with optional backups). 
+
+        import as q from {
+            , ref:"Qux.q"      
             , rev:Text          # hash of folder content or revision history
             , search:[
                 , tag:Text      # to help filter downloads
@@ -543,21 +547,27 @@ Remote modules are indicated by a 'from' field with a revision hash.
                 ] 
             }
 
-### Binary Resources
+### Binary Mode
 
-Sometimes we just want the raw data. 
+Sometimes we just want the raw data. We can indicate binary mode via tag on the reference.
 
-        import ModuleRef binary as Name (from RemoteRef)?
-        import "MyData.csv" binary as csv
+        import :binary ModuleRef as Name
+
+        import as Name from {
+            , ref:binary:ModuleRef
+            , ...
+            }
+
+Name is introduced, and the binary data is lazily loaded, or perhaps loaded on demand (no need to cache in memory). 
 
 ### Builtins
 
-The compiler provides built-in definitions via built-in modules. These are essentially local modules, but the naming convention uses atoms instead of filepaths.
+Built-in definitions are provided via built-in modules. These are treated as local modules except the naming convention uses atoms instead of filenames. 
 
-        import 'prelude as p
+        import 'prelude
         import 'trig as t
 
-For reproducibility, built-in definitions must be stable. But we can introduce new builtins a lot more easily than keywords. Builtins should be favored over keywords for anything that can be expressed as a normal function or value. 
+For reproducibility, built-in definitions shall be stable. Like keywords, they should vary only with language version declarations.
 
 ### Access Control
 
@@ -579,13 +589,13 @@ Object syntax can and should be compact by default. I propose:
             def2 := ...
 
         # desugars as expression
-        foo = object (abstract_path foo) extends [bar, baz] with 
+        foo = object (abstract_global_path foo) extends [bar, baz] with 
             def1 = ...
             def2 := ...
         
         # roughly evaluates as
-        foo = __instance {
-            , name:(abstract_path foo)
+        foo = object_instance {
+            , name:(anno 'scope_unique (abstract_global_path foo))
             , deps:[bar.spec, baz.spec]
             , defs:\_self self -> _self with  
                 def1 = ...
@@ -598,26 +608,26 @@ Object syntax can and should be compact by default. I propose:
         # general expression format
         object (NameExpr|_) (as Name)? (extends ObjectList)? (with Body)? 
 
-To improve concision, expressions within objects are localized. That is, we bind `foo` as `self.foo` and `_foo` as `_self.foo`, where `self` is a keyword referencing the local object namespace, analogous to `module`. Users instead pay a small syntactic tax to access the host scope via `^name`, `^(Expr)`, or use of `module`. Use of `^` composes, e.g. `^^^method` escapes three lexical levels. But it's best to keep syntax shallow.
+To improve concision, expressions within objects are localized by default. That is, we bind `foo` as `self.foo` and `_foo` as `_self.foo`, where `self` is a keyword referencing the local object namespace, analogous to `module`. Users instead pay a small syntactic tax to access the host scope via `^name`, `^(Expr)`, or use of `module`. Use of `^` composes, e.g. `^^^method` escapes three lexical levels. But it's best to keep syntax shallow. See *Explicit Scope*.
 
-The `extends` and `with` sections are optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). If provided, they cannot be empty. In general, `spec.name` may be any value with equality, e.g. `"foo"`. Toplevel object declarations use `abstract_path` to ensure globally unique names, but it's sufficient that we don't reuse a name for two different specs across transitive deps.
+The `extends` and `with` sections are optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). If provided, they cannot be empty. In general, `spec.name` may be any value with equality, e.g. `"foo"`. Toplevel object declarations use `abstract_global_path` to ensure globally unique names, but it's sufficient that we don't reuse a name for two different specs across transitive deps.
 
 To instantiate the object, the compiler applies a linearization algorithm (C3?) to deduplicate and merge components. The compiler uses `spec.name` to distinguish specifications, and asserts (via reflective term annotation) that `spec.name` is not used for two different specs in linearization scope. After specifications are ordered, we apply `spec.defs` to an empty base `{}` then finally introduce `spec` as an implicit final mixin. 
 
-For consistency and convenience, the compiler exposes an instantiation function via built-in `__instance`, which attempts to build an object from any specification.
+For consistency and convenience, the compiler may expose the instantiation function as a builtin `object_instance`, which attempts to build an object from any specification.
 
         extend foo with
             def1 := ...
 
         extend Name (as Name)? with Body        # declaration
 
-We also have syntax `extend Object with ...`, which updates the specification then re-instantiates the object, preserving name and deps. This is declaration-only because it's usually a bad idea to preserve name while forking identity. Users can always bypass restrictions via `__instance`. But see *Anonymous Extension* below.
+We also have syntax `extend Object with ...`, which updates the specification then re-instantiates the object, preserving name and deps. This is declaration-only because it's usually a bad idea to preserve name while forking identity. Users can always bypass restrictions via `object_instance`. But see *Anonymous Extension* below.
 
 *Note:* For objects mostly used in prior form, inherit in prior form. For example, if using `_foo.op`, define `object foo extends _bar, _baz`. Otherwise, `_foo.op` generally refers to *future* versions of `bar` or `baz`. This is relevant for macros and a few other cases.
 
 ### Anonymous Objects
 
-An anonymous object has no name, i.e. `spec.name` is intentionally left undefined. Users may express anonymous objects via `_` in name position, e.g. `object _ extends foo, bar with ...` (or minimally, just `object _`). Anonymous objects must not appear within `spec.deps`, otherwise `__instance` will report an error. Hence, anonymous objects do not participate in multiple inheritance. They may participate in mixin composition.
+An anonymous object has no name, i.e. `spec.name` is intentionally left undefined. Users may express anonymous objects via `_` in name position, e.g. `object _ extends foo, bar with ...` (or minimally, just `object _`). Anonymous objects must not appear within `spec.deps`, otherwise `object_instance` will report an error. Hence, anonymous objects do not participate in multiple inheritance. They may participate in mixin composition.
 
 *Note:* In `object (NameExpr|_) ...`, it's an error if `NameExpr` evaluates to `{}`. We'll insist anonymous objects are explicitly indicated by `_`. 
 
@@ -634,7 +644,7 @@ Introducing operator `&>` (and its mirror `<&`). These operators compose two obj
                 abstract object _ extends o 
             else o
 
-        O &> M = __instance mixed_spec where
+        O &> M = object_instance mixed_spec where
             AO = (toAnon O).spec
             AM = (toAnon M).spec
             mixed_spec = { deps: mixed_deps, defs:mixed_defs }
@@ -807,9 +817,10 @@ This supports both booleans and effects via ad hoc polymorphism, but note that w
 Patterns offer a concise way of extracting data from similar structure.
 
         Name                        # bind as local name (permits '_' and '_Name' too)
-        ()                          # unit
         (Pattern)                   # scoped pattern
-        Pattern as Name             # capture pattern target as a local
+        Pattern as Pattern          # many views of same item
+
+        ()                          # unit
 
         {}                          # empty dict
         {d}                         # any dict
@@ -841,11 +852,11 @@ Patterns offer a concise way of extracting data from similar structure.
         (View -> Pattern)           # view patterns *must* be parenthesized
         (Pattern <- View)           
         (Predicate Pattern)         # predicate patterns (special view)
-        (Pattern when Guard)        # local guards (to control order)
+        (Pattern when Guard)        # local guards
 
 ### View Patterns
 
-View patterns enable us to spill patterns into the rest of the namespace. For example, if we want to insist a number is a nat, we could write `(Nat n < 100)` instead of `(0 =< n < 100) when (n == __floor n)` or similar. View patterns are expressed within a pattern context as:
+View patterns enable us to spill patterns into the rest of the namespace. For example, if we want to insist a number is a nat, we could write `(Nat n < 100)` instead of `(0 =< n < 100) when (n == math.floor n)` or similar. View patterns are expressed within a pattern context as:
 
         (View -> Pattern)     # or equivalently
         (Pattern <- View)
