@@ -75,9 +75,9 @@ Best practice is to avoid expression-indexed paths in module or object namespace
 
 When defining names, we'll distinguish introductions versus overrides. An introduction `name = Expr`. An override uses `name := Expr`. It is an error to introduce a name that is already defined, or to override a name that isn't already defined. This resists ambiguity issues, i.e. a name is introduced with some intention or purpose, and overrides should preserve purpose. 
 
-Users refer to prior versions of names via `_name`, i.e. `_` prefix. This applies consistently to modules and objects, even `_module`. Dictionary updates get a localized version via `as with` syntax. 
+Users refer to prior versions of names via `_name`, i.e. `_` prefix. This applies consistently across modules and objects.
 
-The compiler enforces explicit overrides by implicit assertions similar to: `name = assert (_name == {}) Expr` or `name := assert(_name <> {}) Expr` (where `{}` is undefined). This only becomes an error when the definition is observed. As an escape hatch, we'll also support a non-observing `name ::= \ prior -> Expr`. This is also convenient for in-place updates of definitions, e.g. `name ::= Update`. But users must be a bit more careful with `::=`.
+The compiler enforces explicit overrides by implicit assertions analogous to: `name = assert (_name == {}) Expr` or `name := assert(_name <> {}) Expr` (where `{}` is the 'undefined' value). As an escape hatch, I propose a non-observing `name ::= \ prior -> Expr`. This also serves as an in-place update, i.e. `name ::= Update`. Users have more freedom with `::=`. 
 
 ### Abstract Definitions
 
@@ -327,15 +327,15 @@ In this notation, a '.' prefix is required when first path element is expression
             .[0] := 1
             .[1] := 0
 
-Users may also capture the dictionary via `Dict as Name with ...`, or even support object scope via `Dict as self with ...`. As with objects, users can reference prior definitions via `_name` prefix, and final definitions via `name`. But, for dictionaries, 'final' extends only to the current update because we don't have a specification.
+Users may also capture the dictionary via `Dict as Name with ...`, or even support object scope via `Dict as self with ...`. As with objects, users can reference prior definitions via `_name` prefix, and final definitions via `name`. But, for dictionaries, 'final' extends only to the current update because there is no specification to rebuild the dictionary.
 
         Dict as d with  
             x := _d.x + 1   # prior d.x
-            y = d.x + a     # final d.x
+            y = d.x + a     # result d.x
 
         Dict as self with
             x := _x + 1
-            y = x + ^a
+            y = x + ^a      # access 'a' in host scope
 
 Pattern matching on dictionaries generally have the form `{Path1:Pattern1, Path2:Pattern2, RemainingPattern }`. There is at most one remaining pattern, default `{}` thus requiring a full match. Users may write `{:x,:y,:z}` as shorthand for `{x:x, y:y, z:z}`.
 
