@@ -20,14 +20,23 @@ fn main() -> ExitCode {
             println!("glam {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        "parse" => {
+        "--parse" => {
             let Some(path) = args.next() else {
-                eprintln!("error: `glam parse` needs a source path");
+                eprintln!("error: `glam --parse` needs a source path");
                 return ExitCode::from(2);
             };
             parse_path(&path)
         }
-        path => parse_path(path),
+        option if option.starts_with('-') => {
+            eprintln!("error: unknown option `{option}`");
+            ExitCode::from(2)
+        }
+        _arg => {
+            eprintln!(
+                "error: bare command-line arguments are reserved for configured `conf.cli` rewriting; use `--parse <PATH>` to inspect a source file"
+            );
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -86,6 +95,6 @@ fn declaration_label(kind: &DeclarationKind) -> &'static str {
 
 fn print_help() {
     println!(
-        "Usage: glam [parse] <PATH>\n       glam --help\n       glam --version\n\nParses an initial .g source surface and prints declaration diagnostics."
+        "Usage: glam --parse <PATH>\n       glam --help\n       glam --version\n\nBare non-option arguments are reserved for future configured `conf.cli` rewriting."
     );
 }
