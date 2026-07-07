@@ -15,6 +15,8 @@ Source: `docs/Design.md`, "Configuration" and "Assembly".
   `glam --parse file.g`, so they do not occupy the future `conf.cli` space.
 - Final assembly inputs are expected to be expressed with options such as
   `--file`, `--script`, and `--`.
+- Current spike supports `glam (-f|--file) PATH` for one source file and writes
+  `asm.result` to stdout by default.
 
 ## Source Surface
 
@@ -36,3 +38,30 @@ Source: `docs/Syntax.md`.
   justifies a crate.
 - Prefer spans and diagnostics over panics for source-facing behavior.
 - Tests should pin design constraints as soon as they become executable.
+- Use Chumsky for growing `.g` grammar work. Keep hand-written parsing limited
+  to small source-normalization steps where that is clearer than grammar code.
+- Keep syntax parsing separate from syntax-independent evaluation. The current
+  evaluator only supports text data expressions.
+- `.g` parser AST and `.g`-specific lowering rules belong in `g_syntax`.
+- Syntax-independent terms and values belong in `core`; keep module/import
+  policy and introduce/override checks out of `core`.
+- Evaluation should consume core terms/values, not `.g` syntax nodes directly.
+
+## Samples
+
+- `samples/` is the shared home for `.g` source used in testing,
+  experimentation, and user education.
+- Prefer checked-in samples for smoke checks instead of one-off `/tmp` files.
+- Keep samples small and purpose-specific; if current bootstrap behavior depends
+  on them, cover them with tests.
+
+## Configuration Fixtures
+
+Source: `docs/Design.md`, "Configuration".
+
+- Real assembly is split between command-line assembly elements and user
+  configuration from the environment.
+- `GLAM_CONF` is the explicit way to select configuration in tests and scripts.
+- `samples/config/minimal.g` is the smallest checked-in config fixture.
+- `samples/config/dev.g` is the workspace/devcontainer default, currently set
+  by `.devcontainer/devcontainer.json`.
