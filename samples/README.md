@@ -14,9 +14,28 @@ These are not a standard library. Glam assemblies do not imply a runtime, and ta
 - `config/` contains sample configurations, notably `dev.g` is default for container.
 - `assembly/` contains source-to-output examples. Early samples may produce raw
   binary text before target libraries exist.
+- `invalid/` contains samples that should report diagnostics.
 - `packages/` is reserved for package-shaped examples of local module layout.
 
 Prefer small samples with one clear purpose. If a sample is expected to parse or assemble under the current bootstrap, keep it covered by tests.
+
+## Invalid Samples
+
+Invalid samples use a sibling `.expect` file. Each non-empty, non-comment line
+has this format:
+
+```text
+severity|line|message substring|message substring...
+```
+
+For example:
+
+```text
+error|1|language|declaration
+```
+
+This means an error is expected on line 1, and the diagnostic message must
+contain both `language` and `declaration`.
 
 ## Running Current Samples
 
