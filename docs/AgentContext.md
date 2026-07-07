@@ -7,23 +7,23 @@ This document should summarize salient, relevant points rather than asking futur
 ## Source Layout
 
 - `src/g_syntax.rs` - initial front-end compiler for ".g" syntax
-- `src/core.rs` - assembly-time representations
-  - data types: dicts, lists, numbers, functions
-  - accelerated: atoms, binaries, finger-tree ropes
-  - functions and expressions via interaction nets (not lambdas!)
+- `src/core.rs` - assembly-time representations, independent of syntax
 - `src/eval.rs` - efficient reduction of core terms
-- `src/main.rs` - CLI parsing, tab completion, integration
+- `src/main.rs` - CLI parsing, integration
+- `src/README.md` - rough sketch of architecture
 
 ## Todo
 
+- TODOs in `src/README.md`
 - parser
 - data types
 - evaluator
 - imports - local, remote
 - CLI macros
+- tab completion
 - logging
 - interactive mode
-- accelerators
+- accelerators (many!)
 
 ## Notes
 
