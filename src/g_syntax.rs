@@ -2,7 +2,7 @@ use chumsky::prelude::*;
 
 use std::collections::BTreeMap;
 
-use crate::core::{Key, Term, Value};
+use crate::core::{Atom, Key, Term, Value};
 use crate::diagnostic::Severity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +182,7 @@ pub fn parse_source(source: &SourceFile) -> ParsedSource {
 
 pub fn lower_to_core(parsed: &ParsedSource) -> LoweredSource {
     let mut root = BTreeMap::new();
+    let mut atoms = BTreeMap::new();
     let mut diagnostics = parsed.diagnostics.clone();
 
     for declaration in &parsed.declarations {
@@ -189,7 +190,7 @@ pub fn lower_to_core(parsed: &ParsedSource) -> LoweredSource {
             continue;
         };
 
-        match lower_definition(definition, declaration.line, &mut root) {
+        match lower_definition(definition, declaration.line, &mut root, &mut atoms) {
             Ok(()) => {}
             Err(diagnostic) => diagnostics.push(diagnostic),
         }
@@ -205,6 +206,7 @@ fn lower_definition(
     definition: &DefinitionDecl,
     line: usize,
     root: &mut BTreeMap<Key, Value>,
+    atoms: &mut BTreeMap<String, Atom>,
 ) -> Result<(), Diagnostic> {
     let Some(expr) = &definition.expr else {
         if definition.target == "asm.result" {
@@ -222,8 +224,8 @@ fn lower_definition(
     };
 
     match definition.kind {
-        DefinitionKind::Introduce => insert_path(root, &definition.target, value, line),
-        DefinitionKind::Override => override_path(root, &definition.target, value, line),
+        DefinitionKind::Introduce => insert_path(root, &definition.target, value, line, atoms),
+        DefinitionKind::Override => override_path(root, &definition.target, value, line, atoms),
         DefinitionKind::Update => Err(Diagnostic::error(
             line,
             "update definitions are not supported by the .g spike lowering",
@@ -242,14 +244,15 @@ fn insert_path(
     target: &str,
     value: Value,
     line: usize,
+    atoms: &mut BTreeMap<String, Atom>,
 ) -> Result<(), Diagnostic> {
     let parts = target.split('.').collect::<Vec<_>>();
     let Some((leaf, parents)) = parts.split_last() else {
         return Err(Diagnostic::error(line, "definition target cannot be empty"));
     };
 
-    let parent = ensure_parent_dict(root, parents, line)?;
-    let leaf_key = Key::name(*leaf);
+    let parent = ensure_parent_dict(root, parents, line, atoms)?;
+    let leaf_key = atom_key(leaf, atoms);
     if parent.contains_key(&leaf_key) {
         return Err(Diagnostic::error(
             line,
@@ -266,14 +269,15 @@ fn override_path(
     target: &str,
     value: Value,
     line: usize,
+    atoms: &mut BTreeMap<String, Atom>,
 ) -> Result<(), Diagnostic> {
     let parts = target.split('.').collect::<Vec<_>>();
     let Some((leaf, parents)) = parts.split_last() else {
         return Err(Diagnostic::error(line, "definition target cannot be empty"));
     };
 
-    let parent = ensure_parent_dict(root, parents, line)?;
-    let leaf_key = Key::name(*leaf);
+    let parent = ensure_parent_dict(root, parents, line, atoms)?;
+    let leaf_key = atom_key(leaf, atoms);
     if !parent.contains_key(&leaf_key) {
         return Err(Diagnostic::error(
             line,
@@ -289,12 +293,13 @@ fn ensure_parent_dict<'a>(
     root: &'a mut BTreeMap<Key, Value>,
     parents: &[&str],
     line: usize,
+    atoms: &mut BTreeMap<String, Atom>,
 ) -> Result<&'a mut BTreeMap<Key, Value>, Diagnostic> {
     let mut current = root;
 
     for parent in parents {
         let entry = current
-            .entry(Key::name(*parent))
+            .entry(atom_key(parent, atoms))
             .or_insert_with(|| Value::Dict(BTreeMap::new()));
 
         let Value::Dict(next) = entry else {
@@ -308,6 +313,15 @@ fn ensure_parent_dict<'a>(
     }
 
     Ok(current)
+}
+
+fn atom_key(name: &str, atoms: &mut BTreeMap<String, Atom>) -> Key {
+    Key::Atom(
+        atoms
+            .entry(name.to_owned())
+            .or_insert_with(|| Atom::from_key(&Key::text(name)))
+            .clone(),
+    )
 }
 
 fn validate_language_position(declarations: &[Declaration], diagnostics: &mut Vec<Diagnostic>) {
@@ -735,11 +749,13 @@ mod tests {
     fn lowers_text_literals_to_core_terms() {
         let parsed = parse("language g0\nasm.result = \"Hello, World!\"\n");
         let lowered = lower_to_core(&parsed);
+        let asm = Atom::from_key(&Key::text("asm"));
+        let result = Atom::from_key(&Key::text("result"));
 
         assert_eq!(lowered.diagnostics, []);
         assert_eq!(
             lowered.term.as_ref().and_then(|term| match term {
-                crate::core::Term::Data(value) => value.get_name_path(&["asm", "result"]),
+                crate::core::Term::Data(value) => value.get_atom_path(&[asm, result]),
             }),
             Some(&Value::Text("Hello, World!".to_owned()))
         );

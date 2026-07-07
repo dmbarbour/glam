@@ -1,27 +1,44 @@
 # Agent Notes
 
 This repository is the Rust bootstrap for `glam`, a high-level language for
-assembly-level software description. Before broad implementation work, read:
+assembly-level software description. 
 
-- `docs/Overview.md` for project shape.
-- `docs/DesignPrinciples.md` for the control/reproducibility philosophy.
-- `docs/AgentContext.md` for compact implementation constraints.
+## Reading
 
-Keep implementation slices narrow and testable. Prefer preserving the language
-vision in `docs/*` over choosing whatever is easiest for the current Rust code.
+Required reading:
 
-## Current Bootstrap
+- `docs/DistilledDesign.md` - a compressed view of design
+- `docs/AgentContext.md` - constraints based on tasks or misadventures
 
-- The executable is a temporary bootstrap shell, not the final command model.
-- Bare command-line arguments are reserved for configured `conf.cli` rewriting.
-- Developer inspection commands should be explicit options, e.g. `glam --parse`.
-- The parser in `src/g_syntax.rs` is an early `.g` parser, not the final
-  `.g` grammar.
-- Use checked-in `samples/` files for smoke checks instead of ad hoc source
-  files in `/tmp`.
-- When configuration is needed, use `GLAM_CONF` with a checked-in fixture such
-  as `samples/config/minimal.g`; the devcontainer default is
-  `samples/config/dev.g`.
+Contingent:
+
+- When writing glam ".g" code
+  - `docs/SyntaxCheatSheet.md` - a compressed view of syntax
+
+- When contemplating or reviewing overall holistic implementation:
+  - `docs/Overview.md` - project shape
+  - `docs/DesignPrinciples.md` - guiding principles
+
+- When more details are needed, e.g. deep reviews or initial implementation:
+  - `docs/Design.md` - details and motivations on assembler, configuration, assembly
+  - `docs/Syntax.md` - details on syntax and motivations
+
+## Project Structure
+
+- `docs/` - design docs and some agent docs
+- `samples/` - Glam code samples for testing
+- `src/` - Rust source code for project
+- `tests/` - Rust tests
+
+## Approach
+
+- assembler is written in Rust
+- clarity over performance, at least for now
+  - but don't lock in poor performance
+- favor robust Rust packages where they fit, e.g.
+  - Chumsky for parsing
+  - internment for interning
+- keep implementation slices narrow and testable
 
 ## Routine Checks
 

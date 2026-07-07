@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::core::{Term, Value};
+use crate::core::{Atom, Key, Term, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assembly {
@@ -9,8 +9,11 @@ pub struct Assembly {
 
 impl Assembly {
     pub fn get(&self, path: &str) -> Option<&Value> {
-        self.root
-            .get_name_path(&path.split('.').collect::<Vec<_>>())
+        let path = path
+            .split('.')
+            .map(|part| Atom::from_key(&Key::text(part)))
+            .collect::<Vec<_>>();
+        self.root.get_atom_path(&path)
     }
 
     pub fn result_bytes(&self) -> Result<Vec<u8>, EvalError> {
@@ -65,9 +68,12 @@ mod tests {
     #[test]
     fn evaluates_text_result_to_bytes() {
         let mut asm = BTreeMap::new();
-        asm.insert(Key::name("result"), Value::Text("Hello, World!".to_owned()));
+        asm.insert(
+            Key::atom_from_text("result"),
+            Value::Text("Hello, World!".to_owned()),
+        );
         let mut root = BTreeMap::new();
-        root.insert(Key::name("asm"), Value::Dict(asm));
+        root.insert(Key::atom_from_text("asm"), Value::Dict(asm));
 
         let assembly = eval_term(&Term::Data(Value::Dict(root))).expect("assembly should evaluate");
 

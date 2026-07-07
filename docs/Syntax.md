@@ -14,7 +14,7 @@ Reproducibility requires that the same sources produce the same outcome, but the
 
 Proposed syntax:
 
-        (lang|language) (BaseVer) (with Extensions)?
+        language (BaseVer) (with Extensions)?
         language g0 with utf8
 
 The version declaration should be the first toplevel declaration in a ".g" file. The BaseVer is a recognized string for a package of features. Extensions may modify that package, but the parser for extensions may also depend on BaseVer.

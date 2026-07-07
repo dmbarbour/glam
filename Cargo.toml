@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 chumsky = "0.13.0"
+internment = "0.8.6"
