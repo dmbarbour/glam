@@ -87,6 +87,7 @@ pub enum DefinitionKind {
 pub enum SyntaxExpr {
     Number(i64),
     Text(String),
+    Name(Vec<String>),
     List(Vec<SyntaxExpr>),
     Append(Box<SyntaxExpr>, Box<SyntaxExpr>),
 }
@@ -222,7 +223,7 @@ fn lower_definition(
         return Ok(());
     };
 
-    let value = syntax_expr_to_value(expr, line)?;
+    let value = syntax_expr_to_value(expr, line, atoms)?;
 
     *root = match definition.kind {
         DefinitionKind::Introduce => insert_path(root, &definition.target, value, line, atoms)?,
@@ -236,29 +237,43 @@ fn lower_definition(
     Ok(())
 }
 
-fn syntax_expr_to_value(expr: &SyntaxExpr, line: usize) -> Result<Value, Diagnostic> {
+fn syntax_expr_to_value(
+    expr: &SyntaxExpr,
+    line: usize,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Result<Value, Diagnostic> {
     match expr {
         SyntaxExpr::Number(number) => Ok(Value::Number(*number)),
         SyntaxExpr::Text(text) => Ok(Value::binary_from_text(text)),
-        SyntaxExpr::List(_) | SyntaxExpr::Append(_, _) => {
-            Ok(Value::Expr(Arc::new(syntax_expr_to_core_expr(expr, line)?)))
-        }
+        SyntaxExpr::Name(_) | SyntaxExpr::List(_) | SyntaxExpr::Append(_, _) => Ok(Value::Expr(
+            Arc::new(syntax_expr_to_core_expr(expr, line, atoms)?),
+        )),
     }
 }
 
-fn syntax_expr_to_core_expr(expr: &SyntaxExpr, line: usize) -> Result<CoreExpr, Diagnostic> {
+fn syntax_expr_to_core_expr(
+    expr: &SyntaxExpr,
+    line: usize,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Result<CoreExpr, Diagnostic> {
     Ok(match expr {
         SyntaxExpr::Number(number) => CoreExpr::Value(Value::Number(*number)),
         SyntaxExpr::Text(text) => CoreExpr::Value(Value::binary_from_text(text)),
+        SyntaxExpr::Name(parts) => CoreExpr::Name(Arc::from(
+            parts
+                .iter()
+                .map(|part| atom_key(part, atoms))
+                .collect::<Vec<_>>(),
+        )),
         SyntaxExpr::List(items) => CoreExpr::List(Arc::from(
             items
                 .iter()
-                .map(|expr| syntax_expr_to_core_expr(expr, line).map(Arc::new))
+                .map(|expr| syntax_expr_to_core_expr(expr, line, atoms).map(Arc::new))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
         SyntaxExpr::Append(left, right) => CoreExpr::Append(
-            Arc::new(syntax_expr_to_core_expr(left, line)?),
-            Arc::new(syntax_expr_to_core_expr(right, line)?),
+            Arc::new(syntax_expr_to_core_expr(left, line, atoms)?),
+            Arc::new(syntax_expr_to_core_expr(right, line, atoms)?),
         ),
     })
 }
@@ -360,7 +375,7 @@ fn atom_key(name: &str, atoms: &mut std::collections::BTreeMap<String, Atom>) ->
     Key::Atom(
         atoms
             .entry(name.to_owned())
-            .or_insert_with(|| Atom::from_key(&Key::text(name)))
+            .or_insert_with(|| Atom::from_key(&Key::binary_from_text(name)))
             .clone(),
     )
 }
@@ -581,6 +596,10 @@ fn parse_atom(text: &str) -> Result<(SyntaxExpr, &str), String> {
         return parse_integer_literal(text);
     }
 
+    if text.chars().next().is_some_and(is_name_start) {
+        return parse_name_expr(text);
+    }
+
     Err("unsupported expression".to_owned())
 }
 
@@ -607,6 +626,53 @@ fn parse_integer_literal(text: &str) -> Result<(SyntaxExpr, &str), String> {
         .map_err(|err| format!("invalid integer literal `{digits}`: {err}"))?;
 
     Ok((SyntaxExpr::Number(number), rest))
+}
+
+fn parse_name_expr(text: &str) -> Result<(SyntaxExpr, &str), String> {
+    let mut rest = text;
+    let mut parts = Vec::new();
+
+    loop {
+        let (part, after_part) = parse_name_part(rest)?;
+        parts.push(part.to_owned());
+        rest = after_part;
+
+        if let Some(after_dot) = rest.strip_prefix('.') {
+            rest = after_dot;
+            continue;
+        }
+
+        return Ok((SyntaxExpr::Name(parts), rest));
+    }
+}
+
+fn parse_name_part(text: &str) -> Result<(&str, &str), String> {
+    let mut chars = text.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return Err("expected name".to_owned());
+    };
+    if !is_name_start(first) {
+        return Err("expected name".to_owned());
+    }
+
+    let mut end = first.len_utf8();
+    for (index, ch) in chars {
+        if is_name_continue(ch) {
+            end = index + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    Ok((&text[..end], &text[end..]))
+}
+
+fn is_name_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic()
+}
+
+fn is_name_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn parse_list_literal(text: &str) -> Result<(SyntaxExpr, &str), String> {
@@ -845,7 +911,7 @@ mod tests {
                 target: "foo".to_owned(),
                 kind: DefinitionKind::Update,
                 body: "f".to_owned(),
-                expr: None,
+                expr: Some(SyntaxExpr::Name(vec!["f".to_owned()])),
             })
         );
     }
@@ -908,6 +974,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_name_and_append_expressions() {
+        let parsed = parse("language g0\nasm.result = hello ++ \", \" ++ world ++ \"!\"\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "asm.result".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "hello ++ \", \" ++ world ++ \"!\"".to_owned(),
+                expr: Some(SyntaxExpr::Append(
+                    Box::new(SyntaxExpr::Append(
+                        Box::new(SyntaxExpr::Append(
+                            Box::new(SyntaxExpr::Name(vec!["hello".to_owned()])),
+                            Box::new(SyntaxExpr::Text(", ".to_owned())),
+                        )),
+                        Box::new(SyntaxExpr::Name(vec!["world".to_owned()])),
+                    )),
+                    Box::new(SyntaxExpr::Text("!".to_owned())),
+                )),
+            })
+        );
+    }
+
+    #[test]
     fn lowers_list_expressions_to_core_terms() {
         let parsed = parse("language g0\nasm.result = [72, 101] ++ [108, 108, 111]\n");
         let lowered = lower_to_core(&parsed);
@@ -916,8 +1007,8 @@ mod tests {
         assert_eq!(
             lowered.term.as_ref().and_then(|term| match term {
                 crate::core::Term::Expr(CoreExpr::Value(value)) => value.get_atom_path(&[
-                    Atom::from_key(&Key::text("asm")),
-                    Atom::from_key(&Key::text("result")),
+                    Atom::from_key(&Key::binary_from_text("asm")),
+                    Atom::from_key(&Key::binary_from_text("result")),
                 ]),
                 _ => None,
             }),
@@ -931,6 +1022,35 @@ mod tests {
                     Arc::new(CoreExpr::Value(Value::Number(108))),
                     Arc::new(CoreExpr::Value(Value::Number(111))),
                 ]))),
+            ))))
+        );
+    }
+
+    #[test]
+    fn lowers_name_expressions_to_core_terms() {
+        let parsed = parse(
+            "language g0\nasm.result = hello ++ \", \" ++ world ++ \"!\"\nhello = \"Hello\"\nworld = \"World\"\n",
+        );
+        let lowered = lower_to_core(&parsed);
+
+        assert_eq!(lowered.diagnostics, []);
+        assert_eq!(
+            lowered.term.as_ref().and_then(|term| match term {
+                crate::core::Term::Expr(CoreExpr::Value(value)) => value.get_atom_path(&[
+                    Atom::from_key(&Key::binary_from_text("asm")),
+                    Atom::from_key(&Key::binary_from_text("result")),
+                ]),
+                _ => None,
+            }),
+            Some(&Value::Expr(Arc::new(CoreExpr::Append(
+                Arc::new(CoreExpr::Append(
+                    Arc::new(CoreExpr::Append(
+                        Arc::new(CoreExpr::Name(Arc::from([Key::atom_from_text("hello")]))),
+                        Arc::new(CoreExpr::Value(Value::binary_from_text(", "))),
+                    )),
+                    Arc::new(CoreExpr::Name(Arc::from([Key::atom_from_text("world")]))),
+                )),
+                Arc::new(CoreExpr::Value(Value::binary_from_text("!"))),
             ))))
         );
     }

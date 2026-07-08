@@ -14,6 +14,7 @@ pub enum Expr {
     Value(Value),
     List(Arc<[Arc<Expr>]>),
     Append(Arc<Expr>, Arc<Expr>),
+    Name(Arc<[Key]>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -44,20 +45,37 @@ impl fmt::Debug for Atom {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Key {
     Atom(Atom),
-    Text(String),
+    Number(i64),
+    Binary(Arc<[u8]>),
+    List(Arc<[Key]>),
+    Dict(Arc<[(Key, Key)]>),
 }
 
 impl Key {
     pub fn atom_from_text(text: impl Into<String>) -> Self {
-        Self::atom_from_key(&Self::text(text))
+        Self::atom_from_key(&Self::binary_from_text(text))
     }
 
     pub fn atom_from_key(key: &Key) -> Self {
         Self::Atom(Atom::from_key(key))
     }
 
-    pub fn text(text: impl Into<String>) -> Self {
-        Self::Text(text.into())
+    pub fn binary_from_text(text: impl Into<String>) -> Self {
+        Self::Binary(Arc::from(text.into().into_bytes()))
+    }
+
+    pub fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Number(number) => Some(Self::Number(*number)),
+            Value::Binary(bytes) => Some(Self::Binary(bytes.clone())),
+            Value::List(list) => Some(Self::List(list.to_key_items()?)),
+            Value::Dict(dict) => Some(Self::Dict(Arc::from(
+                dict.iter()
+                    .map(|(key, value)| Some((key.clone(), Self::from_value(value)?)))
+                    .collect::<Option<Vec<_>>>()?,
+            ))),
+            Value::Expr(_) => None,
+        }
     }
 }
 
@@ -65,7 +83,10 @@ impl fmt::Debug for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Key::Atom(atom) => f.debug_tuple("Atom").field(atom).finish(),
-            Key::Text(text) => f.debug_tuple("Text").field(text).finish(),
+            Key::Number(number) => f.debug_tuple("Number").field(number).finish(),
+            Key::Binary(bytes) => f.debug_tuple("Binary").field(bytes).finish(),
+            Key::List(items) => f.debug_tuple("List").field(items).finish(),
+            Key::Dict(entries) => f.debug_tuple("Dict").field(entries).finish(),
         }
     }
 }
@@ -142,6 +163,26 @@ impl List {
     fn is_empty(&self) -> bool {
         matches!(self.0.as_ref(), ListNode::Empty)
     }
+
+    fn to_key_items(&self) -> Option<Arc<[Key]>> {
+        let items = std::cell::RefCell::new(Vec::new());
+        self.for_each_segment(
+            &mut |bytes| {
+                items
+                    .borrow_mut()
+                    .extend(bytes.iter().map(|byte| Key::Number(i64::from(*byte))));
+                Ok::<_, ()>(())
+            },
+            &mut |values| {
+                for value in values.iter() {
+                    items.borrow_mut().push(Key::from_value(value).ok_or(())?);
+                }
+                Ok(())
+            },
+        )
+        .ok()?;
+        Some(Arc::from(items.into_inner()))
+    }
 }
 
 impl Value {
@@ -155,14 +196,19 @@ impl Value {
 }
 
 impl Value {
-    pub fn get_atom_path(&self, path: &[Atom]) -> Option<&Value> {
+    pub fn get_key_path(&self, path: &[Key]) -> Option<&Value> {
         match path {
             [] => Some(self),
             [head, rest @ ..] => match self {
-                Value::Dict(dict) => dict.get(&Key::Atom(head.clone()))?.get_atom_path(rest),
+                Value::Dict(dict) => dict.get(head)?.get_key_path(rest),
                 Value::Number(_) | Value::Binary(_) | Value::List(_) | Value::Expr(_) => None,
             },
         }
+    }
+
+    pub fn get_atom_path(&self, path: &[Atom]) -> Option<&Value> {
+        let path = path.iter().cloned().map(Key::Atom).collect::<Vec<_>>();
+        self.get_key_path(&path)
     }
 }
 
@@ -171,11 +217,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn atoms_and_text_keys_are_distinct() {
-        let asm = Atom::from_key(&Key::text("asm"));
+    fn atoms_and_binary_keys_are_distinct() {
+        let asm = Atom::from_key(&Key::binary_from_text("asm"));
         let dict = Dict::new_sync()
             .insert(Key::Atom(asm.clone()), Value::binary_from_text("atom"))
-            .insert(Key::text("asm"), Value::binary_from_text("text"));
+            .insert(
+                Key::binary_from_text("asm"),
+                Value::binary_from_text("binary"),
+            );
         let value = Value::Dict(dict);
 
         assert_eq!(
@@ -187,21 +236,24 @@ mod tests {
     #[test]
     fn atom_keys_are_canonical_by_key() {
         assert_eq!(
-            Atom::from_key(&Key::text("asm")),
-            Atom::from_key(&Key::text("asm"))
+            Atom::from_key(&Key::binary_from_text("asm")),
+            Atom::from_key(&Key::binary_from_text("asm"))
         );
-        assert_eq!(Atom::from_key(&Key::text("asm")).key(), &Key::text("asm"));
+        assert_eq!(
+            Atom::from_key(&Key::binary_from_text("asm")).key(),
+            &Key::binary_from_text("asm")
+        );
     }
 
     #[test]
     fn atom_keys_from_equal_keys_are_canonical() {
-        let text_key = Key::text("tag");
-        let atom_key_1 = Key::atom_from_key(&text_key);
-        let atom_key_2 = Key::atom_from_key(&Key::text("tag"));
+        let binary_key = Key::binary_from_text("tag");
+        let atom_key_1 = Key::atom_from_key(&binary_key);
+        let atom_key_2 = Key::atom_from_key(&Key::binary_from_text("tag"));
 
         assert!(matches!(atom_key_1, Key::Atom(_)));
         assert_eq!(atom_key_1, atom_key_2);
-        assert_ne!(atom_key_1, text_key);
+        assert_ne!(atom_key_1, binary_key);
     }
 
     #[test]
@@ -237,6 +289,53 @@ mod tests {
         ]));
 
         assert!(matches!(expr, Expr::List(items) if items.len() == 2));
+    }
+
+    #[test]
+    fn semantic_expr_can_hold_names() {
+        let expr = Expr::Name(Arc::from([Key::atom_from_text("hello")]));
+
+        assert!(matches!(expr, Expr::Name(path) if path.len() == 1));
+    }
+
+    #[test]
+    fn keys_can_represent_nested_value_data() {
+        let value = Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("payload"),
+            Value::List(List::concat(
+                List::from_values(vec![Value::Number(1)]),
+                List::from_bytes(Arc::from(&b"Hi"[..])),
+            )),
+        ));
+
+        assert_eq!(
+            Key::from_value(&value),
+            Some(Key::Dict(Arc::from([(
+                Key::atom_from_text("payload"),
+                Key::List(Arc::from([
+                    Key::Number(1),
+                    Key::Number(i64::from(b'H')),
+                    Key::Number(i64::from(b'i')),
+                ])),
+            )])))
+        );
+    }
+
+    #[test]
+    fn keys_reject_expressions() {
+        assert_eq!(
+            Key::from_value(&Value::Expr(Arc::new(Expr::Value(Value::Number(1))))),
+            None
+        );
+    }
+
+    #[test]
+    fn values_support_non_atom_key_paths() {
+        let list_key = Key::List(Arc::from([Key::Number(1), Key::Number(2)]));
+        let dict = Dict::new_sync().insert(list_key.clone(), Value::Number(7));
+        let value = Value::Dict(dict);
+
+        assert_eq!(value.get_key_path(&[list_key]), Some(&Value::Number(7)));
     }
 
     #[test]

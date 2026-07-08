@@ -113,20 +113,27 @@ fn assemble_path(path: &str) -> ExitCode {
 }
 
 fn result_bytes(root: &glam::core::Value, path: &str) -> Result<Vec<u8>, String> {
-    match value_at_path(root, path) {
-        Some(glam::core::Value::Binary(bytes)) => Ok(bytes.to_vec()),
-        Some(glam::core::Value::List(list)) => {
-            list_bytes(list).map_err(|err| format!("`{path}` {err}"))
-        }
-        Some(glam::core::Value::Expr(expr)) => {
-            let value = eval::eval_value(&glam::core::Value::Expr(expr.clone()))
+    let value =
+        value_at_path(root, path).ok_or_else(|| format!("assembly did not define `{path}`"))?;
+    value_bytes(value, root, path)
+}
+
+fn value_bytes(
+    value: &glam::core::Value,
+    root: &glam::core::Value,
+    path: &str,
+) -> Result<Vec<u8>, String> {
+    match value {
+        glam::core::Value::Binary(bytes) => Ok(bytes.to_vec()),
+        glam::core::Value::List(list) => list_bytes(list).map_err(|err| format!("`{path}` {err}")),
+        glam::core::Value::Expr(expr) => {
+            let value = eval::eval_value(&glam::core::Value::Expr(expr.clone()), Some(root))
                 .map_err(|err| err.to_string())?;
-            result_bytes(&value, path)
+            value_bytes(&value, root, path)
         }
-        Some(glam::core::Value::Dict(_)) | Some(glam::core::Value::Number(_)) => {
+        glam::core::Value::Dict(_) | glam::core::Value::Number(_) => {
             Err(format!("`{path}` is not binary text data"))
         }
-        None => Err(format!("assembly did not define `{path}`")),
     }
 }
 
@@ -156,7 +163,7 @@ fn list_bytes(list: &glam::core::List) -> Result<Vec<u8>, String> {
 fn value_at_path<'a>(root: &'a glam::core::Value, path: &str) -> Option<&'a glam::core::Value> {
     let path = path
         .split('.')
-        .map(|part| glam::core::Atom::from_key(&glam::core::Key::text(part)))
+        .map(|part| glam::core::Atom::from_key(&glam::core::Key::binary_from_text(part)))
         .collect::<Vec<_>>();
     root.get_atom_path(&path)
 }

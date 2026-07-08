@@ -1,3 +1,3 @@
 language g0
 
-asm.result = answer
+asm.result = hello world
