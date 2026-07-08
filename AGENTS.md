@@ -9,6 +9,7 @@ Required reading:
 
 - `docs/DistilledDesign.md` - a compressed view of eventual target design
 - `docs/AgentContext.md` - constraints based on tasks or misadventures
+- `src/README.md` - implementation architecture, code-specific todos
 
 Contingent:
 

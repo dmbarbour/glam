@@ -2,9 +2,9 @@ language g0
 
 # Default workspace configuration for the devcontainer.
 #
-# Keep this boring. It should make local development convenient without hiding
-# behavior that future tests should set explicitly.
+# This should (eventually) provide common utility functions for assembly (via 'conf.env').
+# But most other configuration options should be separated for testing.
 import "minimal.g"
 
-conf.env := _conf.env with
-  sample_root = "samples"
+extend conf.env with
+  hello_message = "Hello from conf.env!"

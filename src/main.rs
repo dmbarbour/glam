@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -52,6 +53,14 @@ fn main() -> ExitCode {
 }
 
 fn assemble_path(path: &str) -> ExitCode {
+    // Note this is a temporary spike wiring: syntax lowering still happens
+    // here until the front end compiler (and user-defined syntax) owns more
+    // of the translation pipeline.
+    //
+    // In the general case, a user-defined syntax may support multiple file
+    // extensions, and shall effectfully lower to core, via common API with
+    // the built-in syntax.
+
     let parsed = match parse_source_path(path) {
         Ok(parsed) => parsed,
         Err(exit_code) => return exit_code,
@@ -79,15 +88,15 @@ fn assemble_path(path: &str) -> ExitCode {
         return ExitCode::from(1);
     };
 
-    let assembly = match eval::eval_term(term) {
-        Ok(assembly) => assembly,
+    let root = match eval::eval_term(term) {
+        Ok(root) => root,
         Err(err) => {
             eprintln!("error: {err}");
             return ExitCode::from(1);
         }
     };
 
-    let bytes = match assembly.result_bytes() {
+    let bytes = match result_bytes(&root, "asm.result") {
         Ok(bytes) => bytes,
         Err(err) => {
             eprintln!("error: {err}");
@@ -101,6 +110,55 @@ fn assemble_path(path: &str) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn result_bytes(root: &glam::core::Value, path: &str) -> Result<Vec<u8>, String> {
+    match value_at_path(root, path) {
+        Some(glam::core::Value::Binary(bytes)) => Ok(bytes.to_vec()),
+        Some(glam::core::Value::List(list)) => {
+            list_bytes(list).map_err(|err| format!("`{path}` {err}"))
+        }
+        Some(glam::core::Value::Expr(expr)) => {
+            let value = eval::eval_value(&glam::core::Value::Expr(expr.clone()))
+                .map_err(|err| err.to_string())?;
+            result_bytes(&value, path)
+        }
+        Some(glam::core::Value::Dict(_)) | Some(glam::core::Value::Number(_)) => {
+            Err(format!("`{path}` is not binary text data"))
+        }
+        None => Err(format!("assembly did not define `{path}`")),
+    }
+}
+
+fn list_bytes(list: &glam::core::List) -> Result<Vec<u8>, String> {
+    let bytes = std::cell::RefCell::new(Vec::new());
+    list.for_each_segment(
+        &mut |segment| {
+            bytes.borrow_mut().extend_from_slice(segment);
+            Ok::<_, String>(())
+        },
+        &mut |segment| {
+            for item in segment.iter() {
+                let glam::core::Value::Number(number) = item else {
+                    return Err("must contain only integers and binary segments".to_owned());
+                };
+
+                let byte = u8::try_from(*number)
+                    .map_err(|_| format!("contains integer `{number}` outside the byte range"))?;
+                bytes.borrow_mut().push(byte);
+            }
+            Ok(())
+        },
+    )?;
+    Ok(bytes.into_inner())
+}
+
+fn value_at_path<'a>(root: &'a glam::core::Value, path: &str) -> Option<&'a glam::core::Value> {
+    let path = path
+        .split('.')
+        .map(|part| glam::core::Atom::from_key(&glam::core::Key::text(part)))
+        .collect::<Vec<_>>();
+    root.get_atom_path(&path)
 }
 
 fn parse_path(path: &str) -> ExitCode {
@@ -169,6 +227,6 @@ fn declaration_label(kind: &DeclarationKind) -> &'static str {
 
 fn print_help() {
     println!(
-        "Usage: glam (-f|--file) <PATH>\n       glam --parse <PATH>\n       glam --help\n       glam --version\n\nBare non-option arguments are reserved for future configured `conf.cli` rewriting."
+        "Usage: glam (-f|--file) <PATH>\n       glam --parse <PATH>\n       glam --help\n       glam --version\n\nBare arguments to be rewritten by `conf.cli`."
     );
 }
