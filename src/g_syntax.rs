@@ -2,7 +2,7 @@ use chumsky::prelude::*;
 
 use std::sync::Arc;
 
-use crate::core::{Atom, Dict, Expr as CoreExpr, Key, Term, Value};
+use crate::core::{Atom, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Term, Value};
 use crate::diagnostic::Severity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,9 +87,18 @@ pub enum DefinitionKind {
 pub enum SyntaxExpr {
     Number(i64),
     Text(String),
-    Name(Vec<String>),
+    Name(Vec<SyntaxKeyExpr>),
+    SingletonDict(SyntaxKeyExpr, Box<SyntaxExpr>),
+    DictUnion(Vec<SyntaxExpr>),
     List(Vec<SyntaxExpr>),
     Append(Box<SyntaxExpr>, Box<SyntaxExpr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyntaxKeyExpr {
+    Atom(String),
+    Expr(Box<SyntaxExpr>),
+    ListExpr(Box<SyntaxExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,9 +254,13 @@ fn syntax_expr_to_value(
     match expr {
         SyntaxExpr::Number(number) => Ok(Value::Number(*number)),
         SyntaxExpr::Text(text) => Ok(Value::binary_from_text(text)),
-        SyntaxExpr::Name(_) | SyntaxExpr::List(_) | SyntaxExpr::Append(_, _) => Ok(Value::Expr(
-            Arc::new(syntax_expr_to_core_expr(expr, line, atoms)?),
-        )),
+        SyntaxExpr::Name(_)
+        | SyntaxExpr::SingletonDict(_, _)
+        | SyntaxExpr::DictUnion(_)
+        | SyntaxExpr::List(_)
+        | SyntaxExpr::Append(_, _) => Ok(Value::Expr(Arc::new(syntax_expr_to_core_expr(
+            expr, line, atoms,
+        )?))),
     }
 }
 
@@ -259,11 +272,24 @@ fn syntax_expr_to_core_expr(
     Ok(match expr {
         SyntaxExpr::Number(number) => CoreExpr::Value(Value::Number(*number)),
         SyntaxExpr::Text(text) => CoreExpr::Value(Value::binary_from_text(text)),
+        SyntaxExpr::SingletonDict(key, value) => CoreExpr::SingletonDict {
+            key: syntax_key_expr_to_core(key, line, atoms)?,
+            value: Arc::new(syntax_expr_to_core_expr(value, line, atoms)?),
+        },
+        SyntaxExpr::DictUnion(items) => CoreExpr::DictUnion {
+            items: Arc::from(
+                items
+                    .iter()
+                    .map(|expr| syntax_expr_to_core_expr(expr, line, atoms).map(Arc::new))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            key_context: None,
+        },
         SyntaxExpr::Name(parts) => CoreExpr::Name(Arc::from(
             parts
                 .iter()
-                .map(|part| atom_key(part, atoms))
-                .collect::<Vec<_>>(),
+                .map(|part| syntax_key_expr_to_core(part, line, atoms))
+                .collect::<Result<Vec<_>, _>>()?,
         )),
         SyntaxExpr::List(items) => CoreExpr::List(Arc::from(
             items
@@ -271,10 +297,31 @@ fn syntax_expr_to_core_expr(
                 .map(|expr| syntax_expr_to_core_expr(expr, line, atoms).map(Arc::new))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
-        SyntaxExpr::Append(left, right) => CoreExpr::Append(
-            Arc::new(syntax_expr_to_core_expr(left, line, atoms)?),
+        SyntaxExpr::Append(left, right) => CoreExpr::Apply(
+            Arc::new(CoreExpr::Apply(
+                Arc::new(CoreExpr::Value(Value::Builtin(
+                    crate::core::Builtin::Append,
+                ))),
+                Arc::new(syntax_expr_to_core_expr(left, line, atoms)?),
+            )),
             Arc::new(syntax_expr_to_core_expr(right, line, atoms)?),
         ),
+    })
+}
+
+fn syntax_key_expr_to_core(
+    key: &SyntaxKeyExpr,
+    line: usize,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Result<CoreKeyExpr, Diagnostic> {
+    Ok(match key {
+        SyntaxKeyExpr::Atom(name) => CoreKeyExpr::Key(atom_key(name, atoms)),
+        SyntaxKeyExpr::Expr(expr) => {
+            CoreKeyExpr::Expr(Arc::new(syntax_expr_to_core_expr(expr, line, atoms)?))
+        }
+        SyntaxKeyExpr::ListExpr(expr) => {
+            CoreKeyExpr::ListExpr(Arc::new(syntax_expr_to_core_expr(expr, line, atoms)?))
+        }
     })
 }
 
@@ -558,148 +605,140 @@ fn rest_of_declaration<'src>() -> impl Parser<'src, &'src str, String, extra::Er
 }
 
 fn parse_expr(text: &str) -> Option<SyntaxExpr> {
-    let (expr, rest) = parse_append(text).ok()?;
-    if rest.trim().is_empty() {
-        Some(expr)
-    } else {
-        None
-    }
+    syntax_expr_parser()
+        .then_ignore(end())
+        .parse(text)
+        .into_result()
+        .ok()
 }
 
-fn parse_append(text: &str) -> Result<(SyntaxExpr, &str), String> {
-    let (mut expr, mut rest) = parse_atom(text)?;
+fn syntax_expr_parser<'src>()
+-> impl Parser<'src, &'src str, SyntaxExpr, extra::Err<Rich<'src, char>>> {
+    #[derive(Debug)]
+    enum PathSuffix {
+        Single(SyntaxKeyExpr),
+        Expand(Vec<SyntaxKeyExpr>),
+    }
 
-    loop {
-        let trimmed = rest.trim_start();
-        if let Some(after_op) = trimmed.strip_prefix("++") {
-            let (rhs, new_rest) = parse_atom(after_op)?;
-            expr = SyntaxExpr::Append(Box::new(expr), Box::new(rhs));
-            rest = new_rest;
+    recursive(|expr| {
+        let single_key_expr = || {
+            choice((
+                just('\'').ignore_then(glam_name()).map(SyntaxKeyExpr::Atom),
+                expr.clone().map(|expr| SyntaxKeyExpr::Expr(Box::new(expr))),
+            ))
+        };
+
+        let path_list_shorthand = single_key_expr()
+            .padded()
+            .separated_by(just(',').padded())
+            .allow_leading()
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just('['), just(']'))
+            .map(PathSuffix::Expand);
+        let path_list_expr = expr
+            .clone()
+            .padded()
+            .delimited_by(just('('), just(')'))
+            .map(|expr| PathSuffix::Single(SyntaxKeyExpr::ListExpr(Box::new(expr))));
+
+        // Dotted paths stay lexically tight because `.` has other roles in the
+        // language surface, such as future effect sugar like `.bar`.
+        let name_expr = glam_name()
+            .map(SyntaxKeyExpr::Atom)
+            .then(
+                just('.')
+                    .ignore_then(choice((
+                        path_list_shorthand,
+                        path_list_expr,
+                        glam_name().map(SyntaxKeyExpr::Atom).map(PathSuffix::Single),
+                    )))
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .map(|(first, suffixes)| {
+                let mut parts = vec![first];
+                for suffix in suffixes {
+                    match suffix {
+                        PathSuffix::Single(part) => parts.push(part),
+                        PathSuffix::Expand(items) => parts.extend(items),
+                    }
+                }
+                SyntaxExpr::Name(parts)
+            });
+
+        let number = text::digits(10).to_slice().try_map(|digits: &str, span| {
+            digits
+                .parse::<i64>()
+                .map(SyntaxExpr::Number)
+                .map_err(|err| {
+                    Rich::custom(span, format!("invalid integer literal `{digits}`: {err}"))
+                })
+        });
+        let text = quoted_text().map(SyntaxExpr::Text);
+
+        let list = expr
+            .clone()
+            .padded()
+            .separated_by(just(',').padded())
+            .allow_leading()
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just('['), just(']'))
+            .map(SyntaxExpr::List);
+
+        let dict_item_key = choice((
+            glam_name().map(SyntaxKeyExpr::Atom),
+            single_key_expr()
+                .padded()
+                .delimited_by(just('['), just(']')),
+        ));
+        let dict_item = choice((
+            dict_item_key
+                .then_ignore(just(':').padded())
+                .then(expr.clone())
+                .map(|(key, value)| SyntaxExpr::SingletonDict(key, Box::new(value))),
+            expr.clone(),
+        ));
+        let dict = dict_item
+            .padded()
+            .separated_by(just(',').padded())
+            .allow_leading()
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just('{'), just('}'))
+            .map(SyntaxExpr::DictUnion);
+
+        let atom = choice((text, list, dict, number, name_expr)).boxed();
+
+        atom.clone()
+            .then(
+                just("++")
+                    .padded()
+                    .ignore_then(atom)
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .map(|(first, rest)| {
+                rest.into_iter().fold(first, |left, right| {
+                    SyntaxExpr::Append(Box::new(left), Box::new(right))
+                })
+            })
+    })
+}
+
+fn glam_name<'src>() -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
+    text::ascii::ident().try_map(|name: &str, span| {
+        if name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic())
+        {
+            Ok(name.to_owned())
         } else {
-            return Ok((expr, rest));
+            Err(Rich::custom(span, "expected name"))
         }
-    }
-}
-
-fn parse_atom(text: &str) -> Result<(SyntaxExpr, &str), String> {
-    let text = text.trim_start();
-
-    if let Some(rest) = text.strip_prefix('"') {
-        return parse_text_literal(rest);
-    }
-
-    if let Some(rest) = text.strip_prefix('[') {
-        return parse_list_literal(rest);
-    }
-
-    if text.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
-        return parse_integer_literal(text);
-    }
-
-    if text.chars().next().is_some_and(is_name_start) {
-        return parse_name_expr(text);
-    }
-
-    Err("unsupported expression".to_owned())
-}
-
-fn parse_text_literal(text: &str) -> Result<(SyntaxExpr, &str), String> {
-    for (index, ch) in text.char_indices() {
-        if ch == '"' {
-            let value = &text[..index];
-            let rest = &text[index + 1..];
-            return Ok((SyntaxExpr::Text(value.to_owned()), rest));
-        }
-    }
-
-    Err("unterminated text literal".to_owned())
-}
-
-fn parse_integer_literal(text: &str) -> Result<(SyntaxExpr, &str), String> {
-    let digit_count = text.chars().take_while(|ch| ch.is_ascii_digit()).count();
-
-    let digits = &text[..digit_count];
-    let rest = &text[digit_count..];
-
-    let number = digits
-        .parse::<i64>()
-        .map_err(|err| format!("invalid integer literal `{digits}`: {err}"))?;
-
-    Ok((SyntaxExpr::Number(number), rest))
-}
-
-fn parse_name_expr(text: &str) -> Result<(SyntaxExpr, &str), String> {
-    let mut rest = text;
-    let mut parts = Vec::new();
-
-    loop {
-        let (part, after_part) = parse_name_part(rest)?;
-        parts.push(part.to_owned());
-        rest = after_part;
-
-        if let Some(after_dot) = rest.strip_prefix('.') {
-            rest = after_dot;
-            continue;
-        }
-
-        return Ok((SyntaxExpr::Name(parts), rest));
-    }
-}
-
-fn parse_name_part(text: &str) -> Result<(&str, &str), String> {
-    let mut chars = text.char_indices();
-    let Some((_, first)) = chars.next() else {
-        return Err("expected name".to_owned());
-    };
-    if !is_name_start(first) {
-        return Err("expected name".to_owned());
-    }
-
-    let mut end = first.len_utf8();
-    for (index, ch) in chars {
-        if is_name_continue(ch) {
-            end = index + ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-
-    Ok((&text[..end], &text[end..]))
-}
-
-fn is_name_start(ch: char) -> bool {
-    ch.is_ascii_alphabetic()
-}
-
-fn is_name_continue(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
-}
-
-fn parse_list_literal(text: &str) -> Result<(SyntaxExpr, &str), String> {
-    let mut rest = text;
-    let mut items = Vec::new();
-
-    loop {
-        rest = rest.trim_start();
-        if let Some(after_close) = rest.strip_prefix(']') {
-            return Ok((SyntaxExpr::List(items), after_close));
-        }
-
-        let (item, new_rest) = parse_append(rest)?;
-        items.push(item);
-        rest = new_rest.trim_start();
-
-        if let Some(after_comma) = rest.strip_prefix(',') {
-            rest = after_comma;
-            continue;
-        }
-
-        if let Some(after_close) = rest.strip_prefix(']') {
-            return Ok((SyntaxExpr::List(items), after_close));
-        }
-
-        return Err("expected `,` or `]` in list literal".to_owned());
-    }
+    })
 }
 
 fn whitespace0<'src>() -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> {
@@ -812,8 +851,21 @@ fn split_lines(text: &str) -> Vec<PhysicalLine<'_>> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::core::{Builtin, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value};
+
+    fn core_append(left: CoreExpr, right: CoreExpr) -> CoreExpr {
+        CoreExpr::Apply(
+            Arc::new(CoreExpr::Apply(
+                Arc::new(CoreExpr::Value(Value::Builtin(Builtin::Append))),
+                Arc::new(left),
+            )),
+            Arc::new(right),
+        )
+    }
+
     use super::*;
-    use crate::core::Value;
     use crate::diagnostic::Severity;
 
     fn parse(text: &str) -> ParsedSource {
@@ -911,7 +963,7 @@ mod tests {
                 target: "foo".to_owned(),
                 kind: DefinitionKind::Update,
                 body: "f".to_owned(),
-                expr: Some(SyntaxExpr::Name(vec!["f".to_owned()])),
+                expr: Some(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("f".to_owned())])),
             })
         );
     }
@@ -987,14 +1039,219 @@ mod tests {
                 expr: Some(SyntaxExpr::Append(
                     Box::new(SyntaxExpr::Append(
                         Box::new(SyntaxExpr::Append(
-                            Box::new(SyntaxExpr::Name(vec!["hello".to_owned()])),
+                            Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom(
+                                "hello".to_owned(),
+                            )])),
                             Box::new(SyntaxExpr::Text(", ".to_owned())),
                         )),
-                        Box::new(SyntaxExpr::Name(vec!["world".to_owned()])),
+                        Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom(
+                            "world".to_owned(),
+                        )])),
                     )),
                     Box::new(SyntaxExpr::Text("!".to_owned())),
                 )),
             })
+        );
+    }
+
+    #[test]
+    fn parses_dictionary_literals() {
+        let parsed = parse("language g0\nd = { hello:\"Hello\", world:\"World\" }\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "d".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "{ hello:\"Hello\", world:\"World\" }".to_owned(),
+                expr: Some(SyntaxExpr::DictUnion(vec![
+                    SyntaxExpr::SingletonDict(
+                        SyntaxKeyExpr::Atom("hello".to_owned()),
+                        Box::new(SyntaxExpr::Text("Hello".to_owned())),
+                    ),
+                    SyntaxExpr::SingletonDict(
+                        SyntaxKeyExpr::Atom("world".to_owned()),
+                        Box::new(SyntaxExpr::Text("World".to_owned())),
+                    ),
+                ])),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_dictionary_unions() {
+        let parsed = parse("language g0\nd = { left, right, hello:\"Hello\" }\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "d".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "{ left, right, hello:\"Hello\" }".to_owned(),
+                expr: Some(SyntaxExpr::DictUnion(vec![
+                    SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("left".to_owned())]),
+                    SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("right".to_owned())]),
+                    SyntaxExpr::SingletonDict(
+                        SyntaxKeyExpr::Atom("hello".to_owned()),
+                        Box::new(SyntaxExpr::Text("Hello".to_owned())),
+                    ),
+                ])),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_multiline_literals_with_leading_commas() {
+        let parsed = parse(
+            "language g0\nnums = [\n  , 1\n  , 2\n  ]\nd = {\n  , hello:\"Hello\"\n  , world:\"World\"\n  }\n",
+        );
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "nums".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "[\n, 1\n, 2\n]".to_owned(),
+                expr: Some(SyntaxExpr::List(vec![
+                    SyntaxExpr::Number(1),
+                    SyntaxExpr::Number(2),
+                ])),
+            })
+        );
+        assert_eq!(
+            parsed.declarations[2].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "d".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "{\n, hello:\"Hello\"\n, world:\"World\"\n}".to_owned(),
+                expr: Some(SyntaxExpr::DictUnion(vec![
+                    SyntaxExpr::SingletonDict(
+                        SyntaxKeyExpr::Atom("hello".to_owned()),
+                        Box::new(SyntaxExpr::Text("Hello".to_owned())),
+                    ),
+                    SyntaxExpr::SingletonDict(
+                        SyntaxKeyExpr::Atom("world".to_owned()),
+                        Box::new(SyntaxExpr::Text("World".to_owned())),
+                    ),
+                ])),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_expression_indexed_names_and_keys() {
+        let parsed =
+            parse("language g0\nd = { [42]:\"World\" }\nasm.result = d.[42] ++ d.['tail]\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "d".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "{ [42]:\"World\" }".to_owned(),
+                expr: Some(SyntaxExpr::DictUnion(vec![SyntaxExpr::SingletonDict(
+                    SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(42))),
+                    Box::new(SyntaxExpr::Text("World".to_owned())),
+                )])),
+            })
+        );
+        assert_eq!(
+            parsed.declarations[2].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "asm.result".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "d.[42] ++ d.['tail]".to_owned(),
+                expr: Some(SyntaxExpr::Append(
+                    Box::new(SyntaxExpr::Name(vec![
+                        SyntaxKeyExpr::Atom("d".to_owned()),
+                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(42))),
+                    ])),
+                    Box::new(SyntaxExpr::Name(vec![
+                        SyntaxKeyExpr::Atom("d".to_owned()),
+                        SyntaxKeyExpr::Atom("tail".to_owned()),
+                    ])),
+                )),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_path_list_shorthand_and_general_list_path_exprs() {
+        let parsed = parse("language g0\nasm.result = foo.[1,2,3] ++ foo.([1,2] ++ [3])\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "asm.result".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "foo.[1,2,3] ++ foo.([1,2] ++ [3])".to_owned(),
+                expr: Some(SyntaxExpr::Append(
+                    Box::new(SyntaxExpr::Name(vec![
+                        SyntaxKeyExpr::Atom("foo".to_owned()),
+                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(1))),
+                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(2))),
+                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(3))),
+                    ])),
+                    Box::new(SyntaxExpr::Name(vec![
+                        SyntaxKeyExpr::Atom("foo".to_owned()),
+                        SyntaxKeyExpr::ListExpr(Box::new(SyntaxExpr::Append(
+                            Box::new(SyntaxExpr::List(vec![
+                                SyntaxExpr::Number(1),
+                                SyntaxExpr::Number(2),
+                            ])),
+                            Box::new(SyntaxExpr::List(vec![SyntaxExpr::Number(3)])),
+                        ))),
+                    ])),
+                )),
+            })
+        );
+    }
+
+    #[test]
+    fn dotted_paths_require_tight_dots() {
+        assert!(matches!(
+            parse_expr("foo.[  42  ].bar"),
+            Some(SyntaxExpr::Name(_))
+        ));
+        assert!(matches!(
+            parse_expr("foo.([1,2] ++ [3]).bar"),
+            Some(SyntaxExpr::Name(_))
+        ));
+
+        assert_eq!(
+            parse_expr("foo  .[42].bar"),
+            None,
+            "whitespace before `.` should be rejected"
+        );
+        assert_eq!(
+            parse_expr("foo .bar"),
+            None,
+            "whitespace before `.` should prevent dotted-path parsing"
+        );
+        assert_eq!(
+            parse_expr("foo.[42].  bar"),
+            None,
+            "whitespace after `.` should be rejected"
+        );
+        assert_eq!(
+            parse_expr("foo. bar"),
+            None,
+            "whitespace after `.` should prevent dotted-path parsing"
+        );
+        assert_eq!(
+            parse_expr("foo. [42].bar"),
+            None,
+            "whitespace between `.` and `[` should be rejected"
+        );
+        assert_eq!(
+            parse_expr("foo. ([1,2] ++ [3]).bar"),
+            None,
+            "whitespace between `.` and `(` should be rejected"
         );
     }
 
@@ -1012,16 +1269,16 @@ mod tests {
                 ]),
                 _ => None,
             }),
-            Some(&Value::Expr(Arc::new(CoreExpr::Append(
-                Arc::new(CoreExpr::List(Arc::from([
+            Some(&Value::Expr(Arc::new(core_append(
+                CoreExpr::List(Arc::from([
                     Arc::new(CoreExpr::Value(Value::Number(72))),
                     Arc::new(CoreExpr::Value(Value::Number(101))),
-                ]))),
-                Arc::new(CoreExpr::List(Arc::from([
+                ])),
+                CoreExpr::List(Arc::from([
                     Arc::new(CoreExpr::Value(Value::Number(108))),
                     Arc::new(CoreExpr::Value(Value::Number(108))),
                     Arc::new(CoreExpr::Value(Value::Number(111))),
-                ]))),
+                ])),
             ))))
         );
     }
@@ -1042,16 +1299,54 @@ mod tests {
                 ]),
                 _ => None,
             }),
-            Some(&Value::Expr(Arc::new(CoreExpr::Append(
-                Arc::new(CoreExpr::Append(
-                    Arc::new(CoreExpr::Append(
-                        Arc::new(CoreExpr::Name(Arc::from([Key::atom_from_text("hello")]))),
-                        Arc::new(CoreExpr::Value(Value::binary_from_text(", "))),
-                    )),
-                    Arc::new(CoreExpr::Name(Arc::from([Key::atom_from_text("world")]))),
-                )),
-                Arc::new(CoreExpr::Value(Value::binary_from_text("!"))),
+            Some(&Value::Expr(Arc::new(core_append(
+                core_append(
+                    core_append(
+                        CoreExpr::Name(Arc::from([CoreKeyExpr::Key(
+                            Key::atom_from_text("hello",)
+                        )])),
+                        CoreExpr::Value(Value::binary_from_text(", ")),
+                    ),
+                    CoreExpr::Name(Arc::from([CoreKeyExpr::Key(Key::atom_from_text("world",))])),
+                ),
+                CoreExpr::Value(Value::binary_from_text("!")),
             ))))
+        );
+    }
+
+    #[test]
+    fn lowers_dictionary_literals_to_lazy_values() {
+        let parsed = parse(
+            "language g0\nd = { hello:\"Hello\", world:other ++ \"!\" }\nother = \"World\"\n",
+        );
+        let lowered = lower_to_core(&parsed);
+
+        assert_eq!(lowered.diagnostics, []);
+        assert_eq!(
+            lowered.term.as_ref().and_then(|term| match term {
+                crate::core::Term::Expr(CoreExpr::Value(value)) => {
+                    value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("d"))])
+                }
+                _ => None,
+            }),
+            Some(&Value::Expr(Arc::new(CoreExpr::DictUnion {
+                items: Arc::from([
+                    Arc::new(CoreExpr::SingletonDict {
+                        key: CoreKeyExpr::Key(Key::atom_from_text("hello")),
+                        value: Arc::new(CoreExpr::Value(Value::binary_from_text("Hello"))),
+                    }),
+                    Arc::new(CoreExpr::SingletonDict {
+                        key: CoreKeyExpr::Key(Key::atom_from_text("world")),
+                        value: Arc::new(core_append(
+                            CoreExpr::Name(Arc::from([CoreKeyExpr::Key(Key::atom_from_text(
+                                "other",
+                            ))])),
+                            CoreExpr::Value(Value::binary_from_text("!")),
+                        )),
+                    }),
+                ]),
+                key_context: None,
+            })))
         );
     }
 }

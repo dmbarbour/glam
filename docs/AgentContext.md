@@ -14,11 +14,11 @@ This document should summarize salient, relevant points rather than asking futur
 
 ## Todo
 
-- TODOs in `src/README.md`
 - parser
 - data types
 - evaluator
 - imports - local, remote
+- unique atoms
 - CLI macros
 - tab completion
 - logging

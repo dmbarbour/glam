@@ -13,8 +13,24 @@ pub enum Term {
 pub enum Expr {
     Value(Value),
     List(Arc<[Arc<Expr>]>),
-    Append(Arc<Expr>, Arc<Expr>),
-    Name(Arc<[Key]>),
+    Apply(Arc<Expr>, Arc<Expr>),
+    Name(Arc<[KeyExpr]>),
+    SingletonDict {
+        key: KeyExpr,
+        value: Arc<Expr>,
+    },
+    DictUnion {
+        items: Arc<[Arc<Expr>]>,
+        key_context: Option<Key>,
+    },
+    Error(Arc<str>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyExpr {
+    Key(Key),
+    Expr(Arc<Expr>),
+    ListExpr(Arc<Expr>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -71,9 +87,19 @@ impl Key {
             Value::List(list) => Some(Self::List(list.to_key_items()?)),
             Value::Dict(dict) => Some(Self::Dict(Arc::from(
                 dict.iter()
-                    .map(|(key, value)| Some((key.clone(), Self::from_value(value)?)))
-                    .collect::<Option<Vec<_>>>()?,
+                    .map(|(key, value)| {
+                        let value = Self::from_value(value)?;
+                        if matches!(&value, Key::Dict(entries) if entries.is_empty()) {
+                            return Some(None);
+                        }
+                        Some(Some((key.clone(), value)))
+                    })
+                    .collect::<Option<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>(),
             ))),
+            Value::Builtin(_) => None,
             Value::Expr(_) => None,
         }
     }
@@ -97,7 +123,21 @@ pub enum Value {
     Binary(Arc<[u8]>),
     List(List),
     Dict(Dict),
+    Builtin(Builtin),
     Expr(Arc<Expr>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Builtin {
+    Append,
+}
+
+impl Builtin {
+    pub fn arity(self) -> usize {
+        match self {
+            Self::Append => 2,
+        }
+    }
 }
 
 pub type Dict = RedBlackTreeMapSync<Key, Value>;
@@ -201,7 +241,11 @@ impl Value {
             [] => Some(self),
             [head, rest @ ..] => match self {
                 Value::Dict(dict) => dict.get(head)?.get_key_path(rest),
-                Value::Number(_) | Value::Binary(_) | Value::List(_) | Value::Expr(_) => None,
+                Value::Number(_)
+                | Value::Binary(_)
+                | Value::List(_)
+                | Value::Builtin(_)
+                | Value::Expr(_) => None,
             },
         }
     }
@@ -268,17 +312,20 @@ mod tests {
     }
 
     #[test]
-    fn semantic_expr_can_hold_literal_values_and_append() {
-        let expr = Expr::Append(
-            Arc::new(Expr::Value(Value::List(List::from_values(vec![
-                Value::Number(1),
-            ])))),
+    fn semantic_expr_can_hold_literal_values_builtins_and_application() {
+        let expr = Expr::Apply(
+            Arc::new(Expr::Apply(
+                Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
+                Arc::new(Expr::Value(Value::List(List::from_values(vec![
+                    Value::Number(1),
+                ])))),
+            )),
             Arc::new(Expr::Value(Value::List(List::from_values(vec![
                 Value::Number(2),
             ])))),
         );
 
-        assert!(matches!(expr, Expr::Append(_, _)));
+        assert!(matches!(expr, Expr::Apply(_, _)));
     }
 
     #[test]
@@ -293,9 +340,25 @@ mod tests {
 
     #[test]
     fn semantic_expr_can_hold_names() {
-        let expr = Expr::Name(Arc::from([Key::atom_from_text("hello")]));
+        let expr = Expr::Name(Arc::from([KeyExpr::Key(Key::atom_from_text("hello"))]));
 
         assert!(matches!(expr, Expr::Name(path) if path.len() == 1));
+    }
+
+    #[test]
+    fn semantic_expr_can_hold_singleton_dicts_unions_and_errors() {
+        let expr = Expr::DictUnion {
+            items: Arc::from([
+                Arc::new(Expr::SingletonDict {
+                    key: KeyExpr::Key(Key::atom_from_text("greeting")),
+                    value: Arc::new(Expr::Value(Value::binary_from_text("Hello"))),
+                }),
+                Arc::new(Expr::Error(Arc::from("ambiguous key"))),
+            ]),
+            key_context: Some(Key::atom_from_text("greeting")),
+        };
+
+        assert!(matches!(expr, Expr::DictUnion { items, .. } if items.len() == 2));
     }
 
     #[test]
