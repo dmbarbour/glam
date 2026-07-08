@@ -272,19 +272,12 @@ fn syntax_expr_to_core_expr(
     Ok(match expr {
         SyntaxExpr::Number(number) => CoreExpr::Value(Value::Number(*number)),
         SyntaxExpr::Text(text) => CoreExpr::Value(Value::binary_from_text(text)),
-        SyntaxExpr::SingletonDict(key, value) => CoreExpr::SingletonDict {
-            key: syntax_key_expr_to_core(key, line, atoms)?,
-            value: Arc::new(syntax_expr_to_core_expr(value, line, atoms)?),
-        },
-        SyntaxExpr::DictUnion(items) => CoreExpr::DictUnion {
-            items: Arc::from(
-                items
-                    .iter()
-                    .map(|expr| syntax_expr_to_core_expr(expr, line, atoms).map(Arc::new))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-            key_context: None,
-        },
+        SyntaxExpr::SingletonDict(key, value) => builtin_apply2(
+            crate::core::Builtin::Singleton,
+            syntax_key_expr_to_core_expr(key, line, atoms)?,
+            syntax_expr_to_core_expr(value, line, atoms)?,
+        ),
+        SyntaxExpr::DictUnion(items) => lower_dict_union(items, line, atoms)?,
         SyntaxExpr::Name(parts) => CoreExpr::Name(Arc::from(
             parts
                 .iter()
@@ -307,6 +300,54 @@ fn syntax_expr_to_core_expr(
             Arc::new(syntax_expr_to_core_expr(right, line, atoms)?),
         ),
     })
+}
+
+fn syntax_key_expr_to_core_expr(
+    key: &SyntaxKeyExpr,
+    line: usize,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Result<CoreExpr, Diagnostic> {
+    Ok(match key {
+        SyntaxKeyExpr::Atom(name) => CoreExpr::Value(Value::Atom(atom_value(name, atoms))),
+        SyntaxKeyExpr::Expr(expr) => syntax_expr_to_core_expr(expr, line, atoms)?,
+        SyntaxKeyExpr::ListExpr(_) => {
+            return Err(Diagnostic::error(
+                line,
+                "list-valued path expressions are not valid dictionary keys",
+            ));
+        }
+    })
+}
+
+fn lower_dict_union(
+    items: &[SyntaxExpr],
+    line: usize,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Result<CoreExpr, Diagnostic> {
+    let mut items = items.iter();
+    let Some(first) = items.next() else {
+        return Ok(CoreExpr::Value(Value::Dict(Dict::new_sync())));
+    };
+
+    let mut expr = syntax_expr_to_core_expr(first, line, atoms)?;
+    for item in items {
+        expr = builtin_apply2(
+            crate::core::Builtin::DictUnion,
+            expr,
+            syntax_expr_to_core_expr(item, line, atoms)?,
+        );
+    }
+    Ok(expr)
+}
+
+fn builtin_apply2(builtin: crate::core::Builtin, left: CoreExpr, right: CoreExpr) -> CoreExpr {
+    CoreExpr::Apply(
+        Arc::new(CoreExpr::Apply(
+            Arc::new(CoreExpr::Value(Value::Builtin(builtin))),
+            Arc::new(left),
+        )),
+        Arc::new(right),
+    )
 }
 
 fn syntax_key_expr_to_core(
@@ -419,12 +460,14 @@ fn set_path(
 }
 
 fn atom_key(name: &str, atoms: &mut std::collections::BTreeMap<String, Atom>) -> Key {
-    Key::Atom(
-        atoms
-            .entry(name.to_owned())
-            .or_insert_with(|| Atom::from_key(&Key::binary_from_text(name)))
-            .clone(),
-    )
+    Key::Atom(atom_value(name, atoms))
+}
+
+fn atom_value(name: &str, atoms: &mut std::collections::BTreeMap<String, Atom>) -> Atom {
+    atoms
+        .entry(name.to_owned())
+        .or_insert_with(|| Atom::from_key(&Key::binary_from_text(name)))
+        .clone()
 }
 
 fn validate_language_position(declarations: &[Declaration], diagnostics: &mut Vec<Diagnostic>) {
@@ -856,9 +899,21 @@ mod tests {
     use crate::core::{Builtin, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value};
 
     fn core_append(left: CoreExpr, right: CoreExpr) -> CoreExpr {
+        core_builtin2(Builtin::Append, left, right)
+    }
+
+    fn core_singleton(key: CoreExpr, value: CoreExpr) -> CoreExpr {
+        core_builtin2(Builtin::Singleton, key, value)
+    }
+
+    fn core_dict_union(left: CoreExpr, right: CoreExpr) -> CoreExpr {
+        core_builtin2(Builtin::DictUnion, left, right)
+    }
+
+    fn core_builtin2(builtin: Builtin, left: CoreExpr, right: CoreExpr) -> CoreExpr {
         CoreExpr::Apply(
             Arc::new(CoreExpr::Apply(
-                Arc::new(CoreExpr::Value(Value::Builtin(Builtin::Append))),
+                Arc::new(CoreExpr::Value(Value::Builtin(builtin))),
                 Arc::new(left),
             )),
             Arc::new(right),
@@ -1329,24 +1384,21 @@ mod tests {
                 }
                 _ => None,
             }),
-            Some(&Value::Expr(Arc::new(CoreExpr::DictUnion {
-                items: Arc::from([
-                    Arc::new(CoreExpr::SingletonDict {
-                        key: CoreKeyExpr::Key(Key::atom_from_text("hello")),
-                        value: Arc::new(CoreExpr::Value(Value::binary_from_text("Hello"))),
-                    }),
-                    Arc::new(CoreExpr::SingletonDict {
-                        key: CoreKeyExpr::Key(Key::atom_from_text("world")),
-                        value: Arc::new(core_append(
-                            CoreExpr::Name(Arc::from([CoreKeyExpr::Key(Key::atom_from_text(
-                                "other",
-                            ))])),
-                            CoreExpr::Value(Value::binary_from_text("!")),
-                        )),
-                    }),
-                ]),
-                key_context: None,
-            })))
+            Some(&Value::Expr(Arc::new(core_dict_union(
+                core_singleton(
+                    CoreExpr::Value(Value::Atom(Atom::from_key(&Key::binary_from_text("hello")))),
+                    CoreExpr::Value(Value::binary_from_text("Hello")),
+                ),
+                core_singleton(
+                    CoreExpr::Value(Value::Atom(Atom::from_key(&Key::binary_from_text("world")))),
+                    core_append(
+                        CoreExpr::Name(Arc::from([CoreKeyExpr::Key(
+                            Key::atom_from_text("other",)
+                        )])),
+                        CoreExpr::Value(Value::binary_from_text("!")),
+                    ),
+                ),
+            ))))
         );
     }
 }

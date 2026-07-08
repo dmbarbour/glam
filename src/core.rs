@@ -15,14 +15,6 @@ pub enum Expr {
     List(Arc<[Arc<Expr>]>),
     Apply(Arc<Expr>, Arc<Expr>),
     Name(Arc<[KeyExpr]>),
-    SingletonDict {
-        key: KeyExpr,
-        value: Arc<Expr>,
-    },
-    DictUnion {
-        items: Arc<[Arc<Expr>]>,
-        key_context: Option<Key>,
-    },
     Error(Arc<str>),
 }
 
@@ -82,6 +74,7 @@ impl Key {
 
     pub fn from_value(value: &Value) -> Option<Self> {
         match value {
+            Value::Atom(atom) => Some(Self::Atom(*atom)),
             Value::Number(number) => Some(Self::Number(*number)),
             Value::Binary(bytes) => Some(Self::Binary(bytes.clone())),
             Value::List(list) => Some(Self::List(list.to_key_items()?)),
@@ -119,6 +112,7 @@ impl fmt::Debug for Key {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
+    Atom(Atom),
     Number(i64),
     Binary(Arc<[u8]>),
     List(List),
@@ -130,12 +124,16 @@ pub enum Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Builtin {
     Append,
+    Singleton,
+    DictUnion,
 }
 
 impl Builtin {
     pub fn arity(self) -> usize {
         match self {
             Self::Append => 2,
+            Self::Singleton => 2,
+            Self::DictUnion => 2,
         }
     }
 }
@@ -241,7 +239,8 @@ impl Value {
             [] => Some(self),
             [head, rest @ ..] => match self {
                 Value::Dict(dict) => dict.get(head)?.get_key_path(rest),
-                Value::Number(_)
+                Value::Atom(_)
+                | Value::Number(_)
                 | Value::Binary(_)
                 | Value::List(_)
                 | Value::Builtin(_)
@@ -346,19 +345,17 @@ mod tests {
     }
 
     #[test]
-    fn semantic_expr_can_hold_singleton_dicts_unions_and_errors() {
-        let expr = Expr::DictUnion {
-            items: Arc::from([
-                Arc::new(Expr::SingletonDict {
-                    key: KeyExpr::Key(Key::atom_from_text("greeting")),
-                    value: Arc::new(Expr::Value(Value::binary_from_text("Hello"))),
-                }),
-                Arc::new(Expr::Error(Arc::from("ambiguous key"))),
-            ]),
-            key_context: Some(Key::atom_from_text("greeting")),
-        };
+    fn semantic_values_can_hold_atoms() {
+        let value = Value::Atom(Atom::from_key(&Key::binary_from_text("greeting")));
 
-        assert!(matches!(expr, Expr::DictUnion { items, .. } if items.len() == 2));
+        assert!(matches!(value, Value::Atom(_)));
+    }
+
+    #[test]
+    fn semantic_expr_can_hold_errors() {
+        let expr = Expr::Error(Arc::from("ambiguous key"));
+
+        assert!(matches!(expr, Expr::Error(_)));
     }
 
     #[test]

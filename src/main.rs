@@ -131,7 +131,8 @@ fn value_bytes(
                 .map_err(|err| err.to_string())?;
             value_bytes(&value, root, path)
         }
-        glam::core::Value::Dict(_)
+        glam::core::Value::Atom(_)
+        | glam::core::Value::Dict(_)
         | glam::core::Value::Number(_)
         | glam::core::Value::Builtin(_) => Err(format!("`{path}` is not binary text data")),
     }

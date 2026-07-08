@@ -49,16 +49,13 @@ fn eval_expr(expr: &Expr, root_env: Option<&Value>) -> Result<Value, EvalError> 
         }
         Expr::Apply(function, argument) => eval_apply(function, argument, root_env),
         Expr::Name(path) => resolve_name(path, root_env),
-        Expr::SingletonDict { key, value } => eval_singleton_dict(key, value, root_env),
-        Expr::DictUnion { items, key_context } => {
-            eval_dict_union(items, key_context.as_ref(), root_env)
-        }
         Expr::Error(message) => Err(EvalError::new(message.as_ref())),
     }
 }
 
 pub fn eval_value(value: &Value, root_env: Option<&Value>) -> Result<Value, EvalError> {
     match value {
+        Value::Atom(atom) => Ok(Value::Atom(*atom)),
         Value::Number(number) => Ok(Value::Number(*number)),
         Value::Binary(bytes) => Ok(Value::Binary(bytes.clone())),
         Value::List(list) => Ok(Value::List(list.clone())),
@@ -109,6 +106,7 @@ fn format_name_key_expr(key: &KeyExpr) -> String {
 
 fn value_to_key(value: &Value, root_env: Option<&Value>) -> Result<Key, EvalError> {
     match value {
+        Value::Atom(atom) => Ok(Key::Atom(*atom)),
         Value::Number(number) => Ok(Key::Number(*number)),
         Value::Binary(bytes) => Ok(Key::Binary(bytes.clone())),
         Value::List(list) => Ok(Key::List(list_to_key_items(list, root_env)?)),
@@ -189,26 +187,6 @@ fn force_dict_shell(
     }
 }
 
-fn eval_singleton_dict(
-    key: &KeyExpr,
-    value: &Expr,
-    root_env: Option<&Value>,
-) -> Result<Value, EvalError> {
-    let key = eval_key_expr(key, root_env)?;
-    let observed = eval_expr(value, root_env)?;
-    if is_undefined_dict_value(&observed) {
-        return Ok(Value::Dict(crate::core::Dict::new_sync()));
-    }
-
-    let stored = match value {
-        Expr::Value(value) => value.clone(),
-        _ => Value::Expr(Arc::new(value.clone())),
-    };
-    Ok(Value::Dict(
-        crate::core::Dict::new_sync().insert(key, stored),
-    ))
-}
-
 fn eval_apply(
     function: &Expr,
     argument: &Expr,
@@ -265,6 +243,18 @@ fn apply_builtin(
             })?;
             append_values(eval_value(&left, root_env)?, eval_value(&right, root_env)?)
         }
+        Builtin::Singleton => {
+            let [key, value] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("singleton builtin received the wrong number of arguments")
+            })?;
+            eval_singleton_builtin(&key, &value, root_env)
+        }
+        Builtin::DictUnion => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("dict union builtin received the wrong number of arguments")
+            })?;
+            eval_dict_union_builtin(&left, &right, root_env)
+        }
     }
 }
 
@@ -291,28 +281,41 @@ fn builtin_application_spine(expr: &Expr) -> Option<(Builtin, Vec<Value>)> {
     }
 }
 
-fn eval_dict_union(
-    items: &[Arc<Expr>],
-    key_context: Option<&Key>,
+fn eval_singleton_builtin(
+    key: &Value,
+    value: &Value,
     root_env: Option<&Value>,
 ) -> Result<Value, EvalError> {
-    let mut merged = crate::core::Dict::new_sync();
-
-    for item in items {
-        let value = eval_expr(item, root_env)?;
-        let Value::Dict(dict) = value else {
-            return Err(EvalError::new(match key_context {
-                Some(key) => format!(
-                    "dictionary union is ambiguous at key `{}`",
-                    format_name_part(key)
-                ),
-                None => "dictionary union requires dictionary values".to_owned(),
-            }));
-        };
-        merged = merge_dicts(&merged, &dict);
+    let key = eval_key(key, root_env)?;
+    let observed = eval_value(value, root_env)?;
+    if is_undefined_dict_value(&observed) {
+        return Ok(Value::Dict(crate::core::Dict::new_sync()));
     }
 
-    Ok(Value::Dict(merged))
+    Ok(Value::Dict(
+        crate::core::Dict::new_sync().insert(key, value.clone()),
+    ))
+}
+
+fn eval_dict_union_builtin(
+    left: &Value,
+    right: &Value,
+    root_env: Option<&Value>,
+) -> Result<Value, EvalError> {
+    let left = eval_value(left, root_env)?;
+    let right = eval_value(right, root_env)?;
+    let Value::Dict(left_dict) = left else {
+        return Err(EvalError::new(
+            "dictionary union requires dictionary values",
+        ));
+    };
+    let Value::Dict(right_dict) = right else {
+        return Err(EvalError::new(
+            "dictionary union requires dictionary values",
+        ));
+    };
+
+    Ok(Value::Dict(merge_dicts(&left_dict, &right_dict)))
 }
 
 fn merge_dicts(left: &crate::core::Dict, right: &crate::core::Dict) -> crate::core::Dict {
@@ -335,22 +338,22 @@ fn merge_dicts(left: &crate::core::Dict, right: &crate::core::Dict) -> crate::co
 }
 
 fn merge_duplicate_dict_value(key: &Key, left: &Value, right: &Value) -> Value {
-    match (left, right) {
-        _ if is_undefined_dict_value(left) => right.clone(),
-        _ if is_undefined_dict_value(right) => left.clone(),
-        (Value::Dict(left_dict), Value::Dict(right_dict)) => {
-            Value::Dict(merge_dicts(left_dict, right_dict))
-        }
-        _ if value_can_be_dict(left) || value_can_be_dict(right) => {
-            Value::Expr(Arc::new(Expr::DictUnion {
-                items: Arc::from([value_as_expr(left), value_as_expr(right)]),
-                key_context: Some(key.clone()),
-            }))
-        }
-        _ => Value::Expr(Arc::new(Expr::Error(Arc::from(format!(
+    if is_undefined_dict_value(left) {
+        right.clone()
+    } else if is_undefined_dict_value(right) {
+        left.clone()
+    } else if matches!((left, right), (Value::Dict(_), Value::Dict(_)))
+        || is_expr_value(left)
+        || is_expr_value(right)
+    {
+        // Defer when both sides are concrete dictionaries, or when either side
+        // is still an unevaluated expression that may become one.
+        builtin_apply2_value(Builtin::DictUnion, left, right)
+    } else {
+        Value::Expr(Arc::new(Expr::Error(Arc::from(format!(
             "dictionary union is ambiguous at key `{}`",
             format_name_part(key)
-        ))))),
+        )))))
     }
 }
 
@@ -361,18 +364,18 @@ fn value_as_expr(value: &Value) -> Arc<Expr> {
     }
 }
 
-fn value_can_be_dict(value: &Value) -> bool {
-    matches!(value, Value::Dict(_) | Value::Expr(_))
+fn builtin_apply2_value(builtin: Builtin, left: &Value, right: &Value) -> Value {
+    Value::Expr(Arc::new(Expr::Apply(
+        Arc::new(Expr::Apply(
+            Arc::new(Expr::Value(Value::Builtin(builtin))),
+            value_as_expr(left),
+        )),
+        value_as_expr(right),
+    )))
 }
 
-fn eval_key_expr(key: &KeyExpr, root_env: Option<&Value>) -> Result<Key, EvalError> {
-    match key {
-        KeyExpr::Key(key) => Ok(key.clone()),
-        KeyExpr::Expr(expr) => eval_key(&Value::Expr(expr.clone()), root_env),
-        KeyExpr::ListExpr(_) => Err(EvalError::new(
-            "list-valued path segment cannot be used as a singleton key",
-        )),
-    }
+fn is_expr_value(value: &Value) -> bool {
+    matches!(value, Value::Expr(_))
 }
 
 fn is_undefined_dict_value(value: &Value) -> bool {
@@ -463,6 +466,24 @@ mod tests {
     use crate::core::{Dict, Expr, Term, Value};
 
     use super::*;
+
+    fn builtin2_expr(builtin: Builtin, left: Expr, right: Expr) -> Expr {
+        Expr::Apply(
+            Arc::new(Expr::Apply(
+                Arc::new(Expr::Value(Value::Builtin(builtin))),
+                Arc::new(left),
+            )),
+            Arc::new(right),
+        )
+    }
+
+    fn singleton_expr(key: Value, value: Expr) -> Expr {
+        builtin2_expr(Builtin::Singleton, Expr::Value(key), value)
+    }
+
+    fn dict_union_expr(left: Expr, right: Expr) -> Expr {
+        builtin2_expr(Builtin::DictUnion, left, right)
+    }
 
     #[test]
     fn evaluates_dictionary_terms_to_values() {
@@ -744,13 +765,12 @@ mod tests {
 
     #[test]
     fn singleton_dict_filters_empty_dictionary_values() {
-        let value = eval_term(&Term::Expr(Expr::SingletonDict {
-            key: KeyExpr::Key(Key::atom_from_text("gone")),
-            value: Arc::new(Expr::DictUnion {
-                items: Arc::from([]),
-                key_context: None,
-            }),
-        }))
+        let value = eval_term(&Term::Expr(singleton_expr(
+            Value::Atom(crate::core::Atom::from_key(
+                &crate::core::Key::binary_from_text("gone"),
+            )),
+            Expr::Value(Value::Dict(crate::core::Dict::new_sync())),
+        )))
         .expect("singleton dict should evaluate");
 
         assert_eq!(value, Value::Dict(crate::core::Dict::new_sync()));
@@ -762,34 +782,36 @@ mod tests {
         let hello = Key::atom_from_text("hello");
         let world = Key::atom_from_text("world");
 
-        let expr = Term::Expr(Expr::DictUnion {
-            items: Arc::from([
-                Arc::new(Expr::Value(Value::Dict(
-                    crate::core::Dict::new_sync().insert(
-                        key.clone(),
-                        Value::Dict(
-                            crate::core::Dict::new_sync()
-                                .insert(hello.clone(), Value::binary_from_text("Hello")),
-                        ),
+        let expr = Term::Expr(dict_union_expr(
+            Expr::Value(Value::Dict(
+                crate::core::Dict::new_sync().insert(
+                    key.clone(),
+                    Value::Dict(
+                        crate::core::Dict::new_sync()
+                            .insert(hello.clone(), Value::binary_from_text("Hello")),
                     ),
-                ))),
-                Arc::new(Expr::Value(Value::Dict(
-                    crate::core::Dict::new_sync().insert(
-                        key.clone(),
-                        Value::Dict(
-                            crate::core::Dict::new_sync()
-                                .insert(world.clone(), Value::binary_from_text("World")),
-                        ),
+                ),
+            )),
+            Expr::Value(Value::Dict(
+                crate::core::Dict::new_sync().insert(
+                    key.clone(),
+                    Value::Dict(
+                        crate::core::Dict::new_sync()
+                            .insert(world.clone(), Value::binary_from_text("World")),
                     ),
-                ))),
-            ]),
-            key_context: None,
-        });
+                ),
+            )),
+        ));
 
         let value = eval_term(&expr).expect("dict union should evaluate");
         let greeting = value.get_key_path(&[key]).expect("greeting should exist");
+        let Value::Expr(greeting) = greeting else {
+            panic!("greeting should stay lazy until demanded");
+        };
+        let greeting = eval_value(&Value::Expr(greeting.clone()), None)
+            .expect("nested dict union should evaluate when demanded");
         let Value::Dict(greeting) = greeting else {
-            panic!("greeting should be a merged dictionary");
+            panic!("greeting should evaluate to a merged dictionary");
         };
 
         assert_eq!(
@@ -805,22 +827,20 @@ mod tests {
     #[test]
     fn dictionary_unions_treat_empty_dictionary_values_as_undefined() {
         let key = Key::atom_from_text("greeting");
-        let expr = Term::Expr(Expr::DictUnion {
-            items: Arc::from([
-                Arc::new(Expr::SingletonDict {
-                    key: KeyExpr::Key(key.clone()),
-                    value: Arc::new(Expr::Value(Value::binary_from_text("Hello"))),
-                }),
-                Arc::new(Expr::SingletonDict {
-                    key: KeyExpr::Key(key.clone()),
-                    value: Arc::new(Expr::DictUnion {
-                        items: Arc::from([]),
-                        key_context: None,
-                    }),
-                }),
-            ]),
-            key_context: None,
-        });
+        let expr = Term::Expr(dict_union_expr(
+            singleton_expr(
+                Value::Atom(crate::core::Atom::from_key(
+                    &crate::core::Key::binary_from_text("greeting"),
+                )),
+                Expr::Value(Value::binary_from_text("Hello")),
+            ),
+            singleton_expr(
+                Value::Atom(crate::core::Atom::from_key(
+                    &crate::core::Key::binary_from_text("greeting"),
+                )),
+                Expr::Value(Value::Dict(crate::core::Dict::new_sync())),
+            ),
+        ));
 
         let value = eval_term(&expr).expect("dict union should evaluate");
         assert_eq!(
@@ -832,19 +852,14 @@ mod tests {
     #[test]
     fn dictionary_unions_defer_ambiguous_keys_until_observed() {
         let key = Key::atom_from_text("greeting");
-        let expr = Term::Expr(Expr::DictUnion {
-            items: Arc::from([
-                Arc::new(Expr::Value(Value::Dict(
-                    crate::core::Dict::new_sync()
-                        .insert(key.clone(), Value::binary_from_text("Hello")),
-                ))),
-                Arc::new(Expr::Value(Value::Dict(
-                    crate::core::Dict::new_sync()
-                        .insert(key.clone(), Value::binary_from_text("World")),
-                ))),
-            ]),
-            key_context: None,
-        });
+        let expr = Term::Expr(dict_union_expr(
+            Expr::Value(Value::Dict(
+                crate::core::Dict::new_sync().insert(key.clone(), Value::binary_from_text("Hello")),
+            )),
+            Expr::Value(Value::Dict(
+                crate::core::Dict::new_sync().insert(key.clone(), Value::binary_from_text("World")),
+            )),
+        ));
 
         let value = eval_term(&expr).expect("outer dict union should stay evaluable");
         let ambiguous = value
@@ -870,13 +885,13 @@ mod tests {
 
         let root = crate::core::Dict::new_sync().insert(
             d.clone(),
-            Value::Expr(Arc::new(Expr::DictUnion {
-                items: Arc::from([Arc::new(Expr::Value(Value::Dict(
+            Value::Expr(Arc::new(dict_union_expr(
+                Expr::Value(Value::Dict(
                     crate::core::Dict::new_sync()
                         .insert(hello.clone(), Value::binary_from_text("Hello")),
-                )))]),
-                key_context: None,
-            })),
+                )),
+                Expr::Value(Value::Dict(crate::core::Dict::new_sync())),
+            ))),
         );
 
         let value =
