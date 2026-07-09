@@ -1,1 +1,1 @@
-error|3|asm.result|unsupported
+error|3|found 'w'|expected '+'|'*'|'/'|'-'

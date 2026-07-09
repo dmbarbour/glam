@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::core::{Atom, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Term, Value};
 use crate::diagnostic::Severity;
+use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFile {
@@ -85,12 +86,16 @@ pub enum DefinitionKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyntaxExpr {
-    Number(i64),
+    Number(Number),
     Text(String),
     Name(Vec<SyntaxKeyExpr>),
     SingletonDict(SyntaxKeyExpr, Box<SyntaxExpr>),
     DictUnion(Vec<SyntaxExpr>),
     List(Vec<SyntaxExpr>),
+    Multiply(Box<SyntaxExpr>, Box<SyntaxExpr>),
+    Divide(Box<SyntaxExpr>, Box<SyntaxExpr>),
+    Add(Box<SyntaxExpr>, Box<SyntaxExpr>),
+    Subtract(Box<SyntaxExpr>, Box<SyntaxExpr>),
     Append(Box<SyntaxExpr>, Box<SyntaxExpr>),
 }
 
@@ -222,13 +227,6 @@ fn lower_definition(
     atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<(), Diagnostic> {
     let Some(expr) = &definition.expr else {
-        if definition.target == "asm.result" {
-            return Err(Diagnostic::error(
-                line,
-                "`asm.result` uses an expression unsupported by the .g front end",
-            ));
-        }
-
         return Ok(());
     };
 
@@ -252,12 +250,16 @@ fn syntax_expr_to_value(
     atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<Value, Diagnostic> {
     match expr {
-        SyntaxExpr::Number(number) => Ok(Value::Number(*number)),
+        SyntaxExpr::Number(number) => Ok(Value::Number(number.clone())),
         SyntaxExpr::Text(text) => Ok(Value::binary_from_text(text)),
         SyntaxExpr::Name(_)
         | SyntaxExpr::SingletonDict(_, _)
         | SyntaxExpr::DictUnion(_)
         | SyntaxExpr::List(_)
+        | SyntaxExpr::Multiply(_, _)
+        | SyntaxExpr::Divide(_, _)
+        | SyntaxExpr::Add(_, _)
+        | SyntaxExpr::Subtract(_, _)
         | SyntaxExpr::Append(_, _) => Ok(Value::Expr(Arc::new(syntax_expr_to_core_expr(
             expr, line, atoms,
         )?))),
@@ -270,7 +272,7 @@ fn syntax_expr_to_core_expr(
     atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<CoreExpr, Diagnostic> {
     Ok(match expr {
-        SyntaxExpr::Number(number) => CoreExpr::Value(Value::Number(*number)),
+        SyntaxExpr::Number(number) => CoreExpr::Value(Value::Number(number.clone())),
         SyntaxExpr::Text(text) => CoreExpr::Value(Value::binary_from_text(text)),
         SyntaxExpr::SingletonDict(key, value) => builtin_apply2(
             crate::core::Builtin::Singleton,
@@ -290,16 +292,36 @@ fn syntax_expr_to_core_expr(
                 .map(|expr| syntax_expr_to_core_expr(expr, line, atoms).map(Arc::new))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
-        SyntaxExpr::Append(left, right) => CoreExpr::Apply(
-            Arc::new(CoreExpr::Apply(
-                Arc::new(CoreExpr::Value(Value::Builtin(
-                    crate::core::Builtin::Append,
-                ))),
-                Arc::new(syntax_expr_to_core_expr(left, line, atoms)?),
-            )),
-            Arc::new(syntax_expr_to_core_expr(right, line, atoms)?),
-        ),
+        SyntaxExpr::Multiply(left, right) => {
+            lower_builtin_expr(crate::core::Builtin::Multiply, left, right, line, atoms)?
+        }
+        SyntaxExpr::Divide(left, right) => {
+            lower_builtin_expr(crate::core::Builtin::Divide, left, right, line, atoms)?
+        }
+        SyntaxExpr::Add(left, right) => {
+            lower_builtin_expr(crate::core::Builtin::Add, left, right, line, atoms)?
+        }
+        SyntaxExpr::Subtract(left, right) => {
+            lower_builtin_expr(crate::core::Builtin::Subtract, left, right, line, atoms)?
+        }
+        SyntaxExpr::Append(left, right) => {
+            lower_builtin_expr(crate::core::Builtin::Append, left, right, line, atoms)?
+        }
     })
+}
+
+fn lower_builtin_expr(
+    builtin: crate::core::Builtin,
+    left: &SyntaxExpr,
+    right: &SyntaxExpr,
+    line: usize,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Result<CoreExpr, Diagnostic> {
+    Ok(builtin_apply2(
+        builtin,
+        syntax_expr_to_core_expr(left, line, atoms)?,
+        syntax_expr_to_core_expr(right, line, atoms)?,
+    ))
 }
 
 fn syntax_key_expr_to_core_expr(
@@ -514,7 +536,12 @@ fn classify_declaration(
     }
 
     if let Some(declaration) = declaration {
-        declaration
+        match declaration {
+            DeclarationKind::Definition(definition) => {
+                DeclarationKind::Definition(finalize_definition_expr(definition, line, diagnostics))
+            }
+            other => other,
+        }
     } else {
         DeclarationKind::Unknown
     }
@@ -599,12 +626,11 @@ fn definition_decl<'src>()
             if body.is_empty() {
                 Err(Rich::custom(span, "definition body cannot be empty"))
             } else {
-                let expr = parse_expr(body.as_str());
                 Ok(DefinitionDecl {
                     target,
                     kind,
                     body,
-                    expr,
+                    expr: None,
                 })
             }
         })
@@ -647,23 +673,157 @@ fn rest_of_declaration<'src>() -> impl Parser<'src, &'src str, String, extra::Er
         .map(|text: &str| text.trim().to_owned())
 }
 
-fn parse_expr(text: &str) -> Option<SyntaxExpr> {
+fn parse_expr_result(text: &str) -> Result<SyntaxExpr, String> {
     syntax_expr_parser()
         .then_ignore(end())
         .parse(text)
         .into_result()
-        .ok()
+        .map_err(|errors| {
+            errors
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+}
+
+#[cfg(test)]
+fn parse_expr(text: &str) -> Option<SyntaxExpr> {
+    parse_expr_result(text).ok()
+}
+
+fn finalize_definition_expr(
+    mut definition: DefinitionDecl,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> DefinitionDecl {
+    match parse_expr_result(definition.body.as_str()) {
+        Ok(expr) => definition.expr = Some(expr),
+        Err(message) => diagnostics.push(Diagnostic::error(line, message)),
+    }
+    definition
 }
 
 fn syntax_expr_parser<'src>()
 -> impl Parser<'src, &'src str, SyntaxExpr, extra::Err<Rich<'src, char>>> {
+    #[allow(dead_code)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Associativity {
+        Left,
+        Right,
+        None,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum OperatorRelation {
+        Stronger,
+        Weaker,
+        Same(Associativity),
+        Unrelated,
+    }
+
     #[derive(Debug)]
     enum PathSuffix {
         Single(SyntaxKeyExpr),
         Expand(Vec<SyntaxKeyExpr>),
     }
 
-    recursive(|expr| {
+    fn resolve_infix_chain(
+        first: SyntaxExpr,
+        rest: Vec<(crate::core::Builtin, SyntaxExpr)>,
+    ) -> Result<SyntaxExpr, String> {
+        let mut exprs = vec![first];
+        let mut ops = Vec::new();
+
+        for (next_op, next_expr) in rest {
+            while let Some(previous_op) = ops.last().copied() {
+                match infix_operator_relation(previous_op, next_op) {
+                    OperatorRelation::Stronger | OperatorRelation::Same(Associativity::Left) => {
+                        reduce_top_operator(&mut exprs, &mut ops)?
+                    }
+                    OperatorRelation::Weaker | OperatorRelation::Same(Associativity::Right) => {
+                        break;
+                    }
+                    OperatorRelation::Same(Associativity::None) => {
+                        return Err(format!(
+                            "operator `{}` is non-associative; parenthesize this chain",
+                            infix_operator_symbol(next_op)
+                        ));
+                    }
+                    OperatorRelation::Unrelated => {
+                        return Err(format!(
+                            "operators `{}` and `{}` have no precedence relationship; parenthesize to disambiguate",
+                            infix_operator_symbol(previous_op),
+                            infix_operator_symbol(next_op)
+                        ));
+                    }
+                }
+            }
+
+            ops.push(next_op);
+            exprs.push(next_expr);
+        }
+
+        while !ops.is_empty() {
+            reduce_top_operator(&mut exprs, &mut ops)?;
+        }
+
+        exprs
+            .pop()
+            .ok_or_else(|| "operator chain did not produce an expression".to_owned())
+    }
+
+    fn reduce_top_operator(
+        exprs: &mut Vec<SyntaxExpr>,
+        ops: &mut Vec<crate::core::Builtin>,
+    ) -> Result<(), String> {
+        let right = exprs
+            .pop()
+            .ok_or_else(|| "missing right operand in operator chain".to_owned())?;
+        let left = exprs
+            .pop()
+            .ok_or_else(|| "missing left operand in operator chain".to_owned())?;
+        let op = ops
+            .pop()
+            .ok_or_else(|| "missing operator in operator chain".to_owned())?;
+        exprs.push(syntax_binary_expr(op, left, right));
+        Ok(())
+    }
+
+    fn infix_operator_relation(
+        left: crate::core::Builtin,
+        right: crate::core::Builtin,
+    ) -> OperatorRelation {
+        use crate::core::Builtin::{Add, Append, Divide, Multiply, Subtract};
+
+        match (left, right) {
+            (Append, Append) => OperatorRelation::Same(Associativity::Left),
+            (Append, Add | Subtract | Multiply | Divide) => OperatorRelation::Weaker,
+            (Add | Subtract | Multiply | Divide, Append) => OperatorRelation::Stronger,
+            (Add | Subtract, Add | Subtract) => OperatorRelation::Same(Associativity::Left),
+            (Add | Subtract, Multiply | Divide) => OperatorRelation::Weaker,
+            (Multiply | Divide, Add | Subtract) => OperatorRelation::Stronger,
+            (Multiply, Multiply) => OperatorRelation::Same(Associativity::Left),
+            (Multiply, Divide) => OperatorRelation::Same(Associativity::Left),
+            (Divide, Multiply) => OperatorRelation::Same(Associativity::Left),
+            (Divide, Divide) => OperatorRelation::Same(Associativity::None),
+            _ => OperatorRelation::Unrelated,
+        }
+    }
+
+    fn infix_operator_symbol(builtin: crate::core::Builtin) -> &'static str {
+        match builtin {
+            crate::core::Builtin::Append => "++",
+            crate::core::Builtin::Add => "+",
+            crate::core::Builtin::Subtract => "-",
+            crate::core::Builtin::Multiply => "*",
+            crate::core::Builtin::Divide => "/",
+            crate::core::Builtin::Singleton => ":",
+            crate::core::Builtin::DictUnion => "{,}",
+        }
+    }
+
+    let parser = recursive(|expr| {
         let single_key_expr = || {
             choice((
                 just('\'').ignore_then(glam_name()).map(SyntaxKeyExpr::Atom),
@@ -710,13 +870,16 @@ fn syntax_expr_parser<'src>()
                 SyntaxExpr::Name(parts)
             });
 
-        let number = text::digits(10).to_slice().try_map(|digits: &str, span| {
-            digits
-                .parse::<i64>()
-                .map(SyntaxExpr::Number)
-                .map_err(|err| {
-                    Rich::custom(span, format!("invalid integer literal `{digits}`: {err}"))
-                })
+        let number_literal = choice((
+            just('_').then(one_of("0123456789")).ignored(),
+            one_of("0123456789").ignored(),
+        ))
+        .then(one_of("0123456789_.xXbBeEaAcCdDfF").repeated().to_slice())
+        .to_slice();
+        let number = number_literal.try_map(|text: &str, span| {
+            Number::parse(text).map(SyntaxExpr::Number).map_err(|err| {
+                Rich::custom(span, format!("invalid number literal `{text}`: {err}"))
+            })
         });
         let text = quoted_text().map(SyntaxExpr::Text);
 
@@ -752,22 +915,48 @@ fn syntax_expr_parser<'src>()
             .delimited_by(just('{'), just('}'))
             .map(SyntaxExpr::DictUnion);
 
-        let atom = choice((text, list, dict, number, name_expr)).boxed();
+        let parenthesized = expr.clone().padded().delimited_by(just('('), just(')'));
+
+        let atom = choice((text, list, dict, number, name_expr, parenthesized)).boxed();
+        let infix_operator = choice((
+            just("++").to(crate::core::Builtin::Append),
+            just('*').to(crate::core::Builtin::Multiply),
+            just('/').to(crate::core::Builtin::Divide),
+            just('+')
+                .then_ignore(just('+').not())
+                .to(crate::core::Builtin::Add),
+            just('-').to(crate::core::Builtin::Subtract),
+        ));
 
         atom.clone()
             .then(
-                just("++")
+                infix_operator
                     .padded()
-                    .ignore_then(atom)
+                    .then(atom)
                     .repeated()
                     .collect::<Vec<_>>(),
             )
-            .map(|(first, rest)| {
-                rest.into_iter().fold(first, |left, right| {
-                    SyntaxExpr::Append(Box::new(left), Box::new(right))
-                })
+            .try_map(|(first, rest), span| {
+                resolve_infix_chain(first, rest).map_err(|message| Rich::custom(span, message))
             })
-    })
+    });
+
+    parser
+}
+
+fn syntax_binary_expr(
+    builtin: crate::core::Builtin,
+    left: SyntaxExpr,
+    right: SyntaxExpr,
+) -> SyntaxExpr {
+    match builtin {
+        crate::core::Builtin::Append => SyntaxExpr::Append(Box::new(left), Box::new(right)),
+        crate::core::Builtin::Add => SyntaxExpr::Add(Box::new(left), Box::new(right)),
+        crate::core::Builtin::Subtract => SyntaxExpr::Subtract(Box::new(left), Box::new(right)),
+        crate::core::Builtin::Multiply => SyntaxExpr::Multiply(Box::new(left), Box::new(right)),
+        crate::core::Builtin::Divide => SyntaxExpr::Divide(Box::new(left), Box::new(right)),
+        other => panic!("unexpected infix builtin in syntax parser: {other:?}"),
+    }
 }
 
 fn glam_name<'src>() -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
@@ -897,6 +1086,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::core::{Builtin, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value};
+    use crate::number::Number;
 
     fn core_append(left: CoreExpr, right: CoreExpr) -> CoreExpr {
         core_builtin2(Builtin::Append, left, right)
@@ -927,6 +1117,10 @@ mod tests {
         SourceFile::new("test.g", text).parse()
     }
 
+    fn n(value: i64) -> Number {
+        value.into()
+    }
+
     #[test]
     fn parses_language_declaration_with_extensions() {
         let parsed = parse("language g0 with utf8, demo\nanswer = 42\n");
@@ -953,7 +1147,7 @@ mod tests {
                 target: "qux".to_owned(),
                 kind: DefinitionKind::Override,
                 body: "1".to_owned(),
-                expr: Some(SyntaxExpr::Number(1)),
+                expr: Some(SyntaxExpr::Number(n(1))),
             })
         );
     }
@@ -1000,7 +1194,7 @@ mod tests {
                 target: "foo".to_owned(),
                 kind: DefinitionKind::Introduce,
                 body: "1".to_owned(),
-                expr: Some(SyntaxExpr::Number(1)),
+                expr: None,
             })
         );
         assert_eq!(
@@ -1009,7 +1203,7 @@ mod tests {
                 target: "foo".to_owned(),
                 kind: DefinitionKind::Override,
                 body: "1".to_owned(),
-                expr: Some(SyntaxExpr::Number(1)),
+                expr: None,
             })
         );
         assert_eq!(
@@ -1018,7 +1212,7 @@ mod tests {
                 target: "foo".to_owned(),
                 kind: DefinitionKind::Update,
                 body: "f".to_owned(),
-                expr: Some(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("f".to_owned())])),
+                expr: None,
             })
         );
     }
@@ -1040,8 +1234,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_integer_literals() {
-        let parsed = parse("language g0\nanswer = 42\n");
+    fn parses_number_literals() {
+        let parsed = parse(
+            "language g0\nanswer = 42\nneg = _42\nhex = 0xc0de\nbits = 0b1011_1010\nscaled = 1.234e_7\nexact = 1/6\n",
+        );
 
         assert_eq!(parsed.diagnostics, []);
         assert_eq!(
@@ -1050,7 +1246,55 @@ mod tests {
                 target: "answer".to_owned(),
                 kind: DefinitionKind::Introduce,
                 body: "42".to_owned(),
-                expr: Some(SyntaxExpr::Number(42)),
+                expr: Some(SyntaxExpr::Number(n(42))),
+            })
+        );
+        assert_eq!(
+            parsed.declarations[2].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "neg".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "_42".to_owned(),
+                expr: Some(SyntaxExpr::Number(Number::parse("_42").unwrap())),
+            })
+        );
+        assert_eq!(
+            parsed.declarations[3].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "hex".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "0xc0de".to_owned(),
+                expr: Some(SyntaxExpr::Number(Number::parse("0xc0de").unwrap())),
+            })
+        );
+        assert_eq!(
+            parsed.declarations[4].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "bits".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "0b1011_1010".to_owned(),
+                expr: Some(SyntaxExpr::Number(Number::parse("0b1011_1010").unwrap())),
+            })
+        );
+        assert_eq!(
+            parsed.declarations[5].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "scaled".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "1.234e_7".to_owned(),
+                expr: Some(SyntaxExpr::Number(Number::parse("1.234e_7").unwrap())),
+            })
+        );
+        assert_eq!(
+            parsed.declarations[6].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "exact".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "1/6".to_owned(),
+                expr: Some(SyntaxExpr::Divide(
+                    Box::new(SyntaxExpr::Number(n(1))),
+                    Box::new(SyntaxExpr::Number(n(6))),
+                )),
             })
         );
     }
@@ -1068,13 +1312,41 @@ mod tests {
                 body: "[1, 2] ++ [3, 4]".to_owned(),
                 expr: Some(SyntaxExpr::Append(
                     Box::new(SyntaxExpr::List(vec![
-                        SyntaxExpr::Number(1),
-                        SyntaxExpr::Number(2),
+                        SyntaxExpr::Number(n(1)),
+                        SyntaxExpr::Number(n(2)),
                     ])),
                     Box::new(SyntaxExpr::List(vec![
-                        SyntaxExpr::Number(3),
-                        SyntaxExpr::Number(4),
+                        SyntaxExpr::Number(n(3)),
+                        SyntaxExpr::Number(n(4)),
                     ])),
+                )),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_arithmetic_with_precedence() {
+        let parsed = parse("language g0\nanswer = 1 + 2 * 3 - 4 / 5\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "answer".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "1 + 2 * 3 - 4 / 5".to_owned(),
+                expr: Some(SyntaxExpr::Subtract(
+                    Box::new(SyntaxExpr::Add(
+                        Box::new(SyntaxExpr::Number(n(1))),
+                        Box::new(SyntaxExpr::Multiply(
+                            Box::new(SyntaxExpr::Number(n(2))),
+                            Box::new(SyntaxExpr::Number(n(3))),
+                        )),
+                    )),
+                    Box::new(SyntaxExpr::Divide(
+                        Box::new(SyntaxExpr::Number(n(4))),
+                        Box::new(SyntaxExpr::Number(n(5))),
+                    )),
                 )),
             })
         );
@@ -1171,8 +1443,8 @@ mod tests {
                 kind: DefinitionKind::Introduce,
                 body: "[\n, 1\n, 2\n]".to_owned(),
                 expr: Some(SyntaxExpr::List(vec![
-                    SyntaxExpr::Number(1),
-                    SyntaxExpr::Number(2),
+                    SyntaxExpr::Number(n(1)),
+                    SyntaxExpr::Number(n(2)),
                 ])),
             })
         );
@@ -1209,7 +1481,7 @@ mod tests {
                 kind: DefinitionKind::Introduce,
                 body: "{ [42]:\"World\" }".to_owned(),
                 expr: Some(SyntaxExpr::DictUnion(vec![SyntaxExpr::SingletonDict(
-                    SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(42))),
+                    SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(n(42)))),
                     Box::new(SyntaxExpr::Text("World".to_owned())),
                 )])),
             })
@@ -1223,7 +1495,7 @@ mod tests {
                 expr: Some(SyntaxExpr::Append(
                     Box::new(SyntaxExpr::Name(vec![
                         SyntaxKeyExpr::Atom("d".to_owned()),
-                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(42))),
+                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(n(42)))),
                     ])),
                     Box::new(SyntaxExpr::Name(vec![
                         SyntaxKeyExpr::Atom("d".to_owned()),
@@ -1248,18 +1520,18 @@ mod tests {
                 expr: Some(SyntaxExpr::Append(
                     Box::new(SyntaxExpr::Name(vec![
                         SyntaxKeyExpr::Atom("foo".to_owned()),
-                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(1))),
-                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(2))),
-                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(3))),
+                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(n(1)))),
+                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(n(2)))),
+                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(n(3)))),
                     ])),
                     Box::new(SyntaxExpr::Name(vec![
                         SyntaxKeyExpr::Atom("foo".to_owned()),
                         SyntaxKeyExpr::ListExpr(Box::new(SyntaxExpr::Append(
                             Box::new(SyntaxExpr::List(vec![
-                                SyntaxExpr::Number(1),
-                                SyntaxExpr::Number(2),
+                                SyntaxExpr::Number(n(1)),
+                                SyntaxExpr::Number(n(2)),
                             ])),
-                            Box::new(SyntaxExpr::List(vec![SyntaxExpr::Number(3)])),
+                            Box::new(SyntaxExpr::List(vec![SyntaxExpr::Number(n(3))])),
                         ))),
                     ])),
                 )),
@@ -1311,6 +1583,63 @@ mod tests {
     }
 
     #[test]
+    fn reports_ambiguous_slash_chains_as_parse_errors() {
+        let parsed = parse("language g0\nasm.result = 3/4/5\n");
+
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|diag| diag.line == 2 && diag.message.contains("non-associative"))
+        );
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "asm.result".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "3/4/5".to_owned(),
+                expr: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parentheses_disambiguate_division_chains() {
+        assert_eq!(parse_expr("3/4/5"), None);
+        assert_eq!(parse_expr("3/4 / 5"), None);
+        assert_eq!(
+            parse_expr("(3/4) / 5"),
+            Some(SyntaxExpr::Divide(
+                Box::new(SyntaxExpr::Divide(
+                    Box::new(SyntaxExpr::Number(n(3))),
+                    Box::new(SyntaxExpr::Number(n(4))),
+                )),
+                Box::new(SyntaxExpr::Number(n(5))),
+            ))
+        );
+        assert_eq!(
+            parse_expr("3 / (4/5)"),
+            Some(SyntaxExpr::Divide(
+                Box::new(SyntaxExpr::Number(n(3))),
+                Box::new(SyntaxExpr::Divide(
+                    Box::new(SyntaxExpr::Number(n(4))),
+                    Box::new(SyntaxExpr::Number(n(5))),
+                )),
+            ))
+        );
+        assert_eq!(
+            parse_expr("2 * 3 / 4"),
+            Some(SyntaxExpr::Divide(
+                Box::new(SyntaxExpr::Multiply(
+                    Box::new(SyntaxExpr::Number(n(2))),
+                    Box::new(SyntaxExpr::Number(n(3))),
+                )),
+                Box::new(SyntaxExpr::Number(n(4))),
+            ))
+        );
+    }
+
+    #[test]
     fn lowers_list_expressions_to_core_terms() {
         let parsed = parse("language g0\nasm.result = [72, 101] ++ [108, 108, 111]\n");
         let lowered = lower_to_core(&parsed);
@@ -1326,13 +1655,13 @@ mod tests {
             }),
             Some(&Value::Expr(Arc::new(core_append(
                 CoreExpr::List(Arc::from([
-                    Arc::new(CoreExpr::Value(Value::Number(72))),
-                    Arc::new(CoreExpr::Value(Value::Number(101))),
+                    Arc::new(CoreExpr::Value(Value::Number(72.into()))),
+                    Arc::new(CoreExpr::Value(Value::Number(101.into()))),
                 ])),
                 CoreExpr::List(Arc::from([
-                    Arc::new(CoreExpr::Value(Value::Number(108))),
-                    Arc::new(CoreExpr::Value(Value::Number(108))),
-                    Arc::new(CoreExpr::Value(Value::Number(111))),
+                    Arc::new(CoreExpr::Value(Value::Number(108.into()))),
+                    Arc::new(CoreExpr::Value(Value::Number(108.into()))),
+                    Arc::new(CoreExpr::Value(Value::Number(111.into()))),
                 ])),
             ))))
         );

@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::core::{Builtin, Expr, Key, KeyExpr, List, Term, Value};
+use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalError {
@@ -56,7 +57,7 @@ fn eval_expr(expr: &Expr, root_env: Option<&Value>) -> Result<Value, EvalError> 
 pub fn eval_value(value: &Value, root_env: Option<&Value>) -> Result<Value, EvalError> {
     match value {
         Value::Atom(atom) => Ok(Value::Atom(*atom)),
-        Value::Number(number) => Ok(Value::Number(*number)),
+        Value::Number(number) => Ok(Value::Number(number.clone())),
         Value::Binary(bytes) => Ok(Value::Binary(bytes.clone())),
         Value::List(list) => Ok(Value::List(list.clone())),
         Value::Dict(dict) => Ok(Value::Dict(dict.clone())),
@@ -107,7 +108,7 @@ fn format_name_key_expr(key: &KeyExpr) -> String {
 fn value_to_key(value: &Value, root_env: Option<&Value>) -> Result<Key, EvalError> {
     match value {
         Value::Atom(atom) => Ok(Key::Atom(*atom)),
-        Value::Number(number) => Ok(Key::Number(*number)),
+        Value::Number(number) => Ok(Key::Number(number.clone())),
         Value::Binary(bytes) => Ok(Key::Binary(bytes.clone())),
         Value::List(list) => Ok(Key::List(list_to_key_items(list, root_env)?)),
         Value::Dict(dict) => Ok(Key::Dict(Arc::from(
@@ -243,6 +244,30 @@ fn apply_builtin(
             })?;
             append_values(eval_value(&left, root_env)?, eval_value(&right, root_env)?)
         }
+        Builtin::Add => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("add builtin received the wrong number of arguments")
+            })?;
+            eval_numeric_builtin("add", &left, &right, root_env, Number::add)
+        }
+        Builtin::Subtract => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("subtract builtin received the wrong number of arguments")
+            })?;
+            eval_numeric_builtin("subtract", &left, &right, root_env, Number::sub)
+        }
+        Builtin::Multiply => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("multiply builtin received the wrong number of arguments")
+            })?;
+            eval_numeric_builtin("multiply", &left, &right, root_env, Number::mul)
+        }
+        Builtin::Divide => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("divide builtin received the wrong number of arguments")
+            })?;
+            eval_numeric_divide_builtin(&left, &right, root_env)
+        }
         Builtin::Singleton => {
             let [key, value] = <[Value; 2]>::try_from(args).map_err(|_| {
                 EvalError::new("singleton builtin received the wrong number of arguments")
@@ -256,6 +281,45 @@ fn apply_builtin(
             eval_dict_union_builtin(&left, &right, root_env)
         }
     }
+}
+
+fn eval_numeric_builtin(
+    name: &str,
+    left: &Value,
+    right: &Value,
+    root_env: Option<&Value>,
+    op: impl Fn(&Number, &Number) -> Number,
+) -> Result<Value, EvalError> {
+    let left = eval_number(left, root_env, name)?;
+    let right = eval_number(right, root_env, name)?;
+    Ok(Value::Number(op(&left, &right)))
+}
+
+fn eval_numeric_divide_builtin(
+    left: &Value,
+    right: &Value,
+    root_env: Option<&Value>,
+) -> Result<Value, EvalError> {
+    let left = eval_number(left, root_env, "divide")?;
+    let right = eval_number(right, root_env, "divide")?;
+    let Some(result) = left.checked_div(&right) else {
+        return Err(EvalError::new("divide builtin cannot divide by zero"));
+    };
+    Ok(Value::Number(result))
+}
+
+fn eval_number(
+    value: &Value,
+    root_env: Option<&Value>,
+    builtin_name: &str,
+) -> Result<Number, EvalError> {
+    let value = eval_value(value, root_env)?;
+    let Value::Number(number) = value else {
+        return Err(EvalError::new(format!(
+            "{builtin_name} builtin requires number values"
+        )));
+    };
+    Ok(number)
 }
 
 fn partial_builtin_value(builtin: Builtin, args: &[Value]) -> Value {
@@ -403,7 +467,7 @@ fn eval_key_path_list(value: &Value, root_env: Option<&Value>) -> Result<Vec<Key
         &mut |bytes| {
             items
                 .borrow_mut()
-                .extend(bytes.iter().map(|byte| Key::Number(i64::from(*byte))));
+                .extend(bytes.iter().map(|byte| Key::Number(Number::from_u8(*byte))));
             Ok::<_, EvalError>(())
         },
         &mut |values| {
@@ -422,7 +486,7 @@ fn list_to_key_items(list: &List, root_env: Option<&Value>) -> Result<Arc<[Key]>
         &mut |bytes| {
             items
                 .borrow_mut()
-                .extend(bytes.iter().map(|byte| Key::Number(i64::from(*byte))));
+                .extend(bytes.iter().map(|byte| Key::Number(Number::from_u8(*byte))));
             Ok::<_, EvalError>(())
         },
         &mut |values| {
@@ -464,8 +528,17 @@ mod tests {
     use std::sync::Arc;
 
     use crate::core::{Dict, Expr, Term, Value};
+    use crate::number::Number;
 
     use super::*;
+
+    fn n(value: i64) -> Value {
+        Value::Number(value.into())
+    }
+
+    fn k(value: i64) -> Key {
+        Key::Number(value.into())
+    }
 
     fn builtin2_expr(builtin: Builtin, left: Expr, right: Expr) -> Expr {
         Expr::Apply(
@@ -522,13 +595,11 @@ mod tests {
             Arc::new(Expr::Apply(
                 Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
                 Arc::new(Expr::Value(Value::List(List::from_values(vec![
-                    Value::Number(1),
-                    Value::Number(2),
+                    n(1),
+                    n(2),
                 ])))),
             )),
-            Arc::new(Expr::Value(Value::List(List::from_values(vec![
-                Value::Number(3),
-            ])))),
+            Arc::new(Expr::Value(Value::List(List::from_values(vec![n(3)])))),
         ));
 
         let value = eval_term(&expr).expect("append should evaluate");
@@ -542,23 +613,18 @@ mod tests {
             Ok(())
         })
         .expect("should walk list");
-        assert_eq!(
-            values,
-            vec![Value::Number(1), Value::Number(2), Value::Number(3)]
-        );
+        assert_eq!(values, vec![n(1), n(2), n(3)]);
     }
 
     #[test]
     fn evaluates_mixed_list_segments() {
         let expr = Term::Expr(Expr::List(Arc::from([
-            Arc::new(Expr::Value(Value::Number(1))),
+            Arc::new(Expr::Value(n(1))),
             Arc::new(Expr::Value(Value::binary_from_text("Hi"))),
             Arc::new(Expr::Apply(
                 Arc::new(Expr::Apply(
                     Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
-                    Arc::new(Expr::Value(Value::List(List::from_values(vec![
-                        Value::Number(2),
-                    ])))),
+                    Arc::new(Expr::Value(Value::List(List::from_values(vec![n(2)])))),
                 )),
                 Arc::new(Expr::Value(Value::binary_from_text("!"))),
             )),
@@ -583,10 +649,7 @@ mod tests {
         )
         .expect("should walk list");
 
-        assert_eq!(
-            saw_values,
-            vec![vec![Value::Number(1)], vec![Value::Number(2)]]
-        );
+        assert_eq!(saw_values, vec![vec![n(1)], vec![n(2)]]);
         assert_eq!(saw_bytes, vec![b"Hi".to_vec(), b"!".to_vec()]);
     }
 
@@ -596,8 +659,8 @@ mod tests {
             Arc::new(Expr::Apply(
                 Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
                 Arc::new(Expr::Value(Value::List(List::from_values(vec![
-                    Value::Number(72),
-                    Value::Number(105),
+                    n(72),
+                    n(105),
                 ])))),
             )),
             Arc::new(Expr::Value(Value::binary_from_text("!"))),
@@ -606,6 +669,36 @@ mod tests {
         let value = eval_term(&expr).expect("append should evaluate");
 
         assert!(matches!(value, Value::List(_)));
+    }
+
+    #[test]
+    fn evaluates_arithmetic_builtins() {
+        let expr = Term::Expr(builtin2_expr(
+            Builtin::Subtract,
+            builtin2_expr(
+                Builtin::Add,
+                Expr::Value(n(1)),
+                builtin2_expr(Builtin::Multiply, Expr::Value(n(2)), Expr::Value(n(3))),
+            ),
+            builtin2_expr(Builtin::Divide, Expr::Value(n(4)), Expr::Value(n(5))),
+        ));
+
+        let value = eval_term(&expr).expect("arithmetic should evaluate");
+
+        assert_eq!(value, Value::Number(Number::parse("31/5").unwrap()));
+    }
+
+    #[test]
+    fn divide_builtin_rejects_zero() {
+        let expr = Term::Expr(builtin2_expr(
+            Builtin::Divide,
+            Expr::Value(n(1)),
+            Expr::Value(n(0)),
+        ));
+
+        let err = eval_term(&expr).expect_err("division by zero should fail");
+
+        assert_eq!(err.to_string(), "divide builtin cannot divide by zero");
     }
 
     #[test]
@@ -671,7 +764,11 @@ mod tests {
                     let Value::Number(number) = item else {
                         panic!("byte-oriented result should not contain nested values");
                     };
-                    bytes.borrow_mut().push(*number as u8);
+                    bytes.borrow_mut().push(
+                        number
+                            .to_u8_if_integer()
+                            .expect("byte-oriented result should contain byte integers"),
+                    );
                 }
                 Ok(())
             },
@@ -685,7 +782,7 @@ mod tests {
     fn evaluates_keyable_values_into_keys() {
         let key = eval_key(
             &Value::List(List::concat(
-                List::from_values(vec![Value::Number(1)]),
+                List::from_values(vec![n(1)]),
                 List::from_bytes(Arc::from(&b"Hi"[..])),
             )),
             None,
@@ -695,26 +792,26 @@ mod tests {
         assert_eq!(
             key,
             Key::List(Arc::from([
-                Key::Number(1),
-                Key::Number(i64::from(b'H')),
-                Key::Number(i64::from(b'i')),
+                k(1),
+                Key::Number(Number::from_u8(b'H')),
+                Key::Number(Number::from_u8(b'i')),
             ]))
         );
     }
 
     #[test]
     fn evaluates_expressions_before_key_validation() {
-        let key = eval_key(&Value::Expr(Arc::new(Expr::Value(Value::Number(1)))), None)
+        let key = eval_key(&Value::Expr(Arc::new(Expr::Value(n(1)))), None)
             .expect("expressions should be allowed when they evaluate to keyable values");
 
-        assert_eq!(key, Key::Number(1));
+        assert_eq!(key, k(1));
     }
 
     #[test]
     fn dictionaries_remain_lazy_under_eval_value() {
         let value = Value::Dict(crate::core::Dict::new_sync().insert(
             Key::atom_from_text("answer"),
-            Value::Expr(Arc::new(Expr::Value(Value::Number(42)))),
+            Value::Expr(Arc::new(Expr::Value(n(42)))),
         ));
 
         let evaluated = eval_value(&value, None).expect("dict should stay lazy");
@@ -738,7 +835,7 @@ mod tests {
     #[test]
     fn raw_value_to_key_rejects_expressions() {
         assert_eq!(
-            Key::from_value(&Value::Expr(Arc::new(Expr::Value(Value::Number(1))))),
+            Key::from_value(&Value::Expr(Arc::new(Expr::Value(n(1))))),
             None
         );
     }
@@ -748,7 +845,7 @@ mod tests {
         let key = eval_key(
             &Value::Dict(crate::core::Dict::new_sync().insert(
                 Key::atom_from_text("answer"),
-                Value::Expr(Arc::new(Expr::Value(Value::Number(42)))),
+                Value::Expr(Arc::new(Expr::Value(n(42)))),
             )),
             None,
         )
@@ -756,10 +853,7 @@ mod tests {
 
         assert_eq!(
             key,
-            Key::Dict(Arc::from([(
-                Key::atom_from_text("answer"),
-                Key::Number(42),
-            )]))
+            Key::Dict(Arc::from([(Key::atom_from_text("answer"), k(42),)]))
         );
     }
 
@@ -911,9 +1005,9 @@ mod tests {
     #[test]
     fn names_can_expand_list_valued_path_segments() {
         let foo = Key::atom_from_text("foo");
-        let one = Key::Number(1);
-        let two = Key::Number(2);
-        let three = Key::Number(3);
+        let one = k(1);
+        let two = k(2);
+        let three = k(3);
 
         let nested = Value::Dict(
             crate::core::Dict::new_sync().insert(
@@ -940,13 +1034,11 @@ mod tests {
                     Arc::new(Expr::Apply(
                         Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
                         Arc::new(Expr::List(Arc::from([
-                            Arc::new(Expr::Value(Value::Number(1))),
-                            Arc::new(Expr::Value(Value::Number(2))),
+                            Arc::new(Expr::Value(n(1))),
+                            Arc::new(Expr::Value(n(2))),
                         ]))),
                     )),
-                    Arc::new(Expr::List(Arc::from([Arc::new(Expr::Value(
-                        Value::Number(3),
-                    ))]))),
+                    Arc::new(Expr::List(Arc::from([Arc::new(Expr::Value(n(3)))]))),
                 ))),
             ])))),
             Some(&value),

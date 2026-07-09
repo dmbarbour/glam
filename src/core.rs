@@ -4,6 +4,8 @@ use std::sync::Arc;
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
+use crate::number::Number;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Term {
     Expr(Expr),
@@ -53,7 +55,7 @@ impl fmt::Debug for Atom {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Key {
     Atom(Atom),
-    Number(i64),
+    Number(Number),
     Binary(Arc<[u8]>),
     List(Arc<[Key]>),
     Dict(Arc<[(Key, Key)]>),
@@ -75,7 +77,7 @@ impl Key {
     pub fn from_value(value: &Value) -> Option<Self> {
         match value {
             Value::Atom(atom) => Some(Self::Atom(*atom)),
-            Value::Number(number) => Some(Self::Number(*number)),
+            Value::Number(number) => Some(Self::Number(number.clone())),
             Value::Binary(bytes) => Some(Self::Binary(bytes.clone())),
             Value::List(list) => Some(Self::List(list.to_key_items()?)),
             Value::Dict(dict) => Some(Self::Dict(Arc::from(
@@ -113,7 +115,7 @@ impl fmt::Debug for Key {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Atom(Atom),
-    Number(i64),
+    Number(Number),
     Binary(Arc<[u8]>),
     List(List),
     Dict(Dict),
@@ -124,6 +126,10 @@ pub enum Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Builtin {
     Append,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
     Singleton,
     DictUnion,
 }
@@ -132,6 +138,10 @@ impl Builtin {
     pub fn arity(self) -> usize {
         match self {
             Self::Append => 2,
+            Self::Add => 2,
+            Self::Subtract => 2,
+            Self::Multiply => 2,
+            Self::Divide => 2,
             Self::Singleton => 2,
             Self::DictUnion => 2,
         }
@@ -208,7 +218,7 @@ impl List {
             &mut |bytes| {
                 items
                     .borrow_mut()
-                    .extend(bytes.iter().map(|byte| Key::Number(i64::from(*byte))));
+                    .extend(bytes.iter().map(|byte| Key::Number(Number::from_u8(*byte))));
                 Ok::<_, ()>(())
             },
             &mut |values| {
@@ -302,9 +312,9 @@ mod tests {
     #[test]
     fn values_can_store_lists_and_numbers() {
         let value = Value::List(List::from_values(vec![
-            Value::Number(1),
-            Value::Number(2),
-            Value::Number(3),
+            Value::Number(1.into()),
+            Value::Number(2.into()),
+            Value::Number(3.into()),
         ]));
 
         assert!(matches!(value, Value::List(_)));
@@ -316,11 +326,11 @@ mod tests {
             Arc::new(Expr::Apply(
                 Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
                 Arc::new(Expr::Value(Value::List(List::from_values(vec![
-                    Value::Number(1),
+                    Value::Number(1.into()),
                 ])))),
             )),
             Arc::new(Expr::Value(Value::List(List::from_values(vec![
-                Value::Number(2),
+                Value::Number(2.into()),
             ])))),
         );
 
@@ -330,8 +340,8 @@ mod tests {
     #[test]
     fn semantic_expr_can_hold_lists() {
         let expr = Expr::List(Arc::from([
-            Arc::new(Expr::Value(Value::Number(1))),
-            Arc::new(Expr::Value(Value::Number(2))),
+            Arc::new(Expr::Value(Value::Number(1.into()))),
+            Arc::new(Expr::Value(Value::Number(2.into()))),
         ]));
 
         assert!(matches!(expr, Expr::List(items) if items.len() == 2));
@@ -363,7 +373,7 @@ mod tests {
         let value = Value::Dict(Dict::new_sync().insert(
             Key::atom_from_text("payload"),
             Value::List(List::concat(
-                List::from_values(vec![Value::Number(1)]),
+                List::from_values(vec![Value::Number(1.into())]),
                 List::from_bytes(Arc::from(&b"Hi"[..])),
             )),
         ));
@@ -373,9 +383,9 @@ mod tests {
             Some(Key::Dict(Arc::from([(
                 Key::atom_from_text("payload"),
                 Key::List(Arc::from([
-                    Key::Number(1),
-                    Key::Number(i64::from(b'H')),
-                    Key::Number(i64::from(b'i')),
+                    Key::Number(1.into()),
+                    Key::Number(Number::from_u8(b'H')),
+                    Key::Number(Number::from_u8(b'i')),
                 ])),
             )])))
         );
@@ -384,24 +394,27 @@ mod tests {
     #[test]
     fn keys_reject_expressions() {
         assert_eq!(
-            Key::from_value(&Value::Expr(Arc::new(Expr::Value(Value::Number(1))))),
+            Key::from_value(&Value::Expr(Arc::new(Expr::Value(Value::Number(1.into()))))),
             None
         );
     }
 
     #[test]
     fn values_support_non_atom_key_paths() {
-        let list_key = Key::List(Arc::from([Key::Number(1), Key::Number(2)]));
-        let dict = Dict::new_sync().insert(list_key.clone(), Value::Number(7));
+        let list_key = Key::List(Arc::from([Key::Number(1.into()), Key::Number(2.into())]));
+        let dict = Dict::new_sync().insert(list_key.clone(), Value::Number(7.into()));
         let value = Value::Dict(dict);
 
-        assert_eq!(value.get_key_path(&[list_key]), Some(&Value::Number(7)));
+        assert_eq!(
+            value.get_key_path(&[list_key]),
+            Some(&Value::Number(7.into()))
+        );
     }
 
     #[test]
     fn list_concat_shares_segments() {
         let bytes = List::from_bytes(Arc::from(&b"Hello"[..]));
-        let values = List::from_values(vec![Value::Number(33)]);
+        let values = List::from_values(vec![Value::Number(33.into())]);
         let list = List::concat(bytes, values);
 
         assert!(!list.is_empty());

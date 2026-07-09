@@ -1,4 +1,3 @@
-use std::convert::TryFrom;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -151,8 +150,9 @@ fn list_bytes(list: &glam::core::List) -> Result<Vec<u8>, String> {
                     return Err("must contain only integers and binary segments".to_owned());
                 };
 
-                let byte = u8::try_from(*number)
-                    .map_err(|_| format!("contains integer `{number}` outside the byte range"))?;
+                let byte = number.to_u8_if_integer().ok_or_else(|| {
+                    format!("contains number `{number}` that is not an in-range byte integer")
+                })?;
                 bytes.borrow_mut().push(byte);
             }
             Ok(())

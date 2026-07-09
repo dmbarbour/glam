@@ -10,6 +10,7 @@ This document should summarize salient, relevant points rather than asking futur
 - `src/core.rs` - assembly-time representations, independent of syntax
 - `src/eval.rs` - efficient reduction of core terms
 - `src/main.rs` - CLI parsing, integration
+- `src/numbers.rs` - wrapper for big-rationals
 - `src/README.md` - rough sketch of architecture
 
 ## Todo
