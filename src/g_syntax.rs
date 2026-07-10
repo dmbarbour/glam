@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::compiler::CompileContext;
 use crate::core::Builtin;
-use crate::core::{Atom, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Term, Value};
+use crate::core::{Atom, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value};
 use crate::diagnostic::Severity;
 use crate::number::Number;
 
@@ -129,7 +129,7 @@ struct LocalName {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoweredSource {
-    pub term: Option<Term>,
+    pub open_defs: Value, // open fixpoint, i.e. \ self -> Dict
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -245,29 +245,26 @@ pub fn lower_to_core_with_context(
     parsed: &ParsedSource,
     context: &CompileContext,
 ) -> LoweredSource {
-    let mut root = context.core.expr_value(context.prior.clone());
-    let mut atoms = std::collections::BTreeMap::new();
+    // note: we'll extend 'prior' within the 'body' of an implicit lambda
+    let mut root = context.expr_value(context.prior.clone());
     let mut diagnostics = parsed.diagnostics.clone();
 
     for declaration in &parsed.declarations {
         match &declaration.kind {
             DeclarationKind::Import(import) => {
-                if let Err(diagnostic) =
-                    lower_import(import, declaration.line, context, &mut root, &mut atoms)
+                if let Err(diagnostic) = lower_import(import, declaration.line, context, &mut root)
                 {
                     diagnostics.push(diagnostic);
                 }
             }
             DeclarationKind::Unique(names) => {
-                if let Err(diagnostic) =
-                    lower_unique(names, declaration.line, context, &mut root, &mut atoms)
-                {
+                if let Err(diagnostic) = lower_unique(names, declaration.line, context, &mut root) {
                     diagnostics.push(diagnostic);
                 }
             }
             DeclarationKind::Definition(definition) => {
                 if let Err(diagnostic) =
-                    lower_definition(definition, declaration.line, context, &mut root, &mut atoms)
+                    lower_definition(definition, declaration.line, context, &mut root)
                 {
                     diagnostics.push(diagnostic);
                 }
@@ -277,7 +274,7 @@ pub fn lower_to_core_with_context(
     }
 
     LoweredSource {
-        term: Some(context.core.module_term(root)),
+        open_defs: context.value_expr(context.expr_lambda(root)),
         diagnostics,
     }
 }
@@ -287,29 +284,21 @@ fn lower_import(
     line: usize,
     context: &CompileContext,
     root: &mut CoreExpr,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<(), Diagnostic> {
     let ImportReference::Builtin(name) = &import.reference else {
         return Ok(());
     };
-    let module = builtin_module_value(context, name, atoms)
+    let module = builtin_module_value(context, name)
         .ok_or_else(|| Diagnostic::error(line, format!("unknown built-in module `'{name}`")))?;
 
     *root = match &import.placement {
-        ImportPlacement::Inline => union_module_expr(
-            root.clone(),
-            value_to_core_expr(&module, context.core),
-            context.core,
-        ),
+        ImportPlacement::Inline => {
+            union_module_expr(root.clone(), value_to_core_expr(&module, context), context)
+        }
         ImportPlacement::As(target) => union_module_expr(
             root.clone(),
-            path_to_dict_expr(
-                target,
-                value_to_core_expr(&module, context.core),
-                context,
-                atoms,
-            )?,
-            context.core,
+            path_to_dict_expr(target, value_to_core_expr(&module, context), context)?,
+            context,
         ),
         ImportPlacement::At(_) => {
             return Err(Diagnostic::error(
@@ -327,79 +316,50 @@ fn lower_unique(
     _line: usize,
     context: &CompileContext,
     root: &mut CoreExpr,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<(), Diagnostic> {
     for name in names {
         let path = context.abstract_global_path(name);
-        let value = context.core.abstract_global_path_value(path.as_ref());
+        let value = context.abstract_global_path_value(path.as_ref());
         *root = union_module_expr(
             root.clone(),
-            path_to_dict_expr(name, context.core.expr_value(value), context, atoms)?,
-            context.core,
+            path_to_dict_expr(name, context.expr_value(value), context)?,
+            context,
         );
     }
     Ok(())
 }
 
-fn builtin_module_value(
-    context: &CompileContext,
-    name: &str,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
-) -> Option<Value> {
+fn builtin_module_value(context: &CompileContext, name: &str) -> Option<Value> {
     match name {
-        "math" => Some(context.core.value_dict(builtin_math_module(context, atoms))),
-        "list" => Some(context.core.value_dict(builtin_list_module(context, atoms))),
-        "std" | "prelude" => Some(context.core.value_dict(builtin_std_module(context, atoms))),
+        "math" => Some(context.value_dict(builtin_math_module(context))),
+        "list" => Some(context.value_dict(builtin_list_module(context))),
+        "std" | "prelude" => Some(context.value_dict(builtin_std_module(context))),
         _ => None,
     }
 }
 
-fn builtin_math_module(
-    context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
-) -> Dict {
+fn builtin_math_module(context: &CompileContext) -> Dict {
     Dict::new_sync()
-        .insert(
-            atom_key("floor", atoms),
-            context.core.value_builtin(Builtin::Floor),
-        )
-        .insert(
-            atom_key("mod", atoms),
-            context.core.value_builtin(Builtin::Mod),
-        )
+        .insert(name_as_key("floor"), context.value_builtin(Builtin::Floor))
+        .insert(name_as_key("mod"), context.value_builtin(Builtin::Mod))
 }
 
-fn builtin_list_module(
-    context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
-) -> Dict {
+fn builtin_list_module(context: &CompileContext) -> Dict {
     Dict::new_sync()
-        .insert(
-            atom_key("slice", atoms),
-            context.core.value_builtin(Builtin::Slice),
-        )
-        .insert(
-            atom_key("map", atoms),
-            context.core.value_builtin(Builtin::Map),
-        )
+        .insert(name_as_key("slice"), context.value_builtin(Builtin::Slice))
+        .insert(name_as_key("map"), context.value_builtin(Builtin::Map))
 }
 
-fn builtin_std_module(
-    context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
-) -> Dict {
+fn builtin_std_module(context: &CompileContext) -> Dict {
     Dict::new_sync()
+        .insert(name_as_key("anno"), context.value_builtin(Builtin::Anno))
         .insert(
-            atom_key("anno", atoms),
-            context.core.value_builtin(Builtin::Anno),
+            name_as_key("math"),
+            context.value_dict(builtin_math_module(context)),
         )
         .insert(
-            atom_key("math", atoms),
-            context.core.value_dict(builtin_math_module(context, atoms)),
-        )
-        .insert(
-            atom_key("list", atoms),
-            context.core.value_dict(builtin_list_module(context, atoms)),
+            name_as_key("list"),
+            context.value_dict(builtin_list_module(context)),
         )
 }
 
@@ -408,27 +368,24 @@ fn lower_definition(
     line: usize,
     context: &CompileContext,
     root: &mut CoreExpr,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<(), Diagnostic> {
     let Some(expr) = &definition.expr else {
         return Ok(());
     };
 
-    let value = syntax_expr_to_value(expr, line, context, atoms)?;
+    let value = syntax_expr_to_value(expr, line, context)?;
     let value = match definition.kind {
         DefinitionKind::Introduce => annotate_definition_value(
             BuiltinAssertion::Undefined,
             &definition.target,
             value,
             context,
-            atoms,
         )?,
         DefinitionKind::Override => annotate_definition_value(
             BuiltinAssertion::Defined,
             &definition.target,
             value,
             context,
-            atoms,
         )?,
         DefinitionKind::Update => Err(Diagnostic::error(
             line,
@@ -439,11 +396,10 @@ fn lower_definition(
         root.clone(),
         path_to_dict_expr(
             &definition.target,
-            value_to_core_expr(&value, context.core),
+            value_to_core_expr(&value, context),
             context,
-            atoms,
         )?,
-        context.core,
+        context,
     );
 
     Ok(())
@@ -460,78 +416,60 @@ fn annotate_definition_value(
     target: &str,
     value: Value,
     context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<Value, Diagnostic> {
     let tag = match assertion {
         BuiltinAssertion::Defined => "assert_defined",
         BuiltinAssertion::Undefined => "assert_undefined",
     };
-    let payload = context.core.builtin_apply2_expr(
+    let payload = context.builtin_apply2_expr(
         Builtin::DictUnion,
-        context.core.builtin_apply2_expr(
-            Builtin::Singleton,
-            context
-                .core
-                .expr_value(context.core.value_atom(atom_value("name", atoms))),
-            context.core.expr_value(context.core.value_binary(target)),
+        context.builtin_apply2_expr(
+            Builtin::DictSingleton,
+            context.expr_value(context.value_atom(atom_from_str("name"))),
+            context.expr_value(context.value_binary(target)),
         ),
-        context.core.builtin_apply2_expr(
-            Builtin::Singleton,
-            context
-                .core
-                .expr_value(context.core.value_atom(atom_value("value", atoms))),
-            prior_path_expr(target, context, atoms)?,
+        context.builtin_apply2_expr(
+            Builtin::DictSingleton,
+            context.expr_value(context.value_atom(atom_from_str("value"))),
+            prior_path_expr(target, context)?,
         ),
     );
-    let annotation = context.core.builtin_apply2_expr(
-        Builtin::Singleton,
-        context
-            .core
-            .expr_value(context.core.value_atom(atom_value(tag, atoms))),
+    let annotation = context.builtin_apply2_expr(
+        Builtin::DictSingleton,
+        context.expr_value(context.value_atom(atom_from_str(tag))),
         payload,
     );
 
-    Ok(context.core.value_expr(context.core.builtin_apply2_expr(
+    Ok(context.value_expr(context.builtin_apply2_expr(
         Builtin::Anno,
         annotation,
-        value_to_core_expr(&value, context.core),
+        value_to_core_expr(&value, context),
     )))
 }
 
-fn union_module_expr(
-    root: CoreExpr,
-    item: CoreExpr,
-    core: crate::compiler::CoreInterface,
-) -> CoreExpr {
-    core.builtin_apply2_expr(Builtin::DictUnion, root, item)
+fn union_module_expr(root: CoreExpr, item: CoreExpr, context: &CompileContext) -> CoreExpr {
+    context.builtin_apply2_expr(Builtin::DictUnion, root, item)
 }
 
-fn value_to_core_expr(value: &Value, core: crate::compiler::CoreInterface) -> CoreExpr {
+fn value_to_core_expr(value: &Value, context: &CompileContext) -> CoreExpr {
     match value {
         Value::Expr(thunk) if thunk.env.is_empty() => thunk.expr.as_ref().clone(),
-        _ => core.expr_value(value.clone()),
+        _ => context.expr_value(value.clone()),
     }
 }
 
-fn prior_path_expr(
-    target: &str,
-    context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
-) -> Result<CoreExpr, Diagnostic> {
+fn prior_path_expr(target: &str, context: &CompileContext) -> Result<CoreExpr, Diagnostic> {
     let path = target
         .split('.')
-        .map(|part| context.core.key_expr_key(atom_key(part, atoms)))
+        .map(|part| context.key_expr_key(name_as_key(part)))
         .collect::<Vec<_>>();
-    Ok(context
-        .core
-        .expr_access(context.core.expr_value(context.prior.clone()), path))
+    Ok(context.expr_access(context.expr_value(context.prior.clone()), path))
 }
 
 fn path_to_dict_expr(
     target: &str,
     value: CoreExpr,
     context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<CoreExpr, Diagnostic> {
     let parts = target.split('.').collect::<Vec<_>>();
     if parts.is_empty() {
@@ -540,11 +478,9 @@ fn path_to_dict_expr(
 
     let mut expr = value;
     for part in parts.into_iter().rev() {
-        expr = context.core.builtin_apply2_expr(
-            Builtin::Singleton,
-            context
-                .core
-                .expr_value(context.core.value_atom(atom_value(part, atoms))),
+        expr = context.builtin_apply2_expr(
+            Builtin::DictSingleton,
+            context.expr_value(context.value_atom(atom_from_str(part))),
             expr,
         );
     }
@@ -555,11 +491,10 @@ fn syntax_expr_to_value(
     expr: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<Value, Diagnostic> {
     match expr {
-        SyntaxExpr::Number(number) => Ok(context.core.value_number(number.clone())),
-        SyntaxExpr::Text(text) => Ok(context.core.value_binary(text)),
+        SyntaxExpr::Number(number) => Ok(context.value_number(number.clone())),
+        SyntaxExpr::Text(text) => Ok(context.value_binary(text)),
         SyntaxExpr::Name(_)
         | SyntaxExpr::SingletonDict(_, _)
         | SyntaxExpr::DictUnion(_)
@@ -570,9 +505,9 @@ fn syntax_expr_to_value(
         | SyntaxExpr::Divide(_, _)
         | SyntaxExpr::Add(_, _)
         | SyntaxExpr::Subtract(_, _)
-        | SyntaxExpr::Append(_, _) => Ok(context
-            .core
-            .value_expr(syntax_expr_to_core_expr(expr, line, context, atoms)?)),
+        | SyntaxExpr::Append(_, _) => {
+            Ok(context.value_expr(syntax_expr_to_core_expr(expr, line, context)?))
+        }
     }
 }
 
@@ -580,60 +515,53 @@ fn syntax_expr_to_core_expr(
     expr: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<CoreExpr, Diagnostic> {
-    syntax_expr_to_core_expr_in_scope(expr, line, context, atoms, &mut Vec::new())
+    syntax_expr_to_core_expr_in_scope(expr, line, context, &mut Vec::new())
 }
 
 fn syntax_expr_to_core_expr_in_scope(
     expr: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
     locals: &mut Vec<LocalName>,
 ) -> Result<CoreExpr, Diagnostic> {
     Ok(match expr {
-        SyntaxExpr::Number(number) => context
-            .core
-            .expr_value(context.core.value_number(number.clone())),
-        SyntaxExpr::Text(text) => context.core.expr_value(context.core.value_binary(text)),
-        SyntaxExpr::SingletonDict(key, value) => context.core.builtin_apply2_expr(
-            Builtin::Singleton,
-            syntax_key_expr_to_core_expr(key, line, context, atoms, locals)?,
-            syntax_expr_to_core_expr_in_scope(value, line, context, atoms, locals)?,
+        SyntaxExpr::Number(number) => context.expr_value(context.value_number(number.clone())),
+        SyntaxExpr::Text(text) => context.expr_value(context.value_binary(text)),
+        SyntaxExpr::SingletonDict(key, value) => context.builtin_apply2_expr(
+            Builtin::DictSingleton,
+            syntax_key_expr_to_core_expr(key, line, context, locals)?,
+            syntax_expr_to_core_expr_in_scope(value, line, context, locals)?,
         ),
-        SyntaxExpr::DictUnion(items) => lower_dict_union(items, line, context, atoms, locals)?,
-        SyntaxExpr::Name(parts) => lower_name_expr(parts, line, context, atoms, locals)?,
-        SyntaxExpr::List(items) => context.core.expr_list(
+        SyntaxExpr::DictUnion(items) => lower_dict_union(items, line, context, locals)?,
+        SyntaxExpr::Name(parts) => lower_name_expr(parts, line, context, locals)?,
+        SyntaxExpr::List(items) => context.expr_list(
             items
                 .iter()
                 .map(|expr| {
-                    syntax_expr_to_core_expr_in_scope(expr, line, context, atoms, locals)
-                        .map(Arc::new)
+                    syntax_expr_to_core_expr_in_scope(expr, line, context, locals).map(Arc::new)
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        SyntaxExpr::Lambda(params, body) => {
-            lower_lambda_expr(params, body, line, context, atoms, locals)?
-        }
-        SyntaxExpr::Apply(function, argument) => context.core.expr_apply(
-            syntax_expr_to_core_expr_in_scope(function, line, context, atoms, locals)?,
-            syntax_expr_to_core_expr_in_scope(argument, line, context, atoms, locals)?,
+        SyntaxExpr::Lambda(params, body) => lower_lambda_expr(params, body, line, context, locals)?,
+        SyntaxExpr::Apply(function, argument) => context.expr_apply(
+            syntax_expr_to_core_expr_in_scope(function, line, context, locals)?,
+            syntax_expr_to_core_expr_in_scope(argument, line, context, locals)?,
         ),
         SyntaxExpr::Multiply(left, right) => {
-            lower_builtin_expr(Builtin::Multiply, left, right, line, context, atoms, locals)?
+            lower_builtin_expr(Builtin::Multiply, left, right, line, context, locals)?
         }
         SyntaxExpr::Divide(left, right) => {
-            lower_builtin_expr(Builtin::Divide, left, right, line, context, atoms, locals)?
+            lower_builtin_expr(Builtin::Divide, left, right, line, context, locals)?
         }
         SyntaxExpr::Add(left, right) => {
-            lower_builtin_expr(Builtin::Add, left, right, line, context, atoms, locals)?
+            lower_builtin_expr(Builtin::Add, left, right, line, context, locals)?
         }
         SyntaxExpr::Subtract(left, right) => {
-            lower_builtin_expr(Builtin::Subtract, left, right, line, context, atoms, locals)?
+            lower_builtin_expr(Builtin::Subtract, left, right, line, context, locals)?
         }
         SyntaxExpr::Append(left, right) => {
-            lower_builtin_expr(Builtin::Append, left, right, line, context, atoms, locals)?
+            lower_builtin_expr(Builtin::Append, left, right, line, context, locals)?
         }
     })
 }
@@ -644,13 +572,12 @@ fn lower_builtin_expr(
     right: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
     locals: &mut Vec<LocalName>,
 ) -> Result<CoreExpr, Diagnostic> {
-    Ok(context.core.builtin_apply2_expr(
+    Ok(context.builtin_apply2_expr(
         builtin,
-        syntax_expr_to_core_expr_in_scope(left, line, context, atoms, locals)?,
-        syntax_expr_to_core_expr_in_scope(right, line, context, atoms, locals)?,
+        syntax_expr_to_core_expr_in_scope(left, line, context, locals)?,
+        syntax_expr_to_core_expr_in_scope(right, line, context, locals)?,
     ))
 }
 
@@ -658,15 +585,12 @@ fn syntax_key_expr_to_core_expr(
     key: &SyntaxKeyExpr,
     line: usize,
     context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
     locals: &mut Vec<LocalName>,
 ) -> Result<CoreExpr, Diagnostic> {
     Ok(match key {
-        SyntaxKeyExpr::Atom(name) => context
-            .core
-            .expr_value(context.core.value_atom(atom_value(name, atoms))),
+        SyntaxKeyExpr::Atom(name) => context.expr_value(context.value_atom(atom_from_str(name))),
         SyntaxKeyExpr::Index(expr) => {
-            syntax_expr_to_core_expr_in_scope(expr, line, context, atoms, locals)?
+            syntax_expr_to_core_expr_in_scope(expr, line, context, locals)?
         }
         SyntaxKeyExpr::PathIndex(_) => {
             return Err(Diagnostic::error(
@@ -681,20 +605,19 @@ fn lower_dict_union(
     items: &[SyntaxExpr],
     line: usize,
     context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
     locals: &mut Vec<LocalName>,
 ) -> Result<CoreExpr, Diagnostic> {
     let mut items = items.iter();
     let Some(first) = items.next() else {
-        return Ok(context.core.expr_value(context.core.empty_dict_value()));
+        return Ok(context.expr_value(context.empty_dict_value()));
     };
 
-    let mut expr = syntax_expr_to_core_expr_in_scope(first, line, context, atoms, locals)?;
+    let mut expr = syntax_expr_to_core_expr_in_scope(first, line, context, locals)?;
     for item in items {
-        expr = context.core.builtin_apply2_expr(
+        expr = context.builtin_apply2_expr(
             Builtin::DictUnion,
             expr,
-            syntax_expr_to_core_expr_in_scope(item, line, context, atoms, locals)?,
+            syntax_expr_to_core_expr_in_scope(item, line, context, locals)?,
         );
     }
     Ok(expr)
@@ -705,16 +628,15 @@ fn lower_lambda_expr(
     body: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
     locals: &mut Vec<LocalName>,
 ) -> Result<CoreExpr, Diagnostic> {
     let base_len = locals.len();
     locals.extend(params.iter().map(|param| local_name_metadata(param)));
-    let mut lowered = syntax_expr_to_core_expr_in_scope(body, line, context, atoms, locals)?;
+    let mut lowered = syntax_expr_to_core_expr_in_scope(body, line, context, locals)?;
     locals.truncate(base_len);
 
     for _ in params.iter().rev() {
-        lowered = context.core.expr_lambda(lowered);
+        lowered = context.expr_lambda(lowered);
     }
 
     Ok(lowered)
@@ -724,45 +646,44 @@ fn lower_name_expr(
     parts: &[SyntaxKeyExpr],
     line: usize,
     context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
     locals: &mut Vec<LocalName>,
 ) -> Result<CoreExpr, Diagnostic> {
     let Some(SyntaxKeyExpr::Atom(first)) = parts.first() else {
-        return Ok(context.core.expr_access(
+        return Ok(context.expr_access(
             final_binding_expr(context, locals),
             parts
                 .iter()
-                .map(|part| syntax_key_expr_to_core(part, line, context, atoms, locals))
+                .map(|part| syntax_key_expr_to_core(part, line, context, locals))
                 .collect::<Result<Vec<_>, _>>()?,
         ));
     };
 
     let Some(local_index) = local_binding_index(first, locals) else {
-        return Ok(context.core.expr_access(
+        return Ok(context.expr_access(
             final_binding_expr(context, locals),
             parts
                 .iter()
-                .map(|part| syntax_key_expr_to_core(part, line, context, atoms, locals))
+                .map(|part| syntax_key_expr_to_core(part, line, context, locals))
                 .collect::<Result<Vec<_>, _>>()?,
         ));
     };
 
     if parts.len() == 1 {
-        return Ok(context.core.expr_local(local_index));
+        return Ok(context.expr_local(local_index));
     }
 
-    Ok(context.core.expr_access(
-        context.core.expr_local(local_index),
+    Ok(context.expr_access(
+        context.expr_local(local_index),
         parts[1..]
             .iter()
-            .map(|part| syntax_key_expr_to_core(part, line, context, atoms, locals))
+            .map(|part| syntax_key_expr_to_core(part, line, context, locals))
             .collect::<Result<Vec<_>, _>>()?,
     ))
 }
 
 fn final_binding_expr(context: &CompileContext, locals: &[LocalName]) -> CoreExpr {
     // Globals lower against a synthetic outer `\final -> ...` binding.
-    context.core.expr_local(locals.len())
+    context.expr_local(locals.len())
 }
 
 fn local_binding_index(name: &str, locals: &[LocalName]) -> Option<usize> {
@@ -796,37 +717,27 @@ fn syntax_key_expr_to_core(
     key: &SyntaxKeyExpr,
     line: usize,
     context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
     locals: &mut Vec<LocalName>,
 ) -> Result<CoreKeyExpr, Diagnostic> {
     Ok(match key {
-        SyntaxKeyExpr::Atom(name) => context.core.key_expr_key(atom_key(name, atoms)),
-        SyntaxKeyExpr::Index(expr) => {
-            context
-                .core
-                .key_expr_index(syntax_expr_to_core_expr_in_scope(
-                    expr, line, context, atoms, locals,
-                )?)
-        }
-        SyntaxKeyExpr::PathIndex(expr) => {
-            context
-                .core
-                .key_expr_path_index(syntax_expr_to_core_expr_in_scope(
-                    expr, line, context, atoms, locals,
-                )?)
-        }
+        SyntaxKeyExpr::Atom(name) => context.key_expr_key(name_as_key(name)),
+        SyntaxKeyExpr::Index(expr) => context.key_expr_index(syntax_expr_to_core_expr_in_scope(
+            expr, line, context, locals,
+        )?),
+        SyntaxKeyExpr::PathIndex(expr) => context.key_expr_path_index(
+            syntax_expr_to_core_expr_in_scope(expr, line, context, locals)?,
+        ),
     })
 }
 
-fn atom_key(name: &str, atoms: &mut std::collections::BTreeMap<String, Atom>) -> Key {
-    Key::Atom(atom_value(name, atoms))
+fn name_as_key(name: &str) -> Key {
+    // 'name as dict key or tag
+    Key::Atom(atom_from_str(name))
 }
 
-fn atom_value(name: &str, atoms: &mut std::collections::BTreeMap<String, Atom>) -> Atom {
-    atoms
-        .entry(name.to_owned())
-        .or_insert_with(|| Atom::from_key(&Key::binary_from_text(name)))
-        .clone()
+fn atom_from_str(name: &str) -> Atom {
+    // 'name atom, i.e. ["name"]:()
+    Atom::from_key(&Key::binary_from_text(name))
 }
 
 fn validate_language_position(declarations: &[Declaration], diagnostics: &mut Vec<Diagnostic>) {
@@ -1307,7 +1218,7 @@ fn syntax_expr_parser<'src>()
             crate::core::Builtin::Mod => "mod",
             crate::core::Builtin::Slice => "slice",
             crate::core::Builtin::Map => "map",
-            crate::core::Builtin::Singleton => ":",
+            crate::core::Builtin::DictSingleton => ":",
             crate::core::Builtin::DictUnion => "{,}",
         }
     }
@@ -1633,7 +1544,7 @@ mod tests {
     }
 
     fn core_singleton(key: CoreExpr, value: CoreExpr) -> CoreExpr {
-        core_builtin2(Builtin::Singleton, key, value)
+        core_builtin2(Builtin::DictSingleton, key, value)
     }
 
     fn core_dict_union(left: CoreExpr, right: CoreExpr) -> CoreExpr {
@@ -1644,20 +1555,16 @@ mod tests {
         CoreExpr::Access(Arc::new(CoreExpr::Local(0)), Arc::from(path))
     }
 
-    fn instantiate_module_term(term: &crate::core::Term) -> crate::core::Term {
-        match term {
-            crate::core::Term::Expr(expr) => crate::core::Term::Expr(CoreExpr::Apply(
-                Arc::new(CoreExpr::Value(Value::Builtin(Builtin::Fixpoint))),
-                Arc::new(expr.clone()),
-            )),
-        }
+    fn instantiate_module(open_defs: &crate::core::Value) -> crate::core::Expr {
+        CoreExpr::Apply(
+            Arc::new(CoreExpr::Value(Value::Builtin(Builtin::Fixpoint))),
+            Arc::new(CoreExpr::Value(open_defs.clone())),
+        )
     }
 
     fn evaluated_module_value(lowered: &LoweredSource) -> Value {
-        crate::eval::eval_term(&instantiate_module_term(
-            lowered.term.as_ref().expect("lowered term should exist"),
-        ))
-        .expect("lowered module should evaluate")
+        crate::eval::eval_term(&instantiate_module(&lowered.open_defs))
+            .expect("lowered module should evaluate")
     }
 
     fn value_at_atom_path(root: &Value, path: &[&str]) -> Option<Value> {
@@ -2693,10 +2600,8 @@ mod tests {
         let lowered = lower_to_core(&parsed);
 
         assert_eq!(lowered.diagnostics, []);
-        let value = crate::eval::eval_term(&instantiate_module_term(
-            lowered.term.as_ref().expect("lowered term should exist"),
-        ))
-        .expect("builtin imports should evaluate");
+        let value = crate::eval::eval_term(&instantiate_module(&lowered.open_defs))
+            .expect("builtin imports should evaluate");
 
         let std = value
             .get_atom_path(&[Atom::from_key(&Key::binary_from_text("std"))])
@@ -2776,10 +2681,8 @@ mod tests {
         let lowered = lower_to_core(&parsed);
 
         assert_eq!(lowered.diagnostics, []);
-        let value = crate::eval::eval_term(&instantiate_module_term(
-            lowered.term.as_ref().expect("lowered term should exist"),
-        ))
-        .expect("merged import should evaluate");
+        let value = crate::eval::eval_term(&instantiate_module(&lowered.open_defs))
+            .expect("merged import should evaluate");
         let math = value
             .get_atom_path(&[Atom::from_key(&Key::binary_from_text("math"))])
             .expect("std import should merge into existing math");

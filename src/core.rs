@@ -7,11 +7,6 @@ use rpds::RedBlackTreeMapSync;
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Term {
-    Expr(Expr),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Value(Value),
     List(Arc<[Arc<Expr>]>),
@@ -200,7 +195,7 @@ pub enum Builtin {
     Mod,
     Slice,
     Map,
-    Singleton,
+    DictSingleton,
     DictUnion,
 }
 
@@ -219,7 +214,7 @@ impl Builtin {
             Self::Mod => 2,
             Self::Slice => 3,
             Self::Map => 2,
-            Self::Singleton => 2,
+            Self::DictSingleton => 2,
             Self::DictUnion => 2,
         }
     }

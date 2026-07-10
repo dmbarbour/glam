@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use glam::compiler::CompileContext;
-use glam::core::{Builtin, Expr as CoreExpr, Term, Value};
+use glam::core::{Builtin, Expr as CoreExpr, Value};
 use glam::diagnostic::Severity;
 use glam::eval;
 use glam::g_syntax::{DeclarationKind, ParsedSource, SourceFile, lower_to_core_with_context};
@@ -68,6 +68,7 @@ fn assemble_path(path: &str) -> ExitCode {
         Err(exit_code) => return exit_code,
     };
 
+    // TODO: move printing errors into CompileContext, so that the front-end compiler can control how errors are reported.
     let lowered = lower_to_core_with_context(&parsed, &context);
 
     for diagnostic in &lowered.diagnostics {
@@ -85,12 +86,7 @@ fn assemble_path(path: &str) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let Some(term) = &lowered.term else {
-        eprintln!("error: .g lowering did not produce a core term");
-        return ExitCode::from(1);
-    };
-
-    let term = instantiate_module_term(term);
+    let term = instantiate_module_term(&lowered.open_defs);
     let root = match eval::eval_term(&term) {
         Ok(root) => root,
         Err(err) => {
@@ -115,16 +111,14 @@ fn assemble_path(path: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn instantiate_module_term(term: &Term) -> Term {
-    match term {
-        // Temporary bootstrap-shell behavior: apply one fixpoint to the
-        // assembled anonymous module. Later, multiple files/scripts should be
-        // merged as mixins before this single fixpoint is applied.
-        Term::Expr(expr) => Term::Expr(CoreExpr::Apply(
-            Arc::new(CoreExpr::Value(Value::Builtin(Builtin::Fixpoint))),
-            Arc::new(expr.clone()),
-        )),
-    }
+fn instantiate_module_term(open_defs: &Value) -> CoreExpr {
+    // Temporary bootstrap-shell behavior: apply one fixpoint to the
+    // assembled anonymous module. Later, multiple files/scripts should be
+    // merged as mixins before this single fixpoint is applied.
+    CoreExpr::Apply(
+        Arc::new(CoreExpr::Value(Value::Builtin(Builtin::Fixpoint))),
+        Arc::new(CoreExpr::Value(open_defs.clone())),
+    )
 }
 
 fn result_bytes(root: &glam::core::Value, path: &str) -> Result<Vec<u8>, String> {
