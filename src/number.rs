@@ -1,8 +1,9 @@
 use std::fmt;
 
 use num_bigint::BigInt;
+use num_integer::Integer;
 use num_rational::BigRational;
-use num_traits::{ToPrimitive, Zero};
+use num_traits::{Signed, ToPrimitive, Zero};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Number(BigRational);
@@ -85,6 +86,25 @@ impl Number {
         } else {
             Some(Self(&self.0 / &other.0))
         }
+    }
+
+    pub fn floor(&self) -> Self {
+        Self(BigRational::from_integer(
+            self.0.numer().div_floor(self.0.denom()),
+        ))
+    }
+
+    pub fn checked_mod(&self, other: &Self) -> Option<Self> {
+        let quotient = self.checked_div(other)?.floor();
+        Some(self.sub(&other.mul(&quotient)))
+    }
+
+    pub fn to_usize_if_integer(&self) -> Option<usize> {
+        if !self.0.is_integer() || self.0.is_negative() {
+            return None;
+        }
+
+        self.0.to_integer().to_usize()
     }
 
     fn negated(self) -> Self {
@@ -261,6 +281,28 @@ mod tests {
             "617/5000000000"
         );
         assert_eq!(Number::parse("12e3").unwrap().to_string(), "12000");
+    }
+
+    #[test]
+    fn floors_and_mods_rationals() {
+        assert_eq!(Number::parse("7/2").unwrap().floor().to_string(), "3");
+        assert_eq!(Number::parse("_7/2").unwrap().floor().to_string(), "-4");
+        assert_eq!(
+            Number::parse("17/5")
+                .unwrap()
+                .checked_mod(&Number::parse("3/2").unwrap())
+                .unwrap()
+                .to_string(),
+            "2/5"
+        );
+        assert_eq!(
+            Number::parse("17/5")
+                .unwrap()
+                .checked_mod(&Number::parse("_3/2").unwrap())
+                .unwrap()
+                .to_string(),
+            "-11/10"
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ Use cases:
   - common utility functions via `conf.env`
 - `assembly/` source to output examples. 
   - early samples may produce raw binary text.
-- `invalid/` for testing of diagnostics.
+- `invalid/` for testing of diagnostics and runtime failures.
 
 Glam forbids parent-relative paths (`"../"`) in imports, and samples shall not reference remote repos. Thus, sample folders are self-contained. The preference is to keep samples small and focused. To avoid repetition, common utility functions can be written once then provided via configuration (defining `conf.env`). 
 

@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::core::{Builtin, Expr, Key, KeyExpr, List, Term, Value};
+use crate::core::{Builtin, Closure, Expr, FixpointHandle, Key, KeyExpr, List, Term, Thunk, Value};
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,56 +27,55 @@ impl std::error::Error for EvalError {}
 
 pub fn eval_term(term: &Term) -> Result<Value, EvalError> {
     match term {
-        Term::Expr(expr) => {
-            let root_env = match expr {
-                Expr::Value(Value::Dict(dict)) => Some(Value::Dict(dict.clone())),
-                _ => None,
-            };
-            eval_expr(expr, root_env.as_ref())
-        }
+        Term::Expr(expr) => eval_expr(expr, &[]),
     }
 }
 
-fn eval_expr(expr: &Expr, root_env: Option<&Value>) -> Result<Value, EvalError> {
+fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
     match expr {
-        Expr::Value(value) => eval_value(value, root_env),
+        Expr::Value(value) => eval_value(value),
         Expr::List(items) => {
             let mut list = List::empty();
             for item in items.iter() {
-                let value = eval_expr(item, root_env)?;
+                let value = eval_expr(item, local_env)?;
                 list = List::concat(list, list_literal_segment(value));
             }
             Ok(Value::List(list))
         }
-        Expr::Apply(function, argument) => eval_apply(function, argument, root_env),
-        Expr::Name(path) => resolve_name(path, root_env),
+        Expr::Apply(function, argument) => eval_apply(function, argument, local_env),
+        Expr::Lambda(body) => Ok(Value::Closure(Closure {
+            body: body.clone(),
+            env: Arc::from(local_env.to_vec()),
+        })),
+        Expr::Local(index) => eval_local(*index, local_env),
+        Expr::Access(base, path) => {
+            let base = eval_expr(base, local_env)?;
+            resolve_key_path(base, path, path, local_env)
+        }
         Expr::Error(message) => Err(EvalError::new(message.as_ref())),
     }
 }
 
-pub fn eval_value(value: &Value, root_env: Option<&Value>) -> Result<Value, EvalError> {
+pub fn eval_value(value: &Value) -> Result<Value, EvalError> {
     match value {
         Value::Atom(atom) => Ok(Value::Atom(*atom)),
         Value::Number(number) => Ok(Value::Number(number.clone())),
         Value::Binary(bytes) => Ok(Value::Binary(bytes.clone())),
         Value::List(list) => Ok(Value::List(list.clone())),
         Value::Dict(dict) => Ok(Value::Dict(dict.clone())),
+        Value::Fixpoint(root) => root
+            .get()
+            .cloned()
+            .ok_or_else(|| EvalError::new("fixpoint was observed before initialization")),
         Value::Builtin(builtin) => Ok(Value::Builtin(*builtin)),
-        Value::Expr(expr) => eval_expr(expr, root_env),
+        Value::Closure(closure) => Ok(Value::Closure(closure.clone())),
+        Value::Expr(thunk) => eval_expr(thunk.expr.as_ref(), &thunk.env),
     }
 }
 
-pub fn eval_key(value: &Value, root_env: Option<&Value>) -> Result<Key, EvalError> {
-    let value = eval_value(value, root_env)?;
-    value_to_key(&value, root_env)
-}
-
-fn resolve_name(path: &[KeyExpr], root_env: Option<&Value>) -> Result<Value, EvalError> {
-    let Some(root_env) = root_env else {
-        return Err(EvalError::new("name resolution requires a dictionary root"));
-    };
-
-    resolve_key_path(root_env.clone(), path, path, root_env)
+pub fn eval_key(value: &Value) -> Result<Key, EvalError> {
+    let value = eval_value(value)?;
+    value_to_key(&value, &[])
 }
 
 fn format_name(path: &[KeyExpr]) -> String {
@@ -89,8 +88,10 @@ fn format_name(path: &[KeyExpr]) -> String {
 fn format_name_part(key: &Key) -> String {
     match key {
         Key::Binary(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        Key::AbstractGlobalPath(parts) => parts.join("."),
         Key::Atom(atom) => match atom.key() {
             Key::Binary(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+            Key::AbstractGlobalPath(parts) => parts.join("."),
             other => format!("{other:?}"),
         },
         other => format!("{other:?}"),
@@ -100,21 +101,35 @@ fn format_name_part(key: &Key) -> String {
 fn format_name_key_expr(key: &KeyExpr) -> String {
     match key {
         KeyExpr::Key(key) => format_name_part(key),
-        KeyExpr::Expr(_) => "[expr]".to_owned(),
-        KeyExpr::ListExpr(_) => "(list-expr)".to_owned(),
+        KeyExpr::Index(_) => "[index]".to_owned(),
+        KeyExpr::PathIndex(_) => "(path-index)".to_owned(),
     }
 }
 
-fn value_to_key(value: &Value, root_env: Option<&Value>) -> Result<Key, EvalError> {
+fn eval_local(index: usize, local_env: &[Value]) -> Result<Value, EvalError> {
+    let Some(value) = local_env.get(
+        local_env
+            .len()
+            .checked_sub(index + 1)
+            .ok_or_else(|| EvalError::new(format!("local `{index}` is out of scope")))?,
+    ) else {
+        return Err(EvalError::new(format!("local `{index}` is out of scope")));
+    };
+
+    eval_value(value)
+}
+
+fn value_to_key(value: &Value, local_env: &[Value]) -> Result<Key, EvalError> {
     match value {
         Value::Atom(atom) => Ok(Key::Atom(*atom)),
         Value::Number(number) => Ok(Key::Number(number.clone())),
         Value::Binary(bytes) => Ok(Key::Binary(bytes.clone())),
-        Value::List(list) => Ok(Key::List(list_to_key_items(list, root_env)?)),
+        Value::List(list) => Ok(Key::List(list_to_key_items(list, local_env)?)),
         Value::Dict(dict) => Ok(Key::Dict(Arc::from(
             dict.iter()
                 .map(|(key, value)| {
-                    let value = eval_key(value, root_env)?;
+                    let value = eval_value(value)?;
+                    let value = value_to_key(&value, local_env)?;
                     if matches!(&value, Key::Dict(entries) if entries.is_empty()) {
                         return Ok(None);
                     }
@@ -125,7 +140,13 @@ fn value_to_key(value: &Value, root_env: Option<&Value>) -> Result<Key, EvalErro
                 .flatten()
                 .collect::<Vec<_>>(),
         ))),
+        Value::Fixpoint(_) => Err(EvalError::new(
+            "dictionary keys must evaluate to keyable values",
+        )),
         Value::Builtin(_) => Err(EvalError::new(
+            "dictionary keys must evaluate to keyable values",
+        )),
+        Value::Closure(_) => Err(EvalError::new(
             "dictionary keys must evaluate to keyable values",
         )),
         Value::Expr(_) => Err(EvalError::new(
@@ -138,15 +159,15 @@ fn resolve_key_path(
     current: Value,
     remaining: &[KeyExpr],
     full_path: &[KeyExpr],
-    root_env: &Value,
+    local_env: &[Value],
 ) -> Result<Value, EvalError> {
     let Some((head, rest)) = remaining.split_first() else {
-        return eval_value(&current, Some(root_env));
+        return eval_value(&current);
     };
 
-    let expanded = expand_key_expr(head, Some(root_env))?;
-    let next = resolve_expanded_keys(current, &expanded, full_path, remaining, root_env)?;
-    resolve_key_path(next, rest, full_path, root_env)
+    let expanded = expand_key_expr(head, local_env)?;
+    let next = resolve_expanded_keys(current, &expanded, full_path, remaining, local_env)?;
+    resolve_key_path(next, rest, full_path, local_env)
 }
 
 fn resolve_expanded_keys(
@@ -154,10 +175,10 @@ fn resolve_expanded_keys(
     expanded: &[Key],
     full_path: &[KeyExpr],
     remaining: &[KeyExpr],
-    root_env: &Value,
+    local_env: &[Value],
 ) -> Result<Value, EvalError> {
     for key in expanded {
-        let dict = force_dict_shell(&current, Some(root_env), full_path, remaining)?;
+        let dict = force_dict_shell(&current, local_env, full_path, remaining)?;
         current = dict.get(key).cloned().ok_or_else(|| {
             EvalError::new(format!("name `{}` is not defined", format_name(full_path)))
         })?;
@@ -167,11 +188,11 @@ fn resolve_expanded_keys(
 
 fn force_dict_shell(
     value: &Value,
-    root_env: Option<&Value>,
+    _local_env: &[Value],
     full_path: &[KeyExpr],
     remaining: &[KeyExpr],
 ) -> Result<crate::core::Dict, EvalError> {
-    match eval_value(value, root_env)? {
+    match eval_value(value)? {
         Value::Dict(dict) => Ok(dict),
         _ => {
             let traversed = &full_path[..full_path.len() - remaining.len()];
@@ -188,49 +209,54 @@ fn force_dict_shell(
     }
 }
 
-fn eval_apply(
-    function: &Expr,
-    argument: &Expr,
-    root_env: Option<&Value>,
-) -> Result<Value, EvalError> {
-    let function = eval_expr(function, root_env)?;
-    let argument = thunk_value(argument);
-    apply_value(function, argument, root_env)
+fn eval_apply(function: &Expr, argument: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
+    let function = eval_expr(function, local_env)?;
+    let argument = thunk_value(argument, local_env);
+    apply_value(function, argument, local_env)
 }
 
-fn thunk_value(expr: &Expr) -> Value {
+fn thunk_value(expr: &Expr, local_env: &[Value]) -> Value {
     match expr {
         Expr::Value(value) => value.clone(),
-        _ => Value::Expr(Arc::new(expr.clone())),
+        _ => Value::Expr(Thunk {
+            expr: Arc::new(expr.clone()),
+            env: Arc::from(local_env.to_vec()),
+        }),
     }
 }
 
-fn apply_value(
-    function: Value,
-    argument: Value,
-    root_env: Option<&Value>,
-) -> Result<Value, EvalError> {
+fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<Value, EvalError> {
     match function {
-        Value::Builtin(builtin) => apply_builtin(builtin, Vec::new(), argument, root_env),
-        Value::Expr(expr) => {
-            if let Some((builtin, args)) = builtin_application_spine(expr.as_ref()) {
-                apply_builtin(builtin, args, argument, root_env)
+        Value::Builtin(builtin) => apply_builtin(builtin, Vec::new(), argument, local_env),
+        Value::Closure(closure) => apply_closure(&closure, argument),
+        Value::Expr(thunk) => {
+            if let Some((builtin, args)) = builtin_application_spine(thunk.expr.as_ref()) {
+                apply_builtin(builtin, args, argument, local_env)
             } else {
-                Ok(Value::Expr(Arc::new(Expr::Apply(
-                    expr.clone(),
-                    Arc::new(Expr::Value(argument)),
-                ))))
+                Ok(Value::Expr(Thunk {
+                    expr: Arc::new(Expr::Apply(
+                        thunk.expr.clone(),
+                        Arc::new(Expr::Value(argument)),
+                    )),
+                    env: thunk.env.clone(),
+                }))
             }
         }
         _ => Err(EvalError::new("application requires a function value")),
     }
 }
 
+fn apply_closure(closure: &Closure, argument: Value) -> Result<Value, EvalError> {
+    let mut extended = closure.env.iter().cloned().collect::<Vec<_>>();
+    extended.push(argument);
+    eval_expr(closure.body.as_ref(), &extended)
+}
+
 fn apply_builtin(
     builtin: Builtin,
     mut args: Vec<Value>,
     argument: Value,
-    root_env: Option<&Value>,
+    local_env: &[Value],
 ) -> Result<Value, EvalError> {
     args.push(argument);
     if args.len() < builtin.arity() {
@@ -242,43 +268,73 @@ fn apply_builtin(
             let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
                 EvalError::new("append builtin received the wrong number of arguments")
             })?;
-            append_values(eval_value(&left, root_env)?, eval_value(&right, root_env)?)
+            append_values(eval_value(&left)?, eval_value(&right)?)
         }
         Builtin::Add => {
             let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
                 EvalError::new("add builtin received the wrong number of arguments")
             })?;
-            eval_numeric_builtin("add", &left, &right, root_env, Number::add)
+            eval_numeric_builtin("add", &left, &right, local_env, Number::add)
         }
         Builtin::Subtract => {
             let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
                 EvalError::new("subtract builtin received the wrong number of arguments")
             })?;
-            eval_numeric_builtin("subtract", &left, &right, root_env, Number::sub)
+            eval_numeric_builtin("subtract", &left, &right, local_env, Number::sub)
         }
         Builtin::Multiply => {
             let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
                 EvalError::new("multiply builtin received the wrong number of arguments")
             })?;
-            eval_numeric_builtin("multiply", &left, &right, root_env, Number::mul)
+            eval_numeric_builtin("multiply", &left, &right, local_env, Number::mul)
         }
         Builtin::Divide => {
             let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
                 EvalError::new("divide builtin received the wrong number of arguments")
             })?;
-            eval_numeric_divide_builtin(&left, &right, root_env)
+            eval_numeric_divide_builtin(&left, &right, local_env)
+        }
+        Builtin::Fixpoint => {
+            let [function] = <[Value; 1]>::try_from(args).map_err(|_| {
+                EvalError::new("fixpoint builtin received the wrong number of arguments")
+            })?;
+            eval_fixpoint_builtin(&function)
+        }
+        Builtin::Floor => {
+            let [value] = <[Value; 1]>::try_from(args).map_err(|_| {
+                EvalError::new("floor builtin received the wrong number of arguments")
+            })?;
+            eval_floor_builtin(&value, local_env)
+        }
+        Builtin::Mod => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("mod builtin received the wrong number of arguments")
+            })?;
+            eval_numeric_mod_builtin(&left, &right, local_env)
+        }
+        Builtin::Slice => {
+            let [start, end, value] = <[Value; 3]>::try_from(args).map_err(|_| {
+                EvalError::new("slice builtin received the wrong number of arguments")
+            })?;
+            eval_slice_builtin(&start, &end, &value, local_env)
+        }
+        Builtin::Map => {
+            let [function, value] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("map builtin received the wrong number of arguments")
+            })?;
+            eval_map_builtin(&function, &value, local_env)
         }
         Builtin::Singleton => {
             let [key, value] = <[Value; 2]>::try_from(args).map_err(|_| {
                 EvalError::new("singleton builtin received the wrong number of arguments")
             })?;
-            eval_singleton_builtin(&key, &value, root_env)
+            eval_singleton_builtin(&key, &value, local_env)
         }
         Builtin::DictUnion => {
             let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
                 EvalError::new("dict union builtin received the wrong number of arguments")
             })?;
-            eval_dict_union_builtin(&left, &right, root_env)
+            eval_dict_union_builtin(&left, &right, local_env)
         }
     }
 }
@@ -287,33 +343,117 @@ fn eval_numeric_builtin(
     name: &str,
     left: &Value,
     right: &Value,
-    root_env: Option<&Value>,
+    local_env: &[Value],
     op: impl Fn(&Number, &Number) -> Number,
 ) -> Result<Value, EvalError> {
-    let left = eval_number(left, root_env, name)?;
-    let right = eval_number(right, root_env, name)?;
+    let left = eval_number(left, local_env, name)?;
+    let right = eval_number(right, local_env, name)?;
     Ok(Value::Number(op(&left, &right)))
 }
 
 fn eval_numeric_divide_builtin(
     left: &Value,
     right: &Value,
-    root_env: Option<&Value>,
+    local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let left = eval_number(left, root_env, "divide")?;
-    let right = eval_number(right, root_env, "divide")?;
+    let left = eval_number(left, local_env, "divide")?;
+    let right = eval_number(right, local_env, "divide")?;
     let Some(result) = left.checked_div(&right) else {
         return Err(EvalError::new("divide builtin cannot divide by zero"));
     };
     Ok(Value::Number(result))
 }
 
+fn eval_floor_builtin(value: &Value, local_env: &[Value]) -> Result<Value, EvalError> {
+    Ok(Value::Number(
+        eval_number(value, local_env, "floor")?.floor(),
+    ))
+}
+
+fn eval_numeric_mod_builtin(
+    left: &Value,
+    right: &Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let left = eval_number(left, local_env, "mod")?;
+    let right = eval_number(right, local_env, "mod")?;
+    let Some(result) = left.checked_mod(&right) else {
+        return Err(EvalError::new("mod builtin cannot divide by zero"));
+    };
+    Ok(Value::Number(result))
+}
+
+fn eval_slice_builtin(
+    start: &Value,
+    end: &Value,
+    value: &Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let start = eval_index_number(start, local_env, "slice")?;
+    let end = eval_index_number(end, local_env, "slice")?;
+    if start > end {
+        return Err(EvalError::new(
+            "slice builtin requires start to be less than or equal to end",
+        ));
+    }
+
+    match eval_value(value)? {
+        Value::Binary(bytes) => {
+            if end > bytes.len() {
+                return Err(EvalError::new("slice builtin end is out of bounds"));
+            }
+            Ok(Value::Binary(Arc::from(&bytes[start..end])))
+        }
+        Value::List(list) => {
+            let items = list_to_value_items(&list)?;
+            if end > items.len() {
+                return Err(EvalError::new("slice builtin end is out of bounds"));
+            }
+            Ok(Value::List(List::from_values(items[start..end].to_vec())))
+        }
+        _ => Err(EvalError::new(
+            "slice builtin requires a list or binary value",
+        )),
+    }
+}
+
+fn eval_map_builtin(
+    function: &Value,
+    value: &Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let function = eval_value(function)?;
+    let mapped = match eval_value(value)? {
+        Value::Binary(bytes) => bytes
+            .iter()
+            .map(|byte| {
+                apply_value(
+                    function.clone(),
+                    Value::Number(Number::from_u8(*byte)),
+                    local_env,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Value::List(list) => list_to_value_items(&list)?
+            .into_iter()
+            .map(|item| apply_value(function.clone(), item, local_env))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err(EvalError::new(
+                "map builtin requires a list or binary value",
+            ));
+        }
+    };
+
+    Ok(Value::List(List::from_values(mapped)))
+}
+
 fn eval_number(
     value: &Value,
-    root_env: Option<&Value>,
+    _local_env: &[Value],
     builtin_name: &str,
 ) -> Result<Number, EvalError> {
-    let value = eval_value(value, root_env)?;
+    let value = eval_value(value)?;
     let Value::Number(number) = value else {
         return Err(EvalError::new(format!(
             "{builtin_name} builtin requires number values"
@@ -322,12 +462,28 @@ fn eval_number(
     Ok(number)
 }
 
+fn eval_index_number(
+    value: &Value,
+    local_env: &[Value],
+    builtin_name: &str,
+) -> Result<usize, EvalError> {
+    let number = eval_number(value, local_env, builtin_name)?;
+    number.to_usize_if_integer().ok_or_else(|| {
+        EvalError::new(format!(
+            "{builtin_name} builtin requires non-negative integer indices"
+        ))
+    })
+}
+
 fn partial_builtin_value(builtin: Builtin, args: &[Value]) -> Value {
     let expr = args.iter().cloned().fold(
         Expr::Value(Value::Builtin(builtin)),
         |function, argument| Expr::Apply(Arc::new(function), Arc::new(Expr::Value(argument))),
     );
-    Value::Expr(Arc::new(expr))
+    Value::Expr(Thunk {
+        expr: Arc::new(expr),
+        env: Arc::from([]),
+    })
 }
 
 fn builtin_application_spine(expr: &Expr) -> Option<(Builtin, Vec<Value>)> {
@@ -348,10 +504,11 @@ fn builtin_application_spine(expr: &Expr) -> Option<(Builtin, Vec<Value>)> {
 fn eval_singleton_builtin(
     key: &Value,
     value: &Value,
-    root_env: Option<&Value>,
+    local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let key = eval_key(key, root_env)?;
-    let observed = eval_value(value, root_env)?;
+    let key = eval_value(key)?;
+    let key = value_to_key(&key, local_env)?;
+    let observed = eval_value(value)?;
     if is_undefined_dict_value(&observed) {
         return Ok(Value::Dict(crate::core::Dict::new_sync()));
     }
@@ -364,10 +521,10 @@ fn eval_singleton_builtin(
 fn eval_dict_union_builtin(
     left: &Value,
     right: &Value,
-    root_env: Option<&Value>,
+    _local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let left = eval_value(left, root_env)?;
-    let right = eval_value(right, root_env)?;
+    let left = eval_value(left)?;
+    let right = eval_value(right)?;
     let Value::Dict(left_dict) = left else {
         return Err(EvalError::new(
             "dictionary union requires dictionary values",
@@ -382,10 +539,30 @@ fn eval_dict_union_builtin(
     Ok(Value::Dict(merge_dicts(&left_dict, &right_dict)))
 }
 
-fn merge_dicts(left: &crate::core::Dict, right: &crate::core::Dict) -> crate::core::Dict {
-    let mut merged = left.clone();
+fn eval_fixpoint_builtin(function: &Value) -> Result<Value, EvalError> {
+    let function = eval_value(function)?;
+    let Value::Closure(function) = function else {
+        return Err(EvalError::new("fixpoint builtin requires a lambda value"));
+    };
 
-    for (key, value) in right.iter() {
+    let handle = FixpointHandle::new();
+    let marker = Value::Fixpoint(handle.clone());
+    let value = apply_closure(&function, marker.clone())?;
+    let rebound = bind_fixpoint_value(&value, &marker);
+    handle
+        .set(rebound.clone())
+        .map_err(|_| EvalError::new("fixpoint builtin initialized twice"))?;
+    Ok(rebound)
+}
+
+fn merge_dicts(left: &crate::core::Dict, right: &crate::core::Dict) -> crate::core::Dict {
+    let (mut merged, updates) = if left.size() >= right.size() {
+        (left.clone(), right)
+    } else {
+        (right.clone(), left)
+    };
+
+    for (key, value) in updates.iter() {
         let next_value = match merged.get(key) {
             Some(existing) => Some(merge_duplicate_dict_value(key, existing, value)),
             None if is_undefined_dict_value(value) => None,
@@ -414,28 +591,31 @@ fn merge_duplicate_dict_value(key: &Key, left: &Value, right: &Value) -> Value {
         // is still an unevaluated expression that may become one.
         builtin_apply2_value(Builtin::DictUnion, left, right)
     } else {
-        Value::Expr(Arc::new(Expr::Error(Arc::from(format!(
-            "dictionary union is ambiguous at key `{}`",
-            format_name_part(key)
-        )))))
+        Value::Expr(Thunk {
+            expr: Arc::new(Expr::Error(Arc::from(format!(
+                "dictionary union is ambiguous at key `{}`",
+                format_name_part(key)
+            )))),
+            env: Arc::from([]),
+        })
     }
 }
 
 fn value_as_expr(value: &Value) -> Arc<Expr> {
-    match value {
-        Value::Expr(expr) => expr.clone(),
-        _ => Arc::new(Expr::Value(value.clone())),
-    }
+    Arc::new(Expr::Value(value.clone()))
 }
 
 fn builtin_apply2_value(builtin: Builtin, left: &Value, right: &Value) -> Value {
-    Value::Expr(Arc::new(Expr::Apply(
-        Arc::new(Expr::Apply(
-            Arc::new(Expr::Value(Value::Builtin(builtin))),
-            value_as_expr(left),
+    Value::Expr(Thunk {
+        expr: Arc::new(Expr::Apply(
+            Arc::new(Expr::Apply(
+                Arc::new(Expr::Value(Value::Builtin(builtin))),
+                value_as_expr(left),
+            )),
+            value_as_expr(right),
         )),
-        value_as_expr(right),
-    )))
+        env: Arc::from([]),
+    })
 }
 
 fn is_expr_value(value: &Value) -> bool {
@@ -446,16 +626,29 @@ fn is_undefined_dict_value(value: &Value) -> bool {
     matches!(value, Value::Dict(dict) if dict.is_empty())
 }
 
-fn expand_key_expr(key: &KeyExpr, root_env: Option<&Value>) -> Result<Vec<Key>, EvalError> {
+fn expand_key_expr(key: &KeyExpr, local_env: &[Value]) -> Result<Vec<Key>, EvalError> {
     match key {
         KeyExpr::Key(key) => Ok(vec![key.clone()]),
-        KeyExpr::Expr(expr) => Ok(vec![eval_key(&Value::Expr(expr.clone()), root_env)?]),
-        KeyExpr::ListExpr(expr) => eval_key_path_list(&Value::Expr(expr.clone()), root_env),
+        KeyExpr::Index(expr) => {
+            let value = Value::Expr(Thunk {
+                expr: expr.clone(),
+                env: Arc::from(local_env.to_vec()),
+            });
+            let value = eval_value(&value)?;
+            Ok(vec![value_to_key(&value, local_env)?])
+        }
+        KeyExpr::PathIndex(expr) => eval_key_path_list(
+            &Value::Expr(Thunk {
+                expr: expr.clone(),
+                env: Arc::from(local_env.to_vec()),
+            }),
+            local_env,
+        ),
     }
 }
 
-fn eval_key_path_list(value: &Value, root_env: Option<&Value>) -> Result<Vec<Key>, EvalError> {
-    let value = eval_value(value, root_env)?;
+fn eval_key_path_list(value: &Value, local_env: &[Value]) -> Result<Vec<Key>, EvalError> {
+    let value = eval_value(value)?;
     let Value::List(list) = value else {
         return Err(EvalError::new(
             "path list expression must evaluate to a list value",
@@ -472,7 +665,8 @@ fn eval_key_path_list(value: &Value, root_env: Option<&Value>) -> Result<Vec<Key
         },
         &mut |values| {
             for value in values.iter() {
-                items.borrow_mut().push(eval_key(value, root_env)?);
+                let value = eval_value(value)?;
+                items.borrow_mut().push(value_to_key(&value, local_env)?);
             }
             Ok(())
         },
@@ -480,7 +674,7 @@ fn eval_key_path_list(value: &Value, root_env: Option<&Value>) -> Result<Vec<Key
     Ok(items.into_inner())
 }
 
-fn list_to_key_items(list: &List, root_env: Option<&Value>) -> Result<Arc<[Key]>, EvalError> {
+fn list_to_key_items(list: &List, local_env: &[Value]) -> Result<Arc<[Key]>, EvalError> {
     let items = std::cell::RefCell::new(Vec::new());
     list.for_each_segment(
         &mut |bytes| {
@@ -491,12 +685,100 @@ fn list_to_key_items(list: &List, root_env: Option<&Value>) -> Result<Arc<[Key]>
         },
         &mut |values| {
             for value in values.iter() {
-                items.borrow_mut().push(eval_key(value, root_env)?);
+                let value = eval_value(value)?;
+                items.borrow_mut().push(value_to_key(&value, local_env)?);
             }
             Ok(())
         },
     )?;
     Ok(Arc::from(items.into_inner()))
+}
+
+fn list_to_value_items(list: &List) -> Result<Vec<Value>, EvalError> {
+    let items = std::cell::RefCell::new(Vec::new());
+    list.for_each_segment(
+        &mut |bytes| {
+            items.borrow_mut().extend(
+                bytes
+                    .iter()
+                    .map(|byte| Value::Number(Number::from_u8(*byte))),
+            );
+            Ok::<_, EvalError>(())
+        },
+        &mut |values| {
+            items.borrow_mut().extend(values.iter().cloned());
+            Ok(())
+        },
+    )?;
+    Ok(items.into_inner())
+}
+
+fn bind_fixpoint_dict(dict: &crate::core::Dict, root: &Value) -> crate::core::Dict {
+    dict.iter()
+        .fold(crate::core::Dict::new_sync(), |bound, (key, value)| {
+            bound.insert(key.clone(), bind_fixpoint_value(value, root))
+        })
+}
+
+fn bind_fixpoint_value(value: &Value, root: &Value) -> Value {
+    match value {
+        Value::Atom(atom) => Value::Atom(*atom),
+        Value::Number(number) => Value::Number(number.clone()),
+        Value::Binary(bytes) => Value::Binary(bytes.clone()),
+        Value::List(list) => Value::List(bind_fixpoint_list(list, root)),
+        Value::Dict(dict) => Value::Dict(bind_fixpoint_dict(dict, root)),
+        Value::Fixpoint(_) => value.clone(),
+        Value::Builtin(builtin) => Value::Builtin(*builtin),
+        Value::Closure(closure) if starts_with_fixpoint(&closure.env) => {
+            Value::Closure(closure.clone())
+        }
+        Value::Closure(closure) => Value::Closure(Closure {
+            body: closure.body.clone(),
+            env: prepend_fixpoint(&closure.env, root),
+        }),
+        Value::Expr(thunk) if starts_with_fixpoint(&thunk.env) => Value::Expr(thunk.clone()),
+        Value::Expr(thunk) => Value::Expr(Thunk {
+            expr: thunk.expr.clone(),
+            env: prepend_fixpoint(&thunk.env, root),
+        }),
+    }
+}
+
+fn bind_fixpoint_list(list: &List, root: &Value) -> List {
+    let rebuilt = std::cell::RefCell::new(List::empty());
+    list.for_each_segment(
+        &mut |bytes| {
+            let next = List::concat(rebuilt.borrow().clone(), List::from_bytes(bytes.clone()));
+            rebuilt.replace(next);
+            Ok::<_, ()>(())
+        },
+        &mut |values| {
+            let next = List::concat(
+                rebuilt.borrow().clone(),
+                List::from_values(
+                    values
+                        .iter()
+                        .map(|value| bind_fixpoint_value(value, root))
+                        .collect(),
+                ),
+            );
+            rebuilt.replace(next);
+            Ok(())
+        },
+    )
+    .expect("fixpoint rebinding should not fail");
+    rebuilt.into_inner()
+}
+
+fn prepend_fixpoint(env: &Arc<[Value]>, root: &Value) -> Arc<[Value]> {
+    let mut rebound = Vec::with_capacity(env.len() + 1);
+    rebound.push(root.clone());
+    rebound.extend(env.iter().cloned());
+    Arc::from(rebound)
+}
+
+fn starts_with_fixpoint(env: &[Value]) -> bool {
+    matches!(env.first(), Some(Value::Fixpoint(_)))
 }
 
 fn append_values(left: Value, right: Value) -> Result<Value, EvalError> {
@@ -527,7 +809,7 @@ fn list_literal_segment(value: Value) -> List {
 mod tests {
     use std::sync::Arc;
 
-    use crate::core::{Dict, Expr, Term, Value};
+    use crate::core::{Dict, Expr, FixpointHandle, Term, Thunk, Value};
     use crate::number::Number;
 
     use super::*;
@@ -550,12 +832,54 @@ mod tests {
         )
     }
 
+    fn builtin1_expr(builtin: Builtin, value: Expr) -> Expr {
+        Expr::Apply(
+            Arc::new(Expr::Value(Value::Builtin(builtin))),
+            Arc::new(value),
+        )
+    }
+
+    fn builtin3_expr(builtin: Builtin, first: Expr, second: Expr, third: Expr) -> Expr {
+        Expr::Apply(
+            Arc::new(Expr::Apply(
+                Arc::new(Expr::Apply(
+                    Arc::new(Expr::Value(Value::Builtin(builtin))),
+                    Arc::new(first),
+                )),
+                Arc::new(second),
+            )),
+            Arc::new(third),
+        )
+    }
+
     fn singleton_expr(key: Value, value: Expr) -> Expr {
         builtin2_expr(Builtin::Singleton, Expr::Value(key), value)
     }
 
     fn dict_union_expr(left: Expr, right: Expr) -> Expr {
         builtin2_expr(Builtin::DictUnion, left, right)
+    }
+
+    fn global_access(path: Vec<KeyExpr>) -> Expr {
+        Expr::Access(Arc::new(Expr::Local(0)), Arc::from(path))
+    }
+
+    fn fixpoint_term(dict: Dict) -> Term {
+        Term::Expr(Expr::Apply(
+            Arc::new(Expr::Value(Value::Builtin(Builtin::Fixpoint))),
+            Arc::new(Expr::Lambda(Arc::new(Expr::Value(Value::Dict(dict))))),
+        ))
+    }
+
+    fn rooted_expr_value(root: &Value, expr: Expr) -> Value {
+        let handle = FixpointHandle::new();
+        handle
+            .set(root.clone())
+            .expect("rooted test expression should initialize handle once");
+        Value::Expr(Thunk {
+            expr: Arc::new(expr),
+            env: Arc::from([Value::Fixpoint(handle)]),
+        })
     }
 
     #[test]
@@ -567,8 +891,7 @@ mod tests {
         let root =
             Dict::new_sync().insert(crate::core::Key::atom_from_text("asm"), Value::Dict(asm));
 
-        let value =
-            eval_term(&Term::Expr(Expr::Value(Value::Dict(root)))).expect("term should evaluate");
+        let value = eval_term(&fixpoint_term(root)).expect("term should evaluate");
 
         assert!(matches!(value, Value::Dict(_)));
         assert!(
@@ -689,6 +1012,124 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_extended_math_builtins() {
+        let floor = eval_term(&Term::Expr(builtin1_expr(
+            Builtin::Floor,
+            Expr::Value(Value::Number(Number::parse("_7/2").unwrap())),
+        )))
+        .expect("floor should evaluate");
+        let modulus = eval_term(&Term::Expr(builtin2_expr(
+            Builtin::Mod,
+            Expr::Value(Value::Number(Number::parse("17/5").unwrap())),
+            Expr::Value(Value::Number(Number::parse("3/2").unwrap())),
+        )))
+        .expect("mod should evaluate");
+
+        assert_eq!(floor, Value::Number((-4).into()));
+        assert_eq!(modulus, Value::Number(Number::parse("2/5").unwrap()));
+    }
+
+    #[test]
+    fn evaluates_slice_and_map_builtins() {
+        let slice = eval_term(&Term::Expr(builtin3_expr(
+            Builtin::Slice,
+            Expr::Value(n(1)),
+            Expr::Value(n(4)),
+            Expr::Value(Value::binary_from_text("World!")),
+        )))
+        .expect("slice should evaluate");
+        let mapped = eval_term(&Term::Expr(builtin2_expr(
+            Builtin::Map,
+            Expr::Lambda(Arc::new(Expr::Apply(
+                Arc::new(Expr::Apply(
+                    Arc::new(Expr::Value(Value::Builtin(Builtin::Add))),
+                    Arc::new(Expr::Local(0)),
+                )),
+                Arc::new(Expr::Value(n(1))),
+            ))),
+            Expr::Value(Value::List(List::from_values(vec![n(1), n(2), n(3)]))),
+        )))
+        .expect("map should evaluate");
+
+        assert_eq!(slice, Value::binary_from_text("orl"));
+        let Value::List(mapped) = mapped else {
+            panic!("map should produce a list");
+        };
+        let items = list_to_value_items(&mapped).expect("mapped list should be readable");
+        assert_eq!(items, vec![n(2), n(3), n(4)]);
+    }
+
+    #[test]
+    fn evaluates_lambda_application_lazily() {
+        let expr = Term::Expr(Expr::Apply(
+            Arc::new(Expr::Lambda(Arc::new(Expr::Local(0)))),
+            Arc::new(builtin2_expr(
+                Builtin::Add,
+                Expr::Value(n(1)),
+                Expr::Value(n(2)),
+            )),
+        ));
+
+        let value = eval_term(&expr).expect("lambda application should evaluate");
+
+        assert_eq!(value, n(3));
+    }
+
+    #[test]
+    fn closures_capture_outer_locals() {
+        let expr = Term::Expr(Expr::Apply(
+            Arc::new(Expr::Lambda(Arc::new(Expr::Apply(
+                Arc::new(Expr::Lambda(Arc::new(Expr::Apply(
+                    Arc::new(Expr::Local(0)),
+                    Arc::new(Expr::Value(n(0))),
+                )))),
+                Arc::new(Expr::Lambda(Arc::new(Expr::Local(1)))),
+            )))),
+            Arc::new(Expr::Value(n(42))),
+        ));
+
+        let value = eval_term(&expr).expect("nested closures should evaluate");
+
+        assert_eq!(value, n(42));
+    }
+
+    #[test]
+    fn dropped_arguments_do_not_prevent_later_locals_from_resolving() {
+        let expr = Term::Expr(Expr::Apply(
+            Arc::new(Expr::Apply(
+                Arc::new(Expr::Lambda(Arc::new(Expr::Lambda(Arc::new(Expr::Local(
+                    0,
+                )))))),
+                Arc::new(Expr::Value(n(1))),
+            )),
+            Arc::new(Expr::Value(n(42))),
+        ));
+
+        let value = eval_term(&expr).expect("lambda with dropped argument should evaluate");
+
+        assert_eq!(value, n(42));
+    }
+
+    #[test]
+    fn local_dictionary_paths_resolve_without_a_global_root() {
+        let dict = Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("tail"),
+            Value::binary_from_text("World"),
+        ));
+        let expr = Term::Expr(Expr::Apply(
+            Arc::new(Expr::Lambda(Arc::new(Expr::Access(
+                Arc::new(Expr::Local(0)),
+                Arc::from([KeyExpr::Key(Key::atom_from_text("tail"))]),
+            )))),
+            Arc::new(Expr::Value(dict)),
+        ));
+
+        let value = eval_term(&expr).expect("local dictionary path should evaluate");
+
+        assert_eq!(value, Value::binary_from_text("World"));
+    }
+
+    #[test]
     fn divide_builtin_rejects_zero() {
         let expr = Term::Expr(builtin2_expr(
             Builtin::Divide,
@@ -713,7 +1154,7 @@ mod tests {
                 crate::core::Key::Atom(asm),
                 Value::Dict(Dict::new_sync().insert(
                     crate::core::Key::Atom(result),
-                    Value::Expr(Arc::new(Expr::Apply(
+                    Value::expr(Expr::Apply(
                         Arc::new(Expr::Apply(
                             Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
                             Arc::new(Expr::Apply(
@@ -722,32 +1163,31 @@ mod tests {
                                     Arc::new(Expr::Apply(
                                         Arc::new(Expr::Apply(
                                             Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
-                                            Arc::new(Expr::Name(Arc::from([KeyExpr::Key(
+                                            Arc::new(global_access(vec![KeyExpr::Key(
                                                 hello.clone(),
-                                            )]))),
+                                            )])),
                                         )),
                                         Arc::new(Expr::Value(Value::binary_from_text(", "))),
                                     )),
                                 )),
-                                Arc::new(Expr::Name(Arc::from([KeyExpr::Key(world.clone())]))),
+                                Arc::new(global_access(vec![KeyExpr::Key(world.clone())])),
                             )),
                         )),
                         Arc::new(Expr::Value(Value::binary_from_text("!"))),
-                    ))),
+                    )),
                 )),
             )
             .insert(hello, Value::binary_from_text("Hello"))
             .insert(world, Value::binary_from_text("World"));
 
-        let value =
-            eval_term(&Term::Expr(Expr::Value(Value::Dict(root)))).expect("term should evaluate");
+        let value = eval_term(&fixpoint_term(root)).expect("term should evaluate");
         let result_value = value
             .get_atom_path(&[asm, result])
             .expect("result should exist");
-        let Value::Expr(expr) = result_value else {
+        let Value::Expr(thunk) = result_value else {
             panic!("resolved result should stay lazy until demanded");
         };
-        let resolved = eval_value(&Value::Expr(expr.clone()), Some(&value))
+        let resolved = eval_value(&Value::Expr(thunk.clone()))
             .expect("result expression should evaluate when demanded");
 
         let Value::List(list) = resolved else {
@@ -780,13 +1220,10 @@ mod tests {
 
     #[test]
     fn evaluates_keyable_values_into_keys() {
-        let key = eval_key(
-            &Value::List(List::concat(
-                List::from_values(vec![n(1)]),
-                List::from_bytes(Arc::from(&b"Hi"[..])),
-            )),
-            None,
-        )
+        let key = eval_key(&Value::List(List::concat(
+            List::from_values(vec![n(1)]),
+            List::from_bytes(Arc::from(&b"Hi"[..])),
+        )))
         .expect("list should evaluate to a key");
 
         assert_eq!(
@@ -801,7 +1238,7 @@ mod tests {
 
     #[test]
     fn evaluates_expressions_before_key_validation() {
-        let key = eval_key(&Value::Expr(Arc::new(Expr::Value(n(1)))), None)
+        let key = eval_key(&Value::expr(Expr::Value(n(1))))
             .expect("expressions should be allowed when they evaluate to keyable values");
 
         assert_eq!(key, k(1));
@@ -811,22 +1248,21 @@ mod tests {
     fn dictionaries_remain_lazy_under_eval_value() {
         let value = Value::Dict(crate::core::Dict::new_sync().insert(
             Key::atom_from_text("answer"),
-            Value::Expr(Arc::new(Expr::Value(n(42)))),
+            Value::expr(Expr::Value(n(42))),
         ));
 
-        let evaluated = eval_value(&value, None).expect("dict should stay lazy");
+        let evaluated = eval_value(&value).expect("dict should stay lazy");
 
         assert_eq!(evaluated, value);
     }
 
     #[test]
     fn rejects_unevaluable_keys() {
-        let err = eval_key(
-            &Value::Expr(Arc::new(Expr::Name(Arc::from([KeyExpr::Key(
-                Key::atom_from_text("missing"),
-            )])))),
-            Some(&Value::Dict(crate::core::Dict::new_sync())),
-        )
+        let root = Value::Dict(crate::core::Dict::new_sync());
+        let err = eval_key(&rooted_expr_value(
+            &root,
+            global_access(vec![KeyExpr::Key(Key::atom_from_text("missing"))]),
+        ))
         .expect_err("missing names should not produce keys");
 
         assert_eq!(err.to_string(), "name `missing` is not defined");
@@ -834,21 +1270,15 @@ mod tests {
 
     #[test]
     fn raw_value_to_key_rejects_expressions() {
-        assert_eq!(
-            Key::from_value(&Value::Expr(Arc::new(Expr::Value(n(1))))),
-            None
-        );
+        assert_eq!(Key::from_value(&Value::expr(Expr::Value(n(1)))), None);
     }
 
     #[test]
     fn eval_key_forces_nested_dictionary_values() {
-        let key = eval_key(
-            &Value::Dict(crate::core::Dict::new_sync().insert(
-                Key::atom_from_text("answer"),
-                Value::Expr(Arc::new(Expr::Value(n(42)))),
-            )),
-            None,
-        )
+        let key = eval_key(&Value::Dict(crate::core::Dict::new_sync().insert(
+            Key::atom_from_text("answer"),
+            Value::expr(Expr::Value(n(42))),
+        )))
         .expect("dict key should force nested values");
 
         assert_eq!(
@@ -902,7 +1332,7 @@ mod tests {
         let Value::Expr(greeting) = greeting else {
             panic!("greeting should stay lazy until demanded");
         };
-        let greeting = eval_value(&Value::Expr(greeting.clone()), None)
+        let greeting = eval_value(&Value::Expr(greeting.clone()))
             .expect("nested dict union should evaluate when demanded");
         let Value::Dict(greeting) = greeting else {
             panic!("greeting should evaluate to a merged dictionary");
@@ -963,7 +1393,7 @@ mod tests {
             panic!("ambiguous duplicate should stay as a stuck expression");
         };
 
-        let err = eval_value(&Value::Expr(ambiguous.clone()), None)
+        let err = eval_value(&Value::Expr(ambiguous.clone()))
             .expect_err("ambiguous key should fail only when demanded");
 
         assert_eq!(
@@ -979,24 +1409,20 @@ mod tests {
 
         let root = crate::core::Dict::new_sync().insert(
             d.clone(),
-            Value::Expr(Arc::new(dict_union_expr(
+            Value::expr(dict_union_expr(
                 Expr::Value(Value::Dict(
                     crate::core::Dict::new_sync()
                         .insert(hello.clone(), Value::binary_from_text("Hello")),
                 )),
                 Expr::Value(Value::Dict(crate::core::Dict::new_sync())),
-            ))),
+            )),
         );
 
-        let value =
-            eval_term(&Term::Expr(Expr::Value(Value::Dict(root)))).expect("root should evaluate");
-        let resolved = eval_value(
-            &Value::Expr(Arc::new(Expr::Name(Arc::from([
-                KeyExpr::Key(d),
-                KeyExpr::Key(hello),
-            ])))),
-            Some(&value),
-        )
+        let value = eval_term(&fixpoint_term(root)).expect("root should evaluate");
+        let resolved = eval_value(&rooted_expr_value(
+            &value,
+            global_access(vec![KeyExpr::Key(d), KeyExpr::Key(hello)]),
+        ))
         .expect("dotted name should force intermediate dict unions");
 
         assert_eq!(resolved, Value::binary_from_text("Hello"));
@@ -1025,12 +1451,12 @@ mod tests {
         );
 
         let root = crate::core::Dict::new_sync().insert(foo.clone(), nested);
-        let value =
-            eval_term(&Term::Expr(Expr::Value(Value::Dict(root)))).expect("root should evaluate");
-        let resolved = eval_value(
-            &Value::Expr(Arc::new(Expr::Name(Arc::from([
+        let value = eval_term(&fixpoint_term(root)).expect("root should evaluate");
+        let resolved = eval_value(&rooted_expr_value(
+            &value,
+            global_access(vec![
                 KeyExpr::Key(foo),
-                KeyExpr::ListExpr(Arc::new(Expr::Apply(
+                KeyExpr::PathIndex(Arc::new(Expr::Apply(
                     Arc::new(Expr::Apply(
                         Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
                         Arc::new(Expr::List(Arc::from([
@@ -1040,9 +1466,8 @@ mod tests {
                     )),
                     Arc::new(Expr::List(Arc::from([Arc::new(Expr::Value(n(3)))]))),
                 ))),
-            ])))),
-            Some(&value),
-        )
+            ]),
+        ))
         .expect("list-valued path segment should expand into multiple lookups");
 
         assert_eq!(resolved, Value::binary_from_text("World"));
@@ -1052,15 +1477,15 @@ mod tests {
     fn builtins_are_curried_and_do_not_force_arguments_early() {
         let partial = eval_term(&Term::Expr(Expr::Apply(
             Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
-            Arc::new(Expr::Name(Arc::from([KeyExpr::Key(Key::atom_from_text(
+            Arc::new(global_access(vec![KeyExpr::Key(Key::atom_from_text(
                 "missing",
-            ))]))),
+            ))])),
         )))
         .expect("partial builtin application should not force its first argument");
 
         match partial {
-            Value::Expr(expr) => {
-                let Some((builtin, args)) = builtin_application_spine(expr.as_ref()) else {
+            Value::Expr(thunk) => {
+                let Some((builtin, args)) = builtin_application_spine(thunk.expr.as_ref()) else {
                     panic!("expected builtin application spine");
                 };
                 assert_eq!(builtin, Builtin::Append);

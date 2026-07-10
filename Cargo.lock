@@ -96,6 +96,7 @@ dependencies = [
  "chumsky",
  "internment",
  "num-bigint",
+ "num-integer",
  "num-rational",
  "num-traits",
  "rpds",

@@ -1,8 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
+use glam::compiler::CompileContext;
 use glam::diagnostic::Severity;
-use glam::g_syntax::{Diagnostic, SourceFile, lower_to_core};
+use glam::g_syntax::{Diagnostic, SourceFile, lower_to_core_with_context};
 
 #[test]
 fn invalid_syntax_samples_report_expected_diagnostics() {
@@ -20,13 +22,66 @@ fn invalid_syntax_samples_report_expected_diagnostics() {
         let expect_text = fs::read_to_string(&expect_path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", expect_path.display()));
 
-        let parsed = SourceFile::new(source_path.display().to_string(), source_text).parse();
-        let lowered = lower_to_core(&parsed);
+        let source = SourceFile::new(source_path.display().to_string(), source_text);
+        let context = CompileContext::for_assembly_file(&source.path)
+            .with_source_binary(source.text.as_bytes());
+        let parsed = source.parse_with_context(&context);
+        let lowered = lower_to_core_with_context(&parsed, &context);
         assert_expectations(
             &source_path,
             &parse_expectations(&expect_path, &expect_text),
             &lowered.diagnostics,
         );
+    }
+}
+
+#[test]
+fn invalid_eval_samples_report_expected_runtime_errors() {
+    for source_path in sample_files("samples/invalid/eval") {
+        let expect_path = source_path.with_extension("expect");
+        assert!(
+            expect_path.exists(),
+            "{} is missing sibling expectation file {}",
+            source_path.display(),
+            expect_path.display()
+        );
+
+        let expect_text = fs::read_to_string(&expect_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", expect_path.display()));
+        let expected_stderr = parse_eval_expectations(&expect_path, &expect_text);
+
+        let output = Command::new(env!("CARGO_BIN_EXE_glam"))
+            .arg("--file")
+            .arg(&source_path)
+            .output()
+            .unwrap_or_else(|err| {
+                panic!("failed to run glam for {}: {err}", source_path.display())
+            });
+
+        assert!(
+            !output.status.success(),
+            "{} unexpectedly succeeded\nstdout: {}\nstderr: {}",
+            source_path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            b"",
+            "{} produced unexpected stdout",
+            source_path.display()
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for expected in expected_stderr {
+            assert!(
+                stderr.contains(&expected),
+                "{} stderr did not contain expected substring {:?}\nstderr: {}",
+                source_path.display(),
+                expected,
+                stderr
+            );
+        }
     }
 }
 
@@ -46,6 +101,26 @@ fn parse_expectations(path: &Path, text: &str) -> Vec<ExpectedDiagnostic> {
                 None
             } else {
                 Some(parse_expectation(path, index + 1, line))
+            }
+        })
+        .collect()
+}
+
+fn parse_eval_expectations(path: &Path, text: &str) -> Vec<String> {
+    text.lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                None
+            } else {
+                assert!(
+                    !line.contains('|'),
+                    "{}:{} eval expectations should be plain stderr substrings",
+                    path.display(),
+                    index + 1
+                );
+                Some(line.to_owned())
             }
         })
         .collect()

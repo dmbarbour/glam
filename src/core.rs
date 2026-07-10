@@ -1,5 +1,5 @@
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
@@ -16,15 +16,17 @@ pub enum Expr {
     Value(Value),
     List(Arc<[Arc<Expr>]>),
     Apply(Arc<Expr>, Arc<Expr>),
-    Name(Arc<[KeyExpr]>),
+    Lambda(Arc<Expr>),
+    Local(usize),
+    Access(Arc<Expr>, Arc<[KeyExpr]>),
     Error(Arc<str>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyExpr {
     Key(Key),
-    Expr(Arc<Expr>),
-    ListExpr(Arc<Expr>),
+    Index(Arc<Expr>),
+    PathIndex(Arc<Expr>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -57,6 +59,7 @@ pub enum Key {
     Atom(Atom),
     Number(Number),
     Binary(Arc<[u8]>),
+    AbstractGlobalPath(Arc<[String]>),
     List(Arc<[Key]>),
     Dict(Arc<[(Key, Key)]>),
 }
@@ -72,6 +75,16 @@ impl Key {
 
     pub fn binary_from_text(text: impl Into<String>) -> Self {
         Self::Binary(Arc::from(text.into().into_bytes()))
+    }
+
+    pub fn abstract_global_path<I, S>(parts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::AbstractGlobalPath(Arc::from(
+            parts.into_iter().map(Into::into).collect::<Vec<_>>(),
+        ))
     }
 
     pub fn from_value(value: &Value) -> Option<Self> {
@@ -94,7 +107,9 @@ impl Key {
                     .flatten()
                     .collect::<Vec<_>>(),
             ))),
+            Value::Fixpoint(_) => None,
             Value::Builtin(_) => None,
+            Value::Closure(_) => None,
             Value::Expr(_) => None,
         }
     }
@@ -106,9 +121,43 @@ impl fmt::Debug for Key {
             Key::Atom(atom) => f.debug_tuple("Atom").field(atom).finish(),
             Key::Number(number) => f.debug_tuple("Number").field(number).finish(),
             Key::Binary(bytes) => f.debug_tuple("Binary").field(bytes).finish(),
+            Key::AbstractGlobalPath(parts) => {
+                f.debug_tuple("AbstractGlobalPath").field(parts).finish()
+            }
             Key::List(items) => f.debug_tuple("List").field(items).finish(),
             Key::Dict(entries) => f.debug_tuple("Dict").field(entries).finish(),
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct FixpointHandle(Arc<OnceLock<Value>>);
+
+impl FixpointHandle {
+    pub fn new() -> Self {
+        Self(Arc::new(OnceLock::new()))
+    }
+
+    pub fn get(&self) -> Option<&Value> {
+        self.0.get()
+    }
+
+    pub fn set(&self, value: Value) -> Result<(), Value> {
+        self.0.set(value)
+    }
+}
+
+impl PartialEq for FixpointHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for FixpointHandle {}
+
+impl fmt::Debug for FixpointHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FixpointHandle(..)")
     }
 }
 
@@ -119,8 +168,22 @@ pub enum Value {
     Binary(Arc<[u8]>),
     List(List),
     Dict(Dict),
+    Fixpoint(FixpointHandle),
     Builtin(Builtin),
-    Expr(Arc<Expr>),
+    Closure(Closure),
+    Expr(Thunk),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Closure {
+    pub body: Arc<Expr>,
+    pub env: Arc<[Value]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Thunk {
+    pub expr: Arc<Expr>,
+    pub env: Arc<[Value]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -130,6 +193,11 @@ pub enum Builtin {
     Subtract,
     Multiply,
     Divide,
+    Fixpoint,
+    Floor,
+    Mod,
+    Slice,
+    Map,
     Singleton,
     DictUnion,
 }
@@ -142,6 +210,11 @@ impl Builtin {
             Self::Subtract => 2,
             Self::Multiply => 2,
             Self::Divide => 2,
+            Self::Fixpoint => 1,
+            Self::Floor => 1,
+            Self::Mod => 2,
+            Self::Slice => 3,
+            Self::Map => 2,
             Self::Singleton => 2,
             Self::DictUnion => 2,
         }
@@ -238,6 +311,20 @@ impl Value {
         Self::Binary(Arc::from(text.as_bytes()))
     }
 
+    pub fn expr(expr: Expr) -> Self {
+        Self::Expr(Thunk {
+            expr: Arc::new(expr),
+            env: Arc::from([]),
+        })
+    }
+
+    pub fn expr_arc(expr: Arc<Expr>) -> Self {
+        Self::Expr(Thunk {
+            expr,
+            env: Arc::from([]),
+        })
+    }
+
     pub fn singleton_list(value: Value) -> List {
         List::from_values(vec![value])
     }
@@ -253,6 +340,8 @@ impl Value {
                 | Value::Number(_)
                 | Value::Binary(_)
                 | Value::List(_)
+                | Value::Fixpoint(_)
+                | Value::Closure(_)
                 | Value::Builtin(_)
                 | Value::Expr(_) => None,
             },
@@ -348,10 +437,13 @@ mod tests {
     }
 
     #[test]
-    fn semantic_expr_can_hold_names() {
-        let expr = Expr::Name(Arc::from([KeyExpr::Key(Key::atom_from_text("hello"))]));
+    fn semantic_expr_can_hold_accesses() {
+        let expr = Expr::Access(
+            Arc::new(Expr::Local(0)),
+            Arc::from([KeyExpr::Key(Key::atom_from_text("hello"))]),
+        );
 
-        assert!(matches!(expr, Expr::Name(path) if path.len() == 1));
+        assert!(matches!(expr, Expr::Access(_, path) if path.len() == 1));
     }
 
     #[test]
@@ -394,9 +486,20 @@ mod tests {
     #[test]
     fn keys_reject_expressions() {
         assert_eq!(
-            Key::from_value(&Value::Expr(Arc::new(Expr::Value(Value::Number(1.into()))))),
+            Key::from_value(&Value::expr(Expr::Value(Value::Number(1.into())))),
             None
         );
+    }
+
+    #[test]
+    fn abstract_global_path_keys_are_distinct_from_list_keys() {
+        let abstract_path = Key::abstract_global_path(["builtin", "unit"]);
+        let list_path = Key::List(Arc::from([
+            Key::binary_from_text("builtin"),
+            Key::binary_from_text("unit"),
+        ]));
+
+        assert_ne!(abstract_path, list_path);
     }
 
     #[test]

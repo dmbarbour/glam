@@ -3,9 +3,10 @@ use std::fs;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+use glam::compiler::CompileContext;
 use glam::diagnostic::Severity;
 use glam::eval;
-use glam::g_syntax::{DeclarationKind, SourceFile, lower_to_core};
+use glam::g_syntax::{DeclarationKind, ParsedSource, SourceFile, lower_to_core_with_context};
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -60,12 +61,12 @@ fn assemble_path(path: &str) -> ExitCode {
     // extensions, and shall effectfully lower to core, via common API with
     // the built-in syntax.
 
-    let parsed = match parse_source_path(path) {
+    let (parsed, context) = match parse_source_path(path) {
         Ok(parsed) => parsed,
         Err(exit_code) => return exit_code,
     };
 
-    let lowered = lower_to_core(&parsed);
+    let lowered = lower_to_core_with_context(&parsed, &context);
 
     for diagnostic in &lowered.diagnostics {
         eprintln!(
@@ -125,14 +126,16 @@ fn value_bytes(
     match value {
         glam::core::Value::Binary(bytes) => Ok(bytes.to_vec()),
         glam::core::Value::List(list) => list_bytes(list).map_err(|err| format!("`{path}` {err}")),
-        glam::core::Value::Expr(expr) => {
-            let value = eval::eval_value(&glam::core::Value::Expr(expr.clone()), Some(root))
+        glam::core::Value::Expr(thunk) => {
+            let value = eval::eval_value(&glam::core::Value::Expr(thunk.clone()))
                 .map_err(|err| err.to_string())?;
             value_bytes(&value, root, path)
         }
         glam::core::Value::Atom(_)
         | glam::core::Value::Dict(_)
         | glam::core::Value::Number(_)
+        | glam::core::Value::Fixpoint(_)
+        | glam::core::Value::Closure(_)
         | glam::core::Value::Builtin(_) => Err(format!("`{path}` is not binary text data")),
     }
 }
@@ -170,7 +173,7 @@ fn value_at_path<'a>(root: &'a glam::core::Value, path: &str) -> Option<&'a glam
 }
 
 fn parse_path(path: &str) -> ExitCode {
-    let parsed = match parse_source_path(path) {
+    let (parsed, _context) = match parse_source_path(path) {
         Ok(parsed) => parsed,
         Err(exit_code) => return exit_code,
     };
@@ -178,7 +181,7 @@ fn parse_path(path: &str) -> ExitCode {
     print_parse_summary(path, &parsed)
 }
 
-fn parse_source_path(path: &str) -> Result<glam::g_syntax::ParsedSource, ExitCode> {
+fn parse_source_path(path: &str) -> Result<(ParsedSource, CompileContext), ExitCode> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) => {
@@ -188,10 +191,17 @@ fn parse_source_path(path: &str) -> Result<glam::g_syntax::ParsedSource, ExitCod
     };
 
     let source = SourceFile::new(path, text);
-    Ok(source.parse())
+    let context =
+        CompileContext::for_assembly_file(path).with_source_binary(source.text.as_bytes());
+    Ok((source.parse_with_context(&context), context))
 }
 
 fn print_parse_summary(path: &str, parsed: &glam::g_syntax::ParsedSource) -> ExitCode {
+    let has_errors = parsed
+        .diagnostics
+        .iter()
+        .any(|diagnostic| matches!(diagnostic.severity, Severity::Error));
+
     for diagnostic in &parsed.diagnostics {
         eprintln!(
             "{path}:{}: {}: {}",
@@ -199,21 +209,22 @@ fn print_parse_summary(path: &str, parsed: &glam::g_syntax::ParsedSource) -> Exi
         );
     }
 
-    println!("{} declarations", parsed.declarations.len());
+    let out = &mut io::stderr();
+
+    writeln!(out, "{} declarations", parsed.declarations.len())
+        .expect("failed to write parse summary");
     for declaration in &parsed.declarations {
-        println!(
+        writeln!(
+            out,
             "{:>4}: {:<12} {}",
             declaration.line,
             declaration_label(&declaration.kind),
             declaration.text.lines().next().unwrap_or("")
-        );
+        )
+        .expect("failed to write parse summary");
     }
 
-    if parsed
-        .diagnostics
-        .iter()
-        .any(|diagnostic| matches!(diagnostic.severity, Severity::Error))
-    {
+    if has_errors {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS

@@ -1,140 +1,31 @@
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
-fn file_option_writes_asm_result_to_stdout() {
-    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
-        .arg("--file")
-        .arg("samples/assembly/hello_text.g")
-        .output()
-        .expect("failed to run glam");
+fn hello_assembly_samples_write_hello_world_to_stdout() {
+    for path in hello_sample_files() {
+        let output = Command::new(env!("CARGO_BIN_EXE_glam"))
+            .arg("--file")
+            .arg(&path)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run glam for {}: {err}", path.display()));
 
-    assert!(
-        output.status.success(),
-        "glam failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"Hello, World!");
-    assert_eq!(output.stderr, b"");
-}
-
-#[test]
-fn file_option_writes_computed_asm_result_to_stdout() {
-    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
-        .arg("--file")
-        .arg("samples/assembly/hello_list.g")
-        .output()
-        .expect("failed to run glam");
-
-    assert!(
-        output.status.success(),
-        "glam failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"Hello, World!");
-}
-
-#[test]
-fn file_option_writes_arithmetic_result_to_stdout() {
-    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
-        .arg("--file")
-        .arg("samples/assembly/hello_arith.g")
-        .output()
-        .expect("failed to run glam");
-
-    assert!(
-        output.status.success(),
-        "glam failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"Hello, World!");
-}
-
-#[test]
-fn file_option_writes_mixed_list_and_binary_result_to_stdout() {
-    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
-        .arg("--file")
-        .arg("samples/assembly/hello_mixed.g")
-        .output()
-        .expect("failed to run glam");
-
-    assert!(
-        output.status.success(),
-        "glam failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"Hello, World!");
-}
-
-#[test]
-fn file_option_writes_forward_referenced_name_result_to_stdout() {
-    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
-        .arg("--file")
-        .arg("samples/assembly/hello_names.g")
-        .output()
-        .expect("failed to run glam");
-
-    assert!(
-        output.status.success(),
-        "glam failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"Hello, World!");
-}
-
-#[test]
-fn file_option_writes_dictionary_selected_result_to_stdout() {
-    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
-        .arg("--file")
-        .arg("samples/assembly/hello_dict.g")
-        .output()
-        .expect("failed to run glam");
-
-    assert!(
-        output.status.success(),
-        "glam failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"Hello, World!");
-}
-
-#[test]
-fn file_option_writes_expression_indexed_result_to_stdout() {
-    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
-        .arg("--file")
-        .arg("samples/assembly/hello_indexed.g")
-        .output()
-        .expect("failed to run glam");
-
-    assert!(
-        output.status.success(),
-        "glam failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"Hello, World!");
-}
-
-#[test]
-fn file_option_writes_list_expression_path_result_to_stdout() {
-    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
-        .arg("--file")
-        .arg("samples/assembly/hello_path_expr.g")
-        .output()
-        .expect("failed to run glam");
-
-    assert!(
-        output.status.success(),
-        "glam failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"Hello, World!");
+        assert!(
+            output.status.success(),
+            "{} failed\nstdout: {}\nstderr: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            b"Hello, World!",
+            "{} produced unexpected stdout",
+            path.display()
+        );
+        assert_eq!(output.stderr, b"", "{} produced stderr", path.display());
+    }
 }
 
 #[test]
@@ -147,4 +38,59 @@ fn short_file_option_writes_asm_result_to_stdout() {
 
     assert!(output.status.success());
     assert_eq!(output.stdout, b"Hello, World!");
+}
+
+#[test]
+fn parse_errors_write_summary_and_diagnostics_to_stderr() {
+    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
+        .arg("--parse")
+        .arg("samples/invalid/syntax/missing_language.g")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("samples/invalid/syntax/missing_language.g:1: error:"));
+    assert!(stderr.contains("1 declarations"));
+    assert!(stderr.contains("definition"));
+}
+
+#[test]
+fn parse_success_writes_summary_to_stderr() {
+    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
+        .arg("--parse")
+        .arg("samples/syntax/minimal.g")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("2 declarations"));
+    assert!(stderr.contains("language"));
+    assert!(stderr.contains("definition"));
+}
+
+fn hello_sample_files() -> Vec<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/assembly");
+    let mut files = fs::read_dir(&root)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|err| panic!("failed to read entry in {}: {err}", root.display()))
+                .path()
+        })
+        .filter(|path| path.is_file())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "g"))
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("hello_"))
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    files
 }

@@ -2,6 +2,8 @@ use chumsky::prelude::*;
 
 use std::sync::Arc;
 
+use crate::compiler::CompileContext;
+use crate::core::Builtin;
 use crate::core::{Atom, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Term, Value};
 use crate::diagnostic::Severity;
 use crate::number::Number;
@@ -22,6 +24,10 @@ impl SourceFile {
 
     pub fn parse(&self) -> ParsedSource {
         parse_source(self)
+    }
+
+    pub fn parse_with_context(&self, context: &CompileContext) -> ParsedSource {
+        parse_source_with_context(self, context)
     }
 }
 
@@ -58,8 +64,14 @@ pub struct LanguageDecl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportDecl {
-    pub reference: String,
+    pub reference: ImportReference,
     pub placement: ImportPlacement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportReference {
+    Local(String),
+    Builtin(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +104,8 @@ pub enum SyntaxExpr {
     SingletonDict(SyntaxKeyExpr, Box<SyntaxExpr>),
     DictUnion(Vec<SyntaxExpr>),
     List(Vec<SyntaxExpr>),
+    Lambda(Vec<String>, Box<SyntaxExpr>),
+    Apply(Box<SyntaxExpr>, Box<SyntaxExpr>),
     Multiply(Box<SyntaxExpr>, Box<SyntaxExpr>),
     Divide(Box<SyntaxExpr>, Box<SyntaxExpr>),
     Add(Box<SyntaxExpr>, Box<SyntaxExpr>),
@@ -102,8 +116,15 @@ pub enum SyntaxExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyntaxKeyExpr {
     Atom(String),
-    Expr(Box<SyntaxExpr>),
-    ListExpr(Box<SyntaxExpr>),
+    Index(Box<SyntaxExpr>),
+    PathIndex(Box<SyntaxExpr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalName {
+    raw: String,
+    canonical: Option<String>,
+    suppress_unused_warning: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,8 +159,26 @@ impl Diagnostic {
 }
 
 pub fn parse_source(source: &SourceFile) -> ParsedSource {
-    let mut diagnostics = line_ending_diagnostics(&source.text);
-    let physical_lines = split_lines(&source.text);
+    let context = CompileContext::default().with_source_binary(source.text.as_bytes());
+    parse_source_with_context(source, &context)
+}
+
+pub fn parse_source_with_context(source: &SourceFile, context: &CompileContext) -> ParsedSource {
+    let text = match context.source_text(source.text.as_str()) {
+        Ok(text) => text,
+        Err(err) => {
+            return ParsedSource {
+                declarations: Vec::new(),
+                diagnostics: vec![Diagnostic::error(
+                    1,
+                    format!("source is not valid UTF-8: {err}"),
+                )],
+            };
+        }
+    };
+
+    let mut diagnostics = line_ending_diagnostics(text.as_ref());
+    let physical_lines = split_lines(text.as_ref());
     let mut declarations = Vec::new();
     let mut index = 0;
 
@@ -199,30 +238,195 @@ pub fn parse_source(source: &SourceFile) -> ParsedSource {
 }
 
 pub fn lower_to_core(parsed: &ParsedSource) -> LoweredSource {
-    let mut root = Dict::new_sync();
+    lower_to_core_with_context(parsed, &CompileContext::default())
+}
+
+pub fn lower_to_core_with_context(
+    parsed: &ParsedSource,
+    context: &CompileContext,
+) -> LoweredSource {
+    let mut root = match &context.prior {
+        Value::Dict(dict) => dict.clone(),
+        _ => {
+            return LoweredSource {
+                term: None,
+                diagnostics: vec![Diagnostic::error(
+                    0,
+                    "compile context prior must be a dictionary value",
+                )],
+            };
+        }
+    };
     let mut atoms = std::collections::BTreeMap::new();
     let mut diagnostics = parsed.diagnostics.clone();
 
     for declaration in &parsed.declarations {
-        let DeclarationKind::Definition(definition) = &declaration.kind else {
-            continue;
-        };
-
-        match lower_definition(definition, declaration.line, &mut root, &mut atoms) {
-            Ok(()) => {}
-            Err(diagnostic) => diagnostics.push(diagnostic),
+        match &declaration.kind {
+            DeclarationKind::Import(import) => {
+                if let Err(diagnostic) =
+                    lower_import(import, declaration.line, context, &mut root, &mut atoms)
+                {
+                    diagnostics.push(diagnostic);
+                }
+            }
+            DeclarationKind::Unique(names) => {
+                if let Err(diagnostic) =
+                    lower_unique(names, declaration.line, context, &mut root, &mut atoms)
+                {
+                    diagnostics.push(diagnostic);
+                }
+            }
+            DeclarationKind::Definition(definition) => {
+                if let Err(diagnostic) =
+                    lower_definition(definition, declaration.line, context, &mut root, &mut atoms)
+                {
+                    diagnostics.push(diagnostic);
+                }
+            }
+            _ => {}
         }
     }
 
     LoweredSource {
-        term: Some(Term::Expr(CoreExpr::Value(Value::Dict(root)))),
+        term: Some(context.core.module_term(root)),
         diagnostics,
     }
+}
+
+fn lower_import(
+    import: &ImportDecl,
+    line: usize,
+    context: &CompileContext,
+    root: &mut Dict,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Result<(), Diagnostic> {
+    let ImportReference::Builtin(name) = &import.reference else {
+        return Ok(());
+    };
+    let module = builtin_module_value(context, name, atoms)
+        .ok_or_else(|| Diagnostic::error(line, format!("unknown built-in module `'{name}`")))?;
+
+    *root = match &import.placement {
+        ImportPlacement::Inline => inline_import_module(root, &module, context),
+        ImportPlacement::As(target) => insert_path(root, target, module, line, context, atoms)?,
+        ImportPlacement::At(_) => {
+            return Err(Diagnostic::error(
+                line,
+                "built-in `import ... at ...` is not supported by the current spike",
+            ));
+        }
+    };
+
+    Ok(())
+}
+
+fn lower_unique(
+    names: &[String],
+    line: usize,
+    context: &CompileContext,
+    root: &mut Dict,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Result<(), Diagnostic> {
+    for name in names {
+        let path = context.abstract_global_path(name);
+        let value = context.core.abstract_global_path_value(path.as_ref());
+        *root = insert_path(root, name, value, line, context, atoms)?;
+    }
+    Ok(())
+}
+
+fn inline_import_module(root: &Dict, module: &Value, context: &CompileContext) -> Dict {
+    let Value::Dict(module) = module else {
+        return root.clone();
+    };
+
+    let mut merged = root.clone();
+    for (key, imported) in module.iter() {
+        merged = match merged.get(key) {
+            Some(existing) if is_empty_dict_value(existing) => {
+                merged.insert(key.clone(), imported.clone())
+            }
+            Some(existing) if is_empty_dict_value(imported) => {
+                merged.insert(key.clone(), existing.clone())
+            }
+            Some(existing) => merged.insert(
+                key.clone(),
+                context.core.dict_union_value(existing, imported),
+            ),
+            None if is_empty_dict_value(imported) => merged,
+            None => merged.insert(key.clone(), imported.clone()),
+        };
+    }
+
+    merged
+}
+
+fn is_empty_dict_value(value: &Value) -> bool {
+    matches!(value, Value::Dict(dict) if dict.is_empty())
+}
+
+fn builtin_module_value(
+    context: &CompileContext,
+    name: &str,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Option<Value> {
+    match name {
+        "math" => Some(context.core.value_dict(builtin_math_module(context, atoms))),
+        "list" => Some(context.core.value_dict(builtin_list_module(context, atoms))),
+        "std" | "prelude" => Some(context.core.value_dict(builtin_std_module(context, atoms))),
+        _ => None,
+    }
+}
+
+fn builtin_math_module(
+    context: &CompileContext,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Dict {
+    Dict::new_sync()
+        .insert(
+            atom_key("floor", atoms),
+            context.core.value_builtin(Builtin::Floor),
+        )
+        .insert(
+            atom_key("mod", atoms),
+            context.core.value_builtin(Builtin::Mod),
+        )
+}
+
+fn builtin_list_module(
+    context: &CompileContext,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Dict {
+    Dict::new_sync()
+        .insert(
+            atom_key("slice", atoms),
+            context.core.value_builtin(Builtin::Slice),
+        )
+        .insert(
+            atom_key("map", atoms),
+            context.core.value_builtin(Builtin::Map),
+        )
+}
+
+fn builtin_std_module(
+    context: &CompileContext,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Dict {
+    Dict::new_sync()
+        .insert(
+            atom_key("math", atoms),
+            context.core.value_dict(builtin_math_module(context, atoms)),
+        )
+        .insert(
+            atom_key("list", atoms),
+            context.core.value_dict(builtin_list_module(context, atoms)),
+        )
 }
 
 fn lower_definition(
     definition: &DefinitionDecl,
     line: usize,
+    context: &CompileContext,
     root: &mut Dict,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<(), Diagnostic> {
@@ -230,11 +434,15 @@ fn lower_definition(
         return Ok(());
     };
 
-    let value = syntax_expr_to_value(expr, line, atoms)?;
+    let value = syntax_expr_to_value(expr, line, context, atoms)?;
 
     *root = match definition.kind {
-        DefinitionKind::Introduce => insert_path(root, &definition.target, value, line, atoms)?,
-        DefinitionKind::Override => override_path(root, &definition.target, value, line, atoms)?,
+        DefinitionKind::Introduce => {
+            insert_path(root, &definition.target, value, line, context, atoms)?
+        }
+        DefinitionKind::Override => {
+            override_path(root, &definition.target, value, line, context, atoms)?
+        }
         DefinitionKind::Update => Err(Diagnostic::error(
             line,
             "update definitions are not supported by the .g spike lowering",
@@ -247,92 +455,121 @@ fn lower_definition(
 fn syntax_expr_to_value(
     expr: &SyntaxExpr,
     line: usize,
+    context: &CompileContext,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<Value, Diagnostic> {
     match expr {
-        SyntaxExpr::Number(number) => Ok(Value::Number(number.clone())),
-        SyntaxExpr::Text(text) => Ok(Value::binary_from_text(text)),
+        SyntaxExpr::Number(number) => Ok(context.core.value_number(number.clone())),
+        SyntaxExpr::Text(text) => Ok(context.core.value_binary(text)),
         SyntaxExpr::Name(_)
         | SyntaxExpr::SingletonDict(_, _)
         | SyntaxExpr::DictUnion(_)
         | SyntaxExpr::List(_)
+        | SyntaxExpr::Lambda(_, _)
+        | SyntaxExpr::Apply(_, _)
         | SyntaxExpr::Multiply(_, _)
         | SyntaxExpr::Divide(_, _)
         | SyntaxExpr::Add(_, _)
         | SyntaxExpr::Subtract(_, _)
-        | SyntaxExpr::Append(_, _) => Ok(Value::Expr(Arc::new(syntax_expr_to_core_expr(
-            expr, line, atoms,
-        )?))),
+        | SyntaxExpr::Append(_, _) => Ok(context
+            .core
+            .value_expr(syntax_expr_to_core_expr(expr, line, context, atoms)?)),
     }
 }
 
 fn syntax_expr_to_core_expr(
     expr: &SyntaxExpr,
     line: usize,
+    context: &CompileContext,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<CoreExpr, Diagnostic> {
+    syntax_expr_to_core_expr_in_scope(expr, line, context, atoms, &mut Vec::new())
+}
+
+fn syntax_expr_to_core_expr_in_scope(
+    expr: &SyntaxExpr,
+    line: usize,
+    context: &CompileContext,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+    locals: &mut Vec<LocalName>,
+) -> Result<CoreExpr, Diagnostic> {
     Ok(match expr {
-        SyntaxExpr::Number(number) => CoreExpr::Value(Value::Number(number.clone())),
-        SyntaxExpr::Text(text) => CoreExpr::Value(Value::binary_from_text(text)),
-        SyntaxExpr::SingletonDict(key, value) => builtin_apply2(
-            crate::core::Builtin::Singleton,
-            syntax_key_expr_to_core_expr(key, line, atoms)?,
-            syntax_expr_to_core_expr(value, line, atoms)?,
+        SyntaxExpr::Number(number) => context
+            .core
+            .expr_value(context.core.value_number(number.clone())),
+        SyntaxExpr::Text(text) => context.core.expr_value(context.core.value_binary(text)),
+        SyntaxExpr::SingletonDict(key, value) => context.core.builtin_apply2_expr(
+            Builtin::Singleton,
+            syntax_key_expr_to_core_expr(key, line, context, atoms, locals)?,
+            syntax_expr_to_core_expr_in_scope(value, line, context, atoms, locals)?,
         ),
-        SyntaxExpr::DictUnion(items) => lower_dict_union(items, line, atoms)?,
-        SyntaxExpr::Name(parts) => CoreExpr::Name(Arc::from(
-            parts
-                .iter()
-                .map(|part| syntax_key_expr_to_core(part, line, atoms))
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        SyntaxExpr::List(items) => CoreExpr::List(Arc::from(
+        SyntaxExpr::DictUnion(items) => lower_dict_union(items, line, context, atoms, locals)?,
+        SyntaxExpr::Name(parts) => lower_name_expr(parts, line, context, atoms, locals)?,
+        SyntaxExpr::List(items) => context.core.expr_list(
             items
                 .iter()
-                .map(|expr| syntax_expr_to_core_expr(expr, line, atoms).map(Arc::new))
+                .map(|expr| {
+                    syntax_expr_to_core_expr_in_scope(expr, line, context, atoms, locals)
+                        .map(Arc::new)
+                })
                 .collect::<Result<Vec<_>, _>>()?,
-        )),
+        ),
+        SyntaxExpr::Lambda(params, body) => {
+            lower_lambda_expr(params, body, line, context, atoms, locals)?
+        }
+        SyntaxExpr::Apply(function, argument) => context.core.expr_apply(
+            syntax_expr_to_core_expr_in_scope(function, line, context, atoms, locals)?,
+            syntax_expr_to_core_expr_in_scope(argument, line, context, atoms, locals)?,
+        ),
         SyntaxExpr::Multiply(left, right) => {
-            lower_builtin_expr(crate::core::Builtin::Multiply, left, right, line, atoms)?
+            lower_builtin_expr(Builtin::Multiply, left, right, line, context, atoms, locals)?
         }
         SyntaxExpr::Divide(left, right) => {
-            lower_builtin_expr(crate::core::Builtin::Divide, left, right, line, atoms)?
+            lower_builtin_expr(Builtin::Divide, left, right, line, context, atoms, locals)?
         }
         SyntaxExpr::Add(left, right) => {
-            lower_builtin_expr(crate::core::Builtin::Add, left, right, line, atoms)?
+            lower_builtin_expr(Builtin::Add, left, right, line, context, atoms, locals)?
         }
         SyntaxExpr::Subtract(left, right) => {
-            lower_builtin_expr(crate::core::Builtin::Subtract, left, right, line, atoms)?
+            lower_builtin_expr(Builtin::Subtract, left, right, line, context, atoms, locals)?
         }
         SyntaxExpr::Append(left, right) => {
-            lower_builtin_expr(crate::core::Builtin::Append, left, right, line, atoms)?
+            lower_builtin_expr(Builtin::Append, left, right, line, context, atoms, locals)?
         }
     })
 }
 
 fn lower_builtin_expr(
-    builtin: crate::core::Builtin,
+    builtin: Builtin,
     left: &SyntaxExpr,
     right: &SyntaxExpr,
     line: usize,
+    context: &CompileContext,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
+    locals: &mut Vec<LocalName>,
 ) -> Result<CoreExpr, Diagnostic> {
-    Ok(builtin_apply2(
+    Ok(context.core.builtin_apply2_expr(
         builtin,
-        syntax_expr_to_core_expr(left, line, atoms)?,
-        syntax_expr_to_core_expr(right, line, atoms)?,
+        syntax_expr_to_core_expr_in_scope(left, line, context, atoms, locals)?,
+        syntax_expr_to_core_expr_in_scope(right, line, context, atoms, locals)?,
     ))
 }
 
 fn syntax_key_expr_to_core_expr(
     key: &SyntaxKeyExpr,
     line: usize,
+    context: &CompileContext,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
+    locals: &mut Vec<LocalName>,
 ) -> Result<CoreExpr, Diagnostic> {
     Ok(match key {
-        SyntaxKeyExpr::Atom(name) => CoreExpr::Value(Value::Atom(atom_value(name, atoms))),
-        SyntaxKeyExpr::Expr(expr) => syntax_expr_to_core_expr(expr, line, atoms)?,
-        SyntaxKeyExpr::ListExpr(_) => {
+        SyntaxKeyExpr::Atom(name) => context
+            .core
+            .expr_value(context.core.value_atom(atom_value(name, atoms))),
+        SyntaxKeyExpr::Index(expr) => {
+            syntax_expr_to_core_expr_in_scope(expr, line, context, atoms, locals)?
+        }
+        SyntaxKeyExpr::PathIndex(_) => {
             return Err(Diagnostic::error(
                 line,
                 "list-valued path expressions are not valid dictionary keys",
@@ -344,46 +581,140 @@ fn syntax_key_expr_to_core_expr(
 fn lower_dict_union(
     items: &[SyntaxExpr],
     line: usize,
+    context: &CompileContext,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
+    locals: &mut Vec<LocalName>,
 ) -> Result<CoreExpr, Diagnostic> {
     let mut items = items.iter();
     let Some(first) = items.next() else {
-        return Ok(CoreExpr::Value(Value::Dict(Dict::new_sync())));
+        return Ok(context.core.expr_value(context.core.empty_dict_value()));
     };
 
-    let mut expr = syntax_expr_to_core_expr(first, line, atoms)?;
+    let mut expr = syntax_expr_to_core_expr_in_scope(first, line, context, atoms, locals)?;
     for item in items {
-        expr = builtin_apply2(
-            crate::core::Builtin::DictUnion,
+        expr = context.core.builtin_apply2_expr(
+            Builtin::DictUnion,
             expr,
-            syntax_expr_to_core_expr(item, line, atoms)?,
+            syntax_expr_to_core_expr_in_scope(item, line, context, atoms, locals)?,
         );
     }
     Ok(expr)
 }
 
-fn builtin_apply2(builtin: crate::core::Builtin, left: CoreExpr, right: CoreExpr) -> CoreExpr {
-    CoreExpr::Apply(
-        Arc::new(CoreExpr::Apply(
-            Arc::new(CoreExpr::Value(Value::Builtin(builtin))),
-            Arc::new(left),
-        )),
-        Arc::new(right),
-    )
+fn lower_lambda_expr(
+    params: &[String],
+    body: &SyntaxExpr,
+    line: usize,
+    context: &CompileContext,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+    locals: &mut Vec<LocalName>,
+) -> Result<CoreExpr, Diagnostic> {
+    let base_len = locals.len();
+    locals.extend(params.iter().map(|param| local_name_metadata(param)));
+    let mut lowered = syntax_expr_to_core_expr_in_scope(body, line, context, atoms, locals)?;
+    locals.truncate(base_len);
+
+    for _ in params.iter().rev() {
+        lowered = context.core.expr_lambda(lowered);
+    }
+
+    Ok(lowered)
+}
+
+fn lower_name_expr(
+    parts: &[SyntaxKeyExpr],
+    line: usize,
+    context: &CompileContext,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+    locals: &mut Vec<LocalName>,
+) -> Result<CoreExpr, Diagnostic> {
+    let Some(SyntaxKeyExpr::Atom(first)) = parts.first() else {
+        return Ok(context.core.expr_access(
+            final_binding_expr(context, locals),
+            parts
+                .iter()
+                .map(|part| syntax_key_expr_to_core(part, line, context, atoms, locals))
+                .collect::<Result<Vec<_>, _>>()?,
+        ));
+    };
+
+    let Some(local_index) = local_binding_index(first, locals) else {
+        return Ok(context.core.expr_access(
+            final_binding_expr(context, locals),
+            parts
+                .iter()
+                .map(|part| syntax_key_expr_to_core(part, line, context, atoms, locals))
+                .collect::<Result<Vec<_>, _>>()?,
+        ));
+    };
+
+    if parts.len() == 1 {
+        return Ok(context.core.expr_local(local_index));
+    }
+
+    Ok(context.core.expr_access(
+        context.core.expr_local(local_index),
+        parts[1..]
+            .iter()
+            .map(|part| syntax_key_expr_to_core(part, line, context, atoms, locals))
+            .collect::<Result<Vec<_>, _>>()?,
+    ))
+}
+
+fn final_binding_expr(context: &CompileContext, locals: &[LocalName]) -> CoreExpr {
+    // Globals lower against a synthetic outer `\final -> ...` binding.
+    context.core.expr_local(locals.len())
+}
+
+fn local_binding_index(name: &str, locals: &[LocalName]) -> Option<usize> {
+    locals
+        .iter()
+        .rposition(|candidate| candidate.canonical.as_deref() == Some(name))
+        .map(|position| locals.len() - 1 - position)
+}
+
+fn local_name_metadata(raw: &str) -> LocalName {
+    match raw {
+        "_" => LocalName {
+            raw: raw.to_owned(),
+            canonical: None,
+            suppress_unused_warning: true,
+        },
+        suppressed if suppressed.starts_with('_') => LocalName {
+            raw: suppressed.to_owned(),
+            canonical: Some(suppressed[1..].to_owned()),
+            suppress_unused_warning: true,
+        },
+        name => LocalName {
+            raw: name.to_owned(),
+            canonical: Some(name.to_owned()),
+            suppress_unused_warning: false,
+        },
+    }
 }
 
 fn syntax_key_expr_to_core(
     key: &SyntaxKeyExpr,
     line: usize,
+    context: &CompileContext,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
+    locals: &mut Vec<LocalName>,
 ) -> Result<CoreKeyExpr, Diagnostic> {
     Ok(match key {
-        SyntaxKeyExpr::Atom(name) => CoreKeyExpr::Key(atom_key(name, atoms)),
-        SyntaxKeyExpr::Expr(expr) => {
-            CoreKeyExpr::Expr(Arc::new(syntax_expr_to_core_expr(expr, line, atoms)?))
+        SyntaxKeyExpr::Atom(name) => context.core.key_expr_key(atom_key(name, atoms)),
+        SyntaxKeyExpr::Index(expr) => {
+            context
+                .core
+                .key_expr_index(syntax_expr_to_core_expr_in_scope(
+                    expr, line, context, atoms, locals,
+                )?)
         }
-        SyntaxKeyExpr::ListExpr(expr) => {
-            CoreKeyExpr::ListExpr(Arc::new(syntax_expr_to_core_expr(expr, line, atoms)?))
+        SyntaxKeyExpr::PathIndex(expr) => {
+            context
+                .core
+                .key_expr_path_index(syntax_expr_to_core_expr_in_scope(
+                    expr, line, context, atoms, locals,
+                )?)
         }
     })
 }
@@ -393,6 +724,7 @@ fn insert_path(
     target: &str,
     value: Value,
     line: usize,
+    context: &CompileContext,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<Dict, Diagnostic> {
     let parts = target.split('.').collect::<Vec<_>>();
@@ -409,7 +741,7 @@ fn insert_path(
         ));
     }
 
-    set_path(root, parents, leaf_key, value, line, atoms)
+    set_path(root, parents, leaf_key, value, line, context, atoms)
 }
 
 fn override_path(
@@ -417,6 +749,7 @@ fn override_path(
     target: &str,
     value: Value,
     line: usize,
+    context: &CompileContext,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<Dict, Diagnostic> {
     let parts = target.split('.').collect::<Vec<_>>();
@@ -433,7 +766,7 @@ fn override_path(
         ));
     }
 
-    set_path(root, parents, leaf_key, value, line, atoms)
+    set_path(root, parents, leaf_key, value, line, context, atoms)
 }
 
 fn get_path<'a>(
@@ -460,6 +793,7 @@ fn set_path(
     leaf: Key,
     value: Value,
     line: usize,
+    context: &CompileContext,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<Dict, Diagnostic> {
     let Some((parent, rest)) = parents.split_first() else {
@@ -477,8 +811,8 @@ fn set_path(
         }
         None => Dict::new_sync(),
     };
-    let updated_child = set_path(&child, rest, leaf, value, line, atoms)?;
-    Ok(root.insert(parent_key, Value::Dict(updated_child)))
+    let updated_child = set_path(&child, rest, leaf, value, line, context, atoms)?;
+    Ok(root.insert(parent_key, context.core.value_dict(updated_child)))
 }
 
 fn atom_key(name: &str, atoms: &mut std::collections::BTreeMap<String, Atom>) -> Key {
@@ -583,6 +917,12 @@ fn language_decl<'src>() -> impl Parser<'src, &'src str, LanguageDecl, extra::Er
 }
 
 fn import_decl<'src>() -> impl Parser<'src, &'src str, ImportDecl, extra::Err<Rich<'src, char>>> {
+    let reference = choice((
+        quoted_text().map(ImportReference::Local),
+        just('\'')
+            .ignore_then(glam_name())
+            .map(ImportReference::Builtin),
+    ));
     let placement = just("as")
         .padded()
         .ignore_then(path())
@@ -596,7 +936,7 @@ fn import_decl<'src>() -> impl Parser<'src, &'src str, ImportDecl, extra::Err<Ri
 
     just("import")
         .padded()
-        .ignore_then(quoted_text())
+        .ignore_then(reference)
         .then(placement)
         .map(|(reference, placement)| ImportDecl {
             reference,
@@ -618,18 +958,25 @@ fn keyword_name_list<'src>(
 fn definition_decl<'src>()
 -> impl Parser<'src, &'src str, DefinitionDecl, extra::Err<Rich<'src, char>>> {
     path()
-        .then_ignore(whitespace1())
+        .then(
+            whitespace1().ignore_then(
+                local_name()
+                    .then_ignore(whitespace1())
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            ),
+        )
         .then(definition_operator())
         .then_ignore(whitespace0())
         .then(rest_of_declaration())
-        .try_map(|((target, kind), body), span| {
+        .try_map(|(((target, params), kind), body), span| {
             if body.is_empty() {
                 Err(Rich::custom(span, "definition body cannot be empty"))
             } else {
                 Ok(DefinitionDecl {
                     target,
                     kind,
-                    body,
+                    body: desugar_definition_body(&params, body),
                     expr: None,
                 })
             }
@@ -673,6 +1020,14 @@ fn rest_of_declaration<'src>() -> impl Parser<'src, &'src str, String, extra::Er
         .map(|text: &str| text.trim().to_owned())
 }
 
+fn desugar_definition_body(params: &[String], body: String) -> String {
+    if params.is_empty() {
+        body
+    } else {
+        format!("\\ {} -> {}", params.join(" "), body)
+    }
+}
+
 fn parse_expr_result(text: &str) -> Result<SyntaxExpr, String> {
     syntax_expr_parser()
         .then_ignore(end())
@@ -698,10 +1053,131 @@ fn finalize_definition_expr(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> DefinitionDecl {
     match parse_expr_result(definition.body.as_str()) {
-        Ok(expr) => definition.expr = Some(expr),
+        Ok(expr) => {
+            warn_unused_locals(&expr, line, diagnostics);
+            definition.expr = Some(expr);
+        }
         Err(message) => diagnostics.push(Diagnostic::error(line, message)),
     }
     definition
+}
+
+fn warn_unused_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diagnostic>) {
+    analyze_expr_locals(expr, line, diagnostics);
+}
+
+fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diagnostic>) {
+    match expr {
+        SyntaxExpr::Number(_) | SyntaxExpr::Text(_) => {}
+        SyntaxExpr::Name(parts) => {
+            for part in parts.iter().skip(1) {
+                analyze_key_expr_locals(part, line, diagnostics);
+            }
+        }
+        SyntaxExpr::SingletonDict(key, value) => {
+            analyze_key_expr_locals(key, line, diagnostics);
+            analyze_expr_locals(value, line, diagnostics);
+        }
+        SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) => {
+            for item in items {
+                analyze_expr_locals(item, line, diagnostics);
+            }
+        }
+        SyntaxExpr::Lambda(params, body) => {
+            let params = params
+                .iter()
+                .map(|param| local_name_metadata(param))
+                .collect::<Vec<_>>();
+            let mut used = vec![false; params.len()];
+            mark_used_locals(body, &params, &mut used);
+            for (param, used) in params.iter().zip(used) {
+                if !used && param.canonical.is_some() && !param.suppress_unused_warning {
+                    diagnostics.push(Diagnostic::warn(
+                        line,
+                        format!("unused local `{}`", param.raw),
+                    ));
+                }
+            }
+            analyze_expr_locals(body, line, diagnostics);
+        }
+        SyntaxExpr::Apply(function, argument)
+        | SyntaxExpr::Multiply(function, argument)
+        | SyntaxExpr::Divide(function, argument)
+        | SyntaxExpr::Add(function, argument)
+        | SyntaxExpr::Subtract(function, argument)
+        | SyntaxExpr::Append(function, argument) => {
+            analyze_expr_locals(function, line, diagnostics);
+            analyze_expr_locals(argument, line, diagnostics);
+        }
+    }
+}
+
+fn analyze_key_expr_locals(key: &SyntaxKeyExpr, line: usize, diagnostics: &mut Vec<Diagnostic>) {
+    match key {
+        SyntaxKeyExpr::Atom(_) => {}
+        SyntaxKeyExpr::Index(expr) | SyntaxKeyExpr::PathIndex(expr) => {
+            analyze_expr_locals(expr, line, diagnostics)
+        }
+    }
+}
+
+fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) {
+    match expr {
+        SyntaxExpr::Number(_) | SyntaxExpr::Text(_) => {}
+        SyntaxExpr::Name(parts) => {
+            if let Some(SyntaxKeyExpr::Atom(name)) = parts.first() {
+                if let Some(index) = locals
+                    .iter()
+                    .rposition(|local| local.canonical.as_deref() == Some(name.as_str()))
+                {
+                    used[index] = true;
+                }
+            }
+            for part in parts.iter().skip(1) {
+                mark_used_key_expr(part, locals, used);
+            }
+        }
+        SyntaxExpr::SingletonDict(key, value) => {
+            mark_used_key_expr(key, locals, used);
+            mark_used_locals(value, locals, used);
+        }
+        SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) => {
+            for item in items {
+                mark_used_locals(item, locals, used);
+            }
+        }
+        SyntaxExpr::Lambda(params, body) => {
+            let nested = params
+                .iter()
+                .map(|param| local_name_metadata(param))
+                .collect::<Vec<_>>();
+            let mut combined = Vec::with_capacity(locals.len() + nested.len());
+            combined.extend_from_slice(locals);
+            combined.extend(nested);
+            let mut nested_used = vec![false; combined.len()];
+            nested_used[..locals.len()].copy_from_slice(used);
+            mark_used_locals(body, &combined, &mut nested_used);
+            used.copy_from_slice(&nested_used[..locals.len()]);
+        }
+        SyntaxExpr::Apply(function, argument)
+        | SyntaxExpr::Multiply(function, argument)
+        | SyntaxExpr::Divide(function, argument)
+        | SyntaxExpr::Add(function, argument)
+        | SyntaxExpr::Subtract(function, argument)
+        | SyntaxExpr::Append(function, argument) => {
+            mark_used_locals(function, locals, used);
+            mark_used_locals(argument, locals, used);
+        }
+    }
+}
+
+fn mark_used_key_expr(key: &SyntaxKeyExpr, locals: &[LocalName], used: &mut [bool]) {
+    match key {
+        SyntaxKeyExpr::Atom(_) => {}
+        SyntaxKeyExpr::Index(expr) | SyntaxKeyExpr::PathIndex(expr) => {
+            mark_used_locals(expr, locals, used)
+        }
+    }
 }
 
 fn syntax_expr_parser<'src>()
@@ -800,7 +1276,10 @@ fn syntax_expr_parser<'src>()
             (Append, Append) => OperatorRelation::Same(Associativity::Left),
             (Append, Add | Subtract | Multiply | Divide) => OperatorRelation::Weaker,
             (Add | Subtract | Multiply | Divide, Append) => OperatorRelation::Stronger,
-            (Add | Subtract, Add | Subtract) => OperatorRelation::Same(Associativity::Left),
+            (Add, Add) => OperatorRelation::Same(Associativity::Left),
+            (Add, Subtract) => OperatorRelation::Unrelated,
+            (Subtract, Add) => OperatorRelation::Unrelated,
+            (Subtract, Subtract) => OperatorRelation::Same(Associativity::None),
             (Add | Subtract, Multiply | Divide) => OperatorRelation::Weaker,
             (Multiply | Divide, Add | Subtract) => OperatorRelation::Stronger,
             (Multiply, Multiply) => OperatorRelation::Same(Associativity::Left),
@@ -818,16 +1297,27 @@ fn syntax_expr_parser<'src>()
             crate::core::Builtin::Subtract => "-",
             crate::core::Builtin::Multiply => "*",
             crate::core::Builtin::Divide => "/",
+            crate::core::Builtin::Fixpoint => "fixpoint",
+            crate::core::Builtin::Floor => "floor",
+            crate::core::Builtin::Mod => "mod",
+            crate::core::Builtin::Slice => "slice",
+            crate::core::Builtin::Map => "map",
             crate::core::Builtin::Singleton => ":",
             crate::core::Builtin::DictUnion => "{,}",
         }
     }
 
     let parser = recursive(|expr| {
+        let name = glam_name().boxed();
+        let local = local_name().boxed();
+
         let single_key_expr = || {
             choice((
-                just('\'').ignore_then(glam_name()).map(SyntaxKeyExpr::Atom),
-                expr.clone().map(|expr| SyntaxKeyExpr::Expr(Box::new(expr))),
+                just('\'')
+                    .ignore_then(name.clone())
+                    .map(SyntaxKeyExpr::Atom),
+                expr.clone()
+                    .map(|expr| SyntaxKeyExpr::Index(Box::new(expr))),
             ))
         };
 
@@ -843,18 +1333,21 @@ fn syntax_expr_parser<'src>()
             .clone()
             .padded()
             .delimited_by(just('('), just(')'))
-            .map(|expr| PathSuffix::Single(SyntaxKeyExpr::ListExpr(Box::new(expr))));
+            .map(|expr| PathSuffix::Single(SyntaxKeyExpr::PathIndex(Box::new(expr))));
 
         // Dotted paths stay lexically tight because `.` has other roles in the
         // language surface, such as future effect sugar like `.bar`.
-        let name_expr = glam_name()
+        let name_expr = name
+            .clone()
             .map(SyntaxKeyExpr::Atom)
             .then(
                 just('.')
                     .ignore_then(choice((
                         path_list_shorthand,
                         path_list_expr,
-                        glam_name().map(SyntaxKeyExpr::Atom).map(PathSuffix::Single),
+                        name.clone()
+                            .map(SyntaxKeyExpr::Atom)
+                            .map(PathSuffix::Single),
                     )))
                     .repeated()
                     .collect::<Vec<_>>(),
@@ -894,7 +1387,7 @@ fn syntax_expr_parser<'src>()
             .map(SyntaxExpr::List);
 
         let dict_item_key = choice((
-            glam_name().map(SyntaxKeyExpr::Atom),
+            name.clone().map(SyntaxKeyExpr::Atom),
             single_key_expr()
                 .padded()
                 .delimited_by(just('['), just(']')),
@@ -916,8 +1409,35 @@ fn syntax_expr_parser<'src>()
             .map(SyntaxExpr::DictUnion);
 
         let parenthesized = expr.clone().padded().delimited_by(just('('), just(')'));
+        let lambda = just('\\')
+            .padded()
+            .ignore_then(
+                local
+                    .clone()
+                    .padded()
+                    .repeated()
+                    .at_least(1)
+                    .collect::<Vec<_>>(),
+            )
+            .then_ignore(just("->").padded())
+            .then(expr.clone())
+            .map(|(params, body)| SyntaxExpr::Lambda(params, Box::new(body)));
 
         let atom = choice((text, list, dict, number, name_expr, parenthesized)).boxed();
+        let application = atom
+            .clone()
+            .then(
+                whitespace1()
+                    .ignore_then(atom.clone())
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .map(|(function, arguments)| {
+                arguments.into_iter().fold(function, |function, argument| {
+                    SyntaxExpr::Apply(Box::new(function), Box::new(argument))
+                })
+            })
+            .boxed();
         let infix_operator = choice((
             just("++").to(crate::core::Builtin::Append),
             just('*').to(crate::core::Builtin::Multiply),
@@ -928,17 +1448,21 @@ fn syntax_expr_parser<'src>()
             just('-').to(crate::core::Builtin::Subtract),
         ));
 
-        atom.clone()
-            .then(
-                infix_operator
-                    .padded()
-                    .then(atom)
-                    .repeated()
-                    .collect::<Vec<_>>(),
-            )
-            .try_map(|(first, rest), span| {
-                resolve_infix_chain(first, rest).map_err(|message| Rich::custom(span, message))
-            })
+        choice((
+            lambda,
+            application
+                .clone()
+                .then(
+                    infix_operator
+                        .padded()
+                        .then(application)
+                        .repeated()
+                        .collect::<Vec<_>>(),
+                )
+                .try_map(|(first, rest), span| {
+                    resolve_infix_chain(first, rest).map_err(|message| Rich::custom(span, message))
+                }),
+        ))
     });
 
     parser
@@ -971,6 +1495,16 @@ fn glam_name<'src>() -> impl Parser<'src, &'src str, String, extra::Err<Rich<'sr
             Err(Rich::custom(span, "expected name"))
         }
     })
+}
+
+fn local_name<'src>() -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
+    choice((
+        just('_')
+            .ignore_then(glam_name())
+            .map(|name| format!("_{name}")),
+        just('_').to("_".to_owned()),
+        glam_name(),
+    ))
 }
 
 fn whitespace0<'src>() -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> {
@@ -1085,6 +1619,7 @@ fn split_lines(text: &str) -> Vec<PhysicalLine<'_>> {
 mod tests {
     use std::sync::Arc;
 
+    use crate::compiler::CompileContext;
     use crate::core::{Builtin, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value};
     use crate::number::Number;
 
@@ -1098,6 +1633,30 @@ mod tests {
 
     fn core_dict_union(left: CoreExpr, right: CoreExpr) -> CoreExpr {
         core_builtin2(Builtin::DictUnion, left, right)
+    }
+
+    fn core_global_access(path: Vec<CoreKeyExpr>) -> CoreExpr {
+        CoreExpr::Access(Arc::new(CoreExpr::Local(0)), Arc::from(path))
+    }
+
+    fn lowered_module_dict(lowered: &LoweredSource) -> &Value {
+        match lowered.term.as_ref() {
+            Some(crate::core::Term::Expr(CoreExpr::Apply(function, body)))
+                if matches!(
+                    function.as_ref(),
+                    CoreExpr::Value(Value::Builtin(Builtin::Fixpoint))
+                ) =>
+            {
+                match body.as_ref() {
+                    CoreExpr::Lambda(body) => match body.as_ref() {
+                        CoreExpr::Value(value) => value,
+                        other => panic!("unexpected lowered module body: {other:?}"),
+                    },
+                    other => panic!("unexpected lowered fixpoint body: {other:?}"),
+                }
+            }
+            other => panic!("unexpected lowered term: {other:?}"),
+        }
     }
 
     fn core_builtin2(builtin: Builtin, left: CoreExpr, right: CoreExpr) -> CoreExpr {
@@ -1115,6 +1674,22 @@ mod tests {
 
     fn parse(text: &str) -> ParsedSource {
         SourceFile::new("test.g", text).parse()
+    }
+
+    fn parse_with_context(text: &str, context: &CompileContext) -> ParsedSource {
+        SourceFile::new("test.g", text).parse_with_context(context)
+    }
+
+    fn lower_with_module_path(text: &str, module_path: &[&str]) -> LoweredSource {
+        let parsed = parse(text);
+        let context = CompileContext::from_module_path(module_path.iter().copied());
+        lower_to_core_with_context(&parsed, &context)
+    }
+
+    fn abstract_path_atom(parts: &[&str]) -> Value {
+        Value::Atom(Atom::from_key(&Key::abstract_global_path(
+            parts.iter().copied(),
+        )))
     }
 
     fn n(value: i64) -> Number {
@@ -1160,9 +1735,41 @@ mod tests {
         assert_eq!(
             parsed.declarations[1].kind,
             DeclarationKind::Import(ImportDecl {
-                reference: "minimal.g".to_owned(),
+                reference: ImportReference::Local("minimal.g".to_owned()),
                 placement: ImportPlacement::As("conf".to_owned()),
             })
+        );
+    }
+
+    #[test]
+    fn parses_builtin_imports() {
+        let parsed = parse("language g0\nimport 'std as std\nimport 'math\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Import(ImportDecl {
+                reference: ImportReference::Builtin("std".to_owned()),
+                placement: ImportPlacement::As("std".to_owned()),
+            })
+        );
+        assert_eq!(
+            parsed.declarations[2].kind,
+            DeclarationKind::Import(ImportDecl {
+                reference: ImportReference::Builtin("math".to_owned()),
+                placement: ImportPlacement::Inline,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_unique_declarations() {
+        let parsed = parse("language g0\nunique Foo, palette.Blue\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Unique(vec!["Foo".to_owned(), "palette.Blue".to_owned()])
         );
     }
 
@@ -1212,6 +1819,51 @@ mod tests {
                 target: "foo".to_owned(),
                 kind: DefinitionKind::Update,
                 body: "f".to_owned(),
+                expr: None,
+            })
+        );
+        assert_eq!(
+            definition_decl().parse("foo x y = x + y").into_result(),
+            Ok(DefinitionDecl {
+                target: "foo".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "\\ x y -> x + y".to_owned(),
+                expr: None,
+            })
+        );
+        assert_eq!(
+            definition_decl().parse("skip _ y = y").into_result(),
+            Ok(DefinitionDecl {
+                target: "skip".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "\\ _ y -> y".to_owned(),
+                expr: None,
+            })
+        );
+        assert_eq!(
+            definition_decl().parse("keep _value = value").into_result(),
+            Ok(DefinitionDecl {
+                target: "keep".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "\\ _value -> value".to_owned(),
+                expr: None,
+            })
+        );
+        assert_eq!(
+            definition_decl().parse("foo x := x").into_result(),
+            Ok(DefinitionDecl {
+                target: "foo".to_owned(),
+                kind: DefinitionKind::Override,
+                body: "\\ x -> x".to_owned(),
+                expr: None,
+            })
+        );
+        assert_eq!(
+            definition_decl().parse("foo x ::= update").into_result(),
+            Ok(DefinitionDecl {
+                target: "foo".to_owned(),
+                kind: DefinitionKind::Update,
+                body: "\\ x -> update".to_owned(),
                 expr: None,
             })
         );
@@ -1326,7 +1978,7 @@ mod tests {
 
     #[test]
     fn parses_arithmetic_with_precedence() {
-        let parsed = parse("language g0\nanswer = 1 + 2 * 3 - 4 / 5\n");
+        let parsed = parse("language g0\nanswer = (1 + 2 * 3) - (4 / 5)\n");
 
         assert_eq!(parsed.diagnostics, []);
         assert_eq!(
@@ -1334,7 +1986,7 @@ mod tests {
             DeclarationKind::Definition(DefinitionDecl {
                 target: "answer".to_owned(),
                 kind: DefinitionKind::Introduce,
-                body: "1 + 2 * 3 - 4 / 5".to_owned(),
+                body: "(1 + 2 * 3) - (4 / 5)".to_owned(),
                 expr: Some(SyntaxExpr::Subtract(
                     Box::new(SyntaxExpr::Add(
                         Box::new(SyntaxExpr::Number(n(1))),
@@ -1376,6 +2028,145 @@ mod tests {
                         )])),
                     )),
                     Box::new(SyntaxExpr::Text("!".to_owned())),
+                )),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_lambda_and_application_expressions() {
+        let parsed = parse("language g0\nasm.result = (\\x -> x) \"Hello\"\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "asm.result".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "(\\x -> x) \"Hello\"".to_owned(),
+                expr: Some(SyntaxExpr::Apply(
+                    Box::new(SyntaxExpr::Lambda(
+                        vec!["x".to_owned()],
+                        Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("x".to_owned())])),
+                    )),
+                    Box::new(SyntaxExpr::Text("Hello".to_owned())),
+                )),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_local_root_paths_inside_lambda_bodies() {
+        let parsed = parse("language g0\nasm.result = \\x -> x.tail\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "asm.result".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "\\x -> x.tail".to_owned(),
+                expr: Some(SyntaxExpr::Lambda(
+                    vec!["x".to_owned()],
+                    Box::new(SyntaxExpr::Name(vec![
+                        SyntaxKeyExpr::Atom("x".to_owned()),
+                        SyntaxKeyExpr::Atom("tail".to_owned()),
+                    ])),
+                )),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_explicit_lambda_underscore_local_conventions() {
+        let parsed = parse("language g0\nasm.result = (\\ _value _ -> value) 1 2\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "asm.result".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "(\\ _value _ -> value) 1 2".to_owned(),
+                expr: Some(SyntaxExpr::Apply(
+                    Box::new(SyntaxExpr::Apply(
+                        Box::new(SyntaxExpr::Lambda(
+                            vec!["_value".to_owned(), "_".to_owned()],
+                            Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom(
+                                "value".to_owned(),
+                            )])),
+                        )),
+                        Box::new(SyntaxExpr::Number(n(1))),
+                    )),
+                    Box::new(SyntaxExpr::Number(n(2))),
+                )),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_definition_argument_sugar() {
+        let parsed = parse("language g0\nid x = x\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "id".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "\\ x -> x".to_owned(),
+                expr: Some(SyntaxExpr::Lambda(
+                    vec!["x".to_owned()],
+                    Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("x".to_owned())])),
+                )),
+            })
+        );
+    }
+
+    #[test]
+    fn warns_on_unused_locals_without_underscore_prefix() {
+        let parsed = parse("language g0\nid x = 42\nasm.result = (\\y -> \"ok\") 1\n");
+
+        assert!(parsed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == Severity::Warning
+                && diagnostic.line == 2
+                && diagnostic.message.contains("unused local `x`")
+        }));
+        assert!(parsed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == Severity::Warning
+                && diagnostic.line == 3
+                && diagnostic.message.contains("unused local `y`")
+        }));
+    }
+
+    #[test]
+    fn underscore_locals_suppress_unused_warnings_and_drop_is_allowed() {
+        let parsed = parse("language g0\nkeep _value = value\nskip _ y = y\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "keep".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "\\ _value -> value".to_owned(),
+                expr: Some(SyntaxExpr::Lambda(
+                    vec!["_value".to_owned()],
+                    Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom(
+                        "value".to_owned()
+                    )])),
+                )),
+            })
+        );
+        assert_eq!(
+            parsed.declarations[2].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "skip".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "\\ _ y -> y".to_owned(),
+                expr: Some(SyntaxExpr::Lambda(
+                    vec!["_".to_owned(), "y".to_owned()],
+                    Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("y".to_owned())])),
                 )),
             })
         );
@@ -1481,7 +2272,7 @@ mod tests {
                 kind: DefinitionKind::Introduce,
                 body: "{ [42]:\"World\" }".to_owned(),
                 expr: Some(SyntaxExpr::DictUnion(vec![SyntaxExpr::SingletonDict(
-                    SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(n(42)))),
+                    SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(42)))),
                     Box::new(SyntaxExpr::Text("World".to_owned())),
                 )])),
             })
@@ -1495,7 +2286,7 @@ mod tests {
                 expr: Some(SyntaxExpr::Append(
                     Box::new(SyntaxExpr::Name(vec![
                         SyntaxKeyExpr::Atom("d".to_owned()),
-                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(n(42)))),
+                        SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(42)))),
                     ])),
                     Box::new(SyntaxExpr::Name(vec![
                         SyntaxKeyExpr::Atom("d".to_owned()),
@@ -1520,13 +2311,13 @@ mod tests {
                 expr: Some(SyntaxExpr::Append(
                     Box::new(SyntaxExpr::Name(vec![
                         SyntaxKeyExpr::Atom("foo".to_owned()),
-                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(n(1)))),
-                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(n(2)))),
-                        SyntaxKeyExpr::Expr(Box::new(SyntaxExpr::Number(n(3)))),
+                        SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(1)))),
+                        SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(2)))),
+                        SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(3)))),
                     ])),
                     Box::new(SyntaxExpr::Name(vec![
                         SyntaxKeyExpr::Atom("foo".to_owned()),
-                        SyntaxKeyExpr::ListExpr(Box::new(SyntaxExpr::Append(
+                        SyntaxKeyExpr::PathIndex(Box::new(SyntaxExpr::Append(
                             Box::new(SyntaxExpr::List(vec![
                                 SyntaxExpr::Number(n(1)),
                                 SyntaxExpr::Number(n(2)),
@@ -1604,6 +2395,49 @@ mod tests {
     }
 
     #[test]
+    fn reports_ambiguous_subtract_chains_as_parse_errors() {
+        let parsed = parse("language g0\nasm.result = 3 - 4 - 5\n");
+
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|diag| diag.line == 2
+                    && diag.message.contains("operator `-` is non-associative"))
+        );
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "asm.result".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "3 - 4 - 5".to_owned(),
+                expr: None,
+            })
+        );
+    }
+
+    #[test]
+    fn reports_mixed_add_subtract_chains_as_parse_errors() {
+        let parsed = parse("language g0\nasm.result = 3 + 1 - 4 + 1 - 5 + 1\n");
+
+        assert!(parsed.diagnostics.iter().any(|diag| {
+            diag.line == 2
+                && diag
+                    .message
+                    .contains("operators `+` and `-` have no precedence relationship")
+        }));
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "asm.result".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "3 + 1 - 4 + 1 - 5 + 1".to_owned(),
+                expr: None,
+            })
+        );
+    }
+
+    #[test]
     fn parentheses_disambiguate_division_chains() {
         assert_eq!(parse_expr("3/4/5"), None);
         assert_eq!(parse_expr("3/4 / 5"), None);
@@ -1637,6 +2471,48 @@ mod tests {
                 Box::new(SyntaxExpr::Number(n(4))),
             ))
         );
+        assert_eq!(parse_expr("3 - 4 - 5"), None);
+        assert_eq!(
+            parse_expr("(3 - 4) - 5"),
+            Some(SyntaxExpr::Subtract(
+                Box::new(SyntaxExpr::Subtract(
+                    Box::new(SyntaxExpr::Number(n(3))),
+                    Box::new(SyntaxExpr::Number(n(4))),
+                )),
+                Box::new(SyntaxExpr::Number(n(5))),
+            ))
+        );
+        assert_eq!(
+            parse_expr("3 - (4 - 5)"),
+            Some(SyntaxExpr::Subtract(
+                Box::new(SyntaxExpr::Number(n(3))),
+                Box::new(SyntaxExpr::Subtract(
+                    Box::new(SyntaxExpr::Number(n(4))),
+                    Box::new(SyntaxExpr::Number(n(5))),
+                )),
+            ))
+        );
+        assert_eq!(parse_expr("3 + 4 - 5"), None);
+        assert_eq!(
+            parse_expr("(3 + 4) - 5"),
+            Some(SyntaxExpr::Subtract(
+                Box::new(SyntaxExpr::Add(
+                    Box::new(SyntaxExpr::Number(n(3))),
+                    Box::new(SyntaxExpr::Number(n(4))),
+                )),
+                Box::new(SyntaxExpr::Number(n(5))),
+            ))
+        );
+        assert_eq!(
+            parse_expr("3 + (4 - 5)"),
+            Some(SyntaxExpr::Add(
+                Box::new(SyntaxExpr::Number(n(3))),
+                Box::new(SyntaxExpr::Subtract(
+                    Box::new(SyntaxExpr::Number(n(4))),
+                    Box::new(SyntaxExpr::Number(n(5))),
+                )),
+            ))
+        );
     }
 
     #[test]
@@ -1646,14 +2522,11 @@ mod tests {
 
         assert_eq!(lowered.diagnostics, []);
         assert_eq!(
-            lowered.term.as_ref().and_then(|term| match term {
-                crate::core::Term::Expr(CoreExpr::Value(value)) => value.get_atom_path(&[
-                    Atom::from_key(&Key::binary_from_text("asm")),
-                    Atom::from_key(&Key::binary_from_text("result")),
-                ]),
-                _ => None,
-            }),
-            Some(&Value::Expr(Arc::new(core_append(
+            lowered_module_dict(&lowered).get_atom_path(&[
+                Atom::from_key(&Key::binary_from_text("asm")),
+                Atom::from_key(&Key::binary_from_text("result")),
+            ]),
+            Some(&Value::expr(core_append(
                 CoreExpr::List(Arc::from([
                     Arc::new(CoreExpr::Value(Value::Number(72.into()))),
                     Arc::new(CoreExpr::Value(Value::Number(101.into()))),
@@ -1663,7 +2536,7 @@ mod tests {
                     Arc::new(CoreExpr::Value(Value::Number(108.into()))),
                     Arc::new(CoreExpr::Value(Value::Number(111.into()))),
                 ])),
-            ))))
+            )))
         );
     }
 
@@ -1676,25 +2549,69 @@ mod tests {
 
         assert_eq!(lowered.diagnostics, []);
         assert_eq!(
-            lowered.term.as_ref().and_then(|term| match term {
-                crate::core::Term::Expr(CoreExpr::Value(value)) => value.get_atom_path(&[
-                    Atom::from_key(&Key::binary_from_text("asm")),
-                    Atom::from_key(&Key::binary_from_text("result")),
-                ]),
-                _ => None,
-            }),
-            Some(&Value::Expr(Arc::new(core_append(
+            lowered_module_dict(&lowered).get_atom_path(&[
+                Atom::from_key(&Key::binary_from_text("asm")),
+                Atom::from_key(&Key::binary_from_text("result")),
+            ]),
+            Some(&Value::expr(core_append(
                 core_append(
                     core_append(
-                        CoreExpr::Name(Arc::from([CoreKeyExpr::Key(
-                            Key::atom_from_text("hello",)
-                        )])),
+                        core_global_access(vec![CoreKeyExpr::Key(Key::atom_from_text("hello"))]),
                         CoreExpr::Value(Value::binary_from_text(", ")),
                     ),
-                    CoreExpr::Name(Arc::from([CoreKeyExpr::Key(Key::atom_from_text("world",))])),
+                    core_global_access(vec![CoreKeyExpr::Key(Key::atom_from_text("world"))]),
                 ),
                 CoreExpr::Value(Value::binary_from_text("!")),
-            ))))
+            )))
+        );
+    }
+
+    #[test]
+    fn lowers_lambda_and_application_expressions_to_core_terms() {
+        let parsed = parse("language g0\nasm.result = (\\x -> x.tail) d\n");
+        let lowered = lower_to_core(&parsed);
+
+        assert_eq!(lowered.diagnostics, []);
+        assert_eq!(
+            lowered_module_dict(&lowered).get_atom_path(&[
+                Atom::from_key(&Key::binary_from_text("asm")),
+                Atom::from_key(&Key::binary_from_text("result")),
+            ]),
+            Some(&Value::expr(CoreExpr::Apply(
+                Arc::new(CoreExpr::Lambda(Arc::new(CoreExpr::Access(
+                    Arc::new(CoreExpr::Local(0)),
+                    Arc::from([CoreKeyExpr::Key(Key::atom_from_text("tail"))]),
+                )))),
+                Arc::new(core_global_access(vec![CoreKeyExpr::Key(
+                    Key::atom_from_text("d")
+                )])),
+            )))
+        );
+    }
+
+    #[test]
+    fn lowers_definition_argument_sugar_to_lambda_terms() {
+        let parsed = parse("language g0\nid x = x\nasm.result = id \"Hello, World!\"\n");
+        let lowered = lower_to_core(&parsed);
+
+        assert_eq!(lowered.diagnostics, []);
+        assert_eq!(
+            lowered_module_dict(&lowered)
+                .get_atom_path(&[Atom::from_key(&Key::binary_from_text("id"))]),
+            Some(&Value::expr(CoreExpr::Lambda(Arc::new(CoreExpr::Local(0)))))
+        );
+    }
+
+    #[test]
+    fn lowers_suppressed_local_names_to_canonical_body_references() {
+        let parsed = parse("language g0\nkeep _value = value\n");
+        let lowered = lower_to_core(&parsed);
+
+        assert_eq!(lowered.diagnostics, []);
+        assert_eq!(
+            lowered_module_dict(&lowered)
+                .get_atom_path(&[Atom::from_key(&Key::binary_from_text("keep"))]),
+            Some(&Value::expr(CoreExpr::Lambda(Arc::new(CoreExpr::Local(0)))))
         );
     }
 
@@ -1707,13 +2624,9 @@ mod tests {
 
         assert_eq!(lowered.diagnostics, []);
         assert_eq!(
-            lowered.term.as_ref().and_then(|term| match term {
-                crate::core::Term::Expr(CoreExpr::Value(value)) => {
-                    value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("d"))])
-                }
-                _ => None,
-            }),
-            Some(&Value::Expr(Arc::new(core_dict_union(
+            lowered_module_dict(&lowered)
+                .get_atom_path(&[Atom::from_key(&Key::binary_from_text("d"))]),
+            Some(&Value::expr(core_dict_union(
                 core_singleton(
                     CoreExpr::Value(Value::Atom(Atom::from_key(&Key::binary_from_text("hello")))),
                     CoreExpr::Value(Value::binary_from_text("Hello")),
@@ -1721,13 +2634,140 @@ mod tests {
                 core_singleton(
                     CoreExpr::Value(Value::Atom(Atom::from_key(&Key::binary_from_text("world")))),
                     core_append(
-                        CoreExpr::Name(Arc::from([CoreKeyExpr::Key(
-                            Key::atom_from_text("other",)
-                        )])),
+                        core_global_access(vec![CoreKeyExpr::Key(Key::atom_from_text("other"))]),
                         CoreExpr::Value(Value::binary_from_text("!")),
                     ),
                 ),
-            ))))
+            )))
         );
+    }
+
+    #[test]
+    fn lowering_starts_from_prior_dictionary() {
+        let parsed = parse("language g0\nworld = \"World\"\n");
+        let context = CompileContext::default().with_prior(Value::Dict(
+            crate::core::Dict::new_sync().insert(
+                Key::atom_from_text("hello"),
+                Value::binary_from_text("Hello"),
+            ),
+        ));
+        let lowered = lower_to_core_with_context(&parsed, &context);
+
+        assert_eq!(lowered.diagnostics, []);
+        let value = lowered_module_dict(&lowered);
+
+        assert_eq!(
+            value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("hello"))]),
+            Some(&Value::binary_from_text("Hello"))
+        );
+        assert_eq!(
+            value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("world"))]),
+            Some(&Value::binary_from_text("World"))
+        );
+    }
+
+    #[test]
+    fn lowers_builtin_imports_to_module_dictionaries() {
+        let parsed = parse("language g0\nimport 'std as std\nimport 'math\n");
+        let lowered = lower_to_core(&parsed);
+
+        assert_eq!(lowered.diagnostics, []);
+        let value = lowered_module_dict(&lowered);
+
+        let std = value
+            .get_atom_path(&[Atom::from_key(&Key::binary_from_text("std"))])
+            .expect("std import should exist");
+        let floor = value
+            .get_atom_path(&[Atom::from_key(&Key::binary_from_text("floor"))])
+            .expect("inline math import should expose floor");
+        let mod_fn = value
+            .get_atom_path(&[Atom::from_key(&Key::binary_from_text("mod"))])
+            .expect("inline math import should expose mod");
+
+        assert!(matches!(std, Value::Dict(_)));
+        assert!(matches!(floor, Value::Builtin(crate::core::Builtin::Floor)));
+        assert!(matches!(mod_fn, Value::Builtin(crate::core::Builtin::Mod)));
+    }
+
+    #[test]
+    fn lowers_unique_declarations_via_abstract_global_paths() {
+        let lowered = lower_with_module_path(
+            "language g0\nunique Foo, palette.Blue\n",
+            &["pkg", "module"],
+        );
+
+        assert_eq!(lowered.diagnostics, []);
+        let value = lowered_module_dict(&lowered);
+
+        assert_eq!(
+            value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("Foo"))]),
+            Some(&abstract_path_atom(&["pkg", "module", "Foo"]))
+        );
+        assert_eq!(
+            value.get_atom_path(&[
+                Atom::from_key(&Key::binary_from_text("palette")),
+                Atom::from_key(&Key::binary_from_text("Blue")),
+            ]),
+            Some(&abstract_path_atom(&["pkg", "module", "palette", "Blue"]))
+        );
+    }
+
+    #[test]
+    fn source_paths_remain_separate_from_module_paths() {
+        let context = CompileContext::from_source_path("samples/assembly/hello_text.g");
+
+        assert_eq!(context.source_path(), Some("samples/assembly/hello_text.g"));
+        assert!(context.module_path.is_empty());
+    }
+
+    #[test]
+    fn parse_can_read_source_binary_from_compile_context() {
+        let context = CompileContext::from_module_path(["pkg"])
+            .with_source_binary(&b"language g0\nanswer = 42\n"[..]);
+        let parsed = parse_with_context("language g0\nbroken =", &context);
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(parsed.declarations.len(), 2);
+        assert!(matches!(
+            &parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target,
+                kind: DefinitionKind::Introduce,
+                body,
+                ..
+            }) if target == "answer" && body == "42"
+        ));
+    }
+
+    #[test]
+    fn inline_builtin_imports_use_dict_union_semantics() {
+        let parsed = parse("language g0\nmath.answer = 42\nimport 'std\n");
+        let lowered = lower_to_core(&parsed);
+
+        assert_eq!(lowered.diagnostics, []);
+        let value =
+            crate::eval::eval_term(lowered.term.as_ref().expect("lowered term should exist"))
+                .expect("merged import should evaluate");
+        let math = value
+            .get_atom_path(&[Atom::from_key(&Key::binary_from_text("math"))])
+            .expect("std import should merge into existing math");
+        let math = crate::eval::eval_value(math).expect("merged math binding should evaluate");
+
+        let Value::Dict(math) = math else {
+            panic!("math should evaluate to a dictionary");
+        };
+
+        assert_eq!(
+            math.get(&Key::atom_from_text("answer")),
+            Some(&Value::Number(42.into()))
+        );
+        assert!(matches!(
+            math.get(&Key::atom_from_text("floor")),
+            Some(Value::Builtin(crate::core::Builtin::Floor))
+        ));
+        assert!(matches!(
+            math.get(&Key::atom_from_text("mod")),
+            Some(Value::Builtin(crate::core::Builtin::Mod))
+        ));
     }
 }
