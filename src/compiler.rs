@@ -9,11 +9,12 @@ use crate::number::Number;
 pub struct CompileContext {
     // Ideally, we should actually abstract the effects API, i.e. such that
     // our front-end compilers don't even know what an `Expr` or `Value`
-    // looks like under-the-hood. But for now, we use core data structures directly.
+    // looks like under-the-hood. But for now, we use core data structures.
     source_path: Option<Arc<str>>,
     pub source_binary: Arc<[u8]>,
     pub module_path: Arc<[String]>,
-    pub prior: Value,
+    pub prior_defs: Value, // prior dictionary, can be observed at compile-time
+    pub final_defs: Value, // future dictionary, cannot observe at compile-time
 }
 
 impl Default for CompileContext {
@@ -22,7 +23,8 @@ impl Default for CompileContext {
             source_path: None,
             source_binary: Arc::from([]),
             module_path: Arc::from([]),
-            prior: Value::Dict(Dict::new_sync()),
+            prior_defs: Value::Dict(Dict::new_sync()), // empty prior dictionary
+            final_defs: Value::expr(CoreExpr::Future(crate::core::IVar::new())), // future dictionary, assigned later
         }
     }
 }
@@ -69,11 +71,13 @@ impl CompileContext {
         self
     }
 
-    // TODO: methods to emit diagnostics with source context
-    // diagnostic messages should be expressed as values at this layer
+    pub fn with_prior_defs(mut self, prior: Value) -> Self {
+        self.prior_defs = prior;
+        self
+    }
 
-    pub fn with_prior(mut self, prior: Value) -> Self {
-        self.prior = prior;
+    pub fn with_final_defs(mut self, final_defs: Value) -> Self {
+        self.final_defs = final_defs;
         self
     }
 
@@ -98,6 +102,16 @@ impl CompileContext {
 
         std::str::from_utf8(self.source_binary.as_ref()).map(Cow::Borrowed)
     }
+
+    // TODO: methods to emit diagnostics with source context
+    // diagnostic messages should be emitted as values at this layer
+
+    // TODO: eliminate use of `CoreExpr` in this API. Values only.
+    //   g_syntax will need to be adjusted for this, e.g. rebuilding
+    //   the lambda in every step of lowering, rather than just once at the end.
+
+    // TODO: eliminate direct use of Builtin in this API. The front-end
+    // knows about builtins, but will access them as atoms, not as the Builtin enum.
 
     pub fn expr_value(&self, value: Value) -> CoreExpr {
         CoreExpr::Value(value)
@@ -212,7 +226,7 @@ mod tests {
     fn compile_context_defaults_prior_to_empty_dict() {
         let context = CompileContext::default();
 
-        assert_eq!(context.prior, Value::Dict(Dict::new_sync()));
+        assert_eq!(context.prior_defs, Value::Dict(Dict::new_sync()));
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub enum Expr {
     Lambda(Arc<Expr>),
     Local(usize),
     Access(Arc<Expr>, Arc<[KeyExpr]>),
+    Future(IVar),
     Error(Arc<str>),
 }
 
@@ -102,7 +103,6 @@ impl Key {
                     .flatten()
                     .collect::<Vec<_>>(),
             ))),
-            Value::Fixpoint(_) => None,
             Value::Builtin(_) => None,
             Value::Closure(_) => None,
             Value::Expr(_) => None,
@@ -126,9 +126,9 @@ impl fmt::Debug for Key {
 }
 
 #[derive(Clone)]
-pub struct FixpointHandle(Arc<OnceLock<Value>>);
+pub struct IVar(Arc<OnceLock<Value>>);
 
-impl FixpointHandle {
+impl IVar {
     pub fn new() -> Self {
         Self(Arc::new(OnceLock::new()))
     }
@@ -142,15 +142,15 @@ impl FixpointHandle {
     }
 }
 
-impl PartialEq for FixpointHandle {
+impl PartialEq for IVar {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
-impl Eq for FixpointHandle {}
+impl Eq for IVar {}
 
-impl fmt::Debug for FixpointHandle {
+impl fmt::Debug for IVar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("FixpointHandle(..)")
     }
@@ -163,7 +163,6 @@ pub enum Value {
     Binary(Arc<[u8]>),
     List(List),
     Dict(Dict),
-    Fixpoint(FixpointHandle),
     Builtin(Builtin),
     Closure(Closure),
     Expr(Thunk),
@@ -339,7 +338,6 @@ impl Value {
                 | Value::Number(_)
                 | Value::Binary(_)
                 | Value::List(_)
-                | Value::Fixpoint(_)
                 | Value::Closure(_)
                 | Value::Builtin(_)
                 | Value::Expr(_) => None,

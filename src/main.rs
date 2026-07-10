@@ -2,10 +2,9 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use glam::compiler::CompileContext;
-use glam::core::{Builtin, Expr as CoreExpr, Value};
+use glam::core::{Expr as CoreExpr, Value};
 use glam::diagnostic::Severity;
 use glam::eval;
 use glam::g_syntax::{DeclarationKind, ParsedSource, SourceFile, lower_to_core_with_context};
@@ -68,7 +67,7 @@ fn assemble_path(path: &str) -> ExitCode {
         Err(exit_code) => return exit_code,
     };
 
-    // TODO: move printing errors into CompileContext, so that the front-end compiler can control how errors are reported.
+    // TODO: move printing errors into CompileContext, so a common logger can be used
     let lowered = lower_to_core_with_context(&parsed, &context);
 
     for diagnostic in &lowered.diagnostics {
@@ -86,8 +85,8 @@ fn assemble_path(path: &str) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let term = instantiate_module_term(&lowered.open_defs);
-    let root = match eval::eval_term(&term) {
+    let term = instantiate_module(&context, &lowered.definitions);
+    let root = match eval::eval_value(&term) {
         Ok(root) => root,
         Err(err) => {
             eprintln!("error: {err}");
@@ -111,14 +110,17 @@ fn assemble_path(path: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn instantiate_module_term(open_defs: &Value) -> CoreExpr {
-    // Temporary bootstrap-shell behavior: apply one fixpoint to the
-    // assembled anonymous module. Later, multiple files/scripts should be
-    // merged as mixins before this single fixpoint is applied.
-    CoreExpr::Apply(
-        Arc::new(CoreExpr::Value(Value::Builtin(Builtin::Fixpoint))),
-        Arc::new(CoreExpr::Value(open_defs.clone())),
-    )
+fn instantiate_module(context: &CompileContext, definitions: &Value) -> Value {
+    // Currently relying on default CompileContext to provide default fixpoint.
+    let Value::Expr(thunk) = &context.final_defs else {
+        panic!("CompileContext.final_defs must be a future expression");
+    };
+    let CoreExpr::Future(ivar) = &(*thunk.expr) else {
+        panic!("CompileContext.final_defs must be a future expression");
+    };
+    ivar.set(definitions.clone())
+        .expect("CompileContext.final_defs future must be unassigned");
+    definitions.clone()
 }
 
 fn result_bytes(root: &glam::core::Value, path: &str) -> Result<Vec<u8>, String> {
@@ -138,7 +140,6 @@ fn value_bytes(value: &glam::core::Value, path: &str) -> Result<Vec<u8>, String>
         glam::core::Value::Atom(_)
         | glam::core::Value::Dict(_)
         | glam::core::Value::Number(_)
-        | glam::core::Value::Fixpoint(_)
         | glam::core::Value::Closure(_)
         | glam::core::Value::Builtin(_) => Err(format!("`{path}` is not binary text data")),
     }
@@ -199,6 +200,7 @@ fn parse_path(path: &str) -> ExitCode {
 }
 
 fn parse_source_path(path: &str) -> Result<(ParsedSource, CompileContext), ExitCode> {
+    // TODO: never convert to string, instead pass bytes to the parser and let it handle UTF-8 decoding.
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) => {

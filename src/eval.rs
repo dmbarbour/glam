@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::core::{Builtin, Closure, Expr, FixpointHandle, Key, KeyExpr, List, Thunk, Value};
+use crate::core::{Builtin, Closure, Expr, IVar, Key, KeyExpr, List, Thunk, Value};
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +25,7 @@ impl fmt::Display for EvalError {
 
 impl std::error::Error for EvalError {}
 
-pub fn eval_term(expr: &Expr) -> Result<Value, EvalError> {
+pub fn eval_closed_expr(expr: &Expr) -> Result<Value, EvalError> {
     eval_expr(expr, &[])
 }
 
@@ -50,24 +50,21 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
             let base = eval_expr(base, local_env)?;
             resolve_key_path(base, path, path, local_env)
         }
+        // TODO: Future should lock down and wait for the value to be initialized, rather than
+        // returning an error. At least once we start using parallel evaluation, this will be
+        // necessary
+        Expr::Future(ivar) => ivar
+            .get()
+            .cloned()
+            .ok_or_else(|| EvalError::new("future was observed before initialization")),
         Expr::Error(message) => Err(EvalError::new(message.as_ref())),
     }
 }
 
 pub fn eval_value(value: &Value) -> Result<Value, EvalError> {
     match value {
-        Value::Atom(atom) => Ok(Value::Atom(*atom)),
-        Value::Number(number) => Ok(Value::Number(number.clone())),
-        Value::Binary(bytes) => Ok(Value::Binary(bytes.clone())),
-        Value::List(list) => Ok(Value::List(list.clone())),
-        Value::Dict(dict) => Ok(Value::Dict(dict.clone())),
-        Value::Fixpoint(root) => root
-            .get()
-            .cloned()
-            .ok_or_else(|| EvalError::new("fixpoint was observed before initialization")),
-        Value::Builtin(builtin) => Ok(Value::Builtin(*builtin)),
-        Value::Closure(closure) => Ok(Value::Closure(closure.clone())),
         Value::Expr(thunk) => eval_expr(thunk.expr.as_ref(), &thunk.env),
+        other => Ok(other.clone()),
     }
 }
 
@@ -138,9 +135,6 @@ fn value_to_key(value: &Value, local_env: &[Value]) -> Result<Key, EvalError> {
                 .flatten()
                 .collect::<Vec<_>>(),
         ))),
-        Value::Fixpoint(_) => Err(EvalError::new(
-            "dictionary keys must evaluate to keyable values",
-        )),
         Value::Builtin(_) => Err(EvalError::new(
             "dictionary keys must evaluate to keyable values",
         )),
@@ -563,8 +557,8 @@ fn eval_fixpoint_builtin(function: &Value) -> Result<Value, EvalError> {
         return Err(EvalError::new("fixpoint builtin requires a lambda value"));
     };
 
-    let handle = FixpointHandle::new();
-    let marker = Value::Fixpoint(handle.clone());
+    let handle = IVar::new();
+    let marker = Value::expr(Expr::Future(handle.clone()));
     let value = apply_closure(&function, marker.clone())?;
     handle
         .set(value.clone())
@@ -947,7 +941,7 @@ fn list_literal_segment(value: Value) -> List {
 mod tests {
     use std::sync::Arc;
 
-    use crate::core::{Dict, Expr, FixpointHandle, Thunk, Value};
+    use crate::core::{Dict, Expr, IVar, Thunk, Value};
     use crate::number::Number;
 
     use super::*;
@@ -1045,7 +1039,7 @@ mod tests {
         }
     }
 
-    fn fixpoint_term(dict: Dict) -> Expr {
+    fn fixpoint_dict(dict: Dict) -> Expr {
         Expr::Apply(
             Arc::new(Expr::Value(Value::Builtin(Builtin::Fixpoint))),
             Arc::new(Expr::Lambda(Arc::new(module_value_expr(&Value::Dict(
@@ -1055,13 +1049,13 @@ mod tests {
     }
 
     fn rooted_expr_value(root: &Value, expr: Expr) -> Value {
-        let handle = FixpointHandle::new();
+        let handle = IVar::new();
         handle
             .set(root.clone())
             .expect("rooted test expression should initialize handle once");
         Value::Expr(Thunk {
             expr: Arc::new(expr),
-            env: Arc::from([Value::Fixpoint(handle)]),
+            env: Arc::from([Value::expr(Expr::Future(handle))]),
         })
     }
 
@@ -1074,7 +1068,7 @@ mod tests {
         let root =
             Dict::new_sync().insert(crate::core::Key::atom_from_text("asm"), Value::Dict(asm));
 
-        let value = eval_term(&fixpoint_term(root)).expect("term should evaluate");
+        let value = eval_closed_expr(&fixpoint_dict(root)).expect("term should evaluate");
         let asm = value
             .get_atom_path(&[crate::core::Atom::from_key(
                 &crate::core::Key::binary_from_text("asm"),
@@ -1094,7 +1088,7 @@ mod tests {
 
     #[test]
     fn evaluates_binary_literals() {
-        let value = eval_term(&Expr::Value(Value::binary_from_text("oops")))
+        let value = eval_closed_expr(&Expr::Value(Value::binary_from_text("oops")))
             .expect("binary literal should evaluate");
 
         assert_eq!(value, Value::binary_from_text("oops"));
@@ -1113,7 +1107,7 @@ mod tests {
             Arc::new(Expr::Value(Value::List(List::from_values(vec![n(3)])))),
         );
 
-        let value = eval_term(&expr).expect("append should evaluate");
+        let value = eval_closed_expr(&expr).expect("append should evaluate");
 
         let Value::List(list) = value else {
             panic!("append should produce a list");
@@ -1141,7 +1135,7 @@ mod tests {
             )),
         ]));
 
-        let value = eval_term(&expr).expect("list should evaluate");
+        let value = eval_closed_expr(&expr).expect("list should evaluate");
 
         let Value::List(list) = value else {
             panic!("list expression should produce a list");
@@ -1177,7 +1171,7 @@ mod tests {
             Arc::new(Expr::Value(Value::binary_from_text("!"))),
         );
 
-        let value = eval_term(&expr).expect("append should evaluate");
+        let value = eval_closed_expr(&expr).expect("append should evaluate");
 
         assert!(matches!(value, Value::List(_)));
     }
@@ -1194,19 +1188,19 @@ mod tests {
             builtin2_expr(Builtin::Divide, Expr::Value(n(4)), Expr::Value(n(5))),
         );
 
-        let value = eval_term(&expr).expect("arithmetic should evaluate");
+        let value = eval_closed_expr(&expr).expect("arithmetic should evaluate");
 
         assert_eq!(value, Value::Number(Number::parse("31/5").unwrap()));
     }
 
     #[test]
     fn evaluates_extended_math_builtins() {
-        let floor = eval_term(&builtin1_expr(
+        let floor = eval_closed_expr(&builtin1_expr(
             Builtin::Floor,
             Expr::Value(Value::Number(Number::parse("_7/2").unwrap())),
         ))
         .expect("floor should evaluate");
-        let modulus = eval_term(&builtin2_expr(
+        let modulus = eval_closed_expr(&builtin2_expr(
             Builtin::Mod,
             Expr::Value(Value::Number(Number::parse("17/5").unwrap())),
             Expr::Value(Value::Number(Number::parse("3/2").unwrap())),
@@ -1219,14 +1213,14 @@ mod tests {
 
     #[test]
     fn evaluates_slice_and_map_builtins() {
-        let slice = eval_term(&builtin3_expr(
+        let slice = eval_closed_expr(&builtin3_expr(
             Builtin::Slice,
             Expr::Value(n(1)),
             Expr::Value(n(4)),
             Expr::Value(Value::binary_from_text("World!")),
         ))
         .expect("slice should evaluate");
-        let mapped = eval_term(&builtin2_expr(
+        let mapped = eval_closed_expr(&builtin2_expr(
             Builtin::Map,
             Expr::Lambda(Arc::new(Expr::Apply(
                 Arc::new(Expr::Apply(
@@ -1258,7 +1252,7 @@ mod tests {
             )),
         );
 
-        let value = eval_term(&expr).expect("lambda application should evaluate");
+        let value = eval_closed_expr(&expr).expect("lambda application should evaluate");
 
         assert_eq!(value, n(3));
     }
@@ -1276,7 +1270,7 @@ mod tests {
             Arc::new(Expr::Value(n(42))),
         );
 
-        let value = eval_term(&expr).expect("nested closures should evaluate");
+        let value = eval_closed_expr(&expr).expect("nested closures should evaluate");
 
         assert_eq!(value, n(42));
     }
@@ -1293,7 +1287,7 @@ mod tests {
             Arc::new(Expr::Value(n(42))),
         );
 
-        let value = eval_term(&expr).expect("lambda with dropped argument should evaluate");
+        let value = eval_closed_expr(&expr).expect("lambda with dropped argument should evaluate");
 
         assert_eq!(value, n(42));
     }
@@ -1312,7 +1306,7 @@ mod tests {
             Arc::new(Expr::Value(dict)),
         );
 
-        let value = eval_term(&expr).expect("local dictionary path should evaluate");
+        let value = eval_closed_expr(&expr).expect("local dictionary path should evaluate");
 
         assert_eq!(value, Value::binary_from_text("World"));
     }
@@ -1320,7 +1314,7 @@ mod tests {
     #[test]
     fn divide_builtin_rejects_zero() {
         let expr = builtin2_expr(Builtin::Divide, Expr::Value(n(1)), Expr::Value(n(0)));
-        let err = eval_term(&expr).expect_err("division by zero should fail");
+        let err = eval_closed_expr(&expr).expect_err("division by zero should fail");
         assert_eq!(err.to_string(), "divide builtin cannot divide by zero");
     }
 
@@ -1362,7 +1356,7 @@ mod tests {
             .insert(hello, Value::binary_from_text("Hello"))
             .insert(world, Value::binary_from_text("World"));
 
-        let value = eval_term(&fixpoint_term(root)).expect("term should evaluate");
+        let value = eval_closed_expr(&fixpoint_dict(root)).expect("term should evaluate");
         let asm_value = value.get_atom_path(&[asm]).expect("asm should exist");
         let asm_value = eval_value(asm_value).expect("asm binding should evaluate");
         let Value::Dict(asm_value) = asm_value else {
@@ -1490,7 +1484,7 @@ mod tests {
 
     #[test]
     fn singleton_dict_filters_empty_dictionary_values() {
-        let value = eval_term(&singleton_expr(
+        let value = eval_closed_expr(&singleton_expr(
             Value::Atom(crate::core::Atom::from_key(
                 &crate::core::Key::binary_from_text("gone"),
             )),
@@ -1528,7 +1522,7 @@ mod tests {
             )),
         );
 
-        let value = eval_term(&expr).expect("dict union should evaluate");
+        let value = eval_closed_expr(&expr).expect("dict union should evaluate");
         let greeting = value.get_key_path(&[key]).expect("greeting should exist");
         let Value::Expr(greeting) = greeting else {
             panic!("greeting should stay lazy until demanded");
@@ -1567,7 +1561,7 @@ mod tests {
             ),
         );
 
-        let value = eval_term(&expr).expect("dict union should evaluate");
+        let value = eval_closed_expr(&expr).expect("dict union should evaluate");
         assert_eq!(
             value.get_key_path(&[key]),
             Some(&Value::binary_from_text("Hello"))
@@ -1586,7 +1580,7 @@ mod tests {
             )),
         );
 
-        let value = eval_term(&expr).expect("outer dict union should stay evaluable");
+        let value = eval_closed_expr(&expr).expect("outer dict union should stay evaluable");
         let ambiguous = value
             .get_key_path(&[key])
             .expect("ambiguous key should exist");
@@ -1619,7 +1613,7 @@ mod tests {
             )),
         );
 
-        let value = eval_term(&fixpoint_term(root)).expect("root should evaluate");
+        let value = eval_closed_expr(&fixpoint_dict(root)).expect("root should evaluate");
         let resolved = eval_value(&rooted_expr_value(
             &value,
             global_access(vec![KeyExpr::Key(d), KeyExpr::Key(hello)]),
@@ -1652,7 +1646,7 @@ mod tests {
         );
 
         let root = crate::core::Dict::new_sync().insert(foo.clone(), nested);
-        let value = eval_term(&fixpoint_term(root)).expect("root should evaluate");
+        let value = eval_closed_expr(&fixpoint_dict(root)).expect("root should evaluate");
         let resolved = eval_value(&rooted_expr_value(
             &value,
             global_access(vec![
@@ -1784,7 +1778,7 @@ mod tests {
 
     #[test]
     fn unknown_annotations_pass_through_targets() {
-        let value = eval_term(&Expr::Apply(
+        let value = eval_closed_expr(&Expr::Apply(
             Arc::new(Expr::Apply(
                 Arc::new(Expr::Value(Value::Builtin(Builtin::Anno))),
                 Arc::new(singleton_expr(
@@ -1803,7 +1797,7 @@ mod tests {
 
     #[test]
     fn builtins_are_curried_and_do_not_force_arguments_early() {
-        let partial = eval_term(&Expr::Apply(
+        let partial = eval_closed_expr(&Expr::Apply(
             Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
             Arc::new(global_access(vec![KeyExpr::Key(Key::atom_from_text(
                 "missing",

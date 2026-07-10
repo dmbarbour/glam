@@ -129,7 +129,7 @@ struct LocalName {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoweredSource {
-    pub open_defs: Value, // open fixpoint, i.e. \ self -> Dict
+    pub definitions: Value, // open fixpoint, i.e. \ self -> Dict
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -237,34 +237,33 @@ pub fn parse_source_with_context(source: &SourceFile, context: &CompileContext) 
     }
 }
 
-pub fn lower_to_core(parsed: &ParsedSource) -> LoweredSource {
-    lower_to_core_with_context(parsed, &CompileContext::default())
-}
-
 pub fn lower_to_core_with_context(
     parsed: &ParsedSource,
     context: &CompileContext,
 ) -> LoweredSource {
     // note: we'll extend 'prior' within the 'body' of an implicit lambda
-    let mut root = context.expr_value(context.prior.clone());
+    let mut definitions = context.expr_value(context.prior_defs.clone());
     let mut diagnostics = parsed.diagnostics.clone();
 
     for declaration in &parsed.declarations {
         match &declaration.kind {
             DeclarationKind::Import(import) => {
-                if let Err(diagnostic) = lower_import(import, declaration.line, context, &mut root)
+                if let Err(diagnostic) =
+                    lower_import(import, declaration.line, context, &mut definitions)
                 {
                     diagnostics.push(diagnostic);
                 }
             }
             DeclarationKind::Unique(names) => {
-                if let Err(diagnostic) = lower_unique(names, declaration.line, context, &mut root) {
+                if let Err(diagnostic) =
+                    lower_unique(names, declaration.line, context, &mut definitions)
+                {
                     diagnostics.push(diagnostic);
                 }
             }
             DeclarationKind::Definition(definition) => {
                 if let Err(diagnostic) =
-                    lower_definition(definition, declaration.line, context, &mut root)
+                    lower_definition(definition, declaration.line, context, &mut definitions)
                 {
                     diagnostics.push(diagnostic);
                 }
@@ -274,7 +273,7 @@ pub fn lower_to_core_with_context(
     }
 
     LoweredSource {
-        open_defs: context.value_expr(context.expr_lambda(root)),
+        definitions: context.value_expr(definitions),
         diagnostics,
     }
 }
@@ -283,20 +282,25 @@ fn lower_import(
     import: &ImportDecl,
     line: usize,
     context: &CompileContext,
-    root: &mut CoreExpr,
+    definitions: &mut CoreExpr,
 ) -> Result<(), Diagnostic> {
     let ImportReference::Builtin(name) = &import.reference else {
-        return Ok(());
+        return Err(Diagnostic::error(
+            line,
+            "local `import ...` is not supported by the current spike",
+        ));
     };
     let module = builtin_module_value(context, name)
         .ok_or_else(|| Diagnostic::error(line, format!("unknown built-in module `'{name}`")))?;
 
-    *root = match &import.placement {
-        ImportPlacement::Inline => {
-            union_module_expr(root.clone(), value_to_core_expr(&module, context), context)
-        }
+    *definitions = match &import.placement {
+        ImportPlacement::Inline => union_module_expr(
+            definitions.clone(),
+            value_to_core_expr(&module, context),
+            context,
+        ),
         ImportPlacement::As(target) => union_module_expr(
-            root.clone(),
+            definitions.clone(),
             path_to_dict_expr(target, value_to_core_expr(&module, context), context)?,
             context,
         ),
@@ -315,13 +319,13 @@ fn lower_unique(
     names: &[String],
     _line: usize,
     context: &CompileContext,
-    root: &mut CoreExpr,
+    definitions: &mut CoreExpr,
 ) -> Result<(), Diagnostic> {
     for name in names {
         let path = context.abstract_global_path(name);
         let value = context.abstract_global_path_value(path.as_ref());
-        *root = union_module_expr(
-            root.clone(),
+        *definitions = union_module_expr(
+            definitions.clone(),
             path_to_dict_expr(name, context.expr_value(value), context)?,
             context,
         );
@@ -367,7 +371,7 @@ fn lower_definition(
     definition: &DefinitionDecl,
     line: usize,
     context: &CompileContext,
-    root: &mut CoreExpr,
+    definitions: &mut CoreExpr,
 ) -> Result<(), Diagnostic> {
     let Some(expr) = &definition.expr else {
         return Ok(());
@@ -392,8 +396,8 @@ fn lower_definition(
             "update definitions are not supported by the .g spike lowering",
         ))?,
     };
-    *root = union_module_expr(
-        root.clone(),
+    *definitions = union_module_expr(
+        definitions.clone(),
         path_to_dict_expr(
             &definition.target,
             value_to_core_expr(&value, context),
@@ -447,8 +451,8 @@ fn annotate_definition_value(
     )))
 }
 
-fn union_module_expr(root: CoreExpr, item: CoreExpr, context: &CompileContext) -> CoreExpr {
-    context.builtin_apply2_expr(Builtin::DictUnion, root, item)
+fn union_module_expr(definitions: CoreExpr, item: CoreExpr, context: &CompileContext) -> CoreExpr {
+    context.builtin_apply2_expr(Builtin::DictUnion, definitions, item)
 }
 
 fn value_to_core_expr(value: &Value, context: &CompileContext) -> CoreExpr {
@@ -463,7 +467,7 @@ fn prior_path_expr(target: &str, context: &CompileContext) -> Result<CoreExpr, D
         .split('.')
         .map(|part| context.key_expr_key(name_as_key(part)))
         .collect::<Vec<_>>();
-    Ok(context.expr_access(context.expr_value(context.prior.clone()), path))
+    Ok(context.expr_access(context.expr_value(context.prior_defs.clone()), path))
 }
 
 fn path_to_dict_expr(
@@ -649,18 +653,18 @@ fn lower_name_expr(
     locals: &mut Vec<LocalName>,
 ) -> Result<CoreExpr, Diagnostic> {
     let Some(SyntaxKeyExpr::Atom(first)) = parts.first() else {
-        return Ok(context.expr_access(
-            final_binding_expr(context, locals),
-            parts
-                .iter()
-                .map(|part| syntax_key_expr_to_core(part, line, context, locals))
-                .collect::<Result<Vec<_>, _>>()?,
+        return Err(Diagnostic::error(
+            line,
+            "first part of name expression must be an atom",
         ));
     };
 
+    // TODO: special keyword atoms like 'self' and 'module'
+    // TODO: binding to prior names (part of atom or as flag on lower)
+
     let Some(local_index) = local_binding_index(first, locals) else {
         return Ok(context.expr_access(
-            final_binding_expr(context, locals),
+            context.expr_value(context.final_defs.clone()),
             parts
                 .iter()
                 .map(|part| syntax_key_expr_to_core(part, line, context, locals))
@@ -679,11 +683,6 @@ fn lower_name_expr(
             .map(|part| syntax_key_expr_to_core(part, line, context, locals))
             .collect::<Result<Vec<_>, _>>()?,
     ))
-}
-
-fn final_binding_expr(context: &CompileContext, locals: &[LocalName]) -> CoreExpr {
-    // Globals lower against a synthetic outer `\final -> ...` binding.
-    context.expr_local(locals.len())
 }
 
 fn local_binding_index(name: &str, locals: &[LocalName]) -> Option<usize> {
@@ -1555,20 +1554,20 @@ mod tests {
         CoreExpr::Access(Arc::new(CoreExpr::Local(0)), Arc::from(path))
     }
 
-    fn instantiate_module(open_defs: &crate::core::Value) -> crate::core::Expr {
-        CoreExpr::Apply(
-            Arc::new(CoreExpr::Value(Value::Builtin(Builtin::Fixpoint))),
-            Arc::new(CoreExpr::Value(open_defs.clone())),
-        )
+    fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> Value {
+        let Value::Expr(thunk) = &context.final_defs else {
+            panic!("final module binding should be a lazy expression");
+        };
+        let crate::core::Expr::Future(ivar) = &(*thunk.expr) else {
+            panic!("final module binding should be a future expression");
+        };
+        ivar.set(lowered.definitions.clone())
+            .expect("future should not be set yet");
+        crate::eval::eval_value(&lowered.definitions).expect("lowered module should evaluate")
     }
 
-    fn evaluated_module_value(lowered: &LoweredSource) -> Value {
-        crate::eval::eval_term(&instantiate_module(&lowered.open_defs))
-            .expect("lowered module should evaluate")
-    }
-
-    fn value_at_atom_path(root: &Value, path: &[&str]) -> Option<Value> {
-        let mut current = root.clone();
+    fn value_at_atom_path(definitions: &Value, path: &[&str]) -> Option<Value> {
+        let mut current = definitions.clone();
         for part in path {
             let current_value = crate::eval::eval_value(&current).ok()?;
             let Value::Dict(dict) = current_value else {
@@ -1581,13 +1580,13 @@ mod tests {
         Some(current)
     }
 
-    fn resolved_value_at_path(root: &Value, path: &[&str]) -> Value {
-        let value = value_at_atom_path(root, path).expect("binding should exist");
+    fn resolved_value_at_path(definitions: &Value, path: &[&str]) -> Value {
+        let value = value_at_atom_path(definitions, path).expect("binding should exist");
         crate::eval::eval_value(&value).expect("binding should resolve")
     }
 
-    fn resolved_expr_at_path(root: &Value, path: &[&str]) -> CoreExpr {
-        let value = resolved_value_at_path(root, path);
+    fn resolved_expr_at_path(definitions: &Value, path: &[&str]) -> CoreExpr {
+        let value = resolved_value_at_path(definitions, path);
         let Value::Expr(thunk) = value else {
             panic!("binding should resolve to a lazy expression");
         };
@@ -2453,10 +2452,11 @@ mod tests {
     #[test]
     fn lowers_list_expressions_to_core_terms() {
         let parsed = parse("language g0\nasm.result = [72, 101] ++ [108, 108, 111]\n");
-        let lowered = lower_to_core(&parsed);
-        let value = evaluated_module_value(&lowered);
-
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
             resolved_expr_at_path(&value, &["asm", "result"]),
             core_append(
@@ -2478,10 +2478,11 @@ mod tests {
         let parsed = parse(
             "language g0\nasm.result = hello ++ \", \" ++ world ++ \"!\"\nhello = \"Hello\"\nworld = \"World\"\n",
         );
-        let lowered = lower_to_core(&parsed);
-        let value = evaluated_module_value(&lowered);
-
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
             resolved_expr_at_path(&value, &["asm", "result"]),
             core_append(
@@ -2500,10 +2501,11 @@ mod tests {
     #[test]
     fn lowers_lambda_and_application_expressions_to_core_terms() {
         let parsed = parse("language g0\nasm.result = (\\x -> x.tail) d\n");
-        let lowered = lower_to_core(&parsed);
-        let value = evaluated_module_value(&lowered);
-
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
             resolved_expr_at_path(&value, &["asm", "result"]),
             CoreExpr::Apply(
@@ -2521,10 +2523,11 @@ mod tests {
     #[test]
     fn lowers_definition_argument_sugar_to_lambda_terms() {
         let parsed = parse("language g0\nid x = x\nasm.result = id \"Hello, World!\"\n");
-        let lowered = lower_to_core(&parsed);
-        let value = evaluated_module_value(&lowered);
-
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
             resolved_expr_at_path(&value, &["id"]),
             CoreExpr::Lambda(Arc::new(CoreExpr::Local(0)))
@@ -2534,10 +2537,11 @@ mod tests {
     #[test]
     fn lowers_suppressed_local_names_to_canonical_body_references() {
         let parsed = parse("language g0\nkeep _value = value\n");
-        let lowered = lower_to_core(&parsed);
-        let value = evaluated_module_value(&lowered);
-
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
             resolved_expr_at_path(&value, &["keep"]),
             CoreExpr::Lambda(Arc::new(CoreExpr::Local(0)))
@@ -2549,10 +2553,11 @@ mod tests {
         let parsed = parse(
             "language g0\nd = { hello:\"Hello\", world:other ++ \"!\" }\nother = \"World\"\n",
         );
-        let lowered = lower_to_core(&parsed);
-        let value = evaluated_module_value(&lowered);
-
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
             resolved_expr_at_path(&value, &["d"]),
             core_dict_union(
@@ -2574,16 +2579,16 @@ mod tests {
     #[test]
     fn lowering_starts_from_prior_dictionary() {
         let parsed = parse("language g0\nworld = \"World\"\n");
-        let context = CompileContext::default().with_prior(Value::Dict(
+        let context = CompileContext::default().with_prior_defs(Value::Dict(
             crate::core::Dict::new_sync().insert(
                 Key::atom_from_text("hello"),
                 Value::binary_from_text("Hello"),
             ),
         ));
         let lowered = lower_to_core_with_context(&parsed, &context);
-        let value = evaluated_module_value(&lowered);
-
         assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
             value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("hello"))]),
             Some(&Value::binary_from_text("Hello"))
@@ -2597,12 +2602,11 @@ mod tests {
     #[test]
     fn lowers_builtin_imports_to_module_dictionaries() {
         let parsed = parse("language g0\nimport 'std as std\nimport 'math\n");
-        let lowered = lower_to_core(&parsed);
-
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
-        let value = crate::eval::eval_term(&instantiate_module(&lowered.open_defs))
-            .expect("builtin imports should evaluate");
 
+        let value = evaluated_module_value(&context, &lowered);
         let std = value
             .get_atom_path(&[Atom::from_key(&Key::binary_from_text("std"))])
             .expect("std import should exist");
@@ -2631,13 +2635,14 @@ mod tests {
 
     #[test]
     fn lowers_unique_declarations_via_abstract_global_paths() {
+        let context = CompileContext::default();
         let lowered = lower_with_module_path(
             "language g0\nunique Foo, palette.Blue\n",
             &["pkg", "module"],
         );
-        let value = evaluated_module_value(&lowered);
-
         assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
             value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("Foo"))]),
             Some(&abstract_path_atom(&["pkg", "module", "Foo"]))
@@ -2677,12 +2682,12 @@ mod tests {
 
     #[test]
     fn inline_builtin_imports_use_dict_union_semantics() {
+        let context = CompileContext::default();
         let parsed = parse("language g0\nmath.answer = 42\nimport 'std\n");
-        let lowered = lower_to_core(&parsed);
-
+        let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
-        let value = crate::eval::eval_term(&instantiate_module(&lowered.open_defs))
-            .expect("merged import should evaluate");
+
+        let value = evaluated_module_value(&context, &lowered);
         let math = value
             .get_atom_path(&[Atom::from_key(&Key::binary_from_text("math"))])
             .expect("std import should merge into existing math");
@@ -2711,12 +2716,12 @@ mod tests {
 
     #[test]
     fn introduce_and_override_checks_are_deferred_until_observed() {
+        let context = CompileContext::default();
         let parsed = parse("language g0\nfoo := 1\nok = \"ok\"\n");
-        let lowered = lower_to_core(&parsed);
-
+        let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
-        let value = evaluated_module_value(&lowered);
 
+        let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
             resolved_value_at_path(&value, &["ok"]),
             Value::binary_from_text("ok")
@@ -2740,12 +2745,12 @@ mod tests {
 
     #[test]
     fn duplicate_introductions_stay_lazy_until_observed() {
+        let context = CompileContext::default();
         let parsed = parse("language g0\nfoo = 1\nfoo = 2\nok = \"ok\"\n");
-        let lowered = lower_to_core(&parsed);
-
+        let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
-        let value = evaluated_module_value(&lowered);
 
+        let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
             resolved_value_at_path(&value, &["ok"]),
             Value::binary_from_text("ok")
