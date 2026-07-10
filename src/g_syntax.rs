@@ -1550,8 +1550,8 @@ mod tests {
         core_builtin2(Builtin::DictUnion, left, right)
     }
 
-    fn core_global_access(path: Vec<CoreKeyExpr>) -> CoreExpr {
-        CoreExpr::Access(Arc::new(CoreExpr::Local(0)), Arc::from(path))
+    fn core_global_access(context: &CompileContext, path: Vec<CoreKeyExpr>) -> CoreExpr {
+        CoreExpr::Access(Arc::new(CoreExpr::Value(context.final_defs.clone())), Arc::from(path))
     }
 
     fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> Value {
@@ -2488,10 +2488,10 @@ mod tests {
             core_append(
                 core_append(
                     core_append(
-                        core_global_access(vec![CoreKeyExpr::Key(Key::atom_from_text("hello"))]),
+                        core_global_access(&context, vec![CoreKeyExpr::Key(Key::atom_from_text("hello"))]),
                         CoreExpr::Value(Value::binary_from_text(", ")),
                     ),
-                    core_global_access(vec![CoreKeyExpr::Key(Key::atom_from_text("world"))]),
+                    core_global_access(&context, vec![CoreKeyExpr::Key(Key::atom_from_text("world"))]),
                 ),
                 CoreExpr::Value(Value::binary_from_text("!")),
             )
@@ -2513,7 +2513,7 @@ mod tests {
                     Arc::new(CoreExpr::Local(0)),
                     Arc::from([CoreKeyExpr::Key(Key::atom_from_text("tail"))]),
                 )))),
-                Arc::new(core_global_access(vec![CoreKeyExpr::Key(
+                Arc::new(core_global_access(&context, vec![CoreKeyExpr::Key(
                     Key::atom_from_text("d")
                 )])),
             )
@@ -2568,7 +2568,7 @@ mod tests {
                 core_singleton(
                     CoreExpr::Value(Value::Atom(Atom::from_key(&Key::binary_from_text("world")))),
                     core_append(
-                        core_global_access(vec![CoreKeyExpr::Key(Key::atom_from_text("other"))]),
+                        core_global_access(&context, vec![CoreKeyExpr::Key(Key::atom_from_text("other"))]),
                         CoreExpr::Value(Value::binary_from_text("!")),
                     ),
                 ),
