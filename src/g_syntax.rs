@@ -245,18 +245,7 @@ pub fn lower_to_core_with_context(
     parsed: &ParsedSource,
     context: &CompileContext,
 ) -> LoweredSource {
-    let mut root = match &context.prior {
-        Value::Dict(dict) => dict.clone(),
-        _ => {
-            return LoweredSource {
-                term: None,
-                diagnostics: vec![Diagnostic::error(
-                    0,
-                    "compile context prior must be a dictionary value",
-                )],
-            };
-        }
-    };
+    let mut root = context.core.expr_value(context.prior.clone());
     let mut atoms = std::collections::BTreeMap::new();
     let mut diagnostics = parsed.diagnostics.clone();
 
@@ -297,7 +286,7 @@ fn lower_import(
     import: &ImportDecl,
     line: usize,
     context: &CompileContext,
-    root: &mut Dict,
+    root: &mut CoreExpr,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<(), Diagnostic> {
     let ImportReference::Builtin(name) = &import.reference else {
@@ -307,8 +296,21 @@ fn lower_import(
         .ok_or_else(|| Diagnostic::error(line, format!("unknown built-in module `'{name}`")))?;
 
     *root = match &import.placement {
-        ImportPlacement::Inline => inline_import_module(root, &module, context),
-        ImportPlacement::As(target) => insert_path(root, target, module, line, context, atoms)?,
+        ImportPlacement::Inline => union_module_expr(
+            root.clone(),
+            value_to_core_expr(&module, context.core),
+            context.core,
+        ),
+        ImportPlacement::As(target) => union_module_expr(
+            root.clone(),
+            path_to_dict_expr(
+                target,
+                value_to_core_expr(&module, context.core),
+                context,
+                atoms,
+            )?,
+            context.core,
+        ),
         ImportPlacement::At(_) => {
             return Err(Diagnostic::error(
                 line,
@@ -322,47 +324,21 @@ fn lower_import(
 
 fn lower_unique(
     names: &[String],
-    line: usize,
+    _line: usize,
     context: &CompileContext,
-    root: &mut Dict,
+    root: &mut CoreExpr,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<(), Diagnostic> {
     for name in names {
         let path = context.abstract_global_path(name);
         let value = context.core.abstract_global_path_value(path.as_ref());
-        *root = insert_path(root, name, value, line, context, atoms)?;
+        *root = union_module_expr(
+            root.clone(),
+            path_to_dict_expr(name, context.core.expr_value(value), context, atoms)?,
+            context.core,
+        );
     }
     Ok(())
-}
-
-fn inline_import_module(root: &Dict, module: &Value, context: &CompileContext) -> Dict {
-    let Value::Dict(module) = module else {
-        return root.clone();
-    };
-
-    let mut merged = root.clone();
-    for (key, imported) in module.iter() {
-        merged = match merged.get(key) {
-            Some(existing) if is_empty_dict_value(existing) => {
-                merged.insert(key.clone(), imported.clone())
-            }
-            Some(existing) if is_empty_dict_value(imported) => {
-                merged.insert(key.clone(), existing.clone())
-            }
-            Some(existing) => merged.insert(
-                key.clone(),
-                context.core.dict_union_value(existing, imported),
-            ),
-            None if is_empty_dict_value(imported) => merged,
-            None => merged.insert(key.clone(), imported.clone()),
-        };
-    }
-
-    merged
-}
-
-fn is_empty_dict_value(value: &Value) -> bool {
-    matches!(value, Value::Dict(dict) if dict.is_empty())
 }
 
 fn builtin_module_value(
@@ -414,6 +390,10 @@ fn builtin_std_module(
 ) -> Dict {
     Dict::new_sync()
         .insert(
+            atom_key("anno", atoms),
+            context.core.value_builtin(Builtin::Anno),
+        )
+        .insert(
             atom_key("math", atoms),
             context.core.value_dict(builtin_math_module(context, atoms)),
         )
@@ -427,7 +407,7 @@ fn lower_definition(
     definition: &DefinitionDecl,
     line: usize,
     context: &CompileContext,
-    root: &mut Dict,
+    root: &mut CoreExpr,
     atoms: &mut std::collections::BTreeMap<String, Atom>,
 ) -> Result<(), Diagnostic> {
     let Some(expr) = &definition.expr else {
@@ -435,21 +415,140 @@ fn lower_definition(
     };
 
     let value = syntax_expr_to_value(expr, line, context, atoms)?;
-
-    *root = match definition.kind {
-        DefinitionKind::Introduce => {
-            insert_path(root, &definition.target, value, line, context, atoms)?
-        }
-        DefinitionKind::Override => {
-            override_path(root, &definition.target, value, line, context, atoms)?
-        }
+    let value = match definition.kind {
+        DefinitionKind::Introduce => annotate_definition_value(
+            BuiltinAssertion::Undefined,
+            &definition.target,
+            value,
+            context,
+            atoms,
+        )?,
+        DefinitionKind::Override => annotate_definition_value(
+            BuiltinAssertion::Defined,
+            &definition.target,
+            value,
+            context,
+            atoms,
+        )?,
         DefinitionKind::Update => Err(Diagnostic::error(
             line,
             "update definitions are not supported by the .g spike lowering",
         ))?,
     };
+    *root = union_module_expr(
+        root.clone(),
+        path_to_dict_expr(
+            &definition.target,
+            value_to_core_expr(&value, context.core),
+            context,
+            atoms,
+        )?,
+        context.core,
+    );
 
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum BuiltinAssertion {
+    Defined,
+    Undefined,
+}
+
+fn annotate_definition_value(
+    assertion: BuiltinAssertion,
+    target: &str,
+    value: Value,
+    context: &CompileContext,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Result<Value, Diagnostic> {
+    let tag = match assertion {
+        BuiltinAssertion::Defined => "assert_defined",
+        BuiltinAssertion::Undefined => "assert_undefined",
+    };
+    let payload = context.core.builtin_apply2_expr(
+        Builtin::DictUnion,
+        context.core.builtin_apply2_expr(
+            Builtin::Singleton,
+            context
+                .core
+                .expr_value(context.core.value_atom(atom_value("name", atoms))),
+            context.core.expr_value(context.core.value_binary(target)),
+        ),
+        context.core.builtin_apply2_expr(
+            Builtin::Singleton,
+            context
+                .core
+                .expr_value(context.core.value_atom(atom_value("value", atoms))),
+            prior_path_expr(target, context, atoms)?,
+        ),
+    );
+    let annotation = context.core.builtin_apply2_expr(
+        Builtin::Singleton,
+        context
+            .core
+            .expr_value(context.core.value_atom(atom_value(tag, atoms))),
+        payload,
+    );
+
+    Ok(context.core.value_expr(context.core.builtin_apply2_expr(
+        Builtin::Anno,
+        annotation,
+        value_to_core_expr(&value, context.core),
+    )))
+}
+
+fn union_module_expr(
+    root: CoreExpr,
+    item: CoreExpr,
+    core: crate::compiler::CoreInterface,
+) -> CoreExpr {
+    core.builtin_apply2_expr(Builtin::DictUnion, root, item)
+}
+
+fn value_to_core_expr(value: &Value, core: crate::compiler::CoreInterface) -> CoreExpr {
+    match value {
+        Value::Expr(thunk) if thunk.env.is_empty() => thunk.expr.as_ref().clone(),
+        _ => core.expr_value(value.clone()),
+    }
+}
+
+fn prior_path_expr(
+    target: &str,
+    context: &CompileContext,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Result<CoreExpr, Diagnostic> {
+    let path = target
+        .split('.')
+        .map(|part| context.core.key_expr_key(atom_key(part, atoms)))
+        .collect::<Vec<_>>();
+    Ok(context
+        .core
+        .expr_access(context.core.expr_value(context.prior.clone()), path))
+}
+
+fn path_to_dict_expr(
+    target: &str,
+    value: CoreExpr,
+    context: &CompileContext,
+    atoms: &mut std::collections::BTreeMap<String, Atom>,
+) -> Result<CoreExpr, Diagnostic> {
+    let parts = target.split('.').collect::<Vec<_>>();
+    if parts.is_empty() {
+        return Err(Diagnostic::error(0, "definition target cannot be empty"));
+    }
+
+    let mut expr = value;
+    for part in parts.into_iter().rev() {
+        expr = context.core.builtin_apply2_expr(
+            Builtin::Singleton,
+            context
+                .core
+                .expr_value(context.core.value_atom(atom_value(part, atoms))),
+            expr,
+        );
+    }
+    Ok(expr)
 }
 
 fn syntax_expr_to_value(
@@ -717,102 +816,6 @@ fn syntax_key_expr_to_core(
                 )?)
         }
     })
-}
-
-fn insert_path(
-    root: &Dict,
-    target: &str,
-    value: Value,
-    line: usize,
-    context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
-) -> Result<Dict, Diagnostic> {
-    let parts = target.split('.').collect::<Vec<_>>();
-    let Some((leaf, parents)) = parts.split_last() else {
-        return Err(Diagnostic::error(line, "definition target cannot be empty"));
-    };
-
-    let leaf_key = atom_key(leaf, atoms);
-    let existing = get_path(root, parents, &leaf_key, atoms);
-    if existing.is_some() {
-        return Err(Diagnostic::error(
-            line,
-            format!("cannot introduce `{target}` because it is already defined"),
-        ));
-    }
-
-    set_path(root, parents, leaf_key, value, line, context, atoms)
-}
-
-fn override_path(
-    root: &Dict,
-    target: &str,
-    value: Value,
-    line: usize,
-    context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
-) -> Result<Dict, Diagnostic> {
-    let parts = target.split('.').collect::<Vec<_>>();
-    let Some((leaf, parents)) = parts.split_last() else {
-        return Err(Diagnostic::error(line, "definition target cannot be empty"));
-    };
-
-    let leaf_key = atom_key(leaf, atoms);
-    let existing = get_path(root, parents, &leaf_key, atoms);
-    if existing.is_none() {
-        return Err(Diagnostic::error(
-            line,
-            format!("cannot override `{target}` because it is not defined"),
-        ));
-    }
-
-    set_path(root, parents, leaf_key, value, line, context, atoms)
-}
-
-fn get_path<'a>(
-    root: &'a Dict,
-    parents: &[&str],
-    leaf: &Key,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
-) -> Option<&'a Value> {
-    let mut current = root;
-
-    for parent in parents {
-        let Value::Dict(next) = current.get(&atom_key(parent, atoms))? else {
-            return None;
-        };
-        current = next;
-    }
-
-    current.get(leaf)
-}
-
-fn set_path(
-    root: &Dict,
-    parents: &[&str],
-    leaf: Key,
-    value: Value,
-    line: usize,
-    context: &CompileContext,
-    atoms: &mut std::collections::BTreeMap<String, Atom>,
-) -> Result<Dict, Diagnostic> {
-    let Some((parent, rest)) = parents.split_first() else {
-        return Ok(root.insert(leaf, value));
-    };
-
-    let parent_key = atom_key(parent, atoms);
-    let child = match root.get(&parent_key) {
-        Some(Value::Dict(child)) => child.clone(),
-        Some(_) => {
-            return Err(Diagnostic::error(
-                line,
-                format!("cannot define below `{parent}` because it is not a dictionary"),
-            ));
-        }
-        None => Dict::new_sync(),
-    };
-    let updated_child = set_path(&child, rest, leaf, value, line, context, atoms)?;
-    Ok(root.insert(parent_key, context.core.value_dict(updated_child)))
 }
 
 fn atom_key(name: &str, atoms: &mut std::collections::BTreeMap<String, Atom>) -> Key {
@@ -1298,6 +1301,8 @@ fn syntax_expr_parser<'src>()
             crate::core::Builtin::Multiply => "*",
             crate::core::Builtin::Divide => "/",
             crate::core::Builtin::Fixpoint => "fixpoint",
+            crate::core::Builtin::Anno => "anno",
+            crate::core::Builtin::MergeDuplicate => "merge_duplicate",
             crate::core::Builtin::Floor => "floor",
             crate::core::Builtin::Mod => "mod",
             crate::core::Builtin::Slice => "slice",
@@ -1639,24 +1644,47 @@ mod tests {
         CoreExpr::Access(Arc::new(CoreExpr::Local(0)), Arc::from(path))
     }
 
-    fn lowered_module_dict(lowered: &LoweredSource) -> &Value {
-        match lowered.term.as_ref() {
-            Some(crate::core::Term::Expr(CoreExpr::Apply(function, body)))
-                if matches!(
-                    function.as_ref(),
-                    CoreExpr::Value(Value::Builtin(Builtin::Fixpoint))
-                ) =>
-            {
-                match body.as_ref() {
-                    CoreExpr::Lambda(body) => match body.as_ref() {
-                        CoreExpr::Value(value) => value,
-                        other => panic!("unexpected lowered module body: {other:?}"),
-                    },
-                    other => panic!("unexpected lowered fixpoint body: {other:?}"),
-                }
-            }
-            other => panic!("unexpected lowered term: {other:?}"),
+    fn instantiate_module_term(term: &crate::core::Term) -> crate::core::Term {
+        match term {
+            crate::core::Term::Expr(expr) => crate::core::Term::Expr(CoreExpr::Apply(
+                Arc::new(CoreExpr::Value(Value::Builtin(Builtin::Fixpoint))),
+                Arc::new(expr.clone()),
+            )),
         }
+    }
+
+    fn evaluated_module_value(lowered: &LoweredSource) -> Value {
+        crate::eval::eval_term(&instantiate_module_term(
+            lowered.term.as_ref().expect("lowered term should exist"),
+        ))
+        .expect("lowered module should evaluate")
+    }
+
+    fn value_at_atom_path(root: &Value, path: &[&str]) -> Option<Value> {
+        let mut current = root.clone();
+        for part in path {
+            let current_value = crate::eval::eval_value(&current).ok()?;
+            let Value::Dict(dict) = current_value else {
+                return None;
+            };
+            current = dict
+                .get(&Key::Atom(Atom::from_key(&Key::binary_from_text(*part))))
+                .cloned()?;
+        }
+        Some(current)
+    }
+
+    fn resolved_value_at_path(root: &Value, path: &[&str]) -> Value {
+        let value = value_at_atom_path(root, path).expect("binding should exist");
+        crate::eval::eval_value(&value).expect("binding should resolve")
+    }
+
+    fn resolved_expr_at_path(root: &Value, path: &[&str]) -> CoreExpr {
+        let value = resolved_value_at_path(root, path);
+        let Value::Expr(thunk) = value else {
+            panic!("binding should resolve to a lazy expression");
+        };
+        thunk.expr.as_ref().clone()
     }
 
     fn core_builtin2(builtin: Builtin, left: CoreExpr, right: CoreExpr) -> CoreExpr {
@@ -2519,14 +2547,12 @@ mod tests {
     fn lowers_list_expressions_to_core_terms() {
         let parsed = parse("language g0\nasm.result = [72, 101] ++ [108, 108, 111]\n");
         let lowered = lower_to_core(&parsed);
+        let value = evaluated_module_value(&lowered);
 
         assert_eq!(lowered.diagnostics, []);
         assert_eq!(
-            lowered_module_dict(&lowered).get_atom_path(&[
-                Atom::from_key(&Key::binary_from_text("asm")),
-                Atom::from_key(&Key::binary_from_text("result")),
-            ]),
-            Some(&Value::expr(core_append(
+            resolved_expr_at_path(&value, &["asm", "result"]),
+            core_append(
                 CoreExpr::List(Arc::from([
                     Arc::new(CoreExpr::Value(Value::Number(72.into()))),
                     Arc::new(CoreExpr::Value(Value::Number(101.into()))),
@@ -2536,7 +2562,7 @@ mod tests {
                     Arc::new(CoreExpr::Value(Value::Number(108.into()))),
                     Arc::new(CoreExpr::Value(Value::Number(111.into()))),
                 ])),
-            )))
+            )
         );
     }
 
@@ -2546,14 +2572,12 @@ mod tests {
             "language g0\nasm.result = hello ++ \", \" ++ world ++ \"!\"\nhello = \"Hello\"\nworld = \"World\"\n",
         );
         let lowered = lower_to_core(&parsed);
+        let value = evaluated_module_value(&lowered);
 
         assert_eq!(lowered.diagnostics, []);
         assert_eq!(
-            lowered_module_dict(&lowered).get_atom_path(&[
-                Atom::from_key(&Key::binary_from_text("asm")),
-                Atom::from_key(&Key::binary_from_text("result")),
-            ]),
-            Some(&Value::expr(core_append(
+            resolved_expr_at_path(&value, &["asm", "result"]),
+            core_append(
                 core_append(
                     core_append(
                         core_global_access(vec![CoreKeyExpr::Key(Key::atom_from_text("hello"))]),
@@ -2562,7 +2586,7 @@ mod tests {
                     core_global_access(vec![CoreKeyExpr::Key(Key::atom_from_text("world"))]),
                 ),
                 CoreExpr::Value(Value::binary_from_text("!")),
-            )))
+            )
         );
     }
 
@@ -2570,14 +2594,12 @@ mod tests {
     fn lowers_lambda_and_application_expressions_to_core_terms() {
         let parsed = parse("language g0\nasm.result = (\\x -> x.tail) d\n");
         let lowered = lower_to_core(&parsed);
+        let value = evaluated_module_value(&lowered);
 
         assert_eq!(lowered.diagnostics, []);
         assert_eq!(
-            lowered_module_dict(&lowered).get_atom_path(&[
-                Atom::from_key(&Key::binary_from_text("asm")),
-                Atom::from_key(&Key::binary_from_text("result")),
-            ]),
-            Some(&Value::expr(CoreExpr::Apply(
+            resolved_expr_at_path(&value, &["asm", "result"]),
+            CoreExpr::Apply(
                 Arc::new(CoreExpr::Lambda(Arc::new(CoreExpr::Access(
                     Arc::new(CoreExpr::Local(0)),
                     Arc::from([CoreKeyExpr::Key(Key::atom_from_text("tail"))]),
@@ -2585,7 +2607,7 @@ mod tests {
                 Arc::new(core_global_access(vec![CoreKeyExpr::Key(
                     Key::atom_from_text("d")
                 )])),
-            )))
+            )
         );
     }
 
@@ -2593,12 +2615,12 @@ mod tests {
     fn lowers_definition_argument_sugar_to_lambda_terms() {
         let parsed = parse("language g0\nid x = x\nasm.result = id \"Hello, World!\"\n");
         let lowered = lower_to_core(&parsed);
+        let value = evaluated_module_value(&lowered);
 
         assert_eq!(lowered.diagnostics, []);
         assert_eq!(
-            lowered_module_dict(&lowered)
-                .get_atom_path(&[Atom::from_key(&Key::binary_from_text("id"))]),
-            Some(&Value::expr(CoreExpr::Lambda(Arc::new(CoreExpr::Local(0)))))
+            resolved_expr_at_path(&value, &["id"]),
+            CoreExpr::Lambda(Arc::new(CoreExpr::Local(0)))
         );
     }
 
@@ -2606,12 +2628,12 @@ mod tests {
     fn lowers_suppressed_local_names_to_canonical_body_references() {
         let parsed = parse("language g0\nkeep _value = value\n");
         let lowered = lower_to_core(&parsed);
+        let value = evaluated_module_value(&lowered);
 
         assert_eq!(lowered.diagnostics, []);
         assert_eq!(
-            lowered_module_dict(&lowered)
-                .get_atom_path(&[Atom::from_key(&Key::binary_from_text("keep"))]),
-            Some(&Value::expr(CoreExpr::Lambda(Arc::new(CoreExpr::Local(0)))))
+            resolved_expr_at_path(&value, &["keep"]),
+            CoreExpr::Lambda(Arc::new(CoreExpr::Local(0)))
         );
     }
 
@@ -2621,12 +2643,12 @@ mod tests {
             "language g0\nd = { hello:\"Hello\", world:other ++ \"!\" }\nother = \"World\"\n",
         );
         let lowered = lower_to_core(&parsed);
+        let value = evaluated_module_value(&lowered);
 
         assert_eq!(lowered.diagnostics, []);
         assert_eq!(
-            lowered_module_dict(&lowered)
-                .get_atom_path(&[Atom::from_key(&Key::binary_from_text("d"))]),
-            Some(&Value::expr(core_dict_union(
+            resolved_expr_at_path(&value, &["d"]),
+            core_dict_union(
                 core_singleton(
                     CoreExpr::Value(Value::Atom(Atom::from_key(&Key::binary_from_text("hello")))),
                     CoreExpr::Value(Value::binary_from_text("Hello")),
@@ -2638,7 +2660,7 @@ mod tests {
                         CoreExpr::Value(Value::binary_from_text("!")),
                     ),
                 ),
-            )))
+            )
         );
     }
 
@@ -2652,17 +2674,16 @@ mod tests {
             ),
         ));
         let lowered = lower_to_core_with_context(&parsed, &context);
+        let value = evaluated_module_value(&lowered);
 
         assert_eq!(lowered.diagnostics, []);
-        let value = lowered_module_dict(&lowered);
-
         assert_eq!(
             value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("hello"))]),
             Some(&Value::binary_from_text("Hello"))
         );
         assert_eq!(
-            value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("world"))]),
-            Some(&Value::binary_from_text("World"))
+            resolved_value_at_path(&value, &["world"]),
+            Value::binary_from_text("World")
         );
     }
 
@@ -2672,19 +2693,33 @@ mod tests {
         let lowered = lower_to_core(&parsed);
 
         assert_eq!(lowered.diagnostics, []);
-        let value = lowered_module_dict(&lowered);
+        let value = crate::eval::eval_term(&instantiate_module_term(
+            lowered.term.as_ref().expect("lowered term should exist"),
+        ))
+        .expect("builtin imports should evaluate");
 
         let std = value
             .get_atom_path(&[Atom::from_key(&Key::binary_from_text("std"))])
             .expect("std import should exist");
+        let std = crate::eval::eval_value(std).expect("std import should evaluate to a dictionary");
         let floor = value
             .get_atom_path(&[Atom::from_key(&Key::binary_from_text("floor"))])
             .expect("inline math import should expose floor");
         let mod_fn = value
             .get_atom_path(&[Atom::from_key(&Key::binary_from_text("mod"))])
             .expect("inline math import should expose mod");
+        let anno = match &std {
+            Value::Dict(std) => std
+                .get(&Key::atom_from_text("anno"))
+                .expect("std import should expose anno"),
+            _ => unreachable!(),
+        };
 
+        let Value::Dict(_) = std else {
+            panic!("std import should evaluate to a dictionary");
+        };
         assert!(matches!(std, Value::Dict(_)));
+        assert!(matches!(anno, Value::Builtin(crate::core::Builtin::Anno)));
         assert!(matches!(floor, Value::Builtin(crate::core::Builtin::Floor)));
         assert!(matches!(mod_fn, Value::Builtin(crate::core::Builtin::Mod)));
     }
@@ -2695,19 +2730,15 @@ mod tests {
             "language g0\nunique Foo, palette.Blue\n",
             &["pkg", "module"],
         );
+        let value = evaluated_module_value(&lowered);
 
         assert_eq!(lowered.diagnostics, []);
-        let value = lowered_module_dict(&lowered);
-
         assert_eq!(
             value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("Foo"))]),
             Some(&abstract_path_atom(&["pkg", "module", "Foo"]))
         );
         assert_eq!(
-            value.get_atom_path(&[
-                Atom::from_key(&Key::binary_from_text("palette")),
-                Atom::from_key(&Key::binary_from_text("Blue")),
-            ]),
+            value_at_atom_path(&value, &["palette", "Blue"]).as_ref(),
             Some(&abstract_path_atom(&["pkg", "module", "palette", "Blue"]))
         );
     }
@@ -2745,9 +2776,10 @@ mod tests {
         let lowered = lower_to_core(&parsed);
 
         assert_eq!(lowered.diagnostics, []);
-        let value =
-            crate::eval::eval_term(lowered.term.as_ref().expect("lowered term should exist"))
-                .expect("merged import should evaluate");
+        let value = crate::eval::eval_term(&instantiate_module_term(
+            lowered.term.as_ref().expect("lowered term should exist"),
+        ))
+        .expect("merged import should evaluate");
         let math = value
             .get_atom_path(&[Atom::from_key(&Key::binary_from_text("math"))])
             .expect("std import should merge into existing math");
@@ -2758,8 +2790,11 @@ mod tests {
         };
 
         assert_eq!(
-            math.get(&Key::atom_from_text("answer")),
-            Some(&Value::Number(42.into()))
+            math.get(&Key::atom_from_text("answer"))
+                .map(crate::eval::eval_value)
+                .transpose()
+                .expect("math.answer should resolve"),
+            Some(Value::Number(42.into()))
         );
         assert!(matches!(
             math.get(&Key::atom_from_text("floor")),
@@ -2769,5 +2804,63 @@ mod tests {
             math.get(&Key::atom_from_text("mod")),
             Some(Value::Builtin(crate::core::Builtin::Mod))
         ));
+    }
+
+    #[test]
+    fn introduce_and_override_checks_are_deferred_until_observed() {
+        let parsed = parse("language g0\nfoo := 1\nok = \"ok\"\n");
+        let lowered = lower_to_core(&parsed);
+
+        assert_eq!(lowered.diagnostics, []);
+        let value = evaluated_module_value(&lowered);
+
+        assert_eq!(
+            resolved_value_at_path(&value, &["ok"]),
+            Value::binary_from_text("ok")
+        );
+
+        let foo = value
+            .get_atom_path(&[Atom::from_key(&Key::binary_from_text("foo"))])
+            .expect("foo binding should exist lazily");
+        let foo =
+            crate::eval::eval_value(foo).expect("foo binding should resolve to a stuck expression");
+        let Value::Expr(foo) = foo else {
+            panic!("foo binding should resolve to a stuck expression");
+        };
+        let err = crate::eval::eval_value(&Value::Expr(foo))
+            .expect_err("override check should fail on demand");
+        assert_eq!(
+            err.to_string(),
+            "cannot override `foo` because it is not defined"
+        );
+    }
+
+    #[test]
+    fn duplicate_introductions_stay_lazy_until_observed() {
+        let parsed = parse("language g0\nfoo = 1\nfoo = 2\nok = \"ok\"\n");
+        let lowered = lower_to_core(&parsed);
+
+        assert_eq!(lowered.diagnostics, []);
+        let value = evaluated_module_value(&lowered);
+
+        assert_eq!(
+            resolved_value_at_path(&value, &["ok"]),
+            Value::binary_from_text("ok")
+        );
+
+        let foo = value
+            .get_atom_path(&[Atom::from_key(&Key::binary_from_text("foo"))])
+            .expect("duplicate foo binding should exist lazily");
+        let foo = crate::eval::eval_value(foo)
+            .expect("duplicate foo binding should resolve to a stuck expression");
+        let Value::Expr(foo) = foo else {
+            panic!("duplicate foo binding should resolve to a stuck expression");
+        };
+        let err = crate::eval::eval_value(&Value::Expr(foo))
+            .expect_err("duplicate introductions should fail on demand");
+        assert_eq!(
+            err.to_string(),
+            "dictionary union is ambiguous at key `foo`"
+        );
     }
 }

@@ -194,6 +194,8 @@ pub enum Builtin {
     Multiply,
     Divide,
     Fixpoint,
+    Anno,
+    MergeDuplicate,
     Floor,
     Mod,
     Slice,
@@ -211,6 +213,8 @@ impl Builtin {
             Self::Multiply => 2,
             Self::Divide => 2,
             Self::Fixpoint => 1,
+            Self::Anno => 2,
+            Self::MergeDuplicate => 3,
             Self::Floor => 1,
             Self::Mod => 2,
             Self::Slice => 3,
@@ -480,6 +484,20 @@ mod tests {
                     Key::Number(Number::from_u8(b'i')),
                 ])),
             )])))
+        );
+    }
+
+    #[test]
+    fn empty_dict_values_are_elided_from_dict_keys() {
+        let empty = Value::Dict(Dict::new_sync());
+        let with_empty_field = Value::Dict(
+            Dict::new_sync().insert(Key::atom_from_text("key"), Value::Dict(Dict::new_sync())),
+        );
+
+        assert_eq!(Key::from_value(&empty), Some(Key::Dict(Arc::from([]))));
+        assert_eq!(
+            Key::from_value(&with_empty_field),
+            Some(Key::Dict(Arc::from([])))
         );
     }
 

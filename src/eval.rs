@@ -179,9 +179,10 @@ fn resolve_expanded_keys(
 ) -> Result<Value, EvalError> {
     for key in expanded {
         let dict = force_dict_shell(&current, local_env, full_path, remaining)?;
-        current = dict.get(key).cloned().ok_or_else(|| {
-            EvalError::new(format!("name `{}` is not defined", format_name(full_path)))
-        })?;
+        current = dict
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
     }
     Ok(current)
 }
@@ -192,7 +193,7 @@ fn force_dict_shell(
     full_path: &[KeyExpr],
     remaining: &[KeyExpr],
 ) -> Result<crate::core::Dict, EvalError> {
-    match eval_value(value)? {
+    match force_value_shell(value)? {
         Value::Dict(dict) => Ok(dict),
         _ => {
             let traversed = &full_path[..full_path.len() - remaining.len()];
@@ -207,6 +208,14 @@ fn force_dict_shell(
             )))
         }
     }
+}
+
+fn force_value_shell(value: &Value) -> Result<Value, EvalError> {
+    let mut current = eval_value(value)?;
+    while let Value::Expr(thunk) = current {
+        current = eval_value(&Value::Expr(thunk))?;
+    }
+    Ok(current)
 }
 
 fn eval_apply(function: &Expr, argument: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
@@ -268,7 +277,7 @@ fn apply_builtin(
             let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
                 EvalError::new("append builtin received the wrong number of arguments")
             })?;
-            append_values(eval_value(&left)?, eval_value(&right)?)
+            append_values(force_value_shell(&left)?, force_value_shell(&right)?)
         }
         Builtin::Add => {
             let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
@@ -299,6 +308,18 @@ fn apply_builtin(
                 EvalError::new("fixpoint builtin received the wrong number of arguments")
             })?;
             eval_fixpoint_builtin(&function)
+        }
+        Builtin::Anno => {
+            let [annotation, target] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("anno builtin received the wrong number of arguments")
+            })?;
+            eval_anno_builtin(&annotation, &target, local_env)
+        }
+        Builtin::MergeDuplicate => {
+            let [name, left, right] = <[Value; 3]>::try_from(args).map_err(|_| {
+                EvalError::new("merge duplicate builtin received the wrong number of arguments")
+            })?;
+            eval_merge_duplicate_builtin(&name, &left, &right, local_env)
         }
         Builtin::Floor => {
             let [value] = <[Value; 1]>::try_from(args).map_err(|_| {
@@ -397,7 +418,7 @@ fn eval_slice_builtin(
         ));
     }
 
-    match eval_value(value)? {
+    match force_value_shell(value)? {
         Value::Binary(bytes) => {
             if end > bytes.len() {
                 return Err(EvalError::new("slice builtin end is out of bounds"));
@@ -422,8 +443,8 @@ fn eval_map_builtin(
     value: &Value,
     local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let function = eval_value(function)?;
-    let mapped = match eval_value(value)? {
+    let function = force_value_shell(function)?;
+    let mapped = match force_value_shell(value)? {
         Value::Binary(bytes) => bytes
             .iter()
             .map(|byte| {
@@ -453,7 +474,7 @@ fn eval_number(
     _local_env: &[Value],
     builtin_name: &str,
 ) -> Result<Number, EvalError> {
-    let value = eval_value(value)?;
+    let value = force_value_shell(value)?;
     let Value::Number(number) = value else {
         return Err(EvalError::new(format!(
             "{builtin_name} builtin requires number values"
@@ -508,8 +529,7 @@ fn eval_singleton_builtin(
 ) -> Result<Value, EvalError> {
     let key = eval_value(key)?;
     let key = value_to_key(&key, local_env)?;
-    let observed = eval_value(value)?;
-    if is_undefined_dict_value(&observed) {
+    if matches!(value, Value::Dict(dict) if dict.is_empty()) {
         return Ok(Value::Dict(crate::core::Dict::new_sync()));
     }
 
@@ -548,11 +568,189 @@ fn eval_fixpoint_builtin(function: &Value) -> Result<Value, EvalError> {
     let handle = FixpointHandle::new();
     let marker = Value::Fixpoint(handle.clone());
     let value = apply_closure(&function, marker.clone())?;
-    let rebound = bind_fixpoint_value(&value, &marker);
     handle
-        .set(rebound.clone())
+        .set(value.clone())
         .map_err(|_| EvalError::new("fixpoint builtin initialized twice"))?;
-    Ok(rebound)
+    Ok(value)
+}
+
+fn eval_anno_builtin(
+    annotation: &Value,
+    target: &Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    match recognize_annotation(annotation, local_env)? {
+        RecognizedAnnotation::AssertDefined { name, defined } => {
+            if defined {
+                Ok(target.clone())
+            } else {
+                Ok(annotation_error_value(format!(
+                    "cannot override `{name}` because it is not defined"
+                )))
+            }
+        }
+        RecognizedAnnotation::AssertUndefined { name, defined } => {
+            if defined {
+                Ok(annotation_error_value(format!(
+                    "cannot introduce `{name}` because it is already defined"
+                )))
+            } else {
+                Ok(target.clone())
+            }
+        }
+        RecognizedAnnotation::Invalid(message) => Ok(annotation_error_value(message)),
+        RecognizedAnnotation::Unknown(rendered) => {
+            eprintln!("warning: unrecognized annotation encountered: {rendered}");
+            Ok(target.clone())
+        }
+    }
+}
+
+enum RecognizedAnnotation {
+    AssertDefined { name: String, defined: bool },
+    AssertUndefined { name: String, defined: bool },
+    Invalid(String),
+    Unknown(String),
+}
+
+fn recognize_annotation(
+    annotation: &Value,
+    local_env: &[Value],
+) -> Result<RecognizedAnnotation, EvalError> {
+    let annotation = eval_value(annotation)?;
+    let Value::Dict(annotation) = annotation else {
+        return Ok(RecognizedAnnotation::Unknown(format!("{annotation:?}")));
+    };
+
+    let Some((tag, payload)) = annotation.iter().next() else {
+        return Ok(RecognizedAnnotation::Unknown(format!("{annotation:?}")));
+    };
+    if annotation.iter().nth(1).is_some() {
+        return Ok(RecognizedAnnotation::Unknown(format!("{annotation:?}")));
+    }
+
+    match tag {
+        Key::Atom(atom) if atom_name(atom) == Some("assert_defined") => Ok(
+            match parse_assertion_annotation(payload, local_env, "assert_defined")? {
+                ParsedAssertion::Valid { name, defined } => {
+                    RecognizedAnnotation::AssertDefined { name, defined }
+                }
+                ParsedAssertion::Invalid(message) => RecognizedAnnotation::Invalid(message),
+            },
+        ),
+        Key::Atom(atom) if atom_name(atom) == Some("assert_undefined") => Ok(
+            match parse_assertion_annotation(payload, local_env, "assert_undefined")? {
+                ParsedAssertion::Valid { name, defined } => {
+                    RecognizedAnnotation::AssertUndefined { name, defined }
+                }
+                ParsedAssertion::Invalid(message) => RecognizedAnnotation::Invalid(message),
+            },
+        ),
+        _ => Ok(RecognizedAnnotation::Unknown(format!("{annotation:?}"))),
+    }
+}
+
+enum ParsedAssertion {
+    Valid { name: String, defined: bool },
+    Invalid(String),
+}
+
+fn parse_assertion_annotation(
+    payload: &Value,
+    local_env: &[Value],
+    tag_name: &str,
+) -> Result<ParsedAssertion, EvalError> {
+    let payload = eval_value(payload)?;
+    let Value::Dict(payload) = payload else {
+        return Ok(ParsedAssertion::Invalid(format!(
+            "invalid `{tag_name}` annotation payload"
+        )));
+    };
+
+    let Some(name_value) = payload.get(&Key::atom_from_text("name")) else {
+        return Ok(ParsedAssertion::Invalid(format!(
+            "invalid `{tag_name}` annotation payload"
+        )));
+    };
+    let Some(value) = payload.get(&Key::atom_from_text("value")) else {
+        return Ok(ParsedAssertion::Invalid(format!(
+            "invalid `{tag_name}` annotation payload"
+        )));
+    };
+
+    let name = annotation_name(name_value, local_env)?;
+    let defined = !is_undefined_value(&eval_value(value)?);
+    Ok(ParsedAssertion::Valid { name, defined })
+}
+
+fn annotation_name(value: &Value, _local_env: &[Value]) -> Result<String, EvalError> {
+    let value = eval_value(value)?;
+    Ok(match value {
+        Value::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Value::Atom(atom) => atom_name(&atom)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{atom:?}")),
+        Value::Number(number) => number.to_string(),
+        other => format!("{other:?}"),
+    })
+}
+
+fn atom_name(atom: &crate::core::Atom) -> Option<&str> {
+    match atom.key() {
+        Key::Binary(bytes) => std::str::from_utf8(bytes).ok(),
+        _ => None,
+    }
+}
+
+fn is_undefined_value(value: &Value) -> bool {
+    matches!(value, Value::Dict(dict) if dict.is_empty())
+}
+
+fn annotation_error_value(message: impl Into<String>) -> Value {
+    Value::Expr(Thunk {
+        expr: Arc::new(Expr::Error(Arc::from(message.into()))),
+        env: Arc::from([]),
+    })
+}
+
+fn eval_merge_duplicate_builtin(
+    name: &Value,
+    left: &Value,
+    right: &Value,
+    _local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let name = eval_value(name)?;
+    let name = match name {
+        Value::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Value::Atom(atom) => atom_name(&atom)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{atom:?}")),
+        other => format!("{other:?}"),
+    };
+    let left = eval_value(left)?;
+    let right = eval_value(right)?;
+
+    if is_undefined_value(&left) {
+        return Ok(right);
+    }
+    if is_undefined_value(&right) {
+        return Ok(left);
+    }
+    if is_error_expr_value(&left) {
+        return Ok(left);
+    }
+    if is_error_expr_value(&right) {
+        return Ok(right);
+    }
+
+    match (&left, &right) {
+        (Value::Dict(left_dict), Value::Dict(right_dict)) => {
+            Ok(Value::Dict(merge_dicts(left_dict, right_dict)))
+        }
+        _ => Ok(annotation_error_value(format!(
+            "dictionary union is ambiguous at key `{name}`"
+        ))),
+    }
 }
 
 fn merge_dicts(left: &crate::core::Dict, right: &crate::core::Dict) -> crate::core::Dict {
@@ -587,9 +785,12 @@ fn merge_duplicate_dict_value(key: &Key, left: &Value, right: &Value) -> Value {
         || is_expr_value(left)
         || is_expr_value(right)
     {
-        // Defer when both sides are concrete dictionaries, or when either side
-        // is still an unevaluated expression that may become one.
-        builtin_apply2_value(Builtin::DictUnion, left, right)
+        builtin_apply3_value(
+            Builtin::MergeDuplicate,
+            &Value::binary_from_text(&format_name_part(key)),
+            left,
+            right,
+        )
     } else {
         Value::Expr(Thunk {
             expr: Arc::new(Expr::Error(Arc::from(format!(
@@ -605,14 +806,17 @@ fn value_as_expr(value: &Value) -> Arc<Expr> {
     Arc::new(Expr::Value(value.clone()))
 }
 
-fn builtin_apply2_value(builtin: Builtin, left: &Value, right: &Value) -> Value {
+fn builtin_apply3_value(builtin: Builtin, first: &Value, second: &Value, third: &Value) -> Value {
     Value::Expr(Thunk {
         expr: Arc::new(Expr::Apply(
             Arc::new(Expr::Apply(
-                Arc::new(Expr::Value(Value::Builtin(builtin))),
-                value_as_expr(left),
+                Arc::new(Expr::Apply(
+                    Arc::new(Expr::Value(Value::Builtin(builtin))),
+                    value_as_expr(first),
+                )),
+                value_as_expr(second),
             )),
-            value_as_expr(right),
+            value_as_expr(third),
         )),
         env: Arc::from([]),
     })
@@ -622,8 +826,12 @@ fn is_expr_value(value: &Value) -> bool {
     matches!(value, Value::Expr(_))
 }
 
+fn is_error_expr_value(value: &Value) -> bool {
+    matches!(value, Value::Expr(thunk) if matches!(thunk.expr.as_ref(), Expr::Error(_)))
+}
+
 fn is_undefined_dict_value(value: &Value) -> bool {
-    matches!(value, Value::Dict(dict) if dict.is_empty())
+    is_undefined_value(value)
 }
 
 fn expand_key_expr(key: &KeyExpr, local_env: &[Value]) -> Result<Vec<Key>, EvalError> {
@@ -713,74 +921,6 @@ fn list_to_value_items(list: &List) -> Result<Vec<Value>, EvalError> {
     Ok(items.into_inner())
 }
 
-fn bind_fixpoint_dict(dict: &crate::core::Dict, root: &Value) -> crate::core::Dict {
-    dict.iter()
-        .fold(crate::core::Dict::new_sync(), |bound, (key, value)| {
-            bound.insert(key.clone(), bind_fixpoint_value(value, root))
-        })
-}
-
-fn bind_fixpoint_value(value: &Value, root: &Value) -> Value {
-    match value {
-        Value::Atom(atom) => Value::Atom(*atom),
-        Value::Number(number) => Value::Number(number.clone()),
-        Value::Binary(bytes) => Value::Binary(bytes.clone()),
-        Value::List(list) => Value::List(bind_fixpoint_list(list, root)),
-        Value::Dict(dict) => Value::Dict(bind_fixpoint_dict(dict, root)),
-        Value::Fixpoint(_) => value.clone(),
-        Value::Builtin(builtin) => Value::Builtin(*builtin),
-        Value::Closure(closure) if starts_with_fixpoint(&closure.env) => {
-            Value::Closure(closure.clone())
-        }
-        Value::Closure(closure) => Value::Closure(Closure {
-            body: closure.body.clone(),
-            env: prepend_fixpoint(&closure.env, root),
-        }),
-        Value::Expr(thunk) if starts_with_fixpoint(&thunk.env) => Value::Expr(thunk.clone()),
-        Value::Expr(thunk) => Value::Expr(Thunk {
-            expr: thunk.expr.clone(),
-            env: prepend_fixpoint(&thunk.env, root),
-        }),
-    }
-}
-
-fn bind_fixpoint_list(list: &List, root: &Value) -> List {
-    let rebuilt = std::cell::RefCell::new(List::empty());
-    list.for_each_segment(
-        &mut |bytes| {
-            let next = List::concat(rebuilt.borrow().clone(), List::from_bytes(bytes.clone()));
-            rebuilt.replace(next);
-            Ok::<_, ()>(())
-        },
-        &mut |values| {
-            let next = List::concat(
-                rebuilt.borrow().clone(),
-                List::from_values(
-                    values
-                        .iter()
-                        .map(|value| bind_fixpoint_value(value, root))
-                        .collect(),
-                ),
-            );
-            rebuilt.replace(next);
-            Ok(())
-        },
-    )
-    .expect("fixpoint rebinding should not fail");
-    rebuilt.into_inner()
-}
-
-fn prepend_fixpoint(env: &Arc<[Value]>, root: &Value) -> Arc<[Value]> {
-    let mut rebound = Vec::with_capacity(env.len() + 1);
-    rebound.push(root.clone());
-    rebound.extend(env.iter().cloned());
-    Arc::from(rebound)
-}
-
-fn starts_with_fixpoint(env: &[Value]) -> bool {
-    matches!(env.first(), Some(Value::Fixpoint(_)))
-}
-
 fn append_values(left: Value, right: Value) -> Result<Value, EvalError> {
     let left = append_sequence(left)?;
     let right = append_sequence(right)?;
@@ -864,10 +1004,55 @@ mod tests {
         Expr::Access(Arc::new(Expr::Local(0)), Arc::from(path))
     }
 
+    fn key_value(key: &Key) -> Value {
+        match key {
+            Key::Atom(atom) => Value::Atom(*atom),
+            Key::Number(number) => Value::Number(number.clone()),
+            Key::Binary(bytes) => Value::Binary(bytes.clone()),
+            Key::AbstractGlobalPath(parts) => Value::Atom(crate::core::Atom::from_key(
+                &Key::AbstractGlobalPath(parts.clone()),
+            )),
+            Key::List(items) => {
+                Value::List(List::from_values(items.iter().map(key_value).collect()))
+            }
+            Key::Dict(entries) => Value::Dict(
+                entries
+                    .iter()
+                    .fold(crate::core::Dict::new_sync(), |dict, (key, value)| {
+                        dict.insert(key.clone(), key_value(value))
+                    }),
+            ),
+        }
+    }
+
+    fn module_value_expr(value: &Value) -> Expr {
+        match value {
+            Value::Dict(dict) => {
+                let mut items = dict.iter();
+                let Some((first_key, first_value)) = items.next() else {
+                    return Expr::Value(Value::Dict(crate::core::Dict::new_sync()));
+                };
+
+                let mut expr = singleton_expr(key_value(first_key), module_value_expr(first_value));
+                for (key, value) in items {
+                    expr = dict_union_expr(
+                        expr,
+                        singleton_expr(key_value(key), module_value_expr(value)),
+                    );
+                }
+                expr
+            }
+            Value::Expr(thunk) if thunk.env.is_empty() => thunk.expr.as_ref().clone(),
+            _ => Expr::Value(value.clone()),
+        }
+    }
+
     fn fixpoint_term(dict: Dict) -> Term {
         Term::Expr(Expr::Apply(
             Arc::new(Expr::Value(Value::Builtin(Builtin::Fixpoint))),
-            Arc::new(Expr::Lambda(Arc::new(Expr::Value(Value::Dict(dict))))),
+            Arc::new(Expr::Lambda(Arc::new(module_value_expr(&Value::Dict(
+                dict,
+            ))))),
         ))
     }
 
@@ -892,15 +1077,20 @@ mod tests {
             Dict::new_sync().insert(crate::core::Key::atom_from_text("asm"), Value::Dict(asm));
 
         let value = eval_term(&fixpoint_term(root)).expect("term should evaluate");
+        let asm = value
+            .get_atom_path(&[crate::core::Atom::from_key(
+                &crate::core::Key::binary_from_text("asm"),
+            )])
+            .expect("asm should exist");
+        let asm = eval_value(asm).expect("asm binding should evaluate lazily to a dictionary");
+        let Value::Dict(asm) = asm else {
+            panic!("asm should evaluate to a dictionary");
+        };
 
         assert!(matches!(value, Value::Dict(_)));
-        assert!(
-            value
-                .get_atom_path(&[
-                    crate::core::Atom::from_key(&crate::core::Key::binary_from_text("asm")),
-                    crate::core::Atom::from_key(&crate::core::Key::binary_from_text("result")),
-                ])
-                .is_some()
+        assert_eq!(
+            asm.get(&crate::core::Key::atom_from_text("result")),
+            Some(&Value::binary_from_text("Hello, World!"))
         );
     }
 
@@ -1181,8 +1371,13 @@ mod tests {
             .insert(world, Value::binary_from_text("World"));
 
         let value = eval_term(&fixpoint_term(root)).expect("term should evaluate");
-        let result_value = value
-            .get_atom_path(&[asm, result])
+        let asm_value = value.get_atom_path(&[asm]).expect("asm should exist");
+        let asm_value = eval_value(asm_value).expect("asm binding should evaluate");
+        let Value::Dict(asm_value) = asm_value else {
+            panic!("asm should evaluate to a dictionary");
+        };
+        let result_value = asm_value
+            .get(&crate::core::Key::Atom(result))
             .expect("result should exist");
         let Value::Expr(thunk) = result_value else {
             panic!("resolved result should stay lazy until demanded");
@@ -1259,13 +1454,13 @@ mod tests {
     #[test]
     fn rejects_unevaluable_keys() {
         let root = Value::Dict(crate::core::Dict::new_sync());
-        let err = eval_key(&rooted_expr_value(
+        let key = eval_key(&rooted_expr_value(
             &root,
             global_access(vec![KeyExpr::Key(Key::atom_from_text("missing"))]),
         ))
-        .expect_err("missing names should not produce keys");
+        .expect("missing names should now resolve to empty dictionaries");
 
-        assert_eq!(err.to_string(), "name `missing` is not defined");
+        assert_eq!(key, Key::Dict(Arc::from([])));
     }
 
     #[test]
@@ -1285,6 +1480,20 @@ mod tests {
             key,
             Key::Dict(Arc::from([(Key::atom_from_text("answer"), k(42),)]))
         );
+    }
+
+    #[test]
+    fn eval_key_elides_empty_dictionary_values_from_dict_keys() {
+        let empty = eval_key(&Value::Dict(crate::core::Dict::new_sync()))
+            .expect("empty dict should be keyable");
+        let with_empty_field = eval_key(&Value::Dict(crate::core::Dict::new_sync().insert(
+            Key::atom_from_text("key"),
+            Value::Dict(crate::core::Dict::new_sync()),
+        )))
+        .expect("dict with empty field should be keyable");
+
+        assert_eq!(empty, Key::Dict(Arc::from([])));
+        assert_eq!(with_empty_field, Key::Dict(Arc::from([])));
     }
 
     #[test]
@@ -1471,6 +1680,133 @@ mod tests {
         .expect("list-valued path segment should expand into multiple lookups");
 
         assert_eq!(resolved, Value::binary_from_text("World"));
+    }
+
+    #[test]
+    fn missing_dictionary_members_resolve_to_empty_dictionary() {
+        let root = Value::Dict(crate::core::Dict::new_sync().insert(
+            Key::atom_from_text("present"),
+            Value::Dict(crate::core::Dict::new_sync()),
+        ));
+        let resolved = eval_value(&rooted_expr_value(
+            &root,
+            global_access(vec![
+                KeyExpr::Key(Key::atom_from_text("present")),
+                KeyExpr::Key(Key::atom_from_text("missing")),
+            ]),
+        ))
+        .expect("missing member access should stay evaluable");
+
+        assert_eq!(resolved, Value::Dict(crate::core::Dict::new_sync()));
+    }
+
+    #[test]
+    fn anno_builtin_preserves_lazy_targets_when_assertions_pass() {
+        let root =
+            Value::Dict(crate::core::Dict::new_sync().insert(Key::atom_from_text("later"), n(42)));
+        let annotation = singleton_expr(
+            Value::Atom(crate::core::Atom::from_key(
+                &crate::core::Key::binary_from_text("assert_undefined"),
+            )),
+            dict_union_expr(
+                singleton_expr(
+                    Value::Atom(crate::core::Atom::from_key(
+                        &crate::core::Key::binary_from_text("name"),
+                    )),
+                    Expr::Value(Value::binary_from_text("missing")),
+                ),
+                singleton_expr(
+                    Value::Atom(crate::core::Atom::from_key(
+                        &crate::core::Key::binary_from_text("value"),
+                    )),
+                    global_access(vec![KeyExpr::Key(Key::atom_from_text("missing"))]),
+                ),
+            ),
+        );
+
+        let value = eval_value(&rooted_expr_value(
+            &root,
+            Expr::Apply(
+                Arc::new(Expr::Apply(
+                    Arc::new(Expr::Value(Value::Builtin(Builtin::Anno))),
+                    Arc::new(annotation),
+                )),
+                Arc::new(global_access(vec![KeyExpr::Key(Key::atom_from_text(
+                    "later",
+                ))])),
+            ),
+        ))
+        .expect("anno should pass through successful assertions");
+
+        let Value::Expr(thunk) = value else {
+            panic!("anno should preserve lazy target evaluation");
+        };
+        let resolved =
+            eval_value(&Value::Expr(thunk)).expect("returned target should still evaluate");
+        assert_eq!(resolved, n(42));
+    }
+
+    #[test]
+    fn anno_builtin_returns_stuck_errors_for_failed_assertions() {
+        let annotation = singleton_expr(
+            Value::Atom(crate::core::Atom::from_key(
+                &crate::core::Key::binary_from_text("assert_defined"),
+            )),
+            dict_union_expr(
+                singleton_expr(
+                    Value::Atom(crate::core::Atom::from_key(
+                        &crate::core::Key::binary_from_text("name"),
+                    )),
+                    Expr::Value(Value::binary_from_text("foo")),
+                ),
+                singleton_expr(
+                    Value::Atom(crate::core::Atom::from_key(
+                        &crate::core::Key::binary_from_text("value"),
+                    )),
+                    global_access(vec![KeyExpr::Key(Key::atom_from_text("foo"))]),
+                ),
+            ),
+        );
+
+        let value = eval_value(&rooted_expr_value(
+            &Value::Dict(crate::core::Dict::new_sync()),
+            Expr::Apply(
+                Arc::new(Expr::Apply(
+                    Arc::new(Expr::Value(Value::Builtin(Builtin::Anno))),
+                    Arc::new(annotation),
+                )),
+                Arc::new(Expr::Value(n(1))),
+            ),
+        ))
+        .expect("failed anno should still produce a stuck value");
+
+        let Value::Expr(thunk) = value else {
+            panic!("failed anno should produce a stuck expression");
+        };
+        let err = eval_value(&Value::Expr(thunk)).expect_err("failed anno should raise on demand");
+        assert_eq!(
+            err.to_string(),
+            "cannot override `foo` because it is not defined"
+        );
+    }
+
+    #[test]
+    fn unknown_annotations_pass_through_targets() {
+        let value = eval_term(&Term::Expr(Expr::Apply(
+            Arc::new(Expr::Apply(
+                Arc::new(Expr::Value(Value::Builtin(Builtin::Anno))),
+                Arc::new(singleton_expr(
+                    Value::Atom(crate::core::Atom::from_key(
+                        &crate::core::Key::binary_from_text("mystery"),
+                    )),
+                    Expr::Value(n(0)),
+                )),
+            )),
+            Arc::new(Expr::Value(n(42))),
+        )))
+        .expect("unknown annotations should pass through");
+
+        assert_eq!(value, n(42));
     }
 
     #[test]

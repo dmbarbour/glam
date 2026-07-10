@@ -104,11 +104,8 @@ impl CompileContext {
 pub struct CoreInterface;
 
 impl CoreInterface {
-    pub fn module_term(self, root: Dict) -> Term {
-        Term::Expr(self.expr_apply(
-            self.expr_value(self.value_builtin(Builtin::Fixpoint)),
-            self.expr_lambda(self.expr_value(self.value_dict(root))),
-        ))
+    pub fn module_term(self, root: CoreExpr) -> Term {
+        Term::Expr(self.expr_lambda(root))
     }
 
     pub fn expr_value(self, value: Value) -> CoreExpr {

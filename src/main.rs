@@ -2,8 +2,10 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use glam::compiler::CompileContext;
+use glam::core::{Builtin, Expr as CoreExpr, Term, Value};
 use glam::diagnostic::Severity;
 use glam::eval;
 use glam::g_syntax::{DeclarationKind, ParsedSource, SourceFile, lower_to_core_with_context};
@@ -88,7 +90,8 @@ fn assemble_path(path: &str) -> ExitCode {
         return ExitCode::from(1);
     };
 
-    let root = match eval::eval_term(term) {
+    let term = instantiate_module_term(term);
+    let root = match eval::eval_term(&term) {
         Ok(root) => root,
         Err(err) => {
             eprintln!("error: {err}");
@@ -112,24 +115,31 @@ fn assemble_path(path: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn result_bytes(root: &glam::core::Value, path: &str) -> Result<Vec<u8>, String> {
-    let value =
-        value_at_path(root, path).ok_or_else(|| format!("assembly did not define `{path}`"))?;
-    value_bytes(value, root, path)
+fn instantiate_module_term(term: &Term) -> Term {
+    match term {
+        // Temporary bootstrap-shell behavior: apply one fixpoint to the
+        // assembled anonymous module. Later, multiple files/scripts should be
+        // merged as mixins before this single fixpoint is applied.
+        Term::Expr(expr) => Term::Expr(CoreExpr::Apply(
+            Arc::new(CoreExpr::Value(Value::Builtin(Builtin::Fixpoint))),
+            Arc::new(expr.clone()),
+        )),
+    }
 }
 
-fn value_bytes(
-    value: &glam::core::Value,
-    root: &glam::core::Value,
-    path: &str,
-) -> Result<Vec<u8>, String> {
+fn result_bytes(root: &glam::core::Value, path: &str) -> Result<Vec<u8>, String> {
+    let value = value_at_path(root, path)?;
+    value_bytes(&value, path)
+}
+
+fn value_bytes(value: &glam::core::Value, path: &str) -> Result<Vec<u8>, String> {
     match value {
         glam::core::Value::Binary(bytes) => Ok(bytes.to_vec()),
         glam::core::Value::List(list) => list_bytes(list).map_err(|err| format!("`{path}` {err}")),
         glam::core::Value::Expr(thunk) => {
             let value = eval::eval_value(&glam::core::Value::Expr(thunk.clone()))
                 .map_err(|err| err.to_string())?;
-            value_bytes(&value, root, path)
+            value_bytes(&value, path)
         }
         glam::core::Value::Atom(_)
         | glam::core::Value::Dict(_)
@@ -149,6 +159,7 @@ fn list_bytes(list: &glam::core::List) -> Result<Vec<u8>, String> {
         },
         &mut |segment| {
             for item in segment.iter() {
+                let item = eval::eval_value(item).map_err(|err| err.to_string())?;
                 let glam::core::Value::Number(number) = item else {
                     return Err("must contain only integers and binary segments".to_owned());
                 };
@@ -164,12 +175,24 @@ fn list_bytes(list: &glam::core::List) -> Result<Vec<u8>, String> {
     Ok(bytes.into_inner())
 }
 
-fn value_at_path<'a>(root: &'a glam::core::Value, path: &str) -> Option<&'a glam::core::Value> {
-    let path = path
-        .split('.')
-        .map(|part| glam::core::Atom::from_key(&glam::core::Key::binary_from_text(part)))
-        .collect::<Vec<_>>();
-    root.get_atom_path(&path)
+fn value_at_path(root: &glam::core::Value, path: &str) -> Result<glam::core::Value, String> {
+    let mut current = root.clone();
+
+    for part in path.split('.') {
+        let current_value = eval::eval_value(&current).map_err(|err| err.to_string())?;
+        let glam::core::Value::Dict(dict) = current_value else {
+            return Err(format!("assembly did not define `{path}`"));
+        };
+
+        current = dict
+            .get(&glam::core::Key::Atom(glam::core::Atom::from_key(
+                &glam::core::Key::binary_from_text(part),
+            )))
+            .cloned()
+            .ok_or_else(|| format!("assembly did not define `{path}`"))?;
+    }
+
+    Ok(current)
 }
 
 fn parse_path(path: &str) -> ExitCode {
