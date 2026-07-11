@@ -63,6 +63,7 @@ pub struct LanguageDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportDecl {
     pub reference: ImportReference,
+    pub binary: bool,
     pub placement: ImportPlacement,
 }
 
@@ -290,7 +291,16 @@ fn lower_import(
 ) -> Result<(), Diagnostic> {
     match &import.reference {
         ImportReference::Builtin(name) => {
+            if import.binary {
+                return Err(Diagnostic::error(
+                    line,
+                    "built-in imports cannot use the `binary` modifier",
+                ));
+            }
             lower_builtin_import(name, &import.placement, line, context, definitions)
+        }
+        ImportReference::Local(reference) if import.binary => {
+            lower_local_binary_import(reference, &import.placement, line, context, definitions)
         }
         ImportReference::Local(reference) => {
             lower_local_import(reference, &import.placement, context, definitions)
@@ -365,6 +375,29 @@ fn lower_local_import(
         }
     };
 
+    Ok(())
+}
+
+fn lower_local_binary_import(
+    reference: &str,
+    placement: &ImportPlacement,
+    line: usize,
+    context: &CompileContext,
+    definitions: &mut Value,
+) -> Result<(), Diagnostic> {
+    let ImportPlacement::As(target) = placement else {
+        return Err(Diagnostic::error(
+            line,
+            "`import ... binary` requires `as name` in the current spike",
+        ));
+    };
+
+    let loaded = context.value_load_local_binary(context.local_binary_load_args(reference));
+    *definitions = update_module_value(
+        definitions.clone(),
+        path_to_dict_value(target, loaded, context)?,
+        context,
+    );
     Ok(())
 }
 
@@ -1000,12 +1033,20 @@ fn import_decl<'src>() -> impl Parser<'src, &'src str, ImportDecl, extra::Err<Ri
         .or_not()
         .map(|placement| placement.unwrap_or(ImportPlacement::Inline));
 
+    let binary = just("binary")
+        .padded()
+        .to(true)
+        .or_not()
+        .map(|v| v.unwrap_or(false));
+
     just("import")
         .padded()
         .ignore_then(reference)
+        .then(binary)
         .then(placement)
-        .map(|(reference, placement)| ImportDecl {
+        .map(|((reference, binary), placement)| ImportDecl {
             reference,
+            binary,
             placement,
         })
 }
@@ -1899,7 +1940,20 @@ mod tests {
             parsed.declarations[1].kind,
             DeclarationKind::Import(ImportDecl {
                 reference: ImportReference::Local("minimal.g".to_owned()),
+                binary: false,
                 placement: ImportPlacement::As("conf".to_owned()),
+            })
+        );
+
+        let parsed = parse("language g0\nimport \"payload.bin\" binary as payload\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Import(ImportDecl {
+                reference: ImportReference::Local("payload.bin".to_owned()),
+                binary: true,
+                placement: ImportPlacement::As("payload".to_owned()),
             })
         );
     }
@@ -1913,6 +1967,7 @@ mod tests {
             parsed.declarations[1].kind,
             DeclarationKind::Import(ImportDecl {
                 reference: ImportReference::Builtin("std".to_owned()),
+                binary: false,
                 placement: ImportPlacement::As("std".to_owned()),
             })
         );
@@ -1920,6 +1975,7 @@ mod tests {
             parsed.declarations[2].kind,
             DeclarationKind::Import(ImportDecl {
                 reference: ImportReference::Builtin("math".to_owned()),
+                binary: false,
                 placement: ImportPlacement::Inline,
             })
         );

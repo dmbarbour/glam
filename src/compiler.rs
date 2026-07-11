@@ -8,6 +8,13 @@ use crate::core::{
 use crate::number::Number;
 
 pub type ModuleLoader = Arc<dyn Fn(ModuleLoadArgs) -> Result<Value, String> + Send + Sync>;
+pub type BinaryFileLoader = Arc<dyn Fn(BinaryLoadArgs) -> Result<Value, String> + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryLoadArgs {
+    pub reference: Arc<str>,
+    pub importer_source_path: Option<Arc<str>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleLoadArgs {
@@ -29,6 +36,7 @@ pub struct CompileContext {
     pub prior_defs: Value, // prior dictionary, can be observed at compile-time
     pub final_defs: Value, // future dictionary, cannot observe at compile-time
     local_module_loader: Option<ModuleLoader>,
+    local_binary_loader: Option<BinaryFileLoader>,
 }
 
 impl Default for CompileContext {
@@ -40,6 +48,7 @@ impl Default for CompileContext {
             prior_defs: Value::Dict(Dict::new_sync()), // empty prior dictionary
             final_defs: Value::expr(CoreExpr::Future(crate::core::IVar::new())), // future dictionary, assigned later
             local_module_loader: None,
+            local_binary_loader: None,
         }
     }
 }
@@ -98,6 +107,11 @@ impl CompileContext {
 
     pub fn with_local_module_loader(mut self, loader: ModuleLoader) -> Self {
         self.local_module_loader = Some(loader);
+        self
+    }
+
+    pub fn with_local_binary_loader(mut self, loader: BinaryFileLoader) -> Self {
+        self.local_binary_loader = Some(loader);
         self
     }
 
@@ -252,6 +266,31 @@ impl CompileContext {
                 let Some(loader) = &loader else {
                     return Err(format!(
                         "local import `{}` cannot be loaded without a module loader",
+                        args.reference
+                    ));
+                };
+                loader(args.clone())
+            },
+        ))))
+    }
+
+    pub fn local_binary_load_args(&self, reference: &str) -> BinaryLoadArgs {
+        BinaryLoadArgs {
+            reference: Arc::from(reference),
+            importer_source_path: self.source_path.clone(),
+        }
+    }
+
+    pub fn value_load_local_binary(&self, args: BinaryLoadArgs) -> Value {
+        let label: Arc<str> = Arc::from(format!("import binary {}", args.reference));
+        let loader = self.local_binary_loader.clone();
+
+        Value::expr(CoreExpr::Deferred(Arc::new(DeferredValue::new(
+            label,
+            move || {
+                let Some(loader) = &loader else {
+                    return Err(format!(
+                        "binary import `{}` cannot be loaded without a binary loader",
                         args.reference
                     ));
                 };

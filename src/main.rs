@@ -5,7 +5,9 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use glam::compiler::{CompileContext, ModuleLoadArgs, ModuleLoader};
+use glam::compiler::{
+    BinaryFileLoader, BinaryLoadArgs, CompileContext, ModuleLoadArgs, ModuleLoader,
+};
 use glam::core::{Dict, Expr as CoreExpr, Key, Value};
 use glam::diagnostic::Severity;
 use glam::eval;
@@ -138,9 +140,11 @@ fn assemble_inputs(inputs: &[AssemblyInput], cli_args: &[String]) -> ExitCode {
     // extensions, and shall effectfully lower to core, via common API with
     // the built-in syntax.
 
-    let loader = local_module_loader();
-    let assembly_context =
-        CompileContext::from_module_path(["assembly"]).with_local_module_loader(loader.clone());
+    let module_loader = local_module_loader();
+    let binary_loader = local_binary_loader();
+    let assembly_context = CompileContext::from_module_path(["assembly"])
+        .with_local_module_loader(module_loader.clone())
+        .with_local_binary_loader(binary_loader.clone());
     let final_defs = assembly_context.final_defs.clone();
     let mut definitions = initial_assembly_definitions(&assembly_context, cli_args);
     let mut had_errors = false;
@@ -150,7 +154,8 @@ fn assemble_inputs(inputs: &[AssemblyInput], cli_args: &[String]) -> ExitCode {
             input,
             definitions.clone(),
             final_defs.clone(),
-            loader.clone(),
+            module_loader.clone(),
+            binary_loader.clone(),
         ) {
             Ok(parsed) => parsed,
             Err(exit_code) => return exit_code,
@@ -218,6 +223,7 @@ fn parse_assembly_input(
     prior_defs: Value,
     final_defs: Value,
     loader: ModuleLoader,
+    binary_loader: BinaryFileLoader,
 ) -> Result<(ParsedSource, CompileContext, String), ExitCode> {
     match input {
         AssemblyInput::File(path) => {
@@ -227,6 +233,7 @@ fn parse_assembly_input(
                 .with_prior_defs(prior_defs)
                 .with_final_defs(final_defs)
                 .with_local_module_loader(loader)
+                .with_local_binary_loader(binary_loader)
                 .with_source_binary(source.text.as_bytes());
             let parsed = source.parse_with_context(&context);
             Ok((parsed, context, path.clone()))
@@ -238,6 +245,7 @@ fn parse_assembly_input(
                 .with_prior_defs(prior_defs)
                 .with_final_defs(final_defs)
                 .with_local_module_loader(loader)
+                .with_local_binary_loader(binary_loader)
                 .with_source_binary(source.text.as_bytes());
             let parsed = source.parse_with_context(&context);
             Ok((parsed, context, label))
@@ -249,16 +257,16 @@ fn local_module_loader() -> ModuleLoader {
     Arc::new(load_local_module)
 }
 
+fn local_binary_loader() -> BinaryFileLoader {
+    Arc::new(load_local_binary)
+}
+
 fn load_local_module(args: ModuleLoadArgs) -> Result<Value, String> {
-    let importer = args.importer_source_path.as_deref().ok_or_else(|| {
-        format!(
-            "local import `{}` cannot be loaded from a source without a file path",
-            args.reference
-        )
-    })?;
-    let importer = Path::new(importer);
-    let base = importer.parent().unwrap_or_else(|| Path::new("."));
-    let import_path = base.join(args.reference.as_ref());
+    let import_path = resolve_local_import_path(
+        args.importer_source_path.as_deref(),
+        &args.reference,
+        "local import",
+    )?;
     let path_label = import_path.display().to_string();
 
     let text = fs::read_to_string(&import_path)
@@ -269,6 +277,7 @@ fn load_local_module(args: ModuleLoadArgs) -> Result<Value, String> {
         .with_prior_defs(args.prior_defs)
         .with_final_defs(args.final_defs)
         .with_local_module_loader(local_module_loader())
+        .with_local_binary_loader(local_binary_loader())
         .with_source_binary(source.text.as_bytes());
     let parsed = source.parse_with_context(&context);
     let lowered = lower_to_core_with_context(&parsed, &context);
@@ -289,6 +298,31 @@ fn load_local_module(args: ModuleLoadArgs) -> Result<Value, String> {
     } else {
         Ok(lowered.definitions)
     }
+}
+
+fn load_local_binary(args: BinaryLoadArgs) -> Result<Value, String> {
+    let import_path = resolve_local_import_path(
+        args.importer_source_path.as_deref(),
+        &args.reference,
+        "binary import",
+    )?;
+    let path_label = import_path.display().to_string();
+    let bytes =
+        fs::read(&import_path).map_err(|err| format!("could not read `{path_label}`: {err}"))?;
+    Ok(Value::Binary(Arc::from(bytes.into_boxed_slice())))
+}
+
+fn resolve_local_import_path(
+    importer_source_path: Option<&str>,
+    reference: &str,
+    kind: &str,
+) -> Result<std::path::PathBuf, String> {
+    let importer = importer_source_path.ok_or_else(|| {
+        format!("{kind} `{reference}` cannot be loaded from a source without a file path")
+    })?;
+    let importer = Path::new(importer);
+    let base = importer.parent().unwrap_or_else(|| Path::new("."));
+    Ok(base.join(reference))
 }
 
 fn instantiate_module(context: &CompileContext, definitions: &Value) -> Value {
