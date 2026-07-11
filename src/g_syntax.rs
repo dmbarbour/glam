@@ -262,9 +262,13 @@ pub fn lower_to_core_with_context(
                 }
             }
             DeclarationKind::Definition(definition) => {
-                if let Err(diagnostic) =
-                    lower_definition(definition, declaration.line, context, &mut definitions)
-                {
+                if let Err(diagnostic) = lower_definition(
+                    definition,
+                    declaration.text.as_str(),
+                    declaration.line,
+                    context,
+                    &mut definitions,
+                ) {
                     diagnostics.push(diagnostic);
                 }
             }
@@ -294,12 +298,12 @@ fn lower_import(
         .ok_or_else(|| Diagnostic::error(line, format!("unknown built-in module `'{name}`")))?;
 
     *definitions = match &import.placement {
-        ImportPlacement::Inline => union_module_expr(
+        ImportPlacement::Inline => update_module_expr(
             definitions.clone(),
             value_to_core_expr(&module, context),
             context,
         ),
-        ImportPlacement::As(target) => union_module_expr(
+        ImportPlacement::As(target) => update_module_expr(
             definitions.clone(),
             path_to_dict_expr(target, value_to_core_expr(&module, context), context)?,
             context,
@@ -324,7 +328,7 @@ fn lower_unique(
     for name in names {
         let path = context.abstract_global_path(name);
         let value = context.abstract_global_path_value(path.as_ref());
-        *definitions = union_module_expr(
+        *definitions = update_module_expr(
             definitions.clone(),
             path_to_dict_expr(name, context.expr_value(value), context)?,
             context,
@@ -369,6 +373,7 @@ fn builtin_std_module(context: &CompileContext) -> Dict {
 
 fn lower_definition(
     definition: &DefinitionDecl,
+    declaration_text: &str,
     line: usize,
     context: &CompileContext,
     definitions: &mut CoreExpr,
@@ -382,21 +387,27 @@ fn lower_definition(
         DefinitionKind::Introduce => annotate_definition_value(
             BuiltinAssertion::Undefined,
             &definition.target,
+            definitions.clone(),
             value,
             context,
         )?,
         DefinitionKind::Override => annotate_definition_value(
             BuiltinAssertion::Defined,
             &definition.target,
+            definitions.clone(),
             value,
             context,
         )?,
-        DefinitionKind::Update => Err(Diagnostic::error(
+        DefinitionKind::Update => lower_update_definition(
+            &definition.target,
+            definitions.clone(),
+            value,
+            definition_param_count(definition, declaration_text, line)?,
             line,
-            "update definitions are not supported by the .g spike lowering",
-        ))?,
+            context,
+        )?,
     };
-    *definitions = union_module_expr(
+    *definitions = update_module_expr(
         definitions.clone(),
         path_to_dict_expr(
             &definition.target,
@@ -409,6 +420,36 @@ fn lower_definition(
     Ok(())
 }
 
+fn lower_update_definition(
+    target: &str,
+    visible_definitions: CoreExpr,
+    update: Value,
+    sugar_param_count: usize,
+    line: usize,
+    context: &CompileContext,
+) -> Result<Value, Diagnostic> {
+    let prior = path_expr_in_definitions(target, visible_definitions, context)?;
+    let mut lowered = value_to_core_expr(&update, context);
+
+    for _ in 0..sugar_param_count {
+        let CoreExpr::Lambda(body) = lowered else {
+            return Err(Diagnostic::error(
+                line,
+                "internal error lowering update definition arguments",
+            ));
+        };
+        lowered = body.as_ref().clone();
+    }
+
+    lowered = context.expr_apply(lowered, prior);
+
+    for _ in 0..sugar_param_count {
+        lowered = context.expr_lambda(lowered);
+    }
+
+    Ok(context.value_expr(lowered))
+}
+
 #[derive(Clone, Copy)]
 enum BuiltinAssertion {
     Defined,
@@ -418,6 +459,7 @@ enum BuiltinAssertion {
 fn annotate_definition_value(
     assertion: BuiltinAssertion,
     target: &str,
+    visible_definitions: CoreExpr,
     value: Value,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
@@ -435,7 +477,7 @@ fn annotate_definition_value(
         context.builtin_apply2_expr(
             Builtin::DictSingleton,
             context.expr_value(context.value_atom(atom_from_str("value"))),
-            prior_path_expr(target, context)?,
+            path_expr_in_definitions(target, visible_definitions, context)?,
         ),
     );
     let annotation = context.builtin_apply2_expr(
@@ -451,8 +493,10 @@ fn annotate_definition_value(
     )))
 }
 
-fn union_module_expr(definitions: CoreExpr, item: CoreExpr, context: &CompileContext) -> CoreExpr {
-    context.builtin_apply2_expr(Builtin::DictUnion, definitions, item)
+fn update_module_expr(definitions: CoreExpr, item: CoreExpr, context: &CompileContext) -> CoreExpr {
+    // Module definitions are ordered updates over the incoming namespace.
+    // Ordinary dictionary literals still lower through DictUnion.
+    context.builtin_apply2_expr(Builtin::DictUpdate, definitions, item)
 }
 
 fn value_to_core_expr(value: &Value, context: &CompileContext) -> CoreExpr {
@@ -462,12 +506,37 @@ fn value_to_core_expr(value: &Value, context: &CompileContext) -> CoreExpr {
     }
 }
 
-fn prior_path_expr(target: &str, context: &CompileContext) -> Result<CoreExpr, Diagnostic> {
+fn path_expr_in_definitions(
+    target: &str,
+    definitions: CoreExpr,
+    context: &CompileContext,
+) -> Result<CoreExpr, Diagnostic> {
     let path = target
         .split('.')
         .map(|part| context.key_expr_key(name_as_key(part)))
         .collect::<Vec<_>>();
-    Ok(context.expr_access(context.expr_value(context.prior_defs.clone()), path))
+    Ok(context.expr_access(definitions, path))
+}
+
+fn definition_param_count(
+    definition: &DefinitionDecl,
+    declaration_text: &str,
+    line: usize,
+) -> Result<usize, Diagnostic> {
+    let operator = match definition.kind {
+        DefinitionKind::Introduce => "=",
+        DefinitionKind::Override => ":=",
+        DefinitionKind::Update => "::=",
+    };
+    let suffix = declaration_text
+        .strip_prefix(definition.target.as_str())
+        .ok_or_else(|| {
+            Diagnostic::error(line, "internal error extracting definition parameters")
+        })?;
+    let (params, _) = suffix.split_once(operator).ok_or_else(|| {
+        Diagnostic::error(line, "internal error extracting definition parameters")
+    })?;
+    Ok(params.split_whitespace().count())
 }
 
 fn path_to_dict_expr(
@@ -889,7 +958,7 @@ fn definition_decl<'src>()
                 Ok(DefinitionDecl {
                     target,
                     kind,
-                    body: desugar_definition_body(&params, body),
+                    body: desugar_definition_body(kind, &params, body),
                     expr: None,
                 })
             }
@@ -933,7 +1002,8 @@ fn rest_of_declaration<'src>() -> impl Parser<'src, &'src str, String, extra::Er
         .map(|text: &str| text.trim().to_owned())
 }
 
-fn desugar_definition_body(params: &[String], body: String) -> String {
+fn desugar_definition_body(kind: DefinitionKind, params: &[String], body: String) -> String {
+    let _ = kind;
     if params.is_empty() {
         body
     } else {
@@ -1213,12 +1283,14 @@ fn syntax_expr_parser<'src>()
             crate::core::Builtin::Fixpoint => "fixpoint",
             crate::core::Builtin::Anno => "anno",
             crate::core::Builtin::MergeDuplicate => "merge_duplicate",
+            crate::core::Builtin::UpdateDuplicate => "update_duplicate",
             crate::core::Builtin::Floor => "floor",
             crate::core::Builtin::Mod => "mod",
             crate::core::Builtin::Slice => "slice",
             crate::core::Builtin::Map => "map",
             crate::core::Builtin::DictSingleton => ":",
             crate::core::Builtin::DictUnion => "{,}",
+            crate::core::Builtin::DictUpdate => "dict_update",
         }
     }
 
@@ -1535,7 +1607,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::compiler::CompileContext;
-    use crate::core::{Builtin, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value};
+    use crate::core::{Builtin, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value};
     use crate::number::Number;
 
     fn core_append(left: CoreExpr, right: CoreExpr) -> CoreExpr {
@@ -1551,7 +1623,10 @@ mod tests {
     }
 
     fn core_global_access(context: &CompileContext, path: Vec<CoreKeyExpr>) -> CoreExpr {
-        CoreExpr::Access(Arc::new(CoreExpr::Value(context.final_defs.clone())), Arc::from(path))
+        CoreExpr::Access(
+            Arc::new(CoreExpr::Value(context.final_defs.clone())),
+            Arc::from(path),
+        )
     }
 
     fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> Value {
@@ -1583,6 +1658,49 @@ mod tests {
     fn resolved_value_at_path(definitions: &Value, path: &[&str]) -> Value {
         let value = value_at_atom_path(definitions, path).expect("binding should exist");
         crate::eval::eval_value(&value).expect("binding should resolve")
+    }
+
+    fn fully_evaluated_value(mut value: Value) -> Value {
+        while matches!(value, Value::Expr(_)) {
+            value = crate::eval::eval_value(&value).expect("value should fully evaluate");
+        }
+        value
+    }
+
+    fn output_bytes(value: &Value) -> Vec<u8> {
+        match value {
+            Value::Binary(bytes) => bytes.to_vec(),
+            Value::List(list) => {
+                let bytes = std::cell::RefCell::new(Vec::new());
+                list.for_each_segment(
+                    &mut |segment| {
+                        bytes.borrow_mut().extend_from_slice(segment);
+                        Ok::<_, String>(())
+                    },
+                    &mut |segment| {
+                        for item in segment.iter() {
+                            let item = fully_evaluated_value(item.clone());
+                            let Value::Number(number) = item else {
+                                return Err(
+                                    "output list must contain only integers and binary segments"
+                                        .to_owned(),
+                                );
+                            };
+                            let byte = number.to_u8_if_integer().ok_or_else(|| {
+                                format!(
+                                    "output list contains number `{number}` that is not an in-range byte integer"
+                                )
+                            })?;
+                            bytes.borrow_mut().push(byte);
+                        }
+                        Ok(())
+                    },
+                )
+                .expect("output list should render as bytes");
+                bytes.into_inner()
+            }
+            other => panic!("expected binary output value, got {other:?}"),
+        }
     }
 
     fn resolved_expr_at_path(definitions: &Value, path: &[&str]) -> CoreExpr {
@@ -2058,6 +2176,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_update_definition_argument_sugar() {
+        let parsed = parse("language g0\nid x ::= x\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "id".to_owned(),
+                kind: DefinitionKind::Update,
+                body: "\\ x -> x".to_owned(),
+                expr: Some(SyntaxExpr::Lambda(
+                    vec!["x".to_owned()],
+                    Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("x".to_owned())])),
+                )),
+            })
+        );
+    }
+
+    #[test]
     fn warns_on_unused_locals_without_underscore_prefix() {
         let parsed = parse("language g0\nid x = 42\nasm.result = (\\y -> \"ok\") 1\n");
 
@@ -2488,10 +2625,16 @@ mod tests {
             core_append(
                 core_append(
                     core_append(
-                        core_global_access(&context, vec![CoreKeyExpr::Key(Key::atom_from_text("hello"))]),
+                        core_global_access(
+                            &context,
+                            vec![CoreKeyExpr::Key(Key::atom_from_text("hello"))]
+                        ),
                         CoreExpr::Value(Value::binary_from_text(", ")),
                     ),
-                    core_global_access(&context, vec![CoreKeyExpr::Key(Key::atom_from_text("world"))]),
+                    core_global_access(
+                        &context,
+                        vec![CoreKeyExpr::Key(Key::atom_from_text("world"))]
+                    ),
                 ),
                 CoreExpr::Value(Value::binary_from_text("!")),
             )
@@ -2513,9 +2656,10 @@ mod tests {
                     Arc::new(CoreExpr::Local(0)),
                     Arc::from([CoreKeyExpr::Key(Key::atom_from_text("tail"))]),
                 )))),
-                Arc::new(core_global_access(&context, vec![CoreKeyExpr::Key(
-                    Key::atom_from_text("d")
-                )])),
+                Arc::new(core_global_access(
+                    &context,
+                    vec![CoreKeyExpr::Key(Key::atom_from_text("d"))]
+                )),
             )
         );
     }
@@ -2531,6 +2675,25 @@ mod tests {
         assert_eq!(
             resolved_expr_at_path(&value, &["id"]),
             CoreExpr::Lambda(Arc::new(CoreExpr::Local(0)))
+        );
+    }
+
+    #[test]
+    fn update_definition_argument_sugar_applies_body_to_prior_definition() {
+        let parsed = parse(
+            "language g0\nhello who = \"Hello, \" ++ who\nhello who ::= \\prior -> prior who ++ \"!\"\nasm.result = hello \"World\"\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
         );
     }
 
@@ -2568,7 +2731,10 @@ mod tests {
                 core_singleton(
                     CoreExpr::Value(Value::Atom(Atom::from_key(&Key::binary_from_text("world")))),
                     core_append(
-                        core_global_access(&context, vec![CoreKeyExpr::Key(Key::atom_from_text("other"))]),
+                        core_global_access(
+                            &context,
+                            vec![CoreKeyExpr::Key(Key::atom_from_text("other"))]
+                        ),
                         CoreExpr::Value(Value::binary_from_text("!")),
                     ),
                 ),
@@ -2681,7 +2847,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_builtin_imports_use_dict_union_semantics() {
+    fn inline_builtin_imports_follow_ordered_module_updates() {
         let context = CompileContext::default();
         let parsed = parse("language g0\nmath.answer = 42\nimport 'std\n");
         let lowered = lower_to_core_with_context(&parsed, &context);
@@ -2744,7 +2910,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_introductions_stay_lazy_until_observed() {
+    fn duplicate_introductions_fail_lazily_against_prior_module_updates() {
         let context = CompileContext::default();
         let parsed = parse("language g0\nfoo = 1\nfoo = 2\nok = \"ok\"\n");
         let lowered = lower_to_core_with_context(&parsed, &context);
@@ -2768,7 +2934,52 @@ mod tests {
             .expect_err("duplicate introductions should fail on demand");
         assert_eq!(
             err.to_string(),
-            "dictionary union is ambiguous at key `foo`"
+            "cannot introduce `foo` because it is already defined"
+        );
+    }
+
+    #[test]
+    fn update_definitions_observe_prior_module_state() {
+        let context = CompileContext::default();
+        let parsed = parse("language g0\nfoo = 1\nfoo ::= \\prior -> prior + 1\n");
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            fully_evaluated_value(resolved_value_at_path(&value, &["foo"])),
+            Value::Number(2.into())
+        );
+    }
+
+    #[test]
+    fn update_definitions_can_use_named_updater_functions() {
+        let context = CompileContext::default();
+        let parsed = parse("language g0\ninc prior = prior + 1\nfoo = 1\nfoo ::= inc\n");
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            fully_evaluated_value(resolved_value_at_path(&value, &["foo"])),
+            Value::Number(2.into())
+        );
+    }
+
+    #[test]
+    fn overrides_replace_prior_definitions_without_union_ambiguity() {
+        let context = CompileContext::default().with_prior_defs(Value::Dict(
+            Dict::new_sync().insert(Key::atom_from_text("foo"), Value::Number(1.into())),
+        ));
+        let parsed = parse("language g0\nfoo := 2\n");
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+
+        assert_eq!(
+            resolved_value_at_path(&value, &["foo"]),
+            Value::Number(2.into())
         );
     }
 }

@@ -2,4 +2,4 @@ language g0
 
 foo = 1
 foo := 2
-foo ::= prior
+foo ::= \prior -> prior + 1

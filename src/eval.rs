@@ -313,6 +313,12 @@ fn apply_builtin(
             })?;
             eval_merge_duplicate_builtin(&name, &left, &right, local_env)
         }
+        Builtin::UpdateDuplicate => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("update duplicate builtin received the wrong number of arguments")
+            })?;
+            eval_update_duplicate_builtin(&left, &right, local_env)
+        }
         Builtin::Floor => {
             let [value] = <[Value; 1]>::try_from(args).map_err(|_| {
                 EvalError::new("floor builtin received the wrong number of arguments")
@@ -348,6 +354,12 @@ fn apply_builtin(
                 EvalError::new("dict union builtin received the wrong number of arguments")
             })?;
             eval_dict_union_builtin(&left, &right, local_env)
+        }
+        Builtin::DictUpdate => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("dict update builtin received the wrong number of arguments")
+            })?;
+            eval_dict_update_builtin(&left, &right, local_env)
         }
     }
 }
@@ -551,6 +563,27 @@ fn eval_dict_union_builtin(
     Ok(Value::Dict(merge_dicts(&left_dict, &right_dict)))
 }
 
+fn eval_dict_update_builtin(
+    left: &Value,
+    right: &Value,
+    _local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let left = eval_value(left)?;
+    let right = eval_value(right)?;
+    let Value::Dict(left_dict) = left else {
+        return Err(EvalError::new(
+            "dictionary update requires dictionary values",
+        ));
+    };
+    let Value::Dict(right_dict) = right else {
+        return Err(EvalError::new(
+            "dictionary update requires dictionary values",
+        ));
+    };
+
+    Ok(Value::Dict(update_dicts(&left_dict, &right_dict)))
+}
+
 fn eval_fixpoint_builtin(function: &Value) -> Result<Value, EvalError> {
     let function = eval_value(function)?;
     let Value::Closure(function) = function else {
@@ -745,6 +778,29 @@ fn eval_merge_duplicate_builtin(
     }
 }
 
+fn eval_update_duplicate_builtin(
+    left: &Value,
+    right: &Value,
+    _local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let left = eval_value(left)?;
+    let right = eval_value(right)?;
+
+    if is_undefined_value(&right) {
+        return Ok(right);
+    }
+    if is_undefined_value(&left) {
+        return Ok(right);
+    }
+
+    match (&left, &right) {
+        (Value::Dict(left_dict), Value::Dict(right_dict)) => {
+            Ok(Value::Dict(update_dicts(left_dict, right_dict)))
+        }
+        _ => Ok(right),
+    }
+}
+
 fn merge_dicts(left: &crate::core::Dict, right: &crate::core::Dict) -> crate::core::Dict {
     let (mut merged, updates) = if left.size() >= right.size() {
         (left.clone(), right)
@@ -766,6 +822,37 @@ fn merge_dicts(left: &crate::core::Dict, right: &crate::core::Dict) -> crate::co
     }
 
     merged
+}
+
+fn update_dicts(left: &crate::core::Dict, right: &crate::core::Dict) -> crate::core::Dict {
+    let mut updated = left.clone();
+
+    for (key, value) in right.iter() {
+        let next_value = match updated.get(key) {
+            Some(existing) => Some(update_duplicate_dict_value(existing, value)),
+            _ if is_undefined_dict_value(value) => None,
+            _ => Some(value.clone()),
+        };
+        updated = match next_value {
+            Some(value) if is_undefined_dict_value(&value) => updated.remove(key),
+            Some(value) => updated.insert(key.clone(), value),
+            None => updated.remove(key),
+        };
+    }
+
+    updated
+}
+
+fn update_duplicate_dict_value(left: &Value, right: &Value) -> Value {
+    match (left, right) {
+        (Value::Dict(left_dict), Value::Dict(right_dict)) => {
+            Value::Dict(update_dicts(left_dict, right_dict))
+        }
+        _ if is_expr_value(left) || is_expr_value(right) => {
+            builtin_apply2_value(Builtin::UpdateDuplicate, left, right)
+        }
+        _ => right.clone(),
+    }
 }
 
 fn merge_duplicate_dict_value(key: &Key, left: &Value, right: &Value) -> Value {
@@ -809,6 +896,19 @@ fn builtin_apply3_value(builtin: Builtin, first: &Value, second: &Value, third: 
                 value_as_expr(second),
             )),
             value_as_expr(third),
+        )),
+        env: Arc::from([]),
+    })
+}
+
+fn builtin_apply2_value(builtin: Builtin, left: &Value, right: &Value) -> Value {
+    Value::Expr(Thunk {
+        expr: Arc::new(Expr::Apply(
+            Arc::new(Expr::Apply(
+                Arc::new(Expr::Value(Value::Builtin(builtin))),
+                value_as_expr(left),
+            )),
+            value_as_expr(right),
         )),
         env: Arc::from([]),
     })
@@ -990,6 +1090,10 @@ mod tests {
 
     fn dict_union_expr(left: Expr, right: Expr) -> Expr {
         builtin2_expr(Builtin::DictUnion, left, right)
+    }
+
+    fn dict_update_expr(left: Expr, right: Expr) -> Expr {
+        builtin2_expr(Builtin::DictUpdate, left, right)
     }
 
     fn global_access(path: Vec<KeyExpr>) -> Expr {
@@ -1595,6 +1699,86 @@ mod tests {
             err.to_string(),
             "dictionary union is ambiguous at key `greeting`"
         );
+    }
+
+    #[test]
+    fn dictionary_updates_overwrite_duplicate_values() {
+        let key = Key::atom_from_text("greeting");
+        let expr = dict_update_expr(
+            Expr::Value(Value::Dict(
+                crate::core::Dict::new_sync().insert(key.clone(), Value::binary_from_text("Hello")),
+            )),
+            Expr::Value(Value::Dict(
+                crate::core::Dict::new_sync().insert(key.clone(), Value::binary_from_text("World")),
+            )),
+        );
+
+        let value = eval_closed_expr(&expr).expect("dict update should evaluate");
+
+        assert_eq!(
+            value.get_key_path(&[key]),
+            Some(&Value::binary_from_text("World"))
+        );
+    }
+
+    #[test]
+    fn dictionary_updates_merge_nested_dictionaries_transitively() {
+        let key = Key::atom_from_text("greeting");
+        let hello = Key::atom_from_text("hello");
+        let world = Key::atom_from_text("world");
+
+        let expr = dict_update_expr(
+            Expr::Value(Value::Dict(
+                crate::core::Dict::new_sync().insert(
+                    key.clone(),
+                    Value::Dict(
+                        crate::core::Dict::new_sync()
+                            .insert(hello.clone(), Value::binary_from_text("Hello")),
+                    ),
+                ),
+            )),
+            Expr::Value(Value::Dict(
+                crate::core::Dict::new_sync().insert(
+                    key.clone(),
+                    Value::Dict(
+                        crate::core::Dict::new_sync()
+                            .insert(world.clone(), Value::binary_from_text("World")),
+                    ),
+                ),
+            )),
+        );
+
+        let value = eval_closed_expr(&expr).expect("dict update should evaluate");
+        let greeting = value.get_key_path(&[key]).expect("greeting should exist");
+        let Value::Dict(greeting) = greeting else {
+            panic!("greeting should resolve directly to a dictionary");
+        };
+
+        assert_eq!(
+            greeting.get(&hello),
+            Some(&Value::binary_from_text("Hello"))
+        );
+        assert_eq!(
+            greeting.get(&world),
+            Some(&Value::binary_from_text("World"))
+        );
+    }
+
+    #[test]
+    fn dictionary_updates_treat_empty_dictionary_values_as_undefined() {
+        let key = Key::atom_from_text("greeting");
+        let expr = dict_update_expr(
+            Expr::Value(Value::Dict(
+                crate::core::Dict::new_sync().insert(key.clone(), Value::binary_from_text("Hello")),
+            )),
+            Expr::Value(Value::Dict(
+                crate::core::Dict::new_sync()
+                    .insert(key.clone(), Value::Dict(crate::core::Dict::new_sync())),
+            )),
+        );
+
+        let value = eval_closed_expr(&expr).expect("dict update should evaluate");
+        assert_eq!(value.get_key_path(&[key]), None);
     }
 
     #[test]
