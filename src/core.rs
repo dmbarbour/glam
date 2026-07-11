@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use internment::Intern;
@@ -14,8 +15,60 @@ pub enum Expr {
     Lambda(Arc<Expr>),
     Local(usize),
     Access(Arc<Expr>, Arc<[KeyExpr]>),
+    Deferred(Arc<DeferredValue>),
     Future(IVar),
     Error(Arc<str>),
+}
+
+#[derive(Clone)]
+pub struct DeferredValue {
+    id: u64,
+    label: Arc<str>,
+    thunk: Arc<dyn Fn() -> Result<Value, String> + Send + Sync>,
+    result: Arc<OnceLock<Result<Value, Arc<str>>>>,
+}
+
+impl DeferredValue {
+    pub fn new(
+        label: impl Into<Arc<str>>,
+        thunk: impl Fn() -> Result<Value, String> + Send + Sync + 'static,
+    ) -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+        Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            label: label.into(),
+            thunk: Arc::new(thunk),
+            result: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn force(&self) -> Result<Value, Arc<str>> {
+        self.result
+            .get_or_init(|| (self.thunk)().map_err(Arc::from))
+            .clone()
+    }
+}
+
+impl PartialEq for DeferredValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for DeferredValue {}
+
+impl fmt::Debug for DeferredValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeferredValue")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

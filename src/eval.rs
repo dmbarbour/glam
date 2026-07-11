@@ -57,6 +57,9 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
             .get()
             .cloned()
             .ok_or_else(|| EvalError::new("future was observed before initialization")),
+        Expr::Deferred(deferred) => deferred
+            .force()
+            .map_err(|message| EvalError::new(message.as_ref())),
         Expr::Error(message) => Err(EvalError::new(message.as_ref())),
     }
 }
@@ -547,8 +550,8 @@ fn eval_dict_union_builtin(
     right: &Value,
     _local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let left = eval_value(left)?;
-    let right = eval_value(right)?;
+    let left = force_value_shell(left)?;
+    let right = force_value_shell(right)?;
     let Value::Dict(left_dict) = left else {
         return Err(EvalError::new(
             "dictionary union requires dictionary values",
@@ -568,8 +571,8 @@ fn eval_dict_update_builtin(
     right: &Value,
     _local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let left = eval_value(left)?;
-    let right = eval_value(right)?;
+    let left = force_value_shell(left)?;
+    let right = force_value_shell(right)?;
     let Value::Dict(left_dict) = left else {
         return Err(EvalError::new(
             "dictionary update requires dictionary values",

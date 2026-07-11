@@ -1,9 +1,11 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use glam::compiler::CompileContext;
+use glam::compiler::{CompileContext, ModuleLoadArgs, ModuleLoader};
 use glam::core::{Dict, Expr as CoreExpr, Key, Value};
 use glam::diagnostic::Severity;
 use glam::eval;
@@ -136,17 +138,23 @@ fn assemble_inputs(inputs: &[AssemblyInput], cli_args: &[String]) -> ExitCode {
     // extensions, and shall effectfully lower to core, via common API with
     // the built-in syntax.
 
-    let assembly_context = CompileContext::from_module_path(["assembly"]);
+    let loader = local_module_loader();
+    let assembly_context =
+        CompileContext::from_module_path(["assembly"]).with_local_module_loader(loader.clone());
     let final_defs = assembly_context.final_defs.clone();
     let mut definitions = initial_assembly_definitions(&assembly_context, cli_args);
     let mut had_errors = false;
 
     for input in inputs.iter().rev() {
-        let (parsed, context, diagnostic_label) =
-            match parse_assembly_input(input, definitions.clone(), final_defs.clone()) {
-                Ok(parsed) => parsed,
-                Err(exit_code) => return exit_code,
-            };
+        let (parsed, context, diagnostic_label) = match parse_assembly_input(
+            input,
+            definitions.clone(),
+            final_defs.clone(),
+            loader.clone(),
+        ) {
+            Ok(parsed) => parsed,
+            Err(exit_code) => return exit_code,
+        };
 
         // TODO: move printing errors into CompileContext, so a common logger can be used
         let lowered = lower_to_core_with_context(&parsed, &context);
@@ -209,6 +217,7 @@ fn parse_assembly_input(
     input: &AssemblyInput,
     prior_defs: Value,
     final_defs: Value,
+    loader: ModuleLoader,
 ) -> Result<(ParsedSource, CompileContext, String), ExitCode> {
     match input {
         AssemblyInput::File(path) => {
@@ -217,6 +226,7 @@ fn parse_assembly_input(
                 .with_module_path(["assembly"])
                 .with_prior_defs(prior_defs)
                 .with_final_defs(final_defs)
+                .with_local_module_loader(loader)
                 .with_source_binary(source.text.as_bytes());
             let parsed = source.parse_with_context(&context);
             Ok((parsed, context, path.clone()))
@@ -227,10 +237,57 @@ fn parse_assembly_input(
             let context = CompileContext::from_module_path(["assembly"])
                 .with_prior_defs(prior_defs)
                 .with_final_defs(final_defs)
+                .with_local_module_loader(loader)
                 .with_source_binary(source.text.as_bytes());
             let parsed = source.parse_with_context(&context);
             Ok((parsed, context, label))
         }
+    }
+}
+
+fn local_module_loader() -> ModuleLoader {
+    Arc::new(load_local_module)
+}
+
+fn load_local_module(args: ModuleLoadArgs) -> Result<Value, String> {
+    let importer = args.importer_source_path.as_deref().ok_or_else(|| {
+        format!(
+            "local import `{}` cannot be loaded from a source without a file path",
+            args.reference
+        )
+    })?;
+    let importer = Path::new(importer);
+    let base = importer.parent().unwrap_or_else(|| Path::new("."));
+    let import_path = base.join(args.reference.as_ref());
+    let path_label = import_path.display().to_string();
+
+    let text = fs::read_to_string(&import_path)
+        .map_err(|err| format!("could not read `{path_label}`: {err}"))?;
+    let source = SourceFile::new(&path_label, text);
+    let context = CompileContext::from_source_path(&path_label)
+        .with_module_path(args.module_path.iter().cloned())
+        .with_prior_defs(args.prior_defs)
+        .with_final_defs(args.final_defs)
+        .with_local_module_loader(local_module_loader())
+        .with_source_binary(source.text.as_bytes());
+    let parsed = source.parse_with_context(&context);
+    let lowered = lower_to_core_with_context(&parsed, &context);
+
+    for diagnostic in &lowered.diagnostics {
+        eprintln!(
+            "{path_label}:{}: {}: {}",
+            diagnostic.line, diagnostic.severity, diagnostic.message
+        );
+    }
+
+    if lowered
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        Err(format!("local import `{path_label}` failed to compile"))
+    } else {
+        Ok(lowered.definitions)
     }
 }
 

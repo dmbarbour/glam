@@ -2,10 +2,23 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::core::Builtin;
-use crate::core::{Atom, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value};
+use crate::core::{
+    Atom, DeferredValue, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value,
+};
 use crate::number::Number;
 
+pub type ModuleLoader = Arc<dyn Fn(ModuleLoadArgs) -> Result<Value, String> + Send + Sync>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleLoadArgs {
+    pub reference: Arc<str>,
+    pub importer_source_path: Option<Arc<str>>,
+    pub module_path: Arc<[String]>,
+    pub prior_defs: Value,
+    pub final_defs: Value,
+}
+
+#[derive(Clone)]
 pub struct CompileContext {
     // Ideally, we should actually abstract the effects API, i.e. such that
     // our front-end compilers don't even know what an `Expr` or `Value`
@@ -15,6 +28,7 @@ pub struct CompileContext {
     pub module_path: Arc<[String]>,
     pub prior_defs: Value, // prior dictionary, can be observed at compile-time
     pub final_defs: Value, // future dictionary, cannot observe at compile-time
+    local_module_loader: Option<ModuleLoader>,
 }
 
 impl Default for CompileContext {
@@ -25,6 +39,7 @@ impl Default for CompileContext {
             module_path: Arc::from([]),
             prior_defs: Value::Dict(Dict::new_sync()), // empty prior dictionary
             final_defs: Value::expr(CoreExpr::Future(crate::core::IVar::new())), // future dictionary, assigned later
+            local_module_loader: None,
         }
     }
 }
@@ -78,6 +93,11 @@ impl CompileContext {
 
     pub fn with_final_defs(mut self, final_defs: Value) -> Self {
         self.final_defs = final_defs;
+        self
+    }
+
+    pub fn with_local_module_loader(mut self, loader: ModuleLoader) -> Self {
+        self.local_module_loader = Some(loader);
         self
     }
 
@@ -204,6 +224,40 @@ impl CompileContext {
 
     pub fn builtin_apply2_value(&self, builtin: Builtin, left: Value, right: Value) -> Value {
         self.value_apply(self.value_apply(self.value_builtin(builtin), left), right)
+    }
+
+    pub fn local_module_load_args(
+        &self,
+        reference: &str,
+        module_path: Arc<[String]>,
+        prior_defs: Value,
+        final_defs: Value,
+    ) -> ModuleLoadArgs {
+        ModuleLoadArgs {
+            reference: Arc::from(reference),
+            importer_source_path: self.source_path.clone(),
+            module_path,
+            prior_defs,
+            final_defs,
+        }
+    }
+
+    pub fn value_load_local_module(&self, args: ModuleLoadArgs) -> Value {
+        let label: Arc<str> = Arc::from(format!("import {}", args.reference));
+        let loader = self.local_module_loader.clone();
+
+        Value::expr(CoreExpr::Deferred(Arc::new(DeferredValue::new(
+            label,
+            move || {
+                let Some(loader) = &loader else {
+                    return Err(format!(
+                        "local import `{}` cannot be loaded without a module loader",
+                        args.reference
+                    ));
+                };
+                loader(args.clone())
+            },
+        ))))
     }
 }
 

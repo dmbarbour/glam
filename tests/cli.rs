@@ -121,6 +121,38 @@ fn assembly_args_are_string_list_and_can_be_rewritten_by_mixins() {
 }
 
 #[test]
+fn script_local_import_errors_only_when_observed() {
+    let unused = Command::new(env!("CARGO_BIN_EXE_glam"))
+        .arg("--script.g")
+        .arg("language g0\nimport \"missing.g\" as unused\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        unused.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&unused.stdout),
+        String::from_utf8_lossy(&unused.stderr)
+    );
+    assert_eq!(unused.stdout, b"ok");
+    assert_eq!(unused.stderr, b"");
+
+    let observed = Command::new(env!("CARGO_BIN_EXE_glam"))
+        .arg("--script.g")
+        .arg("language g0\nimport \"missing.g\" as missing\nasm.result = missing.result\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!observed.status.success());
+    assert_eq!(observed.stdout, b"");
+    assert!(
+        String::from_utf8_lossy(&observed.stderr).contains(
+            "local import `missing.g` cannot be loaded from a source without a file path"
+        )
+    );
+}
+
+#[test]
 fn parse_errors_write_summary_and_diagnostics_to_stderr() {
     let output = Command::new(env!("CARGO_BIN_EXE_glam"))
         .arg("--parse")

@@ -288,16 +288,27 @@ fn lower_import(
     context: &CompileContext,
     definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
-    let ImportReference::Builtin(name) = &import.reference else {
-        return Err(Diagnostic::error(
-            line,
-            "local `import ...` is not supported by the current spike",
-        ));
-    };
+    match &import.reference {
+        ImportReference::Builtin(name) => {
+            lower_builtin_import(name, &import.placement, line, context, definitions)
+        }
+        ImportReference::Local(reference) => {
+            lower_local_import(reference, &import.placement, context, definitions)
+        }
+    }
+}
+
+fn lower_builtin_import(
+    name: &str,
+    placement: &ImportPlacement,
+    line: usize,
+    context: &CompileContext,
+    definitions: &mut Value,
+) -> Result<(), Diagnostic> {
     let module = builtin_module_value(context, name)
         .ok_or_else(|| Diagnostic::error(line, format!("unknown built-in module `'{name}`")))?;
 
-    *definitions = match &import.placement {
+    *definitions = match placement {
         ImportPlacement::Inline => update_module_value(definitions.clone(), module, context),
         ImportPlacement::As(target) => update_module_value(
             definitions.clone(),
@@ -313,6 +324,64 @@ fn lower_import(
     };
 
     Ok(())
+}
+
+fn lower_local_import(
+    reference: &str,
+    placement: &ImportPlacement,
+    context: &CompileContext,
+    definitions: &mut Value,
+) -> Result<(), Diagnostic> {
+    match placement {
+        ImportPlacement::Inline => {
+            let args = context.local_module_load_args(
+                reference,
+                context.module_path.clone(),
+                definitions.clone(),
+                context.final_defs.clone(),
+            );
+            *definitions = context.value_load_local_module(args);
+        }
+        ImportPlacement::As(target) => {
+            // TODO: `import ... as m` should desugar through object/env extension
+            // once object syntax exists. For this spike, load into an empty scoped
+            // prior and install the resulting module at the target path.
+            let loaded =
+                scoped_local_import_value(reference, target, context.empty_dict_value(), context)?;
+            *definitions = update_module_value(
+                definitions.clone(),
+                path_to_dict_value(target, loaded, context)?,
+                context,
+            );
+        }
+        ImportPlacement::At(target) => {
+            let scoped_prior = path_value_in_definitions(target, definitions.clone(), context)?;
+            let loaded = scoped_local_import_value(reference, target, scoped_prior, context)?;
+            *definitions = update_module_value(
+                definitions.clone(),
+                path_to_dict_value(target, loaded, context)?,
+                context,
+            );
+        }
+    };
+
+    Ok(())
+}
+
+fn scoped_local_import_value(
+    reference: &str,
+    target: &str,
+    prior_defs: Value,
+    context: &CompileContext,
+) -> Result<Value, Diagnostic> {
+    let final_defs = path_value_in_definitions(target, context.final_defs.clone(), context)?;
+    let args = context.local_module_load_args(
+        reference,
+        scoped_module_path(context, target),
+        prior_defs,
+        final_defs,
+    );
+    Ok(context.value_load_local_module(args))
 }
 
 fn lower_unique(
@@ -497,6 +566,12 @@ fn path_value_in_definitions(
         .map(|part| context.key_expr_key(name_as_key(part)))
         .collect::<Vec<_>>();
     Ok(context.value_access(definitions, path))
+}
+
+fn scoped_module_path(context: &CompileContext, target: &str) -> std::sync::Arc<[String]> {
+    let mut parts = context.module_path.iter().cloned().collect::<Vec<_>>();
+    parts.extend(target.split('.').map(ToOwned::to_owned));
+    std::sync::Arc::from(parts.into_boxed_slice())
 }
 
 fn definition_param_count(
