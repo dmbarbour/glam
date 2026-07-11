@@ -98,8 +98,8 @@ pub enum DefinitionKind {
 pub enum SyntaxExpr {
     Number(Number),
     Text(String),
-    Name(Vec<SyntaxKeyExpr>),
-    PriorName(Vec<SyntaxKeyExpr>),
+    Name(String),
+    PriorName(String),
     Access(Box<SyntaxExpr>, Vec<SyntaxKeyExpr>),
     SingletonDict(SyntaxKeyExpr, Box<SyntaxExpr>),
     DictUnion(Vec<SyntaxExpr>),
@@ -568,11 +568,9 @@ fn syntax_expr_to_value_in_scope(
         SyntaxExpr::DictUnion(items) => {
             lower_dict_union(items, line, context, visible_definitions, locals)?
         }
-        SyntaxExpr::Name(parts) => {
-            lower_name_expr(parts, line, context, visible_definitions, locals)?
-        }
-        SyntaxExpr::PriorName(parts) => {
-            lower_prior_name_expr(parts, line, context, visible_definitions, locals)?
+        SyntaxExpr::Name(name) => lower_name_expr(name, context, locals),
+        SyntaxExpr::PriorName(name) => {
+            lower_prior_name_expr(name, line, context, visible_definitions)?
         }
         SyntaxExpr::Access(base, parts) => context.value_access(
             syntax_expr_to_value_in_scope(base, line, context, visible_definitions, locals)?,
@@ -728,67 +726,35 @@ fn lower_lambda_expr(
     Ok(lowered)
 }
 
-fn lower_name_expr(
-    parts: &[SyntaxKeyExpr],
-    line: usize,
-    context: &CompileContext,
-    visible_definitions: &Value,
-    locals: &mut Vec<LocalName>,
-) -> Result<Value, Diagnostic> {
-    let Some(SyntaxKeyExpr::Atom(first)) = parts.first() else {
-        return Err(Diagnostic::error(
-            line,
-            "first part of name expression must be an atom",
-        ));
-    };
-
+fn lower_name_expr(name: &str, context: &CompileContext, locals: &mut Vec<LocalName>) -> Value {
     // TODO: special keyword atoms like 'self' and 'module'
 
-    let Some(local_index) = local_binding_index(first, locals) else {
-        return Ok(context.value_access(
+    let Some(local_index) = local_binding_index(name, locals) else {
+        return context.value_access(
             context.final_defs.clone(),
-            parts
-                .iter()
-                .map(|part| {
-                    syntax_key_expr_to_core(part, line, context, visible_definitions, locals)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ));
+            vec![context.key_expr_key(Key::atom_from_text(name))],
+        );
     };
 
-    if parts.len() == 1 {
-        return Ok(context.value_local(local_index));
-    }
-
-    Ok(context.value_access(
-        context.value_local(local_index),
-        parts[1..]
-            .iter()
-            .map(|part| syntax_key_expr_to_core(part, line, context, visible_definitions, locals))
-            .collect::<Result<Vec<_>, _>>()?,
-    ))
+    context.value_local(local_index)
 }
 
 fn lower_prior_name_expr(
-    parts: &[SyntaxKeyExpr],
+    name: &str,
     line: usize,
     context: &CompileContext,
     visible_definitions: &Value,
-    locals: &mut Vec<LocalName>,
 ) -> Result<Value, Diagnostic> {
-    let Some(SyntaxKeyExpr::Atom(_)) = parts.first() else {
+    if name.is_empty() {
         return Err(Diagnostic::error(
             line,
-            "first part of prior name expression must be an atom",
+            "prior name expression must have a name",
         ));
-    };
+    }
 
     Ok(context.value_access(
         visible_definitions.clone(),
-        parts
-            .iter()
-            .map(|part| syntax_key_expr_to_core(part, line, context, visible_definitions, locals))
-            .collect::<Result<Vec<_>, _>>()?,
+        vec![context.key_expr_key(Key::atom_from_text(name))],
     ))
 }
 
@@ -1095,11 +1061,7 @@ fn warn_unused_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diag
 fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diagnostic>) {
     match expr {
         SyntaxExpr::Number(_) | SyntaxExpr::Text(_) => {}
-        SyntaxExpr::Name(parts) | SyntaxExpr::PriorName(parts) => {
-            for part in parts.iter().skip(1) {
-                analyze_key_expr_locals(part, line, diagnostics);
-            }
-        }
+        SyntaxExpr::Name(_) | SyntaxExpr::PriorName(_) => {}
         SyntaxExpr::Access(base, parts) => {
             analyze_expr_locals(base, line, diagnostics);
             for part in parts {
@@ -1156,24 +1118,15 @@ fn analyze_key_expr_locals(key: &SyntaxKeyExpr, line: usize, diagnostics: &mut V
 fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) {
     match expr {
         SyntaxExpr::Number(_) | SyntaxExpr::Text(_) => {}
-        SyntaxExpr::Name(parts) => {
-            if let Some(SyntaxKeyExpr::Atom(name)) = parts.first() {
-                if let Some(index) = locals
-                    .iter()
-                    .rposition(|local| local.canonical.as_deref() == Some(name.as_str()))
-                {
-                    used[index] = true;
-                }
-            }
-            for part in parts.iter().skip(1) {
-                mark_used_key_expr(part, locals, used);
+        SyntaxExpr::Name(name) => {
+            if let Some(index) = locals
+                .iter()
+                .rposition(|local| local.canonical.as_deref() == Some(name.as_str()))
+            {
+                used[index] = true;
             }
         }
-        SyntaxExpr::PriorName(parts) => {
-            for part in parts.iter().skip(1) {
-                mark_used_key_expr(part, locals, used);
-            }
-        }
+        SyntaxExpr::PriorName(_) => {}
         SyntaxExpr::Access(base, parts) => {
             mark_used_locals(base, locals, used);
             for part in parts {
@@ -1354,12 +1307,6 @@ fn syntax_expr_parser<'src>()
         }
     }
 
-    fn expand_path_suffixes(first: SyntaxKeyExpr, suffixes: Vec<PathSuffix>) -> Vec<SyntaxKeyExpr> {
-        let mut parts = vec![first];
-        parts.extend(flatten_path_suffixes(suffixes));
-        parts
-    }
-
     fn flatten_path_suffixes(suffixes: Vec<PathSuffix>) -> Vec<SyntaxKeyExpr> {
         let mut parts = Vec::new();
         for suffix in suffixes {
@@ -1369,6 +1316,13 @@ fn syntax_expr_parser<'src>()
             }
         }
         parts
+    }
+
+    fn access_if_path(base: SyntaxExpr, suffixes: Vec<PathSuffix>) -> SyntaxExpr {
+        match flatten_path_suffixes(suffixes) {
+            parts if parts.is_empty() => base,
+            parts => SyntaxExpr::Access(Box::new(base), parts),
+        }
     }
 
     let parser = recursive(|expr| {
@@ -1414,15 +1368,13 @@ fn syntax_expr_parser<'src>()
 
         let prior_name = just('_')
             .ignore_then(name.clone())
-            .map(SyntaxKeyExpr::Atom)
             .then(path_suffix.clone())
-            .map(|(first, suffixes)| SyntaxExpr::PriorName(expand_path_suffixes(first, suffixes)))
+            .map(|(name, suffixes)| access_if_path(SyntaxExpr::PriorName(name), suffixes))
             .boxed();
         let name_expr = name
             .clone()
-            .map(SyntaxKeyExpr::Atom)
             .then(path_suffix.clone())
-            .map(|(first, suffixes)| SyntaxExpr::Name(expand_path_suffixes(first, suffixes)))
+            .map(|(name, suffixes)| access_if_path(SyntaxExpr::Name(name), suffixes))
             .boxed();
 
         let number_literal = choice((
@@ -1488,10 +1440,7 @@ fn syntax_expr_parser<'src>()
         let literal_atom = choice((text, list, dict, number, parenthesized)).boxed();
         let literal_expr = literal_atom
             .then(path_suffix.clone())
-            .map(|(base, suffixes)| match flatten_path_suffixes(suffixes) {
-                parts if parts.is_empty() => base,
-                parts => SyntaxExpr::Access(Box::new(base), parts),
-            })
+            .map(|(base, suffixes)| access_if_path(base, suffixes))
             .boxed();
         let atom = choice((literal_expr, prior_name, name_expr)).boxed();
         let application = atom
@@ -2157,14 +2106,10 @@ mod tests {
                 expr: Some(SyntaxExpr::Append(
                     Box::new(SyntaxExpr::Append(
                         Box::new(SyntaxExpr::Append(
-                            Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom(
-                                "hello".to_owned(),
-                            )])),
+                            Box::new(SyntaxExpr::Name("hello".to_owned())),
                             Box::new(SyntaxExpr::Text(", ".to_owned())),
                         )),
-                        Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom(
-                            "world".to_owned(),
-                        )])),
+                        Box::new(SyntaxExpr::Name("world".to_owned())),
                     )),
                     Box::new(SyntaxExpr::Text("!".to_owned())),
                 )),
@@ -2184,13 +2129,11 @@ mod tests {
                 kind: DefinitionKind::Introduce,
                 body: "_hello ++ _world.tail".to_owned(),
                 expr: Some(SyntaxExpr::Append(
-                    Box::new(SyntaxExpr::PriorName(vec![SyntaxKeyExpr::Atom(
-                        "hello".to_owned(),
-                    )])),
-                    Box::new(SyntaxExpr::PriorName(vec![
-                        SyntaxKeyExpr::Atom("world".to_owned()),
-                        SyntaxKeyExpr::Atom("tail".to_owned()),
-                    ])),
+                    Box::new(SyntaxExpr::PriorName("hello".to_owned())),
+                    Box::new(SyntaxExpr::Access(
+                        Box::new(SyntaxExpr::PriorName("world".to_owned())),
+                        vec![SyntaxKeyExpr::Atom("tail".to_owned())],
+                    )),
                 )),
             })
         );
@@ -2213,7 +2156,7 @@ mod tests {
                 expr: Some(SyntaxExpr::Apply(
                     Box::new(SyntaxExpr::Lambda(
                         vec!["x".to_owned()],
-                        Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("x".to_owned())])),
+                        Box::new(SyntaxExpr::Name("x".to_owned())),
                     )),
                     Box::new(SyntaxExpr::Text("Hello".to_owned())),
                 )),
@@ -2234,10 +2177,10 @@ mod tests {
                 body: "\\x -> x.tail".to_owned(),
                 expr: Some(SyntaxExpr::Lambda(
                     vec!["x".to_owned()],
-                    Box::new(SyntaxExpr::Name(vec![
-                        SyntaxKeyExpr::Atom("x".to_owned()),
-                        SyntaxKeyExpr::Atom("tail".to_owned()),
-                    ])),
+                    Box::new(SyntaxExpr::Access(
+                        Box::new(SyntaxExpr::Name("x".to_owned())),
+                        vec![SyntaxKeyExpr::Atom("tail".to_owned())],
+                    )),
                 )),
             })
         );
@@ -2258,9 +2201,7 @@ mod tests {
                     Box::new(SyntaxExpr::Apply(
                         Box::new(SyntaxExpr::Lambda(
                             vec!["_value".to_owned(), "_".to_owned()],
-                            Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom(
-                                "value".to_owned(),
-                            )])),
+                            Box::new(SyntaxExpr::Name("value".to_owned())),
                         )),
                         Box::new(SyntaxExpr::Number(n(1))),
                     )),
@@ -2283,7 +2224,7 @@ mod tests {
                 body: "\\ x -> x".to_owned(),
                 expr: Some(SyntaxExpr::Lambda(
                     vec!["x".to_owned()],
-                    Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("x".to_owned())])),
+                    Box::new(SyntaxExpr::Name("x".to_owned())),
                 )),
             })
         );
@@ -2302,7 +2243,7 @@ mod tests {
                 body: "\\ x -> x".to_owned(),
                 expr: Some(SyntaxExpr::Lambda(
                     vec!["x".to_owned()],
-                    Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("x".to_owned())])),
+                    Box::new(SyntaxExpr::Name("x".to_owned())),
                 )),
             })
         );
@@ -2337,9 +2278,7 @@ mod tests {
                 body: "\\ _value -> value".to_owned(),
                 expr: Some(SyntaxExpr::Lambda(
                     vec!["_value".to_owned()],
-                    Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom(
-                        "value".to_owned()
-                    )])),
+                    Box::new(SyntaxExpr::Name("value".to_owned())),
                 )),
             })
         );
@@ -2351,7 +2290,7 @@ mod tests {
                 body: "\\ _ y -> y".to_owned(),
                 expr: Some(SyntaxExpr::Lambda(
                     vec!["_".to_owned(), "y".to_owned()],
-                    Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("y".to_owned())])),
+                    Box::new(SyntaxExpr::Name("y".to_owned())),
                 )),
             })
         );
@@ -2394,8 +2333,8 @@ mod tests {
                 kind: DefinitionKind::Introduce,
                 body: "{ left, right, hello:\"Hello\" }".to_owned(),
                 expr: Some(SyntaxExpr::DictUnion(vec![
-                    SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("left".to_owned())]),
-                    SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom("right".to_owned())]),
+                    SyntaxExpr::Name("left".to_owned()),
+                    SyntaxExpr::Name("right".to_owned()),
                     SyntaxExpr::SingletonDict(
                         SyntaxKeyExpr::Atom("hello".to_owned()),
                         Box::new(SyntaxExpr::Text("Hello".to_owned())),
@@ -2469,14 +2408,14 @@ mod tests {
                 kind: DefinitionKind::Introduce,
                 body: "d.[42] ++ d.['tail]".to_owned(),
                 expr: Some(SyntaxExpr::Append(
-                    Box::new(SyntaxExpr::Name(vec![
-                        SyntaxKeyExpr::Atom("d".to_owned()),
-                        SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(42)))),
-                    ])),
-                    Box::new(SyntaxExpr::Name(vec![
-                        SyntaxKeyExpr::Atom("d".to_owned()),
-                        SyntaxKeyExpr::Atom("tail".to_owned()),
-                    ])),
+                    Box::new(SyntaxExpr::Access(
+                        Box::new(SyntaxExpr::Name("d".to_owned())),
+                        vec![SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(42))))],
+                    )),
+                    Box::new(SyntaxExpr::Access(
+                        Box::new(SyntaxExpr::Name("d".to_owned())),
+                        vec![SyntaxKeyExpr::Atom("tail".to_owned())],
+                    )),
                 )),
             })
         );
@@ -2494,22 +2433,24 @@ mod tests {
                 kind: DefinitionKind::Introduce,
                 body: "foo.[1,2,3] ++ foo.([1,2] ++ [3])".to_owned(),
                 expr: Some(SyntaxExpr::Append(
-                    Box::new(SyntaxExpr::Name(vec![
-                        SyntaxKeyExpr::Atom("foo".to_owned()),
-                        SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(1)))),
-                        SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(2)))),
-                        SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(3)))),
-                    ])),
-                    Box::new(SyntaxExpr::Name(vec![
-                        SyntaxKeyExpr::Atom("foo".to_owned()),
-                        SyntaxKeyExpr::PathIndex(Box::new(SyntaxExpr::Append(
+                    Box::new(SyntaxExpr::Access(
+                        Box::new(SyntaxExpr::Name("foo".to_owned())),
+                        vec![
+                            SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(1)))),
+                            SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(2)))),
+                            SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(3)))),
+                        ],
+                    )),
+                    Box::new(SyntaxExpr::Access(
+                        Box::new(SyntaxExpr::Name("foo".to_owned())),
+                        vec![SyntaxKeyExpr::PathIndex(Box::new(SyntaxExpr::Append(
                             Box::new(SyntaxExpr::List(vec![
                                 SyntaxExpr::Number(n(1)),
                                 SyntaxExpr::Number(n(2)),
                             ])),
                             Box::new(SyntaxExpr::List(vec![SyntaxExpr::Number(n(3))])),
-                        ))),
-                    ])),
+                        )))],
+                    )),
                 )),
             })
         );
@@ -2519,11 +2460,11 @@ mod tests {
     fn dotted_paths_require_tight_dots() {
         assert!(matches!(
             parse_expr("foo.[  42  ].bar"),
-            Some(SyntaxExpr::Name(_))
+            Some(SyntaxExpr::Access(_, _))
         ));
         assert!(matches!(
             parse_expr("foo.([1,2] ++ [3]).bar"),
-            Some(SyntaxExpr::Name(_))
+            Some(SyntaxExpr::Access(_, _))
         ));
 
         assert_eq!(
@@ -2580,9 +2521,7 @@ mod tests {
         assert_eq!(
             parse_expr("(foo).bar"),
             Some(SyntaxExpr::Access(
-                Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom(
-                    "foo".to_owned()
-                )])),
+                Box::new(SyntaxExpr::Name("foo".to_owned())),
                 vec![SyntaxKeyExpr::Atom("bar".to_owned())],
             ))
         );
