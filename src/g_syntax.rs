@@ -123,7 +123,7 @@ pub enum SyntaxExpr {
     Text(String),
     Name(String),
     PriorName(String),
-    EscapedName(String),
+    Escape(usize, Box<SyntaxExpr>),
     Access(Box<SyntaxExpr>, Vec<SyntaxKeyExpr>),
     SingletonDict(SyntaxKeyExpr, Box<SyntaxExpr>),
     DictUnion(Vec<SyntaxExpr>),
@@ -155,10 +155,10 @@ struct LocalName {
 struct NameScope {
     final_defs: Value,
     prior_defs: Value,
-    escaped_final_defs: Value,
     object_alias: Option<String>,
     object_final_defs: Option<Value>,
     object_prior_defs: Option<Value>,
+    parent: Option<Box<NameScope>>,
 }
 
 impl NameScope {
@@ -166,10 +166,10 @@ impl NameScope {
         Self {
             final_defs: context.final_defs.clone(),
             prior_defs: visible_definitions,
-            escaped_final_defs: context.final_defs.clone(),
             object_alias: None,
             object_final_defs: None,
             object_prior_defs: None,
+            parent: None,
         }
     }
 }
@@ -685,8 +685,16 @@ fn object_body_scope(
     module_prior_defs: Value,
 ) -> NameScope {
     let object_alias = alias.map(ToOwned::to_owned);
+    let parent = NameScope {
+        final_defs: module_final_defs,
+        prior_defs: module_prior_defs,
+        object_alias: None,
+        object_final_defs: None,
+        object_prior_defs: None,
+        parent: None,
+    };
     let (final_defs, prior_defs) = if object_alias.is_some() {
-        (module_final_defs.clone(), module_prior_defs)
+        (parent.final_defs.clone(), parent.prior_defs.clone())
     } else {
         (object_final_defs.clone(), object_prior_defs.clone())
     };
@@ -694,10 +702,10 @@ fn object_body_scope(
     NameScope {
         final_defs,
         prior_defs,
-        escaped_final_defs: module_final_defs,
         object_alias,
         object_final_defs: Some(object_final_defs),
         object_prior_defs: Some(object_prior_defs),
+        parent: Some(Box::new(parent)),
     }
 }
 
@@ -948,7 +956,10 @@ fn syntax_expr_to_value_in_scope(
         SyntaxExpr::DictUnion(items) => lower_dict_union(items, line, context, scope, locals)?,
         SyntaxExpr::Name(name) => lower_name_expr(name, context, scope, locals),
         SyntaxExpr::PriorName(name) => lower_prior_name_expr(name, line, context, scope)?,
-        SyntaxExpr::EscapedName(name) => lower_escaped_name_expr(name, context, scope),
+        SyntaxExpr::Escape(depth, expr) => {
+            let escaped_scope = escaped_name_scope(scope, *depth);
+            syntax_expr_to_value_in_scope(expr, line, context, &escaped_scope, locals)?
+        }
         SyntaxExpr::Access(base, parts) => context.value_access(
             syntax_expr_to_value_in_scope(base, line, context, scope, locals)?,
             parts
@@ -1115,11 +1126,15 @@ fn lower_prior_name_expr(
     ))
 }
 
-fn lower_escaped_name_expr(name: &str, context: &CompileContext, scope: &NameScope) -> Value {
-    context.value_access(
-        scope.escaped_final_defs.clone(),
-        vec![context.key_expr_key(Key::atom_from_text(name))],
-    )
+fn escaped_name_scope(scope: &NameScope, depth: usize) -> NameScope {
+    let mut escaped = scope.clone();
+    for _ in 0..depth {
+        let Some(parent) = escaped.parent.as_deref() else {
+            break;
+        };
+        escaped = parent.clone();
+    }
+    escaped
 }
 
 fn local_binding_index(name: &str, locals: &[LocalName]) -> Option<usize> {
@@ -1719,7 +1734,8 @@ fn warn_unused_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diag
 fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diagnostic>) {
     match expr {
         SyntaxExpr::Number(_) | SyntaxExpr::Text(_) => {}
-        SyntaxExpr::Name(_) | SyntaxExpr::PriorName(_) | SyntaxExpr::EscapedName(_) => {}
+        SyntaxExpr::Name(_) | SyntaxExpr::PriorName(_) => {}
+        SyntaxExpr::Escape(_, expr) => analyze_expr_locals(expr, line, diagnostics),
         SyntaxExpr::Access(base, parts) => {
             analyze_expr_locals(base, line, diagnostics);
             for part in parts {
@@ -1784,7 +1800,8 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
                 used[index] = true;
             }
         }
-        SyntaxExpr::PriorName(_) | SyntaxExpr::EscapedName(_) => {}
+        SyntaxExpr::PriorName(_) => {}
+        SyntaxExpr::Escape(_, expr) => mark_used_locals(expr, locals, used),
         SyntaxExpr::Access(base, parts) => {
             mark_used_locals(base, locals, used);
             for part in parts {
@@ -2031,12 +2048,23 @@ fn syntax_expr_parser<'src>()
             .then(path_suffix.clone())
             .map(|(name, suffixes)| access_if_path(SyntaxExpr::PriorName(name), suffixes))
             .boxed();
-        let escaped_name = just('^')
+        let escaped_expr = just('^')
             .repeated()
             .at_least(1)
-            .ignore_then(name.clone())
+            .collect::<Vec<_>>()
+            .then(choice((
+                expr.clone().padded().delimited_by(just('('), just(')')),
+                name.clone()
+                    .then(path_suffix.clone())
+                    .map(|(name, suffixes)| access_if_path(SyntaxExpr::Name(name), suffixes)),
+            )))
             .then(path_suffix.clone())
-            .map(|(name, suffixes)| access_if_path(SyntaxExpr::EscapedName(name), suffixes))
+            .map(|((carets, escaped), suffixes)| {
+                access_if_path(
+                    SyntaxExpr::Escape(carets.len(), Box::new(escaped)),
+                    suffixes,
+                )
+            })
             .boxed();
         let name_expr = name
             .clone()
@@ -2109,7 +2137,7 @@ fn syntax_expr_parser<'src>()
             .then(path_suffix.clone())
             .map(|(base, suffixes)| access_if_path(base, suffixes))
             .boxed();
-        let atom = choice((literal_expr, escaped_name, prior_name, name_expr)).boxed();
+        let atom = choice((literal_expr, escaped_expr, prior_name, name_expr)).boxed();
         let application = atom
             .clone()
             .then(
@@ -2906,9 +2934,32 @@ mod tests {
     fn parses_escaped_object_scope_names() {
         assert_eq!(
             parse_expr("^prefix.value"),
+            Some(SyntaxExpr::Escape(
+                1,
+                Box::new(SyntaxExpr::Access(
+                    Box::new(SyntaxExpr::Name("prefix".to_owned())),
+                    vec![SyntaxKeyExpr::Atom("value".to_owned())],
+                )),
+            ))
+        );
+        assert_eq!(
+            parse_expr("^^prefix"),
+            Some(SyntaxExpr::Escape(
+                2,
+                Box::new(SyntaxExpr::Name("prefix".to_owned())),
+            ))
+        );
+        assert_eq!(
+            parse_expr("^(prefix ++ suffix).tail"),
             Some(SyntaxExpr::Access(
-                Box::new(SyntaxExpr::EscapedName("prefix".to_owned())),
-                vec![SyntaxKeyExpr::Atom("value".to_owned())],
+                Box::new(SyntaxExpr::Escape(
+                    1,
+                    Box::new(SyntaxExpr::Append(
+                        Box::new(SyntaxExpr::Name("prefix".to_owned())),
+                        Box::new(SyntaxExpr::Name("suffix".to_owned())),
+                    )),
+                )),
+                vec![SyntaxKeyExpr::Atom("tail".to_owned())],
             ))
         );
     }
@@ -3662,7 +3713,7 @@ mod tests {
     #[test]
     fn object_bodies_can_escape_to_module_scope() {
         let parsed = parse(
-            "language g0\nprefix = \"Hello\"\nobject hello with\n  target = \"World\"\n  text = ^prefix ++ \", \" ++ target ++ \"!\"\nasm.result = hello.text\n",
+            "language g0\nprefix = \"Hello\"\nseparator = \", \"\nobject hello with\n  target = \"World\"\n  text = ^(prefix ++ separator) ++ target ++ \"!\"\n  escaped = ^^prefix\nasm.result = hello.text ++ \" \" ++ hello.escaped\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
         let lowered = lower_to_core_with_context(&parsed, &context);
@@ -3674,7 +3725,7 @@ mod tests {
                 &value,
                 &["asm", "result"]
             ))),
-            b"Hello, World!"
+            b"Hello, World! Hello"
         );
     }
 
