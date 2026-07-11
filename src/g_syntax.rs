@@ -125,6 +125,11 @@ pub enum SyntaxExpr {
     PriorName(String),
     Escape(usize, Box<SyntaxExpr>),
     Access(Box<SyntaxExpr>, Vec<SyntaxKeyExpr>),
+    With {
+        base: Box<SyntaxExpr>,
+        alias: Option<String>,
+        body: Vec<ObjectBodyDefinition>,
+    },
     SingletonDict(SyntaxKeyExpr, Box<SyntaxExpr>),
     DictUnion(Vec<SyntaxExpr>),
     List(Vec<SyntaxExpr>),
@@ -521,11 +526,31 @@ fn lower_definition(
     definitions: &mut Value,
     scope: &NameScope,
 ) -> Result<(), Diagnostic> {
+    lower_definition_with_locals(
+        definition,
+        declaration_text,
+        line,
+        context,
+        definitions,
+        scope,
+        &mut Vec::new(),
+    )
+}
+
+fn lower_definition_with_locals(
+    definition: &DefinitionDecl,
+    declaration_text: &str,
+    line: usize,
+    context: &CompileContext,
+    definitions: &mut Value,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<(), Diagnostic> {
     let Some(expr) = &definition.expr else {
         return Ok(());
     };
 
-    let value = syntax_expr_to_value(expr, line, context, scope)?;
+    let value = syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?;
     let value = match definition.kind {
         DefinitionKind::Introduce => annotate_definition_value(
             BuiltinAssertion::Undefined,
@@ -950,15 +975,6 @@ fn definition_param_count(
     Ok(params.split_whitespace().count())
 }
 
-fn syntax_expr_to_value(
-    expr: &SyntaxExpr,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope,
-) -> Result<Value, Diagnostic> {
-    syntax_expr_to_value_in_scope(expr, line, context, scope, &mut Vec::new())
-}
-
 fn syntax_expr_to_value_in_scope(
     expr: &SyntaxExpr,
     line: usize,
@@ -988,6 +1004,9 @@ fn syntax_expr_to_value_in_scope(
                 .map(|part| syntax_key_expr_to_core(part, line, context, scope, locals))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
+        SyntaxExpr::With { base, alias, body } => {
+            lower_dict_with_expr(base, alias.as_deref(), body, line, context, scope, locals)?
+        }
         SyntaxExpr::List(items) => context.value_list(
             items
                 .iter()
@@ -1017,6 +1036,70 @@ fn syntax_expr_to_value_in_scope(
             lower_builtin_expr(Builtin::Append, left, right, line, context, scope, locals)?
         }
     })
+}
+
+fn lower_dict_with_expr(
+    base: &SyntaxExpr,
+    alias: Option<&str>,
+    body: &[ObjectBodyDefinition],
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<Value, Diagnostic> {
+    let prior_defs = syntax_expr_to_value_in_scope(base, line, context, scope, locals)?;
+    let final_defs = context.value_local(0);
+    let mut definitions = prior_defs.clone();
+
+    for body_definition in body {
+        let body_scope = dict_with_body_scope(
+            alias,
+            final_defs.clone(),
+            definitions.clone(),
+            scope.clone(),
+        );
+        lower_definition_with_locals(
+            &body_definition.definition,
+            body_definition.text.as_str(),
+            body_definition.line,
+            context,
+            &mut definitions,
+            &body_scope,
+            locals,
+        )?;
+    }
+
+    Ok(context.value_apply(
+        context.value_builtin(Builtin::Fixpoint),
+        context.value_lambda(definitions),
+    ))
+}
+
+fn dict_with_body_scope(
+    alias: Option<&str>,
+    dict_final_defs: Value,
+    dict_prior_defs: Value,
+    parent: NameScope,
+) -> NameScope {
+    let object_alias = alias
+        .map(local_name_metadata)
+        .and_then(|alias| alias.canonical);
+    let object_final_defs = Some(dict_final_defs.clone());
+    let object_prior_defs = Some(dict_prior_defs.clone());
+    let (final_defs, prior_defs) = if object_alias.as_deref() == Some("self") {
+        (dict_final_defs, dict_prior_defs)
+    } else {
+        (parent.final_defs.clone(), parent.prior_defs.clone())
+    };
+
+    NameScope {
+        final_defs,
+        prior_defs,
+        object_alias,
+        object_final_defs,
+        object_prior_defs,
+        parent: Some(Box::new(parent)),
+    }
 }
 
 fn lower_builtin_expr(
@@ -1724,7 +1807,21 @@ fn desugar_definition_body(kind: DefinitionKind, params: &[String], body: String
     }
 }
 
+#[cfg(test)]
 fn parse_expr_result(text: &str) -> Result<SyntaxExpr, String> {
+    let mut diagnostics = Vec::new();
+    parse_expr_result_with_diagnostics(text, 1, &mut diagnostics)
+}
+
+fn parse_expr_result_with_diagnostics(
+    text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<SyntaxExpr, String> {
+    if let Some(result) = parse_with_expr_result(text, line, diagnostics) {
+        return result;
+    }
+
     syntax_expr_parser()
         .then_ignore(end())
         .parse(text)
@@ -1738,6 +1835,63 @@ fn parse_expr_result(text: &str) -> Result<SyntaxExpr, String> {
         })
 }
 
+fn parse_with_expr_result(
+    text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Result<SyntaxExpr, String>> {
+    let mut lines = text.lines();
+    let header = lines.next()?.trim();
+    let body_lines = lines.collect::<Vec<_>>();
+    if body_lines.is_empty() {
+        return None;
+    }
+
+    let base_and_alias = header.strip_suffix(" with")?.trim();
+    let (base_text, alias) = parse_optional_with_alias(base_and_alias);
+    if base_text.is_empty() {
+        return Some(Err("with expression requires a base expression".to_owned()));
+    }
+    let base = match parse_expr_result_with_diagnostics(base_text, line, diagnostics) {
+        Ok(base) => base,
+        Err(message) => return Some(Err(message)),
+    };
+
+    let mut body = Vec::new();
+    for (offset, body_line) in body_lines.iter().enumerate() {
+        if body_line.trim().is_empty() {
+            continue;
+        }
+        let body_line_number = line + offset + 1;
+        let Some(definition) =
+            parse_object_body_definition(body_line.trim(), body_line_number, diagnostics)
+        else {
+            continue;
+        };
+        body.push(definition);
+    }
+
+    Some(Ok(SyntaxExpr::With {
+        base: Box::new(base),
+        alias,
+        body,
+    }))
+}
+
+fn parse_optional_with_alias(text: &str) -> (&str, Option<String>) {
+    let Some((base, alias)) = text.rsplit_once(" as ") else {
+        return (text, None);
+    };
+    if alias == "_" {
+        return (base.trim(), None);
+    }
+    if local_name().parse(alias).into_result().is_ok() {
+        (base.trim(), Some(alias.to_owned()))
+    } else {
+        (text, None)
+    }
+}
+
 #[cfg(test)]
 fn parse_expr(text: &str) -> Option<SyntaxExpr> {
     parse_expr_result(text).ok()
@@ -1748,7 +1902,7 @@ fn finalize_definition_expr(
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> DefinitionDecl {
-    match parse_expr_result(definition.body.as_str()) {
+    match parse_expr_result_with_diagnostics(definition.body.as_str(), line, diagnostics) {
         Ok(expr) => {
             warn_unused_locals(&expr, line, diagnostics);
             definition.expr = Some(expr);
@@ -1771,6 +1925,17 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
             analyze_expr_locals(base, line, diagnostics);
             for part in parts {
                 analyze_key_expr_locals(part, line, diagnostics);
+            }
+        }
+        SyntaxExpr::With { base, alias, body } => {
+            analyze_expr_locals(base, line, diagnostics);
+            if let Some(alias) = alias {
+                warn_unused_with_alias(alias, body, line, diagnostics);
+            }
+            for item in body {
+                if let Some(expr) = &item.definition.expr {
+                    analyze_expr_locals(expr, item.line, diagnostics);
+                }
             }
         }
         SyntaxExpr::SingletonDict(key, value) => {
@@ -1811,11 +1976,93 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
     }
 }
 
+fn warn_unused_with_alias(
+    alias: &str,
+    body: &[ObjectBodyDefinition],
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if alias == "self" {
+        return;
+    }
+    let alias = local_name_metadata(alias);
+    if alias.canonical.is_none() || alias.suppress_unused_warning {
+        return;
+    }
+
+    let mut used = vec![false];
+    for item in body {
+        if let Some(expr) = &item.definition.expr {
+            mark_used_locals(expr, std::slice::from_ref(&alias), &mut used);
+            mark_used_prior_alias(expr, alias.canonical.as_deref(), &mut used[0]);
+        }
+    }
+    if !used[0] {
+        diagnostics.push(Diagnostic::warn(
+            line,
+            format!("unused local `{}`", alias.raw),
+        ));
+    }
+}
+
 fn analyze_key_expr_locals(key: &SyntaxKeyExpr, line: usize, diagnostics: &mut Vec<Diagnostic>) {
     match key {
         SyntaxKeyExpr::Atom(_) => {}
         SyntaxKeyExpr::Index(expr) | SyntaxKeyExpr::PathIndex(expr) => {
             analyze_expr_locals(expr, line, diagnostics)
+        }
+    }
+}
+
+fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool) {
+    match expr {
+        SyntaxExpr::PriorName(name) if Some(name.as_str()) == alias => *used = true,
+        SyntaxExpr::Number(_)
+        | SyntaxExpr::Text(_)
+        | SyntaxExpr::Name(_)
+        | SyntaxExpr::PriorName(_) => {}
+        SyntaxExpr::Escape(_, expr) => mark_used_prior_alias(expr, alias, used),
+        SyntaxExpr::Access(base, parts) => {
+            mark_used_prior_alias(base, alias, used);
+            for part in parts {
+                mark_used_prior_alias_in_key(part, alias, used);
+            }
+        }
+        SyntaxExpr::With { base, body, .. } => {
+            mark_used_prior_alias(base, alias, used);
+            for item in body {
+                if let Some(expr) = &item.definition.expr {
+                    mark_used_prior_alias(expr, alias, used);
+                }
+            }
+        }
+        SyntaxExpr::SingletonDict(key, value) => {
+            mark_used_prior_alias_in_key(key, alias, used);
+            mark_used_prior_alias(value, alias, used);
+        }
+        SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) => {
+            for item in items {
+                mark_used_prior_alias(item, alias, used);
+            }
+        }
+        SyntaxExpr::Lambda(_, body) => mark_used_prior_alias(body, alias, used),
+        SyntaxExpr::Apply(function, argument)
+        | SyntaxExpr::Multiply(function, argument)
+        | SyntaxExpr::Divide(function, argument)
+        | SyntaxExpr::Add(function, argument)
+        | SyntaxExpr::Subtract(function, argument)
+        | SyntaxExpr::Append(function, argument) => {
+            mark_used_prior_alias(function, alias, used);
+            mark_used_prior_alias(argument, alias, used);
+        }
+    }
+}
+
+fn mark_used_prior_alias_in_key(key: &SyntaxKeyExpr, alias: Option<&str>, used: &mut bool) {
+    match key {
+        SyntaxKeyExpr::Atom(_) => {}
+        SyntaxKeyExpr::Index(expr) | SyntaxKeyExpr::PathIndex(expr) => {
+            mark_used_prior_alias(expr, alias, used)
         }
     }
 }
@@ -1837,6 +2084,14 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             mark_used_locals(base, locals, used);
             for part in parts {
                 mark_used_key_expr(part, locals, used);
+            }
+        }
+        SyntaxExpr::With { base, body, .. } => {
+            mark_used_locals(base, locals, used);
+            for item in body {
+                if let Some(expr) = &item.definition.expr {
+                    mark_used_locals(expr, locals, used);
+                }
             }
         }
         SyntaxExpr::SingletonDict(key, value) => {
@@ -3404,6 +3659,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_dictionary_with_expressions() {
+        assert!(matches!(
+            parse_expr("{ x:1 } with\nx := 2\ny = x + 1"),
+            Some(SyntaxExpr::With {
+                alias: None,
+                body,
+                ..
+            }) if body.len() == 2
+        ));
+        assert!(matches!(
+            parse_expr("d as prior with\nx := _prior.x + 1"),
+            Some(SyntaxExpr::With {
+                alias: Some(alias),
+                body,
+                ..
+            }) if alias == "prior" && body.len() == 1
+        ));
+        assert!(matches!(
+            parse_expr("d as _prior with\nx := _prior.x + 1"),
+            Some(SyntaxExpr::With {
+                alias: Some(alias),
+                body,
+                ..
+            }) if alias == "_prior" && body.len() == 1
+        ));
+        assert!(matches!(
+            parse_expr("d as _ with\nx := 1"),
+            Some(SyntaxExpr::With {
+                alias: None,
+                body,
+                ..
+            }) if body.len() == 1
+        ));
+    }
+
+    #[test]
     fn reports_ambiguous_slash_chains_as_parse_errors() {
         let parsed = parse("language g0\nasm.result = 3/4/5\n");
 
@@ -3794,6 +4085,102 @@ mod tests {
     fn aliased_extend_bodies_can_reference_prior_object_and_module_scope() {
         let parsed = parse(
             "language g0\nsuffix = \"!\"\nobject hello with\n  text = \"Hello, World\"\nextend hello as h with\n  text := _h.text ++ suffix\nasm.result = hello.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn dictionary_with_without_alias_uses_parent_scope() {
+        let parsed = parse(
+            "language g0\nhello = \"Hello\"\nworld = \"World\"\nd = { hello:\"Nope\", world:\"Nope\" } with\n  hello := \"Still Nope\"\n  text = hello ++ \", \" ++ world ++ \"!\"\nasm.result = d.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn dictionary_with_aliases_capture_prior_and_final_dictionaries() {
+        let parsed = parse(
+            "language g0\nsuffix = \"!\"\nbase = { text:\"Hello, World\" }\nd = base as b with\n  text := _b.text ++ suffix\n  result = b.text\nasm.result = d.result\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn dictionary_with_suppressed_aliases_still_bind_canonical_names() {
+        let parsed = parse(
+            "language g0\nsuffix = \"!\"\nbase = { text:\"Hello, World\" }\nd = base as _b with\n  text := _b.text ++ suffix\n  result = b.text\nasm.result = d.result\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn dictionary_with_aliases_follow_local_unused_warning_rules() {
+        let parsed =
+            parse("language g0\nd = {} as unused with\n  x = 1\ne = {} as _unused with\n  x = 1\n");
+
+        assert_eq!(
+            parsed
+                .diagnostics
+                .iter()
+                .filter(|diag| diag.message.contains("unused local"))
+                .count(),
+            1
+        );
+        assert!(parsed.diagnostics.iter().any(|diag| {
+            diag.severity == Severity::Warning
+                && diag.line == 2
+                && diag.message == "unused local `unused`"
+        }));
+    }
+
+    #[test]
+    fn dictionary_with_self_alias_uses_object_style_scope() {
+        let parsed = parse(
+            "language g0\nsuffix = \"!\"\nbase = { text:\"Hello, World\" }\nd = base as self with\n  text := _text ++ ^suffix\nasm.result = d.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
         let lowered = lower_to_core_with_context(&parsed, &context);
