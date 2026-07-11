@@ -317,12 +317,6 @@ fn apply_builtin(
             })?;
             eval_merge_duplicate_builtin(&name, &left, &right, local_env)
         }
-        Builtin::UpdateDuplicate => {
-            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
-                EvalError::new("update duplicate builtin received the wrong number of arguments")
-            })?;
-            eval_update_duplicate_builtin(&left, &right, local_env)
-        }
         Builtin::Floor => {
             let [value] = <[Value; 1]>::try_from(args).map_err(|_| {
                 EvalError::new("floor builtin received the wrong number of arguments")
@@ -360,16 +354,10 @@ fn apply_builtin(
             eval_dict_union_builtin(&left, &right, local_env)
         }
         Builtin::DictUpdate => {
-            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+            let [path, new_value, dict] = <[Value; 3]>::try_from(args).map_err(|_| {
                 EvalError::new("dict update builtin received the wrong number of arguments")
             })?;
-            eval_dict_update_builtin(&left, &right, local_env)
-        }
-        Builtin::DictRemove => {
-            let [dict, key] = <[Value; 2]>::try_from(args).map_err(|_| {
-                EvalError::new("dict remove builtin received the wrong number of arguments")
-            })?;
-            eval_dict_remove_builtin(&dict, &key, local_env)
+            eval_dict_update_builtin(&path, &new_value, &dict, local_env)
         }
         Builtin::ObjectInstance => {
             let [spec] = <[Value; 1]>::try_from(args).map_err(|_| {
@@ -580,38 +568,26 @@ fn eval_dict_union_builtin(
 }
 
 fn eval_dict_update_builtin(
-    left: &Value,
-    right: &Value,
-    _local_env: &[Value],
-) -> Result<Value, EvalError> {
-    let left = force_value_shell(left)?;
-    let right = force_value_shell(right)?;
-    let Value::Dict(left_dict) = left else {
-        return Err(EvalError::new(
-            "dictionary update requires dictionary values",
-        ));
-    };
-    let Value::Dict(right_dict) = right else {
-        return Err(EvalError::new(
-            "dictionary update requires dictionary values",
-        ));
-    };
-
-    Ok(Value::Dict(update_dicts(&left_dict, &right_dict)))
-}
-
-fn eval_dict_remove_builtin(
+    path: &Value,
+    new_value: &Value,
     dict: &Value,
-    key: &Value,
     local_env: &[Value],
 ) -> Result<Value, EvalError> {
+    let path = eval_key_path_list(path, local_env)?;
+    if path.is_empty() {
+        return Err(EvalError::new(
+            "dict update builtin requires a non-empty path",
+        ));
+    }
     let dict = force_value_shell(dict)?;
     let Value::Dict(dict) = dict else {
-        return Err(EvalError::new("dict remove builtin requires a dictionary"));
+        return Err(EvalError::new("dict update builtin requires a dictionary"));
     };
-    let key = eval_value(key)?;
-    let key = value_to_key(&key, local_env)?;
-    Ok(Value::Dict(dict.remove(&key)))
+    Ok(Value::Dict(update_dict_path(
+        &dict,
+        &path,
+        new_value.clone(),
+    )))
 }
 
 fn eval_fixpoint_builtin(function: &Value) -> Result<Value, EvalError> {
@@ -982,29 +958,6 @@ fn eval_merge_duplicate_builtin(
     }
 }
 
-fn eval_update_duplicate_builtin(
-    left: &Value,
-    right: &Value,
-    _local_env: &[Value],
-) -> Result<Value, EvalError> {
-    let left = eval_value(left)?;
-    let right = eval_value(right)?;
-
-    if is_undefined_value(&right) {
-        return Ok(right);
-    }
-    if is_undefined_value(&left) {
-        return Ok(right);
-    }
-
-    match (&left, &right) {
-        (Value::Dict(left_dict), Value::Dict(right_dict)) => {
-            Ok(Value::Dict(update_dicts(left_dict, right_dict)))
-        }
-        _ => Ok(right),
-    }
-}
-
 fn merge_dicts(left: &crate::core::Dict, right: &crate::core::Dict) -> crate::core::Dict {
     let (mut merged, updates) = if left.size() >= right.size() {
         (left.clone(), right)
@@ -1026,37 +979,6 @@ fn merge_dicts(left: &crate::core::Dict, right: &crate::core::Dict) -> crate::co
     }
 
     merged
-}
-
-fn update_dicts(left: &crate::core::Dict, right: &crate::core::Dict) -> crate::core::Dict {
-    let mut updated = left.clone();
-
-    for (key, value) in right.iter() {
-        let next_value = match updated.get(key) {
-            Some(existing) => Some(update_duplicate_dict_value(existing, value)),
-            _ if is_undefined_dict_value(value) => None,
-            _ => Some(value.clone()),
-        };
-        updated = match next_value {
-            Some(value) if is_undefined_dict_value(&value) => updated.remove(key),
-            Some(value) => updated.insert(key.clone(), value),
-            None => updated.remove(key),
-        };
-    }
-
-    updated
-}
-
-fn update_duplicate_dict_value(left: &Value, right: &Value) -> Value {
-    match (left, right) {
-        (Value::Dict(left_dict), Value::Dict(right_dict)) => {
-            Value::Dict(update_dicts(left_dict, right_dict))
-        }
-        _ if is_expr_value(left) || is_expr_value(right) => {
-            builtin_apply2_value(Builtin::UpdateDuplicate, left, right)
-        }
-        _ => right.clone(),
-    }
 }
 
 fn merge_duplicate_dict_value(key: &Key, left: &Value, right: &Value) -> Value {
@@ -1085,6 +1007,70 @@ fn merge_duplicate_dict_value(key: &Key, left: &Value, right: &Value) -> Value {
     }
 }
 
+fn update_dict_path(dict: &crate::core::Dict, path: &[Key], new_value: Value) -> crate::core::Dict {
+    let Some((head, rest)) = path.split_first() else {
+        return dict.clone();
+    };
+
+    let next_value = if rest.is_empty() {
+        new_value
+    } else {
+        let prior = dict
+            .get(head)
+            .cloned()
+            .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
+        update_nested_dict_path(head, rest, new_value, prior)
+    };
+
+    if is_undefined_dict_value(&next_value) {
+        dict.remove(head)
+    } else {
+        dict.insert(head.clone(), next_value)
+    }
+}
+
+fn update_nested_dict_path(head: &Key, rest: &[Key], new_value: Value, prior: Value) -> Value {
+    match prior {
+        Value::Dict(dict) => Value::Dict(update_dict_path(&dict, rest, new_value)),
+        Value::Expr(_) => builtin_apply3_value(
+            Builtin::DictUpdate,
+            &key_path_value(rest),
+            &new_value,
+            &prior,
+        ),
+        _ => Value::Expr(Thunk {
+            expr: Arc::new(Expr::Error(Arc::from(format!(
+                "dictionary update path `{}` traverses a non-dictionary value",
+                format_name_part(head)
+            )))),
+            env: Arc::from([]),
+        }),
+    }
+}
+
+fn key_path_value(path: &[Key]) -> Value {
+    Value::List(List::from_values(path.iter().map(key_value).collect()))
+}
+
+fn key_value(key: &Key) -> Value {
+    match key {
+        Key::Atom(atom) => Value::Atom(*atom),
+        Key::Number(number) => Value::Number(number.clone()),
+        Key::Binary(bytes) => Value::Binary(bytes.clone()),
+        Key::AbstractGlobalPath(parts) => Value::Atom(crate::core::Atom::from_key(
+            &Key::AbstractGlobalPath(parts.clone()),
+        )),
+        Key::List(items) => Value::List(List::from_values(items.iter().map(key_value).collect())),
+        Key::Dict(entries) => Value::Dict(
+            entries
+                .iter()
+                .fold(crate::core::Dict::new_sync(), |dict, (key, value)| {
+                    dict.insert(key.clone(), key_value(value))
+                }),
+        ),
+    }
+}
+
 fn value_as_expr(value: &Value) -> Arc<Expr> {
     Arc::new(Expr::Value(value.clone()))
 }
@@ -1100,19 +1086,6 @@ fn builtin_apply3_value(builtin: Builtin, first: &Value, second: &Value, third: 
                 value_as_expr(second),
             )),
             value_as_expr(third),
-        )),
-        env: Arc::from([]),
-    })
-}
-
-fn builtin_apply2_value(builtin: Builtin, left: &Value, right: &Value) -> Value {
-    Value::Expr(Thunk {
-        expr: Arc::new(Expr::Apply(
-            Arc::new(Expr::Apply(
-                Arc::new(Expr::Value(Value::Builtin(builtin))),
-                value_as_expr(left),
-            )),
-            value_as_expr(right),
         )),
         env: Arc::from([]),
     })
@@ -1296,8 +1269,8 @@ mod tests {
         builtin2_expr(Builtin::DictUnion, left, right)
     }
 
-    fn dict_update_expr(left: Expr, right: Expr) -> Expr {
-        builtin2_expr(Builtin::DictUpdate, left, right)
+    fn dict_update_expr(path: Expr, new_value: Expr, dict: Expr) -> Expr {
+        builtin3_expr(Builtin::DictUpdate, path, new_value, dict)
     }
 
     fn global_access(path: Vec<KeyExpr>) -> Expr {
@@ -1323,6 +1296,12 @@ mod tests {
                     }),
             ),
         }
+    }
+
+    fn key_path_expr(path: Vec<Key>) -> Expr {
+        Expr::Value(Value::List(List::from_values(
+            path.iter().map(key_value).collect(),
+        )))
     }
 
     fn module_value_expr(value: &Value) -> Expr {
@@ -1909,11 +1888,10 @@ mod tests {
     fn dictionary_updates_overwrite_duplicate_values() {
         let key = Key::atom_from_text("greeting");
         let expr = dict_update_expr(
+            key_path_expr(vec![key.clone()]),
+            Expr::Value(Value::binary_from_text("World")),
             Expr::Value(Value::Dict(
                 crate::core::Dict::new_sync().insert(key.clone(), Value::binary_from_text("Hello")),
-            )),
-            Expr::Value(Value::Dict(
-                crate::core::Dict::new_sync().insert(key.clone(), Value::binary_from_text("World")),
             )),
         );
 
@@ -1932,21 +1910,14 @@ mod tests {
         let world = Key::atom_from_text("world");
 
         let expr = dict_update_expr(
+            key_path_expr(vec![key.clone(), world.clone()]),
+            Expr::Value(Value::binary_from_text("World")),
             Expr::Value(Value::Dict(
                 crate::core::Dict::new_sync().insert(
                     key.clone(),
                     Value::Dict(
                         crate::core::Dict::new_sync()
                             .insert(hello.clone(), Value::binary_from_text("Hello")),
-                    ),
-                ),
-            )),
-            Expr::Value(Value::Dict(
-                crate::core::Dict::new_sync().insert(
-                    key.clone(),
-                    Value::Dict(
-                        crate::core::Dict::new_sync()
-                            .insert(world.clone(), Value::binary_from_text("World")),
                     ),
                 ),
             )),
@@ -1972,12 +1943,10 @@ mod tests {
     fn dictionary_updates_treat_empty_dictionary_values_as_undefined() {
         let key = Key::atom_from_text("greeting");
         let expr = dict_update_expr(
+            key_path_expr(vec![key.clone()]),
+            Expr::Value(Value::Dict(crate::core::Dict::new_sync())),
             Expr::Value(Value::Dict(
                 crate::core::Dict::new_sync().insert(key.clone(), Value::binary_from_text("Hello")),
-            )),
-            Expr::Value(Value::Dict(
-                crate::core::Dict::new_sync()
-                    .insert(key.clone(), Value::Dict(crate::core::Dict::new_sync())),
             )),
         );
 

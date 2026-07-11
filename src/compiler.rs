@@ -240,6 +240,19 @@ impl CompileContext {
         self.value_apply(self.value_apply(self.value_builtin(builtin), left), right)
     }
 
+    pub fn builtin_apply3_value(
+        &self,
+        builtin: Builtin,
+        first: Value,
+        second: Value,
+        third: Value,
+    ) -> Value {
+        self.value_apply(
+            self.value_apply(self.value_apply(self.value_builtin(builtin), first), second),
+            third,
+        )
+    }
+
     pub fn local_module_load_args(
         &self,
         reference: &str,

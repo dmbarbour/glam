@@ -381,12 +381,10 @@ fn lower_builtin_import(
         .ok_or_else(|| Diagnostic::error(line, format!("unknown built-in module `'{name}`")))?;
 
     *definitions = match placement {
-        ImportPlacement::Inline => update_module_value(definitions.clone(), module, context),
-        ImportPlacement::As(target) => update_module_value(
-            definitions.clone(),
-            path_to_dict_value(target, module, context)?,
-            context,
-        ),
+        ImportPlacement::Inline => update_module_dict_value(definitions.clone(), module, context),
+        ImportPlacement::As(target) => {
+            update_module_value(definitions.clone(), target, module, context)
+        }
         ImportPlacement::At(_) => {
             return Err(Diagnostic::error(
                 line,
@@ -420,20 +418,12 @@ fn lower_local_import(
             // prior and install the resulting module at the target path.
             let loaded =
                 scoped_local_import_value(reference, target, context.empty_dict_value(), context)?;
-            *definitions = update_module_value(
-                definitions.clone(),
-                path_to_dict_value(target, loaded, context)?,
-                context,
-            );
+            *definitions = update_module_value(definitions.clone(), target, loaded, context);
         }
         ImportPlacement::At(target) => {
             let scoped_prior = path_value_in_definitions(target, definitions.clone(), context)?;
             let loaded = scoped_local_import_value(reference, target, scoped_prior, context)?;
-            *definitions = update_module_value(
-                definitions.clone(),
-                path_to_dict_value(target, loaded, context)?,
-                context,
-            );
+            *definitions = update_module_value(definitions.clone(), target, loaded, context);
         }
     };
 
@@ -455,11 +445,7 @@ fn lower_local_binary_import(
     };
 
     let loaded = context.value_load_local_binary(context.local_binary_load_args(reference));
-    *definitions = update_module_value(
-        definitions.clone(),
-        path_to_dict_value(target, loaded, context)?,
-        context,
-    );
+    *definitions = update_module_value(definitions.clone(), target, loaded, context);
     Ok(())
 }
 
@@ -488,11 +474,7 @@ fn lower_unique(
     for name in names {
         let path = context.abstract_global_path(name);
         let value = context.abstract_global_path_value(path.as_ref());
-        *definitions = update_module_value(
-            definitions.clone(),
-            path_to_dict_value(name, value, context)?,
-            context,
-        );
+        *definitions = update_module_value(definitions.clone(), name, value, context);
     }
     Ok(())
 }
@@ -568,11 +550,7 @@ fn lower_definition(
             context,
         )?,
     };
-    *definitions = update_module_value(
-        definitions.clone(),
-        path_to_dict_value(&definition.target, value, context)?,
-        context,
-    );
+    *definitions = update_module_value(definitions.clone(), &definition.target, value, context);
 
     Ok(())
 }
@@ -592,11 +570,7 @@ fn lower_object(
         context,
     )?;
 
-    *definitions = update_module_value(
-        definitions.clone(),
-        path_to_dict_value(&object.target, object_value, context)?,
-        context,
-    );
+    *definitions = update_module_value(definitions.clone(), &object.target, object_value, context);
     Ok(())
 }
 
@@ -670,10 +644,11 @@ fn object_body_defs_value(
 }
 
 fn remove_object_spec_value(value: Value, context: &CompileContext) -> Value {
-    context.builtin_apply2_value(
-        Builtin::DictRemove,
+    context.builtin_apply3_value(
+        Builtin::DictUpdate,
+        path_value("spec", context),
+        context.empty_dict_value(),
         value,
-        context.value_atom(atom_from_str("spec")),
     )
 }
 
@@ -724,11 +699,7 @@ fn lower_extend(
         context,
     )?;
 
-    *definitions = update_module_value(
-        definitions.clone(),
-        path_to_dict_value(&extend.target, object_value, context)?,
-        context,
-    );
+    *definitions = update_module_value(definitions.clone(), &extend.target, object_value, context);
     Ok(())
 }
 
@@ -863,10 +834,81 @@ fn annotate_definition_value(
     Ok(context.builtin_apply2_value(Builtin::Anno, annotation, value))
 }
 
-fn update_module_value(definitions: Value, item: Value, context: &CompileContext) -> Value {
+fn update_module_value(
+    definitions: Value,
+    target: &str,
+    value: Value,
+    context: &CompileContext,
+) -> Value {
     // Module definitions are ordered updates over the incoming namespace.
     // Ordinary dictionary literals still lower through DictUnion.
-    context.builtin_apply2_value(Builtin::DictUpdate, definitions, item)
+    context.builtin_apply3_value(
+        Builtin::DictUpdate,
+        path_value(target, context),
+        value,
+        definitions,
+    )
+}
+
+fn update_module_dict_value(definitions: Value, item: Value, context: &CompileContext) -> Value {
+    match item {
+        Value::Dict(dict) => update_module_dict_entries(definitions, Vec::new(), &dict, context),
+        _ => definitions,
+    }
+}
+
+fn update_module_dict_entries(
+    definitions: Value,
+    prefix: Vec<Value>,
+    dict: &Dict,
+    context: &CompileContext,
+) -> Value {
+    dict.iter().fold(definitions, |definitions, (key, value)| {
+        let mut path = prefix.clone();
+        path.push(key_to_value(key, context));
+        match value {
+            Value::Dict(nested) if !nested.is_empty() => {
+                update_module_dict_entries(definitions, path, nested, context)
+            }
+            _ => context.builtin_apply3_value(
+                Builtin::DictUpdate,
+                context.value_list(path),
+                value.clone(),
+                definitions,
+            ),
+        }
+    })
+}
+
+fn path_value(target: &str, context: &CompileContext) -> Value {
+    context.value_list(
+        target
+            .split('.')
+            .map(|part| context.value_atom(atom_from_str(part)))
+            .collect(),
+    )
+}
+
+fn key_to_value(key: &Key, context: &CompileContext) -> Value {
+    match key {
+        Key::Atom(atom) => context.value_atom(*atom),
+        Key::Number(number) => context.value_number(number.clone()),
+        Key::Binary(bytes) => Value::Binary(bytes.clone()),
+        Key::AbstractGlobalPath(parts) => {
+            context.value_atom(Atom::from_key(&Key::AbstractGlobalPath(parts.clone())))
+        }
+        Key::List(items) => context.value_list(
+            items
+                .iter()
+                .map(|item| key_to_value(item, context))
+                .collect(),
+        ),
+        Key::Dict(entries) => {
+            context.value_dict(entries.iter().fold(Dict::new_sync(), |dict, (key, value)| {
+                dict.insert(key.clone(), key_to_value(value, context))
+            }))
+        }
+    }
 }
 
 fn path_value_in_definitions(
@@ -906,27 +948,6 @@ fn definition_param_count(
         Diagnostic::error(line, "internal error extracting definition parameters")
     })?;
     Ok(params.split_whitespace().count())
-}
-
-fn path_to_dict_value(
-    target: &str,
-    value: Value,
-    context: &CompileContext,
-) -> Result<Value, Diagnostic> {
-    let parts = target.split('.').collect::<Vec<_>>();
-    if parts.is_empty() {
-        return Err(Diagnostic::error(0, "definition target cannot be empty"));
-    }
-
-    let mut value = value;
-    for part in parts.into_iter().rev() {
-        value = context.builtin_apply2_value(
-            Builtin::DictSingleton,
-            context.value_atom(atom_from_str(part)),
-            value,
-        );
-    }
-    Ok(value)
 }
 
 fn syntax_expr_to_value(
@@ -1981,7 +2002,6 @@ fn syntax_expr_parser<'src>()
             crate::core::Builtin::Fixpoint => "fixpoint",
             crate::core::Builtin::Anno => "anno",
             crate::core::Builtin::MergeDuplicate => "merge_duplicate",
-            crate::core::Builtin::UpdateDuplicate => "update_duplicate",
             crate::core::Builtin::Floor => "floor",
             crate::core::Builtin::Mod => "mod",
             crate::core::Builtin::Slice => "slice",
@@ -1989,7 +2009,6 @@ fn syntax_expr_parser<'src>()
             crate::core::Builtin::DictSingleton => ":",
             crate::core::Builtin::DictUnion => "{,}",
             crate::core::Builtin::DictUpdate => "dict_update",
-            crate::core::Builtin::DictRemove => "dict_remove",
             crate::core::Builtin::ObjectInstance => "object_instance",
         }
     }

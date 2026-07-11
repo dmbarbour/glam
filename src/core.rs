@@ -243,7 +243,6 @@ pub enum Builtin {
     Fixpoint,
     Anno,
     MergeDuplicate,
-    UpdateDuplicate,
     Floor,
     Mod,
     Slice,
@@ -251,7 +250,6 @@ pub enum Builtin {
     DictSingleton,
     DictUnion,
     DictUpdate,
-    DictRemove,
     ObjectInstance,
 }
 
@@ -266,15 +264,13 @@ impl Builtin {
             Self::Fixpoint => 1,
             Self::Anno => 2,
             Self::MergeDuplicate => 3,
-            Self::UpdateDuplicate => 2,
             Self::Floor => 1,
             Self::Mod => 2,
             Self::Slice => 3,
             Self::Map => 2,
             Self::DictSingleton => 2,
             Self::DictUnion => 2,
-            Self::DictUpdate => 2,
-            Self::DictRemove => 2,
+            Self::DictUpdate => 3,
             Self::ObjectInstance => 1,
         }
     }
