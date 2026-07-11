@@ -397,14 +397,20 @@ fn lower_builtin_import(
 
     *definitions = match placement {
         ImportPlacement::Inline => update_module_dict_value(definitions.clone(), module, context),
-        ImportPlacement::As(target) => {
-            update_module_value(definitions.clone(), target, module, context)
-        }
-        ImportPlacement::At(_) => {
-            return Err(Diagnostic::error(
-                line,
-                "built-in `import ... at ...` is not supported by the current spike",
-            ));
+        ImportPlacement::As(target) => update_module_value(
+            definitions.clone(),
+            target,
+            module_object_value(target, module, context),
+            context,
+        ),
+        ImportPlacement::At(target) => {
+            let object = extend_object_with_defs(
+                target,
+                constant_object_defs(module, context),
+                context,
+                definitions.clone(),
+            )?;
+            update_module_value(definitions.clone(), target, object, context)
         }
     };
 
@@ -428,17 +434,25 @@ fn lower_local_import(
             *definitions = context.value_load_local_module(args);
         }
         ImportPlacement::As(target) => {
-            // TODO: `import ... as m` should desugar through object/env extension
-            // once object syntax exists. For this spike, load into an empty scoped
-            // prior and install the resulting module at the target path.
             let loaded =
                 scoped_local_import_value(reference, target, context.empty_dict_value(), context)?;
-            *definitions = update_module_value(definitions.clone(), target, loaded, context);
+            *definitions = update_module_value(
+                definitions.clone(),
+                target,
+                module_object_value(target, loaded, context),
+                context,
+            );
         }
         ImportPlacement::At(target) => {
             let scoped_prior = path_value_in_definitions(target, definitions.clone(), context)?;
             let loaded = scoped_local_import_value(reference, target, scoped_prior, context)?;
-            *definitions = update_module_value(definitions.clone(), target, loaded, context);
+            let object = extend_object_with_defs(
+                target,
+                constant_object_defs(loaded, context),
+                context,
+                definitions.clone(),
+            )?;
+            *definitions = update_module_value(definitions.clone(), target, object, context);
         }
     };
 
@@ -478,6 +492,25 @@ fn scoped_local_import_value(
         final_defs,
     );
     Ok(context.value_load_local_module(args))
+}
+
+fn module_object_value(target: &str, module: Value, context: &CompileContext) -> Value {
+    let spec = Dict::new_sync()
+        .insert(
+            name_as_key("name"),
+            context.abstract_global_path_value(context.abstract_global_path(target).as_ref()),
+        )
+        .insert(name_as_key("deps"), context.value_list(Vec::new()))
+        .insert(name_as_key("defs"), constant_object_defs(module, context));
+
+    context.value_apply(
+        context.value_builtin(Builtin::ObjectInstance),
+        context.value_dict(spec),
+    )
+}
+
+fn constant_object_defs(value: Value, context: &CompileContext) -> Value {
+    context.value_lambda(context.value_lambda(value))
 }
 
 fn lower_unique(
@@ -749,12 +782,6 @@ fn extend_object_value(
     context: &CompileContext,
     visible_definitions: Value,
 ) -> Result<Value, Diagnostic> {
-    let prior_object =
-        path_value_in_definitions(&extend.target, visible_definitions.clone(), context)?;
-    let prior_spec = context.value_access(
-        prior_object,
-        vec![context.key_expr_key(name_as_key("spec"))],
-    );
     let extension_defs = object_body_defs_value(
         &extend.body,
         extend.alias.as_deref(),
@@ -762,6 +789,20 @@ fn extend_object_value(
         context,
         NameScope::module(context, visible_definitions.clone()),
     )?;
+    extend_object_with_defs(&extend.target, extension_defs, context, visible_definitions)
+}
+
+fn extend_object_with_defs(
+    target: &str,
+    extension_defs: Value,
+    context: &CompileContext,
+    visible_definitions: Value,
+) -> Result<Value, Diagnostic> {
+    let prior_object = path_value_in_definitions(target, visible_definitions, context)?;
+    let prior_spec = context.value_access(
+        prior_object,
+        vec![context.key_expr_key(name_as_key("spec"))],
+    );
     let prior_defs = context.value_access(
         prior_spec.clone(),
         vec![context.key_expr_key(name_as_key("defs"))],
@@ -3056,7 +3097,7 @@ mod tests {
 
     #[test]
     fn parses_builtin_imports() {
-        let parsed = parse("language g0\nimport 'std as std\nimport 'math\n");
+        let parsed = parse("language g0\nimport 'std as std\nimport 'math\nimport 'list as list\n");
 
         assert_eq!(parsed.diagnostics, []);
         assert_eq!(
@@ -4730,7 +4771,7 @@ mod tests {
 
     #[test]
     fn lowers_builtin_imports_to_module_dictionaries() {
-        let parsed = parse("language g0\nimport 'std as std\nimport 'math\n");
+        let parsed = parse("language g0\nimport 'std as std\nimport 'math\nimport 'list as list\n");
         let context = CompileContext::default();
         let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
@@ -4746,6 +4787,22 @@ mod tests {
         let mod_fn = value
             .get_atom_path(&[Atom::from_key(&Key::binary_from_text("mod"))])
             .expect("inline math import should expose mod");
+        let list_len_import = crate::eval::eval_value(&Value::expr(core_global_access(
+            &context,
+            vec![
+                CoreKeyExpr::Key(Key::atom_from_text("list")),
+                CoreKeyExpr::Key(Key::atom_from_text("len")),
+            ],
+        )))
+        .expect("list.len import should resolve");
+        let list_spec = crate::eval::eval_value(&Value::expr(core_global_access(
+            &context,
+            vec![
+                CoreKeyExpr::Key(Key::atom_from_text("list")),
+                CoreKeyExpr::Key(Key::atom_from_text("spec")),
+            ],
+        )))
+        .expect("list.spec import should resolve");
         let (anno, std_list_len) = match &std {
             Value::Dict(std) => {
                 let anno = std
@@ -4785,6 +4842,14 @@ mod tests {
         assert!(matches!(
             list_len,
             Value::Builtin(crate::core::Builtin::ListLen)
+        ));
+        assert!(matches!(
+            list_len_import,
+            Value::Builtin(crate::core::Builtin::ListLen)
+        ));
+        assert!(!matches!(
+            list_spec,
+            Value::Dict(dict) if dict.is_empty()
         ));
     }
 
