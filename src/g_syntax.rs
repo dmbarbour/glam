@@ -90,6 +90,14 @@ pub struct ObjectExtendDecl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectExpr {
+    pub name: Option<Box<SyntaxExpr>>,
+    pub alias: Option<String>,
+    pub deps: Vec<SyntaxExpr>,
+    pub body: Vec<ObjectBodyDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportReference {
     Local(String),
     Builtin(String),
@@ -125,6 +133,7 @@ pub enum SyntaxExpr {
     PriorName(String),
     Escape(usize, Box<SyntaxExpr>),
     Access(Box<SyntaxExpr>, Vec<SyntaxKeyExpr>),
+    Object(ObjectExpr),
     With {
         base: Box<SyntaxExpr>,
         alias: Option<String>,
@@ -605,12 +614,13 @@ fn object_decl_value(
     context: &CompileContext,
     visible_definitions: Value,
 ) -> Result<Value, Diagnostic> {
+    let parent_scope = NameScope::module(context, visible_definitions.clone());
     let defs = object_body_defs_value(
         &object.body,
         object.alias.as_deref(),
         line,
         context,
-        visible_definitions,
+        parent_scope,
     )?;
     let deps = object
         .deps
@@ -638,29 +648,39 @@ fn object_decl_value(
 fn object_body_defs_value(
     body: &[ObjectBodyDefinition],
     alias: Option<&str>,
+    line: usize,
+    context: &CompileContext,
+    parent_scope: NameScope,
+) -> Result<Value, Diagnostic> {
+    object_body_defs_value_in_scope(body, alias, line, context, parent_scope, &mut Vec::new())
+}
+
+fn object_body_defs_value_in_scope(
+    body: &[ObjectBodyDefinition],
+    alias: Option<&str>,
     _line: usize,
     context: &CompileContext,
-    module_prior_defs: Value,
+    parent_scope: NameScope,
+    locals: &mut Vec<LocalName>,
 ) -> Result<Value, Diagnostic> {
     let mut definitions = remove_object_spec_value(context.value_local(1), context);
     let object_final_defs = context.value_local(0);
-    let module_final_defs = context.final_defs.clone();
 
     for body_definition in body {
         let scope = object_body_scope(
             alias,
             object_final_defs.clone(),
             definitions.clone(),
-            module_final_defs.clone(),
-            module_prior_defs.clone(),
+            parent_scope.clone(),
         );
-        lower_definition(
+        lower_definition_with_locals(
             &body_definition.definition,
             body_definition.text.as_str(),
             body_definition.line,
             context,
             &mut definitions,
             &scope,
+            locals,
         )?;
         definitions = remove_object_spec_value(definitions, context);
     }
@@ -681,18 +701,11 @@ fn object_body_scope(
     alias: Option<&str>,
     object_final_defs: Value,
     object_prior_defs: Value,
-    module_final_defs: Value,
-    module_prior_defs: Value,
+    parent: NameScope,
 ) -> NameScope {
-    let object_alias = alias.map(ToOwned::to_owned);
-    let parent = NameScope {
-        final_defs: module_final_defs,
-        prior_defs: module_prior_defs,
-        object_alias: None,
-        object_final_defs: None,
-        object_prior_defs: None,
-        parent: None,
-    };
+    let object_alias = alias
+        .map(local_name_metadata)
+        .and_then(|alias| alias.canonical);
     let (final_defs, prior_defs) = if object_alias.is_some() {
         (parent.final_defs.clone(), parent.prior_defs.clone())
     } else {
@@ -745,7 +758,7 @@ fn extend_object_value(
         extend.alias.as_deref(),
         line,
         context,
-        visible_definitions.clone(),
+        NameScope::module(context, visible_definitions.clone()),
     )?;
     let prior_defs = context.value_access(
         prior_spec.clone(),
@@ -1004,6 +1017,7 @@ fn syntax_expr_to_value_in_scope(
                 .map(|part| syntax_key_expr_to_core(part, line, context, scope, locals))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
+        SyntaxExpr::Object(object) => lower_object_expr(object, line, context, scope, locals)?,
         SyntaxExpr::With { base, alias, body } => {
             lower_dict_with_expr(base, alias.as_deref(), body, line, context, scope, locals)?
         }
@@ -1036,6 +1050,44 @@ fn syntax_expr_to_value_in_scope(
             lower_builtin_expr(Builtin::Append, left, right, line, context, scope, locals)?
         }
     })
+}
+
+fn lower_object_expr(
+    object: &ObjectExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<Value, Diagnostic> {
+    let name = match &object.name {
+        Some(name) => syntax_expr_to_value_in_scope(name, line, context, scope, locals)?,
+        None => context.unit_value(),
+    };
+    let deps = object
+        .deps
+        .iter()
+        .map(|dep| {
+            let dep_object = syntax_expr_to_value_in_scope(dep, line, context, scope, locals)?;
+            Ok(context.value_access(dep_object, vec![context.key_expr_key(name_as_key("spec"))]))
+        })
+        .collect::<Result<Vec<_>, Diagnostic>>()?;
+    let defs = object_body_defs_value_in_scope(
+        &object.body,
+        object.alias.as_deref(),
+        line,
+        context,
+        scope.clone(),
+        locals,
+    )?;
+    let spec = Dict::new_sync()
+        .insert(name_as_key("name"), name)
+        .insert(name_as_key("deps"), context.value_list(deps))
+        .insert(name_as_key("defs"), defs);
+
+    Ok(context.value_apply(
+        context.value_builtin(Builtin::ObjectInstance),
+        context.value_dict(spec),
+    ))
 }
 
 fn lower_dict_with_expr(
@@ -1427,6 +1479,9 @@ fn parse_object_declaration(
         };
         body.push(definition);
     }
+    if let Some(alias) = &header_tail.alias {
+        warn_unused_with_alias(alias, &body, line, diagnostics);
+    }
 
     Some(ObjectDecl {
         target: target.to_owned(),
@@ -1539,10 +1594,10 @@ fn parse_optional_object_alias<'a>(
         ));
         return None;
     };
-    if !glam_name().parse(alias).into_result().is_ok() {
+    if !local_name().parse(alias).into_result().is_ok() {
         diagnostics.push(Diagnostic::error(
             line,
-            format!("object alias `{alias}` is not a valid name"),
+            format!("object alias `{alias}` is not a valid local name"),
         ));
         return None;
     }
@@ -1633,6 +1688,9 @@ fn parse_extend_declaration(
             continue;
         };
         body.push(definition);
+    }
+    if let Some(alias) = &alias {
+        warn_unused_with_alias(alias, &body, line, diagnostics);
     }
 
     Some(ObjectExtendDecl {
@@ -1818,6 +1876,9 @@ fn parse_expr_result_with_diagnostics(
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<SyntaxExpr, String> {
+    if let Some(result) = parse_object_expr_result(text, line, diagnostics) {
+        return result;
+    }
     if let Some(result) = parse_with_expr_result(text, line, diagnostics) {
         return result;
     }
@@ -1833,6 +1894,133 @@ fn parse_expr_result_with_diagnostics(
                 .collect::<Vec<_>>()
                 .join("; ")
         })
+}
+
+fn parse_object_expr_result(
+    text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Result<SyntaxExpr, String>> {
+    let mut lines = text.lines();
+    let header = lines.next()?.trim();
+    let body_lines = lines.collect::<Vec<_>>();
+    let header = header.strip_prefix("object")?.trim();
+    if header.is_empty() {
+        return Some(Err(
+            "object expression requires a name expression or `_`".to_owned()
+        ));
+    }
+
+    let (header, has_with) = match header.strip_suffix(" with") {
+        Some(header) => (header.trim(), true),
+        None => (header, false),
+    };
+    if !body_lines.is_empty() && !has_with {
+        return Some(Err(
+            "object expression body requires `with` in the expression header".to_owned(),
+        ));
+    }
+
+    let (name_text, alias, dep_texts) = match parse_object_expr_header(header) {
+        Ok(parsed) => parsed,
+        Err(message) => return Some(Err(message)),
+    };
+    let name = match name_text {
+        Some(name_text) => match parse_expr_result_with_diagnostics(name_text, line, diagnostics) {
+            Ok(name) => Some(Box::new(name)),
+            Err(message) => return Some(Err(message)),
+        },
+        None => None,
+    };
+    let deps = match dep_texts
+        .iter()
+        .map(|dep| parse_expr_result_with_diagnostics(dep, line, diagnostics))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(deps) => deps,
+        Err(message) => return Some(Err(message)),
+    };
+
+    let mut body = Vec::new();
+    for (offset, body_line) in body_lines.iter().enumerate() {
+        if body_line.trim().is_empty() {
+            continue;
+        }
+        let body_line_number = line + offset + 1;
+        let Some(definition) =
+            parse_object_body_definition(body_line.trim(), body_line_number, diagnostics)
+        else {
+            continue;
+        };
+        body.push(definition);
+    }
+
+    Some(Ok(SyntaxExpr::Object(ObjectExpr {
+        name,
+        alias,
+        deps,
+        body,
+    })))
+}
+
+fn parse_object_expr_header(
+    header: &str,
+) -> Result<(Option<&str>, Option<String>, Vec<&str>), String> {
+    let (name_text, rest) = split_before_object_expr_keyword(header);
+    let name_text = name_text.trim();
+    if name_text.is_empty() {
+        return Err("object expression requires a name expression or `_`".to_owned());
+    }
+    let name = if name_text == "_" {
+        None
+    } else {
+        Some(name_text)
+    };
+
+    let (alias, rest) = parse_optional_object_expr_alias(rest)?;
+    let deps = if rest.is_empty() {
+        Vec::new()
+    } else {
+        let Some(deps) = rest.strip_prefix("extends").map(str::trim) else {
+            return Err(
+                "object expressions currently support only `as ...`, `extends ...`, and `with` after the name"
+                    .to_owned(),
+            );
+        };
+        if deps.is_empty() {
+            return Err("object expression `extends` requires at least one dependency".to_owned());
+        }
+        deps.split(',')
+            .map(str::trim)
+            .filter(|dep| !dep.is_empty())
+            .collect::<Vec<_>>()
+    };
+
+    Ok((name, alias, deps))
+}
+
+fn split_before_object_expr_keyword(header: &str) -> (&str, &str) {
+    let as_index = header.find(" as ");
+    let extends_index = header.find(" extends ");
+    let split = match (as_index, extends_index) {
+        (Some(left), Some(right)) => left.min(right),
+        (Some(index), None) | (None, Some(index)) => index,
+        (None, None) => return (header, ""),
+    };
+    (&header[..split], header[split..].trim_start())
+}
+
+fn parse_optional_object_expr_alias(rest: &str) -> Result<(Option<String>, &str), String> {
+    let Some(after_as) = rest.strip_prefix("as").map(str::trim_start) else {
+        return Ok((None, rest));
+    };
+    let Some((alias, rest)) = take_header_word(after_as) else {
+        return Err("`as` requires an object alias name".to_owned());
+    };
+    if !local_name().parse(alias).into_result().is_ok() {
+        return Err(format!("object alias `{alias}` is not a valid local name"));
+    }
+    Ok((Some(alias.to_owned()), rest.trim()))
 }
 
 fn parse_with_expr_result(
@@ -1925,6 +2113,19 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
             analyze_expr_locals(base, line, diagnostics);
             for part in parts {
                 analyze_key_expr_locals(part, line, diagnostics);
+            }
+        }
+        SyntaxExpr::Object(object) => {
+            if let Some(name) = &object.name {
+                analyze_expr_locals(name, line, diagnostics);
+            }
+            for dep in &object.deps {
+                analyze_expr_locals(dep, line, diagnostics);
+            }
+            for item in &object.body {
+                if let Some(expr) = &item.definition.expr {
+                    analyze_expr_locals(expr, item.line, diagnostics);
+                }
             }
         }
         SyntaxExpr::With { base, alias, body } => {
@@ -2028,6 +2229,19 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
                 mark_used_prior_alias_in_key(part, alias, used);
             }
         }
+        SyntaxExpr::Object(object) => {
+            if let Some(name) = &object.name {
+                mark_used_prior_alias(name, alias, used);
+            }
+            for dep in &object.deps {
+                mark_used_prior_alias(dep, alias, used);
+            }
+            for item in &object.body {
+                if let Some(expr) = &item.definition.expr {
+                    mark_used_prior_alias(expr, alias, used);
+                }
+            }
+        }
         SyntaxExpr::With { base, body, .. } => {
             mark_used_prior_alias(base, alias, used);
             for item in body {
@@ -2084,6 +2298,19 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             mark_used_locals(base, locals, used);
             for part in parts {
                 mark_used_key_expr(part, locals, used);
+            }
+        }
+        SyntaxExpr::Object(object) => {
+            if let Some(name) = &object.name {
+                mark_used_locals(name, locals, used);
+            }
+            for dep in &object.deps {
+                mark_used_locals(dep, locals, used);
+            }
+            for item in &object.body {
+                if let Some(expr) = &item.definition.expr {
+                    mark_used_locals(expr, locals, used);
+                }
             }
         }
         SyntaxExpr::With { base, body, .. } => {
@@ -2935,16 +3162,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_object_expressions() {
+        let parsed = parse(
+            "language g0\nhello = object \"hello\" as _h extends base with\n  text = h.target\n",
+        );
+
+        assert_eq!(parsed.diagnostics, []);
+        assert!(matches!(
+            &parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                expr: Some(SyntaxExpr::Object(ObjectExpr {
+                    name: Some(_),
+                    alias: Some(alias),
+                    deps,
+                    body,
+                })),
+                ..
+            }) if alias == "_h" && deps.len() == 1 && body.len() == 1
+        ));
+    }
+
+    #[test]
     fn parses_object_and_extend_aliases() {
         let parsed = parse(
-            "language g0\nobject child as c extends base with\n  text = c.base\nextend child as c with\n  text := _c.text ++ \"!\"\n",
+            "language g0\nobject child as _c extends base with\n  text = c.base\nextend child as _c with\n  text := _c.text ++ \"!\"\n",
         );
 
         assert_eq!(parsed.diagnostics, []);
         match &parsed.declarations[1].kind {
             DeclarationKind::Object(object) => {
                 assert_eq!(object.target, "child");
-                assert_eq!(object.alias.as_deref(), Some("c"));
+                assert_eq!(object.alias.as_deref(), Some("_c"));
                 assert_eq!(object.deps, ["base".to_owned()]);
             }
             other => panic!("expected object declaration, got {other:?}"),
@@ -2952,10 +3200,36 @@ mod tests {
         match &parsed.declarations[2].kind {
             DeclarationKind::Extend(extend) => {
                 assert_eq!(extend.target, "child");
-                assert_eq!(extend.alias.as_deref(), Some("c"));
+                assert_eq!(extend.alias.as_deref(), Some("_c"));
             }
             other => panic!("expected extend declaration, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn object_declaration_aliases_follow_local_unused_warning_rules() {
+        let parsed = parse(
+            "language g0\nobject a as unused with\n  x = 1\nobject b as _unused with\n  x = 1\nobject c as _ with\n  x = 1\nobject d as used with\n  x = used.y\nextend d as update_unused with\n  x := 2\nextend d as _update_unused with\n  x := 3\n",
+        );
+
+        assert_eq!(
+            parsed
+                .diagnostics
+                .iter()
+                .filter(|diag| diag.message.contains("unused local"))
+                .count(),
+            2
+        );
+        assert!(parsed.diagnostics.iter().any(|diag| {
+            diag.severity == Severity::Warning
+                && diag.line == 2
+                && diag.message == "unused local `unused`"
+        }));
+        assert!(parsed.diagnostics.iter().any(|diag| {
+            diag.severity == Severity::Warning
+                && diag.line == 10
+                && diag.message == "unused local `update_unused`"
+        }));
     }
 
     #[test]
@@ -3936,9 +4210,66 @@ mod tests {
     }
 
     #[test]
+    fn object_expressions_evaluate_as_object_instances() {
+        let parsed = parse(
+            "language g0\nhello = object \"hello\" with\n  text = \"Hello, World!\"\nasm.result = hello.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
     fn object_dependencies_apply_inherited_defs_to_child_self() {
         let parsed = parse(
             "language g0\nobject base with\n  text = hello ++ \", \" ++ target ++ \"!\"\n  hello = \"Hello\"\n  target = \"Base\"\nobject child extends base with\n  target := \"World\"\nasm.result = child.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn object_expressions_can_extend_other_object_expressions() {
+        let parsed = parse(
+            "language g0\nbase = object \"base\" with\n  text = hello ++ \", \" ++ target ++ \"!\"\n  hello = \"Hello\"\n  target = \"Base\"\nhello = object \"hello\" extends base with\n  target := \"World\"\nasm.result = hello.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn object_expression_aliases_default_to_parent_scope() {
+        let parsed = parse(
+            "language g0\nprefix = \"Hello\"\nhello = object \"hello\" as _h with\n  target = \"World\"\n  text = prefix ++ \", \" ++ h.target ++ \"!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
         let lowered = lower_to_core_with_context(&parsed, &context);
@@ -4082,9 +4413,47 @@ mod tests {
     }
 
     #[test]
+    fn suppressed_object_aliases_still_bind_canonical_names() {
+        let parsed = parse(
+            "language g0\nprefix = \"Hello\"\nobject hello as _h with\n  target = \"World\"\n  text = prefix ++ \", \" ++ h.target ++ \"!\"\nasm.result = hello.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
     fn aliased_extend_bodies_can_reference_prior_object_and_module_scope() {
         let parsed = parse(
             "language g0\nsuffix = \"!\"\nobject hello with\n  text = \"Hello, World\"\nextend hello as h with\n  text := _h.text ++ suffix\nasm.result = hello.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn suppressed_extend_aliases_still_bind_canonical_prior_names() {
+        let parsed = parse(
+            "language g0\nsuffix = \"!\"\nobject hello with\n  text = \"Hello, World\"\nextend hello as _h with\n  text := _h.text ++ suffix\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
         let lowered = lower_to_core_with_context(&parsed, &context);
