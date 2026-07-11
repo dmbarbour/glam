@@ -957,7 +957,7 @@ fn syntax_expr_to_value_in_scope(
         SyntaxExpr::Name(name) => lower_name_expr(name, context, scope, locals),
         SyntaxExpr::PriorName(name) => lower_prior_name_expr(name, line, context, scope)?,
         SyntaxExpr::Escape(depth, expr) => {
-            let escaped_scope = escaped_name_scope(scope, *depth);
+            let escaped_scope = escaped_name_scope(scope, *depth, line)?;
             syntax_expr_to_value_in_scope(expr, line, context, &escaped_scope, locals)?
         }
         SyntaxExpr::Access(base, parts) => context.value_access(
@@ -1126,15 +1126,25 @@ fn lower_prior_name_expr(
     ))
 }
 
-fn escaped_name_scope(scope: &NameScope, depth: usize) -> NameScope {
+fn escaped_name_scope(
+    scope: &NameScope,
+    depth: usize,
+    line: usize,
+) -> Result<NameScope, Diagnostic> {
     let mut escaped = scope.clone();
-    for _ in 0..depth {
+    for level in 0..depth {
         let Some(parent) = escaped.parent.as_deref() else {
-            break;
+            return Err(Diagnostic::error(
+                line,
+                format!(
+                    "scope escape depth `{depth}` exceeds available parent scopes at level `{}`",
+                    level + 1
+                ),
+            ));
         };
         escaped = parent.clone();
     }
-    escaped
+    Ok(escaped)
 }
 
 fn local_binding_index(name: &str, locals: &[LocalName]) -> Option<usize> {
@@ -3713,7 +3723,7 @@ mod tests {
     #[test]
     fn object_bodies_can_escape_to_module_scope() {
         let parsed = parse(
-            "language g0\nprefix = \"Hello\"\nseparator = \", \"\nobject hello with\n  target = \"World\"\n  text = ^(prefix ++ separator) ++ target ++ \"!\"\n  escaped = ^^prefix\nasm.result = hello.text ++ \" \" ++ hello.escaped\n",
+            "language g0\nprefix = \"Hello\"\nseparator = \", \"\nobject hello with\n  target = \"World\"\n  text = ^(prefix ++ separator) ++ target ++ \"!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
         let lowered = lower_to_core_with_context(&parsed, &context);
@@ -3725,8 +3735,21 @@ mod tests {
                 &value,
                 &["asm", "result"]
             ))),
-            b"Hello, World! Hello"
+            b"Hello, World!"
         );
+    }
+
+    #[test]
+    fn excessive_scope_escapes_report_lowering_errors() {
+        let parsed = parse("language g0\nasm.result = ^foo\nobject hello with\n  text = ^^foo\n");
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+
+        assert_eq!(lowered.diagnostics.len(), 2);
+        assert!(lowered.diagnostics.iter().all(|diag| {
+            diag.severity == Severity::Error
+                && diag.message.contains("exceeds available parent scopes")
+        }));
     }
 
     #[test]
