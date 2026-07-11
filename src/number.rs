@@ -17,6 +17,10 @@ impl Number {
         Self::integer(i64::from(value))
     }
 
+    pub fn from_usize(value: usize) -> Self {
+        Self(BigRational::from_integer(BigInt::from(value)))
+    }
+
     pub fn parse(text: &str) -> Result<Self, String> {
         let (negative, rest) = if let Some(rest) = text.strip_prefix('_') {
             (true, rest)

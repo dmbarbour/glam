@@ -341,6 +341,12 @@ fn apply_builtin(
             })?;
             eval_map_builtin(&function, &value, local_env)
         }
+        Builtin::ListLen => {
+            let [value] = <[Value; 1]>::try_from(args).map_err(|_| {
+                EvalError::new("list len builtin received the wrong number of arguments")
+            })?;
+            eval_list_len_builtin(&value)
+        }
         Builtin::DictSingleton => {
             let [key, value] = <[Value; 2]>::try_from(args).map_err(|_| {
                 EvalError::new("singleton builtin received the wrong number of arguments")
@@ -434,11 +440,10 @@ fn eval_slice_builtin(
             Ok(Value::Binary(Arc::from(&bytes[start..end])))
         }
         Value::List(list) => {
-            let items = list_to_value_items(&list)?;
-            if end > items.len() {
+            if end > list.len() {
                 return Err(EvalError::new("slice builtin end is out of bounds"));
             }
-            Ok(Value::List(List::from_values(items[start..end].to_vec())))
+            Ok(Value::List(list.slice(start, end)))
         }
         _ => Err(EvalError::new(
             "slice builtin requires a list or binary value",
@@ -475,6 +480,16 @@ fn eval_map_builtin(
     };
 
     Ok(Value::List(List::from_values(mapped)))
+}
+
+fn eval_list_len_builtin(value: &Value) -> Result<Value, EvalError> {
+    match force_value_shell(value)? {
+        Value::Binary(bytes) => Ok(Value::Number(Number::from_usize(bytes.len()))),
+        Value::List(list) => Ok(Value::Number(Number::from_usize(list.len()))),
+        _ => Err(EvalError::new(
+            "list len builtin requires a list or binary value",
+        )),
+    }
 }
 
 fn eval_number(
@@ -803,6 +818,9 @@ fn eval_anno_builtin(
                 Ok(target.clone())
             }
         }
+        RecognizedAnnotation::Deque => eval_deque_annotation(target),
+        RecognizedAnnotation::Binary => eval_binary_annotation(target),
+        RecognizedAnnotation::Array => eval_array_annotation(target),
         RecognizedAnnotation::Invalid(message) => Ok(annotation_error_value(message)),
         RecognizedAnnotation::Unknown(rendered) => {
             eprintln!("warning: unrecognized annotation encountered: {rendered}");
@@ -814,6 +832,9 @@ fn eval_anno_builtin(
 enum RecognizedAnnotation {
     AssertDefined { name: String, defined: bool },
     AssertUndefined { name: String, defined: bool },
+    Deque,
+    Binary,
+    Array,
     Invalid(String),
     Unknown(String),
 }
@@ -823,6 +844,11 @@ fn recognize_annotation(
     local_env: &[Value],
 ) -> Result<RecognizedAnnotation, EvalError> {
     let annotation = eval_value(annotation)?;
+    if let Value::Atom(atom) = &annotation {
+        return Ok(recognize_simple_annotation(atom)
+            .unwrap_or_else(|| RecognizedAnnotation::Unknown(format!("{annotation:?}"))));
+    }
+
     let Value::Dict(annotation) = annotation else {
         return Ok(RecognizedAnnotation::Unknown(format!("{annotation:?}")));
     };
@@ -851,8 +877,23 @@ fn recognize_annotation(
                 ParsedAssertion::Invalid(message) => RecognizedAnnotation::Invalid(message),
             },
         ),
+        Key::Atom(atom) if payload_is_unit(payload) => Ok(recognize_simple_annotation(atom)
+            .unwrap_or_else(|| RecognizedAnnotation::Unknown(format!("{annotation:?}")))),
         _ => Ok(RecognizedAnnotation::Unknown(format!("{annotation:?}"))),
     }
+}
+
+fn recognize_simple_annotation(atom: &crate::core::Atom) -> Option<RecognizedAnnotation> {
+    match atom_name(atom)? {
+        "deque" => Some(RecognizedAnnotation::Deque),
+        "binary" => Some(RecognizedAnnotation::Binary),
+        "array" => Some(RecognizedAnnotation::Array),
+        _ => None,
+    }
+}
+
+fn payload_is_unit(payload: &Value) -> bool {
+    matches!(payload, Value::Dict(dict) if dict.is_empty())
 }
 
 enum ParsedAssertion {
@@ -916,6 +957,43 @@ fn annotation_error_value(message: impl Into<String>) -> Value {
         expr: Arc::new(Expr::Error(Arc::from(message.into()))),
         env: Arc::from([]),
     })
+}
+
+fn eval_deque_annotation(target: &Value) -> Result<Value, EvalError> {
+    match force_value_shell(target)? {
+        Value::List(list) => Ok(Value::List(list.balanced())),
+        other => Ok(annotation_error_value(format!(
+            "`deque` annotation requires a list target, got {other:?}"
+        ))),
+    }
+}
+
+fn eval_binary_annotation(target: &Value) -> Result<Value, EvalError> {
+    match force_value_shell(target)? {
+        Value::Binary(bytes) => Ok(Value::Binary(bytes)),
+        Value::List(list) => match list_to_binary_bytes(&list) {
+            Ok(bytes) => Ok(Value::Binary(Arc::from(bytes))),
+            Err(message) => Ok(annotation_error_value(message)),
+        },
+        other => Ok(annotation_error_value(format!(
+            "`binary` annotation requires a list or binary target, got {other:?}"
+        ))),
+    }
+}
+
+fn eval_array_annotation(target: &Value) -> Result<Value, EvalError> {
+    match force_value_shell(target)? {
+        Value::Binary(bytes) => Ok(Value::List(List::from_values(
+            bytes
+                .iter()
+                .map(|byte| Value::Number(Number::from_u8(*byte)))
+                .collect(),
+        ))),
+        Value::List(list) => Ok(Value::List(List::from_values(list_to_value_items(&list)?))),
+        other => Ok(annotation_error_value(format!(
+            "`array` annotation requires a list or binary target, got {other:?}"
+        ))),
+    }
 }
 
 fn eval_merge_duplicate_builtin(
@@ -1188,6 +1266,41 @@ fn list_to_value_items(list: &List) -> Result<Vec<Value>, EvalError> {
         },
     )?;
     Ok(items.into_inner())
+}
+
+fn list_to_binary_bytes(list: &List) -> Result<Vec<u8>, String> {
+    let bytes = std::cell::RefCell::new(Vec::new());
+    list.for_each_segment(
+        &mut |segment| {
+            bytes.borrow_mut().extend_from_slice(segment);
+            Ok::<_, String>(())
+        },
+        &mut |values| {
+            for value in values.iter() {
+                match force_value_shell(value).map_err(|err| err.to_string())? {
+                    Value::Number(number) => {
+                        let byte = number.to_u8_if_integer().ok_or_else(|| {
+                            format!("`binary` annotation cannot encode number `{number}` as a byte")
+                        })?;
+                        bytes.borrow_mut().push(byte);
+                    }
+                    Value::Binary(segment) => bytes.borrow_mut().extend_from_slice(&segment),
+                    Value::List(list) => {
+                        bytes
+                            .borrow_mut()
+                            .extend(list_to_binary_bytes(&list)?);
+                    }
+                    other => {
+                        return Err(format!(
+                            "`binary` annotation requires list items to be bytes or binaries, got {other:?}"
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(bytes.into_inner())
 }
 
 fn append_values(left: Value, right: Value) -> Result<Value, EvalError> {
@@ -1519,6 +1632,19 @@ mod tests {
             Expr::Value(Value::List(List::from_values(vec![n(1), n(2), n(3)]))),
         ))
         .expect("map should evaluate");
+        let binary_len = eval_closed_expr(&builtin1_expr(
+            Builtin::ListLen,
+            Expr::Value(Value::binary_from_text("World!")),
+        ))
+        .expect("binary len should evaluate");
+        let list_len = eval_closed_expr(&builtin1_expr(
+            Builtin::ListLen,
+            Expr::Value(Value::List(List::concat(
+                List::from_values(vec![n(1), n(2)]),
+                List::from_bytes(Arc::from(&b"Hi"[..])),
+            ))),
+        ))
+        .expect("list len should evaluate");
 
         assert_eq!(slice, Value::binary_from_text("orl"));
         let Value::List(mapped) = mapped else {
@@ -1526,6 +1652,8 @@ mod tests {
         };
         let items = list_to_value_items(&mapped).expect("mapped list should be readable");
         assert_eq!(items, vec![n(2), n(3), n(4)]);
+        assert_eq!(binary_len, n(6));
+        assert_eq!(list_len, n(4));
     }
 
     #[test]
@@ -2130,6 +2258,84 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "cannot override `foo` because it is not defined"
+        );
+    }
+
+    #[test]
+    fn list_annotations_rebalance_and_flatten_lists() {
+        let deque = eval_closed_expr(&builtin2_expr(
+            Builtin::Anno,
+            Expr::Value(Value::Atom(crate::core::Atom::from_key(
+                &Key::binary_from_text("deque"),
+            ))),
+            Expr::Value(Value::List(List::concat(
+                List::from_bytes(Arc::from(&b"Hello"[..])),
+                List::from_values(vec![n(33)]),
+            ))),
+        ))
+        .expect("deque annotation should evaluate");
+        let Value::List(deque) = deque else {
+            panic!("deque annotation should produce a list");
+        };
+        assert_eq!(deque.len(), 6);
+
+        let binary = eval_closed_expr(&builtin2_expr(
+            Builtin::Anno,
+            Expr::Value(Value::Atom(crate::core::Atom::from_key(
+                &Key::binary_from_text("binary"),
+            ))),
+            Expr::Value(Value::List(List::concat(
+                List::from_values(vec![n(72), n(105)]),
+                List::from_bytes(Arc::from(&b"!"[..])),
+            ))),
+        ))
+        .expect("binary annotation should evaluate");
+        assert_eq!(binary, Value::binary_from_text("Hi!"));
+
+        let array = eval_closed_expr(&builtin2_expr(
+            Builtin::Anno,
+            Expr::Value(Value::Atom(crate::core::Atom::from_key(
+                &Key::binary_from_text("array"),
+            ))),
+            Expr::Value(Value::binary_from_text("Hi")),
+        ))
+        .expect("array annotation should evaluate");
+        let Value::List(array) = array else {
+            panic!("array annotation should produce a list");
+        };
+        assert_eq!(list_to_value_items(&array).unwrap(), vec![n(72), n(105)]);
+    }
+
+    #[test]
+    fn list_annotations_return_stuck_errors_for_wrong_targets() {
+        let value = eval_closed_expr(&builtin2_expr(
+            Builtin::Anno,
+            Expr::Value(Value::Atom(crate::core::Atom::from_key(
+                &Key::binary_from_text("binary"),
+            ))),
+            Expr::Value(Value::List(List::from_values(vec![n(300)]))),
+        ))
+        .expect("annotation should evaluate to a stuck expression");
+
+        assert_eq!(
+            eval_value(&value).unwrap_err().to_string(),
+            "`binary` annotation cannot encode number `300` as a byte"
+        );
+
+        let value = eval_closed_expr(&builtin2_expr(
+            Builtin::Anno,
+            Expr::Value(Value::Atom(crate::core::Atom::from_key(
+                &Key::binary_from_text("deque"),
+            ))),
+            Expr::Value(n(1)),
+        ))
+        .expect("annotation should evaluate to a stuck expression");
+
+        assert!(
+            eval_value(&value)
+                .unwrap_err()
+                .to_string()
+                .contains("`deque` annotation requires a list target")
         );
     }
 

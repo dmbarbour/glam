@@ -1,0 +1,2 @@
+# Required stderr substrings for runtime evaluation failure.
+error: `binary` annotation cannot encode number `300` as a byte

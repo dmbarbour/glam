@@ -129,6 +129,7 @@ pub enum DefinitionKind {
 pub enum SyntaxExpr {
     Number(Number),
     Text(String),
+    Atom(String),
     Name(String),
     PriorName(String),
     Escape(usize, Box<SyntaxExpr>),
@@ -512,6 +513,7 @@ fn builtin_list_module(context: &CompileContext) -> Dict {
     Dict::new_sync()
         .insert(name_as_key("slice"), context.value_builtin(Builtin::Slice))
         .insert(name_as_key("map"), context.value_builtin(Builtin::Map))
+        .insert(name_as_key("len"), context.value_builtin(Builtin::ListLen))
 }
 
 fn builtin_std_module(context: &CompileContext) -> Dict {
@@ -998,6 +1000,7 @@ fn syntax_expr_to_value_in_scope(
     Ok(match expr {
         SyntaxExpr::Number(number) => context.value_number(number.clone()),
         SyntaxExpr::Text(text) => context.value_binary(text),
+        SyntaxExpr::Atom(name) => context.value_atom(atom_from_str(name)),
         SyntaxExpr::SingletonDict(key, value) => context.builtin_apply2_value(
             Builtin::DictSingleton,
             syntax_key_expr_to_value(key, line, context, scope, locals)?,
@@ -2106,7 +2109,7 @@ fn warn_unused_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diag
 
 fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diagnostic>) {
     match expr {
-        SyntaxExpr::Number(_) | SyntaxExpr::Text(_) => {}
+        SyntaxExpr::Number(_) | SyntaxExpr::Text(_) | SyntaxExpr::Atom(_) => {}
         SyntaxExpr::Name(_) | SyntaxExpr::PriorName(_) => {}
         SyntaxExpr::Escape(_, expr) => analyze_expr_locals(expr, line, diagnostics),
         SyntaxExpr::Access(base, parts) => {
@@ -2220,6 +2223,7 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
         SyntaxExpr::PriorName(name) if Some(name.as_str()) == alias => *used = true,
         SyntaxExpr::Number(_)
         | SyntaxExpr::Text(_)
+        | SyntaxExpr::Atom(_)
         | SyntaxExpr::Name(_)
         | SyntaxExpr::PriorName(_) => {}
         SyntaxExpr::Escape(_, expr) => mark_used_prior_alias(expr, alias, used),
@@ -2283,7 +2287,7 @@ fn mark_used_prior_alias_in_key(key: &SyntaxKeyExpr, alias: Option<&str>, used: 
 
 fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) {
     match expr {
-        SyntaxExpr::Number(_) | SyntaxExpr::Text(_) => {}
+        SyntaxExpr::Number(_) | SyntaxExpr::Text(_) | SyntaxExpr::Atom(_) => {}
         SyntaxExpr::Name(name) => {
             if let Some(index) = locals
                 .iter()
@@ -2488,6 +2492,7 @@ fn syntax_expr_parser<'src>()
             crate::core::Builtin::Mod => "mod",
             crate::core::Builtin::Slice => "slice",
             crate::core::Builtin::Map => "map",
+            crate::core::Builtin::ListLen => "list.len",
             crate::core::Builtin::DictSingleton => ":",
             crate::core::Builtin::DictUnion => "{,}",
             crate::core::Builtin::DictUpdate => "dict_update",
@@ -2595,6 +2600,7 @@ fn syntax_expr_parser<'src>()
             })
         });
         let text = quoted_text().map(SyntaxExpr::Text);
+        let atom_literal = just('\'').ignore_then(name.clone()).map(SyntaxExpr::Atom);
 
         let list = expr
             .clone()
@@ -2643,7 +2649,7 @@ fn syntax_expr_parser<'src>()
             .then(expr.clone())
             .map(|(params, body)| SyntaxExpr::Lambda(params, Box::new(body)));
 
-        let literal_atom = choice((text, list, dict, number, parenthesized)).boxed();
+        let literal_atom = choice((text, atom_literal, list, dict, number, parenthesized)).boxed();
         let literal_expr = literal_atom
             .then(path_suffix.clone())
             .map(|(base, suffixes)| access_if_path(base, suffixes))
@@ -3340,6 +3346,22 @@ mod tests {
                 kind: DefinitionKind::Introduce,
                 body: "\"Hello, World!\"".to_owned(),
                 expr: Some(SyntaxExpr::Text("Hello, World!".to_owned())),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_atom_literal_expressions() {
+        let parsed = parse("language g0\nanswer = 'deque\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Definition(DefinitionDecl {
+                target: "answer".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "'deque".to_owned(),
+                expr: Some(SyntaxExpr::Atom("deque".to_owned())),
             })
         );
     }
@@ -4724,12 +4746,30 @@ mod tests {
         let mod_fn = value
             .get_atom_path(&[Atom::from_key(&Key::binary_from_text("mod"))])
             .expect("inline math import should expose mod");
-        let anno = match &std {
-            Value::Dict(std) => std
-                .get(&Key::atom_from_text("anno"))
-                .expect("std import should expose anno"),
+        let (anno, std_list_len) = match &std {
+            Value::Dict(std) => {
+                let anno = std
+                    .get(&Key::atom_from_text("anno"))
+                    .expect("std import should expose anno");
+                let std_list = std
+                    .get(&Key::atom_from_text("list"))
+                    .expect("std import should expose list");
+                let Value::Dict(std_list) =
+                    crate::eval::eval_value(std_list).expect("std.list should evaluate")
+                else {
+                    panic!("std.list should evaluate to a dictionary");
+                };
+                let len = std_list
+                    .get(&Key::atom_from_text("len"))
+                    .expect("std.list should expose len");
+                (anno, len.clone())
+            }
             _ => unreachable!(),
         };
+        let list_module = builtin_list_module(&context);
+        let list_len = list_module
+            .get(&Key::atom_from_text("len"))
+            .expect("list module should expose len");
 
         let Value::Dict(_) = std else {
             panic!("std import should evaluate to a dictionary");
@@ -4738,6 +4778,14 @@ mod tests {
         assert!(matches!(anno, Value::Builtin(crate::core::Builtin::Anno)));
         assert!(matches!(floor, Value::Builtin(crate::core::Builtin::Floor)));
         assert!(matches!(mod_fn, Value::Builtin(crate::core::Builtin::Mod)));
+        assert!(matches!(
+            std_list_len,
+            Value::Builtin(crate::core::Builtin::ListLen)
+        ));
+        assert!(matches!(
+            list_len,
+            Value::Builtin(crate::core::Builtin::ListLen)
+        ));
     }
 
     #[test]

@@ -247,6 +247,7 @@ pub enum Builtin {
     Mod,
     Slice,
     Map,
+    ListLen,
     DictSingleton,
     DictUnion,
     DictUpdate,
@@ -268,6 +269,7 @@ impl Builtin {
             Self::Mod => 2,
             Self::Slice => 3,
             Self::Map => 2,
+            Self::ListLen => 1,
             Self::DictSingleton => 2,
             Self::DictUnion => 2,
             Self::DictUpdate => 3,
@@ -287,6 +289,12 @@ enum ListNode {
     Bytes(Arc<[u8]>),
     Values(Arc<[Value]>),
     Concat(List, List),
+    SizedConcat {
+        len: usize,
+        left_len: usize,
+        left: List,
+        right: List,
+    },
 }
 
 impl List {
@@ -320,6 +328,44 @@ impl List {
         }
     }
 
+    fn sized_concat(left: Self, right: Self) -> Self {
+        if left.is_empty() {
+            right
+        } else if right.is_empty() {
+            left
+        } else {
+            let left_len = left.len();
+            let len = left_len + right.len();
+            Self(Arc::new(ListNode::SizedConcat {
+                len,
+                left_len,
+                left,
+                right,
+            }))
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self.0.as_ref() {
+            ListNode::Empty => 0,
+            ListNode::Bytes(bytes) => bytes.len(),
+            ListNode::Values(values) => values.len(),
+            ListNode::Concat(left, right) => left.len() + right.len(),
+            ListNode::SizedConcat { len, .. } => *len,
+        }
+    }
+
+    pub fn balanced(&self) -> Self {
+        let leaves = self.leaves();
+        Self::balanced_from_leaves(&leaves)
+    }
+
+    pub fn slice(&self, start: usize, end: usize) -> Self {
+        assert!(start <= end);
+        assert!(end <= self.len());
+        self.slice_checked(start, end)
+    }
+
     pub fn for_each_segment<E>(
         &self,
         on_bytes: &mut impl FnMut(&Arc<[u8]>) -> Result<(), E>,
@@ -333,11 +379,79 @@ impl List {
                 left.for_each_segment(on_bytes, on_values)?;
                 right.for_each_segment(on_bytes, on_values)
             }
+            ListNode::SizedConcat { left, right, .. } => {
+                left.for_each_segment(on_bytes, on_values)?;
+                right.for_each_segment(on_bytes, on_values)
+            }
         }
     }
 
     fn is_empty(&self) -> bool {
         matches!(self.0.as_ref(), ListNode::Empty)
+    }
+
+    fn leaves(&self) -> Vec<List> {
+        let leaves = std::cell::RefCell::new(Vec::new());
+        self.for_each_segment(
+            &mut |bytes| {
+                leaves.borrow_mut().push(Self::from_bytes(bytes.clone()));
+                Ok::<_, ()>(())
+            },
+            &mut |values| {
+                leaves.borrow_mut().push(Self::from_values(values.to_vec()));
+                Ok(())
+            },
+        )
+        .expect("collecting list leaves should not fail");
+        leaves.into_inner()
+    }
+
+    fn balanced_from_leaves(leaves: &[List]) -> Self {
+        match leaves {
+            [] => Self::empty(),
+            [leaf] => leaf.clone(),
+            _ => {
+                let midpoint = leaves.len() / 2;
+                Self::sized_concat(
+                    Self::balanced_from_leaves(&leaves[..midpoint]),
+                    Self::balanced_from_leaves(&leaves[midpoint..]),
+                )
+            }
+        }
+    }
+
+    fn slice_checked(&self, start: usize, end: usize) -> Self {
+        if start == end {
+            return Self::empty();
+        }
+
+        match self.0.as_ref() {
+            ListNode::Empty => Self::empty(),
+            ListNode::Bytes(bytes) => Self::from_bytes(Arc::from(&bytes[start..end])),
+            ListNode::Values(values) => Self::from_values(values[start..end].to_vec()),
+            ListNode::Concat(left, right) => {
+                Self::slice_concat(left, left.len(), right, start, end)
+            }
+            ListNode::SizedConcat {
+                left_len,
+                left,
+                right,
+                ..
+            } => Self::slice_concat(left, *left_len, right, start, end),
+        }
+    }
+
+    fn slice_concat(left: &List, left_len: usize, right: &List, start: usize, end: usize) -> Self {
+        if end <= left_len {
+            left.slice_checked(start, end)
+        } else if start >= left_len {
+            right.slice_checked(start - left_len, end - left_len)
+        } else {
+            Self::concat(
+                left.slice_checked(start, left_len),
+                right.slice_checked(0, end - left_len),
+            )
+        }
     }
 
     fn to_key_items(&self) -> Option<Arc<[Key]>> {
@@ -589,5 +703,68 @@ mod tests {
         let list = List::concat(bytes, values);
 
         assert!(!list.is_empty());
+    }
+
+    #[test]
+    fn balanced_lists_store_size_metadata_and_preserve_segments() {
+        let list = List::concat(
+            List::concat(
+                List::from_bytes(Arc::from(&b"He"[..])),
+                List::from_bytes(Arc::from(&b"ll"[..])),
+            ),
+            List::from_values(vec![Value::Number(111.into()), Value::Number(33.into())]),
+        );
+
+        let balanced = list.balanced();
+
+        assert_eq!(balanced.len(), 6);
+        assert!(matches!(balanced.0.as_ref(), ListNode::SizedConcat { .. }));
+        let bytes = std::cell::RefCell::new(Vec::new());
+        let values = std::cell::RefCell::new(Vec::new());
+        balanced
+            .for_each_segment(
+                &mut |segment| {
+                    bytes.borrow_mut().extend_from_slice(segment);
+                    Ok::<_, ()>(())
+                },
+                &mut |segment| {
+                    values.borrow_mut().extend(segment.iter().cloned());
+                    Ok(())
+                },
+            )
+            .expect("balanced list should walk");
+        assert_eq!(bytes.into_inner(), b"Hell");
+        assert_eq!(
+            values.into_inner(),
+            vec![Value::Number(111.into()), Value::Number(33.into())]
+        );
+    }
+
+    #[test]
+    fn list_slice_uses_rope_segments() {
+        let list = List::concat(
+            List::from_bytes(Arc::from(&b"Hello"[..])),
+            List::from_values(vec![Value::Number(44.into()), Value::Number(32.into())]),
+        )
+        .balanced();
+
+        let sliced = list.slice(1, 6);
+
+        let bytes = std::cell::RefCell::new(Vec::new());
+        let values = std::cell::RefCell::new(Vec::new());
+        sliced
+            .for_each_segment(
+                &mut |segment| {
+                    bytes.borrow_mut().extend_from_slice(segment);
+                    Ok::<_, ()>(())
+                },
+                &mut |segment| {
+                    values.borrow_mut().extend(segment.iter().cloned());
+                    Ok(())
+                },
+            )
+            .expect("sliced list should walk");
+        assert_eq!(bytes.into_inner(), b"ello");
+        assert_eq!(values.into_inner(), vec![Value::Number(44.into())]);
     }
 }
