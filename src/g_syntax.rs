@@ -1,10 +1,8 @@
 use chumsky::prelude::*;
 
-use std::sync::Arc;
-
 use crate::compiler::CompileContext;
 use crate::core::Builtin;
-use crate::core::{Atom, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value};
+use crate::core::{Atom, Dict, Key, KeyExpr as CoreKeyExpr, Value};
 use crate::diagnostic::Severity;
 use crate::number::Number;
 
@@ -243,7 +241,7 @@ pub fn lower_to_core_with_context(
     context: &CompileContext,
 ) -> LoweredSource {
     // note: we'll extend 'prior' within the 'body' of an implicit lambda
-    let mut definitions = context.expr_value(context.prior_defs.clone());
+    let mut definitions = context.prior_defs.clone();
     let mut diagnostics = parsed.diagnostics.clone();
 
     for declaration in &parsed.declarations {
@@ -278,7 +276,7 @@ pub fn lower_to_core_with_context(
     }
 
     LoweredSource {
-        definitions: context.value_expr(definitions),
+        definitions,
         diagnostics,
     }
 }
@@ -287,7 +285,7 @@ fn lower_import(
     import: &ImportDecl,
     line: usize,
     context: &CompileContext,
-    definitions: &mut CoreExpr,
+    definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
     let ImportReference::Builtin(name) = &import.reference else {
         return Err(Diagnostic::error(
@@ -299,14 +297,10 @@ fn lower_import(
         .ok_or_else(|| Diagnostic::error(line, format!("unknown built-in module `'{name}`")))?;
 
     *definitions = match &import.placement {
-        ImportPlacement::Inline => update_module_expr(
+        ImportPlacement::Inline => update_module_value(definitions.clone(), module, context),
+        ImportPlacement::As(target) => update_module_value(
             definitions.clone(),
-            value_to_core_expr(&module, context),
-            context,
-        ),
-        ImportPlacement::As(target) => update_module_expr(
-            definitions.clone(),
-            path_to_dict_expr(target, value_to_core_expr(&module, context), context)?,
+            path_to_dict_value(target, module, context)?,
             context,
         ),
         ImportPlacement::At(_) => {
@@ -324,14 +318,14 @@ fn lower_unique(
     names: &[String],
     _line: usize,
     context: &CompileContext,
-    definitions: &mut CoreExpr,
+    definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
     for name in names {
         let path = context.abstract_global_path(name);
         let value = context.abstract_global_path_value(path.as_ref());
-        *definitions = update_module_expr(
+        *definitions = update_module_value(
             definitions.clone(),
-            path_to_dict_expr(name, context.expr_value(value), context)?,
+            path_to_dict_value(name, value, context)?,
             context,
         );
     }
@@ -377,7 +371,7 @@ fn lower_definition(
     declaration_text: &str,
     line: usize,
     context: &CompileContext,
-    definitions: &mut CoreExpr,
+    definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
     let Some(expr) = &definition.expr else {
         return Ok(());
@@ -408,13 +402,9 @@ fn lower_definition(
             context,
         )?,
     };
-    *definitions = update_module_expr(
+    *definitions = update_module_value(
         definitions.clone(),
-        path_to_dict_expr(
-            &definition.target,
-            value_to_core_expr(&value, context),
-            context,
-        )?,
+        path_to_dict_value(&definition.target, value, context)?,
         context,
     );
 
@@ -423,32 +413,32 @@ fn lower_definition(
 
 fn lower_update_definition(
     target: &str,
-    visible_definitions: CoreExpr,
+    visible_definitions: Value,
     update: Value,
     sugar_param_count: usize,
     line: usize,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
-    let prior = path_expr_in_definitions(target, visible_definitions, context)?;
-    let mut lowered = value_to_core_expr(&update, context);
+    let prior = path_value_in_definitions(target, visible_definitions, context)?;
+    let mut lowered = update;
 
     for _ in 0..sugar_param_count {
-        let CoreExpr::Lambda(body) = lowered else {
+        let Some(body) = context.value_lambda_body(&lowered) else {
             return Err(Diagnostic::error(
                 line,
                 "internal error lowering update definition arguments",
             ));
         };
-        lowered = body.as_ref().clone();
+        lowered = body;
     }
 
-    lowered = context.expr_apply(lowered, prior);
+    lowered = context.value_apply(lowered, prior);
 
     for _ in 0..sugar_param_count {
-        lowered = context.expr_lambda(lowered);
+        lowered = context.value_lambda(lowered);
     }
 
-    Ok(context.value_expr(lowered))
+    Ok(lowered)
 }
 
 #[derive(Clone, Copy)]
@@ -460,7 +450,7 @@ enum BuiltinAssertion {
 fn annotate_definition_value(
     assertion: BuiltinAssertion,
     target: &str,
-    visible_definitions: CoreExpr,
+    visible_definitions: Value,
     value: Value,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
@@ -468,55 +458,44 @@ fn annotate_definition_value(
         BuiltinAssertion::Defined => "assert_defined",
         BuiltinAssertion::Undefined => "assert_undefined",
     };
-    let payload = context.builtin_apply2_expr(
+    let payload = context.builtin_apply2_value(
         Builtin::DictUnion,
-        context.builtin_apply2_expr(
+        context.builtin_apply2_value(
             Builtin::DictSingleton,
-            context.expr_value(context.value_atom(atom_from_str("name"))),
-            context.expr_value(context.value_binary(target)),
+            context.value_atom(atom_from_str("name")),
+            context.value_binary(target),
         ),
-        context.builtin_apply2_expr(
+        context.builtin_apply2_value(
             Builtin::DictSingleton,
-            context.expr_value(context.value_atom(atom_from_str("value"))),
-            path_expr_in_definitions(target, visible_definitions, context)?,
+            context.value_atom(atom_from_str("value")),
+            path_value_in_definitions(target, visible_definitions, context)?,
         ),
     );
-    let annotation = context.builtin_apply2_expr(
+    let annotation = context.builtin_apply2_value(
         Builtin::DictSingleton,
-        context.expr_value(context.value_atom(atom_from_str(tag))),
+        context.value_atom(atom_from_str(tag)),
         payload,
     );
 
-    Ok(context.value_expr(context.builtin_apply2_expr(
-        Builtin::Anno,
-        annotation,
-        value_to_core_expr(&value, context),
-    )))
+    Ok(context.builtin_apply2_value(Builtin::Anno, annotation, value))
 }
 
-fn update_module_expr(definitions: CoreExpr, item: CoreExpr, context: &CompileContext) -> CoreExpr {
+fn update_module_value(definitions: Value, item: Value, context: &CompileContext) -> Value {
     // Module definitions are ordered updates over the incoming namespace.
     // Ordinary dictionary literals still lower through DictUnion.
-    context.builtin_apply2_expr(Builtin::DictUpdate, definitions, item)
+    context.builtin_apply2_value(Builtin::DictUpdate, definitions, item)
 }
 
-fn value_to_core_expr(value: &Value, context: &CompileContext) -> CoreExpr {
-    match value {
-        Value::Expr(thunk) if thunk.env.is_empty() => thunk.expr.as_ref().clone(),
-        _ => context.expr_value(value.clone()),
-    }
-}
-
-fn path_expr_in_definitions(
+fn path_value_in_definitions(
     target: &str,
-    definitions: CoreExpr,
+    definitions: Value,
     context: &CompileContext,
-) -> Result<CoreExpr, Diagnostic> {
+) -> Result<Value, Diagnostic> {
     let path = target
         .split('.')
         .map(|part| context.key_expr_key(name_as_key(part)))
         .collect::<Vec<_>>();
-    Ok(context.expr_access(definitions, path))
+    Ok(context.value_access(definitions, path))
 }
 
 fn definition_param_count(
@@ -540,79 +519,50 @@ fn definition_param_count(
     Ok(params.split_whitespace().count())
 }
 
-fn path_to_dict_expr(
+fn path_to_dict_value(
     target: &str,
-    value: CoreExpr,
+    value: Value,
     context: &CompileContext,
-) -> Result<CoreExpr, Diagnostic> {
+) -> Result<Value, Diagnostic> {
     let parts = target.split('.').collect::<Vec<_>>();
     if parts.is_empty() {
         return Err(Diagnostic::error(0, "definition target cannot be empty"));
     }
 
-    let mut expr = value;
+    let mut value = value;
     for part in parts.into_iter().rev() {
-        expr = context.builtin_apply2_expr(
+        value = context.builtin_apply2_value(
             Builtin::DictSingleton,
-            context.expr_value(context.value_atom(atom_from_str(part))),
-            expr,
+            context.value_atom(atom_from_str(part)),
+            value,
         );
     }
-    Ok(expr)
+    Ok(value)
 }
 
 fn syntax_expr_to_value(
     expr: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &CoreExpr,
+    visible_definitions: &Value,
 ) -> Result<Value, Diagnostic> {
-    match expr {
-        SyntaxExpr::Number(number) => Ok(context.value_number(number.clone())),
-        SyntaxExpr::Text(text) => Ok(context.value_binary(text)),
-        SyntaxExpr::Name(_)
-        | SyntaxExpr::PriorName(_)
-        | SyntaxExpr::SingletonDict(_, _)
-        | SyntaxExpr::DictUnion(_)
-        | SyntaxExpr::List(_)
-        | SyntaxExpr::Lambda(_, _)
-        | SyntaxExpr::Apply(_, _)
-        | SyntaxExpr::Multiply(_, _)
-        | SyntaxExpr::Divide(_, _)
-        | SyntaxExpr::Add(_, _)
-        | SyntaxExpr::Subtract(_, _)
-        | SyntaxExpr::Append(_, _) => Ok(context.value_expr(syntax_expr_to_core_expr(
-            expr,
-            line,
-            context,
-            visible_definitions,
-        )?)),
-    }
+    syntax_expr_to_value_in_scope(expr, line, context, visible_definitions, &mut Vec::new())
 }
 
-fn syntax_expr_to_core_expr(
+fn syntax_expr_to_value_in_scope(
     expr: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &CoreExpr,
-) -> Result<CoreExpr, Diagnostic> {
-    syntax_expr_to_core_expr_in_scope(expr, line, context, visible_definitions, &mut Vec::new())
-}
-
-fn syntax_expr_to_core_expr_in_scope(
-    expr: &SyntaxExpr,
-    line: usize,
-    context: &CompileContext,
-    visible_definitions: &CoreExpr,
+    visible_definitions: &Value,
     locals: &mut Vec<LocalName>,
-) -> Result<CoreExpr, Diagnostic> {
+) -> Result<Value, Diagnostic> {
     Ok(match expr {
-        SyntaxExpr::Number(number) => context.expr_value(context.value_number(number.clone())),
-        SyntaxExpr::Text(text) => context.expr_value(context.value_binary(text)),
-        SyntaxExpr::SingletonDict(key, value) => context.builtin_apply2_expr(
+        SyntaxExpr::Number(number) => context.value_number(number.clone()),
+        SyntaxExpr::Text(text) => context.value_binary(text),
+        SyntaxExpr::SingletonDict(key, value) => context.builtin_apply2_value(
             Builtin::DictSingleton,
-            syntax_key_expr_to_core_expr(key, line, context, visible_definitions, locals)?,
-            syntax_expr_to_core_expr_in_scope(value, line, context, visible_definitions, locals)?,
+            syntax_key_expr_to_value(key, line, context, visible_definitions, locals)?,
+            syntax_expr_to_value_in_scope(value, line, context, visible_definitions, locals)?,
         ),
         SyntaxExpr::DictUnion(items) => {
             lower_dict_union(items, line, context, visible_definitions, locals)?
@@ -623,39 +573,20 @@ fn syntax_expr_to_core_expr_in_scope(
         SyntaxExpr::PriorName(parts) => {
             lower_prior_name_expr(parts, line, context, visible_definitions, locals)?
         }
-        SyntaxExpr::List(items) => context.expr_list(
+        SyntaxExpr::List(items) => context.value_list(
             items
                 .iter()
                 .map(|expr| {
-                    syntax_expr_to_core_expr_in_scope(
-                        expr,
-                        line,
-                        context,
-                        visible_definitions,
-                        locals,
-                    )
-                    .map(Arc::new)
+                    syntax_expr_to_value_in_scope(expr, line, context, visible_definitions, locals)
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         SyntaxExpr::Lambda(params, body) => {
             lower_lambda_expr(params, body, line, context, visible_definitions, locals)?
         }
-        SyntaxExpr::Apply(function, argument) => context.expr_apply(
-            syntax_expr_to_core_expr_in_scope(
-                function,
-                line,
-                context,
-                visible_definitions,
-                locals,
-            )?,
-            syntax_expr_to_core_expr_in_scope(
-                argument,
-                line,
-                context,
-                visible_definitions,
-                locals,
-            )?,
+        SyntaxExpr::Apply(function, argument) => context.value_apply(
+            syntax_expr_to_value_in_scope(function, line, context, visible_definitions, locals)?,
+            syntax_expr_to_value_in_scope(argument, line, context, visible_definitions, locals)?,
         ),
         SyntaxExpr::Multiply(left, right) => lower_builtin_expr(
             Builtin::Multiply,
@@ -711,27 +642,27 @@ fn lower_builtin_expr(
     right: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &CoreExpr,
+    visible_definitions: &Value,
     locals: &mut Vec<LocalName>,
-) -> Result<CoreExpr, Diagnostic> {
-    Ok(context.builtin_apply2_expr(
+) -> Result<Value, Diagnostic> {
+    Ok(context.builtin_apply2_value(
         builtin,
-        syntax_expr_to_core_expr_in_scope(left, line, context, visible_definitions, locals)?,
-        syntax_expr_to_core_expr_in_scope(right, line, context, visible_definitions, locals)?,
+        syntax_expr_to_value_in_scope(left, line, context, visible_definitions, locals)?,
+        syntax_expr_to_value_in_scope(right, line, context, visible_definitions, locals)?,
     ))
 }
 
-fn syntax_key_expr_to_core_expr(
+fn syntax_key_expr_to_value(
     key: &SyntaxKeyExpr,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &CoreExpr,
+    visible_definitions: &Value,
     locals: &mut Vec<LocalName>,
-) -> Result<CoreExpr, Diagnostic> {
+) -> Result<Value, Diagnostic> {
     Ok(match key {
-        SyntaxKeyExpr::Atom(name) => context.expr_value(context.value_atom(atom_from_str(name))),
+        SyntaxKeyExpr::Atom(name) => context.value_atom(atom_from_str(name)),
         SyntaxKeyExpr::Index(expr) => {
-            syntax_expr_to_core_expr_in_scope(expr, line, context, visible_definitions, locals)?
+            syntax_expr_to_value_in_scope(expr, line, context, visible_definitions, locals)?
         }
         SyntaxKeyExpr::PathIndex(_) => {
             return Err(Diagnostic::error(
@@ -746,24 +677,24 @@ fn lower_dict_union(
     items: &[SyntaxExpr],
     line: usize,
     context: &CompileContext,
-    visible_definitions: &CoreExpr,
+    visible_definitions: &Value,
     locals: &mut Vec<LocalName>,
-) -> Result<CoreExpr, Diagnostic> {
+) -> Result<Value, Diagnostic> {
     let mut items = items.iter();
     let Some(first) = items.next() else {
-        return Ok(context.expr_value(context.empty_dict_value()));
+        return Ok(context.empty_dict_value());
     };
 
-    let mut expr =
-        syntax_expr_to_core_expr_in_scope(first, line, context, visible_definitions, locals)?;
+    let mut value =
+        syntax_expr_to_value_in_scope(first, line, context, visible_definitions, locals)?;
     for item in items {
-        expr = context.builtin_apply2_expr(
+        value = context.builtin_apply2_value(
             Builtin::DictUnion,
-            expr,
-            syntax_expr_to_core_expr_in_scope(item, line, context, visible_definitions, locals)?,
+            value,
+            syntax_expr_to_value_in_scope(item, line, context, visible_definitions, locals)?,
         );
     }
-    Ok(expr)
+    Ok(value)
 }
 
 fn lower_lambda_expr(
@@ -771,17 +702,17 @@ fn lower_lambda_expr(
     body: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &CoreExpr,
+    visible_definitions: &Value,
     locals: &mut Vec<LocalName>,
-) -> Result<CoreExpr, Diagnostic> {
+) -> Result<Value, Diagnostic> {
     let base_len = locals.len();
     locals.extend(params.iter().map(|param| local_name_metadata(param)));
     let mut lowered =
-        syntax_expr_to_core_expr_in_scope(body, line, context, visible_definitions, locals)?;
+        syntax_expr_to_value_in_scope(body, line, context, visible_definitions, locals)?;
     locals.truncate(base_len);
 
     for _ in params.iter().rev() {
-        lowered = context.expr_lambda(lowered);
+        lowered = context.value_lambda(lowered);
     }
 
     Ok(lowered)
@@ -791,9 +722,9 @@ fn lower_name_expr(
     parts: &[SyntaxKeyExpr],
     line: usize,
     context: &CompileContext,
-    visible_definitions: &CoreExpr,
+    visible_definitions: &Value,
     locals: &mut Vec<LocalName>,
-) -> Result<CoreExpr, Diagnostic> {
+) -> Result<Value, Diagnostic> {
     let Some(SyntaxKeyExpr::Atom(first)) = parts.first() else {
         return Err(Diagnostic::error(
             line,
@@ -804,8 +735,8 @@ fn lower_name_expr(
     // TODO: special keyword atoms like 'self' and 'module'
 
     let Some(local_index) = local_binding_index(first, locals) else {
-        return Ok(context.expr_access(
-            context.expr_value(context.final_defs.clone()),
+        return Ok(context.value_access(
+            context.final_defs.clone(),
             parts
                 .iter()
                 .map(|part| {
@@ -816,11 +747,11 @@ fn lower_name_expr(
     };
 
     if parts.len() == 1 {
-        return Ok(context.expr_local(local_index));
+        return Ok(context.value_local(local_index));
     }
 
-    Ok(context.expr_access(
-        context.expr_local(local_index),
+    Ok(context.value_access(
+        context.value_local(local_index),
         parts[1..]
             .iter()
             .map(|part| syntax_key_expr_to_core(part, line, context, visible_definitions, locals))
@@ -832,9 +763,9 @@ fn lower_prior_name_expr(
     parts: &[SyntaxKeyExpr],
     line: usize,
     context: &CompileContext,
-    visible_definitions: &CoreExpr,
+    visible_definitions: &Value,
     locals: &mut Vec<LocalName>,
-) -> Result<CoreExpr, Diagnostic> {
+) -> Result<Value, Diagnostic> {
     let Some(SyntaxKeyExpr::Atom(_)) = parts.first() else {
         return Err(Diagnostic::error(
             line,
@@ -842,7 +773,7 @@ fn lower_prior_name_expr(
         ));
     };
 
-    Ok(context.expr_access(
+    Ok(context.value_access(
         visible_definitions.clone(),
         parts
             .iter()
@@ -882,12 +813,12 @@ fn syntax_key_expr_to_core(
     key: &SyntaxKeyExpr,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &CoreExpr,
+    visible_definitions: &Value,
     locals: &mut Vec<LocalName>,
 ) -> Result<CoreKeyExpr, Diagnostic> {
     Ok(match key {
         SyntaxKeyExpr::Atom(name) => context.key_expr_key(name_as_key(name)),
-        SyntaxKeyExpr::Index(expr) => context.key_expr_index(syntax_expr_to_core_expr_in_scope(
+        SyntaxKeyExpr::Index(expr) => context.key_expr_index(syntax_expr_to_value_in_scope(
             expr,
             line,
             context,
@@ -895,7 +826,7 @@ fn syntax_key_expr_to_core(
             locals,
         )?),
         SyntaxKeyExpr::PathIndex(expr) => context.key_expr_path_index(
-            syntax_expr_to_core_expr_in_scope(expr, line, context, visible_definitions, locals)?,
+            syntax_expr_to_value_in_scope(expr, line, context, visible_definitions, locals)?,
         ),
     })
 }
@@ -1738,10 +1669,10 @@ mod tests {
     }
 
     fn core_global_access(context: &CompileContext, path: Vec<CoreKeyExpr>) -> CoreExpr {
-        CoreExpr::Access(
-            Arc::new(CoreExpr::Value(context.final_defs.clone())),
-            Arc::from(path),
-        )
+        let Value::Expr(thunk) = &context.final_defs else {
+            panic!("final module binding should be a lazy expression");
+        };
+        CoreExpr::Access(thunk.expr.clone(), Arc::from(path))
     }
 
     fn core_visible_access(base: CoreExpr, path: Vec<CoreKeyExpr>) -> CoreExpr {

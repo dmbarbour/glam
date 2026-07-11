@@ -106,47 +106,19 @@ impl CompileContext {
     // TODO: methods to emit diagnostics with source context
     // diagnostic messages should be emitted as values at this layer
 
-    // TODO: eliminate use of `CoreExpr` in this API. Values only.
-    //   g_syntax will need to be adjusted for this, e.g. rebuilding
-    //   the lambda in every step of lowering, rather than just once at the end.
-
     // TODO: eliminate direct use of Builtin in this API. The front-end
     // knows about builtins, but will access them as atoms, not as the Builtin enum.
-
-    pub fn expr_value(&self, value: Value) -> CoreExpr {
-        CoreExpr::Value(value)
-    }
-
-    pub fn expr_list(&self, items: Vec<Arc<CoreExpr>>) -> CoreExpr {
-        CoreExpr::List(Arc::from(items))
-    }
-
-    pub fn expr_apply(&self, function: CoreExpr, argument: CoreExpr) -> CoreExpr {
-        CoreExpr::Apply(Arc::new(function), Arc::new(argument))
-    }
-
-    pub fn expr_lambda(&self, body: CoreExpr) -> CoreExpr {
-        CoreExpr::Lambda(Arc::new(body))
-    }
-
-    pub fn expr_local(&self, index: usize) -> CoreExpr {
-        CoreExpr::Local(index)
-    }
-
-    pub fn expr_access(&self, base: CoreExpr, path: Vec<CoreKeyExpr>) -> CoreExpr {
-        CoreExpr::Access(Arc::new(base), Arc::from(path))
-    }
 
     pub fn key_expr_key(&self, key: Key) -> CoreKeyExpr {
         CoreKeyExpr::Key(key)
     }
 
-    pub fn key_expr_index(&self, expr: CoreExpr) -> CoreKeyExpr {
-        CoreKeyExpr::Index(Arc::new(expr))
+    pub fn key_expr_index(&self, value: Value) -> CoreKeyExpr {
+        CoreKeyExpr::Index(Arc::new(value_to_core_expr(value)))
     }
 
-    pub fn key_expr_path_index(&self, expr: CoreExpr) -> CoreKeyExpr {
-        CoreKeyExpr::PathIndex(Arc::new(expr))
+    pub fn key_expr_path_index(&self, value: Value) -> CoreKeyExpr {
+        CoreKeyExpr::PathIndex(Arc::new(value_to_core_expr(value)))
     }
 
     pub fn value_number(&self, number: Number) -> Value {
@@ -169,10 +141,6 @@ impl CompileContext {
         Value::Builtin(builtin)
     }
 
-    pub fn value_expr(&self, expr: CoreExpr) -> Value {
-        Value::expr(expr)
-    }
-
     pub fn empty_dict_value(&self) -> Value {
         self.value_dict(Dict::new_sync())
     }
@@ -189,24 +157,60 @@ impl CompileContext {
         ])))
     }
 
-    pub fn dict_union_value(&self, left: &Value, right: &Value) -> Value {
-        self.value_expr(self.builtin_apply2_expr(
-            Builtin::DictUnion,
-            self.expr_value(left.clone()),
-            self.expr_value(right.clone()),
+    pub fn value_list(&self, items: Vec<Value>) -> Value {
+        Value::expr(CoreExpr::List(Arc::from(
+            items
+                .into_iter()
+                .map(value_to_core_expr)
+                .map(Arc::new)
+                .collect::<Vec<_>>(),
+        )))
+    }
+
+    pub fn value_apply(&self, function: Value, argument: Value) -> Value {
+        Value::expr(CoreExpr::Apply(
+            Arc::new(value_to_core_expr(function)),
+            Arc::new(value_to_core_expr(argument)),
         ))
     }
 
-    pub fn builtin_apply2_expr(
-        &self,
-        builtin: Builtin,
-        left: CoreExpr,
-        right: CoreExpr,
-    ) -> CoreExpr {
-        self.expr_apply(
-            self.expr_apply(self.expr_value(self.value_builtin(builtin)), left),
-            right,
-        )
+    pub fn value_lambda(&self, body: Value) -> Value {
+        Value::expr(CoreExpr::Lambda(Arc::new(value_to_core_expr(body))))
+    }
+
+    pub fn value_local(&self, index: usize) -> Value {
+        Value::expr(CoreExpr::Local(index))
+    }
+
+    pub fn value_access(&self, base: Value, path: Vec<CoreKeyExpr>) -> Value {
+        Value::expr(CoreExpr::Access(
+            Arc::new(value_to_core_expr(base)),
+            Arc::from(path),
+        ))
+    }
+
+    pub fn value_lambda_body(&self, value: &Value) -> Option<Value> {
+        let Value::Expr(thunk) = value else {
+            return None;
+        };
+        if !thunk.env.is_empty() {
+            return None;
+        }
+        let CoreExpr::Lambda(body) = thunk.expr.as_ref() else {
+            return None;
+        };
+        Some(Value::expr(body.as_ref().clone()))
+    }
+
+    pub fn builtin_apply2_value(&self, builtin: Builtin, left: Value, right: Value) -> Value {
+        self.value_apply(self.value_apply(self.value_builtin(builtin), left), right)
+    }
+}
+
+fn value_to_core_expr(value: Value) -> CoreExpr {
+    match value {
+        Value::Expr(thunk) if thunk.env.is_empty() => thunk.expr.as_ref().clone(),
+        value => CoreExpr::Value(value),
     }
 }
 
