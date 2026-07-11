@@ -81,6 +81,46 @@ fn scripts_compose_with_files_as_ordered_mixins() {
 }
 
 #[test]
+fn assembly_args_default_to_empty_list() {
+    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
+        .arg("--script.g")
+        .arg("language g0\nasm.result = { [[]]:\"empty\" }.[asm.args]\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"empty");
+    assert_eq!(output.stderr, b"");
+}
+
+#[test]
+fn assembly_args_are_string_list_and_can_be_rewritten_by_mixins() {
+    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
+        .arg("--script.g")
+        .arg("language g0\nasm.result = { [[\"rewritten\"]]:\"ok\" }.[asm.args]\n")
+        .arg("--script.g")
+        .arg("language g0\nasm.args := [\"rewritten\"]\n")
+        .arg("--")
+        .arg("original")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ok");
+    assert_eq!(output.stderr, b"");
+}
+
+#[test]
 fn parse_errors_write_summary_and_diagnostics_to_stderr() {
     let output = Command::new(env!("CARGO_BIN_EXE_glam"))
         .arg("--parse")

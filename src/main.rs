@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use glam::compiler::CompileContext;
-use glam::core::{Expr as CoreExpr, Value};
+use glam::core::{Dict, Expr as CoreExpr, Key, Value};
 use glam::diagnostic::Severity;
 use glam::eval;
 use glam::g_syntax::{DeclarationKind, ParsedSource, SourceFile, lower_to_core_with_context};
@@ -45,8 +45,9 @@ fn main() -> ExitCode {
             };
 
             let mut inputs = vec![AssemblyInput::File(path)];
-            match collect_assembly_inputs(args, &mut inputs) {
-                Ok(()) => assemble_inputs(&inputs),
+            let mut cli_args = Vec::new();
+            match collect_assembly_inputs(args, &mut inputs, &mut cli_args) {
+                Ok(()) => assemble_inputs(&inputs, &cli_args),
                 Err(exit_code) => exit_code,
             }
         }
@@ -58,8 +59,9 @@ fn main() -> ExitCode {
             };
 
             let mut inputs = vec![AssemblyInput::Script { extension, body }];
-            match collect_assembly_inputs(args, &mut inputs) {
-                Ok(()) => assemble_inputs(&inputs),
+            let mut cli_args = Vec::new();
+            match collect_assembly_inputs(args, &mut inputs, &mut cli_args) {
+                Ok(()) => assemble_inputs(&inputs, &cli_args),
                 Err(exit_code) => exit_code,
             }
         }
@@ -79,9 +81,14 @@ fn main() -> ExitCode {
 fn collect_assembly_inputs(
     mut args: impl Iterator<Item = String>,
     inputs: &mut Vec<AssemblyInput>,
+    cli_args: &mut Vec<String>,
 ) -> Result<(), ExitCode> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--" => {
+                cli_args.extend(args);
+                return Ok(());
+            }
             "-f" | "--file" => {
                 let Some(path) = args.next() else {
                     eprintln!("error: `{arg}` needs a source path");
@@ -120,7 +127,7 @@ fn script_extension(option: &str) -> Option<&str> {
         .filter(|extension| !extension.is_empty())
 }
 
-fn assemble_inputs(inputs: &[AssemblyInput]) -> ExitCode {
+fn assemble_inputs(inputs: &[AssemblyInput], cli_args: &[String]) -> ExitCode {
     // Note this is a temporary spike wiring: syntax lowering still happens
     // here until the front end compiler (and user-defined syntax) owns more
     // of the translation pipeline.
@@ -131,7 +138,7 @@ fn assemble_inputs(inputs: &[AssemblyInput]) -> ExitCode {
 
     let assembly_context = CompileContext::from_module_path(["assembly"]);
     let final_defs = assembly_context.final_defs.clone();
-    let mut definitions = assembly_context.prior_defs.clone();
+    let mut definitions = initial_assembly_definitions(&assembly_context, cli_args);
     let mut had_errors = false;
 
     for input in inputs.iter().rev() {
@@ -185,6 +192,17 @@ fn assemble_inputs(inputs: &[AssemblyInput]) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn initial_assembly_definitions(context: &CompileContext, cli_args: &[String]) -> Value {
+    let args = context.value_list(
+        cli_args
+            .iter()
+            .map(|arg| context.value_binary(arg))
+            .collect(),
+    );
+    let asm = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("args"), args));
+    Value::Dict(Dict::new_sync().insert(Key::atom_from_text("asm"), asm))
 }
 
 fn parse_assembly_input(

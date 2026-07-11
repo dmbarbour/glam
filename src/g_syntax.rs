@@ -100,6 +100,7 @@ pub enum SyntaxExpr {
     Text(String),
     Name(Vec<SyntaxKeyExpr>),
     PriorName(Vec<SyntaxKeyExpr>),
+    Access(Box<SyntaxExpr>, Vec<SyntaxKeyExpr>),
     SingletonDict(SyntaxKeyExpr, Box<SyntaxExpr>),
     DictUnion(Vec<SyntaxExpr>),
     List(Vec<SyntaxExpr>),
@@ -573,6 +574,15 @@ fn syntax_expr_to_value_in_scope(
         SyntaxExpr::PriorName(parts) => {
             lower_prior_name_expr(parts, line, context, visible_definitions, locals)?
         }
+        SyntaxExpr::Access(base, parts) => context.value_access(
+            syntax_expr_to_value_in_scope(base, line, context, visible_definitions, locals)?,
+            parts
+                .iter()
+                .map(|part| {
+                    syntax_key_expr_to_core(part, line, context, visible_definitions, locals)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         SyntaxExpr::List(items) => context.value_list(
             items
                 .iter()
@@ -1090,6 +1100,12 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
                 analyze_key_expr_locals(part, line, diagnostics);
             }
         }
+        SyntaxExpr::Access(base, parts) => {
+            analyze_expr_locals(base, line, diagnostics);
+            for part in parts {
+                analyze_key_expr_locals(part, line, diagnostics);
+            }
+        }
         SyntaxExpr::SingletonDict(key, value) => {
             analyze_key_expr_locals(key, line, diagnostics);
             analyze_expr_locals(value, line, diagnostics);
@@ -1158,6 +1174,12 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
                 mark_used_key_expr(part, locals, used);
             }
         }
+        SyntaxExpr::Access(base, parts) => {
+            mark_used_locals(base, locals, used);
+            for part in parts {
+                mark_used_key_expr(part, locals, used);
+            }
+        }
         SyntaxExpr::SingletonDict(key, value) => {
             mark_used_key_expr(key, locals, used);
             mark_used_locals(value, locals, used);
@@ -1219,7 +1241,7 @@ fn syntax_expr_parser<'src>()
         Unrelated,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     enum PathSuffix {
         Single(SyntaxKeyExpr),
         Expand(Vec<SyntaxKeyExpr>),
@@ -1332,6 +1354,23 @@ fn syntax_expr_parser<'src>()
         }
     }
 
+    fn expand_path_suffixes(first: SyntaxKeyExpr, suffixes: Vec<PathSuffix>) -> Vec<SyntaxKeyExpr> {
+        let mut parts = vec![first];
+        parts.extend(flatten_path_suffixes(suffixes));
+        parts
+    }
+
+    fn flatten_path_suffixes(suffixes: Vec<PathSuffix>) -> Vec<SyntaxKeyExpr> {
+        let mut parts = Vec::new();
+        for suffix in suffixes {
+            match suffix {
+                PathSuffix::Single(part) => parts.push(part),
+                PathSuffix::Expand(items) => parts.extend(items),
+            }
+        }
+        parts
+    }
+
     let parser = recursive(|expr| {
         let name = glam_name().boxed();
         let local = local_name().boxed();
@@ -1362,39 +1401,29 @@ fn syntax_expr_parser<'src>()
 
         // Dotted paths stay lexically tight because `.` has other roles in the
         // language surface, such as future effect sugar like `.bar`.
-        let prior_name = just('_').ignore_then(name.clone()).boxed();
-        let root_name = choice((
-            prior_name.map(|name| (true, name)),
-            name.clone().map(|name| (false, name)),
-        ));
-        let name_expr = root_name
-            .map(|(is_prior, name)| (is_prior, SyntaxKeyExpr::Atom(name)))
-            .then(
-                just('.')
-                    .ignore_then(choice((
-                        path_list_shorthand,
-                        path_list_expr,
-                        name.clone()
-                            .map(SyntaxKeyExpr::Atom)
-                            .map(PathSuffix::Single),
-                    )))
-                    .repeated()
-                    .collect::<Vec<_>>(),
-            )
-            .map(|((is_prior, first), suffixes)| {
-                let mut parts = vec![first];
-                for suffix in suffixes {
-                    match suffix {
-                        PathSuffix::Single(part) => parts.push(part),
-                        PathSuffix::Expand(items) => parts.extend(items),
-                    }
-                }
-                if is_prior {
-                    SyntaxExpr::PriorName(parts)
-                } else {
-                    SyntaxExpr::Name(parts)
-                }
-            });
+        let path_suffix = just('.')
+            .ignore_then(choice((
+                path_list_shorthand,
+                path_list_expr,
+                name.clone()
+                    .map(SyntaxKeyExpr::Atom)
+                    .map(PathSuffix::Single),
+            )))
+            .repeated()
+            .collect::<Vec<_>>();
+
+        let prior_name = just('_')
+            .ignore_then(name.clone())
+            .map(SyntaxKeyExpr::Atom)
+            .then(path_suffix.clone())
+            .map(|(first, suffixes)| SyntaxExpr::PriorName(expand_path_suffixes(first, suffixes)))
+            .boxed();
+        let name_expr = name
+            .clone()
+            .map(SyntaxKeyExpr::Atom)
+            .then(path_suffix.clone())
+            .map(|(first, suffixes)| SyntaxExpr::Name(expand_path_suffixes(first, suffixes)))
+            .boxed();
 
         let number_literal = choice((
             just('_').then(one_of("0123456789")).ignored(),
@@ -1456,7 +1485,15 @@ fn syntax_expr_parser<'src>()
             .then(expr.clone())
             .map(|(params, body)| SyntaxExpr::Lambda(params, Box::new(body)));
 
-        let atom = choice((text, list, dict, number, name_expr, parenthesized)).boxed();
+        let literal_atom = choice((text, list, dict, number, parenthesized)).boxed();
+        let literal_expr = literal_atom
+            .then(path_suffix.clone())
+            .map(|(base, suffixes)| match flatten_path_suffixes(suffixes) {
+                parts if parts.is_empty() => base,
+                parts => SyntaxExpr::Access(Box::new(base), parts),
+            })
+            .boxed();
+        let atom = choice((literal_expr, prior_name, name_expr)).boxed();
         let application = atom
             .clone()
             .then(
@@ -2518,6 +2555,36 @@ mod tests {
             parse_expr("foo. ([1,2] ++ [3]).bar"),
             None,
             "whitespace between `.` and `(` should be rejected"
+        );
+    }
+
+    #[test]
+    fn parses_dotted_paths_on_literal_expressions() {
+        assert_eq!(
+            parse_expr("{ hello:\"Hello\" }.hello"),
+            Some(SyntaxExpr::Access(
+                Box::new(SyntaxExpr::DictUnion(vec![SyntaxExpr::SingletonDict(
+                    SyntaxKeyExpr::Atom("hello".to_owned()),
+                    Box::new(SyntaxExpr::Text("Hello".to_owned())),
+                )])),
+                vec![SyntaxKeyExpr::Atom("hello".to_owned())],
+            ))
+        );
+        assert_eq!(
+            parse_expr("[\"Hello\"].[0]"),
+            Some(SyntaxExpr::Access(
+                Box::new(SyntaxExpr::List(vec![SyntaxExpr::Text("Hello".to_owned())])),
+                vec![SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(0))))],
+            ))
+        );
+        assert_eq!(
+            parse_expr("(foo).bar"),
+            Some(SyntaxExpr::Access(
+                Box::new(SyntaxExpr::Name(vec![SyntaxKeyExpr::Atom(
+                    "foo".to_owned()
+                )])),
+                vec![SyntaxKeyExpr::Atom("bar".to_owned())],
+            ))
         );
     }
 

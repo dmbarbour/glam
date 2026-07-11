@@ -934,7 +934,7 @@ fn expand_key_expr(key: &KeyExpr, local_env: &[Value]) -> Result<Vec<Key>, EvalE
                 expr: expr.clone(),
                 env: Arc::from(local_env.to_vec()),
             });
-            let value = eval_value(&value)?;
+            let value = force_value_shell(&value)?;
             Ok(vec![value_to_key(&value, local_env)?])
         }
         KeyExpr::PathIndex(expr) => eval_key_path_list(
