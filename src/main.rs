@@ -475,7 +475,7 @@ fn declaration_label(kind: &DeclarationKind) -> &'static str {
         DeclarationKind::Import(_) => "import",
         DeclarationKind::Abstract(_) => "abstract",
         DeclarationKind::Unique(_) => "unique",
-        DeclarationKind::Object => "object",
+        DeclarationKind::Object(_) => "object",
         DeclarationKind::Extend => "extend",
         DeclarationKind::Definition(_) => "definition",
         DeclarationKind::Unknown => "unknown",

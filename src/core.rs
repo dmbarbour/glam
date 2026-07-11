@@ -251,6 +251,7 @@ pub enum Builtin {
     DictSingleton,
     DictUnion,
     DictUpdate,
+    ObjectInstance,
 }
 
 impl Builtin {
@@ -272,6 +273,7 @@ impl Builtin {
             Self::DictSingleton => 2,
             Self::DictUnion => 2,
             Self::DictUpdate => 2,
+            Self::ObjectInstance => 1,
         }
     }
 }

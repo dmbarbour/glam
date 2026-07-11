@@ -38,6 +38,7 @@ This document should summarize salient, relevant points rather than asking futur
 - Tests should pin design constraints as soon as they become executable.
 - Use Chumsky for growing `.g` grammar work. Keep hand-written parsing limited
   to small source-normalization steps where that is clearer than grammar code.
+- Object implementation notes live in `docs/agent_context/object_spike.md`.
 
 ### Command Line
 

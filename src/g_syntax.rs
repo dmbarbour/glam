@@ -48,7 +48,7 @@ pub enum DeclarationKind {
     Import(ImportDecl),
     Abstract(Vec<String>),
     Unique(Vec<String>),
-    Object,
+    Object(ObjectDecl),
     Extend,
     Definition(DefinitionDecl),
     Unknown,
@@ -65,6 +65,20 @@ pub struct ImportDecl {
     pub reference: ImportReference,
     pub binary: bool,
     pub placement: ImportPlacement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectDecl {
+    pub target: String,
+    pub deps: Vec<String>,
+    pub body: Vec<ObjectBodyDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectBodyDefinition {
+    pub line: usize,
+    pub text: String,
+    pub definition: DefinitionDecl,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +140,21 @@ struct LocalName {
     raw: String,
     canonical: Option<String>,
     suppress_unused_warning: bool,
+}
+
+#[derive(Debug, Clone)]
+struct NameScope {
+    final_defs: Value,
+    prior_defs: Value,
+}
+
+impl NameScope {
+    fn module(context: &CompileContext, visible_definitions: Value) -> Self {
+        Self {
+            final_defs: context.final_defs.clone(),
+            prior_defs: visible_definitions,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,13 +292,22 @@ pub fn lower_to_core_with_context(
                 }
             }
             DeclarationKind::Definition(definition) => {
+                let scope = NameScope::module(context, definitions.clone());
                 if let Err(diagnostic) = lower_definition(
                     definition,
                     declaration.text.as_str(),
                     declaration.line,
                     context,
                     &mut definitions,
+                    &scope,
                 ) {
+                    diagnostics.push(diagnostic);
+                }
+            }
+            DeclarationKind::Object(object) => {
+                if let Err(diagnostic) =
+                    lower_object(object, declaration.line, context, &mut definitions)
+                {
                     diagnostics.push(diagnostic);
                 }
             }
@@ -475,12 +513,13 @@ fn lower_definition(
     line: usize,
     context: &CompileContext,
     definitions: &mut Value,
+    scope: &NameScope,
 ) -> Result<(), Diagnostic> {
     let Some(expr) = &definition.expr else {
         return Ok(());
     };
 
-    let value = syntax_expr_to_value(expr, line, context, definitions)?;
+    let value = syntax_expr_to_value(expr, line, context, scope)?;
     let value = match definition.kind {
         DefinitionKind::Introduce => annotate_definition_value(
             BuiltinAssertion::Undefined,
@@ -512,6 +551,83 @@ fn lower_definition(
     );
 
     Ok(())
+}
+
+fn lower_object(
+    object: &ObjectDecl,
+    line: usize,
+    context: &CompileContext,
+    definitions: &mut Value,
+) -> Result<(), Diagnostic> {
+    let object_value = object_decl_value(object, line, context)?;
+    let object_value = annotate_definition_value(
+        BuiltinAssertion::Undefined,
+        &object.target,
+        definitions.clone(),
+        object_value,
+        context,
+    )?;
+
+    *definitions = update_module_value(
+        definitions.clone(),
+        path_to_dict_value(&object.target, object_value, context)?,
+        context,
+    );
+    Ok(())
+}
+
+fn object_decl_value(
+    object: &ObjectDecl,
+    line: usize,
+    context: &CompileContext,
+) -> Result<Value, Diagnostic> {
+    let defs = object_defs_value(object, line, context)?;
+    let deps = object
+        .deps
+        .iter()
+        .map(|dep| {
+            let dep_object = path_value_in_definitions(dep, context.final_defs.clone(), context)?;
+            Ok(context.value_access(dep_object, vec![context.key_expr_key(name_as_key("spec"))]))
+        })
+        .collect::<Result<Vec<_>, Diagnostic>>()?;
+    let spec = Dict::new_sync()
+        .insert(
+            name_as_key("name"),
+            context
+                .abstract_global_path_value(context.abstract_global_path(&object.target).as_ref()),
+        )
+        .insert(name_as_key("deps"), context.value_list(deps))
+        .insert(name_as_key("defs"), defs);
+
+    Ok(context.value_apply(
+        context.value_builtin(Builtin::ObjectInstance),
+        context.value_dict(spec),
+    ))
+}
+
+fn object_defs_value(
+    object: &ObjectDecl,
+    _line: usize,
+    context: &CompileContext,
+) -> Result<Value, Diagnostic> {
+    let mut definitions = context.value_local(1);
+    let scope = NameScope {
+        final_defs: context.value_local(0),
+        prior_defs: context.value_local(1),
+    };
+
+    for body_definition in &object.body {
+        lower_definition(
+            &body_definition.definition,
+            body_definition.text.as_str(),
+            body_definition.line,
+            context,
+            &mut definitions,
+            &scope,
+        )?;
+    }
+
+    Ok(context.value_lambda(context.value_lambda(definitions)))
 }
 
 fn lower_update_definition(
@@ -653,16 +769,16 @@ fn syntax_expr_to_value(
     expr: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &Value,
+    scope: &NameScope,
 ) -> Result<Value, Diagnostic> {
-    syntax_expr_to_value_in_scope(expr, line, context, visible_definitions, &mut Vec::new())
+    syntax_expr_to_value_in_scope(expr, line, context, scope, &mut Vec::new())
 }
 
 fn syntax_expr_to_value_in_scope(
     expr: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &Value,
+    scope: &NameScope,
     locals: &mut Vec<LocalName>,
 ) -> Result<Value, Diagnostic> {
     Ok(match expr {
@@ -670,85 +786,47 @@ fn syntax_expr_to_value_in_scope(
         SyntaxExpr::Text(text) => context.value_binary(text),
         SyntaxExpr::SingletonDict(key, value) => context.builtin_apply2_value(
             Builtin::DictSingleton,
-            syntax_key_expr_to_value(key, line, context, visible_definitions, locals)?,
-            syntax_expr_to_value_in_scope(value, line, context, visible_definitions, locals)?,
+            syntax_key_expr_to_value(key, line, context, scope, locals)?,
+            syntax_expr_to_value_in_scope(value, line, context, scope, locals)?,
         ),
-        SyntaxExpr::DictUnion(items) => {
-            lower_dict_union(items, line, context, visible_definitions, locals)?
-        }
-        SyntaxExpr::Name(name) => lower_name_expr(name, context, locals),
-        SyntaxExpr::PriorName(name) => {
-            lower_prior_name_expr(name, line, context, visible_definitions)?
-        }
+        SyntaxExpr::DictUnion(items) => lower_dict_union(items, line, context, scope, locals)?,
+        SyntaxExpr::Name(name) => lower_name_expr(name, context, scope, locals),
+        SyntaxExpr::PriorName(name) => lower_prior_name_expr(name, line, context, scope)?,
         SyntaxExpr::Access(base, parts) => context.value_access(
-            syntax_expr_to_value_in_scope(base, line, context, visible_definitions, locals)?,
+            syntax_expr_to_value_in_scope(base, line, context, scope, locals)?,
             parts
                 .iter()
-                .map(|part| {
-                    syntax_key_expr_to_core(part, line, context, visible_definitions, locals)
-                })
+                .map(|part| syntax_key_expr_to_core(part, line, context, scope, locals))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         SyntaxExpr::List(items) => context.value_list(
             items
                 .iter()
-                .map(|expr| {
-                    syntax_expr_to_value_in_scope(expr, line, context, visible_definitions, locals)
-                })
+                .map(|expr| syntax_expr_to_value_in_scope(expr, line, context, scope, locals))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         SyntaxExpr::Lambda(params, body) => {
-            lower_lambda_expr(params, body, line, context, visible_definitions, locals)?
+            lower_lambda_expr(params, body, line, context, scope, locals)?
         }
         SyntaxExpr::Apply(function, argument) => context.value_apply(
-            syntax_expr_to_value_in_scope(function, line, context, visible_definitions, locals)?,
-            syntax_expr_to_value_in_scope(argument, line, context, visible_definitions, locals)?,
+            syntax_expr_to_value_in_scope(function, line, context, scope, locals)?,
+            syntax_expr_to_value_in_scope(argument, line, context, scope, locals)?,
         ),
-        SyntaxExpr::Multiply(left, right) => lower_builtin_expr(
-            Builtin::Multiply,
-            left,
-            right,
-            line,
-            context,
-            visible_definitions,
-            locals,
-        )?,
-        SyntaxExpr::Divide(left, right) => lower_builtin_expr(
-            Builtin::Divide,
-            left,
-            right,
-            line,
-            context,
-            visible_definitions,
-            locals,
-        )?,
-        SyntaxExpr::Add(left, right) => lower_builtin_expr(
-            Builtin::Add,
-            left,
-            right,
-            line,
-            context,
-            visible_definitions,
-            locals,
-        )?,
-        SyntaxExpr::Subtract(left, right) => lower_builtin_expr(
-            Builtin::Subtract,
-            left,
-            right,
-            line,
-            context,
-            visible_definitions,
-            locals,
-        )?,
-        SyntaxExpr::Append(left, right) => lower_builtin_expr(
-            Builtin::Append,
-            left,
-            right,
-            line,
-            context,
-            visible_definitions,
-            locals,
-        )?,
+        SyntaxExpr::Multiply(left, right) => {
+            lower_builtin_expr(Builtin::Multiply, left, right, line, context, scope, locals)?
+        }
+        SyntaxExpr::Divide(left, right) => {
+            lower_builtin_expr(Builtin::Divide, left, right, line, context, scope, locals)?
+        }
+        SyntaxExpr::Add(left, right) => {
+            lower_builtin_expr(Builtin::Add, left, right, line, context, scope, locals)?
+        }
+        SyntaxExpr::Subtract(left, right) => {
+            lower_builtin_expr(Builtin::Subtract, left, right, line, context, scope, locals)?
+        }
+        SyntaxExpr::Append(left, right) => {
+            lower_builtin_expr(Builtin::Append, left, right, line, context, scope, locals)?
+        }
     })
 }
 
@@ -758,13 +836,13 @@ fn lower_builtin_expr(
     right: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &Value,
+    scope: &NameScope,
     locals: &mut Vec<LocalName>,
 ) -> Result<Value, Diagnostic> {
     Ok(context.builtin_apply2_value(
         builtin,
-        syntax_expr_to_value_in_scope(left, line, context, visible_definitions, locals)?,
-        syntax_expr_to_value_in_scope(right, line, context, visible_definitions, locals)?,
+        syntax_expr_to_value_in_scope(left, line, context, scope, locals)?,
+        syntax_expr_to_value_in_scope(right, line, context, scope, locals)?,
     ))
 }
 
@@ -772,13 +850,13 @@ fn syntax_key_expr_to_value(
     key: &SyntaxKeyExpr,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &Value,
+    scope: &NameScope,
     locals: &mut Vec<LocalName>,
 ) -> Result<Value, Diagnostic> {
     Ok(match key {
         SyntaxKeyExpr::Atom(name) => context.value_atom(atom_from_str(name)),
         SyntaxKeyExpr::Index(expr) => {
-            syntax_expr_to_value_in_scope(expr, line, context, visible_definitions, locals)?
+            syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?
         }
         SyntaxKeyExpr::PathIndex(_) => {
             return Err(Diagnostic::error(
@@ -793,7 +871,7 @@ fn lower_dict_union(
     items: &[SyntaxExpr],
     line: usize,
     context: &CompileContext,
-    visible_definitions: &Value,
+    scope: &NameScope,
     locals: &mut Vec<LocalName>,
 ) -> Result<Value, Diagnostic> {
     let mut items = items.iter();
@@ -801,13 +879,12 @@ fn lower_dict_union(
         return Ok(context.empty_dict_value());
     };
 
-    let mut value =
-        syntax_expr_to_value_in_scope(first, line, context, visible_definitions, locals)?;
+    let mut value = syntax_expr_to_value_in_scope(first, line, context, scope, locals)?;
     for item in items {
         value = context.builtin_apply2_value(
             Builtin::DictUnion,
             value,
-            syntax_expr_to_value_in_scope(item, line, context, visible_definitions, locals)?,
+            syntax_expr_to_value_in_scope(item, line, context, scope, locals)?,
         );
     }
     Ok(value)
@@ -818,13 +895,12 @@ fn lower_lambda_expr(
     body: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &Value,
+    scope: &NameScope,
     locals: &mut Vec<LocalName>,
 ) -> Result<Value, Diagnostic> {
     let base_len = locals.len();
     locals.extend(params.iter().map(|param| local_name_metadata(param)));
-    let mut lowered =
-        syntax_expr_to_value_in_scope(body, line, context, visible_definitions, locals)?;
+    let mut lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
     for _ in params.iter().rev() {
@@ -834,12 +910,17 @@ fn lower_lambda_expr(
     Ok(lowered)
 }
 
-fn lower_name_expr(name: &str, context: &CompileContext, locals: &mut Vec<LocalName>) -> Value {
+fn lower_name_expr(
+    name: &str,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Value {
     // TODO: special keyword atoms like 'self' and 'module'
 
     let Some(local_index) = local_binding_index(name, locals) else {
         return context.value_access(
-            context.final_defs.clone(),
+            scope.final_defs.clone(),
             vec![context.key_expr_key(Key::atom_from_text(name))],
         );
     };
@@ -851,7 +932,7 @@ fn lower_prior_name_expr(
     name: &str,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &Value,
+    scope: &NameScope,
 ) -> Result<Value, Diagnostic> {
     if name.is_empty() {
         return Err(Diagnostic::error(
@@ -861,7 +942,7 @@ fn lower_prior_name_expr(
     }
 
     Ok(context.value_access(
-        visible_definitions.clone(),
+        scope.prior_defs.clone(),
         vec![context.key_expr_key(Key::atom_from_text(name))],
     ))
 }
@@ -897,20 +978,16 @@ fn syntax_key_expr_to_core(
     key: &SyntaxKeyExpr,
     line: usize,
     context: &CompileContext,
-    visible_definitions: &Value,
+    scope: &NameScope,
     locals: &mut Vec<LocalName>,
 ) -> Result<CoreKeyExpr, Diagnostic> {
     Ok(match key {
         SyntaxKeyExpr::Atom(name) => context.key_expr_key(name_as_key(name)),
         SyntaxKeyExpr::Index(expr) => context.key_expr_index(syntax_expr_to_value_in_scope(
-            expr,
-            line,
-            context,
-            visible_definitions,
-            locals,
+            expr, line, context, scope, locals,
         )?),
         SyntaxKeyExpr::PathIndex(expr) => context.key_expr_path_index(
-            syntax_expr_to_value_in_scope(expr, line, context, visible_definitions, locals)?,
+            syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?,
         ),
     })
 }
@@ -957,7 +1034,7 @@ fn classify_declaration(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> DeclarationKind {
     match first_word(text) {
-        Some("object") => return DeclarationKind::Object,
+        Some("object") => return classify_object_declaration(text, line, diagnostics),
         Some("extend") | Some("extends") => return DeclarationKind::Extend,
         _ => {}
     }
@@ -978,6 +1055,173 @@ fn classify_declaration(
     } else {
         DeclarationKind::Unknown
     }
+}
+
+fn classify_object_declaration(
+    text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> DeclarationKind {
+    match parse_object_declaration(text, line, diagnostics) {
+        Some(object) => DeclarationKind::Object(object),
+        None => DeclarationKind::Unknown,
+    }
+}
+
+fn parse_object_declaration(
+    text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<ObjectDecl> {
+    let mut lines = text.lines();
+    let header = lines.next()?.trim();
+    let body_lines = lines.collect::<Vec<_>>();
+    let header = header.strip_prefix("object")?.trim();
+
+    let (target, rest) = take_header_word(header).unwrap_or(("", ""));
+    if target.is_empty() {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "object declaration requires a name",
+        ));
+        return None;
+    }
+    if target == "_" {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "anonymous object declarations are not supported by the current spike",
+        ));
+        return None;
+    }
+    if !path().parse(target).into_result().is_ok() {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "object declaration requires a path name",
+        ));
+        return None;
+    }
+
+    let (deps, has_with) = parse_object_header_tail(rest.trim(), line, diagnostics)?;
+    if !body_lines.is_empty() && !has_with {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "object body requires `with` in the declaration header",
+        ));
+        return None;
+    }
+
+    let mut body = Vec::new();
+    for (offset, body_line) in body_lines.iter().enumerate() {
+        if body_line.trim().is_empty() {
+            continue;
+        }
+        let body_line_number = line + offset + 1;
+        let Some(definition) =
+            parse_object_body_definition(body_line.trim(), body_line_number, diagnostics)
+        else {
+            continue;
+        };
+        body.push(definition);
+    }
+
+    Some(ObjectDecl {
+        target: target.to_owned(),
+        deps,
+        body,
+    })
+}
+
+fn parse_object_header_tail(
+    rest: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<(Vec<String>, bool)> {
+    if rest.is_empty() {
+        return Some((Vec::new(), false));
+    }
+    if rest == "with" {
+        return Some((Vec::new(), true));
+    }
+
+    let Some(after_extends) = rest.strip_prefix("extends").map(str::trim) else {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "object declarations currently support only `extends ...` and `with` after the name",
+        ));
+        return None;
+    };
+    if after_extends.is_empty() {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "object `extends` requires at least one dependency",
+        ));
+        return None;
+    }
+
+    let (deps_text, has_with) = match after_extends.strip_suffix(" with") {
+        Some(deps) => (deps.trim(), true),
+        None if after_extends == "with" => {
+            diagnostics.push(Diagnostic::error(
+                line,
+                "object `extends` requires at least one dependency",
+            ));
+            return None;
+        }
+        None => (after_extends, false),
+    };
+    let deps = deps_text
+        .split(',')
+        .map(str::trim)
+        .filter(|dep| !dep.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if deps.is_empty() {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "object `extends` requires at least one dependency",
+        ));
+        return None;
+    }
+    for dep in &deps {
+        if !path().parse(dep.as_str()).into_result().is_ok() {
+            diagnostics.push(Diagnostic::error(
+                line,
+                format!("object dependency `{dep}` is not a path name"),
+            ));
+            return None;
+        }
+    }
+
+    Some((deps, has_with))
+}
+
+fn parse_object_body_definition(
+    text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<ObjectBodyDefinition> {
+    let (declaration, errors) = definition_decl().parse(text).into_output_errors();
+    for error in errors {
+        diagnostics.push(Diagnostic::error(line, error.to_string()));
+    }
+
+    let Some(definition) = declaration else {
+        return None;
+    };
+    Some(ObjectBodyDefinition {
+        line,
+        text: text.to_owned(),
+        definition: finalize_definition_expr(definition, line, diagnostics),
+    })
+}
+
+fn take_header_word(text: &str) -> Option<(&str, &str)> {
+    let text = text.trim_start();
+    if text.is_empty() {
+        return None;
+    }
+    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    Some((&text[..end], &text[end..]))
 }
 
 fn declaration_parser<'src>()
@@ -1420,6 +1664,7 @@ fn syntax_expr_parser<'src>()
             crate::core::Builtin::DictSingleton => ":",
             crate::core::Builtin::DictUnion => "{,}",
             crate::core::Builtin::DictUpdate => "dict_update",
+            crate::core::Builtin::ObjectInstance => "object_instance",
         }
     }
 
@@ -1989,6 +2234,44 @@ mod tests {
         assert_eq!(
             parsed.declarations[1].kind,
             DeclarationKind::Unique(vec!["Foo".to_owned(), "palette.Blue".to_owned()])
+        );
+    }
+
+    #[test]
+    fn parses_named_object_declarations() {
+        let parsed = parse(
+            "language g0\nobject child extends base, mixin with\n  text = \"Hello\"\n  target := \"World\"\n",
+        );
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Object(ObjectDecl {
+                target: "child".to_owned(),
+                deps: vec!["base".to_owned(), "mixin".to_owned()],
+                body: vec![
+                    ObjectBodyDefinition {
+                        line: 3,
+                        text: "text = \"Hello\"".to_owned(),
+                        definition: DefinitionDecl {
+                            target: "text".to_owned(),
+                            kind: DefinitionKind::Introduce,
+                            body: "\"Hello\"".to_owned(),
+                            expr: Some(SyntaxExpr::Text("Hello".to_owned())),
+                        },
+                    },
+                    ObjectBodyDefinition {
+                        line: 4,
+                        text: "target := \"World\"".to_owned(),
+                        definition: DefinitionDecl {
+                            target: "target".to_owned(),
+                            kind: DefinitionKind::Override,
+                            body: "\"World\"".to_owned(),
+                            expr: Some(SyntaxExpr::Text("World".to_owned())),
+                        },
+                    },
+                ],
+            })
         );
     }
 
@@ -2877,6 +3160,63 @@ mod tests {
                 ),
                 CoreExpr::Value(Value::binary_from_text("!")),
             )
+        );
+    }
+
+    #[test]
+    fn object_declarations_evaluate_as_object_instances() {
+        let parsed = parse(
+            "language g0\nobject hello with\n  text = \"Hello, World!\"\nasm.result = hello.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn object_dependencies_apply_inherited_defs_to_child_self() {
+        let parsed = parse(
+            "language g0\nobject base with\n  text = hello ++ \", \" ++ target ++ \"!\"\n  hello = \"Hello\"\n  target = \"Base\"\nobject child extends base with\n  target := \"World\"\nasm.result = child.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn object_prior_names_resolve_against_inherited_self() {
+        let parsed = parse(
+            "language g0\nobject base with\n  text = \"Hello, World\"\nobject child extends base with\n  text := _text ++ \"!\"\nasm.result = child.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
         );
     }
 

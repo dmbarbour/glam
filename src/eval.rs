@@ -364,6 +364,12 @@ fn apply_builtin(
             })?;
             eval_dict_update_builtin(&left, &right, local_env)
         }
+        Builtin::ObjectInstance => {
+            let [spec] = <[Value; 1]>::try_from(args).map_err(|_| {
+                EvalError::new("object instance builtin received the wrong number of arguments")
+            })?;
+            eval_object_instance_builtin(&spec, local_env)
+        }
     }
 }
 
@@ -600,6 +606,78 @@ fn eval_fixpoint_builtin(function: &Value) -> Result<Value, EvalError> {
         .set(value.clone())
         .map_err(|_| EvalError::new("fixpoint builtin initialized twice"))?;
     Ok(value)
+}
+
+fn eval_object_instance_builtin(spec: &Value, local_env: &[Value]) -> Result<Value, EvalError> {
+    let spec_dict = object_spec_dict(spec)?;
+    let specs = object_linearization(&spec_dict)?;
+
+    let handle = IVar::new();
+    let self_marker = Value::expr(Expr::Future(handle.clone()));
+    let mut base = Value::Dict(crate::core::Dict::new_sync());
+    for spec in specs {
+        let defs = spec
+            .get(&Key::atom_from_text("defs"))
+            .cloned()
+            .unwrap_or_else(default_object_defs_value);
+        let mixed = apply_value(eval_value(&defs)?, base, local_env)?;
+        let mixed = apply_value(eval_value(&mixed)?, self_marker.clone(), local_env)?;
+        let Value::Dict(mixed_dict) = force_value_shell(&mixed)? else {
+            return Err(EvalError::new(
+                "object definition mixin must produce a dictionary",
+            ));
+        };
+        base = Value::Dict(mixed_dict);
+    }
+
+    let Value::Dict(base_dict) = base else {
+        return Err(EvalError::new("object base is not a dictionary"));
+    };
+    let object = Value::Dict(base_dict.insert(Key::atom_from_text("spec"), Value::Dict(spec_dict)));
+    handle
+        .set(object.clone())
+        .map_err(|_| EvalError::new("object instance initialized twice"))?;
+    Ok(object)
+}
+
+fn object_spec_dict(spec: &Value) -> Result<crate::core::Dict, EvalError> {
+    let spec = force_value_shell(spec)?;
+    let Value::Dict(spec_dict) = spec else {
+        return Err(EvalError::new(
+            "object instance builtin requires a specification dictionary",
+        ));
+    };
+    Ok(spec_dict)
+}
+
+fn object_linearization(spec: &crate::core::Dict) -> Result<Vec<crate::core::Dict>, EvalError> {
+    let deps = spec
+        .get(&Key::atom_from_text("deps"))
+        .cloned()
+        .unwrap_or_else(|| Value::List(List::empty()));
+    let mut specs = Vec::new();
+    for dep_spec in object_dep_specs(&deps)? {
+        let dep_spec = object_spec_dict(&dep_spec)?;
+        specs.extend(object_linearization(&dep_spec)?);
+    }
+    specs.push(spec.clone());
+    Ok(specs)
+}
+
+fn object_dep_specs(deps: &Value) -> Result<Vec<Value>, EvalError> {
+    match force_value_shell(deps)? {
+        Value::List(list) => list_to_value_items(&list),
+        Value::Dict(dict) if dict.is_empty() => Ok(Vec::new()),
+        _ => Err(EvalError::new(
+            "object specification deps must evaluate to a list",
+        )),
+    }
+}
+
+fn default_object_defs_value() -> Value {
+    Value::expr(Expr::Lambda(Arc::new(Expr::Lambda(Arc::new(Expr::Local(
+        1,
+    ))))))
 }
 
 fn eval_anno_builtin(
