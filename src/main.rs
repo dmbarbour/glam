@@ -9,6 +9,12 @@ use glam::diagnostic::Severity;
 use glam::eval;
 use glam::g_syntax::{DeclarationKind, ParsedSource, SourceFile, lower_to_core_with_context};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AssemblyInput {
+    File(String),
+    Script { extension: String, body: String },
+}
+
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(first) = args.next() else {
@@ -38,7 +44,24 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             };
 
-            assemble_path(&path)
+            let mut inputs = vec![AssemblyInput::File(path)];
+            match collect_assembly_inputs(args, &mut inputs) {
+                Ok(()) => assemble_inputs(&inputs),
+                Err(exit_code) => exit_code,
+            }
+        }
+        option if script_extension(option).is_some() => {
+            let extension = script_extension(option).expect("checked above").to_owned();
+            let Some(body) = args.next() else {
+                eprintln!("error: `{option}` needs a script body");
+                return ExitCode::from(2);
+            };
+
+            let mut inputs = vec![AssemblyInput::Script { extension, body }];
+            match collect_assembly_inputs(args, &mut inputs) {
+                Ok(()) => assemble_inputs(&inputs),
+                Err(exit_code) => exit_code,
+            }
         }
         option if option.starts_with('-') => {
             eprintln!("error: unknown option `{option}`");
@@ -53,7 +76,51 @@ fn main() -> ExitCode {
     }
 }
 
-fn assemble_path(path: &str) -> ExitCode {
+fn collect_assembly_inputs(
+    mut args: impl Iterator<Item = String>,
+    inputs: &mut Vec<AssemblyInput>,
+) -> Result<(), ExitCode> {
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-f" | "--file" => {
+                let Some(path) = args.next() else {
+                    eprintln!("error: `{arg}` needs a source path");
+                    return Err(ExitCode::from(2));
+                };
+                inputs.push(AssemblyInput::File(path));
+            }
+            option if script_extension(option).is_some() => {
+                let extension = script_extension(option).expect("checked above").to_owned();
+                let Some(body) = args.next() else {
+                    eprintln!("error: `{option}` needs a script body");
+                    return Err(ExitCode::from(2));
+                };
+                inputs.push(AssemblyInput::Script { extension, body });
+            }
+            option if option.starts_with('-') => {
+                eprintln!("error: unknown option `{option}`");
+                return Err(ExitCode::from(2));
+            }
+            _arg => {
+                eprintln!(
+                    "error: bare command-line arguments are reserved for configured `conf.cli` rewriting"
+                );
+                return Err(ExitCode::from(2));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn script_extension(option: &str) -> Option<&str> {
+    option
+        .strip_prefix("--script.")
+        .or_else(|| option.strip_prefix("-s."))
+        .filter(|extension| !extension.is_empty())
+}
+
+fn assemble_inputs(inputs: &[AssemblyInput]) -> ExitCode {
     // Note this is a temporary spike wiring: syntax lowering still happens
     // here until the front end compiler (and user-defined syntax) owns more
     // of the translation pipeline.
@@ -62,30 +129,40 @@ fn assemble_path(path: &str) -> ExitCode {
     // extensions, and shall effectfully lower to core, via common API with
     // the built-in syntax.
 
-    let (parsed, context) = match parse_source_path(path) {
-        Ok(parsed) => parsed,
-        Err(exit_code) => return exit_code,
-    };
+    let assembly_context = CompileContext::from_module_path(["assembly"]);
+    let final_defs = assembly_context.final_defs.clone();
+    let mut definitions = assembly_context.prior_defs.clone();
+    let mut had_errors = false;
 
-    // TODO: move printing errors into CompileContext, so a common logger can be used
-    let lowered = lower_to_core_with_context(&parsed, &context);
+    for input in inputs.iter().rev() {
+        let (parsed, context, diagnostic_label) =
+            match parse_assembly_input(input, definitions.clone(), final_defs.clone()) {
+                Ok(parsed) => parsed,
+                Err(exit_code) => return exit_code,
+            };
 
-    for diagnostic in &lowered.diagnostics {
-        eprintln!(
-            "{path}:{}: {}: {}",
-            diagnostic.line, diagnostic.severity, diagnostic.message
-        );
+        // TODO: move printing errors into CompileContext, so a common logger can be used
+        let lowered = lower_to_core_with_context(&parsed, &context);
+
+        for diagnostic in &lowered.diagnostics {
+            eprintln!(
+                "{diagnostic_label}:{}: {}: {}",
+                diagnostic.line, diagnostic.severity, diagnostic.message
+            );
+        }
+
+        had_errors |= lowered
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Severity::Error);
+        definitions = lowered.definitions;
     }
 
-    if lowered
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.severity == Severity::Error)
-    {
+    if had_errors {
         return ExitCode::from(1);
     }
 
-    let term = instantiate_module(&context, &lowered.definitions);
+    let term = instantiate_module(&assembly_context, &definitions);
     let root = match eval::eval_value(&term) {
         Ok(root) => root,
         Err(err) => {
@@ -108,6 +185,35 @@ fn assemble_path(path: &str) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn parse_assembly_input(
+    input: &AssemblyInput,
+    prior_defs: Value,
+    final_defs: Value,
+) -> Result<(ParsedSource, CompileContext, String), ExitCode> {
+    match input {
+        AssemblyInput::File(path) => {
+            let source = read_source_path(path)?;
+            let context = CompileContext::from_source_path(path)
+                .with_module_path(["assembly"])
+                .with_prior_defs(prior_defs)
+                .with_final_defs(final_defs)
+                .with_source_binary(source.text.as_bytes());
+            let parsed = source.parse_with_context(&context);
+            Ok((parsed, context, path.clone()))
+        }
+        AssemblyInput::Script { extension, body } => {
+            let label = format!("<script.{extension}>");
+            let source = SourceFile::new(&label, body);
+            let context = CompileContext::from_module_path(["assembly"])
+                .with_prior_defs(prior_defs)
+                .with_final_defs(final_defs)
+                .with_source_binary(source.text.as_bytes());
+            let parsed = source.parse_with_context(&context);
+            Ok((parsed, context, label))
+        }
+    }
 }
 
 fn instantiate_module(context: &CompileContext, definitions: &Value) -> Value {
@@ -200,6 +306,13 @@ fn parse_path(path: &str) -> ExitCode {
 }
 
 fn parse_source_path(path: &str) -> Result<(ParsedSource, CompileContext), ExitCode> {
+    let source = read_source_path(path)?;
+    let context =
+        CompileContext::for_assembly_file(path).with_source_binary(source.text.as_bytes());
+    Ok((source.parse_with_context(&context), context))
+}
+
+fn read_source_path(path: &str) -> Result<SourceFile, ExitCode> {
     // TODO: never convert to string, instead pass bytes to the parser and let it handle UTF-8 decoding.
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -209,10 +322,7 @@ fn parse_source_path(path: &str) -> Result<(ParsedSource, CompileContext), ExitC
         }
     };
 
-    let source = SourceFile::new(path, text);
-    let context =
-        CompileContext::for_assembly_file(path).with_source_binary(source.text.as_bytes());
-    Ok((source.parse_with_context(&context), context))
+    Ok(SourceFile::new(path, text))
 }
 
 fn print_parse_summary(path: &str, parsed: &glam::g_syntax::ParsedSource) -> ExitCode {
@@ -265,6 +375,6 @@ fn declaration_label(kind: &DeclarationKind) -> &'static str {
 
 fn print_help() {
     println!(
-        "Usage: glam (-f|--file) <PATH>\n       glam --parse <PATH>\n       glam --help\n       glam --version\n\nBare arguments to be rewritten by `conf.cli`."
+        "Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...\n       glam --parse <PATH>\n       glam --help\n       glam --version\n\nAssembly inputs are applied as mixins; earlier inputs override later inputs.\nBare arguments are reserved for configured `conf.cli` rewriting."
     );
 }

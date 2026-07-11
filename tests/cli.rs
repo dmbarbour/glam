@@ -41,6 +41,46 @@ fn short_file_option_writes_asm_result_to_stdout() {
 }
 
 #[test]
+fn multiple_files_compose_as_ordered_mixins() {
+    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
+        .arg("--file")
+        .arg("samples/assembly/mixin_override.g")
+        .arg("--file")
+        .arg("samples/assembly/mixin_base.g")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"Hello, World!");
+    assert_eq!(output.stderr, b"");
+}
+
+#[test]
+fn scripts_compose_with_files_as_ordered_mixins() {
+    let output = Command::new(env!("CARGO_BIN_EXE_glam"))
+        .arg("--script.g")
+        .arg("language g0\nasm.result := \"script\"\n")
+        .arg("--file")
+        .arg("samples/assembly/hello_text.g")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"script");
+    assert_eq!(output.stderr, b"");
+}
+
+#[test]
 fn parse_errors_write_summary_and_diagnostics_to_stderr() {
     let output = Command::new(env!("CARGO_BIN_EXE_glam"))
         .arg("--parse")
