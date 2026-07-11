@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -364,6 +365,12 @@ fn apply_builtin(
             })?;
             eval_dict_update_builtin(&left, &right, local_env)
         }
+        Builtin::DictRemove => {
+            let [dict, key] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("dict remove builtin received the wrong number of arguments")
+            })?;
+            eval_dict_remove_builtin(&dict, &key, local_env)
+        }
         Builtin::ObjectInstance => {
             let [spec] = <[Value; 1]>::try_from(args).map_err(|_| {
                 EvalError::new("object instance builtin received the wrong number of arguments")
@@ -593,6 +600,20 @@ fn eval_dict_update_builtin(
     Ok(Value::Dict(update_dicts(&left_dict, &right_dict)))
 }
 
+fn eval_dict_remove_builtin(
+    dict: &Value,
+    key: &Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let dict = force_value_shell(dict)?;
+    let Value::Dict(dict) = dict else {
+        return Err(EvalError::new("dict remove builtin requires a dictionary"));
+    };
+    let key = eval_value(key)?;
+    let key = value_to_key(&key, local_env)?;
+    Ok(Value::Dict(dict.remove(&key)))
+}
+
 fn eval_fixpoint_builtin(function: &Value) -> Result<Value, EvalError> {
     let function = eval_value(function)?;
     let Value::Closure(function) = function else {
@@ -610,7 +631,7 @@ fn eval_fixpoint_builtin(function: &Value) -> Result<Value, EvalError> {
 
 fn eval_object_instance_builtin(spec: &Value, local_env: &[Value]) -> Result<Value, EvalError> {
     let spec_dict = object_spec_dict(spec)?;
-    let specs = object_linearization(&spec_dict)?;
+    let specs = object_application_order(&spec_dict, local_env)?;
 
     let handle = IVar::new();
     let self_marker = Value::expr(Expr::Future(handle.clone()));
@@ -650,18 +671,120 @@ fn object_spec_dict(spec: &Value) -> Result<crate::core::Dict, EvalError> {
     Ok(spec_dict)
 }
 
-fn object_linearization(spec: &crate::core::Dict) -> Result<Vec<crate::core::Dict>, EvalError> {
+fn object_application_order(
+    spec: &crate::core::Dict,
+    local_env: &[Value],
+) -> Result<Vec<crate::core::Dict>, EvalError> {
+    let mut seen = BTreeMap::new();
+    let mut linearized = object_c3_linearization(spec, local_env, &mut seen)?;
+    linearized.reverse();
+    Ok(linearized)
+}
+
+fn object_c3_linearization(
+    spec: &crate::core::Dict,
+    local_env: &[Value],
+    seen: &mut BTreeMap<Key, crate::core::Dict>,
+) -> Result<Vec<crate::core::Dict>, EvalError> {
+    let name = object_spec_name(spec, local_env)?;
+    remember_object_spec(&name, spec, seen)?;
     let deps = spec
         .get(&Key::atom_from_text("deps"))
         .cloned()
         .unwrap_or_else(|| Value::List(List::empty()));
-    let mut specs = Vec::new();
-    for dep_spec in object_dep_specs(&deps)? {
+    let deps = object_dep_specs(&deps)?;
+    let mut sequences = Vec::new();
+    for dep_spec in &deps {
         let dep_spec = object_spec_dict(&dep_spec)?;
-        specs.extend(object_linearization(&dep_spec)?);
+        sequences.push(object_c3_linearization(&dep_spec, local_env, seen)?);
     }
-    specs.push(spec.clone());
-    Ok(specs)
+    sequences.push(
+        deps.iter()
+            .map(object_spec_dict)
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+
+    let mut linearized = vec![spec.clone()];
+    linearized.extend(c3_merge(sequences, local_env)?);
+    Ok(linearized)
+}
+
+fn c3_merge(
+    mut sequences: Vec<Vec<crate::core::Dict>>,
+    local_env: &[Value],
+) -> Result<Vec<crate::core::Dict>, EvalError> {
+    let mut result = Vec::new();
+
+    loop {
+        sequences.retain(|sequence| !sequence.is_empty());
+        if sequences.is_empty() {
+            return Ok(result);
+        }
+
+        let mut selected = None;
+        'candidate: for sequence in &sequences {
+            let candidate = &sequence[0];
+            let candidate_name = object_spec_name(candidate, local_env)?;
+            for other in &sequences {
+                if other
+                    .iter()
+                    .skip(1)
+                    .map(|spec| object_spec_name(spec, local_env))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .contains(&candidate_name)
+                {
+                    continue 'candidate;
+                }
+            }
+            selected = Some((candidate_name, candidate.clone()));
+            break;
+        }
+
+        let Some((selected_name, selected_spec)) = selected else {
+            return Err(EvalError::new(
+                "object dependencies have inconsistent C3 linearization",
+            ));
+        };
+        result.push(selected_spec);
+
+        for sequence in &mut sequences {
+            if sequence
+                .first()
+                .map(|spec| object_spec_name(spec, local_env))
+                .transpose()?
+                .as_ref()
+                == Some(&selected_name)
+            {
+                sequence.remove(0);
+            }
+        }
+    }
+}
+
+fn object_spec_name(spec: &crate::core::Dict, local_env: &[Value]) -> Result<Key, EvalError> {
+    let Some(name) = spec.get(&Key::atom_from_text("name")) else {
+        return Err(EvalError::new("object specification requires a name"));
+    };
+    let name = eval_value(name)?;
+    value_to_key(&name, local_env)
+}
+
+fn remember_object_spec(
+    name: &Key,
+    spec: &crate::core::Dict,
+    seen: &mut BTreeMap<Key, crate::core::Dict>,
+) -> Result<(), EvalError> {
+    if let Some(existing) = seen.get(name) {
+        if existing != spec {
+            return Err(EvalError::new(format!(
+                "object linearization found conflicting specs for `{}`",
+                format_name_part(name)
+            )));
+        }
+    } else {
+        seen.insert(name.clone(), spec.clone());
+    }
+    Ok(())
 }
 
 fn object_dep_specs(deps: &Value) -> Result<Vec<Value>, EvalError> {

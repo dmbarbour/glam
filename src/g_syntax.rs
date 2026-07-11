@@ -49,7 +49,7 @@ pub enum DeclarationKind {
     Abstract(Vec<String>),
     Unique(Vec<String>),
     Object(ObjectDecl),
-    Extend,
+    Extend(ObjectExtendDecl),
     Definition(DefinitionDecl),
     Unknown,
 }
@@ -79,6 +79,12 @@ pub struct ObjectBodyDefinition {
     pub line: usize,
     pub text: String,
     pub definition: DefinitionDecl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectExtendDecl {
+    pub target: String,
+    pub body: Vec<ObjectBodyDefinition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +313,13 @@ pub fn lower_to_core_with_context(
             DeclarationKind::Object(object) => {
                 if let Err(diagnostic) =
                     lower_object(object, declaration.line, context, &mut definitions)
+                {
+                    diagnostics.push(diagnostic);
+                }
+            }
+            DeclarationKind::Extend(extend) => {
+                if let Err(diagnostic) =
+                    lower_extend(extend, declaration.line, context, &mut definitions)
                 {
                     diagnostics.push(diagnostic);
                 }
@@ -581,7 +594,7 @@ fn object_decl_value(
     line: usize,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
-    let defs = object_defs_value(object, line, context)?;
+    let defs = object_body_defs_value(&object.body, line, context)?;
     let deps = object
         .deps
         .iter()
@@ -605,18 +618,19 @@ fn object_decl_value(
     ))
 }
 
-fn object_defs_value(
-    object: &ObjectDecl,
+fn object_body_defs_value(
+    body: &[ObjectBodyDefinition],
     _line: usize,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
-    let mut definitions = context.value_local(1);
-    let scope = NameScope {
-        final_defs: context.value_local(0),
-        prior_defs: context.value_local(1),
-    };
+    let mut definitions = remove_object_spec_value(context.value_local(1), context);
+    let final_defs = context.value_local(0);
 
-    for body_definition in &object.body {
+    for body_definition in body {
+        let scope = NameScope {
+            final_defs: final_defs.clone(),
+            prior_defs: definitions.clone(),
+        };
         lower_definition(
             &body_definition.definition,
             body_definition.text.as_str(),
@@ -625,9 +639,96 @@ fn object_defs_value(
             &mut definitions,
             &scope,
         )?;
+        definitions = remove_object_spec_value(definitions, context);
     }
 
     Ok(context.value_lambda(context.value_lambda(definitions)))
+}
+
+fn remove_object_spec_value(value: Value, context: &CompileContext) -> Value {
+    context.builtin_apply2_value(
+        Builtin::DictRemove,
+        value,
+        context.value_atom(atom_from_str("spec")),
+    )
+}
+
+fn lower_extend(
+    extend: &ObjectExtendDecl,
+    line: usize,
+    context: &CompileContext,
+    definitions: &mut Value,
+) -> Result<(), Diagnostic> {
+    let object_value = extend_object_value(extend, line, context, definitions.clone())?;
+    let object_value = annotate_definition_value(
+        BuiltinAssertion::Defined,
+        &extend.target,
+        definitions.clone(),
+        object_value,
+        context,
+    )?;
+
+    *definitions = update_module_value(
+        definitions.clone(),
+        path_to_dict_value(&extend.target, object_value, context)?,
+        context,
+    );
+    Ok(())
+}
+
+fn extend_object_value(
+    extend: &ObjectExtendDecl,
+    line: usize,
+    context: &CompileContext,
+    visible_definitions: Value,
+) -> Result<Value, Diagnostic> {
+    let prior_object = path_value_in_definitions(&extend.target, visible_definitions, context)?;
+    let prior_spec = context.value_access(
+        prior_object,
+        vec![context.key_expr_key(name_as_key("spec"))],
+    );
+    let extension_defs = object_body_defs_value(&extend.body, line, context)?;
+    let prior_defs = context.value_access(
+        prior_spec.clone(),
+        vec![context.key_expr_key(name_as_key("defs"))],
+    );
+    let spec = Dict::new_sync()
+        .insert(
+            name_as_key("name"),
+            context.value_access(
+                prior_spec.clone(),
+                vec![context.key_expr_key(name_as_key("name"))],
+            ),
+        )
+        .insert(
+            name_as_key("deps"),
+            context.value_access(prior_spec, vec![context.key_expr_key(name_as_key("deps"))]),
+        )
+        .insert(
+            name_as_key("defs"),
+            compose_object_defs(prior_defs, extension_defs, context),
+        );
+
+    Ok(context.value_apply(
+        context.value_builtin(Builtin::ObjectInstance),
+        context.value_dict(spec),
+    ))
+}
+
+fn compose_object_defs(
+    prior_defs: Value,
+    extension_defs: Value,
+    context: &CompileContext,
+) -> Value {
+    let prior_self = context.value_apply(
+        context.value_apply(prior_defs, context.value_local(1)),
+        context.value_local(0),
+    );
+    let body = context.value_apply(
+        context.value_apply(extension_defs, prior_self),
+        context.value_local(0),
+    );
+    context.value_lambda(context.value_lambda(body))
 }
 
 fn lower_update_definition(
@@ -1035,7 +1136,7 @@ fn classify_declaration(
 ) -> DeclarationKind {
     match first_word(text) {
         Some("object") => return classify_object_declaration(text, line, diagnostics),
-        Some("extend") | Some("extends") => return DeclarationKind::Extend,
+        Some("extend") => return classify_extend_declaration(text, line, diagnostics),
         _ => {}
     }
 
@@ -1212,6 +1313,76 @@ fn parse_object_body_definition(
         line,
         text: text.to_owned(),
         definition: finalize_definition_expr(definition, line, diagnostics),
+    })
+}
+
+fn classify_extend_declaration(
+    text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> DeclarationKind {
+    match parse_extend_declaration(text, line, diagnostics) {
+        Some(extend) => DeclarationKind::Extend(extend),
+        None => DeclarationKind::Unknown,
+    }
+}
+
+fn parse_extend_declaration(
+    text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<ObjectExtendDecl> {
+    let mut lines = text.lines();
+    let header = lines.next()?.trim();
+    let body_lines = lines.collect::<Vec<_>>();
+    let header = header.strip_prefix("extend")?.trim();
+
+    let Some(target) = header.strip_suffix(" with").map(str::trim) else {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "extend declarations currently require `extend name with`",
+        ));
+        return None;
+    };
+    if target.is_empty() {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "extend declaration requires a name",
+        ));
+        return None;
+    }
+    if !path().parse(target).into_result().is_ok() {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "extend declaration requires a path name",
+        ));
+        return None;
+    }
+    if body_lines.is_empty() {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "extend declaration requires a body",
+        ));
+        return None;
+    }
+
+    let mut body = Vec::new();
+    for (offset, body_line) in body_lines.iter().enumerate() {
+        if body_line.trim().is_empty() {
+            continue;
+        }
+        let body_line_number = line + offset + 1;
+        let Some(definition) =
+            parse_object_body_definition(body_line.trim(), body_line_number, diagnostics)
+        else {
+            continue;
+        };
+        body.push(definition);
+    }
+
+    Some(ObjectExtendDecl {
+        target: target.to_owned(),
+        body,
     })
 }
 
@@ -1664,6 +1835,7 @@ fn syntax_expr_parser<'src>()
             crate::core::Builtin::DictSingleton => ":",
             crate::core::Builtin::DictUnion => "{,}",
             crate::core::Builtin::DictUpdate => "dict_update",
+            crate::core::Builtin::DictRemove => "dict_remove",
             crate::core::Builtin::ObjectInstance => "object_instance",
         }
     }
@@ -2268,6 +2440,45 @@ mod tests {
                             kind: DefinitionKind::Override,
                             body: "\"World\"".to_owned(),
                             expr: Some(SyntaxExpr::Text("World".to_owned())),
+                        },
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_extend_declarations() {
+        let parsed =
+            parse("language g0\nextend child with\n  text := _text ++ \"!\"\n  tail = \"done\"\n");
+
+        assert_eq!(parsed.diagnostics, []);
+        assert_eq!(
+            parsed.declarations[1].kind,
+            DeclarationKind::Extend(ObjectExtendDecl {
+                target: "child".to_owned(),
+                body: vec![
+                    ObjectBodyDefinition {
+                        line: 3,
+                        text: "text := _text ++ \"!\"".to_owned(),
+                        definition: DefinitionDecl {
+                            target: "text".to_owned(),
+                            kind: DefinitionKind::Override,
+                            body: "_text ++ \"!\"".to_owned(),
+                            expr: Some(SyntaxExpr::Append(
+                                Box::new(SyntaxExpr::PriorName("text".to_owned())),
+                                Box::new(SyntaxExpr::Text("!".to_owned())),
+                            )),
+                        },
+                    },
+                    ObjectBodyDefinition {
+                        line: 4,
+                        text: "tail = \"done\"".to_owned(),
+                        definition: DefinitionDecl {
+                            target: "tail".to_owned(),
+                            kind: DefinitionKind::Introduce,
+                            body: "\"done\"".to_owned(),
+                            expr: Some(SyntaxExpr::Text("done".to_owned())),
                         },
                     },
                 ],
@@ -3205,6 +3416,63 @@ mod tests {
     fn object_prior_names_resolve_against_inherited_self() {
         let parsed = parse(
             "language g0\nobject base with\n  text = \"Hello, World\"\nobject child extends base with\n  text := _text ++ \"!\"\nasm.result = child.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn object_dependencies_use_c3_deduplication() {
+        let parsed = parse(
+            "language g0\nobject root with\n  code = \"root\"\nobject left extends root with\n  code := _code ++ \"L\"\nobject right extends root with\n  code := _code ++ \"R\"\nobject child extends left, right with\n  code := _code ++ \"C\"\nasm.result = child.code\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"rootRLC"
+        );
+    }
+
+    #[test]
+    fn extend_declarations_reinstantiate_objects() {
+        let parsed = parse(
+            "language g0\nobject hello with\n  text = \"Hello, World\"\nextend hello with\n  text := _text ++ \"!\"\nasm.result = hello.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn object_body_edits_do_not_observe_direct_spec_definitions() {
+        let parsed = parse(
+            "language g0\nobject hello with\n  spec = { bad:\"bad\" }\n  text = { [{}]:\"Hello, World!\" }.[_spec]\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
         let lowered = lower_to_core_with_context(&parsed, &context);
