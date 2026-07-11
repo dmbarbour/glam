@@ -1,6 +1,6 @@
 language g0
 
-hello who = who
-hello who := "Hello, " ++ who ++ "!"
+hello = "Hello"
+hello := _hello ++ ", World!"
 
-asm.result = hello "World"
+asm.result = hello
