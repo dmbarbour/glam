@@ -1,14 +1,14 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use glam::compiler::{
     BinaryFileLoader, BinaryLoadArgs, CompileContext, ModuleLoadArgs, ModuleLoader,
 };
-use glam::core::{Dict, Expr as CoreExpr, Key, Value};
+use glam::core::{Builtin, Dict, Expr as CoreExpr, Key, Value};
 use glam::diagnostic::Severity;
 use glam::eval;
 use glam::g_syntax::{DeclarationKind, ParsedSource, SourceFile, lower_to_core_with_context};
@@ -142,11 +142,16 @@ fn assemble_inputs(inputs: &[AssemblyInput], cli_args: &[String]) -> ExitCode {
 
     let module_loader = local_module_loader();
     let binary_loader = local_binary_loader();
+    let configuration_env = match load_configuration(module_loader.clone(), binary_loader.clone()) {
+        Ok(env) => env,
+        Err(exit_code) => return exit_code,
+    };
     let assembly_context = CompileContext::from_module_path(["assembly"])
         .with_local_module_loader(module_loader.clone())
         .with_local_binary_loader(binary_loader.clone());
     let final_defs = assembly_context.final_defs.clone();
-    let mut definitions = initial_assembly_definitions(&assembly_context, cli_args);
+    let mut definitions =
+        initial_assembly_definitions(&assembly_context, cli_args, configuration_env);
     let mut had_errors = false;
 
     for input in inputs.iter().rev() {
@@ -207,7 +212,11 @@ fn assemble_inputs(inputs: &[AssemblyInput], cli_args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn initial_assembly_definitions(context: &CompileContext, cli_args: &[String]) -> Value {
+fn initial_assembly_definitions(
+    context: &CompileContext,
+    cli_args: &[String],
+    configuration_env: Value,
+) -> Value {
     let args = context.value_list(
         cli_args
             .iter()
@@ -215,7 +224,164 @@ fn initial_assembly_definitions(context: &CompileContext, cli_args: &[String]) -
             .collect(),
     );
     let asm = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("args"), args));
-    Value::Dict(Dict::new_sync().insert(Key::atom_from_text("asm"), asm))
+    Value::Dict(
+        Dict::new_sync()
+            .insert(Key::atom_from_text("asm"), asm)
+            .insert(Key::atom_from_text("env"), configuration_env),
+    )
+}
+
+fn load_configuration(
+    module_loader: ModuleLoader,
+    binary_loader: BinaryFileLoader,
+) -> Result<Value, ExitCode> {
+    let configuration_context = CompileContext::from_module_path(["configuration"])
+        .with_local_module_loader(module_loader.clone())
+        .with_local_binary_loader(binary_loader.clone());
+    let final_defs = configuration_context.final_defs.clone();
+    let mut definitions = initial_configuration_definitions(&configuration_context);
+    let mut had_errors = false;
+
+    for path in configuration_paths().into_iter().rev() {
+        let source = read_source_path_buf(&path)?;
+        let diagnostic_label = source.path.clone();
+        let context = CompileContext::from_source_path(&diagnostic_label)
+            .with_module_path(["configuration"])
+            .with_prior_defs(definitions.clone())
+            .with_final_defs(final_defs.clone())
+            .with_local_module_loader(module_loader.clone())
+            .with_local_binary_loader(binary_loader.clone())
+            .with_source_binary(source.text.as_bytes());
+        let parsed = source.parse_with_context(&context);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+
+        for diagnostic in &lowered.diagnostics {
+            eprintln!(
+                "{diagnostic_label}:{}: {}: {}",
+                diagnostic.line, diagnostic.severity, diagnostic.message
+            );
+        }
+
+        had_errors |= lowered
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Severity::Error);
+        definitions = lowered.definitions;
+    }
+
+    if had_errors {
+        return Err(ExitCode::from(1));
+    }
+
+    let term = instantiate_module(&configuration_context, &definitions);
+    let root = match eval::eval_value(&term) {
+        Ok(root) => root,
+        Err(err) => {
+            eprintln!("error: configuration evaluation failed: {err}");
+            return Err(ExitCode::from(1));
+        }
+    };
+
+    match value_at_path(&root, "conf.env") {
+        Ok(env) if !is_undefined_value(&env) => eval::eval_value(&env).map_err(|err| {
+            eprintln!("error: configuration `conf.env` failed to evaluate: {err}");
+            ExitCode::from(1)
+        }),
+        Ok(_) | Err(_) => Ok(empty_environment_object(&configuration_context)),
+    }
+}
+
+fn initial_configuration_definitions(context: &CompileContext) -> Value {
+    let env = empty_environment_object(context);
+
+    Value::Dict(Dict::new_sync().insert(Key::atom_from_text("env"), env))
+}
+
+fn is_undefined_value(value: &Value) -> bool {
+    matches!(value, Value::Dict(dict) if dict.is_empty())
+}
+
+fn empty_environment_object(context: &CompileContext) -> Value {
+    let spec = Dict::new_sync()
+        .insert(
+            Key::atom_from_text("name"),
+            context.abstract_global_path_value(context.abstract_global_path("env").as_ref()),
+        )
+        .insert(Key::atom_from_text("deps"), context.value_list(Vec::new()))
+        .insert(
+            Key::atom_from_text("defs"),
+            context.value_lambda(context.value_lambda(context.value_local(1))),
+        );
+
+    context.value_apply(
+        context.value_builtin(Builtin::ObjectInstance),
+        context.value_dict(spec),
+    )
+}
+
+fn configuration_paths() -> Vec<PathBuf> {
+    if let Some(paths) = configuration_paths_from_env("GLAS_CONF")
+        .or_else(|| configuration_paths_from_env("GLAM_CONF"))
+    {
+        return paths;
+    }
+
+    if let Some(path) = default_user_configuration_path().filter(|path| path.exists()) {
+        return vec![path];
+    }
+
+    let workspace_default = PathBuf::from("samples/config/dev.g");
+    if workspace_default.exists() {
+        return vec![workspace_default];
+    }
+
+    Vec::new()
+}
+
+fn configuration_paths_from_env(name: &str) -> Option<Vec<PathBuf>> {
+    env::var_os(name).map(|value| {
+        env::split_paths(&value)
+            .filter(|path| !path.as_os_str().is_empty())
+            .collect()
+    })
+}
+
+fn default_user_configuration_path() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|path| path.join("glas").join("conf.g"))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        home_dir().map(|path| {
+            path.join("Library")
+                .join("Application Support")
+                .join("glas")
+                .join("conf.g")
+        })
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home_dir().map(|home| home.join(".config")))
+            .map(|path| path.join("glas").join("conf.g"))
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        None
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 fn parse_assembly_input(
@@ -434,6 +600,19 @@ fn read_source_path(path: &str) -> Result<SourceFile, ExitCode> {
     Ok(SourceFile::new(path, text))
 }
 
+fn read_source_path_buf(path: &Path) -> Result<SourceFile, ExitCode> {
+    let path_label = path.display().to_string();
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("error: could not read `{path_label}`: {err}");
+            return Err(ExitCode::from(1));
+        }
+    };
+
+    Ok(SourceFile::new(&path_label, text))
+}
+
 fn print_parse_summary(path: &str, parsed: &glam::g_syntax::ParsedSource) -> ExitCode {
     let has_errors = parsed
         .diagnostics
@@ -484,6 +663,6 @@ fn declaration_label(kind: &DeclarationKind) -> &'static str {
 
 fn print_help() {
     println!(
-        "Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...\n       glam --parse <PATH>\n       glam --help\n       glam --version\n\nAssembly inputs are applied as mixins; earlier inputs override later inputs.\nBare arguments are reserved for configured `conf.cli` rewriting."
+        "Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...\n       glam --parse <PATH>\n       glam --help\n       glam --version\n\nAssembly inputs are applied as mixins; earlier inputs override later inputs.\nConfiguration is loaded from GLAS_CONF as an OS path-list, or from the user config/default fixture.\nBare arguments are reserved for configured `conf.cli` rewriting."
     );
 }
