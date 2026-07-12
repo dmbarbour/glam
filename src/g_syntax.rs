@@ -183,6 +183,23 @@ pub enum SyntaxKeyExpr {
     PathIndex(Box<SyntaxExpr>),
 }
 
+#[derive(Debug, Clone)]
+enum PathSuffix {
+    Single(SyntaxKeyExpr),
+    Expand(Vec<SyntaxKeyExpr>),
+}
+
+fn flatten_path_suffixes(suffixes: Vec<PathSuffix>) -> Vec<SyntaxKeyExpr> {
+    let mut parts = Vec::new();
+    for suffix in suffixes {
+        match suffix {
+            PathSuffix::Single(part) => parts.push(part),
+            PathSuffix::Expand(items) => parts.extend(items),
+        }
+    }
+    parts
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LocalName {
     raw: String,
@@ -194,6 +211,8 @@ struct LocalName {
 struct NameScope {
     final_defs: Value,
     prior_defs: Value,
+    module_final_defs: Value,
+    module_prior_defs: Value,
     object_alias: Option<String>,
     object_final_defs: Option<Value>,
     object_prior_defs: Option<Value>,
@@ -204,7 +223,9 @@ impl NameScope {
     fn module(context: &CompileContext, visible_definitions: Value) -> Self {
         Self {
             final_defs: context.final_defs.clone(),
-            prior_defs: visible_definitions,
+            prior_defs: visible_definitions.clone(),
+            module_final_defs: context.final_defs.clone(),
+            module_prior_defs: visible_definitions,
             object_alias: None,
             object_final_defs: None,
             object_prior_defs: None,
@@ -628,20 +649,27 @@ fn lower_definition_with_locals(
     };
 
     let value = syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?;
+    let target_scope = definition_target_scope(scope, definitions.clone());
     let value = match definition.kind {
         DefinitionKind::Introduce => annotate_definition_value(
             BuiltinAssertion::Undefined,
             &definition.target,
             definitions.clone(),
             value,
+            line,
             context,
+            &target_scope,
+            locals,
         )?,
         DefinitionKind::Override => annotate_definition_value(
             BuiltinAssertion::Defined,
             &definition.target,
             definitions.clone(),
             value,
+            line,
             context,
+            &target_scope,
+            locals,
         )?,
         DefinitionKind::Update => lower_update_definition(
             &definition.target,
@@ -650,11 +678,34 @@ fn lower_definition_with_locals(
             definition_param_count(definition, declaration_text, line)?,
             line,
             context,
+            &target_scope,
+            locals,
         )?,
     };
-    *definitions = update_module_value(definitions.clone(), &definition.target, value, context);
+    *definitions = update_definition_target_value(
+        definitions.clone(),
+        &definition.target,
+        value,
+        line,
+        context,
+        &target_scope,
+        locals,
+    )?;
 
     Ok(())
+}
+
+fn definition_target_scope(scope: &NameScope, visible_definitions: Value) -> NameScope {
+    if scope.object_final_defs.is_some() {
+        return scope.clone();
+    }
+
+    let mut scope = scope.clone();
+    scope.final_defs = visible_definitions.clone();
+    scope.prior_defs = visible_definitions.clone();
+    scope.module_final_defs = visible_definitions.clone();
+    scope.module_prior_defs = visible_definitions;
+    scope
 }
 
 fn lower_object(
@@ -664,12 +715,17 @@ fn lower_object(
     definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
     let object_value = object_decl_value(object, line, context, definitions.clone())?;
+    let scope = NameScope::module(context, definitions.clone());
+    let mut locals = Vec::new();
     let object_value = annotate_definition_value(
         BuiltinAssertion::Undefined,
         &object.target,
         definitions.clone(),
         object_value,
+        line,
         context,
+        &scope,
+        &mut locals,
     )?;
 
     *definitions = update_module_value(definitions.clone(), &object.target, object_value, context);
@@ -725,6 +781,8 @@ fn shift_name_scope_locals(scope: &NameScope, amount: usize) -> NameScope {
     NameScope {
         final_defs: shift_value_locals(&scope.final_defs, amount, 0),
         prior_defs: shift_value_locals(&scope.prior_defs, amount, 0),
+        module_final_defs: shift_value_locals(&scope.module_final_defs, amount, 0),
+        module_prior_defs: shift_value_locals(&scope.module_prior_defs, amount, 0),
         object_alias: scope.object_alias.clone(),
         object_final_defs: scope
             .object_final_defs
@@ -881,7 +939,10 @@ fn lower_nested_object(
         &object.target,
         definitions.clone(),
         object_value,
+        line,
         context,
+        scope,
+        locals,
     )?;
 
     *definitions = update_module_value(definitions.clone(), &object.target, object_value, context);
@@ -936,6 +997,8 @@ fn object_body_scope(
     NameScope {
         final_defs,
         prior_defs,
+        module_final_defs: parent.module_final_defs.clone(),
+        module_prior_defs: parent.module_prior_defs.clone(),
         object_alias,
         object_final_defs: Some(object_final_defs),
         object_prior_defs: Some(object_prior_defs),
@@ -950,12 +1013,17 @@ fn lower_extend(
     definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
     let object_value = extend_object_value(extend, line, context, definitions.clone())?;
+    let scope = NameScope::module(context, definitions.clone());
+    let mut locals = Vec::new();
     let object_value = annotate_definition_value(
         BuiltinAssertion::Defined,
         &extend.target,
         definitions.clone(),
         object_value,
+        line,
         context,
+        &scope,
+        &mut locals,
     )?;
 
     *definitions = update_module_value(definitions.clone(), &extend.target, object_value, context);
@@ -1039,8 +1107,11 @@ fn lower_update_definition(
     sugar_param_count: usize,
     line: usize,
     context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
 ) -> Result<Value, Diagnostic> {
-    let prior = path_value_in_definitions(target, visible_definitions, context)?;
+    let prior =
+        definition_target_access_value(target, visible_definitions, line, context, scope, locals)?;
     let mut lowered = update;
 
     for _ in 0..sugar_param_count {
@@ -1073,7 +1144,10 @@ fn annotate_definition_value(
     target: &str,
     visible_definitions: Value,
     value: Value,
+    line: usize,
     context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
 ) -> Result<Value, Diagnostic> {
     let tag = match assertion {
         BuiltinAssertion::Defined => "assert_defined",
@@ -1089,7 +1163,14 @@ fn annotate_definition_value(
         context.builtin_apply2_value(
             Builtin::DictSingleton,
             context.value_atom(atom_from_str("value")),
-            path_value_in_definitions(target, visible_definitions, context)?,
+            definition_target_access_value(
+                target,
+                visible_definitions,
+                line,
+                context,
+                scope,
+                locals,
+            )?,
         ),
     );
     let annotation = context.builtin_apply2_value(
@@ -1115,6 +1196,23 @@ fn update_module_value(
         value,
         definitions,
     )
+}
+
+fn update_definition_target_value(
+    definitions: Value,
+    target: &str,
+    value: Value,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<Value, Diagnostic> {
+    Ok(context.builtin_apply3_value(
+        Builtin::DictUpdate,
+        definition_target_path_value(target, line, context, scope, locals)?,
+        value,
+        definitions,
+    ))
 }
 
 fn update_module_dict_value(definitions: Value, item: Value, context: &CompileContext) -> Value {
@@ -1154,6 +1252,101 @@ fn path_value(target: &str, context: &CompileContext) -> Value {
             .map(|part| context.value_atom(atom_from_str(part)))
             .collect(),
     )
+}
+
+fn definition_target_parts(target: &str, line: usize) -> Result<Vec<SyntaxKeyExpr>, Diagnostic> {
+    definition_target_path()
+        .then_ignore(end())
+        .parse(target)
+        .into_result()
+        .map_err(|errors| {
+            Diagnostic::error(
+                line,
+                errors
+                    .into_iter()
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })
+}
+
+fn definition_target_access_value(
+    target: &str,
+    definitions: Value,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<Value, Diagnostic> {
+    let path = definition_target_parts(target, line)?
+        .iter()
+        .map(|part| syntax_key_expr_to_core(part, line, context, scope, locals))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(context.value_access(definitions, path))
+}
+
+fn definition_target_path_value(
+    target: &str,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<Value, Diagnostic> {
+    let parts = definition_target_parts(target, line)?;
+    syntax_path_value(&parts, line, context, scope, locals)
+}
+
+fn syntax_path_value(
+    parts: &[SyntaxKeyExpr],
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<Value, Diagnostic> {
+    let mut result: Option<Value> = None;
+    let mut pending = Vec::new();
+
+    for part in parts {
+        match part {
+            SyntaxKeyExpr::PathIndex(expr) => {
+                result = append_path_segments(
+                    result,
+                    std::mem::take(&mut pending),
+                    syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?,
+                    context,
+                );
+            }
+            SyntaxKeyExpr::Atom(name) => pending.push(context.value_atom(atom_from_str(name))),
+            SyntaxKeyExpr::Index(expr) => {
+                pending.push(syntax_expr_to_value_in_scope(
+                    expr, line, context, scope, locals,
+                )?);
+            }
+        }
+    }
+
+    Ok(match result {
+        Some(result) => {
+            let tail = context.value_list(pending);
+            context.builtin_apply2_value(Builtin::Append, result, tail)
+        }
+        None => context.value_list(pending),
+    })
+}
+
+fn append_path_segments(
+    result: Option<Value>,
+    pending: Vec<Value>,
+    splice: Value,
+    context: &CompileContext,
+) -> Option<Value> {
+    let prefix = context.value_list(pending);
+    let combined = match result {
+        Some(result) => context.builtin_apply2_value(Builtin::Append, result, prefix),
+        None => prefix,
+    };
+    Some(context.builtin_apply2_value(Builtin::Append, combined, splice))
 }
 
 fn key_to_value(key: &Key, context: &CompileContext) -> Value {
@@ -1393,6 +1586,8 @@ fn dict_with_body_scope(
     NameScope {
         final_defs,
         prior_defs,
+        module_final_defs: parent.module_final_defs.clone(),
+        module_prior_defs: parent.module_prior_defs.clone(),
         object_alias,
         object_final_defs,
         object_prior_defs,
@@ -1486,7 +1681,16 @@ fn lower_name_expr(
     scope: &NameScope,
     locals: &mut Vec<LocalName>,
 ) -> Value {
-    // TODO: special keyword atoms like 'self' and 'module'
+    match name {
+        "module" => return scope.module_final_defs.clone(),
+        "self" => {
+            return scope
+                .object_final_defs
+                .clone()
+                .unwrap_or_else(|| scope.module_final_defs.clone());
+        }
+        _ => {}
+    }
 
     let Some(local_index) = local_binding_index(name, locals) else {
         if scope.object_alias.as_deref() == Some(name) {
@@ -1514,6 +1718,17 @@ fn lower_prior_name_expr(
             line,
             "prior name expression must have a name",
         ));
+    }
+
+    match name {
+        "module" => return Ok(scope.module_prior_defs.clone()),
+        "self" => {
+            return Ok(scope
+                .object_prior_defs
+                .clone()
+                .unwrap_or_else(|| scope.module_prior_defs.clone()));
+        }
+        _ => {}
     }
 
     if scope.object_alias.as_deref() == Some(name) {
@@ -2088,7 +2303,7 @@ fn keyword_name_list<'src>(
 
 fn definition_decl<'src>()
 -> impl Parser<'src, &'src str, DefinitionDecl, extra::Err<Rich<'src, char>>> {
-    path()
+    definition_target()
         .then(
             whitespace1().ignore_then(
                 local_name()
@@ -2112,6 +2327,61 @@ fn definition_decl<'src>()
                 })
             }
         })
+}
+
+fn definition_target<'src>() -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
+    definition_target_path().to_slice().map(ToOwned::to_owned)
+}
+
+fn definition_target_path<'src>()
+-> impl Parser<'src, &'src str, Vec<SyntaxKeyExpr>, extra::Err<Rich<'src, char>>> {
+    let name = glam_name().boxed();
+    let expr = syntax_expr_parser().boxed();
+    let single_key_expr = || {
+        choice((
+            just('\'')
+                .ignore_then(name.clone())
+                .map(SyntaxKeyExpr::Atom),
+            expr.clone()
+                .map(|expr| SyntaxKeyExpr::Index(Box::new(expr))),
+        ))
+    };
+    let path_list_shorthand = single_key_expr()
+        .padded()
+        .separated_by(just(',').padded())
+        .allow_leading()
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just('['), just(']'))
+        .map(PathSuffix::Expand);
+    let path_list_expr = expr
+        .padded()
+        .delimited_by(just('('), just(')'))
+        .map(|expr| PathSuffix::Single(SyntaxKeyExpr::PathIndex(Box::new(expr))));
+    let path_suffix_item = just('.').ignore_then(choice((
+        path_list_shorthand,
+        path_list_expr,
+        name.clone()
+            .map(SyntaxKeyExpr::Atom)
+            .map(PathSuffix::Single),
+    )));
+    let path_suffix = path_suffix_item.clone().repeated().collect::<Vec<_>>();
+
+    choice((
+        name.clone()
+            .map(SyntaxKeyExpr::Atom)
+            .then(path_suffix.clone())
+            .map(|(name, suffixes)| {
+                let mut parts = vec![name];
+                parts.extend(flatten_path_suffixes(suffixes));
+                parts
+            }),
+        path_suffix_item
+            .repeated()
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .map(flatten_path_suffixes),
+    ))
 }
 
 fn definition_operator<'src>()
@@ -2683,12 +2953,6 @@ fn syntax_expr_parser<'src>()
         Unrelated,
     }
 
-    #[derive(Debug, Clone)]
-    enum PathSuffix {
-        Single(SyntaxKeyExpr),
-        Expand(Vec<SyntaxKeyExpr>),
-    }
-
     fn resolve_infix_chain(
         first: SyntaxExpr,
         rest: Vec<(crate::core::Builtin, SyntaxExpr)>,
@@ -2798,17 +3062,6 @@ fn syntax_expr_parser<'src>()
             crate::core::Builtin::ObjectInstanceFromParts => "object_instance_from_parts",
             crate::core::Builtin::ObjectInstance => "object_instance",
         }
-    }
-
-    fn flatten_path_suffixes(suffixes: Vec<PathSuffix>) -> Vec<SyntaxKeyExpr> {
-        let mut parts = Vec::new();
-        for suffix in suffixes {
-            match suffix {
-                PathSuffix::Single(part) => parts.push(part),
-                PathSuffix::Expand(items) => parts.extend(items),
-            }
-        }
-        parts
     }
 
     fn access_if_path(base: SyntaxExpr, suffixes: Vec<PathSuffix>) -> SyntaxExpr {
@@ -3666,6 +3919,26 @@ mod tests {
                 target: "foo".to_owned(),
                 kind: DefinitionKind::Update,
                 body: "\\ x -> update".to_owned(),
+                expr: None,
+            })
+        );
+        assert_eq!(
+            definition_decl().parse(".[idx] = value").into_result(),
+            Ok(DefinitionDecl {
+                target: ".[idx]".to_owned(),
+                kind: DefinitionKind::Introduce,
+                body: "value".to_owned(),
+                expr: None,
+            })
+        );
+        assert_eq!(
+            definition_decl()
+                .parse("foo.([1,2] ++ [3]) := value")
+                .into_result(),
+            Ok(DefinitionDecl {
+                target: "foo.([1,2] ++ [3])".to_owned(),
+                kind: DefinitionKind::Override,
+                body: "value".to_owned(),
                 expr: None,
             })
         );
@@ -4645,6 +4918,82 @@ mod tests {
     }
 
     #[test]
+    fn self_and_module_keywords_resolve_at_module_scope() {
+        let parsed = parse(
+            "language g0\nhello = \"Hello\"\nworld = \"World\"\nasm.result = self.hello ++ \", \" ++ module.world ++ \"!\"\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn prior_self_and_module_keywords_resolve_at_module_scope() {
+        let parsed = parse(
+            "language g0\nhello = \"Hello\"\nworld = \"World\"\nhello := _self.hello ++ \", \" ++ _module.world ++ \"!\"\nasm.result = hello\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn self_and_module_keywords_resolve_inside_aliased_object_scope() {
+        let parsed = parse(
+            "language g0\nprefix = \"Hello\"\nobject hello as self with\n  prefix = \"Nope\"\n  target = \"World\"\n  text = module.prefix ++ \", \" ++ self.target ++ \"!\"\nasm.result = hello.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn prior_self_keyword_resolves_inside_object_scope() {
+        let parsed = parse(
+            "language g0\nobject hello with\n  text = \"Hello, World\"\n  text := _self.text ++ \"!\"\nasm.result = hello.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
     fn object_prior_names_resolve_against_inherited_self() {
         let parsed = parse(
             "language g0\nobject base with\n  text = \"Hello, World\"\nobject child extends base with\n  text := _text ++ \"!\"\nasm.result = child.text\n",
@@ -4686,6 +5035,63 @@ mod tests {
     fn object_dependencies_can_inherit_from_dictionaries() {
         let parsed = parse(
             "language g0\nbase = { hello:\"Hello\", target:\"Base\" }\nobject child extends base with\n  target := \"World\"\n  text = hello ++ \", \" ++ target ++ \"!\"\nasm.result = child.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn module_definitions_can_use_expression_indexed_targets() {
+        let parsed = parse(
+            "language g0\nidx = 42\n.[idx] = \"Hello\"\nasm.result = module.[idx] ++ \", World!\"\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn module_definitions_can_use_path_list_targets() {
+        let parsed = parse(
+            "language g0\nroot.(['hello, 'target]) = \"World\"\nroot.hello.prefix = \"Hello\"\nasm.result = root.hello.prefix ++ \", \" ++ root.hello.target ++ \"!\"\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn object_definitions_can_use_expression_indexed_targets() {
+        let parsed = parse(
+            "language g0\nidx = 42\nobject hello as self with\n  .[idx] = \"Hello\"\n  text = self.[idx] ++ \", World!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
         let lowered = lower_to_core_with_context(&parsed, &context);
