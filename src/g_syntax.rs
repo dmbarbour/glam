@@ -662,7 +662,7 @@ fn object_decl_value(
         .iter()
         .map(|dep| {
             let dep_object = path_value_in_definitions(dep, context.final_defs.clone(), context)?;
-            Ok(context.value_access(dep_object, vec![context.key_expr_key(name_as_key("spec"))]))
+            Ok(object_spec_value(dep_object, context))
         })
         .collect::<Result<Vec<_>, Diagnostic>>()?;
     let spec = Dict::new_sync()
@@ -678,6 +678,10 @@ fn object_decl_value(
         context.value_builtin(Builtin::ObjectInstance),
         context.value_dict(spec),
     ))
+}
+
+fn object_spec_value(value: Value, context: &CompileContext) -> Value {
+    context.value_apply(context.value_builtin(Builtin::ObjectSpec), value)
 }
 
 fn object_body_defs_value(
@@ -1105,14 +1109,14 @@ fn lower_object_expr(
 ) -> Result<Value, Diagnostic> {
     let name = match &object.name {
         Some(name) => syntax_expr_to_value_in_scope(name, line, context, scope, locals)?,
-        None => context.unit_value(),
+        None => context.empty_dict_value(),
     };
     let deps = object
         .deps
         .iter()
         .map(|dep| {
             let dep_object = syntax_expr_to_value_in_scope(dep, line, context, scope, locals)?;
-            Ok(context.value_access(dep_object, vec![context.key_expr_key(name_as_key("spec"))]))
+            Ok(object_spec_value(dep_object, context))
         })
         .collect::<Result<Vec<_>, Diagnostic>>()?;
     let defs = object_body_defs_value_in_scope(
@@ -2537,6 +2541,7 @@ fn syntax_expr_parser<'src>()
             crate::core::Builtin::DictSingleton => ":",
             crate::core::Builtin::DictUnion => "{,}",
             crate::core::Builtin::DictUpdate => "dict_update",
+            crate::core::Builtin::ObjectSpec => "object_spec",
             crate::core::Builtin::ObjectInstance => "object_instance",
         }
     }
@@ -4383,6 +4388,79 @@ mod tests {
                 &["asm", "result"]
             ))),
             b"rootRLC"
+        );
+    }
+
+    #[test]
+    fn object_dependencies_can_inherit_from_dictionaries() {
+        let parsed = parse(
+            "language g0\nbase = { hello:\"Hello\", target:\"Base\" }\nobject child extends base with\n  target := \"World\"\n  text = hello ++ \", \" ++ target ++ \"!\"\nasm.result = child.text\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn repeated_anonymous_object_mixins_are_not_deduplicated() {
+        let parsed = parse(
+            "language g0\nobject base with\n  count = 0\ninc = object _ with\n  count := _count + 1\nobject child extends inc, inc, inc, base with\nasm.result = child.count\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            fully_evaluated_value(resolved_value_at_path(&value, &["asm", "result"])),
+            Value::Number(3.into())
+        );
+    }
+
+    #[test]
+    fn anonymous_object_dependencies_can_have_anonymous_and_named_dependencies() {
+        let parsed = parse(
+            "language g0\nobject base with\n  code = \"B\"\nadd_a = object _ with\n  code := _code ++ \"A\"\nadd_m = object _ extends add_a, base with\n  code := _code ++ \"M\"\nobject child extends add_m with\n  code := _code ++ \"C\"\nasm.result = child.code\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"BAMC"
+        );
+    }
+
+    #[test]
+    fn anonymous_object_dependencies_follow_dependency_override_order() {
+        let parsed = parse(
+            "language g0\nobject base with\n  code = \"\"\nadd_a = object _ with\n  code := _code ++ \"A\"\nadd_b = object _ with\n  code := _code ++ \"B\"\nobject child extends add_a, add_b, base with\nasm.result = child.code\n",
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"BA"
         );
     }
 

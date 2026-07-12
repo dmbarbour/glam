@@ -365,6 +365,12 @@ fn apply_builtin(
             })?;
             eval_dict_update_builtin(&path, &new_value, &dict, local_env)
         }
+        Builtin::ObjectSpec => {
+            let [value] = <[Value; 1]>::try_from(args).map_err(|_| {
+                EvalError::new("object spec builtin received the wrong number of arguments")
+            })?;
+            eval_object_spec_builtin(&value)
+        }
         Builtin::ObjectInstance => {
             let [spec] = <[Value; 1]>::try_from(args).map_err(|_| {
                 EvalError::new("object instance builtin received the wrong number of arguments")
@@ -530,6 +536,16 @@ fn partial_builtin_value(builtin: Builtin, args: &[Value]) -> Value {
     })
 }
 
+fn builtin2_expr(builtin: Builtin, left: Expr, right: Expr) -> Expr {
+    Expr::Apply(
+        Arc::new(Expr::Apply(
+            Arc::new(Expr::Value(Value::Builtin(builtin))),
+            Arc::new(left),
+        )),
+        Arc::new(right),
+    )
+}
+
 fn builtin_application_spine(expr: &Expr) -> Option<(Builtin, Vec<Value>)> {
     match expr {
         Expr::Value(Value::Builtin(builtin)) => Some((*builtin, Vec::new())),
@@ -652,6 +668,24 @@ fn eval_object_instance_builtin(spec: &Value, local_env: &[Value]) -> Result<Val
     Ok(object)
 }
 
+fn eval_object_spec_builtin(value: &Value) -> Result<Value, EvalError> {
+    let value = force_value_shell(value)?;
+    let Value::Dict(dict) = value else {
+        return Err(EvalError::new(
+            "object spec builtin requires an object or dictionary value",
+        ));
+    };
+
+    if let Some(spec) = dict.get(&Key::atom_from_text("spec")) {
+        let spec = force_value_shell(spec)?;
+        if !is_undefined_dict_value(&spec) {
+            return Ok(spec);
+        }
+    }
+
+    Ok(dict_object_spec(dict))
+}
+
 fn object_spec_dict(spec: &Value) -> Result<crate::core::Dict, EvalError> {
     let spec = force_value_shell(spec)?;
     let Value::Dict(spec_dict) = spec else {
@@ -662,48 +696,118 @@ fn object_spec_dict(spec: &Value) -> Result<crate::core::Dict, EvalError> {
     Ok(spec_dict)
 }
 
+fn dict_object_spec(dict: crate::core::Dict) -> Value {
+    let defs = Expr::Lambda(Arc::new(Expr::Lambda(Arc::new(dict_union_expr(
+        Expr::Local(1),
+        Expr::Value(Value::Dict(dict)),
+    )))));
+    let spec = crate::core::Dict::new_sync()
+        .insert(
+            Key::atom_from_text("name"),
+            Value::Dict(crate::core::Dict::new_sync()),
+        )
+        .insert(Key::atom_from_text("deps"), Value::List(List::empty()))
+        .insert(Key::atom_from_text("defs"), Value::expr(defs));
+    Value::Dict(spec)
+}
+
+fn dict_union_expr(left: Expr, right: Expr) -> Expr {
+    builtin2_expr(Builtin::DictUnion, left, right)
+}
+
 fn object_application_order(
     spec: &crate::core::Dict,
     local_env: &[Value],
 ) -> Result<Vec<crate::core::Dict>, EvalError> {
     let mut seen = BTreeMap::new();
-    let mut linearized = object_c3_linearization(spec, local_env, &mut seen)?;
+    let mut next_anonymous_id = 0;
+    let mut linearized =
+        object_c3_linearization(spec, local_env, &mut seen, &mut next_anonymous_id)?;
     linearized.reverse();
-    Ok(linearized)
+    Ok(linearized
+        .into_iter()
+        .map(|entry| entry.spec)
+        .collect::<Vec<_>>())
+}
+
+#[derive(Clone)]
+struct LinearizedObjectSpec {
+    spec: crate::core::Dict,
+    name: Key,
+    anonymous_id: Option<u64>,
+}
+
+impl LinearizedObjectSpec {
+    fn new(
+        spec: crate::core::Dict,
+        local_env: &[Value],
+        next_anonymous_id: &mut u64,
+    ) -> Result<Self, EvalError> {
+        let name = object_spec_name(&spec, local_env)?;
+        let anonymous_id = if is_anonymous_object_name(&name) {
+            let id = *next_anonymous_id;
+            *next_anonymous_id += 1;
+            Some(id)
+        } else {
+            None
+        };
+        Ok(Self {
+            spec,
+            name,
+            anonymous_id,
+        })
+    }
 }
 
 fn object_c3_linearization(
     spec: &crate::core::Dict,
     local_env: &[Value],
     seen: &mut BTreeMap<Key, crate::core::Dict>,
-) -> Result<Vec<crate::core::Dict>, EvalError> {
-    let name = object_spec_name(spec, local_env)?;
-    remember_object_spec(&name, spec, seen)?;
+    next_anonymous_id: &mut u64,
+) -> Result<Vec<LinearizedObjectSpec>, EvalError> {
+    let entry = LinearizedObjectSpec::new(spec.clone(), local_env, next_anonymous_id)?;
+    if entry.anonymous_id.is_none() {
+        remember_object_spec(&entry.name, spec, seen)?;
+    }
     let deps = spec
         .get(&Key::atom_from_text("deps"))
         .cloned()
         .unwrap_or_else(|| Value::List(List::empty()));
     let deps = object_dep_specs(&deps)?;
-    let mut sequences = Vec::new();
+    let mut sequences: Vec<Vec<LinearizedObjectSpec>> = Vec::new();
+    let mut direct_deps = Vec::new();
+    let mut saw_named_dep = false;
     for dep_spec in &deps {
         let dep_spec = object_spec_dict(&dep_spec)?;
-        sequences.push(object_c3_linearization(&dep_spec, local_env, seen)?);
+        let dep_linearization =
+            object_c3_linearization(&dep_spec, local_env, seen, next_anonymous_id)?;
+        let dep_entry = dep_linearization
+            .first()
+            .cloned()
+            .ok_or_else(|| EvalError::new("object dependency linearization was empty"))?;
+        if dep_entry.anonymous_id.is_some() {
+            if saw_named_dep {
+                return Err(EvalError::new(
+                    "anonymous object dependencies must appear before named object dependencies",
+                ));
+            }
+        } else {
+            saw_named_dep = true;
+        }
+        direct_deps.push(dep_entry);
+        sequences.push(dep_linearization);
     }
-    sequences.push(
-        deps.iter()
-            .map(object_spec_dict)
-            .collect::<Result<Vec<_>, _>>()?,
-    );
+    sequences.push(direct_deps);
 
-    let mut linearized = vec![spec.clone()];
+    let mut linearized = vec![entry];
     linearized.extend(c3_merge(sequences, local_env)?);
     Ok(linearized)
 }
 
 fn c3_merge(
-    mut sequences: Vec<Vec<crate::core::Dict>>,
-    local_env: &[Value],
-) -> Result<Vec<crate::core::Dict>, EvalError> {
+    mut sequences: Vec<Vec<LinearizedObjectSpec>>,
+    _local_env: &[Value],
+) -> Result<Vec<LinearizedObjectSpec>, EvalError> {
     let mut result = Vec::new();
 
     loop {
@@ -715,40 +819,42 @@ fn c3_merge(
         let mut selected = None;
         'candidate: for sequence in &sequences {
             let candidate = &sequence[0];
-            let candidate_name = object_spec_name(candidate, local_env)?;
             for other in &sequences {
                 if other
                     .iter()
                     .skip(1)
-                    .map(|spec| object_spec_name(spec, local_env))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .contains(&candidate_name)
+                    .any(|spec| same_linearized_object_spec(spec, candidate))
                 {
                     continue 'candidate;
                 }
             }
-            selected = Some((candidate_name, candidate.clone()));
+            selected = Some(candidate.clone());
             break;
         }
 
-        let Some((selected_name, selected_spec)) = selected else {
+        let Some(selected_spec) = selected else {
             return Err(EvalError::new(
                 "object dependencies have inconsistent C3 linearization",
             ));
         };
-        result.push(selected_spec);
+        result.push(selected_spec.clone());
 
         for sequence in &mut sequences {
             if sequence
                 .first()
-                .map(|spec| object_spec_name(spec, local_env))
-                .transpose()?
-                .as_ref()
-                == Some(&selected_name)
+                .is_some_and(|spec| same_linearized_object_spec(spec, &selected_spec))
             {
                 sequence.remove(0);
             }
         }
+    }
+}
+
+fn same_linearized_object_spec(left: &LinearizedObjectSpec, right: &LinearizedObjectSpec) -> bool {
+    match (left.anonymous_id, right.anonymous_id) {
+        (Some(left), Some(right)) => left == right,
+        (None, None) => left.name == right.name,
+        _ => false,
     }
 }
 
@@ -758,6 +864,10 @@ fn object_spec_name(spec: &crate::core::Dict, local_env: &[Value]) -> Result<Key
     };
     let name = eval_value(name)?;
     value_to_key(&name, local_env)
+}
+
+fn is_anonymous_object_name(name: &Key) -> bool {
+    matches!(name, Key::Dict(entries) if entries.is_empty())
 }
 
 fn remember_object_spec(
