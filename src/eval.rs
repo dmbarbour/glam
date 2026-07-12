@@ -371,6 +371,20 @@ fn apply_builtin(
             })?;
             eval_object_spec_builtin(&value)
         }
+        Builtin::ObjectLocalName => {
+            let [host, parts] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("object local name builtin received the wrong number of arguments")
+            })?;
+            eval_object_local_name_builtin(&host, &parts)
+        }
+        Builtin::ObjectInstanceFromParts => {
+            let [name, deps, defs] = <[Value; 3]>::try_from(args).map_err(|_| {
+                EvalError::new(
+                    "object instance from parts builtin received the wrong number of arguments",
+                )
+            })?;
+            eval_object_instance_from_parts_builtin(name, deps, defs, local_env)
+        }
         Builtin::ObjectInstance => {
             let [spec] = <[Value; 1]>::try_from(args).map_err(|_| {
                 EvalError::new("object instance builtin received the wrong number of arguments")
@@ -668,6 +682,19 @@ fn eval_object_instance_builtin(spec: &Value, local_env: &[Value]) -> Result<Val
     Ok(object)
 }
 
+fn eval_object_instance_from_parts_builtin(
+    name: Value,
+    deps: Value,
+    defs: Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let spec = crate::core::Dict::new_sync()
+        .insert(Key::atom_from_text("name"), name)
+        .insert(Key::atom_from_text("deps"), deps)
+        .insert(Key::atom_from_text("defs"), defs);
+    eval_object_instance_builtin(&Value::Dict(spec), local_env)
+}
+
 fn eval_object_spec_builtin(value: &Value) -> Result<Value, EvalError> {
     let value = force_value_shell(value)?;
     let Value::Dict(dict) = value else {
@@ -684,6 +711,26 @@ fn eval_object_spec_builtin(value: &Value) -> Result<Value, EvalError> {
     }
 
     Ok(dict_object_spec(dict))
+}
+
+fn eval_object_local_name_builtin(host: &Value, parts: &Value) -> Result<Value, EvalError> {
+    let host_spec = eval_object_spec_builtin(host)?;
+    let host_spec = object_spec_dict(&host_spec)?;
+    let Some(host_name) = host_spec.get(&Key::atom_from_text("name")).cloned() else {
+        return Err(EvalError::new("object specification requires a name"));
+    };
+
+    let mut name_parts = vec![eval_value(&host_name)?];
+    name_parts.extend(match force_value_shell(parts)? {
+        Value::List(parts) => list_to_value_items(&parts)?,
+        Value::Dict(dict) if dict.is_empty() => Vec::new(),
+        _ => {
+            return Err(EvalError::new(
+                "object local name builtin requires a list of name parts",
+            ));
+        }
+    });
+    Ok(Value::List(List::from_values(name_parts)))
 }
 
 fn object_spec_dict(spec: &Value) -> Result<crate::core::Dict, EvalError> {

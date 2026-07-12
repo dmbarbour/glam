@@ -252,6 +252,8 @@ pub enum Builtin {
     DictUnion,
     DictUpdate,
     ObjectSpec,
+    ObjectLocalName,
+    ObjectInstanceFromParts,
     ObjectInstance,
 }
 
@@ -275,6 +277,8 @@ impl Builtin {
             Self::DictUnion => 2,
             Self::DictUpdate => 3,
             Self::ObjectSpec => 1,
+            Self::ObjectLocalName => 2,
+            Self::ObjectInstanceFromParts => 3,
             Self::ObjectInstance => 1,
         }
     }
