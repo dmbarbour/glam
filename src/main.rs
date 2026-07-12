@@ -475,7 +475,7 @@ fn load_local_binary(args: BinaryLoadArgs) -> Result<Value, String> {
     let path_label = import_path.display().to_string();
     let bytes =
         fs::read(&import_path).map_err(|err| format!("could not read `{path_label}`: {err}"))?;
-    Ok(Value::Binary(Arc::from(bytes.into_boxed_slice())))
+    Ok(Value::Binary(bytes::Bytes::from(bytes)))
 }
 
 fn resolve_local_import_path(

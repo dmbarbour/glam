@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use crate::core::{Builtin, Closure, Expr, IVar, Key, KeyExpr, List, Thunk, Value};
 use crate::number::Number;
 
@@ -457,7 +459,7 @@ fn eval_slice_builtin(
             if end > bytes.len() {
                 return Err(EvalError::new("slice builtin end is out of bounds"));
             }
-            Ok(Value::Binary(Arc::from(&bytes[start..end])))
+            Ok(Value::Binary(bytes.slice(start..end)))
         }
         Value::List(list) => {
             if end > list.len() {
@@ -1129,7 +1131,7 @@ fn eval_binary_annotation(target: &Value) -> Result<Value, EvalError> {
     match force_value_shell(target)? {
         Value::Binary(bytes) => Ok(Value::Binary(bytes)),
         Value::List(list) => match list_to_binary_bytes(&list) {
-            Ok(bytes) => Ok(Value::Binary(Arc::from(bytes))),
+            Ok(bytes) => Ok(Value::Binary(Bytes::from(bytes))),
             Err(message) => Ok(annotation_error_value(message)),
         },
         other => Ok(annotation_error_value(format!(
@@ -1488,6 +1490,8 @@ fn list_literal_segment(value: Value) -> List {
 mod tests {
     use std::sync::Arc;
 
+    use bytes::Bytes;
+
     use crate::core::{Dict, Expr, IVar, Thunk, Value};
     use crate::number::Number;
 
@@ -1798,7 +1802,7 @@ mod tests {
             Builtin::ListLen,
             Expr::Value(Value::List(List::concat(
                 List::from_values(vec![n(1), n(2)]),
-                List::from_bytes(Arc::from(&b"Hi"[..])),
+                List::from_bytes(Bytes::from_static(b"Hi")),
             ))),
         ))
         .expect("list len should evaluate");
@@ -1811,6 +1815,24 @@ mod tests {
         assert_eq!(items, vec![n(2), n(3), n(4)]);
         assert_eq!(binary_len, n(6));
         assert_eq!(list_len, n(4));
+    }
+
+    #[test]
+    fn slice_builtin_shares_binary_storage() {
+        let bytes = Bytes::from_static(b"Hello");
+        let slice = eval_closed_expr(&builtin3_expr(
+            Builtin::Slice,
+            Expr::Value(n(1)),
+            Expr::Value(n(4)),
+            Expr::Value(Value::Binary(bytes.clone())),
+        ))
+        .expect("slice should evaluate");
+
+        let Value::Binary(slice) = slice else {
+            panic!("binary slice should remain binary");
+        };
+        assert_eq!(&slice[..], b"ell");
+        assert_eq!(slice.as_ptr(), bytes[1..].as_ptr());
     }
 
     #[test]
@@ -1975,7 +1997,7 @@ mod tests {
     fn evaluates_keyable_values_into_keys() {
         let key = eval_key(&Value::List(List::concat(
             List::from_values(vec![n(1)]),
-            List::from_bytes(Arc::from(&b"Hi"[..])),
+            List::from_bytes(Bytes::from_static(b"Hi")),
         )))
         .expect("list should evaluate to a key");
 
@@ -2426,7 +2448,7 @@ mod tests {
                 &Key::binary_from_text("deque"),
             ))),
             Expr::Value(Value::List(List::concat(
-                List::from_bytes(Arc::from(&b"Hello"[..])),
+                List::from_bytes(Bytes::from_static(b"Hello")),
                 List::from_values(vec![n(33)]),
             ))),
         ))
@@ -2443,7 +2465,7 @@ mod tests {
             ))),
             Expr::Value(Value::List(List::concat(
                 List::from_values(vec![n(72), n(105)]),
-                List::from_bytes(Arc::from(&b"!"[..])),
+                List::from_bytes(Bytes::from_static(b"!")),
             ))),
         ))
         .expect("binary annotation should evaluate");

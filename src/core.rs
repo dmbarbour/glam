@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use bytes::Bytes;
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
@@ -107,14 +108,14 @@ impl fmt::Debug for Atom {
 pub enum Key {
     Atom(Atom),
     Number(Number),
-    Binary(Arc<[u8]>),
+    Binary(Bytes),
     AbstractGlobalPath(Arc<[String]>),
     List(Arc<[Key]>),
     Dict(Arc<[(Key, Key)]>),
 }
 
 impl Key {
-    pub fn atom_from_text(text: impl Into<String>) -> Self {
+    pub fn atom_from_text(text: impl AsRef<str>) -> Self {
         Self::atom_from_key(&Self::binary_from_text(text))
     }
 
@@ -122,8 +123,8 @@ impl Key {
         Self::Atom(Atom::from_key(key))
     }
 
-    pub fn binary_from_text(text: impl Into<String>) -> Self {
-        Self::Binary(Arc::from(text.into().into_bytes()))
+    pub fn binary_from_text(text: impl AsRef<str>) -> Self {
+        Self::Binary(Bytes::copy_from_slice(text.as_ref().as_bytes()))
     }
 
     pub fn abstract_global_path<I, S>(parts: I) -> Self
@@ -213,7 +214,7 @@ impl fmt::Debug for IVar {
 pub enum Value {
     Atom(Atom),
     Number(Number),
-    Binary(Arc<[u8]>),
+    Binary(Bytes),
     List(List),
     Dict(Dict),
     Builtin(Builtin),
@@ -292,8 +293,8 @@ pub struct List(Arc<ListNode>);
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ListNode {
     Empty,
-    Bytes(Arc<[u8]>),
-    Values(Arc<[Value]>),
+    Bytes(Bytes),
+    Values(SharedSlice<Value>),
     Concat(List, List),
     SizedConcat {
         len: usize,
@@ -303,12 +304,63 @@ enum ListNode {
     },
 }
 
+#[derive(Clone)]
+struct SharedSlice<T> {
+    data: Arc<[T]>,
+    start: usize,
+    len: usize,
+}
+
+impl<T> SharedSlice<T> {
+    fn from_vec(values: Vec<T>) -> Self {
+        let len = values.len();
+        Self {
+            data: Arc::from(values),
+            start: 0,
+            len,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn as_slice(&self) -> &[T] {
+        &self.data[self.start..self.start + self.len]
+    }
+
+    fn slice(&self, start: usize, end: usize) -> Self {
+        assert!(start <= end);
+        assert!(end <= self.len);
+        Self {
+            data: self.data.clone(),
+            start: self.start + start,
+            len: end - start,
+        }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for SharedSlice<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_slice().fmt(f)
+    }
+}
+
+impl<T: PartialEq> PartialEq for SharedSlice<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl<T: Eq> Eq for SharedSlice<T> {}
+
 impl List {
     pub fn empty() -> Self {
         Self(Arc::new(ListNode::Empty))
     }
 
-    pub fn from_bytes(bytes: Arc<[u8]>) -> Self {
+    pub fn from_bytes(bytes: impl Into<Bytes>) -> Self {
+        let bytes = bytes.into();
         if bytes.is_empty() {
             Self::empty()
         } else {
@@ -320,7 +372,7 @@ impl List {
         if values.is_empty() {
             Self::empty()
         } else {
-            Self(Arc::new(ListNode::Values(Arc::from(values))))
+            Self(Arc::new(ListNode::Values(SharedSlice::from_vec(values))))
         }
     }
 
@@ -374,13 +426,13 @@ impl List {
 
     pub fn for_each_segment<E>(
         &self,
-        on_bytes: &mut impl FnMut(&Arc<[u8]>) -> Result<(), E>,
-        on_values: &mut impl FnMut(&Arc<[Value]>) -> Result<(), E>,
+        on_bytes: &mut impl FnMut(&[u8]) -> Result<(), E>,
+        on_values: &mut impl FnMut(&[Value]) -> Result<(), E>,
     ) -> Result<(), E> {
         match self.0.as_ref() {
             ListNode::Empty => Ok(()),
             ListNode::Bytes(bytes) => on_bytes(bytes),
-            ListNode::Values(values) => on_values(values),
+            ListNode::Values(values) => on_values(values.as_slice()),
             ListNode::Concat(left, right) => {
                 left.for_each_segment(on_bytes, on_values)?;
                 right.for_each_segment(on_bytes, on_values)
@@ -397,19 +449,23 @@ impl List {
     }
 
     fn leaves(&self) -> Vec<List> {
-        let leaves = std::cell::RefCell::new(Vec::new());
-        self.for_each_segment(
-            &mut |bytes| {
-                leaves.borrow_mut().push(Self::from_bytes(bytes.clone()));
-                Ok::<_, ()>(())
-            },
-            &mut |values| {
-                leaves.borrow_mut().push(Self::from_values(values.to_vec()));
-                Ok(())
-            },
-        )
-        .expect("collecting list leaves should not fail");
-        leaves.into_inner()
+        let mut leaves = Vec::new();
+        self.collect_leaves(&mut leaves);
+        leaves
+    }
+
+    fn collect_leaves(&self, leaves: &mut Vec<List>) {
+        match self.0.as_ref() {
+            ListNode::Empty => {}
+            ListNode::Bytes(bytes) => leaves.push(Self::from_bytes(bytes.clone())),
+            ListNode::Values(values) => {
+                leaves.push(Self(Arc::new(ListNode::Values(values.clone()))));
+            }
+            ListNode::Concat(left, right) | ListNode::SizedConcat { left, right, .. } => {
+                left.collect_leaves(leaves);
+                right.collect_leaves(leaves);
+            }
+        }
     }
 
     fn balanced_from_leaves(leaves: &[List]) -> Self {
@@ -433,8 +489,8 @@ impl List {
 
         match self.0.as_ref() {
             ListNode::Empty => Self::empty(),
-            ListNode::Bytes(bytes) => Self::from_bytes(Arc::from(&bytes[start..end])),
-            ListNode::Values(values) => Self::from_values(values[start..end].to_vec()),
+            ListNode::Bytes(bytes) => Self::from_bytes(bytes.slice(start..end)),
+            ListNode::Values(values) => Self(Arc::new(ListNode::Values(values.slice(start, end)))),
             ListNode::Concat(left, right) => {
                 Self::slice_concat(left, left.len(), right, start, end)
             }
@@ -483,7 +539,7 @@ impl List {
 
 impl Value {
     pub fn binary_from_text(text: &str) -> Self {
-        Self::Binary(Arc::from(text.as_bytes()))
+        Self::Binary(Bytes::copy_from_slice(text.as_bytes()))
     }
 
     pub fn expr(expr: Expr) -> Self {
@@ -531,6 +587,7 @@ impl Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn atoms_and_binary_keys_are_distinct() {
@@ -640,7 +697,7 @@ mod tests {
             Key::atom_from_text("payload"),
             Value::List(List::concat(
                 List::from_values(vec![Value::Number(1.into())]),
-                List::from_bytes(Arc::from(&b"Hi"[..])),
+                List::from_bytes(Bytes::from_static(b"Hi")),
             )),
         ));
 
@@ -704,7 +761,7 @@ mod tests {
 
     #[test]
     fn list_concat_shares_segments() {
-        let bytes = List::from_bytes(Arc::from(&b"Hello"[..]));
+        let bytes = List::from_bytes(Bytes::from_static(b"Hello"));
         let values = List::from_values(vec![Value::Number(33.into())]);
         let list = List::concat(bytes, values);
 
@@ -715,8 +772,8 @@ mod tests {
     fn balanced_lists_store_size_metadata_and_preserve_segments() {
         let list = List::concat(
             List::concat(
-                List::from_bytes(Arc::from(&b"He"[..])),
-                List::from_bytes(Arc::from(&b"ll"[..])),
+                List::from_bytes(Bytes::from_static(b"He")),
+                List::from_bytes(Bytes::from_static(b"ll")),
             ),
             List::from_values(vec![Value::Number(111.into()), Value::Number(33.into())]),
         );
@@ -749,7 +806,7 @@ mod tests {
     #[test]
     fn list_slice_uses_rope_segments() {
         let list = List::concat(
-            List::from_bytes(Arc::from(&b"Hello"[..])),
+            List::from_bytes(Bytes::from_static(b"Hello")),
             List::from_values(vec![Value::Number(44.into()), Value::Number(32.into())]),
         )
         .balanced();
@@ -772,5 +829,37 @@ mod tests {
             .expect("sliced list should walk");
         assert_eq!(bytes.into_inner(), b"ello");
         assert_eq!(values.into_inner(), vec![Value::Number(44.into())]);
+    }
+
+    #[test]
+    fn list_slice_shares_partial_byte_and_value_leaves() {
+        let bytes = Bytes::from_static(b"Hello");
+        let value_leaf =
+            List::from_values(vec![Value::Number(44.into()), Value::Number(32.into())]);
+        let original_value_ptr = match value_leaf.0.as_ref() {
+            ListNode::Values(values) => values.as_slice().as_ptr(),
+            _ => panic!("value leaf should store values"),
+        };
+        let list = List::concat(List::from_bytes(bytes.clone()), value_leaf).balanced();
+
+        let sliced = list.slice(1, 6);
+
+        let byte_ptrs = std::cell::RefCell::new(Vec::new());
+        let value_ptrs = std::cell::RefCell::new(Vec::new());
+        sliced
+            .for_each_segment(
+                &mut |segment| {
+                    byte_ptrs.borrow_mut().push(segment.as_ptr());
+                    Ok::<_, ()>(())
+                },
+                &mut |segment| {
+                    value_ptrs.borrow_mut().push(segment.as_ptr());
+                    Ok(())
+                },
+            )
+            .expect("sliced list should walk");
+
+        assert_eq!(byte_ptrs.into_inner(), vec![bytes[1..].as_ptr()]);
+        assert_eq!(value_ptrs.into_inner(), vec![original_value_ptr]);
     }
 }
