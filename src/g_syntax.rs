@@ -176,6 +176,10 @@ pub enum SyntaxExpr {
         left: Box<SyntaxExpr>,
         right: Box<SyntaxExpr>,
     },
+    ComparisonChain {
+        first: Box<SyntaxExpr>,
+        rest: Vec<(SyntaxOperator, SyntaxExpr)>,
+    },
     OperatorSection {
         operator: SyntaxOperator,
         left: Option<Box<SyntaxExpr>>,
@@ -207,6 +211,20 @@ pub enum SyntaxKeyExpr {
     Atom(String),
     Index(Box<SyntaxExpr>),
     PathIndex(Box<SyntaxExpr>),
+}
+
+fn is_comparison_operator(operator: SyntaxOperator) -> bool {
+    matches!(
+        operator,
+        SyntaxOperator::Builtin(
+            Builtin::Greater
+                | Builtin::GreaterEqual
+                | Builtin::Equal
+                | Builtin::NotEqual
+                | Builtin::LessEqual
+                | Builtin::Less
+        )
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -949,6 +967,10 @@ fn shift_expr_locals(expr: &CoreExpr, amount: usize, cutoff: usize) -> CoreExpr 
         CoreExpr::Lambda(body) => {
             CoreExpr::Lambda(Arc::new(shift_expr_locals(body, amount, cutoff + 1)))
         }
+        CoreExpr::Let(bound, body) => CoreExpr::Let(
+            Arc::new(shift_expr_locals(bound, amount, cutoff)),
+            Arc::new(shift_expr_locals(body, amount, cutoff + 1)),
+        ),
         CoreExpr::Local(index) if *index >= cutoff => CoreExpr::Local(index + amount),
         CoreExpr::Local(index) => CoreExpr::Local(*index),
         CoreExpr::Access(base, path) => CoreExpr::Access(
@@ -1610,6 +1632,9 @@ fn syntax_expr_to_value_in_scope(
             left,
             right,
         } => lower_syntax_operator_expr(*operator, left, right, line, context, scope, locals)?,
+        SyntaxExpr::ComparisonChain { first, rest } => {
+            lower_comparison_chain(first, rest, line, context, scope, locals)?
+        }
         SyntaxExpr::OperatorSection {
             operator,
             left,
@@ -1871,6 +1896,67 @@ fn lower_syntax_operator_expr(
             Ok(lower_syntax_operator_values(operator, left, right, context))
         }
     }
+}
+
+fn lower_comparison_chain(
+    first: &SyntaxExpr,
+    rest: &[(SyntaxOperator, SyntaxExpr)],
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<Value, Diagnostic> {
+    let left = syntax_expr_to_value_in_scope(first, line, context, scope, locals)?;
+    let rest = rest
+        .iter()
+        .map(|(operator, expr)| {
+            if !is_comparison_operator(*operator) {
+                return Err(Diagnostic::error(
+                    line,
+                    "internal error: comparison chain contained a non-comparison operator",
+                ));
+            }
+            Ok((
+                *operator,
+                syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, Diagnostic>>()?;
+    Ok(lower_comparison_chain_values(left, &rest, context))
+}
+
+fn lower_comparison_chain_values(
+    left: Value,
+    rest: &[(SyntaxOperator, Value)],
+    context: &CompileContext,
+) -> Value {
+    let Some((operator, right)) = rest.first() else {
+        return left;
+    };
+
+    if rest.len() == 1 {
+        return lower_syntax_operator_values(*operator, left, right.clone(), context);
+    }
+
+    let right_local = context.value_local(0);
+    let first_condition = lower_syntax_operator_values(
+        *operator,
+        shift_value_locals(&left, 1, 0),
+        right_local.clone(),
+        context,
+    );
+    let shifted_rest = rest[1..]
+        .iter()
+        .map(|(operator, value)| (*operator, shift_value_locals(value, 1, 0)))
+        .collect::<Vec<_>>();
+    let remaining_condition = lower_comparison_chain_values(right_local, &shifted_rest, context);
+    let body = lower_syntax_operator_values(
+        SyntaxOperator::BoolAnd,
+        first_condition,
+        remaining_condition,
+        context,
+    );
+    context.value_let(right.clone(), body)
 }
 
 fn lower_syntax_operator_function(operator: SyntaxOperator, context: &CompileContext) -> Value {
@@ -3058,6 +3144,12 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
                 analyze_expr_locals(right, line, diagnostics);
             }
         }
+        SyntaxExpr::ComparisonChain { first, rest } => {
+            analyze_expr_locals(first, line, diagnostics);
+            for (_, expr) in rest {
+                analyze_expr_locals(expr, line, diagnostics);
+            }
+        }
         SyntaxExpr::OperatorApply { left, right, .. }
         | SyntaxExpr::Apply(left, right)
         | SyntaxExpr::Multiply(left, right)
@@ -3172,6 +3264,12 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
                 mark_used_prior_alias(right, alias, used);
             }
         }
+        SyntaxExpr::ComparisonChain { first, rest } => {
+            mark_used_prior_alias(first, alias, used);
+            for (_, expr) in rest {
+                mark_used_prior_alias(expr, alias, used);
+            }
+        }
         SyntaxExpr::OperatorApply { left, right, .. }
         | SyntaxExpr::Apply(left, right)
         | SyntaxExpr::Multiply(left, right)
@@ -3281,6 +3379,12 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
                 mark_used_locals(right, locals, used);
             }
         }
+        SyntaxExpr::ComparisonChain { first, rest } => {
+            mark_used_locals(first, locals, used);
+            for (_, expr) in rest {
+                mark_used_locals(expr, locals, used);
+            }
+        }
         SyntaxExpr::OperatorApply { left, right, .. }
         | SyntaxExpr::Apply(left, right)
         | SyntaxExpr::Multiply(left, right)
@@ -3338,11 +3442,36 @@ fn syntax_expr_parser<'src>()
         Unrelated,
     }
 
+    enum PartialExpr {
+        Expr(SyntaxExpr),
+        ComparisonChain {
+            first: Box<SyntaxExpr>,
+            rest: Vec<(SyntaxOperator, SyntaxExpr)>,
+        },
+    }
+
+    impl PartialExpr {
+        fn into_expr(self) -> SyntaxExpr {
+            match self {
+                PartialExpr::Expr(expr) => expr,
+                PartialExpr::ComparisonChain { first, mut rest } if rest.len() == 1 => {
+                    let (operator, right) = rest
+                        .pop()
+                        .expect("single-item comparison chain should contain one comparison");
+                    syntax_binary_expr(operator, *first, right)
+                }
+                PartialExpr::ComparisonChain { first, rest } => {
+                    SyntaxExpr::ComparisonChain { first, rest }
+                }
+            }
+        }
+    }
+
     fn resolve_infix_chain(
         first: SyntaxExpr,
         rest: Vec<(SyntaxOperator, SyntaxExpr)>,
     ) -> Result<SyntaxExpr, String> {
-        let mut exprs = vec![first];
+        let mut exprs = vec![PartialExpr::Expr(first)];
         let mut ops = Vec::new();
 
         for (next_op, next_expr) in rest {
@@ -3353,6 +3482,12 @@ fn syntax_expr_parser<'src>()
                     }
                     OperatorRelation::Weaker | OperatorRelation::Same(Associativity::Right) => {
                         break;
+                    }
+                    OperatorRelation::Same(Associativity::None)
+                        if is_comparison_operator(previous_op)
+                            && is_comparison_operator(next_op) =>
+                    {
+                        reduce_top_operator(&mut exprs, &mut ops)?
                     }
                     OperatorRelation::Same(Associativity::None) => {
                         return Err(format!(
@@ -3371,7 +3506,7 @@ fn syntax_expr_parser<'src>()
             }
 
             ops.push(next_op);
-            exprs.push(next_expr);
+            exprs.push(PartialExpr::Expr(next_expr));
         }
 
         while !ops.is_empty() {
@@ -3380,15 +3515,17 @@ fn syntax_expr_parser<'src>()
 
         exprs
             .pop()
+            .map(PartialExpr::into_expr)
             .ok_or_else(|| "operator chain did not produce an expression".to_owned())
     }
 
     fn reduce_top_operator(
-        exprs: &mut Vec<SyntaxExpr>,
+        exprs: &mut Vec<PartialExpr>,
         ops: &mut Vec<SyntaxOperator>,
     ) -> Result<(), String> {
         let right = exprs
             .pop()
+            .map(PartialExpr::into_expr)
             .ok_or_else(|| "missing right operand in operator chain".to_owned())?;
         let left = exprs
             .pop()
@@ -3396,7 +3533,24 @@ fn syntax_expr_parser<'src>()
         let op = ops
             .pop()
             .ok_or_else(|| "missing operator in operator chain".to_owned())?;
-        exprs.push(syntax_binary_expr(op, left, right));
+        if is_comparison_operator(op) {
+            match left {
+                PartialExpr::Expr(left) => exprs.push(PartialExpr::ComparisonChain {
+                    first: Box::new(left),
+                    rest: vec![(op, right)],
+                }),
+                PartialExpr::ComparisonChain { first, mut rest } => {
+                    rest.push((op, right));
+                    exprs.push(PartialExpr::ComparisonChain { first, rest });
+                }
+            }
+        } else {
+            exprs.push(PartialExpr::Expr(syntax_binary_expr(
+                op,
+                left.into_expr(),
+                right,
+            )));
+        }
         Ok(())
     }
 
@@ -4089,6 +4243,31 @@ mod tests {
             panic!("binding should resolve to a lazy expression");
         };
         thunk.expr.as_ref().clone()
+    }
+
+    fn expr_contains_let(expr: &CoreExpr) -> bool {
+        match expr {
+            CoreExpr::Let(_, _) => true,
+            CoreExpr::Value(Value::Expr(thunk)) => expr_contains_let(thunk.expr.as_ref()),
+            CoreExpr::Value(_) | CoreExpr::Local(_) | CoreExpr::Future(_) | CoreExpr::Error(_) => {
+                false
+            }
+            CoreExpr::List(items) => items.iter().any(|item| expr_contains_let(item.as_ref())),
+            CoreExpr::Apply(function, argument) => {
+                expr_contains_let(function.as_ref()) || expr_contains_let(argument.as_ref())
+            }
+            CoreExpr::Lambda(body) => expr_contains_let(body.as_ref()),
+            CoreExpr::Access(base, path) => {
+                expr_contains_let(base.as_ref())
+                    || path.iter().any(|key| match key {
+                        CoreKeyExpr::Key(_) => false,
+                        CoreKeyExpr::Index(expr) | CoreKeyExpr::PathIndex(expr) => {
+                            expr_contains_let(expr.as_ref())
+                        }
+                    })
+            }
+            CoreExpr::Deferred(_) => false,
+        }
     }
 
     fn core_builtin2(builtin: Builtin, left: CoreExpr, right: CoreExpr) -> CoreExpr {
@@ -4929,6 +5108,22 @@ mod tests {
                     right: Box::new(SyntaxExpr::Name("y".to_owned())),
                 }),
                 right: Box::new(SyntaxExpr::Name("z".to_owned())),
+            })
+        );
+        assert_eq!(
+            parse_expr("x < y =< z"),
+            Some(SyntaxExpr::ComparisonChain {
+                first: Box::new(SyntaxExpr::Name("x".to_owned())),
+                rest: vec![
+                    (
+                        SyntaxOperator::Builtin(Builtin::Less),
+                        SyntaxExpr::Name("y".to_owned()),
+                    ),
+                    (
+                        SyntaxOperator::Builtin(Builtin::LessEqual),
+                        SyntaxExpr::Name("z".to_owned()),
+                    ),
+                ],
             })
         );
         assert_eq!(parse_expr("and"), None);
@@ -6419,7 +6614,7 @@ mod tests {
     #[test]
     fn comparisons_and_boolean_operators_evaluate_as_effects() {
         let parsed = parse(
-            "language g0\nimport 'std\ntuple_left = { tuple:[1,2] }\ntuple_right = { tuple:[1,3] }\nasm.gt = list.pure ((3 > 2) =>> .r \"G\")\nasm.ge = list.pure ((3 >= 3) =>> .r \"E\")\nasm.eq = list.pure ((3 == 3) =>> .r \"Q\")\nasm.ne = list.pure ((3 <> 4) =>> .r \"N\")\nasm.le = list.pure ((3 =< 3) =>> .r \"L\")\nasm.lt = list.pure ((2 < 3) =>> .r \"T\")\nasm.fail = list.pure ((3 < 2) =>> .r \"bad\")\nasm.list = list.pure (([1,2] < [1,3]) =>> .r \"S\")\nasm.binary_list = list.pure ((\"AB\" == [65,66]) =>> .r \"B\")\nasm.tuple = list.pure ((tuple_left < tuple_right) =>> .r \"U\")\nasm.dict = list.pure (({ a:1, b:{} } == { a:1 }) =>> .r \"D\")\nasm.and = list.pure ((3 > 2 and \"A\" == [65]) =>> .r \"A\")\nasm.or = list.pure ((3 < 2 or 3 == 3) =>> .r \"O\")\nasm.not_true = list.pure ((not (3 > 2)) =>> .r \"bad\")\nasm.not_false = list.pure ((not (3 < 2)) =>> .r \"F\")\nasm.could_true = list.pure ((could (.alt .fail (3 == 3))) =>> .r \"C\")\nasm.could_false = list.pure ((could .fail) =>> .r \"bad\")\n",
+            "language g0\nimport 'std\ntuple_left = { tuple:[1,2] }\ntuple_right = { tuple:[1,3] }\nasm.gt = list.pure ((3 > 2) =>> .r \"G\")\nasm.ge = list.pure ((3 >= 3) =>> .r \"E\")\nasm.eq = list.pure ((3 == 3) =>> .r \"Q\")\nasm.ne = list.pure ((3 <> 4) =>> .r \"N\")\nasm.le = list.pure ((3 =< 3) =>> .r \"L\")\nasm.lt = list.pure ((2 < 3) =>> .r \"T\")\nasm.fail = list.pure ((3 < 2) =>> .r \"bad\")\nasm.chain = list.pure ((1 < 2 =< 2 <> 3) =>> .r \"H\")\nasm.chain_fail = list.pure ((1 < 3 < 2) =>> .r \"bad\")\nasm.chain_raw = 1 < (2 + 0) < 3\nasm.list = list.pure (([1,2] < [1,3]) =>> .r \"S\")\nasm.binary_list = list.pure ((\"AB\" == [65,66]) =>> .r \"B\")\nasm.tuple = list.pure ((tuple_left < tuple_right) =>> .r \"U\")\nasm.dict = list.pure (({ a:1, b:{} } == { a:1 }) =>> .r \"D\")\nasm.and = list.pure ((3 > 2 and \"A\" == [65]) =>> .r \"A\")\nasm.or = list.pure ((3 < 2 or 3 == 3) =>> .r \"O\")\nasm.not_true = list.pure ((not (3 > 2)) =>> .r \"bad\")\nasm.not_false = list.pure ((not (3 < 2)) =>> .r \"F\")\nasm.could_true = list.pure ((could (.alt .fail (3 == 3))) =>> .r \"C\")\nasm.could_false = list.pure ((could .fail) =>> .r \"bad\")\n",
         );
         let context = CompileContext::default();
         let lowered = lower_to_core_with_context(&parsed, &context);
@@ -6434,6 +6629,8 @@ mod tests {
             ("le", b"L"),
             ("lt", b"T"),
             ("fail", b""),
+            ("chain", b"H"),
+            ("chain_fail", b""),
             ("list", b"S"),
             ("binary_list", b"B"),
             ("tuple", b"U"),
@@ -6454,6 +6651,13 @@ mod tests {
                 "{path}"
             );
         }
+
+        let chain_raw =
+            value_at_atom_path(&value, &["asm", "chain_raw"]).expect("raw chain should exist");
+        let Value::Expr(thunk) = chain_raw else {
+            panic!("raw chain should remain a lazy expression");
+        };
+        assert!(expr_contains_let(thunk.expr.as_ref()));
     }
 
     #[test]

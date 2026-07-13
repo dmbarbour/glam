@@ -212,6 +212,13 @@ impl CompileContext {
         Value::expr(CoreExpr::Lambda(Arc::new(value_to_core_expr(body))))
     }
 
+    pub fn value_let(&self, bound: Value, body: Value) -> Value {
+        Value::expr(CoreExpr::Let(
+            Arc::new(value_to_core_expr(bound)),
+            Arc::new(value_to_core_expr(body)),
+        ))
+    }
+
     pub fn value_local(&self, index: usize) -> Value {
         Value::expr(CoreExpr::Local(index))
     }
