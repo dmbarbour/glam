@@ -154,6 +154,7 @@ pub enum SyntaxExpr {
     Number(Number),
     Text(String),
     Atom(String),
+    Effect(String),
     Name(String),
     PriorName(String),
     Escape(usize, Box<SyntaxExpr>),
@@ -1509,6 +1510,7 @@ fn syntax_expr_to_value_in_scope(
         SyntaxExpr::Number(number) => context.value_number(number.clone()),
         SyntaxExpr::Text(text) => context.value_binary(text),
         SyntaxExpr::Atom(name) => context.value_atom(atom_from_str(name)),
+        SyntaxExpr::Effect(name) => lower_effect_expr(name, context),
         SyntaxExpr::SingletonDict(key, value) => context.builtin_apply2_value(
             Builtin::DictSingleton,
             syntax_key_expr_to_value(key, line, context, scope, locals)?,
@@ -1686,6 +1688,18 @@ fn lower_builtin_expr(
         syntax_expr_to_value_in_scope(left, line, context, scope, locals)?,
         syntax_expr_to_value_in_scope(right, line, context, scope, locals)?,
     ))
+}
+
+fn lower_effect_expr(name: &str, context: &CompileContext) -> Value {
+    let body = context.value_access(
+        context.value_local(0),
+        vec![context.key_expr_key(Key::atom_from_text(name))],
+    );
+    context.builtin_apply2_value(
+        Builtin::DictSingleton,
+        context.value_atom(atom_from_str("eff")),
+        context.value_lambda(body),
+    )
 }
 
 fn lower_operator_section(
@@ -2870,7 +2884,10 @@ fn warn_unused_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diag
 
 fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diagnostic>) {
     match expr {
-        SyntaxExpr::Number(_) | SyntaxExpr::Text(_) | SyntaxExpr::Atom(_) => {}
+        SyntaxExpr::Number(_)
+        | SyntaxExpr::Text(_)
+        | SyntaxExpr::Atom(_)
+        | SyntaxExpr::Effect(_) => {}
         SyntaxExpr::Name(_) | SyntaxExpr::PriorName(_) => {}
         SyntaxExpr::Escape(_, expr) => analyze_expr_locals(expr, line, diagnostics),
         SyntaxExpr::Access(base, parts) => {
@@ -2997,6 +3014,7 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
         SyntaxExpr::Number(_)
         | SyntaxExpr::Text(_)
         | SyntaxExpr::Atom(_)
+        | SyntaxExpr::Effect(_)
         | SyntaxExpr::Name(_)
         | SyntaxExpr::PriorName(_) => {}
         SyntaxExpr::Escape(_, expr) => mark_used_prior_alias(expr, alias, used),
@@ -3082,7 +3100,10 @@ fn mark_used_prior_alias_in_key(key: &SyntaxKeyExpr, alias: Option<&str>, used: 
 
 fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) {
     match expr {
-        SyntaxExpr::Number(_) | SyntaxExpr::Text(_) | SyntaxExpr::Atom(_) => {}
+        SyntaxExpr::Number(_)
+        | SyntaxExpr::Text(_)
+        | SyntaxExpr::Atom(_)
+        | SyntaxExpr::Effect(_) => {}
         SyntaxExpr::Name(name) => {
             if let Some(index) = locals
                 .iter()
@@ -3421,6 +3442,10 @@ fn syntax_expr_parser<'src>()
             .then(path_suffix.clone())
             .map(|(name, suffixes)| access_if_path(SyntaxExpr::Name(name), suffixes))
             .boxed();
+        let effect_expr = just('.')
+            .ignore_then(name.clone())
+            .map(SyntaxExpr::Effect)
+            .boxed();
 
         let number_literal = choice((
             just('_').then(one_of("0123456789")).ignored(),
@@ -3542,7 +3567,14 @@ fn syntax_expr_parser<'src>()
             .then(path_suffix.clone())
             .map(|(base, suffixes)| access_if_path(base, suffixes))
             .boxed();
-        let atom = choice((literal_expr, escaped_expr, prior_name, name_expr)).boxed();
+        let atom = choice((
+            literal_expr,
+            escaped_expr,
+            effect_expr,
+            prior_name,
+            name_expr,
+        ))
+        .boxed();
         let application = atom
             .clone()
             .then(
@@ -4507,6 +4539,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_effect_shorthand_expressions() {
+        assert_eq!(
+            parse_expr(".emit"),
+            Some(SyntaxExpr::Effect("emit".to_owned()))
+        );
+        assert_eq!(
+            parse_expr(".emit 'eax 42"),
+            Some(SyntaxExpr::Apply(
+                Box::new(SyntaxExpr::Apply(
+                    Box::new(SyntaxExpr::Effect("emit".to_owned())),
+                    Box::new(SyntaxExpr::Atom("eax".to_owned())),
+                )),
+                Box::new(SyntaxExpr::Number(n(42))),
+            ))
+        );
+    }
+
+    #[test]
     fn parses_operator_sections() {
         assert_eq!(
             parse_expr("(+ 42)"),
@@ -4904,8 +4954,11 @@ mod tests {
         );
         assert_eq!(
             parse_expr("foo .bar"),
-            None,
-            "whitespace before `.` should prevent dotted-path parsing"
+            Some(SyntaxExpr::Apply(
+                Box::new(SyntaxExpr::Name("foo".to_owned())),
+                Box::new(SyntaxExpr::Effect("bar".to_owned())),
+            )),
+            "whitespace before `.` should parse `.bar` as a separate effect expression"
         );
         assert_eq!(
             parse_expr("foo.[42].  bar"),
@@ -5910,6 +5963,44 @@ mod tests {
                     vec![CoreKeyExpr::Key(Key::atom_from_text("d"))]
                 )),
             )
+        );
+    }
+
+    #[test]
+    fn effect_shorthand_builds_applicable_effect_values() {
+        let parsed = parse(
+            "language g0\napi = { emit:(\\x -> x ++ \"!\") }\neffect = .emit \"Hi\"\nasm.result = effect.eff api\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hi!"
+        );
+    }
+
+    #[test]
+    fn method_objects_apply_via_apply_member_from_syntax() {
+        let parsed = parse(
+            "language g0\nmethod = { apply:(\\x -> x ++ \"!\") }\nasm.result = method \"Hi\"\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hi!"
         );
     }
 

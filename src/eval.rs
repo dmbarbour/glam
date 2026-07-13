@@ -246,6 +246,7 @@ fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<
     match function {
         Value::Builtin(builtin) => apply_builtin(builtin, Vec::new(), argument, local_env),
         Value::Closure(closure) => apply_closure(&closure, argument),
+        Value::Dict(dict) => apply_dict_value(&dict, argument, local_env),
         Value::Expr(thunk) => {
             if let Some((builtin, args)) = builtin_application_spine(thunk.expr.as_ref()) {
                 apply_builtin(builtin, args, argument, local_env)
@@ -261,6 +262,56 @@ fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<
         }
         _ => Err(EvalError::new("application requires a function value")),
     }
+}
+
+fn apply_dict_value(
+    dict: &crate::core::Dict,
+    argument: Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    if let Some(function) = singleton_effect_function(dict) {
+        return Ok(effect_value(apply_effect_function_value(
+            function, argument,
+        )));
+    }
+
+    if let Some(function) = dict.get(&Key::atom_from_text("apply")) {
+        if !is_undefined_dict_value(function) {
+            return apply_value(eval_value(function)?, argument, local_env);
+        }
+    }
+
+    Err(EvalError::new("application requires a function value"))
+}
+
+fn singleton_effect_function(dict: &crate::core::Dict) -> Option<Value> {
+    let eff_key = Key::atom_from_text("eff");
+    let function = dict.get(&eff_key)?;
+    if is_undefined_dict_value(function) {
+        return None;
+    }
+    if dict
+        .iter()
+        .all(|(key, value)| *key == eff_key || is_undefined_dict_value(value))
+    {
+        Some(function.clone())
+    } else {
+        None
+    }
+}
+
+fn apply_effect_function_value(function: Value, argument: Value) -> Value {
+    Value::expr(Expr::Lambda(Arc::new(Expr::Apply(
+        Arc::new(Expr::Apply(
+            Arc::new(Expr::Value(function)),
+            Arc::new(Expr::Local(0)),
+        )),
+        Arc::new(Expr::Value(argument)),
+    ))))
+}
+
+fn effect_value(function: Value) -> Value {
+    Value::Dict(crate::core::Dict::new_sync().insert(Key::atom_from_text("eff"), function))
 }
 
 fn apply_closure(closure: &Closure, argument: Value) -> Result<Value, EvalError> {
@@ -2133,6 +2184,76 @@ mod tests {
         let value = eval_closed_expr(&expr).expect("lambda with dropped argument should evaluate");
 
         assert_eq!(value, n(42));
+    }
+
+    #[test]
+    fn method_objects_apply_via_apply_member() {
+        let method = Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("apply"),
+            Value::expr(Expr::Lambda(Arc::new(builtin2_expr(
+                Builtin::Add,
+                Expr::Local(0),
+                Expr::Value(n(1)),
+            )))),
+        ));
+        let value = eval_closed_expr(&Expr::Apply(
+            Arc::new(Expr::Value(method)),
+            Arc::new(Expr::Value(n(41))),
+        ))
+        .expect("method object application should evaluate");
+
+        assert_eq!(value, n(42));
+    }
+
+    #[test]
+    fn effect_values_apply_by_extending_the_effect_function() {
+        let effect = effect_value(Value::expr(Expr::Lambda(Arc::new(Expr::Access(
+            Arc::new(Expr::Local(0)),
+            Arc::from([KeyExpr::Key(Key::atom_from_text("op"))]),
+        )))));
+        let applied = eval_closed_expr(&Expr::Apply(
+            Arc::new(Expr::Value(effect)),
+            Arc::new(Expr::Value(n(41))),
+        ))
+        .expect("effect application should evaluate");
+        let Value::Dict(effect) = applied else {
+            panic!("effect application should produce an effect value");
+        };
+        let function = effect
+            .get(&Key::atom_from_text("eff"))
+            .expect("effect should contain an eff function")
+            .clone();
+        let api = Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("op"),
+            Value::expr(Expr::Lambda(Arc::new(builtin2_expr(
+                Builtin::Add,
+                Expr::Local(0),
+                Expr::Value(n(1)),
+            )))),
+        ));
+
+        let value = apply_value(eval_value(&function).unwrap(), api, &[])
+            .expect("extended effect function should evaluate with an API");
+        assert_eq!(value, n(42));
+    }
+
+    #[test]
+    fn effect_application_requires_singleton_eff_tag() {
+        let not_singleton = Value::Dict(
+            Dict::new_sync()
+                .insert(
+                    Key::atom_from_text("eff"),
+                    Value::expr(Expr::Lambda(Arc::new(Expr::Local(0)))),
+                )
+                .insert(Key::atom_from_text("extra"), n(1)),
+        );
+        let err = eval_closed_expr(&Expr::Apply(
+            Arc::new(Expr::Value(not_singleton)),
+            Arc::new(Expr::Value(n(42))),
+        ))
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "application requires a function value");
     }
 
     #[test]
