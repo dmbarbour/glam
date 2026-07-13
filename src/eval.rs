@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::core::{Builtin, Closure, Expr, IVar, Key, KeyExpr, List, Thunk, Value};
+use crate::core::{Builtin, Closure, DeferredValue, Expr, IVar, Key, KeyExpr, List, Thunk, Value};
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -706,9 +706,9 @@ fn eval_list_head_builtin(value: &Value) -> Result<Value, EvalError> {
             .first()
             .map(|byte| Value::Number(Number::from_u8(*byte)))
             .ok_or_else(|| EvalError::new("list head builtin requires a non-empty list or binary")),
-        Value::List(list) => list_to_value_items(&list)?
-            .into_iter()
-            .next()
+        Value::List(list) => list
+            .try_pop_front(&mut force_list_thunk)?
+            .map(|(head, _)| head)
             .ok_or_else(|| EvalError::new("list head builtin requires a non-empty list or binary")),
         _ => Err(EvalError::new(
             "list head builtin requires a list or binary value",
@@ -728,7 +728,7 @@ fn eval_list_tail_builtin(value: &Value) -> Result<Value, EvalError> {
             }
         }
         Value::List(list) => {
-            let Some((_, tail)) = list.try_split_at(1, &mut force_list_thunk)? else {
+            let Some((_, tail)) = list.try_pop_front(&mut force_list_thunk)? else {
                 return Err(EvalError::new(
                     "list tail builtin requires a non-empty list or binary",
                 ));
@@ -742,9 +742,10 @@ fn eval_list_tail_builtin(value: &Value) -> Result<Value, EvalError> {
 }
 
 fn eval_list_effect_builtin(effect: &Value, local_env: &[Value]) -> Result<Value, EvalError> {
-    Ok(Value::List(List::from_values(run_list_effect(
-        effect, local_env,
-    )?)))
+    Ok(Value::List(lazy_run_list_effect(
+        effect.clone(),
+        Arc::from(local_env.to_vec()),
+    )))
 }
 
 fn eval_list_effect_seq_builtin(
@@ -752,13 +753,11 @@ fn eval_list_effect_seq_builtin(
     continuation: &Value,
     local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let continuation = eval_value(continuation)?;
-    let mut results = Vec::new();
-    for value in run_list_effect(operation, local_env)? {
-        let next = apply_value(continuation.clone(), value, local_env)?;
-        results.extend(run_list_effect(&next, local_env)?);
-    }
-    Ok(Value::List(List::from_values(results)))
+    Ok(Value::List(flat_map_list_effect_results(
+        lazy_run_list_effect(operation.clone(), Arc::from(local_env.to_vec())),
+        continuation.clone(),
+        Arc::from(local_env.to_vec()),
+    )))
 }
 
 fn eval_list_effect_alt_builtin(
@@ -766,18 +765,19 @@ fn eval_list_effect_alt_builtin(
     right: &Value,
     local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let mut results = run_list_effect(left, local_env)?;
-    results.extend(run_list_effect(right, local_env)?);
-    Ok(Value::List(List::from_values(results)))
+    Ok(Value::List(List::concat(
+        lazy_run_list_effect(left.clone(), Arc::from(local_env.to_vec())),
+        lazy_run_list_effect(right.clone(), Arc::from(local_env.to_vec())),
+    )))
 }
 
 fn eval_list_effect_cut_builtin(
     operation: &Value,
     local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let results = run_list_effect(operation, local_env)?;
-    Ok(Value::List(List::from_values(
-        results.into_iter().take(1).collect(),
+    Ok(Value::List(cut_list_effect_results(
+        operation.clone(),
+        Arc::from(local_env.to_vec()),
     )))
 }
 
@@ -786,20 +786,21 @@ fn eval_list_effect_fix_builtin(function: &Value, local_env: &[Value]) -> Result
     let handle = IVar::new();
     let marker = Value::expr(Expr::Future(handle.clone()));
     let operation = apply_value(function, marker.clone(), local_env)?;
-    let results = run_list_effect(&operation, local_env)?;
-    handle
-        .set(
-            results
-                .first()
-                .cloned()
-                .unwrap_or_else(|| Value::List(List::empty())),
-        )
-        .map_err(|_| EvalError::new("list effect fix initialized twice"))?;
-    Ok(Value::List(List::from_values(results)))
+    Ok(Value::List(fix_list_effect_results(
+        operation,
+        handle,
+        Arc::from(local_env.to_vec()),
+    )))
 }
 
-fn run_list_effect(effect: &Value, local_env: &[Value]) -> Result<Vec<Value>, EvalError> {
-    let effect = force_value_shell(effect)?;
+fn lazy_run_list_effect(effect: Value, local_env: Arc<[Value]>) -> List {
+    deferred_list("list effect", move || {
+        run_list_effect_to_list(effect.clone(), local_env.clone())
+    })
+}
+
+fn run_list_effect_to_list(effect: Value, local_env: Arc<[Value]>) -> Result<List, EvalError> {
+    let effect = force_value_shell(&effect)?;
     let Value::Dict(dict) = effect else {
         return Err(EvalError::new(format!(
             "list effect handler requires an effect dictionary, got {effect:?}"
@@ -811,14 +812,71 @@ fn run_list_effect(effect: &Value, local_env: &[Value]) -> Result<Vec<Value>, Ev
         ));
     };
 
-    let handled = apply_value(eval_value(&function)?, list_effect_api(), local_env)?;
+    let handled = apply_value(eval_value(&function)?, list_effect_api(), &local_env)?;
     let handled = force_value_shell(&handled)?;
     let Value::List(results) = handled else {
         return Err(EvalError::new(format!(
             "list effect handler expected a standard effect result list, got {handled:?}"
         )));
     };
-    list_to_value_items(&results)
+    Ok(results)
+}
+
+fn flat_map_list_effect_results(
+    results: List,
+    continuation: Value,
+    local_env: Arc<[Value]>,
+) -> List {
+    deferred_list("list effect seq", move || {
+        let Some((head, tail)) = results.try_pop_front(&mut force_list_thunk)? else {
+            return Ok(List::empty());
+        };
+        let continuation = eval_value(&continuation)?;
+        let next = apply_value(continuation.clone(), head, &local_env)?;
+        Ok(List::concat(
+            lazy_run_list_effect(next, local_env.clone()),
+            flat_map_list_effect_results(tail, continuation, local_env.clone()),
+        ))
+    })
+}
+
+fn cut_list_effect_results(operation: Value, local_env: Arc<[Value]>) -> List {
+    deferred_list("list effect cut", move || {
+        let results = lazy_run_list_effect(operation.clone(), local_env.clone());
+        let Some((head, _)) = results.try_pop_front(&mut force_list_thunk)? else {
+            return Ok(List::empty());
+        };
+        Ok(List::from_values(vec![head]))
+    })
+}
+
+fn fix_list_effect_results(operation: Value, handle: IVar, local_env: Arc<[Value]>) -> List {
+    deferred_list("list effect fix", move || {
+        let results = lazy_run_list_effect(operation.clone(), local_env.clone());
+        let Some((head, tail)) = results.try_pop_front(&mut force_list_thunk)? else {
+            handle
+                .set(Value::List(List::empty()))
+                .map_err(|_| EvalError::new("list effect fix initialized twice"))?;
+            return Ok(List::empty());
+        };
+        handle
+            .set(head.clone())
+            .map_err(|_| EvalError::new("list effect fix initialized twice"))?;
+        Ok(List::concat(List::from_values(vec![head]), tail))
+    })
+}
+
+fn deferred_list(
+    label: &'static str,
+    thunk: impl Fn() -> Result<List, EvalError> + Send + Sync + 'static,
+) -> List {
+    List::from_thunk(Thunk {
+        expr: Arc::new(Expr::Deferred(Arc::new(DeferredValue::new(
+            label,
+            move || thunk().map(Value::List).map_err(|err| err.to_string()),
+        )))),
+        env: Arc::from([]),
+    })
 }
 
 fn list_effect_api() -> Value {

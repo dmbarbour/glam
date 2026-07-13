@@ -572,6 +572,50 @@ impl List {
         self.split_from_end_checked_with(count, force_thunk)
     }
 
+    pub fn try_pop_front<E>(
+        &self,
+        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
+    ) -> Result<Option<(Value, Self)>, E> {
+        match self.0.as_ref() {
+            ListNode::Empty => Ok(None),
+            ListNode::Bytes(bytes) => Ok(bytes.first().map(|byte| {
+                (
+                    Value::Number(Number::from_u8(*byte)),
+                    Self::from_bytes(bytes.slice(1..bytes.len())),
+                )
+            })),
+            ListNode::Values(values) => {
+                let Some(first) = values.as_slice().first() else {
+                    return Ok(None);
+                };
+                Ok(Some((
+                    first.clone(),
+                    Self::from_value_slice(values.slice(1, values.len())),
+                )))
+            }
+            ListNode::Concat(left, right) => {
+                if let Some((first, left_tail)) = left.try_pop_front(force_thunk)? {
+                    Ok(Some((first, Self::concat(left_tail, right.clone()))))
+                } else {
+                    right.try_pop_front(force_thunk)
+                }
+            }
+            ListNode::Finger(finger) => {
+                if finger.measure().0 == 0 {
+                    Ok(None)
+                } else {
+                    let (first, rest) = Self::split_finger_at(finger, 1);
+                    let Some((value, _)) = Self::from_finger(first).try_pop_front(force_thunk)?
+                    else {
+                        unreachable!("non-empty one-item finger tree should have a front value");
+                    };
+                    Ok(Some((value, Self::from_finger(rest))))
+                }
+            }
+            ListNode::Thunk(thunk) => force_thunk(thunk)?.try_pop_front(force_thunk),
+        }
+    }
+
     pub fn for_each_segment<E>(
         &self,
         on_bytes: &mut impl FnMut(&[u8]) -> Result<(), E>,

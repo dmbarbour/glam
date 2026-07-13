@@ -6288,7 +6288,7 @@ mod tests {
     #[test]
     fn list_effect_handler_runs_standard_backtracking_effects() {
         let parsed = parse(
-            "language g0\nimport 'list as list\nchoices = (.alt (.r \"A\") (.alt .fail (.r \"B\"))) >>= (\\x -> .r (x ++ \"!\"))\ncut = .cut (.alt (.r \"C\") (.r \"D\"))\nobject_effect = { eff:(.r \"E\").eff, meta:1 }\nfixed = .fix (\\self -> .r { text:\"F\", self:self })\nasm.choices = list.pure choices\nasm.cut = list.pure cut\nasm.object = list.pure object_effect\nasm.fixed = (list.head (list.pure fixed)).text\nasm.head = list.head \"Hi\"\nasm.tail = list.tail \"Hi\"\n",
+            "language g0\nimport 'list as list\nchoices = (.alt (.r \"A\") (.alt .fail (.r \"B\"))) >>= (\\x -> .r (x ++ \"!\"))\ncut = .cut (.alt (.r \"C\") (.r \"D\"))\ncut_bad = .cut (.alt (.r \"G\") 42)\ncut_seq_bad = .cut ((.alt (.r \"S\") 42) >>= (\\x -> .r (x ++ \"!\")))\nobject_effect = { eff:(.r \"E\").eff, meta:1 }\nfixed = .fix (\\self -> .r { text:\"F\", self:self })\nasm.choices = list.pure choices\nasm.cut = list.pure cut\nasm.cut_fail = list.pure (.cut .fail)\nasm.cut_bad = list.pure cut_bad\nasm.cut_seq_bad = list.pure cut_seq_bad\nasm.object = list.pure object_effect\nasm.fixed = (list.head (list.pure fixed)).text\nasm.head = list.head \"Hi\"\nasm.tail = list.tail \"Hi\"\n",
         );
         let context = CompileContext::default();
         let lowered = lower_to_core_with_context(&parsed, &context);
@@ -6308,6 +6308,27 @@ mod tests {
                 &["asm", "cut"]
             ))),
             b"C"
+        );
+        assert_eq!(
+            output_binary_result_list(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "cut_fail"]
+            ))),
+            b""
+        );
+        assert_eq!(
+            output_binary_result_list(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "cut_bad"]
+            ))),
+            b"G"
+        );
+        assert_eq!(
+            output_binary_result_list(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "cut_seq_bad"]
+            ))),
+            b"S!"
         );
         assert_eq!(
             output_binary_result_list(&fully_evaluated_value(resolved_value_at_path(
