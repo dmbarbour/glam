@@ -334,7 +334,9 @@ Effects API:
 
 - Node constructors introduce ports. Principal port is head.
   - `.bind -> [ap, arg, result]` - constructor of functions
-  - `.copy N -> [x0, x1, x2, ..., xN]` - dataflow, unique instances
+  - `.copy N -> [x0, x1, x2, ..., xN]` - dataflow, globally unique instances
+    - implementations may identify an instance with a process-global `u64` UID
+    - copies produced by interaction retain the source UID
     - `.copy 0 -> [e]` - explicitly drops data
     - `.copy 1 -> [lhs,rhs]` - tunnel for non-local composition 
   - `.data Expr -> [d]` - functions, lists, dicts, numbers
@@ -349,7 +351,7 @@ Nodes interact only when principal ports connect.
 - bind-copy: dup
 - bind-data: call function, stuck otherwise
 - copy-data: dup
-- copy-copy: join self (same instance), dup otherwise
+- copy-copy: join self (same UID), dup otherwise
 - data-data: stuck
 - rules are commutative, e.g. copy-bind is bind-copy
 - assembler may use intermediate nodes under-the-hood

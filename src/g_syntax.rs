@@ -994,7 +994,6 @@ fn shift_expr_locals(expr: &CoreExpr, amount: usize, cutoff: usize) -> CoreExpr 
         CoreExpr::Future(ivar) => CoreExpr::Future(ivar.clone()),
         CoreExpr::Deferred(deferred) => CoreExpr::Deferred(deferred.clone()),
         CoreExpr::Error(message) => CoreExpr::Error(message.clone()),
-        CoreExpr::Net(net, node) => CoreExpr::Net(net.clone(), *node),
     }
 }
 

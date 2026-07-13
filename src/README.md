@@ -14,15 +14,16 @@
 - `g_syntax.rs` lowers AST to a module lambda body expression, plus lowering diagnostics, through compile-time context and a core-facing interface
 - `main.rs` applies one temporary top-level fixpoint to the anonymous assembly module
 - `interaction_net.rs` lowers each reached core lambda body once to immutable,
-  shared graph code; nested lambdas are lowered only when reached
-- `eval.rs` evaluates lambda graph code with call-by-need thunks and lazily
-  traverses nested module dictionaries
+  shared `Bind`/`Copy`/`Data` port-and-wire topology, discovers active pairs,
+  and reconstructs mutable topology for interaction
+- `eval.rs` retains the call-by-need compatibility evaluator while core
+  `bind-data` operations migrate to demand-driven net reduction
 - `main` expects binary `asm.result`, writes to `stdout`
 
 At the moment, even this simple case is not fully implemented. Thus, it remains the focus for now.
 
-The current interaction-net slice establishes the lambda-to-shared-graph
-boundary without exposing syntax. It does not yet implement the general
-`.bind`/`.copy`/`.data`/`.wire` construction effects or symmetric interaction
-rules from `docs/Design.md`; those belong before adding the `interaction_net`
-keyword.
+The current interaction-net slice establishes the lambda-to-shared-net boundary
+without exposing syntax. Copy instances have global `u64` UIDs; copies produced
+by interaction retain their UID, so copy-copy reduction joins equal identities
+and duplicates different ones. The general construction effects and complete
+`bind-data` evaluator still belong before adding the `interaction_net` keyword.

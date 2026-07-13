@@ -6,7 +6,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::core::{Builtin, Closure, DeferredValue, Expr, IVar, Key, KeyExpr, List, Thunk, Value};
-use crate::interaction_net::{InteractionNet, KeyNode, Node, NodeId};
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +48,7 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
         Expr::Lambda(lambda) => Ok(Value::Closure(Closure {
             interaction_net: lambda.interaction_net(),
             env: Arc::from(local_env.to_vec()),
+            source_body: lambda.body().clone(),
         })),
         Expr::Local(index) => eval_local(*index, local_env),
         Expr::Access(base, path) => {
@@ -66,116 +66,7 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
             .force()
             .map_err(|message| EvalError::new(message.as_ref())),
         Expr::Error(message) => Err(EvalError::new(message.as_ref())),
-        Expr::Net(net, node) => eval_net_node(net, *node, local_env),
     }
-}
-
-fn eval_net_node(
-    net: &Arc<InteractionNet>,
-    node: NodeId,
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
-    match net.node(node) {
-        Node::Value(value) => eval_value(value),
-        Node::List(items) => {
-            let mut list = List::empty();
-            for item in items.iter() {
-                let value = eval_net_node(net, *item, local_env)?;
-                list = List::concat(list, list_literal_segment(value));
-            }
-            Ok(Value::List(list))
-        }
-        Node::Apply(function, argument) => {
-            let function = eval_net_node(net, *function, local_env)?;
-            let argument = thunk_net_node(net.clone(), *argument, local_env);
-            apply_value(function, argument, local_env)
-        }
-        Node::Lambda(lambda) => Ok(Value::Closure(Closure {
-            interaction_net: lambda.interaction_net(),
-            env: Arc::from(local_env.to_vec()),
-        })),
-        Node::Local(index) => eval_local(*index, local_env),
-        Node::Access(base, path) => {
-            let base = eval_net_node(net, *base, local_env)?;
-            resolve_net_key_path(base, net, path, path, local_env)
-        }
-        Node::Deferred(deferred) => deferred
-            .force()
-            .map_err(|message| EvalError::new(message.as_ref())),
-        Node::Future(ivar) => ivar
-            .get()
-            .cloned()
-            .ok_or_else(|| EvalError::new("future was observed before initialization")),
-        Node::Error(message) => Err(EvalError::new(message.as_ref())),
-    }
-}
-
-fn thunk_net_node(net: Arc<InteractionNet>, node: NodeId, local_env: &[Value]) -> Value {
-    match net.node(node) {
-        Node::Value(value) => value.clone(),
-        _ => Value::Expr(Thunk::new(
-            Arc::new(Expr::Net(net, node)),
-            Arc::from(local_env.to_vec()),
-        )),
-    }
-}
-
-fn resolve_net_key_path(
-    current: Value,
-    net: &Arc<InteractionNet>,
-    remaining: &[KeyNode],
-    full_path: &[KeyNode],
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
-    let Some((head, rest)) = remaining.split_first() else {
-        return eval_value(&current);
-    };
-
-    let expanded = match head {
-        KeyNode::Key(key) => vec![key.clone()],
-        KeyNode::Index(node) => {
-            let value = force_value_shell(&thunk_net_node(net.clone(), *node, local_env))?;
-            vec![value_to_key(&value, local_env)?]
-        }
-        KeyNode::PathIndex(node) => {
-            eval_key_path_list(&thunk_net_node(net.clone(), *node, local_env), local_env)?
-        }
-    };
-
-    let mut next = current;
-    for key in expanded {
-        let dict = match force_value_shell(&next)? {
-            Value::Dict(dict) => dict,
-            _ => {
-                let traversed = &full_path[..full_path.len() - remaining.len()];
-                let culprit = if traversed.is_empty() {
-                    full_path
-                } else {
-                    traversed
-                };
-                return Err(EvalError::new(format!(
-                    "name `{}` is not a dictionary",
-                    format_net_name(culprit)
-                )));
-            }
-        };
-        next = dict
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
-    }
-    resolve_net_key_path(next, net, rest, full_path, local_env)
-}
-
-fn format_net_name(path: &[KeyNode]) -> String {
-    path.iter()
-        .map(|part| match part {
-            KeyNode::Key(key) => format_name_part(key),
-            KeyNode::Index(_) => "[index]".to_owned(),
-            KeyNode::PathIndex(_) => "(path-index)".to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join(".")
 }
 
 pub fn eval_value(value: &Value) -> Result<Value, EvalError> {
@@ -442,11 +333,9 @@ fn effect_value(function: Value) -> Value {
 fn apply_closure(closure: &Closure, argument: Value) -> Result<Value, EvalError> {
     let mut extended = closure.env.iter().cloned().collect::<Vec<_>>();
     extended.push(argument);
-    eval_net_node(
-        &closure.interaction_net,
-        closure.interaction_net.root(),
-        &extended,
-    )
+    // TODO: replace this compatibility bridge with demand-driven reduction of
+    // bind-data calls after all core operators have data-call implementations.
+    eval_expr(&closure.source_body, &extended)
 }
 
 fn apply_builtin(

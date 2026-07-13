@@ -8,7 +8,7 @@ use fingertrees::monoid::Sum;
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
-use crate::interaction_net::{InteractionNet, NodeId};
+use crate::interaction_net::InteractionNet;
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,8 +22,6 @@ pub enum Expr {
     Deferred(Arc<DeferredValue>),
     Future(IVar),
     Error(Arc<str>),
-    /// An internal reference to a node in a lowered interaction net.
-    Net(Arc<InteractionNet>, NodeId),
 }
 
 impl Expr {
@@ -52,7 +50,7 @@ impl Lambda {
 
     pub fn interaction_net(&self) -> Arc<InteractionNet> {
         self.interaction_net
-            .get_or_init(|| Arc::new(InteractionNet::lower(self.body.as_ref())))
+            .get_or_init(|| Arc::new(InteractionNet::lower_lambda(self.body.clone())))
             .clone()
     }
 
@@ -275,6 +273,7 @@ pub enum Value {
 pub struct Closure {
     pub interaction_net: Arc<InteractionNet>,
     pub env: Arc<[Value]>,
+    pub(crate) source_body: Arc<Expr>,
 }
 
 #[derive(Clone)]

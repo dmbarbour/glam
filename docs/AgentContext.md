@@ -69,11 +69,17 @@ This document should summarize salient, relevant points rather than asking futur
 - Core dictionaries use explicit `Key` values. `.g` paths lower through
   interned atom keys, not text keys. 
 - Each `core::Lambda` owns a once-initialized interaction net. Closure creation
-  reuses that net and captures only its environment; applying a closure must not
-  re-lower or copy its body. Nested lambdas stay unlowered until reached.
-- The current graph evaluator is the migration boundary, not yet the complete
-  general interaction-net effects API or symmetric reducer described in
-  `Design.md`. Add those before exposing the `interaction_net` keyword.
+  reuses that template and captures only its environment; applying a closure
+  must not re-lower its body. Runtime reconstruction may copy topology with new
+  node IDs while preserving each logical `Copy` UID. Nested lambdas stay
+  unlowered until reached.
+- Lambda nets contain only port-and-wire `Bind`, `Copy`, and `Data` nodes.
+  Every source `Copy` gets a process-global `u64` UID; interaction-created
+  copies preserve it. Equal-UID copy pairs join, while different UIDs duplicate.
+- The topology reducer implements bind/copy join and duplication rules. Core
+  evaluation still has a compatibility bridge while `bind-data` calls are being
+  moved to demand-driven net evaluation. Complete that before exposing the
+  `interaction_net` keyword.
 
 ### Configuration Fixtures
 
