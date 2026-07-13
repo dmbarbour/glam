@@ -334,11 +334,11 @@ Effects API:
 
 - Node constructors introduce ports. Principal port is head.
   - `.bind -> [ap, arg, result]` - constructor of functions
-  - `.copy N -> [x0, x1, x2, ..., xN]` - dataflow, globally unique instances
-    - implementations may identify an instance with a process-global `u64` UID
-    - copies produced by interaction retain the source UID
+  - `.copy N -> [x0, x1, x2, ..., xN]` - dataflow, distinct logical instances
     - `.copy 0 -> [e]` - explicitly drops data
     - `.copy 1 -> [lhs,rhs]` - tunnel for non-local composition 
+    - lambda lowering may normalize these to erasers, direct wires, and trees of
+      binary sharing fans
   - `.data Expr -> [d]` - functions, lists, dicts, numbers
     - `Expr` is copied logically (refct or GC)
 - Wires consume ports. Each port must be wired exactly once.
@@ -351,7 +351,11 @@ Nodes interact only when principal ports connect.
 - bind-copy: dup
 - bind-data: call function, stuck otherwise
 - copy-data: dup
-- copy-copy: join self (same UID), dup otherwise
+- copy-copy: join paired residuals of one duplication process, dup otherwise
+  - pairing is an oracle decision, not equality of one permanent node UID
+  - lowered templates use local fan sites; runtime instantiation supplies one
+    namespace for the whole template
+  - dynamic duplication history distinguishes residual fans within a namespace
 - data-data: stuck
 - rules are commutative, e.g. copy-bind is bind-copy
 - assembler may use intermediate nodes under-the-hood
@@ -364,9 +368,9 @@ Rules:
   - copy node to each auxilliary opposite
   - wire auxilliaries to copies positionally
 - call: 
-  - reconstruct function inet in caller inet
-    - *note:* unique `.copy` instances per call
-    - ideal: lazily normalize and reconstruct
+  - make the function inet available in the caller inet
+    - ideal: retain one shared function graph and push duplication through it
+      lazily instead of eagerly relabeling or copying its body
   - connect the bind-bind principal ports 
 - stuck: a type error! report and debug
 

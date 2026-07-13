@@ -1,9 +1,11 @@
 //! Port-and-wire interaction nets and lambda lowering.
 //!
-//! A [`crate::core::Lambda`] owns one immutable `InteractionNet` template.
-//! Runtime reconstruction may clone its topology, but never lowers the lambda
-//! body again. Every source-level `Copy` constructor receives a global identity;
-//! copies made by interaction preserve that identity.
+//! Lambda lowering produces an immutable template with template-local fan
+//! sites. Instantiation allocates one process-global namespace for the whole
+//! template, avoiding a traversal that freshens every fan. Runtime fan
+//! identities also carry their duplication history behind an explicit oracle
+//! boundary; this is the direct-history stepping stone toward Lamping's local
+//! bracket/croissant oracle.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -14,18 +16,30 @@ use crate::core::{DeferredValue, Expr, IVar, Key, KeyExpr, Lambda, Value};
 pub type NodeId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CopyUid(u64);
+pub struct FanSite(u32);
 
-impl CopyUid {
-    pub fn fresh() -> Self {
-        static NEXT_UID: AtomicU64 = AtomicU64::new(1);
+impl FanSite {
+    pub fn get(self) -> u32 {
+        self.0
+    }
 
-        let uid = NEXT_UID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |uid| {
-                uid.checked_add(1)
-            })
-            .expect("interaction-net copy UID space exhausted");
-        Self(uid)
+    #[cfg(test)]
+    const fn from_raw(site: u32) -> Self {
+        Self(site)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InstanceId(u64);
+
+impl InstanceId {
+    fn fresh() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+        let id = NEXT_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("interaction-net instance ID space exhausted");
+        Self(id)
     }
 
     pub fn get(self) -> u64 {
@@ -33,8 +47,44 @@ impl CopyUid {
     }
 
     #[cfg(test)]
-    fn from_raw(uid: u64) -> Self {
-        Self(uid)
+    const fn from_raw(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DuplicationStep {
+    pub through: FanIdentity,
+    pub branch: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FanIdentity {
+    pub instance: InstanceId,
+    pub site: FanSite,
+    pub context: Arc<[DuplicationStep]>,
+}
+
+impl FanIdentity {
+    fn root(instance: InstanceId, site: FanSite) -> Self {
+        Self {
+            instance,
+            site,
+            context: Arc::from([]),
+        }
+    }
+
+    fn residual(&self, through: &Self, branch: u8) -> Self {
+        let mut context = self.context.to_vec();
+        context.push(DuplicationStep {
+            through: through.clone(),
+            branch,
+        });
+        Self {
+            instance: self.instance,
+            site: self.site,
+            context: Arc::from(context),
+        }
     }
 }
 
@@ -65,7 +115,6 @@ pub enum DataKey {
     PathIndex,
 }
 
-/// Opaque expressions admitted through the single-port `Data` constructor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmbeddedData {
     Value(Value),
@@ -78,22 +127,42 @@ pub enum EmbeddedData {
     Error(Arc<str>),
 }
 
+/// Immutable nodes in a lowered lambda template.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     /// Ports: `[ap*, arg, result]`.
     Bind,
-    /// Ports: `[input*, output_0, ..., output_n]`.
-    Copy { uid: CopyUid, outputs: u32 },
-    /// Ports: `[data*]`.
+    /// Binary Lamping-style fan. Ports: `[input*, left, right]`.
+    Fan { site: FanSite },
+    /// Eraser for a value used zero times. Port: `[input*]`.
+    Erase,
+    /// Embedded data. Port: `[data*]`.
     Data(EmbeddedData),
 }
 
 impl Node {
-    pub fn port_count(&self) -> u32 {
+    fn port_count(&self) -> u32 {
         match self {
-            Self::Bind => 3,
-            Self::Copy { outputs, .. } => outputs + 1,
-            Self::Data(_) => 1,
+            Self::Bind | Self::Fan { .. } => 3,
+            Self::Erase | Self::Data(_) => 1,
+        }
+    }
+}
+
+/// Runtime nodes qualify template-local fan sites with one instance namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeNode {
+    Bind,
+    Fan { identity: FanIdentity },
+    Erase,
+    Data(EmbeddedData),
+}
+
+impl RuntimeNode {
+    fn port_count(&self) -> u32 {
+        match self {
+            Self::Bind | Self::Fan { .. } => 3,
+            Self::Erase | Self::Data(_) => 1,
         }
     }
 }
@@ -140,7 +209,7 @@ impl InteractionNet {
     }
 
     pub fn instantiate(&self) -> RuntimeNet {
-        RuntimeNet::new(self)
+        RuntimeNet::new(self, InstanceId::fresh())
     }
 }
 
@@ -148,6 +217,7 @@ struct Lowerer {
     nodes: Vec<Node>,
     wires: Vec<Wire>,
     local_uses: Vec<Vec<Port>>,
+    next_fan_site: u32,
 }
 
 impl Lowerer {
@@ -156,6 +226,7 @@ impl Lowerer {
             nodes: Vec::new(),
             wires: Vec::new(),
             local_uses: Vec::new(),
+            next_fan_site: 0,
         };
         let root = lowerer.push(Node::Bind);
         lowerer.compile_into(&body, Port::auxiliary(root, 2));
@@ -176,6 +247,15 @@ impl Lowerer {
         let id = self.nodes.len();
         self.nodes.push(node);
         id
+    }
+
+    fn fresh_fan(&mut self) -> NodeId {
+        let site = FanSite(self.next_fan_site);
+        self.next_fan_site = self
+            .next_fan_site
+            .checked_add(1)
+            .expect("too many fan sites in one lambda template");
+        self.push(Node::Fan { site })
     }
 
     fn wire(&mut self, left: Port, right: Port) {
@@ -259,19 +339,23 @@ impl Lowerer {
                 let capture = self.push(Node::Data(EmbeddedData::Capture(index - 1)));
                 Port::principal(capture)
             };
-            let copy = self.push(Node::Copy {
-                uid: CopyUid::fresh(),
-                outputs: u32::try_from(targets.len()).expect("too many local uses in lambda"),
-            });
-            self.wire(source, Port::principal(copy));
-            for (output, target) in targets.iter().enumerate() {
-                self.wire(
-                    Port::auxiliary(
-                        copy,
-                        u32::try_from(output + 1).expect("too many local uses in lambda"),
-                    ),
-                    *target,
-                );
+            self.distribute(source, targets);
+        }
+    }
+
+    fn distribute(&mut self, source: Port, targets: &[Port]) {
+        match targets {
+            [] => {
+                let erase = self.push(Node::Erase);
+                self.wire(source, Port::principal(erase));
+            }
+            [target] => self.wire(source, *target),
+            _ => {
+                let fan = self.fresh_fan();
+                self.wire(source, Port::principal(fan));
+                let middle = targets.len() / 2;
+                self.distribute(Port::auxiliary(fan, 1), &targets[..middle]);
+                self.distribute(Port::auxiliary(fan, 2), &targets[middle..]);
             }
         }
     }
@@ -322,31 +406,81 @@ impl Lowerer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanRelationship {
+    Paired,
+    Independent,
+}
+
+/// The oracle is deliberately explicit: fan pairing is not raw label equality.
+pub trait FanOracle {
+    fn relationship(&self, left: &FanIdentity, right: &FanIdentity) -> FanRelationship;
+}
+
+/// A direct representation of duplication history. This avoids global fan
+/// relabelling now and provides the semantic reference for a future local
+/// bracket/croissant implementation of the same oracle.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct HistoryOracle;
+
+impl FanOracle for HistoryOracle {
+    fn relationship(&self, left: &FanIdentity, right: &FanIdentity) -> FanRelationship {
+        if left == right {
+            FanRelationship::Paired
+        } else {
+            FanRelationship::Independent
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reduction {
     BindJoin,
-    CopyJoin { uid: CopyUid },
-    CopyDup { left: CopyUid, right: CopyUid },
-    CopyData { uid: CopyUid },
-    CopyBind { uid: CopyUid },
+    FanJoin {
+        identity: FanIdentity,
+    },
+    FanCommute {
+        left: FanIdentity,
+        right: FanIdentity,
+    },
+    FanData {
+        identity: FanIdentity,
+    },
+    FanBind {
+        identity: FanIdentity,
+    },
+    Erase,
     Call,
     Stuck,
 }
 
-/// Mutable topology reconstructed from a shared net template.
 pub struct RuntimeNet {
-    nodes: Vec<Option<Node>>,
+    instance: InstanceId,
+    nodes: Vec<Option<RuntimeNode>>,
     links: Vec<Vec<Option<Port>>>,
     active: VecDeque<ActivePair>,
 }
 
 impl RuntimeNet {
-    fn new(net: &InteractionNet) -> Self {
-        let nodes = net.nodes.iter().cloned().map(Some).collect::<Vec<_>>();
+    fn new(net: &InteractionNet, instance: InstanceId) -> Self {
+        let nodes = net
+            .nodes
+            .iter()
+            .map(|node| {
+                Some(match node {
+                    Node::Bind => RuntimeNode::Bind,
+                    Node::Fan { site } => RuntimeNode::Fan {
+                        identity: FanIdentity::root(instance, *site),
+                    },
+                    Node::Erase => RuntimeNode::Erase,
+                    Node::Data(data) => RuntimeNode::Data(data.clone()),
+                })
+            })
+            .collect::<Vec<_>>();
         let mut runtime = Self {
-            links: net
-                .nodes
+            instance,
+            links: nodes
                 .iter()
-                .map(|node| vec![None; node.port_count() as usize])
+                .map(|node| vec![None; node.as_ref().unwrap().port_count() as usize])
                 .collect(),
             nodes,
             active: VecDeque::new(),
@@ -355,6 +489,10 @@ impl RuntimeNet {
             runtime.connect(wire.left, wire.right);
         }
         runtime
+    }
+
+    pub fn instance(&self) -> InstanceId {
+        self.instance
     }
 
     pub fn active_pairs(&self) -> Vec<ActivePair> {
@@ -372,11 +510,15 @@ impl RuntimeNet {
             .collect()
     }
 
-    pub fn node(&self, id: NodeId) -> Option<&Node> {
+    pub fn node(&self, id: NodeId) -> Option<&RuntimeNode> {
         self.nodes.get(id).and_then(Option::as_ref)
     }
 
     pub fn reduce_next(&mut self) -> Option<Reduction> {
+        self.reduce_next_with(&HistoryOracle)
+    }
+
+    pub fn reduce_next_with(&mut self, oracle: &impl FanOracle) -> Option<Reduction> {
         while let Some(pair) = self.active.pop_front() {
             let left_port = Port::principal(pair.left);
             let right_port = Port::principal(pair.right);
@@ -386,68 +528,62 @@ impl RuntimeNet {
             let left = self.node(pair.left)?.clone();
             let right = self.node(pair.right)?.clone();
             return Some(match (&left, &right) {
-                (Node::Bind, Node::Bind) => {
+                (RuntimeNode::Bind, RuntimeNode::Bind) => {
                     self.join(pair.left, pair.right, 2);
                     Reduction::BindJoin
                 }
-                (
-                    Node::Copy {
-                        uid: left_uid,
-                        outputs: left_outputs,
-                    },
-                    Node::Copy {
-                        uid: right_uid,
-                        outputs: right_outputs,
-                    },
-                ) if left_uid == right_uid => {
-                    assert_eq!(
-                        left_outputs, right_outputs,
-                        "equal copy UIDs need equal arity"
-                    );
-                    self.join(pair.left, pair.right, *left_outputs);
-                    Reduction::CopyJoin { uid: *left_uid }
-                }
-                (
-                    Node::Copy {
-                        uid: left_uid,
-                        outputs: left_outputs,
-                    },
-                    Node::Copy {
-                        uid: right_uid,
-                        outputs: right_outputs,
-                    },
-                ) => {
-                    self.duplicate_copies(
-                        pair.left,
-                        *left_uid,
-                        *left_outputs,
-                        pair.right,
-                        *right_uid,
-                        *right_outputs,
-                    );
-                    Reduction::CopyDup {
-                        left: *left_uid,
-                        right: *right_uid,
+                (RuntimeNode::Fan { identity: left }, RuntimeNode::Fan { identity: right }) => {
+                    match oracle.relationship(left, right) {
+                        FanRelationship::Paired => {
+                            self.join(pair.left, pair.right, 2);
+                            Reduction::FanJoin {
+                                identity: left.clone(),
+                            }
+                        }
+                        FanRelationship::Independent => {
+                            self.commute_fans(pair.left, left, pair.right, right);
+                            Reduction::FanCommute {
+                                left: left.clone(),
+                                right: right.clone(),
+                            }
+                        }
                     }
                 }
-                (Node::Copy { uid, outputs }, Node::Data(_)) => {
-                    self.duplicate_data(pair.left, *outputs, pair.right);
-                    Reduction::CopyData { uid: *uid }
+                (RuntimeNode::Fan { identity }, RuntimeNode::Data(_)) => {
+                    self.duplicate_data(pair.left, pair.right);
+                    Reduction::FanData {
+                        identity: identity.clone(),
+                    }
                 }
-                (Node::Data(_), Node::Copy { uid, outputs }) => {
-                    self.duplicate_data(pair.right, *outputs, pair.left);
-                    Reduction::CopyData { uid: *uid }
+                (RuntimeNode::Data(_), RuntimeNode::Fan { identity }) => {
+                    self.duplicate_data(pair.right, pair.left);
+                    Reduction::FanData {
+                        identity: identity.clone(),
+                    }
                 }
-                (Node::Copy { uid, outputs }, Node::Bind) => {
-                    self.duplicate_bind(pair.left, *uid, *outputs, pair.right);
-                    Reduction::CopyBind { uid: *uid }
+                (RuntimeNode::Fan { identity }, RuntimeNode::Bind) => {
+                    self.duplicate_bind(pair.left, identity, pair.right);
+                    Reduction::FanBind {
+                        identity: identity.clone(),
+                    }
                 }
-                (Node::Bind, Node::Copy { uid, outputs }) => {
-                    self.duplicate_bind(pair.right, *uid, *outputs, pair.left);
-                    Reduction::CopyBind { uid: *uid }
+                (RuntimeNode::Bind, RuntimeNode::Fan { identity }) => {
+                    self.duplicate_bind(pair.right, identity, pair.left);
+                    Reduction::FanBind {
+                        identity: identity.clone(),
+                    }
                 }
-                (Node::Bind, Node::Data(_)) | (Node::Data(_), Node::Bind) => Reduction::Call,
-                (Node::Data(_), Node::Data(_)) => Reduction::Stuck,
+                (RuntimeNode::Erase, _) => {
+                    self.erase(pair.left, pair.right);
+                    Reduction::Erase
+                }
+                (_, RuntimeNode::Erase) => {
+                    self.erase(pair.right, pair.left);
+                    Reduction::Erase
+                }
+                (RuntimeNode::Bind, RuntimeNode::Data(_))
+                | (RuntimeNode::Data(_), RuntimeNode::Bind) => Reduction::Call,
+                (RuntimeNode::Data(_), RuntimeNode::Data(_)) => Reduction::Stuck,
             });
         }
         None
@@ -455,136 +591,129 @@ impl RuntimeNet {
 
     fn join(&mut self, left: NodeId, right: NodeId, auxiliaries: u32) {
         self.disconnect(Port::principal(left));
-        let left_neighbors = (1..=auxiliaries)
-            .map(|index| self.disconnect(Port::auxiliary(left, index)))
-            .collect::<Vec<_>>();
-        let right_neighbors = (1..=auxiliaries)
-            .map(|index| self.disconnect(Port::auxiliary(right, index)))
-            .collect::<Vec<_>>();
+        let left_neighbors = self.take_auxiliaries(left, auxiliaries);
+        let right_neighbors = self.take_auxiliaries(right, auxiliaries);
         self.remove_node(left);
         self.remove_node(right);
         for (left, right) in left_neighbors.into_iter().zip(right_neighbors) {
-            self.connect(
-                left.expect("joined port must be wired"),
-                right.expect("joined port must be wired"),
-            );
+            self.connect(left, right);
         }
     }
 
-    fn duplicate_data(&mut self, copy: NodeId, outputs: u32, data: NodeId) {
-        self.disconnect(Port::principal(copy));
-        let targets = (1..=outputs)
-            .map(|index| {
-                self.disconnect(Port::auxiliary(copy, index))
-                    .expect("copy output must be wired")
-            })
-            .collect::<Vec<_>>();
-        let Node::Data(payload) = self.nodes[data].take().expect("data node must exist") else {
+    fn duplicate_data(&mut self, fan: NodeId, data: NodeId) {
+        self.disconnect(Port::principal(fan));
+        let targets = self.take_auxiliaries(fan, 2);
+        let RuntimeNode::Data(payload) = self.nodes[data].take().expect("data node must exist")
+        else {
             unreachable!();
         };
         self.links[data].clear();
-        self.remove_node(copy);
+        self.remove_node(fan);
         for target in targets {
-            let clone = self.add_node(Node::Data(payload.clone()));
+            let clone = self.add_node(RuntimeNode::Data(payload.clone()));
             self.connect(Port::principal(clone), target);
         }
     }
 
-    fn duplicate_bind(&mut self, copy: NodeId, uid: CopyUid, outputs: u32, bind: NodeId) {
-        self.disconnect(Port::principal(copy));
-        let copy_targets = (1..=outputs)
-            .map(|index| {
-                self.disconnect(Port::auxiliary(copy, index))
-                    .expect("copy output must be wired")
-            })
-            .collect::<Vec<_>>();
-        let bind_targets = (1..=2)
-            .map(|index| {
-                self.disconnect(Port::auxiliary(bind, index))
-                    .expect("bind auxiliary must be wired")
-            })
-            .collect::<Vec<_>>();
-        self.remove_node(copy);
+    fn duplicate_bind(&mut self, fan: NodeId, identity: &FanIdentity, bind: NodeId) {
+        self.disconnect(Port::principal(fan));
+        let fan_targets = self.take_auxiliaries(fan, 2);
+        let bind_targets = self.take_auxiliaries(bind, 2);
+        self.remove_node(fan);
         self.remove_node(bind);
 
-        let binds = copy_targets
+        let binds = fan_targets
             .into_iter()
             .map(|target| {
-                let node = self.add_node(Node::Bind);
+                let node = self.add_node(RuntimeNode::Bind);
                 self.connect(Port::principal(node), target);
                 node
             })
             .collect::<Vec<_>>();
         for (auxiliary, target) in bind_targets.into_iter().enumerate() {
-            let fan = self.add_node(Node::Copy { uid, outputs });
-            self.connect(Port::principal(fan), target);
-            for (output, bind) in binds.iter().enumerate() {
+            let residual = self.add_node(RuntimeNode::Fan {
+                identity: identity.clone(),
+            });
+            self.connect(Port::principal(residual), target);
+            for (branch, bind) in binds.iter().enumerate() {
                 self.connect(
-                    Port::auxiliary(fan, output as u32 + 1),
+                    Port::auxiliary(residual, branch as u32 + 1),
                     Port::auxiliary(*bind, auxiliary as u32 + 1),
                 );
             }
         }
     }
 
-    fn duplicate_copies(
+    fn commute_fans(
         &mut self,
         left: NodeId,
-        left_uid: CopyUid,
-        left_outputs: u32,
+        left_identity: &FanIdentity,
         right: NodeId,
-        right_uid: CopyUid,
-        right_outputs: u32,
+        right_identity: &FanIdentity,
     ) {
         self.disconnect(Port::principal(left));
-        let left_targets = (1..=left_outputs)
-            .map(|index| {
-                self.disconnect(Port::auxiliary(left, index))
-                    .expect("copy output must be wired")
-            })
-            .collect::<Vec<_>>();
-        let right_targets = (1..=right_outputs)
-            .map(|index| {
-                self.disconnect(Port::auxiliary(right, index))
-                    .expect("copy output must be wired")
-            })
-            .collect::<Vec<_>>();
+        let left_targets = self.take_auxiliaries(left, 2);
+        let right_targets = self.take_auxiliaries(right, 2);
         self.remove_node(left);
         self.remove_node(right);
 
-        let right_copies = left_targets
+        let right_fans = left_targets
             .into_iter()
-            .map(|target| {
-                let node = self.add_node(Node::Copy {
-                    uid: right_uid,
-                    outputs: right_outputs,
+            .enumerate()
+            .map(|(branch, target)| {
+                let node = self.add_node(RuntimeNode::Fan {
+                    identity: right_identity.residual(left_identity, branch as u8),
                 });
                 self.connect(Port::principal(node), target);
                 node
             })
             .collect::<Vec<_>>();
-        let left_copies = right_targets
+        let left_fans = right_targets
             .into_iter()
-            .map(|target| {
-                let node = self.add_node(Node::Copy {
-                    uid: left_uid,
-                    outputs: left_outputs,
+            .enumerate()
+            .map(|(branch, target)| {
+                let node = self.add_node(RuntimeNode::Fan {
+                    identity: left_identity.residual(right_identity, branch as u8),
                 });
                 self.connect(Port::principal(node), target);
                 node
             })
             .collect::<Vec<_>>();
-        for (left_index, right_copy) in right_copies.iter().enumerate() {
-            for (right_index, left_copy) in left_copies.iter().enumerate() {
+        for (left_branch, right_fan) in right_fans.iter().enumerate() {
+            for (right_branch, left_fan) in left_fans.iter().enumerate() {
                 self.connect(
-                    Port::auxiliary(*right_copy, right_index as u32 + 1),
-                    Port::auxiliary(*left_copy, left_index as u32 + 1),
+                    Port::auxiliary(*right_fan, right_branch as u32 + 1),
+                    Port::auxiliary(*left_fan, left_branch as u32 + 1),
                 );
             }
         }
     }
 
-    fn add_node(&mut self, node: Node) -> NodeId {
+    fn erase(&mut self, eraser: NodeId, other: NodeId) {
+        self.disconnect(Port::principal(eraser));
+        let auxiliaries = match self.node(other).expect("erased node must exist") {
+            RuntimeNode::Bind | RuntimeNode::Fan { .. } => 2,
+            RuntimeNode::Erase | RuntimeNode::Data(_) => 0,
+        };
+        let targets = self.take_auxiliaries(other, auxiliaries);
+        self.remove_node(eraser);
+        self.remove_node(other);
+        for target in targets {
+            let erase = self.add_node(RuntimeNode::Erase);
+            self.connect(Port::principal(erase), target);
+        }
+    }
+
+    fn take_auxiliaries(&mut self, node: NodeId, count: u32) -> Vec<Port> {
+        (1..=count)
+            .map(|index| {
+                self.disconnect(Port::auxiliary(node, index))
+                    .expect("interaction auxiliary port must be wired")
+            })
+            .collect()
+    }
+
+    fn add_node(&mut self, node: RuntimeNode) -> NodeId {
         let id = self.nodes.len();
         self.links.push(vec![None; node.port_count() as usize]);
         self.nodes.push(Some(node));
@@ -632,122 +761,143 @@ mod tests {
         Value::Dict(Dict::new_sync())
     }
 
+    fn identity(instance: u64, site: u32) -> FanIdentity {
+        FanIdentity::root(InstanceId::from_raw(instance), FanSite::from_raw(site))
+    }
+
     #[test]
-    fn identity_lowers_to_bind_copy_and_wires() {
+    fn identity_uses_a_direct_wire_without_a_fan() {
         let net = InteractionNet::lower_lambda(Arc::new(Expr::Local(0)));
         assert!(matches!(net.nodes()[0], Node::Bind));
-        let Node::Copy { outputs, .. } = net.nodes()[1] else {
-            panic!("identity argument should lower through Copy 1");
-        };
-        assert_eq!(outputs, 1);
-        assert_eq!(net.exposed(), Port::principal(0));
-        assert_eq!(net.wires().len(), 2);
-        assert!(net.active_pairs().is_empty());
-    }
-
-    #[test]
-    fn unused_argument_lowers_to_copy_zero() {
-        let net = InteractionNet::lower_lambda(Arc::new(Expr::Value(unit())));
         assert!(
-            net.nodes()
+            !net.nodes()
                 .iter()
-                .any(|node| matches!(node, Node::Copy { outputs: 0, .. }))
+                .any(|node| matches!(node, Node::Fan { .. }))
         );
+        assert!(!net.nodes().iter().any(|node| matches!(node, Node::Erase)));
+        assert_eq!(net.exposed(), Port::principal(0));
+        assert_eq!(net.wires().len(), 1);
     }
 
     #[test]
-    fn repeated_argument_lowers_to_one_copy_with_matching_arity() {
+    fn unused_argument_lowers_to_eraser() {
+        let net = InteractionNet::lower_lambda(Arc::new(Expr::Value(unit())));
+        assert!(net.nodes().iter().any(|node| matches!(node, Node::Erase)));
+    }
+
+    #[test]
+    fn repeated_argument_lowers_to_binary_fans_with_local_sites() {
         let body = Expr::Apply(Arc::new(Expr::Local(0)), Arc::new(Expr::Local(0)));
         let net = InteractionNet::lower_lambda(Arc::new(body));
-        let copies = net
+        let sites = net
             .nodes()
             .iter()
             .filter_map(|node| match node {
-                Node::Copy { uid, outputs } => Some((*uid, *outputs)),
+                Node::Fan { site } => Some(*site),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(copies.len(), 1);
-        assert_eq!(copies[0].1, 2);
+        assert_eq!(sites, vec![FanSite::from_raw(0)]);
     }
 
     #[test]
-    fn every_source_copy_gets_a_distinct_global_uid() {
-        let first = InteractionNet::lower_lambda(Arc::new(Expr::Local(0)));
-        let second = InteractionNet::lower_lambda(Arc::new(Expr::Local(0)));
-        let uid = |net: &InteractionNet| {
-            net.nodes()
+    fn instantiation_freshens_one_namespace_not_every_fan_site() {
+        let body = Expr::Apply(Arc::new(Expr::Local(0)), Arc::new(Expr::Local(0)));
+        let net = InteractionNet::lower_lambda(Arc::new(body));
+        let first = net.instantiate();
+        let second = net.instantiate();
+        assert_ne!(first.instance(), second.instance());
+        let fan = |runtime: &RuntimeNet| {
+            runtime
+                .nodes
                 .iter()
-                .find_map(|node| match node {
-                    Node::Copy { uid, .. } => Some(*uid),
+                .find_map(|node| match node.as_ref()? {
+                    RuntimeNode::Fan { identity } => Some(identity.clone()),
                     _ => None,
                 })
                 .unwrap()
         };
-        assert_ne!(uid(&first), uid(&second));
+        let first_fan = fan(&first);
+        let second_fan = fan(&second);
+        assert_eq!(first_fan.site, second_fan.site);
+        assert_ne!(first_fan.instance, second_fan.instance);
     }
 
-    fn copy_pair(left_uid: CopyUid, right_uid: CopyUid) -> RuntimeNet {
+    fn fan_pair(left: FanIdentity, right: FanIdentity) -> RuntimeNet {
+        let instance = left.instance;
         let nodes = vec![
-            Node::Copy {
-                uid: left_uid,
-                outputs: 1,
-            },
-            Node::Copy {
-                uid: right_uid,
-                outputs: 1,
-            },
-            Node::Data(EmbeddedData::Value(unit())),
-            Node::Data(EmbeddedData::Value(unit())),
+            Some(RuntimeNode::Fan { identity: left }),
+            Some(RuntimeNode::Fan { identity: right }),
+            Some(RuntimeNode::Data(EmbeddedData::Value(unit()))),
+            Some(RuntimeNode::Data(EmbeddedData::Value(unit()))),
+            Some(RuntimeNode::Data(EmbeddedData::Value(unit()))),
+            Some(RuntimeNode::Data(EmbeddedData::Value(unit()))),
         ];
-        let net = InteractionNet {
-            nodes: Arc::from(nodes),
-            wires: Arc::from([
-                Wire {
-                    left: Port::principal(0),
-                    right: Port::principal(1),
-                },
-                Wire {
-                    left: Port::auxiliary(0, 1),
-                    right: Port::principal(2),
-                },
-                Wire {
-                    left: Port::auxiliary(1, 1),
-                    right: Port::principal(3),
-                },
-            ]),
-            exposed: Port::principal(usize::MAX),
-            active_pairs: Arc::from([ActivePair { left: 0, right: 1 }]),
+        let mut runtime = RuntimeNet {
+            instance,
+            links: nodes
+                .iter()
+                .map(|node| vec![None; node.as_ref().unwrap().port_count() as usize])
+                .collect(),
+            nodes,
+            active: VecDeque::new(),
         };
-        net.instantiate()
+        runtime.connect(Port::principal(0), Port::principal(1));
+        runtime.connect(Port::auxiliary(0, 1), Port::principal(2));
+        runtime.connect(Port::auxiliary(0, 2), Port::principal(3));
+        runtime.connect(Port::auxiliary(1, 1), Port::principal(4));
+        runtime.connect(Port::auxiliary(1, 2), Port::principal(5));
+        runtime
     }
 
     #[test]
-    fn same_uid_copy_pair_joins() {
-        let uid = CopyUid::from_raw(7);
-        let mut net = copy_pair(uid, uid);
-        assert_eq!(net.reduce_next(), Some(Reduction::CopyJoin { uid }));
+    fn oracle_pairs_identical_fan_histories() {
+        let fan = identity(7, 3);
+        let mut net = fan_pair(fan.clone(), fan.clone());
+        assert_eq!(
+            net.reduce_next(),
+            Some(Reduction::FanJoin {
+                identity: fan.clone()
+            })
+        );
         assert!(net.node(0).is_none());
         assert!(net.node(1).is_none());
-        assert_eq!(net.active_pairs(), vec![ActivePair { left: 2, right: 3 }]);
-    }
-
-    #[test]
-    fn different_uid_copy_pair_duplicates() {
-        let left = CopyUid::from_raw(7);
-        let right = CopyUid::from_raw(8);
-        let mut net = copy_pair(left, right);
-        assert_eq!(net.reduce_next(), Some(Reduction::CopyDup { left, right }));
-        assert!(net.node(0).is_none());
-        assert!(net.node(1).is_none());
-        assert!(matches!(
-            net.node(4),
-            Some(Node::Copy { uid, .. }) if *uid == right
-        ));
-        assert!(matches!(
-            net.node(5),
-            Some(Node::Copy { uid, .. }) if *uid == left
-        ));
         assert_eq!(net.active_pairs().len(), 2);
+    }
+
+    #[test]
+    fn equal_template_sites_from_different_instances_do_not_pair() {
+        let left = identity(7, 3);
+        let right = identity(8, 3);
+        let mut net = fan_pair(left.clone(), right.clone());
+        assert_eq!(
+            net.reduce_next(),
+            Some(Reduction::FanCommute {
+                left: left.clone(),
+                right: right.clone()
+            })
+        );
+        assert_eq!(net.active_pairs().len(), 4);
+    }
+
+    #[test]
+    fn fan_commutation_records_dynamic_duplication_history() {
+        let left = identity(7, 3);
+        let right = identity(7, 4);
+        let mut net = fan_pair(left.clone(), right.clone());
+        assert!(matches!(
+            net.reduce_next(),
+            Some(Reduction::FanCommute { .. })
+        ));
+        let residuals = net
+            .nodes
+            .iter()
+            .filter_map(|node| match node.as_ref()? {
+                RuntimeNode::Fan { identity } => Some(identity),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(residuals.len(), 4);
+        assert!(residuals.iter().all(|fan| fan.context.len() == 1));
     }
 }

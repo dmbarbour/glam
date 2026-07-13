@@ -71,12 +71,16 @@ This document should summarize salient, relevant points rather than asking futur
 - Each `core::Lambda` owns a once-initialized interaction net. Closure creation
   reuses that template and captures only its environment; applying a closure
   must not re-lower its body. Runtime reconstruction may copy topology with new
-  node IDs while preserving each logical `Copy` UID. Nested lambdas stay
-  unlowered until reached.
-- Lambda nets contain only port-and-wire `Bind`, `Copy`, and `Data` nodes.
-  Every source `Copy` gets a process-global `u64` UID; interaction-created
-  copies preserve it. Equal-UID copy pairs join, while different UIDs duplicate.
-- The topology reducer implements bind/copy join and duplication rules. Core
+  node IDs. Nested lambdas stay unlowered until reached.
+- Lambda templates contain `Bind`, binary `Fan`, `Erase`, and `Data` nodes.
+  Fan sites are local to a template; one process-global `InstanceId` qualifies
+  the entire runtime instance. Fan pairing goes through an oracle and includes
+  dynamic duplication history rather than comparing permanent global UIDs.
+- `HistoryOracle` is a correctness-oriented direct-history implementation and
+  the reference semantics for later Lamping bracket/croissant control nodes; it
+  is not itself the final local, optimal oracle.
+- The topology reducer implements bind/fan join, fan commutation, duplication,
+  and erasure rules. Core
   evaluation still has a compatibility bridge while `bind-data` calls are being
   moved to demand-driven net evaluation. Complete that before exposing the
   `interaction_net` keyword.
