@@ -599,6 +599,14 @@ fn builtin_math_module(context: &CompileContext) -> Dict {
 fn builtin_list_module(context: &CompileContext) -> Dict {
     Dict::new_sync()
         .insert(name_as_key("slice"), context.value_builtin(Builtin::Slice))
+        .insert(
+            name_as_key("split"),
+            context.value_builtin(Builtin::ListSplit),
+        )
+        .insert(
+            name_as_key("split_end"),
+            context.value_builtin(Builtin::ListSplitEnd),
+        )
         .insert(name_as_key("map"), context.value_builtin(Builtin::Map))
         .insert(name_as_key("len"), context.value_builtin(Builtin::ListLen))
 }
@@ -3054,6 +3062,8 @@ fn syntax_expr_parser<'src>()
             crate::core::Builtin::Slice => "slice",
             crate::core::Builtin::Map => "map",
             crate::core::Builtin::ListLen => "list.len",
+            crate::core::Builtin::ListSplit => "list.split",
+            crate::core::Builtin::ListSplitEnd => "list.split_end",
             crate::core::Builtin::DictSingleton => ":",
             crate::core::Builtin::DictUnion => "{,}",
             crate::core::Builtin::DictUpdate => "dict_update",
@@ -5654,7 +5664,7 @@ mod tests {
             ],
         )))
         .expect("list.spec import should resolve");
-        let (anno, std_list_len) = match &std {
+        let (anno, std_list_len, std_list_split, std_list_split_end) = match &std {
             Value::Dict(std) => {
                 let anno = std
                     .get(&Key::atom_from_text("anno"))
@@ -5670,7 +5680,13 @@ mod tests {
                 let len = std_list
                     .get(&Key::atom_from_text("len"))
                     .expect("std.list should expose len");
-                (anno, len.clone())
+                let split = std_list
+                    .get(&Key::atom_from_text("split"))
+                    .expect("std.list should expose split");
+                let split_end = std_list
+                    .get(&Key::atom_from_text("split_end"))
+                    .expect("std.list should expose split_end");
+                (anno, len.clone(), split.clone(), split_end.clone())
             }
             _ => unreachable!(),
         };
@@ -5678,6 +5694,12 @@ mod tests {
         let list_len = list_module
             .get(&Key::atom_from_text("len"))
             .expect("list module should expose len");
+        let list_split = list_module
+            .get(&Key::atom_from_text("split"))
+            .expect("list module should expose split");
+        let list_split_end = list_module
+            .get(&Key::atom_from_text("split_end"))
+            .expect("list module should expose split_end");
 
         let Value::Dict(_) = std else {
             panic!("std import should evaluate to a dictionary");
@@ -5691,8 +5713,24 @@ mod tests {
             Value::Builtin(crate::core::Builtin::ListLen)
         ));
         assert!(matches!(
+            std_list_split,
+            Value::Builtin(crate::core::Builtin::ListSplit)
+        ));
+        assert!(matches!(
+            std_list_split_end,
+            Value::Builtin(crate::core::Builtin::ListSplitEnd)
+        ));
+        assert!(matches!(
             list_len,
             Value::Builtin(crate::core::Builtin::ListLen)
+        ));
+        assert!(matches!(
+            list_split,
+            Value::Builtin(crate::core::Builtin::ListSplit)
+        ));
+        assert!(matches!(
+            list_split_end,
+            Value::Builtin(crate::core::Builtin::ListSplitEnd)
         ));
         assert!(matches!(
             list_len_import,

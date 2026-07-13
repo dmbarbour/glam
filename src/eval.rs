@@ -349,6 +349,18 @@ fn apply_builtin(
             })?;
             eval_list_len_builtin(&value)
         }
+        Builtin::ListSplit => {
+            let [index, value] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("list split builtin received the wrong number of arguments")
+            })?;
+            eval_list_split_builtin(&index, &value, local_env)
+        }
+        Builtin::ListSplitEnd => {
+            let [count, value] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("list split_end builtin received the wrong number of arguments")
+            })?;
+            eval_list_split_end_builtin(&count, &value, local_env)
+        }
         Builtin::DictSingleton => {
             let [key, value] = <[Value; 2]>::try_from(args).map_err(|_| {
                 EvalError::new("singleton builtin received the wrong number of arguments")
@@ -512,6 +524,72 @@ fn eval_list_len_builtin(value: &Value) -> Result<Value, EvalError> {
             "list len builtin requires a list or binary value",
         )),
     }
+}
+
+fn eval_list_split_builtin(
+    index: &Value,
+    value: &Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let index = eval_index_number(index, local_env, "split")?;
+    match force_value_shell(value)? {
+        Value::Binary(bytes) => {
+            if index > bytes.len() {
+                return Err(EvalError::new("split builtin index is out of bounds"));
+            }
+            Ok(split_result_value(
+                Value::Binary(bytes.slice(0..index)),
+                Value::Binary(bytes.slice(index..bytes.len())),
+            ))
+        }
+        Value::List(list) => {
+            if index > list.len() {
+                return Err(EvalError::new("split builtin index is out of bounds"));
+            }
+            let (left, right) = list.split_at(index);
+            Ok(split_result_value(Value::List(left), Value::List(right)))
+        }
+        _ => Err(EvalError::new(
+            "split builtin requires a list or binary value",
+        )),
+    }
+}
+
+fn eval_list_split_end_builtin(
+    count: &Value,
+    value: &Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let count = eval_index_number(count, local_env, "split_end")?;
+    match force_value_shell(value)? {
+        Value::Binary(bytes) => {
+            if count > bytes.len() {
+                return Err(EvalError::new("split_end builtin count is out of bounds"));
+            }
+            let index = bytes.len() - count;
+            Ok(split_result_value(
+                Value::Binary(bytes.slice(0..index)),
+                Value::Binary(bytes.slice(index..bytes.len())),
+            ))
+        }
+        Value::List(list) => {
+            let Some((left, right)) = list.split_from_end(count) else {
+                return Err(EvalError::new("split_end builtin count is out of bounds"));
+            };
+            Ok(split_result_value(Value::List(left), Value::List(right)))
+        }
+        _ => Err(EvalError::new(
+            "split_end builtin requires a list or binary value",
+        )),
+    }
+}
+
+fn split_result_value(left: Value, right: Value) -> Value {
+    Value::Dict(
+        crate::core::Dict::new_sync()
+            .insert(Key::atom_from_text("left"), left)
+            .insert(Key::atom_from_text("right"), right),
+    )
 }
 
 fn eval_number(
@@ -1815,6 +1893,65 @@ mod tests {
         assert_eq!(items, vec![n(2), n(3), n(4)]);
         assert_eq!(binary_len, n(6));
         assert_eq!(list_len, n(4));
+    }
+
+    #[test]
+    fn evaluates_split_and_split_end_builtins() {
+        let split = eval_closed_expr(&builtin2_expr(
+            Builtin::ListSplit,
+            Expr::Value(n(2)),
+            Expr::Value(Value::binary_from_text("Hello")),
+        ))
+        .expect("split should evaluate");
+        let split_end = eval_closed_expr(&builtin2_expr(
+            Builtin::ListSplitEnd,
+            Expr::Value(n(2)),
+            Expr::Value(Value::List(List::concat(
+                List::from_values(vec![n(1), n(2)]),
+                List::from_bytes(Bytes::from_static(b"abc")),
+            ))),
+        ))
+        .expect("split_end should evaluate");
+
+        let Value::Dict(split) = split else {
+            panic!("split should return a dictionary");
+        };
+        assert_eq!(
+            split.get(&Key::atom_from_text("left")),
+            Some(&Value::binary_from_text("He"))
+        );
+        assert_eq!(
+            split.get(&Key::atom_from_text("right")),
+            Some(&Value::binary_from_text("llo"))
+        );
+
+        let Value::Dict(split_end) = split_end else {
+            panic!("split_end should return a dictionary");
+        };
+        let Value::List(prefix) = split_end
+            .get(&Key::atom_from_text("left"))
+            .expect("split_end should include left")
+        else {
+            panic!("split_end left should be a list");
+        };
+        let Value::List(suffix) = split_end
+            .get(&Key::atom_from_text("right"))
+            .expect("split_end should include right")
+        else {
+            panic!("split_end right should be a list");
+        };
+
+        assert_eq!(
+            list_to_value_items(prefix).expect("prefix should be readable"),
+            vec![n(1), n(2), Value::Number(Number::from_u8(b'a'))]
+        );
+        assert_eq!(
+            list_to_value_items(suffix).expect("suffix should be readable"),
+            vec![
+                Value::Number(Number::from_u8(b'b')),
+                Value::Number(Number::from_u8(b'c'))
+            ]
+        );
     }
 
     #[test]

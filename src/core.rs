@@ -251,6 +251,8 @@ pub enum Builtin {
     Slice,
     Map,
     ListLen,
+    ListSplit,
+    ListSplitEnd,
     DictSingleton,
     DictUnion,
     DictUpdate,
@@ -276,6 +278,8 @@ impl Builtin {
             Self::Slice => 3,
             Self::Map => 2,
             Self::ListLen => 1,
+            Self::ListSplit => 2,
+            Self::ListSplitEnd => 2,
             Self::DictSingleton => 2,
             Self::DictUnion => 2,
             Self::DictUpdate => 3,
@@ -433,6 +437,14 @@ impl List {
         }
     }
 
+    fn from_value_slice(values: SharedSlice<Value>) -> Self {
+        if values.len() == 0 {
+            Self::empty()
+        } else {
+            Self(Arc::new(ListNode::Values(values)))
+        }
+    }
+
     pub fn concat(left: Self, right: Self) -> Self {
         if left.is_empty() {
             right
@@ -461,6 +473,15 @@ impl List {
         assert!(start <= end);
         assert!(end <= self.len());
         self.slice_checked(start, end)
+    }
+
+    pub fn split_at(&self, index: usize) -> (Self, Self) {
+        assert!(index <= self.len());
+        self.split_at_checked(index)
+    }
+
+    pub fn split_from_end(&self, count: usize) -> Option<(Self, Self)> {
+        self.split_from_end_checked(count)
     }
 
     pub fn for_each_segment<E>(
@@ -545,11 +566,72 @@ impl List {
         match self.0.as_ref() {
             ListNode::Empty => Self::empty(),
             ListNode::Bytes(bytes) => Self::from_bytes(bytes.slice(start..end)),
-            ListNode::Values(values) => Self(Arc::new(ListNode::Values(values.slice(start, end)))),
+            ListNode::Values(values) => Self::from_value_slice(values.slice(start, end)),
             ListNode::Concat(left, right) => {
                 Self::slice_concat(left, left.len(), right, start, end)
             }
             ListNode::Finger(finger) => Self::slice_finger(finger, start, end),
+        }
+    }
+
+    fn split_at_checked(&self, index: usize) -> (Self, Self) {
+        match self.0.as_ref() {
+            ListNode::Empty => {
+                assert_eq!(index, 0);
+                (Self::empty(), Self::empty())
+            }
+            ListNode::Bytes(bytes) => (
+                Self::from_bytes(bytes.slice(0..index)),
+                Self::from_bytes(bytes.slice(index..bytes.len())),
+            ),
+            ListNode::Values(values) => (
+                Self::from_value_slice(values.slice(0, index)),
+                Self::from_value_slice(values.slice(index, values.len())),
+            ),
+            ListNode::Concat(left, right) => {
+                let left_len = left.len();
+                if index < left_len {
+                    let (left_left, left_right) = left.split_at_checked(index);
+                    (left_left, Self::concat(left_right, right.clone()))
+                } else if index == left_len {
+                    (left.clone(), right.clone())
+                } else {
+                    let (right_left, right_right) = right.split_at_checked(index - left_len);
+                    (Self::concat(left.clone(), right_left), right_right)
+                }
+            }
+            ListNode::Finger(finger) => {
+                let (left, right) = Self::split_finger_at(finger, index);
+                (Self::from_finger(left), Self::from_finger(right))
+            }
+        }
+    }
+
+    fn split_from_end_checked(&self, count: usize) -> Option<(Self, Self)> {
+        match self.0.as_ref() {
+            ListNode::Concat(left, right) => {
+                let right_len = right.len();
+                if count < right_len {
+                    let Some((right_left, right_right)) = right.split_from_end_checked(count)
+                    else {
+                        unreachable!("right branch should split when count is below its length");
+                    };
+                    Some((Self::concat(left.clone(), right_left), right_right))
+                } else if count == right_len {
+                    Some((left.clone(), right.clone()))
+                } else {
+                    let (left_left, left_right) = left.split_from_end_checked(count - right_len)?;
+                    Some((left_left, Self::concat(left_right, right.clone())))
+                }
+            }
+            _ => {
+                let len = self.len();
+                if count > len {
+                    None
+                } else {
+                    Some(self.split_at_checked(len - count))
+                }
+            }
         }
     }
 
@@ -948,5 +1030,32 @@ mod tests {
 
         assert_eq!(byte_ptrs.into_inner(), vec![bytes[1..].as_ptr()]);
         assert_eq!(value_ptrs.into_inner(), vec![original_value_ptr]);
+    }
+
+    #[test]
+    fn list_split_from_end_preserves_lazy_concat_when_split_is_in_right_branch() {
+        let left = List::from_values(vec![Value::Number(1.into()), Value::Number(2.into())]);
+        let list = List::concat(left.clone(), List::from_bytes(Bytes::from_static(b"abc")));
+
+        let (prefix, suffix) = list
+            .split_from_end(1)
+            .expect("suffix count should be in bounds");
+
+        let ListNode::Concat(prefix_left, _) = prefix.0.as_ref() else {
+            panic!("prefix should preserve lazy concat structure");
+        };
+        assert_eq!(prefix_left, &left);
+
+        let bytes = std::cell::RefCell::new(Vec::new());
+        suffix
+            .for_each_segment(
+                &mut |segment| {
+                    bytes.borrow_mut().extend_from_slice(segment);
+                    Ok::<_, ()>(())
+                },
+                &mut |_| Ok(()),
+            )
+            .expect("suffix should walk");
+        assert_eq!(bytes.into_inner(), b"c");
     }
 }
