@@ -170,6 +170,10 @@ pub enum SyntaxExpr {
     DictUnion(Vec<SyntaxExpr>),
     List(Vec<SyntaxExpr>),
     Lambda(Vec<String>, Box<SyntaxExpr>),
+    Let {
+        bindings: Vec<(String, SyntaxExpr)>,
+        body: Box<SyntaxExpr>,
+    },
     Apply(Box<SyntaxExpr>, Box<SyntaxExpr>),
     OperatorApply {
         operator: SyntaxOperator,
@@ -967,10 +971,6 @@ fn shift_expr_locals(expr: &CoreExpr, amount: usize, cutoff: usize) -> CoreExpr 
         CoreExpr::Lambda(body) => {
             CoreExpr::Lambda(Arc::new(shift_expr_locals(body, amount, cutoff + 1)))
         }
-        CoreExpr::Let(bound, body) => CoreExpr::Let(
-            Arc::new(shift_expr_locals(bound, amount, cutoff)),
-            Arc::new(shift_expr_locals(body, amount, cutoff + 1)),
-        ),
         CoreExpr::Local(index) if *index >= cutoff => CoreExpr::Local(index + amount),
         CoreExpr::Local(index) => CoreExpr::Local(*index),
         CoreExpr::Access(base, path) => CoreExpr::Access(
@@ -1623,6 +1623,9 @@ fn syntax_expr_to_value_in_scope(
         SyntaxExpr::Lambda(params, body) => {
             lower_lambda_expr(params, body, line, context, scope, locals)?
         }
+        SyntaxExpr::Let { bindings, body } => {
+            lower_let_expr(bindings, body, line, context, scope, locals)?
+        }
         SyntaxExpr::Apply(function, argument) => context.value_apply(
             syntax_expr_to_value_in_scope(function, line, context, scope, locals)?,
             syntax_expr_to_value_in_scope(argument, line, context, scope, locals)?,
@@ -1956,7 +1959,7 @@ fn lower_comparison_chain_values(
         remaining_condition,
         context,
     );
-    context.value_let(right.clone(), body)
+    context.value_apply(context.value_lambda(body), right.clone())
 }
 
 fn lower_syntax_operator_function(operator: SyntaxOperator, context: &CompileContext) -> Value {
@@ -2104,6 +2107,34 @@ fn lower_lambda_expr(
 
     for _ in params.iter().rev() {
         lowered = context.value_lambda(lowered);
+    }
+
+    Ok(lowered)
+}
+
+fn lower_let_expr(
+    bindings: &[(String, SyntaxExpr)],
+    body: &SyntaxExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<Value, Diagnostic> {
+    let values = bindings
+        .iter()
+        .map(|(_, expr)| syntax_expr_to_value_in_scope(expr, line, context, scope, locals))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let base_len = locals.len();
+    locals.extend(bindings.iter().map(|(name, _)| local_name_metadata(name)));
+    let mut lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals)?;
+    locals.truncate(base_len);
+
+    for _ in bindings.iter().rev() {
+        lowered = context.value_lambda(lowered);
+    }
+    for value in values {
+        lowered = context.value_apply(lowered, value);
     }
 
     Ok(lowered)
@@ -2875,6 +2906,13 @@ fn parse_expr_result_with_diagnostics(
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<SyntaxExpr, String> {
+    let text = text.trim();
+    if let Some(result) = parse_let_expr_result(text, line, diagnostics) {
+        return result;
+    }
+    if let Some(result) = parse_where_expr_result(text, line, diagnostics) {
+        return result;
+    }
     if let Some(result) = parse_object_expr_result(text, line, diagnostics) {
         return result;
     }
@@ -2893,6 +2931,287 @@ fn parse_expr_result_with_diagnostics(
                 .collect::<Vec<_>>()
                 .join("; ")
         })
+}
+
+fn parse_let_expr_result(
+    text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Result<SyntaxExpr, String>> {
+    let rest = text.strip_prefix("let")?;
+    if !rest
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_whitespace())
+    {
+        return None;
+    }
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return Some(Err("let expression requires bindings and a body".to_owned()));
+    }
+
+    let (bindings_text, body_text) = match split_top_level_keyword(rest, "in", false) {
+        Some((bindings, body)) => (bindings.trim(), body.trim()),
+        None => match split_multiline_let(rest) {
+            Ok((bindings, body)) => (bindings.trim(), body.trim()),
+            Err(message) => return Some(Err(message)),
+        },
+    };
+
+    Some(parse_let_expr_from_parts(
+        bindings_text,
+        body_text,
+        line,
+        diagnostics,
+    ))
+}
+
+fn parse_where_expr_result(
+    text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Result<SyntaxExpr, String>> {
+    let (body_text, bindings_text) = split_top_level_keyword(text, "where", true)?;
+    let body_text = body_text.trim();
+    let bindings_text = bindings_text.trim();
+    if body_text.is_empty() {
+        return Some(Err("where expression requires a body".to_owned()));
+    }
+    Some(parse_let_expr_from_parts(
+        bindings_text,
+        body_text,
+        line,
+        diagnostics,
+    ))
+}
+
+fn parse_let_expr_from_parts(
+    bindings_text: &str,
+    body_text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<SyntaxExpr, String> {
+    if body_text.is_empty() {
+        return Err("let expression requires a body".to_owned());
+    }
+    let bindings = parse_local_bindings(bindings_text, line, diagnostics)?;
+    if bindings.is_empty() {
+        return Err("let expression requires at least one binding".to_owned());
+    }
+    let body = parse_expr_result_with_diagnostics(body_text, line, diagnostics)?;
+    Ok(SyntaxExpr::Let {
+        bindings,
+        body: Box::new(body),
+    })
+}
+
+fn parse_local_bindings(
+    text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Vec<(String, SyntaxExpr)>, String> {
+    let binding_texts = if text.contains('\n') {
+        parse_multiline_binding_texts(text)?
+    } else {
+        split_top_level_semicolons(text)
+    };
+
+    binding_texts
+        .into_iter()
+        .filter(|binding| !binding.trim().is_empty())
+        .map(|binding| parse_local_binding(binding.trim(), line, diagnostics))
+        .collect()
+}
+
+fn parse_local_binding(
+    text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<(String, SyntaxExpr), String> {
+    let Some((name, value)) = split_top_level_binding_equals(text) else {
+        return Err(format!("local binding `{text}` must use `=`"));
+    };
+    let name = name.trim();
+    if local_name().parse(name).into_result().is_err() || name.contains(char::is_whitespace) {
+        return Err(format!("invalid local binding name `{name}`"));
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("local binding `{name}` requires a value"));
+    }
+    Ok((
+        name.to_owned(),
+        parse_expr_result_with_diagnostics(value, line, diagnostics)?,
+    ))
+}
+
+fn split_multiline_let(text: &str) -> Result<(&str, &str), String> {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() < 2 {
+        return Err("multi-line let expression requires a body or `in`".to_owned());
+    }
+
+    let mut binding_end = 0;
+    let mut saw_binding = false;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            binding_end = index + 1;
+            continue;
+        }
+        if is_indented(line) {
+            binding_end = index + 1;
+            continue;
+        }
+        if split_top_level_binding_equals(trimmed).is_some() {
+            saw_binding = true;
+            binding_end = index + 1;
+            continue;
+        }
+        break;
+    }
+
+    if !saw_binding {
+        return Err("let expression requires at least one binding".to_owned());
+    }
+    if binding_end >= lines.len() {
+        return Err("multi-line let expression requires a body".to_owned());
+    }
+
+    let binding_offset: usize = lines[..binding_end].iter().map(|line| line.len() + 1).sum();
+    Ok((
+        &text[..binding_offset.saturating_sub(1)],
+        &text[binding_offset..],
+    ))
+}
+
+fn parse_multiline_binding_texts(text: &str) -> Result<Vec<&str>, String> {
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty()
+            && !is_indented(line)
+            && split_top_level_binding_equals(trimmed).is_some()
+        {
+            starts.push(offset);
+        }
+        offset += line.len() + 1;
+    }
+
+    if starts.is_empty() {
+        return Err("local binding block requires at least one binding".to_owned());
+    }
+    starts.push(text.len() + 1);
+
+    let mut bindings = Vec::new();
+    for pair in starts.windows(2) {
+        let start = pair[0];
+        let end = pair[1].saturating_sub(1).min(text.len());
+        bindings.push(text[start..end].trim());
+    }
+    Ok(bindings)
+}
+
+fn split_top_level_keyword<'a>(
+    text: &'a str,
+    keyword: &str,
+    from_end: bool,
+) -> Option<(&'a str, &'a str)> {
+    let matches = top_level_keyword_indices(text, keyword);
+    let index = if from_end {
+        matches.into_iter().last()?
+    } else {
+        matches.into_iter().next()?
+    };
+    Some((&text[..index], &text[index + keyword.len()..]))
+}
+
+fn top_level_keyword_indices(text: &str, keyword: &str) -> Vec<usize> {
+    let mut indices = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+
+    for (index, ch) in text.char_indices() {
+        if in_string {
+            if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && keyword_starts_at(text, index, keyword) => indices.push(index),
+            _ => {}
+        }
+    }
+
+    indices
+}
+
+fn keyword_starts_at(text: &str, index: usize, keyword: &str) -> bool {
+    if !text[index..].starts_with(keyword) {
+        return false;
+    }
+    let before = text[..index].chars().next_back();
+    let after = text[index + keyword.len()..].chars().next();
+    !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char)
+}
+
+fn is_name_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn split_top_level_semicolons(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for index in top_level_char_indices(text, ';') {
+        parts.push(&text[start..index]);
+        start = index + 1;
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+fn split_top_level_binding_equals(text: &str) -> Option<(&str, &str)> {
+    top_level_char_indices(text, '=')
+        .into_iter()
+        .find(|index| {
+            let before = text[..*index].chars().next_back();
+            let after = text[index + 1..].chars().next();
+            !matches!(before, Some(':') | Some('<') | Some('>') | Some('='))
+                && !matches!(after, Some('=') | Some('>') | Some('<'))
+        })
+        .map(|index| (&text[..index], &text[index + 1..]))
+}
+
+fn top_level_char_indices(text: &str, needle: char) -> Vec<usize> {
+    let mut indices = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+
+    for (index, ch) in text.char_indices() {
+        if in_string {
+            if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && ch == needle => indices.push(index),
+            _ => {}
+        }
+    }
+
+    indices
 }
 
 fn parse_object_expr_result(
@@ -3136,6 +3455,26 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
             }
             analyze_expr_locals(body, line, diagnostics);
         }
+        SyntaxExpr::Let { bindings, body } => {
+            let params = bindings
+                .iter()
+                .map(|(name, _)| local_name_metadata(name))
+                .collect::<Vec<_>>();
+            let mut used = vec![false; params.len()];
+            mark_used_locals(body, &params, &mut used);
+            for (param, used) in params.iter().zip(used) {
+                if !used && param.canonical.is_some() && !param.suppress_unused_warning {
+                    diagnostics.push(Diagnostic::warn(
+                        line,
+                        format!("unused local `{}`", param.raw),
+                    ));
+                }
+            }
+            for (_, value) in bindings {
+                analyze_expr_locals(value, line, diagnostics);
+            }
+            analyze_expr_locals(body, line, diagnostics);
+        }
         SyntaxExpr::OperatorSection { left, right, .. } => {
             if let Some(left) = left {
                 analyze_expr_locals(left, line, diagnostics);
@@ -3256,6 +3595,12 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
             }
         }
         SyntaxExpr::Lambda(_, body) => mark_used_prior_alias(body, alias, used),
+        SyntaxExpr::Let { bindings, body } => {
+            for (_, value) in bindings {
+                mark_used_prior_alias(value, alias, used);
+            }
+            mark_used_prior_alias(body, alias, used);
+        }
         SyntaxExpr::OperatorSection { left, right, .. } => {
             if let Some(left) = left {
                 mark_used_prior_alias(left, alias, used);
@@ -3362,6 +3707,22 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             let nested = params
                 .iter()
                 .map(|param| local_name_metadata(param))
+                .collect::<Vec<_>>();
+            let mut combined = Vec::with_capacity(locals.len() + nested.len());
+            combined.extend_from_slice(locals);
+            combined.extend(nested);
+            let mut nested_used = vec![false; combined.len()];
+            nested_used[..locals.len()].copy_from_slice(used);
+            mark_used_locals(body, &combined, &mut nested_used);
+            used.copy_from_slice(&nested_used[..locals.len()]);
+        }
+        SyntaxExpr::Let { bindings, body } => {
+            for (_, value) in bindings {
+                mark_used_locals(value, locals, used);
+            }
+            let nested = bindings
+                .iter()
+                .map(|(name, _)| local_name_metadata(name))
                 .collect::<Vec<_>>();
             let mut combined = Vec::with_capacity(locals.len() + nested.len());
             combined.extend_from_slice(locals);
@@ -5123,6 +5484,56 @@ mod tests {
     }
 
     #[test]
+    fn parses_let_and_where_expressions() {
+        assert_eq!(
+            parse_expr("let x = 1 in x + x"),
+            Some(SyntaxExpr::Let {
+                bindings: vec![("x".to_owned(), SyntaxExpr::Number(n(1)))],
+                body: Box::new(SyntaxExpr::Add(
+                    Box::new(SyntaxExpr::Name("x".to_owned())),
+                    Box::new(SyntaxExpr::Name("x".to_owned())),
+                )),
+            })
+        );
+        assert_eq!(
+            parse_expr("let x = 1; _y = 2 in x"),
+            Some(SyntaxExpr::Let {
+                bindings: vec![
+                    ("x".to_owned(), SyntaxExpr::Number(n(1))),
+                    ("_y".to_owned(), SyntaxExpr::Number(n(2))),
+                ],
+                body: Box::new(SyntaxExpr::Name("x".to_owned())),
+            })
+        );
+        assert_eq!(
+            parse_expr("let x = 1\ny = 2\nx + y"),
+            Some(SyntaxExpr::Let {
+                bindings: vec![
+                    ("x".to_owned(), SyntaxExpr::Number(n(1))),
+                    ("y".to_owned(), SyntaxExpr::Number(n(2))),
+                ],
+                body: Box::new(SyntaxExpr::Add(
+                    Box::new(SyntaxExpr::Name("x".to_owned())),
+                    Box::new(SyntaxExpr::Name("y".to_owned())),
+                )),
+            })
+        );
+        assert_eq!(
+            parse_expr("x + y where x = 1; y = 2"),
+            Some(SyntaxExpr::Let {
+                bindings: vec![
+                    ("x".to_owned(), SyntaxExpr::Number(n(1))),
+                    ("y".to_owned(), SyntaxExpr::Number(n(2))),
+                ],
+                body: Box::new(SyntaxExpr::Add(
+                    Box::new(SyntaxExpr::Name("x".to_owned())),
+                    Box::new(SyntaxExpr::Name("y".to_owned())),
+                )),
+            })
+        );
+    }
+
+    #[test]
     fn parses_definition_argument_sugar() {
         let parsed = parse("language g0\nid x = x\n");
 
@@ -5174,6 +5585,20 @@ mod tests {
                 && diagnostic.line == 3
                 && diagnostic.message.contains("unused local `y`")
         }));
+    }
+
+    #[test]
+    fn let_bindings_follow_local_unused_warning_rules() {
+        let parsed =
+            parse("language g0\nasm.result = let unused = 1; _suppressed = 2; _ = 3 in 4\n");
+
+        let warnings = parsed
+            .diagnostics
+            .iter()
+            .filter(|diag| diag.message.contains("unused local"))
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].message, "unused local `unused`");
     }
 
     #[test]
@@ -6356,6 +6781,63 @@ mod tests {
     fn lowers_lambda_and_application_expressions_to_core_terms() {
         let parsed =
             parse("language g0\nd = { tail:\"Hello, World!\" }\nasm.result = (\\x -> x.tail) d\n");
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn lowers_let_expressions_to_lambda_application() {
+        let parsed = parse(
+            "language g0\nasm.result = let hello = \"Hello\"; world = \"World\" in hello ++ \", \" ++ world ++ \"!\"\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn lowers_where_expressions_to_lambda_application() {
+        let parsed = parse(
+            "language g0\nasm.result = hello ++ \", \" ++ world ++ \"!\" where hello = \"Hello\"; world = \"World\"\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn lowers_multiline_let_expressions_to_lambda_application() {
+        let parsed = parse(
+            "language g0\nasm.result = let hello = \"Hello\"\n    world = \"World\"\n    hello ++ \", \" ++ world ++ \"!\"\n",
+        );
         let context = CompileContext::default();
         let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);

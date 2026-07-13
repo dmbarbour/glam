@@ -49,7 +49,6 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
             body: body.clone(),
             env: Arc::from(local_env.to_vec()),
         })),
-        Expr::Let(bound, body) => eval_let(bound, body, local_env),
         Expr::Local(index) => eval_local(*index, local_env),
         Expr::Access(base, path) => {
             let base = eval_expr(base, local_env)?;
@@ -128,13 +127,6 @@ fn eval_local(index: usize, local_env: &[Value]) -> Result<Value, EvalError> {
     };
 
     eval_value(value)
-}
-
-fn eval_let(bound: &Arc<Expr>, body: &Arc<Expr>, local_env: &[Value]) -> Result<Value, EvalError> {
-    let shared = Value::Expr(Thunk::new(bound.clone(), Arc::from(local_env.to_vec())));
-    let mut extended = local_env.to_vec();
-    extended.push(shared);
-    eval_expr(body.as_ref(), &extended)
 }
 
 fn value_to_key(value: &Value, local_env: &[Value]) -> Result<Key, EvalError> {
@@ -2590,25 +2582,6 @@ mod tests {
         let value = eval_closed_expr(&expr).expect("arithmetic should evaluate");
 
         assert_eq!(value, Value::Number(Number::parse("31/5").unwrap()));
-    }
-
-    #[test]
-    fn let_expressions_share_forced_values() {
-        let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let count = force_count.clone();
-        let counted = Expr::Deferred(Arc::new(DeferredValue::new("counted", move || {
-            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(n(2))
-        })));
-        let expr = Expr::Let(
-            Arc::new(counted),
-            Arc::new(builtin2_expr(Builtin::Add, Expr::Local(0), Expr::Local(0))),
-        );
-
-        let value = eval_closed_expr(&expr).expect("let body should evaluate");
-
-        assert_eq!(value, n(4));
-        assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

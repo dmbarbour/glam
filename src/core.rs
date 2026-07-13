@@ -16,7 +16,6 @@ pub enum Expr {
     List(Arc<[Arc<Expr>]>),
     Apply(Arc<Expr>, Arc<Expr>),
     Lambda(Arc<Expr>),
-    Let(Arc<Expr>, Arc<Expr>),
     Local(usize),
     Access(Arc<Expr>, Arc<[KeyExpr]>),
     Deferred(Arc<DeferredValue>),
