@@ -1117,6 +1117,16 @@ fn eval_anno_builtin(
                 Ok(target.clone())
             }
         }
+        RecognizedAnnotation::AssertUnit { value } => {
+            let value = eval_value(&value)?;
+            if is_unit_value(&value) {
+                Ok(target.clone())
+            } else {
+                Ok(annotation_error_value(format!(
+                    "`=>>` requires discarded effect results to be unit, got {value:?}"
+                )))
+            }
+        }
         RecognizedAnnotation::Deque => eval_deque_annotation(target),
         RecognizedAnnotation::Binary => eval_binary_annotation(target),
         RecognizedAnnotation::Array => eval_array_annotation(target),
@@ -1131,6 +1141,7 @@ fn eval_anno_builtin(
 enum RecognizedAnnotation {
     AssertDefined { name: String, defined: bool },
     AssertUndefined { name: String, defined: bool },
+    AssertUnit { value: Value },
     Deque,
     Binary,
     Array,
@@ -1176,6 +1187,14 @@ fn recognize_annotation(
                 ParsedAssertion::Invalid(message) => RecognizedAnnotation::Invalid(message),
             },
         ),
+        Key::Atom(atom) if atom_name(atom) == Some("assert_unit") => {
+            Ok(match parse_value_annotation(payload, "assert_unit")? {
+                ParsedValueAnnotation::Valid { value } => {
+                    RecognizedAnnotation::AssertUnit { value }
+                }
+                ParsedValueAnnotation::Invalid(message) => RecognizedAnnotation::Invalid(message),
+            })
+        }
         Key::Atom(atom) if payload_is_unit(payload) => Ok(recognize_simple_annotation(atom)
             .unwrap_or_else(|| RecognizedAnnotation::Unknown(format!("{annotation:?}")))),
         _ => Ok(RecognizedAnnotation::Unknown(format!("{annotation:?}"))),
@@ -1197,6 +1216,11 @@ fn payload_is_unit(payload: &Value) -> bool {
 
 enum ParsedAssertion {
     Valid { name: String, defined: bool },
+    Invalid(String),
+}
+
+enum ParsedValueAnnotation {
+    Valid { value: Value },
     Invalid(String),
 }
 
@@ -1228,6 +1252,28 @@ fn parse_assertion_annotation(
     Ok(ParsedAssertion::Valid { name, defined })
 }
 
+fn parse_value_annotation(
+    payload: &Value,
+    tag_name: &str,
+) -> Result<ParsedValueAnnotation, EvalError> {
+    let payload = eval_value(payload)?;
+    let Value::Dict(payload) = payload else {
+        return Ok(ParsedValueAnnotation::Invalid(format!(
+            "invalid `{tag_name}` annotation payload"
+        )));
+    };
+
+    let Some(value) = payload.get(&Key::atom_from_text("value")) else {
+        return Ok(ParsedValueAnnotation::Invalid(format!(
+            "invalid `{tag_name}` annotation payload"
+        )));
+    };
+
+    Ok(ParsedValueAnnotation::Valid {
+        value: value.clone(),
+    })
+}
+
 fn annotation_name(value: &Value, _local_env: &[Value]) -> Result<String, EvalError> {
     let value = eval_value(value)?;
     Ok(match value {
@@ -1249,6 +1295,13 @@ fn atom_name(atom: &crate::core::Atom) -> Option<&str> {
 
 fn is_undefined_value(value: &Value) -> bool {
     matches!(value, Value::Dict(dict) if dict.is_empty())
+}
+
+fn is_unit_value(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Atom(atom) if atom.key() == &Key::abstract_global_path(["builtin", "unit"])
+    )
 }
 
 fn annotation_error_value(message: impl Into<String>) -> Value {

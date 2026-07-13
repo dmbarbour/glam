@@ -151,6 +151,7 @@ pub enum DefinitionKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyntaxExpr {
+    Unit,
     Number(Number),
     Text(String),
     Atom(String),
@@ -194,6 +195,9 @@ pub enum SyntaxOperator {
     PipeBackward,
     ComposeForward,
     ComposeBackward,
+    EffectBind,
+    KleisliCompose,
+    EffectThen,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1507,6 +1511,7 @@ fn syntax_expr_to_value_in_scope(
     locals: &mut Vec<LocalName>,
 ) -> Result<Value, Diagnostic> {
     Ok(match expr {
+        SyntaxExpr::Unit => context.unit_value(),
         SyntaxExpr::Number(number) => context.value_number(number.clone()),
         SyntaxExpr::Text(text) => context.value_binary(text),
         SyntaxExpr::Atom(name) => context.value_atom(atom_from_str(name)),
@@ -1773,14 +1778,16 @@ fn lower_syntax_operator_expr(
         SyntaxOperator::Builtin(builtin) => {
             lower_builtin_expr(builtin, left, right, line, context, scope, locals)
         }
-        SyntaxOperator::PipeForward | SyntaxOperator::PipeBackward => {
-            Ok(lower_syntax_operator_values(
-                operator,
-                syntax_expr_to_value_in_scope(left, line, context, scope, locals)?,
-                syntax_expr_to_value_in_scope(right, line, context, scope, locals)?,
-                context,
-            ))
-        }
+        SyntaxOperator::PipeForward
+        | SyntaxOperator::PipeBackward
+        | SyntaxOperator::EffectBind
+        | SyntaxOperator::KleisliCompose
+        | SyntaxOperator::EffectThen => Ok(lower_syntax_operator_values(
+            operator,
+            syntax_expr_to_value_in_scope(left, line, context, scope, locals)?,
+            syntax_expr_to_value_in_scope(right, line, context, scope, locals)?,
+            context,
+        )),
         SyntaxOperator::ComposeForward | SyntaxOperator::ComposeBackward => {
             let shifted_scope = shift_name_scope_locals(scope, 1);
             let base_len = locals.len();
@@ -1817,7 +1824,10 @@ fn lower_syntax_operator_function(operator: SyntaxOperator, context: &CompileCon
         SyntaxOperator::PipeForward
         | SyntaxOperator::PipeBackward
         | SyntaxOperator::ComposeForward
-        | SyntaxOperator::ComposeBackward => {
+        | SyntaxOperator::ComposeBackward
+        | SyntaxOperator::EffectBind
+        | SyntaxOperator::KleisliCompose
+        | SyntaxOperator::EffectThen => {
             let left = context.value_local(1);
             let right = context.value_local(0);
             let body = lower_syntax_operator_values(operator, left, right, context);
@@ -1838,6 +1848,9 @@ fn lower_syntax_operator_values(
         SyntaxOperator::PipeBackward => context.value_apply(left, right),
         SyntaxOperator::ComposeForward => compose_values(left, right, context),
         SyntaxOperator::ComposeBackward => compose_values(right, left, context),
+        SyntaxOperator::EffectBind => effect_call_value("seq", vec![left, right], context),
+        SyntaxOperator::KleisliCompose => kleisli_compose_values(left, right, context),
+        SyntaxOperator::EffectThen => effect_then_values(left, right, context),
     }
 }
 
@@ -1846,6 +1859,45 @@ fn compose_values(first: Value, second: Value, context: &CompileContext) -> Valu
     let first = shift_value_locals(&first, 1, 0);
     let second = shift_value_locals(&second, 1, 0);
     context.value_lambda(context.value_apply(second, context.value_apply(first, input)))
+}
+
+fn kleisli_compose_values(first: Value, second: Value, context: &CompileContext) -> Value {
+    let input = context.value_local(0);
+    let first = shift_value_locals(&first, 1, 0);
+    let second = shift_value_locals(&second, 1, 0);
+    let operation = context.value_apply(first, input);
+    let body = effect_call_value("seq", vec![operation, second], context);
+    context.value_lambda(body)
+}
+
+fn effect_then_values(operation: Value, next: Value, context: &CompileContext) -> Value {
+    let result = context.value_local(0);
+    let next = shift_value_locals(&next, 1, 0);
+    let body = annotate_assert_unit_value(result, next, context);
+    let continuation = context.value_lambda(body);
+    effect_call_value("seq", vec![operation, continuation], context)
+}
+
+fn effect_call_value(name: &str, arguments: Vec<Value>, context: &CompileContext) -> Value {
+    arguments
+        .into_iter()
+        .fold(lower_effect_expr(name, context), |function, argument| {
+            context.value_apply(function, argument)
+        })
+}
+
+fn annotate_assert_unit_value(value: Value, target: Value, context: &CompileContext) -> Value {
+    let payload = context.builtin_apply2_value(
+        Builtin::DictSingleton,
+        context.value_atom(atom_from_str("value")),
+        value,
+    );
+    let annotation = context.builtin_apply2_value(
+        Builtin::DictSingleton,
+        context.value_atom(atom_from_str("assert_unit")),
+        payload,
+    );
+    context.builtin_apply2_value(Builtin::Anno, annotation, target)
 }
 
 fn syntax_key_expr_to_value(
@@ -2884,7 +2936,8 @@ fn warn_unused_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diag
 
 fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diagnostic>) {
     match expr {
-        SyntaxExpr::Number(_)
+        SyntaxExpr::Unit
+        | SyntaxExpr::Number(_)
         | SyntaxExpr::Text(_)
         | SyntaxExpr::Atom(_)
         | SyntaxExpr::Effect(_) => {}
@@ -3011,7 +3064,8 @@ fn analyze_key_expr_locals(key: &SyntaxKeyExpr, line: usize, diagnostics: &mut V
 fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool) {
     match expr {
         SyntaxExpr::PriorName(name) if Some(name.as_str()) == alias => *used = true,
-        SyntaxExpr::Number(_)
+        SyntaxExpr::Unit
+        | SyntaxExpr::Number(_)
         | SyntaxExpr::Text(_)
         | SyntaxExpr::Atom(_)
         | SyntaxExpr::Effect(_)
@@ -3100,7 +3154,8 @@ fn mark_used_prior_alias_in_key(key: &SyntaxKeyExpr, alias: Option<&str>, used: 
 
 fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) {
     match expr {
-        SyntaxExpr::Number(_)
+        SyntaxExpr::Unit
+        | SyntaxExpr::Number(_)
         | SyntaxExpr::Text(_)
         | SyntaxExpr::Atom(_)
         | SyntaxExpr::Effect(_) => {}
@@ -3288,9 +3343,17 @@ fn syntax_expr_parser<'src>()
 
     fn infix_operator_relation(left: SyntaxOperator, right: SyntaxOperator) -> OperatorRelation {
         use crate::core::Builtin::{Add, Append, Divide, Multiply, Subtract};
-        use SyntaxOperator::{Builtin, ComposeBackward, ComposeForward, PipeBackward, PipeForward};
+        use SyntaxOperator::{
+            Builtin, ComposeBackward, ComposeForward, EffectBind, EffectThen, KleisliCompose,
+            PipeBackward, PipeForward,
+        };
 
         match (left, right) {
+            (EffectBind, EffectBind)
+            | (EffectBind, EffectThen)
+            | (EffectThen, EffectBind)
+            | (EffectThen, EffectThen) => OperatorRelation::Same(Associativity::Left),
+            (KleisliCompose, KleisliCompose) => OperatorRelation::Same(Associativity::Right),
             (PipeForward, PipeForward) => OperatorRelation::Same(Associativity::Left),
             (PipeBackward, PipeBackward) => OperatorRelation::Same(Associativity::Right),
             (PipeForward, PipeBackward) | (PipeBackward, PipeForward) => {
@@ -3321,15 +3384,19 @@ fn syntax_expr_parser<'src>()
 
     fn operator_precedence(operator: SyntaxOperator) -> u8 {
         use crate::core::Builtin::{Add, Append, Divide, Multiply, Subtract};
-        use SyntaxOperator::{Builtin, ComposeBackward, ComposeForward, PipeBackward, PipeForward};
+        use SyntaxOperator::{
+            Builtin, ComposeBackward, ComposeForward, EffectBind, EffectThen, KleisliCompose,
+            PipeBackward, PipeForward,
+        };
 
         match operator {
-            PipeForward | PipeBackward => 0,
-            ComposeForward | ComposeBackward => 1,
-            Builtin(Append) => 2,
-            Builtin(Add | Subtract) => 3,
-            Builtin(Multiply | Divide) => 4,
-            Builtin(_) => 5,
+            EffectBind | EffectThen => 0,
+            PipeForward | PipeBackward => 1,
+            ComposeForward | ComposeBackward | KleisliCompose => 2,
+            Builtin(Append) => 3,
+            Builtin(Add | Subtract) => 4,
+            Builtin(Multiply | Divide) => 5,
+            Builtin(_) => 6,
         }
     }
 
@@ -3344,6 +3411,9 @@ fn syntax_expr_parser<'src>()
             SyntaxOperator::PipeBackward => "<|",
             SyntaxOperator::ComposeForward => ">>",
             SyntaxOperator::ComposeBackward => "<<",
+            SyntaxOperator::EffectBind => ">>=",
+            SyntaxOperator::KleisliCompose => ">=>",
+            SyntaxOperator::EffectThen => "=>>",
             SyntaxOperator::Builtin(crate::core::Builtin::Fixpoint) => "fixpoint",
             SyntaxOperator::Builtin(crate::core::Builtin::Anno) => "anno",
             SyntaxOperator::Builtin(crate::core::Builtin::MergeDuplicate) => "merge_duplicate",
@@ -3460,6 +3530,7 @@ fn syntax_expr_parser<'src>()
         });
         let text = quoted_text().map(SyntaxExpr::Text);
         let atom_literal = just('\'').ignore_then(name.clone()).map(SyntaxExpr::Atom);
+        let unit = just("()").to(SyntaxExpr::Unit);
 
         let list = expr
             .clone()
@@ -3494,6 +3565,9 @@ fn syntax_expr_parser<'src>()
             .map(SyntaxExpr::DictUnion);
 
         let infix_operator = choice((
+            just(">>=").to(SyntaxOperator::EffectBind),
+            just(">=>").to(SyntaxOperator::KleisliCompose),
+            just("=>>").to(SyntaxOperator::EffectThen),
             just(">>")
                 .then_ignore(just('=').not())
                 .to(SyntaxOperator::ComposeForward),
@@ -3552,6 +3626,7 @@ fn syntax_expr_parser<'src>()
             .map(|(params, body)| SyntaxExpr::Lambda(params, Box::new(body)));
 
         let literal_atom = choice((
+            unit,
             text,
             atom_literal,
             list,
@@ -3622,7 +3697,10 @@ fn syntax_binary_expr(operator: SyntaxOperator, left: SyntaxExpr, right: SyntaxE
         SyntaxOperator::PipeForward
         | SyntaxOperator::PipeBackward
         | SyntaxOperator::ComposeForward
-        | SyntaxOperator::ComposeBackward => SyntaxExpr::OperatorApply {
+        | SyntaxOperator::ComposeBackward
+        | SyntaxOperator::EffectBind
+        | SyntaxOperator::KleisliCompose
+        | SyntaxOperator::EffectThen => SyntaxExpr::OperatorApply {
             operator,
             left: Box::new(left),
             right: Box::new(right),
@@ -4540,6 +4618,7 @@ mod tests {
 
     #[test]
     fn parses_effect_shorthand_expressions() {
+        assert_eq!(parse_expr("()"), Some(SyntaxExpr::Unit));
         assert_eq!(
             parse_expr(".emit"),
             Some(SyntaxExpr::Effect("emit".to_owned()))
@@ -4627,6 +4706,30 @@ mod tests {
             })
         );
         assert_eq!(
+            parse_expr("op >>= k"),
+            Some(SyntaxExpr::OperatorApply {
+                operator: SyntaxOperator::EffectBind,
+                left: Box::new(SyntaxExpr::Name("op".to_owned())),
+                right: Box::new(SyntaxExpr::Name("k".to_owned())),
+            })
+        );
+        assert_eq!(
+            parse_expr("k1 >=> k2"),
+            Some(SyntaxExpr::OperatorApply {
+                operator: SyntaxOperator::KleisliCompose,
+                left: Box::new(SyntaxExpr::Name("k1".to_owned())),
+                right: Box::new(SyntaxExpr::Name("k2".to_owned())),
+            })
+        );
+        assert_eq!(
+            parse_expr("op =>> next"),
+            Some(SyntaxExpr::OperatorApply {
+                operator: SyntaxOperator::EffectThen,
+                left: Box::new(SyntaxExpr::Name("op".to_owned())),
+                right: Box::new(SyntaxExpr::Name("next".to_owned())),
+            })
+        );
+        assert_eq!(
             parse_expr("(|> f)"),
             Some(SyntaxExpr::OperatorSection {
                 operator: SyntaxOperator::PipeForward,
@@ -4640,6 +4743,14 @@ mod tests {
                 operator: SyntaxOperator::ComposeForward,
                 left: None,
                 right: None,
+            })
+        );
+        assert_eq!(
+            parse_expr("(>>= k)"),
+            Some(SyntaxExpr::OperatorSection {
+                operator: SyntaxOperator::EffectBind,
+                left: None,
+                right: Some(Box::new(SyntaxExpr::Name("k".to_owned()))),
             })
         );
     }
@@ -6064,6 +6175,61 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[test]
+    fn effect_operators_evaluate_as_syntax_sugar() {
+        let parsed = parse(
+            "language g0\napi = { r:(\\x -> x), seq:(\\op k -> (k (op.eff api)).eff api) }\nop = .r \"Hello\"\nk x = .r (x ++ \", World!\")\nf x = .r (x ++ \", World\")\ng x = .r (x ++ \"!\")\nop_unit = .r ()\nbind_section = (>>= k)\nbind_function = (>>=)\nthen_function = (=>>)\nkleisli_function = (>=>)\nasm.bind = (op >>= k).eff api\nasm.bind_section = (bind_section op).eff api\nasm.bind_function = (bind_function op k).eff api\nasm.kleisli = ((f >=> g) \"Hello\").eff api\nasm.kleisli_function = (kleisli_function f g \"Hello\").eff api\nasm.then = (op_unit =>> .r \"Hello, World!\").eff api\nasm.then_function = (then_function op_unit (.r \"Hello, World!\")).eff api\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        for path in [
+            "bind",
+            "bind_section",
+            "bind_function",
+            "kleisli",
+            "kleisli_function",
+            "then",
+            "then_function",
+        ] {
+            assert_eq!(
+                output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                    &value,
+                    &["asm", path]
+                ))),
+                b"Hello, World!",
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn effect_then_requires_unit_result_when_observed() {
+        let parsed = parse(
+            "language g0\napi = { r:(\\x -> x), seq:(\\op k -> (k (op.eff api)).eff api) }\nbad = .r \"not unit\" =>> .r \"unreachable\"\nasm.result = bad.eff api\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        let mut result =
+            value_at_atom_path(&value, &["asm", "result"]).expect("result should exist");
+        let err = loop {
+            match crate::eval::eval_value(&result) {
+                Ok(Value::Expr(next)) => result = Value::Expr(next),
+                Ok(other) => panic!("non-unit result should not evaluate to {other:?}"),
+                Err(err) => break err,
+            }
+        };
+        assert!(
+            err.to_string()
+                .contains("requires discarded effect results to be unit")
+        );
     }
 
     #[test]
