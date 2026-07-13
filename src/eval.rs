@@ -286,10 +286,7 @@ fn apply_dict_value(
 
 fn singleton_effect_function(dict: &crate::core::Dict) -> Option<Value> {
     let eff_key = Key::atom_from_text("eff");
-    let function = dict.get(&eff_key)?;
-    if is_undefined_dict_value(function) {
-        return None;
-    }
+    let function = dict_effect_function(dict)?;
     if dict
         .iter()
         .all(|(key, value)| *key == eff_key || is_undefined_dict_value(value))
@@ -297,6 +294,15 @@ fn singleton_effect_function(dict: &crate::core::Dict) -> Option<Value> {
         Some(function.clone())
     } else {
         None
+    }
+}
+
+fn dict_effect_function(dict: &crate::core::Dict) -> Option<Value> {
+    let function = dict.get(&Key::atom_from_text("eff"))?;
+    if is_undefined_dict_value(function) {
+        None
+    } else {
+        Some(function.clone())
     }
 }
 
@@ -421,6 +427,54 @@ fn apply_builtin(
                 EvalError::new("list split_end builtin received the wrong number of arguments")
             })?;
             eval_list_split_end_builtin(&count, &value, local_env)
+        }
+        Builtin::ListHead => {
+            let [value] = <[Value; 1]>::try_from(args).map_err(|_| {
+                EvalError::new("list head builtin received the wrong number of arguments")
+            })?;
+            eval_list_head_builtin(&value)
+        }
+        Builtin::ListTail => {
+            let [value] = <[Value; 1]>::try_from(args).map_err(|_| {
+                EvalError::new("list tail builtin received the wrong number of arguments")
+            })?;
+            eval_list_tail_builtin(&value)
+        }
+        Builtin::ListEffect => {
+            let [effect] = <[Value; 1]>::try_from(args).map_err(|_| {
+                EvalError::new("list effect builtin received the wrong number of arguments")
+            })?;
+            eval_list_effect_builtin(&effect, local_env)
+        }
+        Builtin::ListEffectReturn => {
+            let [value] = <[Value; 1]>::try_from(args).map_err(|_| {
+                EvalError::new("list effect return builtin received the wrong number of arguments")
+            })?;
+            Ok(Value::List(List::from_values(vec![value])))
+        }
+        Builtin::ListEffectSeq => {
+            let [operation, continuation] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("list effect seq builtin received the wrong number of arguments")
+            })?;
+            eval_list_effect_seq_builtin(&operation, &continuation, local_env)
+        }
+        Builtin::ListEffectAlt => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("list effect alt builtin received the wrong number of arguments")
+            })?;
+            eval_list_effect_alt_builtin(&left, &right, local_env)
+        }
+        Builtin::ListEffectCut => {
+            let [operation] = <[Value; 1]>::try_from(args).map_err(|_| {
+                EvalError::new("list effect cut builtin received the wrong number of arguments")
+            })?;
+            eval_list_effect_cut_builtin(&operation, local_env)
+        }
+        Builtin::ListEffectFix => {
+            let [function] = <[Value; 1]>::try_from(args).map_err(|_| {
+                EvalError::new("list effect fix builtin received the wrong number of arguments")
+            })?;
+            eval_list_effect_fix_builtin(&function, local_env)
         }
         Builtin::DictSingleton => {
             let [key, value] = <[Value; 2]>::try_from(args).map_err(|_| {
@@ -644,6 +698,154 @@ fn eval_list_split_end_builtin(
             "split_end builtin requires a list or binary value",
         )),
     }
+}
+
+fn eval_list_head_builtin(value: &Value) -> Result<Value, EvalError> {
+    match force_value_shell(value)? {
+        Value::Binary(bytes) => bytes
+            .first()
+            .map(|byte| Value::Number(Number::from_u8(*byte)))
+            .ok_or_else(|| EvalError::new("list head builtin requires a non-empty list or binary")),
+        Value::List(list) => list_to_value_items(&list)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| EvalError::new("list head builtin requires a non-empty list or binary")),
+        _ => Err(EvalError::new(
+            "list head builtin requires a list or binary value",
+        )),
+    }
+}
+
+fn eval_list_tail_builtin(value: &Value) -> Result<Value, EvalError> {
+    match force_value_shell(value)? {
+        Value::Binary(bytes) => {
+            if bytes.is_empty() {
+                Err(EvalError::new(
+                    "list tail builtin requires a non-empty list or binary",
+                ))
+            } else {
+                Ok(Value::Binary(bytes.slice(1..bytes.len())))
+            }
+        }
+        Value::List(list) => {
+            let Some((_, tail)) = list.try_split_at(1, &mut force_list_thunk)? else {
+                return Err(EvalError::new(
+                    "list tail builtin requires a non-empty list or binary",
+                ));
+            };
+            Ok(Value::List(tail))
+        }
+        _ => Err(EvalError::new(
+            "list tail builtin requires a list or binary value",
+        )),
+    }
+}
+
+fn eval_list_effect_builtin(effect: &Value, local_env: &[Value]) -> Result<Value, EvalError> {
+    Ok(Value::List(List::from_values(run_list_effect(
+        effect, local_env,
+    )?)))
+}
+
+fn eval_list_effect_seq_builtin(
+    operation: &Value,
+    continuation: &Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let continuation = eval_value(continuation)?;
+    let mut results = Vec::new();
+    for value in run_list_effect(operation, local_env)? {
+        let next = apply_value(continuation.clone(), value, local_env)?;
+        results.extend(run_list_effect(&next, local_env)?);
+    }
+    Ok(Value::List(List::from_values(results)))
+}
+
+fn eval_list_effect_alt_builtin(
+    left: &Value,
+    right: &Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let mut results = run_list_effect(left, local_env)?;
+    results.extend(run_list_effect(right, local_env)?);
+    Ok(Value::List(List::from_values(results)))
+}
+
+fn eval_list_effect_cut_builtin(
+    operation: &Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let results = run_list_effect(operation, local_env)?;
+    Ok(Value::List(List::from_values(
+        results.into_iter().take(1).collect(),
+    )))
+}
+
+fn eval_list_effect_fix_builtin(function: &Value, local_env: &[Value]) -> Result<Value, EvalError> {
+    let function = eval_value(function)?;
+    let handle = IVar::new();
+    let marker = Value::expr(Expr::Future(handle.clone()));
+    let operation = apply_value(function, marker.clone(), local_env)?;
+    let results = run_list_effect(&operation, local_env)?;
+    handle
+        .set(
+            results
+                .first()
+                .cloned()
+                .unwrap_or_else(|| Value::List(List::empty())),
+        )
+        .map_err(|_| EvalError::new("list effect fix initialized twice"))?;
+    Ok(Value::List(List::from_values(results)))
+}
+
+fn run_list_effect(effect: &Value, local_env: &[Value]) -> Result<Vec<Value>, EvalError> {
+    let effect = force_value_shell(effect)?;
+    let Value::Dict(dict) = effect else {
+        return Err(EvalError::new(format!(
+            "list effect handler requires an effect dictionary, got {effect:?}"
+        )));
+    };
+    let Some(function) = dict_effect_function(&dict) else {
+        return Err(EvalError::new(
+            "list effect handler requires an `eff` member",
+        ));
+    };
+
+    let handled = apply_value(eval_value(&function)?, list_effect_api(), local_env)?;
+    let handled = force_value_shell(&handled)?;
+    let Value::List(results) = handled else {
+        return Err(EvalError::new(format!(
+            "list effect handler expected a standard effect result list, got {handled:?}"
+        )));
+    };
+    list_to_value_items(&results)
+}
+
+fn list_effect_api() -> Value {
+    Value::Dict(
+        crate::core::Dict::new_sync()
+            .insert(
+                Key::atom_from_text("r"),
+                Value::Builtin(Builtin::ListEffectReturn),
+            )
+            .insert(
+                Key::atom_from_text("seq"),
+                Value::Builtin(Builtin::ListEffectSeq),
+            )
+            .insert(
+                Key::atom_from_text("alt"),
+                Value::Builtin(Builtin::ListEffectAlt),
+            )
+            .insert(Key::atom_from_text("fail"), Value::List(List::empty()))
+            .insert(
+                Key::atom_from_text("cut"),
+                Value::Builtin(Builtin::ListEffectCut),
+            )
+            .insert(
+                Key::atom_from_text("fix"),
+                Value::Builtin(Builtin::ListEffectFix),
+            ),
+    )
 }
 
 fn split_result_value(left: Value, right: Value) -> Value {

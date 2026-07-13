@@ -673,6 +673,18 @@ fn builtin_list_module(context: &CompileContext) -> Dict {
         )
         .insert(name_as_key("map"), context.value_builtin(Builtin::Map))
         .insert(name_as_key("len"), context.value_builtin(Builtin::ListLen))
+        .insert(
+            name_as_key("head"),
+            context.value_builtin(Builtin::ListHead),
+        )
+        .insert(
+            name_as_key("tail"),
+            context.value_builtin(Builtin::ListTail),
+        )
+        .insert(
+            name_as_key("pure"),
+            context.value_builtin(Builtin::ListEffect),
+        )
 }
 
 fn builtin_std_module(context: &CompileContext) -> Dict {
@@ -3424,6 +3436,14 @@ fn syntax_expr_parser<'src>()
             SyntaxOperator::Builtin(crate::core::Builtin::ListLen) => "list.len",
             SyntaxOperator::Builtin(crate::core::Builtin::ListSplit) => "list.split",
             SyntaxOperator::Builtin(crate::core::Builtin::ListSplitEnd) => "list.split_end",
+            SyntaxOperator::Builtin(crate::core::Builtin::ListHead) => "list.head",
+            SyntaxOperator::Builtin(crate::core::Builtin::ListTail) => "list.tail",
+            SyntaxOperator::Builtin(crate::core::Builtin::ListEffect) => "list.pure",
+            SyntaxOperator::Builtin(crate::core::Builtin::ListEffectReturn) => "list.pure.r",
+            SyntaxOperator::Builtin(crate::core::Builtin::ListEffectSeq) => "list.pure.seq",
+            SyntaxOperator::Builtin(crate::core::Builtin::ListEffectAlt) => "list.pure.alt",
+            SyntaxOperator::Builtin(crate::core::Builtin::ListEffectCut) => "list.pure.cut",
+            SyntaxOperator::Builtin(crate::core::Builtin::ListEffectFix) => "list.pure.fix",
             SyntaxOperator::Builtin(crate::core::Builtin::DictSingleton) => ":",
             SyntaxOperator::Builtin(crate::core::Builtin::DictUnion) => "{,}",
             SyntaxOperator::Builtin(crate::core::Builtin::DictUpdate) => "dict_update",
@@ -3935,6 +3955,39 @@ mod tests {
             }
             other => panic!("expected binary output value, got {other:?}"),
         }
+    }
+
+    fn output_binary_result_list(value: &Value) -> Vec<u8> {
+        let Value::List(list) = value else {
+            panic!("expected list output value, got {value:?}");
+        };
+        let bytes = std::cell::RefCell::new(Vec::new());
+        list.try_for_each_segment(
+            &mut |segment| {
+                bytes.borrow_mut().extend_from_slice(segment);
+                Ok::<_, String>(())
+            },
+            &mut |values| {
+                for value in values {
+                    let value = fully_evaluated_value(
+                        crate::eval::eval_value(value).map_err(|err| err.to_string())?,
+                    );
+                    bytes.borrow_mut().extend(output_bytes(&value));
+                }
+                Ok(())
+            },
+            &mut |thunk| match crate::eval::eval_value(&Value::Expr(thunk.clone()))
+                .map_err(|err| err.to_string())?
+            {
+                Value::Binary(bytes) => Ok(crate::core::List::from_bytes(bytes)),
+                Value::List(list) => Ok(list),
+                other => Err(format!(
+                    "lazy output chunk was not a list or binary: {other:?}"
+                )),
+            },
+        )
+        .expect("result list should render as binary values");
+        bytes.into_inner()
     }
 
     fn resolved_expr_at_path(definitions: &Value, path: &[&str]) -> CoreExpr {
@@ -6233,6 +6286,57 @@ mod tests {
     }
 
     #[test]
+    fn list_effect_handler_runs_standard_backtracking_effects() {
+        let parsed = parse(
+            "language g0\nimport 'list as list\nchoices = (.alt (.r \"A\") (.alt .fail (.r \"B\"))) >>= (\\x -> .r (x ++ \"!\"))\ncut = .cut (.alt (.r \"C\") (.r \"D\"))\nobject_effect = { eff:(.r \"E\").eff, meta:1 }\nfixed = .fix (\\self -> .r { text:\"F\", self:self })\nasm.choices = list.pure choices\nasm.cut = list.pure cut\nasm.object = list.pure object_effect\nasm.fixed = (list.head (list.pure fixed)).text\nasm.head = list.head \"Hi\"\nasm.tail = list.tail \"Hi\"\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_binary_result_list(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "choices"]
+            ))),
+            b"A!B!"
+        );
+        assert_eq!(
+            output_binary_result_list(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "cut"]
+            ))),
+            b"C"
+        );
+        assert_eq!(
+            output_binary_result_list(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "object"]
+            ))),
+            b"E"
+        );
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "fixed"]
+            ))),
+            b"F"
+        );
+        assert_eq!(
+            fully_evaluated_value(resolved_value_at_path(&value, &["asm", "head"])),
+            Value::Number(n(72))
+        );
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "tail"]
+            ))),
+            b"i"
+        );
+    }
+
+    #[test]
     fn operator_section_operands_resolve_module_scope_names() {
         let parsed = parse(
             "language g0\nsuffix = \"!\"\nadd_suffix = (++ suffix)\nasm.result = add_suffix \"Hello\"\n",
@@ -6403,7 +6507,39 @@ mod tests {
             ],
         )))
         .expect("list.spec import should resolve");
-        let (anno, std_list_len, std_list_split, std_list_split_end) = match &std {
+        let list_head_import = crate::eval::eval_value(&Value::expr(core_global_access(
+            &context,
+            vec![
+                CoreKeyExpr::Key(Key::atom_from_text("list")),
+                CoreKeyExpr::Key(Key::atom_from_text("head")),
+            ],
+        )))
+        .expect("list.head import should resolve");
+        let list_tail_import = crate::eval::eval_value(&Value::expr(core_global_access(
+            &context,
+            vec![
+                CoreKeyExpr::Key(Key::atom_from_text("list")),
+                CoreKeyExpr::Key(Key::atom_from_text("tail")),
+            ],
+        )))
+        .expect("list.tail import should resolve");
+        let list_pure_import = crate::eval::eval_value(&Value::expr(core_global_access(
+            &context,
+            vec![
+                CoreKeyExpr::Key(Key::atom_from_text("list")),
+                CoreKeyExpr::Key(Key::atom_from_text("pure")),
+            ],
+        )))
+        .expect("list.pure import should resolve");
+        let (
+            anno,
+            std_list_len,
+            std_list_split,
+            std_list_split_end,
+            std_list_head,
+            std_list_tail,
+            std_list_pure,
+        ) = match &std {
             Value::Dict(std) => {
                 let anno = std
                     .get(&Key::atom_from_text("anno"))
@@ -6425,7 +6561,24 @@ mod tests {
                 let split_end = std_list
                     .get(&Key::atom_from_text("split_end"))
                     .expect("std.list should expose split_end");
-                (anno, len.clone(), split.clone(), split_end.clone())
+                let head = std_list
+                    .get(&Key::atom_from_text("head"))
+                    .expect("std.list should expose head");
+                let tail = std_list
+                    .get(&Key::atom_from_text("tail"))
+                    .expect("std.list should expose tail");
+                let pure = std_list
+                    .get(&Key::atom_from_text("pure"))
+                    .expect("std.list should expose pure");
+                (
+                    anno,
+                    len.clone(),
+                    split.clone(),
+                    split_end.clone(),
+                    head.clone(),
+                    tail.clone(),
+                    pure.clone(),
+                )
             }
             _ => unreachable!(),
         };
@@ -6439,6 +6592,15 @@ mod tests {
         let list_split_end = list_module
             .get(&Key::atom_from_text("split_end"))
             .expect("list module should expose split_end");
+        let list_head = list_module
+            .get(&Key::atom_from_text("head"))
+            .expect("list module should expose head");
+        let list_tail = list_module
+            .get(&Key::atom_from_text("tail"))
+            .expect("list module should expose tail");
+        let list_pure = list_module
+            .get(&Key::atom_from_text("pure"))
+            .expect("list module should expose pure");
 
         let Value::Dict(_) = std else {
             panic!("std import should evaluate to a dictionary");
@@ -6460,6 +6622,18 @@ mod tests {
             Value::Builtin(crate::core::Builtin::ListSplitEnd)
         ));
         assert!(matches!(
+            std_list_head,
+            Value::Builtin(crate::core::Builtin::ListHead)
+        ));
+        assert!(matches!(
+            std_list_tail,
+            Value::Builtin(crate::core::Builtin::ListTail)
+        ));
+        assert!(matches!(
+            std_list_pure,
+            Value::Builtin(crate::core::Builtin::ListEffect)
+        ));
+        assert!(matches!(
             list_len,
             Value::Builtin(crate::core::Builtin::ListLen)
         ));
@@ -6472,8 +6646,32 @@ mod tests {
             Value::Builtin(crate::core::Builtin::ListSplitEnd)
         ));
         assert!(matches!(
+            list_head,
+            Value::Builtin(crate::core::Builtin::ListHead)
+        ));
+        assert!(matches!(
+            list_tail,
+            Value::Builtin(crate::core::Builtin::ListTail)
+        ));
+        assert!(matches!(
+            list_pure,
+            Value::Builtin(crate::core::Builtin::ListEffect)
+        ));
+        assert!(matches!(
             list_len_import,
             Value::Builtin(crate::core::Builtin::ListLen)
+        ));
+        assert!(matches!(
+            list_head_import,
+            Value::Builtin(crate::core::Builtin::ListHead)
+        ));
+        assert!(matches!(
+            list_tail_import,
+            Value::Builtin(crate::core::Builtin::ListTail)
+        ));
+        assert!(matches!(
+            list_pure_import,
+            Value::Builtin(crate::core::Builtin::ListEffect)
         ));
         assert!(!matches!(
             list_spec,
