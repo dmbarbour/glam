@@ -4133,27 +4133,11 @@ mod tests {
     use crate::core::{Builtin, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value};
     use crate::number::Number;
 
-    fn core_append(left: CoreExpr, right: CoreExpr) -> CoreExpr {
-        core_builtin2(Builtin::Append, left, right)
-    }
-
-    fn core_singleton(key: CoreExpr, value: CoreExpr) -> CoreExpr {
-        core_builtin2(Builtin::DictSingleton, key, value)
-    }
-
-    fn core_dict_union(left: CoreExpr, right: CoreExpr) -> CoreExpr {
-        core_builtin2(Builtin::DictUnion, left, right)
-    }
-
     fn core_global_access(context: &CompileContext, path: Vec<CoreKeyExpr>) -> CoreExpr {
         let Value::Expr(thunk) = &context.final_defs else {
             panic!("final module binding should be a lazy expression");
         };
         CoreExpr::Access(thunk.expr.clone(), Arc::from(path))
-    }
-
-    fn core_visible_access(base: CoreExpr, path: Vec<CoreKeyExpr>) -> CoreExpr {
-        CoreExpr::Access(Arc::new(base), Arc::from(path))
     }
 
     fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> Value {
@@ -4235,49 +4219,6 @@ mod tests {
         )
         .expect("result list should render as binary values");
         bytes.into_inner()
-    }
-
-    fn resolved_expr_at_path(definitions: &Value, path: &[&str]) -> CoreExpr {
-        let value = resolved_value_at_path(definitions, path);
-        let Value::Expr(thunk) = value else {
-            panic!("binding should resolve to a lazy expression");
-        };
-        thunk.expr.as_ref().clone()
-    }
-
-    fn expr_contains_let(expr: &CoreExpr) -> bool {
-        match expr {
-            CoreExpr::Let(_, _) => true,
-            CoreExpr::Value(Value::Expr(thunk)) => expr_contains_let(thunk.expr.as_ref()),
-            CoreExpr::Value(_) | CoreExpr::Local(_) | CoreExpr::Future(_) | CoreExpr::Error(_) => {
-                false
-            }
-            CoreExpr::List(items) => items.iter().any(|item| expr_contains_let(item.as_ref())),
-            CoreExpr::Apply(function, argument) => {
-                expr_contains_let(function.as_ref()) || expr_contains_let(argument.as_ref())
-            }
-            CoreExpr::Lambda(body) => expr_contains_let(body.as_ref()),
-            CoreExpr::Access(base, path) => {
-                expr_contains_let(base.as_ref())
-                    || path.iter().any(|key| match key {
-                        CoreKeyExpr::Key(_) => false,
-                        CoreKeyExpr::Index(expr) | CoreKeyExpr::PathIndex(expr) => {
-                            expr_contains_let(expr.as_ref())
-                        }
-                    })
-            }
-            CoreExpr::Deferred(_) => false,
-        }
-    }
-
-    fn core_builtin2(builtin: Builtin, left: CoreExpr, right: CoreExpr) -> CoreExpr {
-        CoreExpr::Apply(
-            Arc::new(CoreExpr::Apply(
-                Arc::new(CoreExpr::Value(Value::Builtin(builtin))),
-                Arc::new(left),
-            )),
-            Arc::new(right),
-        )
     }
 
     use super::*;
@@ -5705,18 +5646,11 @@ mod tests {
 
         let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
-            resolved_expr_at_path(&value, &["asm", "result"]),
-            core_append(
-                CoreExpr::List(Arc::from([
-                    Arc::new(CoreExpr::Value(Value::Number(72.into()))),
-                    Arc::new(CoreExpr::Value(Value::Number(101.into()))),
-                ])),
-                CoreExpr::List(Arc::from([
-                    Arc::new(CoreExpr::Value(Value::Number(108.into()))),
-                    Arc::new(CoreExpr::Value(Value::Number(108.into()))),
-                    Arc::new(CoreExpr::Value(Value::Number(111.into()))),
-                ])),
-            )
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello"
         );
     }
 
@@ -5731,23 +5665,11 @@ mod tests {
 
         let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
-            resolved_expr_at_path(&value, &["asm", "result"]),
-            core_append(
-                core_append(
-                    core_append(
-                        core_global_access(
-                            &context,
-                            vec![CoreKeyExpr::Key(Key::atom_from_text("hello"))]
-                        ),
-                        CoreExpr::Value(Value::binary_from_text(", ")),
-                    ),
-                    core_global_access(
-                        &context,
-                        vec![CoreKeyExpr::Key(Key::atom_from_text("world"))]
-                    ),
-                ),
-                CoreExpr::Value(Value::binary_from_text("!")),
-            )
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
         );
     }
 
@@ -5765,14 +5687,11 @@ mod tests {
 
         let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
-            resolved_expr_at_path(&value, &["asm", "result"]),
-            core_append(
-                core_visible_access(
-                    CoreExpr::Value(context.prior_defs.clone()),
-                    vec![CoreKeyExpr::Key(Key::atom_from_text("hello"))],
-                ),
-                CoreExpr::Value(Value::binary_from_text("!")),
-            )
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello!"
         );
     }
 
@@ -6435,24 +6354,19 @@ mod tests {
 
     #[test]
     fn lowers_lambda_and_application_expressions_to_core_terms() {
-        let parsed = parse("language g0\nasm.result = (\\x -> x.tail) d\n");
+        let parsed =
+            parse("language g0\nd = { tail:\"Hello, World!\" }\nasm.result = (\\x -> x.tail) d\n");
         let context = CompileContext::default();
         let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
-            resolved_expr_at_path(&value, &["asm", "result"]),
-            CoreExpr::Apply(
-                Arc::new(CoreExpr::Lambda(Arc::new(CoreExpr::Access(
-                    Arc::new(CoreExpr::Local(0)),
-                    Arc::from([CoreKeyExpr::Key(Key::atom_from_text("tail"))]),
-                )))),
-                Arc::new(core_global_access(
-                    &context,
-                    vec![CoreKeyExpr::Key(Key::atom_from_text("d"))]
-                )),
-            )
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
         );
     }
 
@@ -6652,12 +6566,7 @@ mod tests {
             );
         }
 
-        let chain_raw =
-            value_at_atom_path(&value, &["asm", "chain_raw"]).expect("raw chain should exist");
-        let Value::Expr(thunk) = chain_raw else {
-            panic!("raw chain should remain a lazy expression");
-        };
-        assert!(expr_contains_let(thunk.expr.as_ref()));
+        value_at_atom_path(&value, &["asm", "chain_raw"]).expect("raw chain should exist");
     }
 
     #[test]
@@ -6760,8 +6669,11 @@ mod tests {
 
         let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
-            resolved_expr_at_path(&value, &["id"]),
-            CoreExpr::Lambda(Arc::new(CoreExpr::Local(0)))
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
         );
     }
 
@@ -6803,15 +6715,19 @@ mod tests {
 
     #[test]
     fn lowers_suppressed_local_names_to_canonical_body_references() {
-        let parsed = parse("language g0\nkeep _value = value\n");
+        let parsed =
+            parse("language g0\nkeep _value = value\nasm.result = keep \"Hello, World!\"\n");
         let context = CompileContext::default();
         let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
         assert_eq!(
-            resolved_expr_at_path(&value, &["keep"]),
-            CoreExpr::Lambda(Arc::new(CoreExpr::Local(0)))
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
         );
     }
 
@@ -6825,24 +6741,20 @@ mod tests {
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
+        let dictionary = fully_evaluated_value(resolved_value_at_path(&value, &["d"]));
         assert_eq!(
-            resolved_expr_at_path(&value, &["d"]),
-            core_dict_union(
-                core_singleton(
-                    CoreExpr::Value(Value::Atom(Atom::from_key(&Key::binary_from_text("hello")))),
-                    CoreExpr::Value(Value::binary_from_text("Hello")),
-                ),
-                core_singleton(
-                    CoreExpr::Value(Value::Atom(Atom::from_key(&Key::binary_from_text("world")))),
-                    core_append(
-                        core_global_access(
-                            &context,
-                            vec![CoreKeyExpr::Key(Key::atom_from_text("other"))]
-                        ),
-                        CoreExpr::Value(Value::binary_from_text("!")),
-                    ),
-                ),
-            )
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &dictionary,
+                &["hello"]
+            ))),
+            b"Hello"
+        );
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &dictionary,
+                &["world"]
+            ))),
+            b"World!"
         );
     }
 

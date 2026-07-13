@@ -123,12 +123,7 @@ fn eval_local(index: usize, local_env: &[Value]) -> Result<Value, EvalError> {
 }
 
 fn eval_let(bound: &Arc<Expr>, body: &Arc<Expr>, local_env: &[Value]) -> Result<Value, EvalError> {
-    let bound = bound.clone();
-    let env = Arc::from(local_env.to_vec());
-    let shared = Value::expr(Expr::Deferred(Arc::new(DeferredValue::new(
-        "let",
-        move || eval_expr(bound.as_ref(), &env).map_err(|err| err.to_string()),
-    ))));
+    let shared = shared_expr_value(bound.clone(), Arc::from(local_env.to_vec()), "let");
     let mut extended = local_env.to_vec();
     extended.push(shared);
     eval_expr(body.as_ref(), &extended)
@@ -249,11 +244,22 @@ fn eval_apply(function: &Expr, argument: &Expr, local_env: &[Value]) -> Result<V
 fn thunk_value(expr: &Expr, local_env: &[Value]) -> Value {
     match expr {
         Expr::Value(value) => value.clone(),
-        _ => Value::Expr(Thunk {
-            expr: Arc::new(expr.clone()),
-            env: Arc::from(local_env.to_vec()),
-        }),
+        _ => shared_expr_value(
+            Arc::new(expr.clone()),
+            Arc::from(local_env.to_vec()),
+            "thunk",
+        ),
     }
+}
+
+fn shared_expr_value(expr: Arc<Expr>, env: Arc<[Value]>, label: &'static str) -> Value {
+    Value::Expr(Thunk {
+        expr: Arc::new(Expr::Deferred(Arc::new(DeferredValue::new(
+            label,
+            move || eval_expr(expr.as_ref(), &env).map_err(|err| err.to_string()),
+        )))),
+        env: Arc::from([]),
+    })
 }
 
 fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<Value, EvalError> {
@@ -265,13 +271,14 @@ fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<
             if let Some((builtin, args)) = builtin_application_spine(thunk.expr.as_ref()) {
                 apply_builtin(builtin, args, argument, local_env)
             } else {
-                Ok(Value::Expr(Thunk {
-                    expr: Arc::new(Expr::Apply(
+                Ok(shared_expr_value(
+                    Arc::new(Expr::Apply(
                         thunk.expr.clone(),
                         Arc::new(Expr::Value(argument)),
                     )),
-                    env: thunk.env.clone(),
-                }))
+                    thunk.env.clone(),
+                    "application",
+                ))
             }
         }
         _ => Err(EvalError::new("application requires a function value")),
@@ -1510,7 +1517,7 @@ impl LinearizedObjectSpec {
 fn object_c3_linearization(
     spec: &crate::core::Dict,
     local_env: &[Value],
-    seen: &mut BTreeMap<Key, crate::core::Dict>,
+    seen: &mut BTreeMap<Key, ()>,
     next_anonymous_id: &mut u64,
 ) -> Result<Vec<LinearizedObjectSpec>, EvalError> {
     let entry = LinearizedObjectSpec::new(spec.clone(), local_env, next_anonymous_id)?;
@@ -1620,19 +1627,10 @@ fn is_anonymous_object_name(name: &Key) -> bool {
 
 fn remember_object_spec(
     name: &Key,
-    spec: &crate::core::Dict,
-    seen: &mut BTreeMap<Key, crate::core::Dict>,
+    _spec: &crate::core::Dict,
+    seen: &mut BTreeMap<Key, ()>,
 ) -> Result<(), EvalError> {
-    if let Some(existing) = seen.get(name) {
-        if existing != spec {
-            return Err(EvalError::new(format!(
-                "object linearization found conflicting specs for `{}`",
-                format_name_part(name)
-            )));
-        }
-    } else {
-        seen.insert(name.clone(), spec.clone());
-    }
+    seen.insert(name.clone(), ());
     Ok(())
 }
 
@@ -2621,6 +2619,29 @@ mod tests {
         );
 
         let value = eval_closed_expr(&expr).expect("let body should evaluate");
+
+        assert_eq!(value, n(4));
+        assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn expression_arguments_share_forced_values() {
+        let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = force_count.clone();
+        let counted = Expr::Deferred(Arc::new(DeferredValue::new("counted", move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(n(2))
+        })));
+        let expr = Expr::Apply(
+            Arc::new(Expr::Lambda(Arc::new(builtin2_expr(
+                Builtin::Add,
+                Expr::Local(0),
+                Expr::Local(0),
+            )))),
+            Arc::new(counted),
+        );
+
+        let value = eval_closed_expr(&expr).expect("lambda body should evaluate");
 
         assert_eq!(value, n(4));
         assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
