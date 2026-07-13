@@ -71,9 +71,17 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
 
 pub fn eval_value(value: &Value) -> Result<Value, EvalError> {
     match value {
-        Value::Expr(thunk) => eval_expr(thunk.expr.as_ref(), &thunk.env),
+        Value::Expr(thunk) => eval_thunk(thunk),
         other => Ok(other.clone()),
     }
+}
+
+fn eval_thunk(thunk: &Thunk) -> Result<Value, EvalError> {
+    if let Some(value) = thunk.cached() {
+        return Ok(value);
+    }
+    let value = eval_expr(thunk.expr.as_ref(), &thunk.env)?;
+    Ok(thunk.cache(value))
 }
 
 pub fn eval_key(value: &Value) -> Result<Key, EvalError> {
@@ -123,7 +131,7 @@ fn eval_local(index: usize, local_env: &[Value]) -> Result<Value, EvalError> {
 }
 
 fn eval_let(bound: &Arc<Expr>, body: &Arc<Expr>, local_env: &[Value]) -> Result<Value, EvalError> {
-    let shared = shared_expr_value(bound.clone(), Arc::from(local_env.to_vec()), "let");
+    let shared = Value::Expr(Thunk::new(bound.clone(), Arc::from(local_env.to_vec())));
     let mut extended = local_env.to_vec();
     extended.push(shared);
     eval_expr(body.as_ref(), &extended)
@@ -244,22 +252,11 @@ fn eval_apply(function: &Expr, argument: &Expr, local_env: &[Value]) -> Result<V
 fn thunk_value(expr: &Expr, local_env: &[Value]) -> Value {
     match expr {
         Expr::Value(value) => value.clone(),
-        _ => shared_expr_value(
+        _ => Value::Expr(Thunk::new(
             Arc::new(expr.clone()),
             Arc::from(local_env.to_vec()),
-            "thunk",
-        ),
+        )),
     }
-}
-
-fn shared_expr_value(expr: Arc<Expr>, env: Arc<[Value]>, label: &'static str) -> Value {
-    Value::Expr(Thunk {
-        expr: Arc::new(Expr::Deferred(Arc::new(DeferredValue::new(
-            label,
-            move || eval_expr(expr.as_ref(), &env).map_err(|err| err.to_string()),
-        )))),
-        env: Arc::from([]),
-    })
 }
 
 fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<Value, EvalError> {
@@ -271,14 +268,13 @@ fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<
             if let Some((builtin, args)) = builtin_application_spine(thunk.expr.as_ref()) {
                 apply_builtin(builtin, args, argument, local_env)
             } else {
-                Ok(shared_expr_value(
+                Ok(Value::Expr(Thunk::new(
                     Arc::new(Expr::Apply(
                         thunk.expr.clone(),
                         Arc::new(Expr::Value(argument)),
                     )),
                     thunk.env.clone(),
-                    "application",
-                ))
+                )))
             }
         }
         _ => Err(EvalError::new("application requires a function value")),
@@ -1176,13 +1172,13 @@ fn deferred_list(
     label: &'static str,
     thunk: impl Fn() -> Result<List, EvalError> + Send + Sync + 'static,
 ) -> List {
-    List::from_thunk(Thunk {
-        expr: Arc::new(Expr::Deferred(Arc::new(DeferredValue::new(
+    List::from_thunk(Thunk::new(
+        Arc::new(Expr::Deferred(Arc::new(DeferredValue::new(
             label,
             move || thunk().map(Value::List).map_err(|err| err.to_string()),
         )))),
-        env: Arc::from([]),
-    })
+        Arc::from([]),
+    ))
 }
 
 fn list_effect_api() -> Value {
@@ -1252,10 +1248,7 @@ fn partial_builtin_value(builtin: Builtin, args: &[Value]) -> Value {
         Expr::Value(Value::Builtin(builtin)),
         |function, argument| Expr::Apply(Arc::new(function), Arc::new(Expr::Value(argument))),
     );
-    Value::Expr(Thunk {
-        expr: Arc::new(expr),
-        env: Arc::from([]),
-    })
+    Value::Expr(Thunk::new(Arc::new(expr), Arc::from([])))
 }
 
 fn builtin2_expr(builtin: Builtin, left: Expr, right: Expr) -> Expr {
@@ -1862,10 +1855,10 @@ fn is_unit_value(value: &Value) -> bool {
 }
 
 fn annotation_error_value(message: impl Into<String>) -> Value {
-    Value::Expr(Thunk {
-        expr: Arc::new(Expr::Error(Arc::from(message.into()))),
-        env: Arc::from([]),
-    })
+    Value::Expr(Thunk::new(
+        Arc::new(Expr::Error(Arc::from(message.into()))),
+        Arc::from([]),
+    ))
 }
 
 fn eval_deque_annotation(target: &Value) -> Result<Value, EvalError> {
@@ -1984,13 +1977,13 @@ fn merge_duplicate_dict_value(key: &Key, left: &Value, right: &Value) -> Value {
             right,
         )
     } else {
-        Value::Expr(Thunk {
-            expr: Arc::new(Expr::Error(Arc::from(format!(
+        Value::Expr(Thunk::new(
+            Arc::new(Expr::Error(Arc::from(format!(
                 "dictionary union is ambiguous at key `{}`",
                 format_name_part(key)
             )))),
-            env: Arc::from([]),
-        })
+            Arc::from([]),
+        ))
     }
 }
 
@@ -2025,13 +2018,13 @@ fn update_nested_dict_path(head: &Key, rest: &[Key], new_value: Value, prior: Va
             &new_value,
             &prior,
         ),
-        _ => Value::Expr(Thunk {
-            expr: Arc::new(Expr::Error(Arc::from(format!(
+        _ => Value::Expr(Thunk::new(
+            Arc::new(Expr::Error(Arc::from(format!(
                 "dictionary update path `{}` traverses a non-dictionary value",
                 format_name_part(head)
             )))),
-            env: Arc::from([]),
-        }),
+            Arc::from([]),
+        )),
     }
 }
 
@@ -2063,8 +2056,8 @@ fn value_as_expr(value: &Value) -> Arc<Expr> {
 }
 
 fn builtin_apply3_value(builtin: Builtin, first: &Value, second: &Value, third: &Value) -> Value {
-    Value::Expr(Thunk {
-        expr: Arc::new(Expr::Apply(
+    Value::Expr(Thunk::new(
+        Arc::new(Expr::Apply(
             Arc::new(Expr::Apply(
                 Arc::new(Expr::Apply(
                     Arc::new(Expr::Value(Value::Builtin(builtin))),
@@ -2074,8 +2067,8 @@ fn builtin_apply3_value(builtin: Builtin, first: &Value, second: &Value, third: 
             )),
             value_as_expr(third),
         )),
-        env: Arc::from([]),
-    })
+        Arc::from([]),
+    ))
 }
 
 fn is_expr_value(value: &Value) -> bool {
@@ -2094,18 +2087,12 @@ fn expand_key_expr(key: &KeyExpr, local_env: &[Value]) -> Result<Vec<Key>, EvalE
     match key {
         KeyExpr::Key(key) => Ok(vec![key.clone()]),
         KeyExpr::Index(expr) => {
-            let value = Value::Expr(Thunk {
-                expr: expr.clone(),
-                env: Arc::from(local_env.to_vec()),
-            });
+            let value = Value::Expr(Thunk::new(expr.clone(), Arc::from(local_env.to_vec())));
             let value = force_value_shell(&value)?;
             Ok(vec![value_to_key(&value, local_env)?])
         }
         KeyExpr::PathIndex(expr) => eval_key_path_list(
-            &Value::Expr(Thunk {
-                expr: expr.clone(),
-                env: Arc::from(local_env.to_vec()),
-            }),
+            &Value::Expr(Thunk::new(expr.clone(), Arc::from(local_env.to_vec()))),
             local_env,
         ),
     }
@@ -2395,10 +2382,10 @@ mod tests {
         handle
             .set(root.clone())
             .expect("rooted test expression should initialize handle once");
-        Value::Expr(Thunk {
-            expr: Arc::new(expr),
-            env: Arc::from([Value::expr(Expr::Future(handle))]),
-        })
+        Value::Expr(Thunk::new(
+            Arc::new(expr),
+            Arc::from([Value::expr(Expr::Future(handle))]),
+        ))
     }
 
     #[test]
@@ -2561,10 +2548,10 @@ mod tests {
 
     #[test]
     fn split_end_does_not_force_lazy_left_branch_when_suffix_is_in_right_branch() {
-        let lazy_left = List::from_thunk(Thunk {
-            expr: Arc::new(Expr::Error(Arc::from("left branch was forced"))),
-            env: Arc::from([]),
-        });
+        let lazy_left = List::from_thunk(Thunk::new(
+            Arc::new(Expr::Error(Arc::from("left branch was forced"))),
+            Arc::from([]),
+        ));
         let list = List::concat(lazy_left, List::from_bytes(Bytes::from_static(b"abc")));
         let split = eval_closed_expr(&builtin2_expr(
             Builtin::ListSplitEnd,

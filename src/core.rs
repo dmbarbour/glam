@@ -231,10 +231,50 @@ pub struct Closure {
     pub env: Arc<[Value]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Thunk {
     pub expr: Arc<Expr>,
     pub env: Arc<[Value]>,
+    result: Arc<OnceLock<Value>>,
+}
+
+impl Thunk {
+    pub fn new(expr: Arc<Expr>, env: Arc<[Value]>) -> Self {
+        Self {
+            expr,
+            env,
+            result: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub fn cached(&self) -> Option<Value> {
+        self.result.get().cloned()
+    }
+
+    pub fn cache(&self, value: Value) -> Value {
+        let _ = self.result.set(value);
+        self.result
+            .get()
+            .expect("thunk cache should contain a value after set")
+            .clone()
+    }
+}
+
+impl PartialEq for Thunk {
+    fn eq(&self, other: &Self) -> bool {
+        self.expr == other.expr && self.env == other.env
+    }
+}
+
+impl Eq for Thunk {}
+
+impl fmt::Debug for Thunk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Thunk")
+            .field("expr", &self.expr)
+            .field("env", &self.env)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1025,17 +1065,11 @@ impl Value {
     }
 
     pub fn expr(expr: Expr) -> Self {
-        Self::Expr(Thunk {
-            expr: Arc::new(expr),
-            env: Arc::from([]),
-        })
+        Self::Expr(Thunk::new(Arc::new(expr), Arc::from([])))
     }
 
     pub fn expr_arc(expr: Arc<Expr>) -> Self {
-        Self::Expr(Thunk {
-            expr,
-            env: Arc::from([]),
-        })
+        Self::Expr(Thunk::new(expr, Arc::from([])))
     }
 
     pub fn singleton_list(value: Value) -> List {
