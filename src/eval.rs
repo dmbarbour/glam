@@ -6,6 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::core::{Builtin, Closure, DeferredValue, Expr, IVar, Key, KeyExpr, List, Thunk, Value};
+use crate::list::ListItem;
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,6 +235,18 @@ fn force_list_thunk(thunk: &Thunk) -> Result<List, EvalError> {
             "lazy list chunk must evaluate to a list or binary value, got {other:?}"
         ))),
     }
+}
+
+fn pop_list_front(list: &List) -> Result<Option<(Value, List)>, EvalError> {
+    Ok(list
+        .try_pop_front(&mut force_list_thunk)?
+        .map(|(item, tail)| {
+            let value = match item {
+                ListItem::Byte(byte) => Value::Number(Number::from_u8(byte)),
+                ListItem::Value(value) => value,
+            };
+            (value, tail)
+        }))
 }
 
 fn eval_apply(function: &Expr, argument: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
@@ -736,10 +749,7 @@ fn compare_lists_ordered(
     name: &str,
 ) -> Result<Ordering, EvalError> {
     loop {
-        match (
-            left.try_pop_front(&mut force_list_thunk)?,
-            right.try_pop_front(&mut force_list_thunk)?,
-        ) {
+        match (pop_list_front(&left)?, pop_list_front(&right)?) {
             (None, None) => return Ok(Ordering::Equal),
             (None, Some(_)) => return Ok(Ordering::Less),
             (Some(_), None) => return Ok(Ordering::Greater),
@@ -800,10 +810,7 @@ fn equal_lists(
     name: &str,
 ) -> Result<bool, EvalError> {
     loop {
-        match (
-            left.try_pop_front(&mut force_list_thunk)?,
-            right.try_pop_front(&mut force_list_thunk)?,
-        ) {
+        match (pop_list_front(&left)?, pop_list_front(&right)?) {
             (None, None) => return Ok(true),
             (None, Some(_)) | (Some(_), None) => return Ok(false),
             (Some((left_head, left_tail)), Some((right_head, right_tail))) => {
@@ -1003,8 +1010,7 @@ fn eval_list_head_builtin(value: &Value) -> Result<Value, EvalError> {
             .first()
             .map(|byte| Value::Number(Number::from_u8(*byte)))
             .ok_or_else(|| EvalError::new("list head builtin requires a non-empty list or binary")),
-        Value::List(list) => list
-            .try_pop_front(&mut force_list_thunk)?
+        Value::List(list) => pop_list_front(&list)?
             .map(|(head, _)| head)
             .ok_or_else(|| EvalError::new("list head builtin requires a non-empty list or binary")),
         _ => Err(EvalError::new(
@@ -1025,7 +1031,7 @@ fn eval_list_tail_builtin(value: &Value) -> Result<Value, EvalError> {
             }
         }
         Value::List(list) => {
-            let Some((_, tail)) = list.try_pop_front(&mut force_list_thunk)? else {
+            let Some((_, tail)) = pop_list_front(&list)? else {
                 return Err(EvalError::new(
                     "list tail builtin requires a non-empty list or binary",
                 ));
@@ -1125,7 +1131,7 @@ fn flat_map_list_effect_results(
     local_env: Arc<[Value]>,
 ) -> List {
     deferred_list("list effect seq", move || {
-        let Some((head, tail)) = results.try_pop_front(&mut force_list_thunk)? else {
+        let Some((head, tail)) = pop_list_front(&results)? else {
             return Ok(List::empty());
         };
         let continuation = eval_value(&continuation)?;
@@ -1140,7 +1146,7 @@ fn flat_map_list_effect_results(
 fn cut_list_effect_results(operation: Value, local_env: Arc<[Value]>) -> List {
     deferred_list("list effect cut", move || {
         let results = lazy_run_list_effect(operation.clone(), local_env.clone());
-        let Some((head, _)) = results.try_pop_front(&mut force_list_thunk)? else {
+        let Some((head, _)) = pop_list_front(&results)? else {
             return Ok(List::empty());
         };
         Ok(List::from_values(vec![head]))
@@ -1150,7 +1156,7 @@ fn cut_list_effect_results(operation: Value, local_env: Arc<[Value]>) -> List {
 fn fix_list_effect_results(operation: Value, handle: IVar, local_env: Arc<[Value]>) -> List {
     deferred_list("list effect fix", move || {
         let results = lazy_run_list_effect(operation.clone(), local_env.clone());
-        let Some((head, tail)) = results.try_pop_front(&mut force_list_thunk)? else {
+        let Some((head, tail)) = pop_list_front(&results)? else {
             handle
                 .set(Value::List(List::empty()))
                 .map_err(|_| EvalError::new("list effect fix initialized twice"))?;

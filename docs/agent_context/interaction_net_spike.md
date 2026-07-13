@@ -2,8 +2,9 @@
 
 ## Template and runtime identity
 
-`core::Lambda` owns one `OnceLock<Arc<InteractionNet>>`. Lowering assigns small
-`FanSite` numbers local to that immutable template. `InteractionNet::instantiate`
+`core::Lambda` owns one `OnceLock<Arc<CoreInteractionNet>>`. `core_net` lowering
+assigns small `FanSite` numbers local to that immutable template.
+`InteractionNet::instantiate`
 allocates one process-global `InstanceId` and qualifies every fan as
 `(InstanceId, FanSite)`, so instantiation does not traverse the graph merely to
 allocate a fresh global ID for each fan.
@@ -13,6 +14,9 @@ Variable use is normalized during lowering:
 - zero uses become `Erase`
 - one use becomes a direct wire
 - multiple uses become a balanced tree of binary `Fan` nodes
+
+`interaction_net` is generic over embedded data and has no dependency on core.
+`core_net` owns `CoreNetData` and the `Expr` lowering adapter.
 
 ## Pairing oracle
 

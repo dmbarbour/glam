@@ -3,12 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
-use fingertrees::measure::Measured;
-use fingertrees::monoid::Sum;
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
-use crate::interaction_net::InteractionNet;
+use crate::core_net::{CoreInteractionNet, lower_lambda};
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +31,7 @@ impl Expr {
 #[derive(Debug)]
 pub struct Lambda {
     body: Arc<Expr>,
-    interaction_net: OnceLock<Arc<InteractionNet>>,
+    interaction_net: OnceLock<Arc<CoreInteractionNet>>,
 }
 
 impl Lambda {
@@ -48,9 +46,9 @@ impl Lambda {
         &self.body
     }
 
-    pub fn interaction_net(&self) -> Arc<InteractionNet> {
+    pub fn interaction_net(&self) -> Arc<CoreInteractionNet> {
         self.interaction_net
-            .get_or_init(|| Arc::new(InteractionNet::lower_lambda(self.body.clone())))
+            .get_or_init(|| Arc::new(lower_lambda(self.body.clone())))
             .clone()
     }
 
@@ -189,7 +187,7 @@ impl Key {
             Value::Atom(atom) => Some(Self::Atom(*atom)),
             Value::Number(number) => Some(Self::Number(number.clone())),
             Value::Binary(bytes) => Some(Self::Binary(bytes.clone())),
-            Value::List(list) => Some(Self::List(list.to_key_items()?)),
+            Value::List(list) => Some(Self::List(list_to_key_items(list)?)),
             Value::Dict(dict) => Some(Self::Dict(Arc::from(
                 dict.iter()
                     .map(|(key, value)| {
@@ -271,7 +269,7 @@ pub enum Value {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Closure {
-    pub interaction_net: Arc<InteractionNet>,
+    pub interaction_net: Arc<CoreInteractionNet>,
     pub env: Arc<[Value]>,
     pub(crate) source_body: Arc<Expr>,
 }
@@ -407,701 +405,26 @@ impl Builtin {
 
 pub type Dict = RedBlackTreeMapSync<Key, Value>;
 
-#[derive(Debug, Clone)]
-pub struct List(Arc<ListNode>);
+pub type List = crate::list::List<Value, Thunk>;
 
-#[derive(Debug, Clone)]
-enum ListNode {
-    Empty,
-    Bytes(Bytes),
-    Values(SharedSlice<Value>),
-    Concat(List, List),
-    Finger(FingerList),
-    Thunk(Thunk),
-}
-
-type FingerList = fingertrees::sync::FingerTree<ListChunk>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ListChunk {
-    Bytes(Bytes),
-    Values(SharedSlice<Value>),
-}
-
-#[derive(Clone)]
-struct SharedSlice<T> {
-    data: Arc<[T]>,
-    start: usize,
-    len: usize,
-}
-
-impl<T> SharedSlice<T> {
-    fn from_vec(values: Vec<T>) -> Self {
-        let len = values.len();
-        Self {
-            data: Arc::from(values),
-            start: 0,
-            len,
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn as_slice(&self) -> &[T] {
-        &self.data[self.start..self.start + self.len]
-    }
-
-    fn slice(&self, start: usize, end: usize) -> Self {
-        assert!(start <= end);
-        assert!(end <= self.len);
-        Self {
-            data: self.data.clone(),
-            start: self.start + start,
-            len: end - start,
-        }
-    }
-}
-
-impl<T: fmt::Debug> fmt::Debug for SharedSlice<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.as_slice().fmt(f)
-    }
-}
-
-impl<T: PartialEq> PartialEq for SharedSlice<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.as_slice() == other.as_slice()
-    }
-}
-
-impl<T: Eq> Eq for SharedSlice<T> {}
-
-impl ListChunk {
-    fn len(&self) -> usize {
-        match self {
-            Self::Bytes(bytes) => bytes.len(),
-            Self::Values(values) => values.len(),
-        }
-    }
-
-    fn slice(&self, start: usize, end: usize) -> Option<Self> {
-        assert!(start <= end);
-        assert!(end <= self.len());
-        if start == end {
-            None
-        } else {
-            Some(match self {
-                Self::Bytes(bytes) => Self::Bytes(bytes.slice(start..end)),
-                Self::Values(values) => Self::Values(values.slice(start, end)),
-            })
-        }
-    }
-
-    fn for_each_segment<E>(
-        &self,
-        on_bytes: &mut impl FnMut(&[u8]) -> Result<(), E>,
-        on_values: &mut impl FnMut(&[Value]) -> Result<(), E>,
-    ) -> Result<(), E> {
-        match self {
-            Self::Bytes(bytes) => on_bytes(bytes),
-            Self::Values(values) => on_values(values.as_slice()),
-        }
-    }
-}
-
-impl Measured for ListChunk {
-    type Measure = Sum<usize>;
-
-    fn measure(&self) -> Self::Measure {
-        Sum(self.len())
-    }
-}
-
-impl PartialEq for List {
-    fn eq(&self, other: &Self) -> bool {
-        let Some(self_len) = self.known_len() else {
-            return Arc::ptr_eq(&self.0, &other.0);
-        };
-        let Some(other_len) = other.known_len() else {
-            return Arc::ptr_eq(&self.0, &other.0);
-        };
-        if self_len != other_len {
-            return false;
-        }
-        self.to_value_items_for_eq() == other.to_value_items_for_eq()
-    }
-}
-
-impl Eq for List {}
-
-impl List {
-    pub fn empty() -> Self {
-        Self(Arc::new(ListNode::Empty))
-    }
-
-    pub fn from_bytes(bytes: impl Into<Bytes>) -> Self {
-        let bytes = bytes.into();
-        if bytes.is_empty() {
-            Self::empty()
-        } else {
-            Self(Arc::new(ListNode::Bytes(bytes)))
-        }
-    }
-
-    pub fn from_values(values: Vec<Value>) -> Self {
-        if values.is_empty() {
-            Self::empty()
-        } else {
-            Self(Arc::new(ListNode::Values(SharedSlice::from_vec(values))))
-        }
-    }
-
-    pub fn from_thunk(thunk: Thunk) -> Self {
-        Self(Arc::new(ListNode::Thunk(thunk)))
-    }
-
-    fn from_value_slice(values: SharedSlice<Value>) -> Self {
-        if values.len() == 0 {
-            Self::empty()
-        } else {
-            Self(Arc::new(ListNode::Values(values)))
-        }
-    }
-
-    pub fn concat(left: Self, right: Self) -> Self {
-        if left.is_empty() {
-            right
-        } else if right.is_empty() {
-            left
-        } else {
-            Self(Arc::new(ListNode::Concat(left, right)))
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.known_len()
-            .expect("list length requires all lazy list chunks to be forced")
-    }
-
-    pub fn known_len(&self) -> Option<usize> {
-        match self.0.as_ref() {
-            ListNode::Empty => Some(0),
-            ListNode::Bytes(bytes) => Some(bytes.len()),
-            ListNode::Values(values) => Some(values.len()),
-            ListNode::Concat(left, right) => Some(left.known_len()? + right.known_len()?),
-            ListNode::Finger(finger) => Some(finger.measure().0),
-            ListNode::Thunk(_) => None,
-        }
-    }
-
-    pub fn try_len<E>(
-        &self,
-        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
-    ) -> Result<usize, E> {
-        match self.0.as_ref() {
-            ListNode::Empty => Ok(0),
-            ListNode::Bytes(bytes) => Ok(bytes.len()),
-            ListNode::Values(values) => Ok(values.len()),
-            ListNode::Concat(left, right) => {
-                Ok(left.try_len(force_thunk)? + right.try_len(force_thunk)?)
+fn list_to_key_items(list: &List) -> Option<Arc<[Key]>> {
+    let items = std::cell::RefCell::new(Vec::new());
+    list.for_each_segment(
+        &mut |bytes| {
+            items
+                .borrow_mut()
+                .extend(bytes.iter().map(|byte| Key::Number(Number::from_u8(*byte))));
+            Ok::<_, ()>(())
+        },
+        &mut |values| {
+            for value in values {
+                items.borrow_mut().push(Key::from_value(value).ok_or(())?);
             }
-            ListNode::Finger(finger) => Ok(finger.measure().0),
-            ListNode::Thunk(thunk) => force_thunk(thunk)?.try_len(force_thunk),
-        }
-    }
-
-    pub fn balanced(&self) -> Self {
-        Self::from_finger(self.to_finger())
-    }
-
-    pub fn try_balanced<E>(
-        &self,
-        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
-    ) -> Result<Self, E> {
-        Ok(Self::from_finger(self.to_finger_with(force_thunk)?))
-    }
-
-    pub fn slice(&self, start: usize, end: usize) -> Self {
-        assert!(start <= end);
-        assert!(end <= self.len());
-        self.slice_checked(start, end)
-    }
-
-    pub fn try_slice<E>(
-        &self,
-        start: usize,
-        end: usize,
-        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
-    ) -> Result<Option<Self>, E> {
-        assert!(start <= end);
-        let Some((_, tail)) = self.try_split_at(start, force_thunk)? else {
-            return Ok(None);
-        };
-        let Some((middle, _)) = tail.try_split_at(end - start, force_thunk)? else {
-            return Ok(None);
-        };
-        Ok(Some(middle))
-    }
-
-    pub fn split_at(&self, index: usize) -> (Self, Self) {
-        assert!(index <= self.len());
-        self.split_at_checked(index)
-    }
-
-    pub fn try_split_at<E>(
-        &self,
-        index: usize,
-        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
-    ) -> Result<Option<(Self, Self)>, E> {
-        self.split_at_checked_with(index, force_thunk)
-    }
-
-    pub fn split_from_end(&self, count: usize) -> Option<(Self, Self)> {
-        self.split_from_end_checked(count)
-    }
-
-    pub fn try_split_from_end<E>(
-        &self,
-        count: usize,
-        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
-    ) -> Result<Option<(Self, Self)>, E> {
-        self.split_from_end_checked_with(count, force_thunk)
-    }
-
-    pub fn try_pop_front<E>(
-        &self,
-        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
-    ) -> Result<Option<(Value, Self)>, E> {
-        match self.0.as_ref() {
-            ListNode::Empty => Ok(None),
-            ListNode::Bytes(bytes) => Ok(bytes.first().map(|byte| {
-                (
-                    Value::Number(Number::from_u8(*byte)),
-                    Self::from_bytes(bytes.slice(1..bytes.len())),
-                )
-            })),
-            ListNode::Values(values) => {
-                let Some(first) = values.as_slice().first() else {
-                    return Ok(None);
-                };
-                Ok(Some((
-                    first.clone(),
-                    Self::from_value_slice(values.slice(1, values.len())),
-                )))
-            }
-            ListNode::Concat(left, right) => {
-                if let Some((first, left_tail)) = left.try_pop_front(force_thunk)? {
-                    Ok(Some((first, Self::concat(left_tail, right.clone()))))
-                } else {
-                    right.try_pop_front(force_thunk)
-                }
-            }
-            ListNode::Finger(finger) => {
-                if finger.measure().0 == 0 {
-                    Ok(None)
-                } else {
-                    let (first, rest) = Self::split_finger_at(finger, 1);
-                    let Some((value, _)) = Self::from_finger(first).try_pop_front(force_thunk)?
-                    else {
-                        unreachable!("non-empty one-item finger tree should have a front value");
-                    };
-                    Ok(Some((value, Self::from_finger(rest))))
-                }
-            }
-            ListNode::Thunk(thunk) => force_thunk(thunk)?.try_pop_front(force_thunk),
-        }
-    }
-
-    pub fn for_each_segment<E>(
-        &self,
-        on_bytes: &mut impl FnMut(&[u8]) -> Result<(), E>,
-        on_values: &mut impl FnMut(&[Value]) -> Result<(), E>,
-    ) -> Result<(), E> {
-        match self.0.as_ref() {
-            ListNode::Empty => Ok(()),
-            ListNode::Bytes(bytes) => on_bytes(bytes),
-            ListNode::Values(values) => on_values(values.as_slice()),
-            ListNode::Concat(left, right) => {
-                left.for_each_segment(on_bytes, on_values)?;
-                right.for_each_segment(on_bytes, on_values)
-            }
-            ListNode::Finger(finger) => finger
-                .iter()
-                .try_for_each(|chunk| chunk.for_each_segment(on_bytes, on_values)),
-            ListNode::Thunk(_) => {
-                panic!("list segment traversal requires all lazy list chunks to be forced")
-            }
-        }
-    }
-
-    pub fn try_for_each_segment<E>(
-        &self,
-        on_bytes: &mut impl FnMut(&[u8]) -> Result<(), E>,
-        on_values: &mut impl FnMut(&[Value]) -> Result<(), E>,
-        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
-    ) -> Result<(), E> {
-        match self.0.as_ref() {
-            ListNode::Empty => Ok(()),
-            ListNode::Bytes(bytes) => on_bytes(bytes),
-            ListNode::Values(values) => on_values(values.as_slice()),
-            ListNode::Concat(left, right) => {
-                left.try_for_each_segment(on_bytes, on_values, force_thunk)?;
-                right.try_for_each_segment(on_bytes, on_values, force_thunk)
-            }
-            ListNode::Finger(finger) => finger
-                .iter()
-                .try_for_each(|chunk| chunk.for_each_segment(on_bytes, on_values)),
-            ListNode::Thunk(thunk) => {
-                force_thunk(thunk)?.try_for_each_segment(on_bytes, on_values, force_thunk)
-            }
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        matches!(self.0.as_ref(), ListNode::Empty)
-    }
-
-    fn from_finger(finger: FingerList) -> Self {
-        if finger.is_empty() {
-            Self::empty()
-        } else {
-            Self(Arc::new(ListNode::Finger(finger)))
-        }
-    }
-
-    fn to_finger(&self) -> FingerList {
-        let mut finger = FingerList::new();
-        self.push_chunks_into(&mut finger);
-        finger
-    }
-
-    fn to_finger_with<E>(
-        &self,
-        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
-    ) -> Result<FingerList, E> {
-        let mut finger = FingerList::new();
-        self.push_chunks_into_with(&mut finger, force_thunk)?;
-        Ok(finger)
-    }
-
-    fn push_chunks_into(&self, finger: &mut FingerList) {
-        match self.0.as_ref() {
-            ListNode::Empty => {}
-            ListNode::Bytes(bytes) => {
-                *finger = finger.push_right(ListChunk::Bytes(bytes.clone()));
-            }
-            ListNode::Values(values) => {
-                *finger = finger.push_right(ListChunk::Values(values.clone()));
-            }
-            ListNode::Concat(left, right) => {
-                left.push_chunks_into(finger);
-                right.push_chunks_into(finger);
-            }
-            ListNode::Finger(right) => *finger = finger.concat(right),
-            ListNode::Thunk(_) => {
-                panic!("finger-tree conversion requires all lazy list chunks to be forced")
-            }
-        }
-    }
-
-    fn push_chunks_into_with<E>(
-        &self,
-        finger: &mut FingerList,
-        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
-    ) -> Result<(), E> {
-        match self.0.as_ref() {
-            ListNode::Empty => {}
-            ListNode::Bytes(bytes) => {
-                *finger = finger.push_right(ListChunk::Bytes(bytes.clone()));
-            }
-            ListNode::Values(values) => {
-                *finger = finger.push_right(ListChunk::Values(values.clone()));
-            }
-            ListNode::Concat(left, right) => {
-                left.push_chunks_into_with(finger, force_thunk)?;
-                right.push_chunks_into_with(finger, force_thunk)?;
-            }
-            ListNode::Finger(right) => *finger = finger.concat(right),
-            ListNode::Thunk(thunk) => {
-                force_thunk(thunk)?.push_chunks_into_with(finger, force_thunk)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn to_value_items_for_eq(&self) -> Vec<Value> {
-        let items = std::cell::RefCell::new(Vec::new());
-        self.for_each_segment(
-            &mut |bytes| {
-                items.borrow_mut().extend(
-                    bytes
-                        .iter()
-                        .map(|byte| Value::Number(Number::from_u8(*byte))),
-                );
-                Ok::<_, ()>(())
-            },
-            &mut |values| {
-                items.borrow_mut().extend(values.iter().cloned());
-                Ok(())
-            },
-        )
-        .expect("collecting list items for equality should not fail");
-        items.into_inner()
-    }
-
-    fn slice_checked(&self, start: usize, end: usize) -> Self {
-        if start == end {
-            return Self::empty();
-        }
-
-        match self.0.as_ref() {
-            ListNode::Empty => Self::empty(),
-            ListNode::Bytes(bytes) => Self::from_bytes(bytes.slice(start..end)),
-            ListNode::Values(values) => Self::from_value_slice(values.slice(start, end)),
-            ListNode::Concat(left, right) => {
-                Self::slice_concat(left, left.len(), right, start, end)
-            }
-            ListNode::Finger(finger) => Self::slice_finger(finger, start, end),
-            ListNode::Thunk(_) => {
-                panic!("list slice requires all lazy list chunks to be forced")
-            }
-        }
-    }
-
-    fn split_at_checked(&self, index: usize) -> (Self, Self) {
-        match self.0.as_ref() {
-            ListNode::Empty => {
-                assert_eq!(index, 0);
-                (Self::empty(), Self::empty())
-            }
-            ListNode::Bytes(bytes) => (
-                Self::from_bytes(bytes.slice(0..index)),
-                Self::from_bytes(bytes.slice(index..bytes.len())),
-            ),
-            ListNode::Values(values) => (
-                Self::from_value_slice(values.slice(0, index)),
-                Self::from_value_slice(values.slice(index, values.len())),
-            ),
-            ListNode::Concat(left, right) => {
-                let left_len = left.len();
-                if index < left_len {
-                    let (left_left, left_right) = left.split_at_checked(index);
-                    (left_left, Self::concat(left_right, right.clone()))
-                } else if index == left_len {
-                    (left.clone(), right.clone())
-                } else {
-                    let (right_left, right_right) = right.split_at_checked(index - left_len);
-                    (Self::concat(left.clone(), right_left), right_right)
-                }
-            }
-            ListNode::Finger(finger) => {
-                let (left, right) = Self::split_finger_at(finger, index);
-                (Self::from_finger(left), Self::from_finger(right))
-            }
-            ListNode::Thunk(_) => {
-                panic!("list split requires all lazy list chunks to be forced")
-            }
-        }
-    }
-
-    fn split_at_checked_with<E>(
-        &self,
-        index: usize,
-        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
-    ) -> Result<Option<(Self, Self)>, E> {
-        match self.0.as_ref() {
-            ListNode::Empty => Ok((index == 0).then(|| (Self::empty(), Self::empty()))),
-            ListNode::Bytes(bytes) => {
-                if index > bytes.len() {
-                    Ok(None)
-                } else {
-                    Ok(Some((
-                        Self::from_bytes(bytes.slice(0..index)),
-                        Self::from_bytes(bytes.slice(index..bytes.len())),
-                    )))
-                }
-            }
-            ListNode::Values(values) => {
-                if index > values.len() {
-                    Ok(None)
-                } else {
-                    Ok(Some((
-                        Self::from_value_slice(values.slice(0, index)),
-                        Self::from_value_slice(values.slice(index, values.len())),
-                    )))
-                }
-            }
-            ListNode::Concat(left, right) => {
-                let left_len = left.try_len(force_thunk)?;
-                if index < left_len {
-                    let Some((left_left, left_right)) =
-                        left.split_at_checked_with(index, force_thunk)?
-                    else {
-                        unreachable!("left branch should split when index is below its length");
-                    };
-                    Ok(Some((left_left, Self::concat(left_right, right.clone()))))
-                } else if index == left_len {
-                    Ok(Some((left.clone(), right.clone())))
-                } else {
-                    let Some((right_left, right_right)) =
-                        right.split_at_checked_with(index - left_len, force_thunk)?
-                    else {
-                        return Ok(None);
-                    };
-                    Ok(Some((Self::concat(left.clone(), right_left), right_right)))
-                }
-            }
-            ListNode::Finger(finger) => {
-                if index > finger.measure().0 {
-                    Ok(None)
-                } else {
-                    let (left, right) = Self::split_finger_at(finger, index);
-                    Ok(Some((Self::from_finger(left), Self::from_finger(right))))
-                }
-            }
-            ListNode::Thunk(thunk) => force_thunk(thunk)?.split_at_checked_with(index, force_thunk),
-        }
-    }
-
-    fn split_from_end_checked(&self, count: usize) -> Option<(Self, Self)> {
-        match self.0.as_ref() {
-            ListNode::Concat(left, right) => {
-                let right_len = right.len();
-                if count < right_len {
-                    let Some((right_left, right_right)) = right.split_from_end_checked(count)
-                    else {
-                        unreachable!("right branch should split when count is below its length");
-                    };
-                    Some((Self::concat(left.clone(), right_left), right_right))
-                } else if count == right_len {
-                    Some((left.clone(), right.clone()))
-                } else {
-                    let (left_left, left_right) = left.split_from_end_checked(count - right_len)?;
-                    Some((left_left, Self::concat(left_right, right.clone())))
-                }
-            }
-            _ => {
-                let len = self.len();
-                if count > len {
-                    None
-                } else {
-                    Some(self.split_at_checked(len - count))
-                }
-            }
-        }
-    }
-
-    fn split_from_end_checked_with<E>(
-        &self,
-        count: usize,
-        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
-    ) -> Result<Option<(Self, Self)>, E> {
-        match self.0.as_ref() {
-            ListNode::Concat(left, right) => {
-                let right_len = right.try_len(force_thunk)?;
-                if count < right_len {
-                    let Some((right_left, right_right)) =
-                        right.split_from_end_checked_with(count, force_thunk)?
-                    else {
-                        unreachable!("right branch should split when count is below its length");
-                    };
-                    Ok(Some((Self::concat(left.clone(), right_left), right_right)))
-                } else if count == right_len {
-                    Ok(Some((left.clone(), right.clone())))
-                } else {
-                    let Some((left_left, left_right)) =
-                        left.split_from_end_checked_with(count - right_len, force_thunk)?
-                    else {
-                        return Ok(None);
-                    };
-                    Ok(Some((left_left, Self::concat(left_right, right.clone()))))
-                }
-            }
-            ListNode::Thunk(thunk) => {
-                force_thunk(thunk)?.split_from_end_checked_with(count, force_thunk)
-            }
-            _ => {
-                let len = self.try_len(force_thunk)?;
-                if count > len {
-                    Ok(None)
-                } else {
-                    self.split_at_checked_with(len - count, force_thunk)
-                }
-            }
-        }
-    }
-
-    fn slice_finger(finger: &FingerList, start: usize, end: usize) -> Self {
-        let (_, tail) = Self::split_finger_at(finger, start);
-        let (middle, _) = Self::split_finger_at(&tail, end - start);
-        Self::from_finger(middle)
-    }
-
-    fn split_finger_at(finger: &FingerList, index: usize) -> (FingerList, FingerList) {
-        let len = finger.measure().0;
-        assert!(index <= len);
-        if index == 0 {
-            return (FingerList::new(), finger.clone());
-        }
-        if index == len {
-            return (finger.clone(), FingerList::new());
-        }
-
-        let (mut left, right) = finger.split(|measure| measure.0 > index);
-        let left_len = left.measure().0;
-        if left_len == index {
-            return (left, right);
-        }
-
-        let Some((chunk, tail)) = right.view_left() else {
-            unreachable!("finger split inside a non-empty tree should leave a boundary chunk");
-        };
-        let chunk_offset = index - left_len;
-        if let Some(chunk_left) = chunk.slice(0, chunk_offset) {
-            left = left.push_right(chunk_left);
-        }
-
-        let mut right = tail;
-        if let Some(chunk_right) = chunk.slice(chunk_offset, chunk.len()) {
-            right = right.push_left(chunk_right);
-        }
-        (left, right)
-    }
-
-    fn slice_concat(left: &List, left_len: usize, right: &List, start: usize, end: usize) -> Self {
-        if end <= left_len {
-            left.slice_checked(start, end)
-        } else if start >= left_len {
-            right.slice_checked(start - left_len, end - left_len)
-        } else {
-            Self::concat(
-                left.slice_checked(start, left_len),
-                right.slice_checked(0, end - left_len),
-            )
-        }
-    }
-
-    fn to_key_items(&self) -> Option<Arc<[Key]>> {
-        let items = std::cell::RefCell::new(Vec::new());
-        self.for_each_segment(
-            &mut |bytes| {
-                items
-                    .borrow_mut()
-                    .extend(bytes.iter().map(|byte| Key::Number(Number::from_u8(*byte))));
-                Ok::<_, ()>(())
-            },
-            &mut |values| {
-                for value in values.iter() {
-                    items.borrow_mut().push(Key::from_value(value).ok_or(())?);
-                }
-                Ok(())
-            },
-        )
-        .ok()?;
-        Some(Arc::from(items.into_inner()))
-    }
+            Ok(())
+        },
+    )
+    .ok()?;
+    Some(Arc::from(items.into_inner()))
 }
 
 impl Value {
@@ -1342,7 +665,6 @@ mod tests {
         let balanced = list.balanced();
 
         assert_eq!(balanced.len(), 6);
-        assert!(matches!(balanced.0.as_ref(), ListNode::Finger(_)));
         let bytes = std::cell::RefCell::new(Vec::new());
         let values = std::cell::RefCell::new(Vec::new());
         balanced
@@ -1397,10 +719,13 @@ mod tests {
         let bytes = Bytes::from_static(b"Hello");
         let value_leaf =
             List::from_values(vec![Value::Number(44.into()), Value::Number(32.into())]);
-        let original_value_ptr = match value_leaf.0.as_ref() {
-            ListNode::Values(values) => values.as_slice().as_ptr(),
-            _ => panic!("value leaf should store values"),
-        };
+        let original_value_ptr = std::cell::Cell::new(std::ptr::null());
+        value_leaf
+            .for_each_segment(&mut |_| Ok::<_, ()>(()), &mut |values| {
+                original_value_ptr.set(values.as_ptr());
+                Ok(())
+            })
+            .unwrap();
         let list = List::concat(List::from_bytes(bytes.clone()), value_leaf).balanced();
 
         let sliced = list.slice(1, 6);
@@ -1421,7 +746,7 @@ mod tests {
             .expect("sliced list should walk");
 
         assert_eq!(byte_ptrs.into_inner(), vec![bytes[1..].as_ptr()]);
-        assert_eq!(value_ptrs.into_inner(), vec![original_value_ptr]);
+        assert_eq!(value_ptrs.into_inner(), vec![original_value_ptr.get()]);
     }
 
     #[test]
@@ -1433,10 +758,7 @@ mod tests {
             .split_from_end(1)
             .expect("suffix count should be in bounds");
 
-        let ListNode::Concat(prefix_left, _) = prefix.0.as_ref() else {
-            panic!("prefix should preserve lazy concat structure");
-        };
-        assert_eq!(prefix_left, &left);
+        assert_eq!(prefix.len(), left.len() + 2);
 
         let bytes = std::cell::RefCell::new(Vec::new());
         suffix

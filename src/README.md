@@ -13,9 +13,12 @@
 - `g_syntax.rs` parses file.g through compile-time context, sourcing bytes and reporting diagnostics there
 - `g_syntax.rs` lowers AST to a module lambda body expression, plus lowering diagnostics, through compile-time context and a core-facing interface
 - `main.rs` applies one temporary top-level fixpoint to the anonymous assembly module
-- `interaction_net.rs` lowers each reached core lambda body once to immutable,
-  shared `Bind`/binary-`Fan`/`Erase`/`Data` port-and-wire topology, discovers
-  active pairs, and reconstructs mutable topology for interaction
+- `core_net.rs` lowers each reached core lambda body once into an immutable,
+  shared interaction-net template carrying `CoreNetData`
+- `interaction_net.rs` provides generic `InteractionNet<Data>` topology,
+  checked construction, active-pair discovery, and mutable runtime reduction
+- `list.rs` provides compact byte leaves, generic value leaves, finger-tree
+  ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
 - `eval.rs` retains the call-by-need compatibility evaluator while core
   `bind-data` operations migrate to demand-driven net reduction
 - `main` expects binary `asm.result`, writes to `stdout`

@@ -1,17 +1,14 @@
-//! Port-and-wire interaction nets and lambda lowering.
+//! Generic port-and-wire interaction-net topology and reduction.
 //!
-//! Lambda lowering produces an immutable template with template-local fan
-//! sites. Instantiation allocates one process-global namespace for the whole
-//! template, avoiding a traversal that freshens every fan. Runtime fan
-//! identities also carry their duplication history behind an explicit oracle
-//! boundary; this is the direct-history stepping stone toward Lamping's local
+//! Embedded data is supplied by the client. Immutable templates use local fan
+//! sites; instantiation allocates one process-global namespace for the whole
+//! graph. Runtime fan identities carry duplication history behind an explicit
+//! oracle boundary, the direct-history stepping stone toward Lamping's local
 //! bracket/croissant oracle.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-use crate::core::{DeferredValue, Expr, IVar, Key, KeyExpr, Lambda, Value};
 
 pub type NodeId = usize;
 
@@ -108,39 +105,20 @@ impl Port {
     }
 }
 
+/// Immutable nodes in a reusable interaction-net template.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DataKey {
-    Key(Key),
-    Index,
-    PathIndex,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EmbeddedData {
-    Value(Value),
-    Lambda(Arc<Lambda>),
-    Capture(usize),
-    List(usize),
-    Access(Arc<[DataKey]>),
-    Deferred(Arc<DeferredValue>),
-    Future(IVar),
-    Error(Arc<str>),
-}
-
-/// Immutable nodes in a lowered lambda template.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Node {
+pub enum Node<D> {
     /// Ports: `[ap*, arg, result]`.
     Bind,
     /// Binary Lamping-style fan. Ports: `[input*, left, right]`.
     Fan { site: FanSite },
     /// Eraser for a value used zero times. Port: `[input*]`.
     Erase,
-    /// Embedded data. Port: `[data*]`.
-    Data(EmbeddedData),
+    /// Client-defined embedded data. Port: `[data*]`.
+    Data(D),
 }
 
-impl Node {
+impl<D> Node<D> {
     fn port_count(&self) -> u32 {
         match self {
             Self::Bind | Self::Fan { .. } => 3,
@@ -149,16 +127,15 @@ impl Node {
     }
 }
 
-/// Runtime nodes qualify template-local fan sites with one instance namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeNode {
+pub enum RuntimeNode<D> {
     Bind,
     Fan { identity: FanIdentity },
     Erase,
-    Data(EmbeddedData),
+    Data(D),
 }
 
-impl RuntimeNode {
+impl<D> RuntimeNode<D> {
     fn port_count(&self) -> u32 {
         match self {
             Self::Bind | Self::Fan { .. } => 3,
@@ -180,19 +157,15 @@ pub struct ActivePair {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InteractionNet {
-    nodes: Arc<[Node]>,
+pub struct InteractionNet<D> {
+    nodes: Arc<[Node<D>]>,
     wires: Arc<[Wire]>,
     exposed: Port,
     active_pairs: Arc<[ActivePair]>,
 }
 
-impl InteractionNet {
-    pub fn lower_lambda(body: Arc<Expr>) -> Self {
-        Lowerer::lower_lambda(body)
-    }
-
-    pub fn nodes(&self) -> &[Node] {
+impl<D> InteractionNet<D> {
+    pub fn nodes(&self) -> &[Node<D>] {
         &self.nodes
     }
 
@@ -207,156 +180,71 @@ impl InteractionNet {
     pub fn active_pairs(&self) -> &[ActivePair] {
         &self.active_pairs
     }
+}
 
-    pub fn instantiate(&self) -> RuntimeNet {
+impl<D: Clone> InteractionNet<D> {
+    pub fn instantiate(&self) -> RuntimeNet<D> {
         RuntimeNet::new(self, InstanceId::fresh())
     }
 }
 
-struct Lowerer {
-    nodes: Vec<Node>,
+/// Checked construction of a reusable net template.
+pub struct NetBuilder<D> {
+    nodes: Vec<Node<D>>,
     wires: Vec<Wire>,
-    local_uses: Vec<Vec<Port>>,
     next_fan_site: u32,
 }
 
-impl Lowerer {
-    fn lower_lambda(body: Arc<Expr>) -> InteractionNet {
-        let mut lowerer = Self {
+impl<D> Default for NetBuilder<D> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<D> NetBuilder<D> {
+    pub fn new() -> Self {
+        Self {
             nodes: Vec::new(),
             wires: Vec::new(),
-            local_uses: Vec::new(),
             next_fan_site: 0,
-        };
-        let root = lowerer.push(Node::Bind);
-        lowerer.compile_into(&body, Port::auxiliary(root, 2));
-        lowerer.close_locals(root);
-        let exposed = Port::principal(root);
-        lowerer.validate(exposed);
-        let active_pairs = lowerer.find_active_pairs();
-
-        InteractionNet {
-            nodes: Arc::from(lowerer.nodes),
-            wires: Arc::from(lowerer.wires),
-            exposed,
-            active_pairs: Arc::from(active_pairs),
         }
     }
 
-    fn push(&mut self, node: Node) -> NodeId {
+    pub fn push(&mut self, node: Node<D>) -> NodeId {
         let id = self.nodes.len();
         self.nodes.push(node);
         id
     }
 
-    fn fresh_fan(&mut self) -> NodeId {
+    pub fn push_fan(&mut self) -> NodeId {
         let site = FanSite(self.next_fan_site);
         self.next_fan_site = self
             .next_fan_site
             .checked_add(1)
-            .expect("too many fan sites in one lambda template");
+            .expect("too many fan sites in one interaction-net template");
         self.push(Node::Fan { site })
     }
 
-    fn wire(&mut self, left: Port, right: Port) {
+    pub fn wire(&mut self, left: Port, right: Port) {
         self.wires.push(Wire { left, right });
     }
 
-    fn compile_into(&mut self, expr: &Expr, target: Port) {
-        match expr {
-            Expr::Value(value) => self.data_into(EmbeddedData::Value(value.clone()), target),
-            Expr::List(items) => {
-                let args = items.iter().map(Arc::as_ref).collect::<Vec<_>>();
-                self.data_application_into(EmbeddedData::List(items.len()), &args, target);
-            }
-            Expr::Apply(function, argument) => {
-                let bind = self.push(Node::Bind);
-                self.wire(Port::auxiliary(bind, 2), target);
-                self.compile_into(function, Port::principal(bind));
-                self.compile_into(argument, Port::auxiliary(bind, 1));
-            }
-            Expr::Lambda(lambda) => self.data_into(EmbeddedData::Lambda(lambda.clone()), target),
-            Expr::Local(index) => {
-                if self.local_uses.len() <= *index {
-                    self.local_uses.resize_with(index + 1, Vec::new);
-                }
-                self.local_uses[*index].push(target);
-            }
-            Expr::Access(base, path) => {
-                let mut args = vec![base.as_ref()];
-                let keys = path
-                    .iter()
-                    .map(|key| match key {
-                        KeyExpr::Key(key) => DataKey::Key(key.clone()),
-                        KeyExpr::Index(expr) => {
-                            args.push(expr);
-                            DataKey::Index
-                        }
-                        KeyExpr::PathIndex(expr) => {
-                            args.push(expr);
-                            DataKey::PathIndex
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                self.data_application_into(EmbeddedData::Access(Arc::from(keys)), &args, target);
-            }
-            Expr::Deferred(value) => self.data_into(EmbeddedData::Deferred(value.clone()), target),
-            Expr::Future(value) => self.data_into(EmbeddedData::Future(value.clone()), target),
-            Expr::Error(message) => self.data_into(EmbeddedData::Error(message.clone()), target),
-        }
-    }
-
-    fn data_into(&mut self, data: EmbeddedData, target: Port) {
-        let node = self.push(Node::Data(data));
-        self.wire(Port::principal(node), target);
-    }
-
-    fn data_application_into(&mut self, data: EmbeddedData, args: &[&Expr], target: Port) {
-        if args.is_empty() {
-            self.data_into(data, target);
-            return;
-        }
-
-        let function = self.push(Node::Data(data));
-        let mut output = Port::principal(function);
-        for argument in args {
-            let bind = self.push(Node::Bind);
-            self.wire(output, Port::principal(bind));
-            self.compile_into(argument, Port::auxiliary(bind, 1));
-            output = Port::auxiliary(bind, 2);
-        }
-        self.wire(output, target);
-    }
-
-    fn close_locals(&mut self, root: NodeId) {
-        let uses = std::mem::take(&mut self.local_uses);
-        let max_index = uses.len().max(1);
-        for index in 0..max_index {
-            let targets = uses.get(index).map(Vec::as_slice).unwrap_or_default();
-            let source = if index == 0 {
-                Port::auxiliary(root, 1)
-            } else {
-                let capture = self.push(Node::Data(EmbeddedData::Capture(index - 1)));
-                Port::principal(capture)
-            };
-            self.distribute(source, targets);
-        }
-    }
-
-    fn distribute(&mut self, source: Port, targets: &[Port]) {
-        match targets {
-            [] => {
-                let erase = self.push(Node::Erase);
-                self.wire(source, Port::principal(erase));
-            }
-            [target] => self.wire(source, *target),
-            _ => {
-                let fan = self.fresh_fan();
-                self.wire(source, Port::principal(fan));
-                let middle = targets.len() / 2;
-                self.distribute(Port::auxiliary(fan, 1), &targets[..middle]);
-                self.distribute(Port::auxiliary(fan, 2), &targets[middle..]);
-            }
+    pub fn finish(self, exposed: Port) -> InteractionNet<D> {
+        self.validate(exposed);
+        let active_pairs = self
+            .wires
+            .iter()
+            .filter(|wire| wire.left.is_principal() && wire.right.is_principal())
+            .map(|wire| ActivePair {
+                left: wire.left.node,
+                right: wire.right.node,
+            })
+            .collect::<Vec<_>>();
+        InteractionNet {
+            nodes: Arc::from(self.nodes),
+            wires: Arc::from(self.wires),
+            exposed,
+            active_pairs: Arc::from(active_pairs),
         }
     }
 
@@ -391,17 +279,6 @@ impl Lowerer {
                 );
             }
         }
-    }
-
-    fn find_active_pairs(&self) -> Vec<ActivePair> {
-        self.wires
-            .iter()
-            .filter(|wire| wire.left.is_principal() && wire.right.is_principal())
-            .map(|wire| ActivePair {
-                left: wire.left.node,
-                right: wire.right.node,
-            })
-            .collect()
     }
 }
 
@@ -453,15 +330,15 @@ pub enum Reduction {
     Stuck,
 }
 
-pub struct RuntimeNet {
+pub struct RuntimeNet<D> {
     instance: InstanceId,
-    nodes: Vec<Option<RuntimeNode>>,
+    nodes: Vec<Option<RuntimeNode<D>>>,
     links: Vec<Vec<Option<Port>>>,
     active: VecDeque<ActivePair>,
 }
 
-impl RuntimeNet {
-    fn new(net: &InteractionNet, instance: InstanceId) -> Self {
+impl<D: Clone> RuntimeNet<D> {
+    fn new(net: &InteractionNet<D>, instance: InstanceId) -> Self {
         let nodes = net
             .nodes
             .iter()
@@ -510,7 +387,7 @@ impl RuntimeNet {
             .collect()
     }
 
-    pub fn node(&self, id: NodeId) -> Option<&RuntimeNode> {
+    pub fn node(&self, id: NodeId) -> Option<&RuntimeNode<D>> {
         self.nodes.get(id).and_then(Option::as_ref)
     }
 
@@ -713,7 +590,7 @@ impl RuntimeNet {
             .collect()
     }
 
-    fn add_node(&mut self, node: RuntimeNode) -> NodeId {
+    fn add_node(&mut self, node: RuntimeNode<D>) -> NodeId {
         let id = self.nodes.len();
         self.links.push(vec![None; node.port_count() as usize]);
         self.nodes.push(Some(node));
@@ -755,59 +632,32 @@ impl RuntimeNet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Dict;
-
-    fn unit() -> Value {
-        Value::Dict(Dict::new_sync())
-    }
 
     fn identity(instance: u64, site: u32) -> FanIdentity {
         FanIdentity::root(InstanceId::from_raw(instance), FanSite::from_raw(site))
     }
 
-    #[test]
-    fn identity_uses_a_direct_wire_without_a_fan() {
-        let net = InteractionNet::lower_lambda(Arc::new(Expr::Local(0)));
-        assert!(matches!(net.nodes()[0], Node::Bind));
-        assert!(
-            !net.nodes()
-                .iter()
-                .any(|node| matches!(node, Node::Fan { .. }))
-        );
-        assert!(!net.nodes().iter().any(|node| matches!(node, Node::Erase)));
-        assert_eq!(net.exposed(), Port::principal(0));
-        assert_eq!(net.wires().len(), 1);
-    }
-
-    #[test]
-    fn unused_argument_lowers_to_eraser() {
-        let net = InteractionNet::lower_lambda(Arc::new(Expr::Value(unit())));
-        assert!(net.nodes().iter().any(|node| matches!(node, Node::Erase)));
-    }
-
-    #[test]
-    fn repeated_argument_lowers_to_binary_fans_with_local_sites() {
-        let body = Expr::Apply(Arc::new(Expr::Local(0)), Arc::new(Expr::Local(0)));
-        let net = InteractionNet::lower_lambda(Arc::new(body));
-        let sites = net
-            .nodes()
-            .iter()
-            .filter_map(|node| match node {
-                Node::Fan { site } => Some(*site),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(sites, vec![FanSite::from_raw(0)]);
+    fn duplicated_argument_template() -> InteractionNet<()> {
+        let mut net = NetBuilder::new();
+        let bind = net.push(Node::Bind);
+        let fan = net.push_fan();
+        let left = net.push(Node::Data(()));
+        let right = net.push(Node::Data(()));
+        let result = net.push(Node::Data(()));
+        net.wire(Port::auxiliary(bind, 1), Port::principal(fan));
+        net.wire(Port::auxiliary(fan, 1), Port::principal(left));
+        net.wire(Port::auxiliary(fan, 2), Port::principal(right));
+        net.wire(Port::auxiliary(bind, 2), Port::principal(result));
+        net.finish(Port::principal(bind))
     }
 
     #[test]
     fn instantiation_freshens_one_namespace_not_every_fan_site() {
-        let body = Expr::Apply(Arc::new(Expr::Local(0)), Arc::new(Expr::Local(0)));
-        let net = InteractionNet::lower_lambda(Arc::new(body));
+        let net = duplicated_argument_template();
         let first = net.instantiate();
         let second = net.instantiate();
         assert_ne!(first.instance(), second.instance());
-        let fan = |runtime: &RuntimeNet| {
+        let fan = |runtime: &RuntimeNet<()>| {
             runtime
                 .nodes
                 .iter()
@@ -823,15 +673,15 @@ mod tests {
         assert_ne!(first_fan.instance, second_fan.instance);
     }
 
-    fn fan_pair(left: FanIdentity, right: FanIdentity) -> RuntimeNet {
+    fn fan_pair(left: FanIdentity, right: FanIdentity) -> RuntimeNet<()> {
         let instance = left.instance;
         let nodes = vec![
             Some(RuntimeNode::Fan { identity: left }),
             Some(RuntimeNode::Fan { identity: right }),
-            Some(RuntimeNode::Data(EmbeddedData::Value(unit()))),
-            Some(RuntimeNode::Data(EmbeddedData::Value(unit()))),
-            Some(RuntimeNode::Data(EmbeddedData::Value(unit()))),
-            Some(RuntimeNode::Data(EmbeddedData::Value(unit()))),
+            Some(RuntimeNode::Data(())),
+            Some(RuntimeNode::Data(())),
+            Some(RuntimeNode::Data(())),
+            Some(RuntimeNode::Data(())),
         ];
         let mut runtime = RuntimeNet {
             instance,

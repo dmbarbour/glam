@@ -8,8 +8,10 @@ This document should summarize salient, relevant points rather than asking futur
 
 - `src/g_syntax.rs` - initial front-end compiler for ".g" syntax
 - `src/core.rs` - assembly-time representations, independent of syntax
+- `src/core_net.rs` - lowering from core expressions to core-data interaction nets
 - `src/eval.rs` - efficient reduction of core terms
-- `src/interaction_net.rs` - lazily lowered, shared graph code for lambda bodies
+- `src/interaction_net.rs` - generic interaction-net topology and reduction
+- `src/list.rs` - generic compact, lazy, persistent list ropes
 - `src/main.rs` - CLI parsing, integration
 - `src/numbers.rs` - wrapper for big-rationals
 - `src/README.md` - rough sketch of architecture
@@ -68,11 +70,16 @@ This document should summarize salient, relevant points rather than asking futur
 - Evaluation should consume core terms/values, not `.g` syntax nodes directly.
 - Core dictionaries use explicit `Key` values. `.g` paths lower through
   interned atom keys, not text keys. 
+- Core lists alias `list::List<Value, Thunk>`. `list.rs` preserves `Bytes` as
+  compact leaves and treats thunks as opaque lazy holes; evaluator code supplies
+  forcing and converts individual observed bytes to core number values.
 - Each `core::Lambda` owns a once-initialized interaction net. Closure creation
   reuses that template and captures only its environment; applying a closure
   must not re-lower its body. Runtime reconstruction may copy topology with new
   node IDs. Nested lambdas stay unlowered until reached.
 - Lambda templates contain `Bind`, binary `Fan`, `Erase`, and `Data` nodes.
+  The generic topology lives in `interaction_net.rs`; core data and expression
+  lowering live in `core_net.rs`.
   Fan sites are local to a template; one process-global `InstanceId` qualifies
   the entire runtime instance. Fan pairing goes through an oracle and includes
   dynamic duplication history rather than comparing permanent global UIDs.
