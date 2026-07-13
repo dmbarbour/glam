@@ -6,12 +6,8 @@
 	"image": "mcr.microsoft.com/devcontainers/base:trixie",
 	"features": {
 		"ghcr.io/devcontainers/features/rust:1": {},
-		"ghcr.io/devcontainers-extra/features/haskell:2": {},
 		"ghcr.io/sliekens/devcontainer-features/codex:1": {}
 	},
-
-	// Features to add to the dev container. More info: https://containers.dev/features.
-	// "features": {},
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	"forwardPorts": [9090],

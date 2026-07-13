@@ -1,10 +1,5 @@
 {
   "features": {
-    "ghcr.io/devcontainers-extra/features/haskell:2": {
-      "version": "2.2.3",
-      "resolved": "ghcr.io/devcontainers-extra/features/haskell@sha256:c3fc7bd427d1ea4efcd79038f415723611839135bd9e1097928a6fa55f637aaa",
-      "integrity": "sha256:c3fc7bd427d1ea4efcd79038f415723611839135bd9e1097928a6fa55f637aaa"
-    },
     "ghcr.io/devcontainers/features/rust:1": {
       "version": "1.5.0",
       "resolved": "ghcr.io/devcontainers/features/rust@sha256:0c55e65f2e3df736e478f26ee4d5ed41bae6b54dac1318c443e31444c8ed283c",
