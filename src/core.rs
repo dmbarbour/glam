@@ -8,6 +8,7 @@ use fingertrees::monoid::Sum;
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
+use crate::interaction_net::{InteractionNet, NodeId};
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,13 +16,59 @@ pub enum Expr {
     Value(Value),
     List(Arc<[Arc<Expr>]>),
     Apply(Arc<Expr>, Arc<Expr>),
-    Lambda(Arc<Expr>),
+    Lambda(Arc<Lambda>),
     Local(usize),
     Access(Arc<Expr>, Arc<[KeyExpr]>),
     Deferred(Arc<DeferredValue>),
     Future(IVar),
     Error(Arc<str>),
+    /// An internal reference to a node in a lowered interaction net.
+    Net(Arc<InteractionNet>, NodeId),
 }
+
+impl Expr {
+    pub fn lambda(body: Arc<Expr>) -> Self {
+        Self::Lambda(Arc::new(Lambda::new(body)))
+    }
+}
+
+#[derive(Debug)]
+pub struct Lambda {
+    body: Arc<Expr>,
+    interaction_net: OnceLock<Arc<InteractionNet>>,
+}
+
+impl Lambda {
+    pub fn new(body: Arc<Expr>) -> Self {
+        Self {
+            body,
+            interaction_net: OnceLock::new(),
+        }
+    }
+
+    pub fn body(&self) -> &Arc<Expr> {
+        &self.body
+    }
+
+    pub fn interaction_net(&self) -> Arc<InteractionNet> {
+        self.interaction_net
+            .get_or_init(|| Arc::new(InteractionNet::lower(self.body.as_ref())))
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_lowered(&self) -> bool {
+        self.interaction_net.get().is_some()
+    }
+}
+
+impl PartialEq for Lambda {
+    fn eq(&self, other: &Self) -> bool {
+        self.body == other.body
+    }
+}
+
+impl Eq for Lambda {}
 
 #[derive(Clone)]
 pub struct DeferredValue {
@@ -226,7 +273,7 @@ pub enum Value {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Closure {
-    pub body: Arc<Expr>,
+    pub interaction_net: Arc<InteractionNet>,
     pub env: Arc<[Value]>,
 }
 

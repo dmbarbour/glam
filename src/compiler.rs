@@ -209,7 +209,7 @@ impl CompileContext {
     }
 
     pub fn value_lambda(&self, body: Value) -> Value {
-        Value::expr(CoreExpr::Lambda(Arc::new(value_to_core_expr(body))))
+        Value::expr(CoreExpr::lambda(Arc::new(value_to_core_expr(body))))
     }
 
     pub fn value_local(&self, index: usize) -> Value {
@@ -233,7 +233,7 @@ impl CompileContext {
         let CoreExpr::Lambda(body) = thunk.expr.as_ref() else {
             return None;
         };
-        Some(Value::expr(body.as_ref().clone()))
+        Some(Value::expr(body.body().as_ref().clone()))
     }
 
     pub fn builtin_apply2_value(&self, builtin: Builtin, left: Value, right: Value) -> Value {

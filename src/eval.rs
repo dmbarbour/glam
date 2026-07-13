@@ -6,6 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::core::{Builtin, Closure, DeferredValue, Expr, IVar, Key, KeyExpr, List, Thunk, Value};
+use crate::interaction_net::{InteractionNet, KeyNode, Node, NodeId};
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,8 +46,8 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::List(list))
         }
         Expr::Apply(function, argument) => eval_apply(function, argument, local_env),
-        Expr::Lambda(body) => Ok(Value::Closure(Closure {
-            body: body.clone(),
+        Expr::Lambda(lambda) => Ok(Value::Closure(Closure {
+            interaction_net: lambda.interaction_net(),
             env: Arc::from(local_env.to_vec()),
         })),
         Expr::Local(index) => eval_local(*index, local_env),
@@ -65,7 +66,116 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
             .force()
             .map_err(|message| EvalError::new(message.as_ref())),
         Expr::Error(message) => Err(EvalError::new(message.as_ref())),
+        Expr::Net(net, node) => eval_net_node(net, *node, local_env),
     }
+}
+
+fn eval_net_node(
+    net: &Arc<InteractionNet>,
+    node: NodeId,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    match net.node(node) {
+        Node::Value(value) => eval_value(value),
+        Node::List(items) => {
+            let mut list = List::empty();
+            for item in items.iter() {
+                let value = eval_net_node(net, *item, local_env)?;
+                list = List::concat(list, list_literal_segment(value));
+            }
+            Ok(Value::List(list))
+        }
+        Node::Apply(function, argument) => {
+            let function = eval_net_node(net, *function, local_env)?;
+            let argument = thunk_net_node(net.clone(), *argument, local_env);
+            apply_value(function, argument, local_env)
+        }
+        Node::Lambda(lambda) => Ok(Value::Closure(Closure {
+            interaction_net: lambda.interaction_net(),
+            env: Arc::from(local_env.to_vec()),
+        })),
+        Node::Local(index) => eval_local(*index, local_env),
+        Node::Access(base, path) => {
+            let base = eval_net_node(net, *base, local_env)?;
+            resolve_net_key_path(base, net, path, path, local_env)
+        }
+        Node::Deferred(deferred) => deferred
+            .force()
+            .map_err(|message| EvalError::new(message.as_ref())),
+        Node::Future(ivar) => ivar
+            .get()
+            .cloned()
+            .ok_or_else(|| EvalError::new("future was observed before initialization")),
+        Node::Error(message) => Err(EvalError::new(message.as_ref())),
+    }
+}
+
+fn thunk_net_node(net: Arc<InteractionNet>, node: NodeId, local_env: &[Value]) -> Value {
+    match net.node(node) {
+        Node::Value(value) => value.clone(),
+        _ => Value::Expr(Thunk::new(
+            Arc::new(Expr::Net(net, node)),
+            Arc::from(local_env.to_vec()),
+        )),
+    }
+}
+
+fn resolve_net_key_path(
+    current: Value,
+    net: &Arc<InteractionNet>,
+    remaining: &[KeyNode],
+    full_path: &[KeyNode],
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let Some((head, rest)) = remaining.split_first() else {
+        return eval_value(&current);
+    };
+
+    let expanded = match head {
+        KeyNode::Key(key) => vec![key.clone()],
+        KeyNode::Index(node) => {
+            let value = force_value_shell(&thunk_net_node(net.clone(), *node, local_env))?;
+            vec![value_to_key(&value, local_env)?]
+        }
+        KeyNode::PathIndex(node) => {
+            eval_key_path_list(&thunk_net_node(net.clone(), *node, local_env), local_env)?
+        }
+    };
+
+    let mut next = current;
+    for key in expanded {
+        let dict = match force_value_shell(&next)? {
+            Value::Dict(dict) => dict,
+            _ => {
+                let traversed = &full_path[..full_path.len() - remaining.len()];
+                let culprit = if traversed.is_empty() {
+                    full_path
+                } else {
+                    traversed
+                };
+                return Err(EvalError::new(format!(
+                    "name `{}` is not a dictionary",
+                    format_net_name(culprit)
+                )));
+            }
+        };
+        next = dict
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
+    }
+    resolve_net_key_path(next, net, rest, full_path, local_env)
+}
+
+fn format_net_name(path: &[KeyNode]) -> String {
+    path.iter()
+        .map(|part| match part {
+            KeyNode::Key(key) => format_name_part(key),
+            KeyNode::Index(_) => "[index]".to_owned(),
+            KeyNode::PathIndex(_) => "(path-index)".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 pub fn eval_value(value: &Value) -> Result<Value, EvalError> {
@@ -316,7 +426,7 @@ fn dict_effect_function(dict: &crate::core::Dict) -> Option<Value> {
 }
 
 fn apply_effect_function_value(function: Value, argument: Value) -> Value {
-    Value::expr(Expr::Lambda(Arc::new(Expr::Apply(
+    Value::expr(Expr::lambda(Arc::new(Expr::Apply(
         Arc::new(Expr::Apply(
             Arc::new(Expr::Value(function)),
             Arc::new(Expr::Local(0)),
@@ -332,7 +442,11 @@ fn effect_value(function: Value) -> Value {
 fn apply_closure(closure: &Closure, argument: Value) -> Result<Value, EvalError> {
     let mut extended = closure.env.iter().cloned().collect::<Vec<_>>();
     extended.push(argument);
-    eval_expr(closure.body.as_ref(), &extended)
+    eval_net_node(
+        &closure.interaction_net,
+        closure.interaction_net.root(),
+        &extended,
+    )
 }
 
 fn apply_builtin(
@@ -670,7 +784,7 @@ fn effect_call_expr_value(name: &str, arguments: Vec<Value>) -> Value {
         .fold(api_member, |function, argument| {
             Expr::Apply(Arc::new(function), Arc::new(Expr::Value(argument)))
         });
-    effect_value(Value::expr(Expr::Lambda(Arc::new(body))))
+    effect_value(Value::expr(Expr::lambda(Arc::new(body))))
 }
 
 fn builtin_unit_value() -> Value {
@@ -1437,7 +1551,7 @@ fn object_spec_dict(spec: &Value) -> Result<crate::core::Dict, EvalError> {
 }
 
 fn dict_object_spec(dict: crate::core::Dict) -> Value {
-    let defs = Expr::Lambda(Arc::new(Expr::Lambda(Arc::new(dict_union_expr(
+    let defs = Expr::lambda(Arc::new(Expr::lambda(Arc::new(dict_union_expr(
         Expr::Local(1),
         Expr::Value(Value::Dict(dict)),
     )))));
@@ -1630,7 +1744,7 @@ fn object_dep_specs(deps: &Value) -> Result<Vec<Value>, EvalError> {
 }
 
 fn default_object_defs_value() -> Value {
-    Value::expr(Expr::Lambda(Arc::new(Expr::Lambda(Arc::new(Expr::Local(
+    Value::expr(Expr::lambda(Arc::new(Expr::lambda(Arc::new(Expr::Local(
         1,
     ))))))
 }
@@ -2252,10 +2366,40 @@ mod tests {
 
     use bytes::Bytes;
 
-    use crate::core::{Dict, Expr, IVar, Thunk, Value};
+    use crate::core::{Dict, Expr, IVar, Lambda, Thunk, Value};
     use crate::number::Number;
 
     use super::*;
+
+    #[test]
+    fn each_lambda_lowers_to_one_shared_interaction_net() {
+        let lambda = Arc::new(Lambda::new(Arc::new(Expr::Local(0))));
+        let expr = Expr::Lambda(lambda.clone());
+
+        assert!(!lambda.is_lowered());
+        let first = eval_closed_expr(&expr).expect("lambda should evaluate to a closure");
+        let second = eval_closed_expr(&expr).expect("lambda should reuse its lowered net");
+        assert!(lambda.is_lowered());
+
+        let (Value::Closure(first), Value::Closure(second)) = (first, second) else {
+            panic!("lambda evaluations should produce closures");
+        };
+        assert!(Arc::ptr_eq(&first.interaction_net, &second.interaction_net));
+    }
+
+    #[test]
+    fn lowering_an_outer_lambda_does_not_lower_unreached_nested_lambdas() {
+        let inner = Arc::new(Lambda::new(Arc::new(Expr::Error(Arc::from(
+            "unreached body",
+        )))));
+        let outer = Arc::new(Lambda::new(Arc::new(Expr::Lambda(inner.clone()))));
+
+        let value = eval_closed_expr(&Expr::Lambda(outer.clone()))
+            .expect("outer lambda should become a closure");
+        assert!(matches!(value, Value::Closure(_)));
+        assert!(outer.is_lowered());
+        assert!(!inner.is_lowered());
+    }
 
     fn n(value: i64) -> Value {
         Value::Number(value.into())
@@ -2363,7 +2507,7 @@ mod tests {
     fn fixpoint_dict(dict: Dict) -> Expr {
         Expr::Apply(
             Arc::new(Expr::Value(Value::Builtin(Builtin::Fixpoint))),
-            Arc::new(Expr::Lambda(Arc::new(module_value_expr(&Value::Dict(
+            Arc::new(Expr::lambda(Arc::new(module_value_expr(&Value::Dict(
                 dict,
             ))))),
         )
@@ -2593,7 +2737,7 @@ mod tests {
             Ok(n(2))
         })));
         let expr = Expr::Apply(
-            Arc::new(Expr::Lambda(Arc::new(builtin2_expr(
+            Arc::new(Expr::lambda(Arc::new(builtin2_expr(
                 Builtin::Add,
                 Expr::Local(0),
                 Expr::Local(0),
@@ -2609,7 +2753,7 @@ mod tests {
 
     #[test]
     fn equality_errors_when_dictionary_comparison_reaches_functions() {
-        let function = Value::expr(Expr::Lambda(Arc::new(Expr::Local(0))));
+        let function = Value::expr(Expr::lambda(Arc::new(Expr::Local(0))));
         let left = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("f"), function.clone()));
         let right = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("f"), function));
         let err = eval_closed_expr(&builtin2_expr(
@@ -2651,7 +2795,7 @@ mod tests {
         .expect("slice should evaluate");
         let mapped = eval_closed_expr(&builtin2_expr(
             Builtin::Map,
-            Expr::Lambda(Arc::new(Expr::Apply(
+            Expr::lambda(Arc::new(Expr::Apply(
                 Arc::new(Expr::Apply(
                     Arc::new(Expr::Value(Value::Builtin(Builtin::Add))),
                     Arc::new(Expr::Local(0)),
@@ -2765,7 +2909,7 @@ mod tests {
     #[test]
     fn evaluates_lambda_application_lazily() {
         let expr = Expr::Apply(
-            Arc::new(Expr::Lambda(Arc::new(Expr::Local(0)))),
+            Arc::new(Expr::lambda(Arc::new(Expr::Local(0)))),
             Arc::new(builtin2_expr(
                 Builtin::Add,
                 Expr::Value(n(1)),
@@ -2781,12 +2925,12 @@ mod tests {
     #[test]
     fn closures_capture_outer_locals() {
         let expr = Expr::Apply(
-            Arc::new(Expr::Lambda(Arc::new(Expr::Apply(
-                Arc::new(Expr::Lambda(Arc::new(Expr::Apply(
+            Arc::new(Expr::lambda(Arc::new(Expr::Apply(
+                Arc::new(Expr::lambda(Arc::new(Expr::Apply(
                     Arc::new(Expr::Local(0)),
                     Arc::new(Expr::Value(n(0))),
                 )))),
-                Arc::new(Expr::Lambda(Arc::new(Expr::Local(1)))),
+                Arc::new(Expr::lambda(Arc::new(Expr::Local(1)))),
             )))),
             Arc::new(Expr::Value(n(42))),
         );
@@ -2800,7 +2944,7 @@ mod tests {
     fn dropped_arguments_do_not_prevent_later_locals_from_resolving() {
         let expr = Expr::Apply(
             Arc::new(Expr::Apply(
-                Arc::new(Expr::Lambda(Arc::new(Expr::Lambda(Arc::new(Expr::Local(
+                Arc::new(Expr::lambda(Arc::new(Expr::lambda(Arc::new(Expr::Local(
                     0,
                 )))))),
                 Arc::new(Expr::Value(n(1))),
@@ -2817,7 +2961,7 @@ mod tests {
     fn method_objects_apply_via_apply_member() {
         let method = Value::Dict(Dict::new_sync().insert(
             Key::atom_from_text("apply"),
-            Value::expr(Expr::Lambda(Arc::new(builtin2_expr(
+            Value::expr(Expr::lambda(Arc::new(builtin2_expr(
                 Builtin::Add,
                 Expr::Local(0),
                 Expr::Value(n(1)),
@@ -2834,7 +2978,7 @@ mod tests {
 
     #[test]
     fn effect_values_apply_by_extending_the_effect_function() {
-        let effect = effect_value(Value::expr(Expr::Lambda(Arc::new(Expr::Access(
+        let effect = effect_value(Value::expr(Expr::lambda(Arc::new(Expr::Access(
             Arc::new(Expr::Local(0)),
             Arc::from([KeyExpr::Key(Key::atom_from_text("op"))]),
         )))));
@@ -2852,7 +2996,7 @@ mod tests {
             .clone();
         let api = Value::Dict(Dict::new_sync().insert(
             Key::atom_from_text("op"),
-            Value::expr(Expr::Lambda(Arc::new(builtin2_expr(
+            Value::expr(Expr::lambda(Arc::new(builtin2_expr(
                 Builtin::Add,
                 Expr::Local(0),
                 Expr::Value(n(1)),
@@ -2870,7 +3014,7 @@ mod tests {
             Dict::new_sync()
                 .insert(
                     Key::atom_from_text("eff"),
-                    Value::expr(Expr::Lambda(Arc::new(Expr::Local(0)))),
+                    Value::expr(Expr::lambda(Arc::new(Expr::Local(0)))),
                 )
                 .insert(Key::atom_from_text("extra"), n(1)),
         );
@@ -2890,7 +3034,7 @@ mod tests {
             Value::binary_from_text("World"),
         ));
         let expr = Expr::Apply(
-            Arc::new(Expr::Lambda(Arc::new(Expr::Access(
+            Arc::new(Expr::lambda(Arc::new(Expr::Access(
                 Arc::new(Expr::Local(0)),
                 Arc::from([KeyExpr::Key(Key::atom_from_text("tail"))]),
             )))),

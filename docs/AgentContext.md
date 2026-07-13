@@ -9,6 +9,7 @@ This document should summarize salient, relevant points rather than asking futur
 - `src/g_syntax.rs` - initial front-end compiler for ".g" syntax
 - `src/core.rs` - assembly-time representations, independent of syntax
 - `src/eval.rs` - efficient reduction of core terms
+- `src/interaction_net.rs` - lazily lowered, shared graph code for lambda bodies
 - `src/main.rs` - CLI parsing, integration
 - `src/numbers.rs` - wrapper for big-rationals
 - `src/README.md` - rough sketch of architecture
@@ -63,11 +64,16 @@ This document should summarize salient, relevant points rather than asking futur
 
 ### Eval
 
-- Keep syntax parsing separate from syntax-independent evaluation. The current
-  evaluator only supports text data expressions.
+- Keep syntax parsing separate from syntax-independent evaluation.
 - Evaluation should consume core terms/values, not `.g` syntax nodes directly.
 - Core dictionaries use explicit `Key` values. `.g` paths lower through
   interned atom keys, not text keys. 
+- Each `core::Lambda` owns a once-initialized interaction net. Closure creation
+  reuses that net and captures only its environment; applying a closure must not
+  re-lower or copy its body. Nested lambdas stay unlowered until reached.
+- The current graph evaluator is the migration boundary, not yet the complete
+  general interaction-net effects API or symmetric reducer described in
+  `Design.md`. Add those before exposing the `interaction_net` keyword.
 
 ### Configuration Fixtures
 

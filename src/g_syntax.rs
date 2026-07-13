@@ -979,7 +979,7 @@ fn shift_expr_locals(expr: &CoreExpr, amount: usize, cutoff: usize) -> CoreExpr 
             Arc::new(shift_expr_locals(argument, amount, cutoff)),
         ),
         CoreExpr::Lambda(body) => {
-            CoreExpr::Lambda(Arc::new(shift_expr_locals(body, amount, cutoff + 1)))
+            CoreExpr::lambda(Arc::new(shift_expr_locals(body.body(), amount, cutoff + 1)))
         }
         CoreExpr::Local(index) if *index >= cutoff => CoreExpr::Local(index + amount),
         CoreExpr::Local(index) => CoreExpr::Local(*index),
@@ -994,6 +994,7 @@ fn shift_expr_locals(expr: &CoreExpr, amount: usize, cutoff: usize) -> CoreExpr 
         CoreExpr::Future(ivar) => CoreExpr::Future(ivar.clone()),
         CoreExpr::Deferred(deferred) => CoreExpr::Deferred(deferred.clone()),
         CoreExpr::Error(message) => CoreExpr::Error(message.clone()),
+        CoreExpr::Net(net, node) => CoreExpr::Net(net.clone(), *node),
     }
 }
 
