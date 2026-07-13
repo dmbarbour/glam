@@ -141,6 +141,44 @@ fn configuration_env_is_visible_to_assembly() {
 }
 
 #[test]
+fn import_as_inherits_assembly_env() {
+    let dir = unique_temp_dir("glam-import-as-env");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create temp dir {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    let main = dir.join("main.g");
+    let lib = dir.join("lib.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nextend conf.env with\n  message = \"Hello from import env!\"\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+    fs::write(
+        &main,
+        "language g0\nimport \"lib.g\" as lib\nasm.result = lib.result\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", main.display()));
+    fs::write(&lib, "language g0\nresult = env.message\n")
+        .unwrap_or_else(|err| panic!("failed to write {}: {err}", lib.display()));
+
+    let output = glam_command()
+        .env("GLAS_CONF", &config)
+        .arg("--file")
+        .arg(&main)
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"Hello from import env!");
+    assert_eq!(output.stderr, b"");
+}
+
+#[test]
 fn configuration_files_compose_using_path_separator() {
     let dir = unique_temp_dir("glam-conf-path-list");
     fs::create_dir_all(&dir).unwrap_or_else(|err| {

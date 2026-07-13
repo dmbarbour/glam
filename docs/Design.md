@@ -378,7 +378,7 @@ For interaction nets in general, there is no arg-result distinction. Data flows 
 
 ## Modules
 
-Each module is represented by a file that represents a mixin and extends a hosted module object. The assembler provides a built-in front-end compiler for ".g" files, but *User-Defined Syntax* is supported, with users defining a monadic front-end compilers aligned to file extensions, and the assembler bootstrapping upon override.
+Each module is represented by a file that represents a mixin and extends an implicit, anonymous module object. The assembler provides a built-in front-end compiler for ".g" files, but *User-Defined Syntax* is supported, with users defining a monadic front-end compilers aligned to file extensions, and the assembler bootstrapping upon override.
 
 To simplify architecture, file dependencies are constrained: a file may reference only local files and subfolders or transitively immutable remote files. We enforce immutability by requiring a DVCS revision hash for remote references. Because parent-relative and absolute filepaths are forbidden, every folder serves as a stand-alone package, easily shared and edited. 
 

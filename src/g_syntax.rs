@@ -488,8 +488,8 @@ fn lower_local_import(
             *definitions = context.value_load_local_module(args);
         }
         ImportPlacement::As(target) => {
-            let loaded =
-                scoped_local_import_value(reference, target, context.empty_dict_value(), context)?;
+            let prior_defs = import_as_prior_defs(target, definitions.clone(), context)?;
+            let loaded = scoped_local_import_value(reference, target, prior_defs, context)?;
             *definitions = update_module_value(
                 definitions.clone(),
                 target,
@@ -546,6 +546,46 @@ fn scoped_local_import_value(
         final_defs,
     );
     Ok(context.value_load_local_module(args))
+}
+
+fn import_as_prior_defs(
+    target: &str,
+    definitions: Value,
+    context: &CompileContext,
+) -> Result<Value, Diagnostic> {
+    let env = inherited_import_env_object_value(target, definitions, context)?;
+    Ok(update_module_value(
+        context.empty_dict_value(),
+        "env",
+        env,
+        context,
+    ))
+}
+
+fn inherited_import_env_object_value(
+    target: &str,
+    definitions: Value,
+    context: &CompileContext,
+) -> Result<Value, Diagnostic> {
+    let parent_env = path_value_in_definitions("env", definitions, context)?;
+    let name = context.abstract_global_path_value(
+        context
+            .abstract_global_path(&format!("{target}.env"))
+            .as_ref(),
+    );
+    let deps = context.value_list(vec![object_spec_value(parent_env, context)]);
+    Ok(object_instance_from_parts_value(
+        name,
+        deps,
+        empty_object_defs(context),
+        context,
+    ))
+}
+
+fn empty_object_defs(context: &CompileContext) -> Value {
+    context.value_lambda(
+        context.value_lambda(remove_object_spec_value(context.value_local(1), context)),
+    )
 }
 
 fn module_object_value(target: &str, module: Value, context: &CompileContext) -> Value {
