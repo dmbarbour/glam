@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
+use fingertrees::measure::Measured;
+use fingertrees::monoid::Sum;
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
@@ -287,21 +289,24 @@ impl Builtin {
 
 pub type Dict = RedBlackTreeMapSync<Key, Value>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct List(Arc<ListNode>);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum ListNode {
     Empty,
     Bytes(Bytes),
     Values(SharedSlice<Value>),
     Concat(List, List),
-    SizedConcat {
-        len: usize,
-        left_len: usize,
-        left: List,
-        right: List,
-    },
+    Finger(FingerList),
+}
+
+type FingerList = fingertrees::sync::FingerTree<ListChunk>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ListChunk {
+    Bytes(Bytes),
+    Values(SharedSlice<Value>),
 }
 
 #[derive(Clone)]
@@ -354,6 +359,58 @@ impl<T: PartialEq> PartialEq for SharedSlice<T> {
 
 impl<T: Eq> Eq for SharedSlice<T> {}
 
+impl ListChunk {
+    fn len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Values(values) => values.len(),
+        }
+    }
+
+    fn slice(&self, start: usize, end: usize) -> Option<Self> {
+        assert!(start <= end);
+        assert!(end <= self.len());
+        if start == end {
+            None
+        } else {
+            Some(match self {
+                Self::Bytes(bytes) => Self::Bytes(bytes.slice(start..end)),
+                Self::Values(values) => Self::Values(values.slice(start, end)),
+            })
+        }
+    }
+
+    fn for_each_segment<E>(
+        &self,
+        on_bytes: &mut impl FnMut(&[u8]) -> Result<(), E>,
+        on_values: &mut impl FnMut(&[Value]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        match self {
+            Self::Bytes(bytes) => on_bytes(bytes),
+            Self::Values(values) => on_values(values.as_slice()),
+        }
+    }
+}
+
+impl Measured for ListChunk {
+    type Measure = Sum<usize>;
+
+    fn measure(&self) -> Self::Measure {
+        Sum(self.len())
+    }
+}
+
+impl PartialEq for List {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        self.to_value_items_for_eq() == other.to_value_items_for_eq()
+    }
+}
+
+impl Eq for List {}
+
 impl List {
     pub fn empty() -> Self {
         Self(Arc::new(ListNode::Empty))
@@ -386,36 +443,18 @@ impl List {
         }
     }
 
-    fn sized_concat(left: Self, right: Self) -> Self {
-        if left.is_empty() {
-            right
-        } else if right.is_empty() {
-            left
-        } else {
-            let left_len = left.len();
-            let len = left_len + right.len();
-            Self(Arc::new(ListNode::SizedConcat {
-                len,
-                left_len,
-                left,
-                right,
-            }))
-        }
-    }
-
     pub fn len(&self) -> usize {
         match self.0.as_ref() {
             ListNode::Empty => 0,
             ListNode::Bytes(bytes) => bytes.len(),
             ListNode::Values(values) => values.len(),
             ListNode::Concat(left, right) => left.len() + right.len(),
-            ListNode::SizedConcat { len, .. } => *len,
+            ListNode::Finger(finger) => finger.measure().0,
         }
     }
 
     pub fn balanced(&self) -> Self {
-        let leaves = self.leaves();
-        Self::balanced_from_leaves(&leaves)
+        Self::from_finger(self.to_finger())
     }
 
     pub fn slice(&self, start: usize, end: usize) -> Self {
@@ -437,10 +476,9 @@ impl List {
                 left.for_each_segment(on_bytes, on_values)?;
                 right.for_each_segment(on_bytes, on_values)
             }
-            ListNode::SizedConcat { left, right, .. } => {
-                left.for_each_segment(on_bytes, on_values)?;
-                right.for_each_segment(on_bytes, on_values)
-            }
+            ListNode::Finger(finger) => finger
+                .iter()
+                .try_for_each(|chunk| chunk.for_each_segment(on_bytes, on_values)),
         }
     }
 
@@ -448,38 +486,55 @@ impl List {
         matches!(self.0.as_ref(), ListNode::Empty)
     }
 
-    fn leaves(&self) -> Vec<List> {
-        let mut leaves = Vec::new();
-        self.collect_leaves(&mut leaves);
-        leaves
+    fn from_finger(finger: FingerList) -> Self {
+        if finger.is_empty() {
+            Self::empty()
+        } else {
+            Self(Arc::new(ListNode::Finger(finger)))
+        }
     }
 
-    fn collect_leaves(&self, leaves: &mut Vec<List>) {
+    fn to_finger(&self) -> FingerList {
+        let mut finger = FingerList::new();
+        self.push_chunks_into(&mut finger);
+        finger
+    }
+
+    fn push_chunks_into(&self, finger: &mut FingerList) {
         match self.0.as_ref() {
             ListNode::Empty => {}
-            ListNode::Bytes(bytes) => leaves.push(Self::from_bytes(bytes.clone())),
+            ListNode::Bytes(bytes) => {
+                *finger = finger.push_right(ListChunk::Bytes(bytes.clone()));
+            }
             ListNode::Values(values) => {
-                leaves.push(Self(Arc::new(ListNode::Values(values.clone()))));
+                *finger = finger.push_right(ListChunk::Values(values.clone()));
             }
-            ListNode::Concat(left, right) | ListNode::SizedConcat { left, right, .. } => {
-                left.collect_leaves(leaves);
-                right.collect_leaves(leaves);
+            ListNode::Concat(left, right) => {
+                left.push_chunks_into(finger);
+                right.push_chunks_into(finger);
             }
+            ListNode::Finger(right) => *finger = finger.concat(right),
         }
     }
 
-    fn balanced_from_leaves(leaves: &[List]) -> Self {
-        match leaves {
-            [] => Self::empty(),
-            [leaf] => leaf.clone(),
-            _ => {
-                let midpoint = leaves.len() / 2;
-                Self::sized_concat(
-                    Self::balanced_from_leaves(&leaves[..midpoint]),
-                    Self::balanced_from_leaves(&leaves[midpoint..]),
-                )
-            }
-        }
+    fn to_value_items_for_eq(&self) -> Vec<Value> {
+        let items = std::cell::RefCell::new(Vec::new());
+        self.for_each_segment(
+            &mut |bytes| {
+                items.borrow_mut().extend(
+                    bytes
+                        .iter()
+                        .map(|byte| Value::Number(Number::from_u8(*byte))),
+                );
+                Ok::<_, ()>(())
+            },
+            &mut |values| {
+                items.borrow_mut().extend(values.iter().cloned());
+                Ok(())
+            },
+        )
+        .expect("collecting list items for equality should not fail");
+        items.into_inner()
     }
 
     fn slice_checked(&self, start: usize, end: usize) -> Self {
@@ -494,13 +549,45 @@ impl List {
             ListNode::Concat(left, right) => {
                 Self::slice_concat(left, left.len(), right, start, end)
             }
-            ListNode::SizedConcat {
-                left_len,
-                left,
-                right,
-                ..
-            } => Self::slice_concat(left, *left_len, right, start, end),
+            ListNode::Finger(finger) => Self::slice_finger(finger, start, end),
         }
+    }
+
+    fn slice_finger(finger: &FingerList, start: usize, end: usize) -> Self {
+        let (_, tail) = Self::split_finger_at(finger, start);
+        let (middle, _) = Self::split_finger_at(&tail, end - start);
+        Self::from_finger(middle)
+    }
+
+    fn split_finger_at(finger: &FingerList, index: usize) -> (FingerList, FingerList) {
+        let len = finger.measure().0;
+        assert!(index <= len);
+        if index == 0 {
+            return (FingerList::new(), finger.clone());
+        }
+        if index == len {
+            return (finger.clone(), FingerList::new());
+        }
+
+        let (mut left, right) = finger.split(|measure| measure.0 > index);
+        let left_len = left.measure().0;
+        if left_len == index {
+            return (left, right);
+        }
+
+        let Some((chunk, tail)) = right.view_left() else {
+            unreachable!("finger split inside a non-empty tree should leave a boundary chunk");
+        };
+        let chunk_offset = index - left_len;
+        if let Some(chunk_left) = chunk.slice(0, chunk_offset) {
+            left = left.push_right(chunk_left);
+        }
+
+        let mut right = tail;
+        if let Some(chunk_right) = chunk.slice(chunk_offset, chunk.len()) {
+            right = right.push_left(chunk_right);
+        }
+        (left, right)
     }
 
     fn slice_concat(left: &List, left_len: usize, right: &List, start: usize, end: usize) -> Self {
@@ -769,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn balanced_lists_store_size_metadata_and_preserve_segments() {
+    fn balanced_lists_use_finger_tree_and_preserve_segments() {
         let list = List::concat(
             List::concat(
                 List::from_bytes(Bytes::from_static(b"He")),
@@ -781,7 +868,7 @@ mod tests {
         let balanced = list.balanced();
 
         assert_eq!(balanced.len(), 6);
-        assert!(matches!(balanced.0.as_ref(), ListNode::SizedConcat { .. }));
+        assert!(matches!(balanced.0.as_ref(), ListNode::Finger(_)));
         let bytes = std::cell::RefCell::new(Vec::new());
         let values = std::cell::RefCell::new(Vec::new());
         balanced
