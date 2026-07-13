@@ -169,11 +169,22 @@ pub enum SyntaxExpr {
     List(Vec<SyntaxExpr>),
     Lambda(Vec<String>, Box<SyntaxExpr>),
     Apply(Box<SyntaxExpr>, Box<SyntaxExpr>),
+    OperatorSection {
+        builtin: Builtin,
+        missing: OperatorSectionMissing,
+        operand: Box<SyntaxExpr>,
+    },
     Multiply(Box<SyntaxExpr>, Box<SyntaxExpr>),
     Divide(Box<SyntaxExpr>, Box<SyntaxExpr>),
     Add(Box<SyntaxExpr>, Box<SyntaxExpr>),
     Subtract(Box<SyntaxExpr>, Box<SyntaxExpr>),
     Append(Box<SyntaxExpr>, Box<SyntaxExpr>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperatorSectionMissing {
+    Left,
+    Right,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1526,6 +1537,11 @@ fn syntax_expr_to_value_in_scope(
             syntax_expr_to_value_in_scope(function, line, context, scope, locals)?,
             syntax_expr_to_value_in_scope(argument, line, context, scope, locals)?,
         ),
+        SyntaxExpr::OperatorSection {
+            builtin,
+            missing,
+            operand,
+        } => lower_operator_section(*builtin, *missing, operand, line, context, scope, locals)?,
         SyntaxExpr::Multiply(left, right) => {
             lower_builtin_expr(Builtin::Multiply, left, right, line, context, scope, locals)?
         }
@@ -1657,6 +1673,41 @@ fn lower_builtin_expr(
         syntax_expr_to_value_in_scope(left, line, context, scope, locals)?,
         syntax_expr_to_value_in_scope(right, line, context, scope, locals)?,
     ))
+}
+
+fn lower_operator_section(
+    builtin: Builtin,
+    missing: OperatorSectionMissing,
+    operand: &SyntaxExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<Value, Diagnostic> {
+    let shifted_scope = shift_name_scope_locals(scope, 1);
+    let base_len = locals.len();
+    locals.push(LocalName {
+        raw: "<operator-section>".to_owned(),
+        canonical: None,
+        suppress_unused_warning: true,
+    });
+    let operand =
+        match syntax_expr_to_value_in_scope(operand, line, context, &shifted_scope, locals) {
+            Ok(operand) => operand,
+            Err(err) => {
+                locals.truncate(base_len);
+                return Err(err);
+            }
+        };
+    locals.truncate(base_len);
+    let section_arg = context.value_local(0);
+    let body = match missing {
+        OperatorSectionMissing::Left => context.builtin_apply2_value(builtin, section_arg, operand),
+        OperatorSectionMissing::Right => {
+            context.builtin_apply2_value(builtin, operand, section_arg)
+        }
+    };
+    Ok(context.value_lambda(body))
 }
 
 fn syntax_key_expr_to_value(
@@ -2746,6 +2797,9 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
             }
             analyze_expr_locals(body, line, diagnostics);
         }
+        SyntaxExpr::OperatorSection { operand, .. } => {
+            analyze_expr_locals(operand, line, diagnostics);
+        }
         SyntaxExpr::Apply(function, argument)
         | SyntaxExpr::Multiply(function, argument)
         | SyntaxExpr::Divide(function, argument)
@@ -2849,6 +2903,9 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
             }
         }
         SyntaxExpr::Lambda(_, body) => mark_used_prior_alias(body, alias, used),
+        SyntaxExpr::OperatorSection { operand, .. } => {
+            mark_used_prior_alias(operand, alias, used);
+        }
         SyntaxExpr::Apply(function, argument)
         | SyntaxExpr::Multiply(function, argument)
         | SyntaxExpr::Divide(function, argument)
@@ -2944,6 +3001,9 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             nested_used[..locals.len()].copy_from_slice(used);
             mark_used_locals(body, &combined, &mut nested_used);
             used.copy_from_slice(&nested_used[..locals.len()]);
+        }
+        SyntaxExpr::OperatorSection { operand, .. } => {
+            mark_used_locals(operand, locals, used);
         }
         SyntaxExpr::Apply(function, argument)
         | SyntaxExpr::Multiply(function, argument)
@@ -3237,6 +3297,34 @@ fn syntax_expr_parser<'src>()
             .delimited_by(just('{'), just('}'))
             .map(SyntaxExpr::DictUnion);
 
+        let infix_operator = choice((
+            just("++").to(crate::core::Builtin::Append),
+            just('*').to(crate::core::Builtin::Multiply),
+            just('/').to(crate::core::Builtin::Divide),
+            just('+')
+                .then_ignore(just('+').not())
+                .to(crate::core::Builtin::Add),
+            just('-').to(crate::core::Builtin::Subtract),
+        ));
+        let prefix_operator_section = infix_operator
+            .clone()
+            .padded()
+            .then(expr.clone())
+            .delimited_by(just('('), just(')'))
+            .map(|(builtin, operand)| SyntaxExpr::OperatorSection {
+                builtin,
+                missing: OperatorSectionMissing::Left,
+                operand: Box::new(operand),
+            });
+        let postfix_operator_section = expr
+            .clone()
+            .then(infix_operator.clone().padded())
+            .delimited_by(just('('), just(')'))
+            .map(|(operand, builtin)| SyntaxExpr::OperatorSection {
+                builtin,
+                missing: OperatorSectionMissing::Right,
+                operand: Box::new(operand),
+            });
         let parenthesized = expr.clone().padded().delimited_by(just('('), just(')'));
         let lambda = just('\\')
             .padded()
@@ -3252,7 +3340,17 @@ fn syntax_expr_parser<'src>()
             .then(expr.clone())
             .map(|(params, body)| SyntaxExpr::Lambda(params, Box::new(body)));
 
-        let literal_atom = choice((text, atom_literal, list, dict, number, parenthesized)).boxed();
+        let literal_atom = choice((
+            text,
+            atom_literal,
+            list,
+            dict,
+            number,
+            prefix_operator_section,
+            postfix_operator_section,
+            parenthesized,
+        ))
+        .boxed();
         let literal_expr = literal_atom
             .then(path_suffix.clone())
             .map(|(base, suffixes)| access_if_path(base, suffixes))
@@ -3272,16 +3370,6 @@ fn syntax_expr_parser<'src>()
                 })
             })
             .boxed();
-        let infix_operator = choice((
-            just("++").to(crate::core::Builtin::Append),
-            just('*').to(crate::core::Builtin::Multiply),
-            just('/').to(crate::core::Builtin::Divide),
-            just('+')
-                .then_ignore(just('+').not())
-                .to(crate::core::Builtin::Add),
-            just('-').to(crate::core::Builtin::Subtract),
-        ));
-
         choice((
             lambda,
             application
@@ -4221,6 +4309,34 @@ mod tests {
                     )),
                     Box::new(SyntaxExpr::Text("Hello".to_owned())),
                 )),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_operator_sections() {
+        assert_eq!(
+            parse_expr("(+ 42)"),
+            Some(SyntaxExpr::OperatorSection {
+                builtin: Builtin::Add,
+                missing: OperatorSectionMissing::Left,
+                operand: Box::new(SyntaxExpr::Number(n(42))),
+            })
+        );
+        assert_eq!(
+            parse_expr("(42 -)"),
+            Some(SyntaxExpr::OperatorSection {
+                builtin: Builtin::Subtract,
+                missing: OperatorSectionMissing::Right,
+                operand: Box::new(SyntaxExpr::Number(n(42))),
+            })
+        );
+        assert_eq!(
+            parse_expr("(++ suffix)"),
+            Some(SyntaxExpr::OperatorSection {
+                builtin: Builtin::Append,
+                missing: OperatorSectionMissing::Left,
+                operand: Box::new(SyntaxExpr::Name("suffix".to_owned())),
             })
         );
     }
@@ -5523,6 +5639,45 @@ mod tests {
                     vec![CoreKeyExpr::Key(Key::atom_from_text("d"))]
                 )),
             )
+        );
+    }
+
+    #[test]
+    fn operator_sections_evaluate_as_unary_lambdas() {
+        let parsed = parse(
+            "language g0\nadd_answer = (+ 42)\nsub_from_answer = (42 -)\nasm.sum = add_answer 8\nasm.diff = sub_from_answer 8\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            fully_evaluated_value(resolved_value_at_path(&value, &["asm", "sum"])),
+            Value::Number(n(50))
+        );
+        assert_eq!(
+            fully_evaluated_value(resolved_value_at_path(&value, &["asm", "diff"])),
+            Value::Number(n(34))
+        );
+    }
+
+    #[test]
+    fn operator_section_operands_resolve_module_scope_names() {
+        let parsed = parse(
+            "language g0\nsuffix = \"!\"\nadd_suffix = (++ suffix)\nasm.result = add_suffix \"Hello\"\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello!"
         );
     }
 
