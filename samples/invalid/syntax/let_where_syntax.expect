@@ -1,0 +1,3 @@
+error|4|multi-line let binding names|align
+error|10|multi-line let expression|must not use `in`
+error|18|continuation indentation|first continuation line

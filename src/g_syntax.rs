@@ -373,8 +373,18 @@ pub fn parse_source_with_context(source: &SourceFile, context: &CompileContext) 
                 break;
             }
 
-            if is_indented(next.text) && continuation_indent.is_none() {
-                continuation_indent = Some(indentation_width(next.text));
+            if is_indented(next.text) {
+                let next_indent = indentation_width(next.text);
+                match continuation_indent {
+                    Some(indent) if next_indent < indent => {
+                        diagnostics.push(Diagnostic::error(
+                            next.number,
+                            "continuation indentation must align with or exceed the first continuation line",
+                        ));
+                    }
+                    None => continuation_indent = Some(next_indent),
+                    _ => {}
+                }
             }
 
             let next_text = strip_comment(next.text).trim_end();
@@ -2951,16 +2961,30 @@ fn parse_let_expr_result(
         return Some(Err("let expression requires bindings and a body".to_owned()));
     }
 
-    let (bindings_text, body_text) = match split_top_level_keyword(rest, "in", false) {
-        Some((bindings, body)) => (bindings.trim(), body.trim()),
+    let in_indices = top_level_keyword_indices(rest, "in");
+    let (bindings, body_text) = match in_indices.first().copied() {
+        Some(index) if rest[..index].contains('\n') => {
+            return Some(Err("multi-line let expression must not use `in`".to_owned()));
+        }
+        Some(index) => {
+            let bindings_text = rest[..index].trim();
+            let body_text = rest[index + "in".len()..].trim();
+            match parse_local_bindings(bindings_text, line, diagnostics) {
+                Ok(bindings) => (bindings, body_text),
+                Err(message) => return Some(Err(message)),
+            }
+        }
         None => match split_multiline_let(rest) {
-            Ok((bindings, body)) => (bindings.trim(), body.trim()),
+            Ok((bindings, body)) => match parse_local_binding_texts(bindings, line, diagnostics) {
+                Ok(bindings) => (bindings, body.trim()),
+                Err(message) => return Some(Err(message)),
+            },
             Err(message) => return Some(Err(message)),
         },
     };
 
-    Some(parse_let_expr_from_parts(
-        bindings_text,
+    Some(parse_let_expr_from_bindings(
+        bindings,
         body_text,
         line,
         diagnostics,
@@ -2996,6 +3020,18 @@ fn parse_let_expr_from_parts(
         return Err("let expression requires a body".to_owned());
     }
     let bindings = parse_local_bindings(bindings_text, line, diagnostics)?;
+    parse_let_expr_from_bindings(bindings, body_text, line, diagnostics)
+}
+
+fn parse_let_expr_from_bindings(
+    bindings: Vec<(String, SyntaxExpr)>,
+    body_text: &str,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<SyntaxExpr, String> {
+    if body_text.is_empty() {
+        return Err("let expression requires a body".to_owned());
+    }
     if bindings.is_empty() {
         return Err("let expression requires at least one binding".to_owned());
     }
@@ -3017,6 +3053,14 @@ fn parse_local_bindings(
         split_top_level_semicolons(text)
     };
 
+    parse_local_binding_texts(binding_texts, line, diagnostics)
+}
+
+fn parse_local_binding_texts(
+    binding_texts: Vec<&str>,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Vec<(String, SyntaxExpr)>, String> {
     binding_texts
         .into_iter()
         .filter(|binding| !binding.trim().is_empty())
@@ -3046,44 +3090,62 @@ fn parse_local_binding(
     ))
 }
 
-fn split_multiline_let(text: &str) -> Result<(&str, &str), String> {
+fn split_multiline_let(text: &str) -> Result<(Vec<&str>, &str), String> {
     let lines = text.lines().collect::<Vec<_>>();
     if lines.len() < 2 {
         return Err("multi-line let expression requires a body or `in`".to_owned());
     }
 
-    let mut binding_end = 0;
-    let mut saw_binding = false;
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            binding_end = index + 1;
-            continue;
-        }
-        if is_indented(line) {
-            binding_end = index + 1;
-            continue;
-        }
-        if split_top_level_binding_equals(trimmed).is_some() {
-            saw_binding = true;
-            binding_end = index + 1;
-            continue;
-        }
-        break;
-    }
-
-    if !saw_binding {
+    let first = lines[0].trim();
+    if split_top_level_binding_equals(first).is_none() {
         return Err("let expression requires at least one binding".to_owned());
     }
-    if binding_end >= lines.len() {
-        return Err("multi-line let expression requires a body".to_owned());
+
+    let binding_indent = "let ".len();
+    let mut starts = vec![0usize];
+    let mut body_start = None;
+    let mut offset = lines[0].len() + 1;
+
+    for line in lines.iter().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            offset += line.len() + 1;
+            continue;
+        }
+
+        let indent = indentation_width(line);
+        if indent == 0 {
+            if split_top_level_binding_equals(trimmed).is_some() {
+                return Err(
+                    "multi-line let binding names must align under the first binding".to_owned(),
+                );
+            }
+            body_start = Some(offset);
+            break;
+        }
+
+        if split_top_level_binding_equals(trimmed).is_some() {
+            if indent != binding_indent {
+                return Err(
+                    "multi-line let binding names must align under the first binding".to_owned(),
+                );
+            }
+            starts.push(offset + indent);
+        }
+
+        offset += line.len() + 1;
     }
 
-    let binding_offset: usize = lines[..binding_end].iter().map(|line| line.len() + 1).sum();
-    Ok((
-        &text[..binding_offset.saturating_sub(1)],
-        &text[binding_offset..],
-    ))
+    let Some(body_start) = body_start else {
+        return Err("multi-line let expression requires a body".to_owned());
+    };
+
+    starts.push(body_start);
+    let bindings = starts
+        .windows(2)
+        .map(|pair| text[pair[0]..pair[1].saturating_sub(1)].trim())
+        .collect::<Vec<_>>();
+    Ok((bindings, &text[body_start..]))
 }
 
 fn parse_multiline_binding_texts(text: &str) -> Result<Vec<&str>, String> {
@@ -5506,7 +5568,7 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_expr("let x = 1\ny = 2\nx + y"),
+            parse_expr("let x = 1\n    y = 2\nx + y"),
             Some(SyntaxExpr::Let {
                 bindings: vec![
                     ("x".to_owned(), SyntaxExpr::Number(n(1))),
@@ -6836,7 +6898,7 @@ mod tests {
     #[test]
     fn lowers_multiline_let_expressions_to_lambda_application() {
         let parsed = parse(
-            "language g0\nasm.result = let hello = \"Hello\"\n    world = \"World\"\n    hello ++ \", \" ++ world ++ \"!\"\n",
+            "language g0\nasm.result =\n  let hello = \"Hello\"\n      world = \"World\"\n  hello ++ \", \" ++ world ++ \"!\"\n",
         );
         let context = CompileContext::default();
         let lowered = lower_to_core_with_context(&parsed, &context);
