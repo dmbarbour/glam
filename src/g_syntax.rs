@@ -169,8 +169,13 @@ pub enum SyntaxExpr {
     List(Vec<SyntaxExpr>),
     Lambda(Vec<String>, Box<SyntaxExpr>),
     Apply(Box<SyntaxExpr>, Box<SyntaxExpr>),
+    OperatorApply {
+        operator: SyntaxOperator,
+        left: Box<SyntaxExpr>,
+        right: Box<SyntaxExpr>,
+    },
     OperatorSection {
-        builtin: Builtin,
+        operator: SyntaxOperator,
         left: Option<Box<SyntaxExpr>>,
         right: Option<Box<SyntaxExpr>>,
     },
@@ -179,6 +184,15 @@ pub enum SyntaxExpr {
     Add(Box<SyntaxExpr>, Box<SyntaxExpr>),
     Subtract(Box<SyntaxExpr>, Box<SyntaxExpr>),
     Append(Box<SyntaxExpr>, Box<SyntaxExpr>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyntaxOperator {
+    Builtin(Builtin),
+    PipeForward,
+    PipeBackward,
+    ComposeForward,
+    ComposeBackward,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1531,11 +1545,16 @@ fn syntax_expr_to_value_in_scope(
             syntax_expr_to_value_in_scope(function, line, context, scope, locals)?,
             syntax_expr_to_value_in_scope(argument, line, context, scope, locals)?,
         ),
-        SyntaxExpr::OperatorSection {
-            builtin,
+        SyntaxExpr::OperatorApply {
+            operator,
             left,
             right,
-        } => lower_operator_section(*builtin, left, right, line, context, scope, locals)?,
+        } => lower_syntax_operator_expr(*operator, left, right, line, context, scope, locals)?,
+        SyntaxExpr::OperatorSection {
+            operator,
+            left,
+            right,
+        } => lower_operator_section(*operator, left, right, line, context, scope, locals)?,
         SyntaxExpr::Multiply(left, right) => {
             lower_builtin_expr(Builtin::Multiply, left, right, line, context, scope, locals)?
         }
@@ -1670,7 +1689,7 @@ fn lower_builtin_expr(
 }
 
 fn lower_operator_section(
-    builtin: Builtin,
+    operator: SyntaxOperator,
     left: &Option<Box<SyntaxExpr>>,
     right: &Option<Box<SyntaxExpr>>,
     line: usize,
@@ -1679,9 +1698,9 @@ fn lower_operator_section(
     locals: &mut Vec<LocalName>,
 ) -> Result<Value, Diagnostic> {
     match (left, right) {
-        (None, None) => return Ok(context.value_builtin(builtin)),
+        (None, None) => return Ok(lower_syntax_operator_function(operator, context)),
         (Some(left), Some(right)) => {
-            return lower_builtin_expr(builtin, left, right, line, context, scope, locals);
+            return lower_syntax_operator_expr(operator, left, right, line, context, scope, locals);
         }
         _ => {}
     }
@@ -1720,11 +1739,99 @@ fn lower_operator_section(
     locals.truncate(base_len);
     let section_arg = context.value_local(0);
     let body = match (lowered_left, lowered_right) {
-        (None, Some(right)) => context.builtin_apply2_value(builtin, section_arg, right),
-        (Some(left), None) => context.builtin_apply2_value(builtin, left, section_arg),
+        (None, Some(right)) => lower_syntax_operator_values(operator, section_arg, right, context),
+        (Some(left), None) => lower_syntax_operator_values(operator, left, section_arg, context),
         _ => unreachable!("operator section arity was handled before lowering operands"),
     };
     Ok(context.value_lambda(body))
+}
+
+fn lower_syntax_operator_expr(
+    operator: SyntaxOperator,
+    left: &SyntaxExpr,
+    right: &SyntaxExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<Value, Diagnostic> {
+    match operator {
+        SyntaxOperator::Builtin(builtin) => {
+            lower_builtin_expr(builtin, left, right, line, context, scope, locals)
+        }
+        SyntaxOperator::PipeForward | SyntaxOperator::PipeBackward => {
+            Ok(lower_syntax_operator_values(
+                operator,
+                syntax_expr_to_value_in_scope(left, line, context, scope, locals)?,
+                syntax_expr_to_value_in_scope(right, line, context, scope, locals)?,
+                context,
+            ))
+        }
+        SyntaxOperator::ComposeForward | SyntaxOperator::ComposeBackward => {
+            let shifted_scope = shift_name_scope_locals(scope, 1);
+            let base_len = locals.len();
+            locals.push(LocalName {
+                raw: "<composition>".to_owned(),
+                canonical: None,
+                suppress_unused_warning: true,
+            });
+            let left =
+                match syntax_expr_to_value_in_scope(left, line, context, &shifted_scope, locals) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        locals.truncate(base_len);
+                        return Err(err);
+                    }
+                };
+            let right =
+                match syntax_expr_to_value_in_scope(right, line, context, &shifted_scope, locals) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        locals.truncate(base_len);
+                        return Err(err);
+                    }
+                };
+            locals.truncate(base_len);
+            Ok(lower_syntax_operator_values(operator, left, right, context))
+        }
+    }
+}
+
+fn lower_syntax_operator_function(operator: SyntaxOperator, context: &CompileContext) -> Value {
+    match operator {
+        SyntaxOperator::Builtin(builtin) => context.value_builtin(builtin),
+        SyntaxOperator::PipeForward
+        | SyntaxOperator::PipeBackward
+        | SyntaxOperator::ComposeForward
+        | SyntaxOperator::ComposeBackward => {
+            let left = context.value_local(1);
+            let right = context.value_local(0);
+            let body = lower_syntax_operator_values(operator, left, right, context);
+            context.value_lambda(context.value_lambda(body))
+        }
+    }
+}
+
+fn lower_syntax_operator_values(
+    operator: SyntaxOperator,
+    left: Value,
+    right: Value,
+    context: &CompileContext,
+) -> Value {
+    match operator {
+        SyntaxOperator::Builtin(builtin) => context.builtin_apply2_value(builtin, left, right),
+        SyntaxOperator::PipeForward => context.value_apply(right, left),
+        SyntaxOperator::PipeBackward => context.value_apply(left, right),
+        SyntaxOperator::ComposeForward => compose_values(left, right, context),
+        SyntaxOperator::ComposeBackward => compose_values(right, left, context),
+    }
+}
+
+fn compose_values(first: Value, second: Value, context: &CompileContext) -> Value {
+    let input = context.value_local(0);
+    let first = shift_value_locals(&first, 1, 0);
+    let second = shift_value_locals(&second, 1, 0);
+    context.value_lambda(context.value_apply(second, context.value_apply(first, input)))
 }
 
 fn syntax_key_expr_to_value(
@@ -2822,14 +2929,15 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
                 analyze_expr_locals(right, line, diagnostics);
             }
         }
-        SyntaxExpr::Apply(function, argument)
-        | SyntaxExpr::Multiply(function, argument)
-        | SyntaxExpr::Divide(function, argument)
-        | SyntaxExpr::Add(function, argument)
-        | SyntaxExpr::Subtract(function, argument)
-        | SyntaxExpr::Append(function, argument) => {
-            analyze_expr_locals(function, line, diagnostics);
-            analyze_expr_locals(argument, line, diagnostics);
+        SyntaxExpr::OperatorApply { left, right, .. }
+        | SyntaxExpr::Apply(left, right)
+        | SyntaxExpr::Multiply(left, right)
+        | SyntaxExpr::Divide(left, right)
+        | SyntaxExpr::Add(left, right)
+        | SyntaxExpr::Subtract(left, right)
+        | SyntaxExpr::Append(left, right) => {
+            analyze_expr_locals(left, line, diagnostics);
+            analyze_expr_locals(right, line, diagnostics);
         }
     }
 }
@@ -2933,14 +3041,15 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
                 mark_used_prior_alias(right, alias, used);
             }
         }
-        SyntaxExpr::Apply(function, argument)
-        | SyntaxExpr::Multiply(function, argument)
-        | SyntaxExpr::Divide(function, argument)
-        | SyntaxExpr::Add(function, argument)
-        | SyntaxExpr::Subtract(function, argument)
-        | SyntaxExpr::Append(function, argument) => {
-            mark_used_prior_alias(function, alias, used);
-            mark_used_prior_alias(argument, alias, used);
+        SyntaxExpr::OperatorApply { left, right, .. }
+        | SyntaxExpr::Apply(left, right)
+        | SyntaxExpr::Multiply(left, right)
+        | SyntaxExpr::Divide(left, right)
+        | SyntaxExpr::Add(left, right)
+        | SyntaxExpr::Subtract(left, right)
+        | SyntaxExpr::Append(left, right) => {
+            mark_used_prior_alias(left, alias, used);
+            mark_used_prior_alias(right, alias, used);
         }
     }
 }
@@ -3037,14 +3146,15 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
                 mark_used_locals(right, locals, used);
             }
         }
-        SyntaxExpr::Apply(function, argument)
-        | SyntaxExpr::Multiply(function, argument)
-        | SyntaxExpr::Divide(function, argument)
-        | SyntaxExpr::Add(function, argument)
-        | SyntaxExpr::Subtract(function, argument)
-        | SyntaxExpr::Append(function, argument) => {
-            mark_used_locals(function, locals, used);
-            mark_used_locals(argument, locals, used);
+        SyntaxExpr::OperatorApply { left, right, .. }
+        | SyntaxExpr::Apply(left, right)
+        | SyntaxExpr::Multiply(left, right)
+        | SyntaxExpr::Divide(left, right)
+        | SyntaxExpr::Add(left, right)
+        | SyntaxExpr::Subtract(left, right)
+        | SyntaxExpr::Append(left, right) => {
+            mark_used_locals(left, locals, used);
+            mark_used_locals(right, locals, used);
         }
     }
 }
@@ -3095,7 +3205,7 @@ fn syntax_expr_parser<'src>()
 
     fn resolve_infix_chain(
         first: SyntaxExpr,
-        rest: Vec<(crate::core::Builtin, SyntaxExpr)>,
+        rest: Vec<(SyntaxOperator, SyntaxExpr)>,
     ) -> Result<SyntaxExpr, String> {
         let mut exprs = vec![first];
         let mut ops = Vec::new();
@@ -3140,7 +3250,7 @@ fn syntax_expr_parser<'src>()
 
     fn reduce_top_operator(
         exprs: &mut Vec<SyntaxExpr>,
-        ops: &mut Vec<crate::core::Builtin>,
+        ops: &mut Vec<SyntaxOperator>,
     ) -> Result<(), String> {
         let right = exprs
             .pop()
@@ -3155,54 +3265,83 @@ fn syntax_expr_parser<'src>()
         Ok(())
     }
 
-    fn infix_operator_relation(
-        left: crate::core::Builtin,
-        right: crate::core::Builtin,
-    ) -> OperatorRelation {
+    fn infix_operator_relation(left: SyntaxOperator, right: SyntaxOperator) -> OperatorRelation {
         use crate::core::Builtin::{Add, Append, Divide, Multiply, Subtract};
+        use SyntaxOperator::{Builtin, ComposeBackward, ComposeForward, PipeBackward, PipeForward};
 
         match (left, right) {
-            (Append, Append) => OperatorRelation::Same(Associativity::Left),
-            (Append, Add | Subtract | Multiply | Divide) => OperatorRelation::Weaker,
-            (Add | Subtract | Multiply | Divide, Append) => OperatorRelation::Stronger,
-            (Add, Add) => OperatorRelation::Same(Associativity::Left),
-            (Add, Subtract) => OperatorRelation::Unrelated,
-            (Subtract, Add) => OperatorRelation::Unrelated,
-            (Subtract, Subtract) => OperatorRelation::Same(Associativity::None),
-            (Add | Subtract, Multiply | Divide) => OperatorRelation::Weaker,
-            (Multiply | Divide, Add | Subtract) => OperatorRelation::Stronger,
-            (Multiply, Multiply) => OperatorRelation::Same(Associativity::Left),
-            (Multiply, Divide) => OperatorRelation::Same(Associativity::Left),
-            (Divide, Multiply) => OperatorRelation::Same(Associativity::Left),
-            (Divide, Divide) => OperatorRelation::Same(Associativity::None),
-            _ => OperatorRelation::Unrelated,
+            (PipeForward, PipeForward) => OperatorRelation::Same(Associativity::Left),
+            (PipeBackward, PipeBackward) => OperatorRelation::Same(Associativity::Right),
+            (PipeForward, PipeBackward) | (PipeBackward, PipeForward) => {
+                OperatorRelation::Unrelated
+            }
+            (ComposeForward, ComposeForward) => OperatorRelation::Same(Associativity::Left),
+            (ComposeBackward, ComposeBackward) => OperatorRelation::Same(Associativity::Right),
+            (ComposeForward, ComposeBackward) | (ComposeBackward, ComposeForward) => {
+                OperatorRelation::Unrelated
+            }
+            (Builtin(Append), Builtin(Append)) => OperatorRelation::Same(Associativity::Left),
+            (Builtin(Add), Builtin(Add)) => OperatorRelation::Same(Associativity::Left),
+            (Builtin(Add), Builtin(Subtract)) | (Builtin(Subtract), Builtin(Add)) => {
+                OperatorRelation::Unrelated
+            }
+            (Builtin(Subtract), Builtin(Subtract)) => OperatorRelation::Same(Associativity::None),
+            (Builtin(Multiply), Builtin(Multiply))
+            | (Builtin(Multiply), Builtin(Divide))
+            | (Builtin(Divide), Builtin(Multiply)) => OperatorRelation::Same(Associativity::Left),
+            (Builtin(Divide), Builtin(Divide)) => OperatorRelation::Same(Associativity::None),
+            _ => match operator_precedence(left).cmp(&operator_precedence(right)) {
+                std::cmp::Ordering::Greater => OperatorRelation::Stronger,
+                std::cmp::Ordering::Less => OperatorRelation::Weaker,
+                std::cmp::Ordering::Equal => OperatorRelation::Unrelated,
+            },
         }
     }
 
-    fn infix_operator_symbol(builtin: crate::core::Builtin) -> &'static str {
-        match builtin {
-            crate::core::Builtin::Append => "++",
-            crate::core::Builtin::Add => "+",
-            crate::core::Builtin::Subtract => "-",
-            crate::core::Builtin::Multiply => "*",
-            crate::core::Builtin::Divide => "/",
-            crate::core::Builtin::Fixpoint => "fixpoint",
-            crate::core::Builtin::Anno => "anno",
-            crate::core::Builtin::MergeDuplicate => "merge_duplicate",
-            crate::core::Builtin::Floor => "floor",
-            crate::core::Builtin::Mod => "mod",
-            crate::core::Builtin::Slice => "slice",
-            crate::core::Builtin::Map => "map",
-            crate::core::Builtin::ListLen => "list.len",
-            crate::core::Builtin::ListSplit => "list.split",
-            crate::core::Builtin::ListSplitEnd => "list.split_end",
-            crate::core::Builtin::DictSingleton => ":",
-            crate::core::Builtin::DictUnion => "{,}",
-            crate::core::Builtin::DictUpdate => "dict_update",
-            crate::core::Builtin::ObjectSpec => "object_spec",
-            crate::core::Builtin::ObjectLocalName => "object_local_name",
-            crate::core::Builtin::ObjectInstanceFromParts => "object_instance_from_parts",
-            crate::core::Builtin::ObjectInstance => "object_instance",
+    fn operator_precedence(operator: SyntaxOperator) -> u8 {
+        use crate::core::Builtin::{Add, Append, Divide, Multiply, Subtract};
+        use SyntaxOperator::{Builtin, ComposeBackward, ComposeForward, PipeBackward, PipeForward};
+
+        match operator {
+            PipeForward | PipeBackward => 0,
+            ComposeForward | ComposeBackward => 1,
+            Builtin(Append) => 2,
+            Builtin(Add | Subtract) => 3,
+            Builtin(Multiply | Divide) => 4,
+            Builtin(_) => 5,
+        }
+    }
+
+    fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
+        match operator {
+            SyntaxOperator::Builtin(crate::core::Builtin::Append) => "++",
+            SyntaxOperator::Builtin(crate::core::Builtin::Add) => "+",
+            SyntaxOperator::Builtin(crate::core::Builtin::Subtract) => "-",
+            SyntaxOperator::Builtin(crate::core::Builtin::Multiply) => "*",
+            SyntaxOperator::Builtin(crate::core::Builtin::Divide) => "/",
+            SyntaxOperator::PipeForward => "|>",
+            SyntaxOperator::PipeBackward => "<|",
+            SyntaxOperator::ComposeForward => ">>",
+            SyntaxOperator::ComposeBackward => "<<",
+            SyntaxOperator::Builtin(crate::core::Builtin::Fixpoint) => "fixpoint",
+            SyntaxOperator::Builtin(crate::core::Builtin::Anno) => "anno",
+            SyntaxOperator::Builtin(crate::core::Builtin::MergeDuplicate) => "merge_duplicate",
+            SyntaxOperator::Builtin(crate::core::Builtin::Floor) => "floor",
+            SyntaxOperator::Builtin(crate::core::Builtin::Mod) => "mod",
+            SyntaxOperator::Builtin(crate::core::Builtin::Slice) => "slice",
+            SyntaxOperator::Builtin(crate::core::Builtin::Map) => "map",
+            SyntaxOperator::Builtin(crate::core::Builtin::ListLen) => "list.len",
+            SyntaxOperator::Builtin(crate::core::Builtin::ListSplit) => "list.split",
+            SyntaxOperator::Builtin(crate::core::Builtin::ListSplitEnd) => "list.split_end",
+            SyntaxOperator::Builtin(crate::core::Builtin::DictSingleton) => ":",
+            SyntaxOperator::Builtin(crate::core::Builtin::DictUnion) => "{,}",
+            SyntaxOperator::Builtin(crate::core::Builtin::DictUpdate) => "dict_update",
+            SyntaxOperator::Builtin(crate::core::Builtin::ObjectSpec) => "object_spec",
+            SyntaxOperator::Builtin(crate::core::Builtin::ObjectLocalName) => "object_local_name",
+            SyntaxOperator::Builtin(crate::core::Builtin::ObjectInstanceFromParts) => {
+                "object_instance_from_parts"
+            }
+            SyntaxOperator::Builtin(crate::core::Builtin::ObjectInstance) => "object_instance",
         }
     }
 
@@ -3330,21 +3469,27 @@ fn syntax_expr_parser<'src>()
             .map(SyntaxExpr::DictUnion);
 
         let infix_operator = choice((
-            just("++").to(crate::core::Builtin::Append),
-            just('*').to(crate::core::Builtin::Multiply),
-            just('/').to(crate::core::Builtin::Divide),
+            just(">>")
+                .then_ignore(just('=').not())
+                .to(SyntaxOperator::ComposeForward),
+            just("<<").to(SyntaxOperator::ComposeBackward),
+            just("|>").to(SyntaxOperator::PipeForward),
+            just("<|").to(SyntaxOperator::PipeBackward),
+            just("++").to(SyntaxOperator::Builtin(crate::core::Builtin::Append)),
+            just('*').to(SyntaxOperator::Builtin(crate::core::Builtin::Multiply)),
+            just('/').to(SyntaxOperator::Builtin(crate::core::Builtin::Divide)),
             just('+')
                 .then_ignore(just('+').not())
-                .to(crate::core::Builtin::Add),
-            just('-').to(crate::core::Builtin::Subtract),
+                .to(SyntaxOperator::Builtin(crate::core::Builtin::Add)),
+            just('-').to(SyntaxOperator::Builtin(crate::core::Builtin::Subtract)),
         ));
         let prefix_operator_section = infix_operator
             .clone()
             .padded()
             .then(expr.clone())
             .delimited_by(just('('), just(')'))
-            .map(|(builtin, right)| SyntaxExpr::OperatorSection {
-                builtin,
+            .map(|(operator, right)| SyntaxExpr::OperatorSection {
+                operator,
                 left: None,
                 right: Some(Box::new(right)),
             });
@@ -3352,8 +3497,8 @@ fn syntax_expr_parser<'src>()
             .clone()
             .then(infix_operator.clone().padded())
             .delimited_by(just('('), just(')'))
-            .map(|(left, builtin)| SyntaxExpr::OperatorSection {
-                builtin,
+            .map(|(left, operator)| SyntaxExpr::OperatorSection {
+                operator,
                 left: Some(Box::new(left)),
                 right: None,
             });
@@ -3361,8 +3506,8 @@ fn syntax_expr_parser<'src>()
             .clone()
             .padded()
             .delimited_by(just('('), just(')'))
-            .map(|builtin| SyntaxExpr::OperatorSection {
-                builtin,
+            .map(|operator| SyntaxExpr::OperatorSection {
+                operator,
                 left: None,
                 right: None,
             });
@@ -3432,18 +3577,24 @@ fn syntax_expr_parser<'src>()
     parser
 }
 
-fn syntax_binary_expr(
-    builtin: crate::core::Builtin,
-    left: SyntaxExpr,
-    right: SyntaxExpr,
-) -> SyntaxExpr {
-    match builtin {
-        crate::core::Builtin::Append => SyntaxExpr::Append(Box::new(left), Box::new(right)),
-        crate::core::Builtin::Add => SyntaxExpr::Add(Box::new(left), Box::new(right)),
-        crate::core::Builtin::Subtract => SyntaxExpr::Subtract(Box::new(left), Box::new(right)),
-        crate::core::Builtin::Multiply => SyntaxExpr::Multiply(Box::new(left), Box::new(right)),
-        crate::core::Builtin::Divide => SyntaxExpr::Divide(Box::new(left), Box::new(right)),
-        other => panic!("unexpected infix builtin in syntax parser: {other:?}"),
+fn syntax_binary_expr(operator: SyntaxOperator, left: SyntaxExpr, right: SyntaxExpr) -> SyntaxExpr {
+    match operator {
+        SyntaxOperator::Builtin(builtin) => match builtin {
+            crate::core::Builtin::Append => SyntaxExpr::Append(Box::new(left), Box::new(right)),
+            crate::core::Builtin::Add => SyntaxExpr::Add(Box::new(left), Box::new(right)),
+            crate::core::Builtin::Subtract => SyntaxExpr::Subtract(Box::new(left), Box::new(right)),
+            crate::core::Builtin::Multiply => SyntaxExpr::Multiply(Box::new(left), Box::new(right)),
+            crate::core::Builtin::Divide => SyntaxExpr::Divide(Box::new(left), Box::new(right)),
+            other => panic!("unexpected infix builtin in syntax parser: {other:?}"),
+        },
+        SyntaxOperator::PipeForward
+        | SyntaxOperator::PipeBackward
+        | SyntaxOperator::ComposeForward
+        | SyntaxOperator::ComposeBackward => SyntaxExpr::OperatorApply {
+            operator,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
     }
 }
 
@@ -4360,7 +4511,7 @@ mod tests {
         assert_eq!(
             parse_expr("(+ 42)"),
             Some(SyntaxExpr::OperatorSection {
-                builtin: Builtin::Add,
+                operator: SyntaxOperator::Builtin(Builtin::Add),
                 left: None,
                 right: Some(Box::new(SyntaxExpr::Number(n(42)))),
             })
@@ -4368,7 +4519,7 @@ mod tests {
         assert_eq!(
             parse_expr("(42 -)"),
             Some(SyntaxExpr::OperatorSection {
-                builtin: Builtin::Subtract,
+                operator: SyntaxOperator::Builtin(Builtin::Subtract),
                 left: Some(Box::new(SyntaxExpr::Number(n(42)))),
                 right: None,
             })
@@ -4376,7 +4527,7 @@ mod tests {
         assert_eq!(
             parse_expr("(++ suffix)"),
             Some(SyntaxExpr::OperatorSection {
-                builtin: Builtin::Append,
+                operator: SyntaxOperator::Builtin(Builtin::Append),
                 left: None,
                 right: Some(Box::new(SyntaxExpr::Name("suffix".to_owned()))),
             })
@@ -4384,7 +4535,59 @@ mod tests {
         assert_eq!(
             parse_expr("(+)"),
             Some(SyntaxExpr::OperatorSection {
-                builtin: Builtin::Add,
+                operator: SyntaxOperator::Builtin(Builtin::Add),
+                left: None,
+                right: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_pipe_and_composition_operators() {
+        assert_eq!(
+            parse_expr("value |> f"),
+            Some(SyntaxExpr::OperatorApply {
+                operator: SyntaxOperator::PipeForward,
+                left: Box::new(SyntaxExpr::Name("value".to_owned())),
+                right: Box::new(SyntaxExpr::Name("f".to_owned())),
+            })
+        );
+        assert_eq!(
+            parse_expr("f <| value"),
+            Some(SyntaxExpr::OperatorApply {
+                operator: SyntaxOperator::PipeBackward,
+                left: Box::new(SyntaxExpr::Name("f".to_owned())),
+                right: Box::new(SyntaxExpr::Name("value".to_owned())),
+            })
+        );
+        assert_eq!(
+            parse_expr("f >> g"),
+            Some(SyntaxExpr::OperatorApply {
+                operator: SyntaxOperator::ComposeForward,
+                left: Box::new(SyntaxExpr::Name("f".to_owned())),
+                right: Box::new(SyntaxExpr::Name("g".to_owned())),
+            })
+        );
+        assert_eq!(
+            parse_expr("g << f"),
+            Some(SyntaxExpr::OperatorApply {
+                operator: SyntaxOperator::ComposeBackward,
+                left: Box::new(SyntaxExpr::Name("g".to_owned())),
+                right: Box::new(SyntaxExpr::Name("f".to_owned())),
+            })
+        );
+        assert_eq!(
+            parse_expr("(|> f)"),
+            Some(SyntaxExpr::OperatorSection {
+                operator: SyntaxOperator::PipeForward,
+                left: None,
+                right: Some(Box::new(SyntaxExpr::Name("f".to_owned()))),
+            })
+        );
+        assert_eq!(
+            parse_expr("(>>)"),
+            Some(SyntaxExpr::OperatorSection {
+                operator: SyntaxOperator::ComposeForward,
                 left: None,
                 right: None,
             })
@@ -4852,6 +5055,24 @@ mod tests {
                 expr: None,
             })
         );
+    }
+
+    #[test]
+    fn reports_mixed_pipe_and_composition_directions_as_parse_errors() {
+        let parsed = parse("language g0\npipe = value |> f <| g\ncompose = f >> g << h\n");
+
+        assert!(parsed.diagnostics.iter().any(|diag| {
+            diag.line == 2
+                && diag
+                    .message
+                    .contains("operators `|>` and `<|` have no precedence relationship")
+        }));
+        assert!(parsed.diagnostics.iter().any(|diag| {
+            diag.line == 3
+                && diag
+                    .message
+                    .contains("operators `>>` and `<<` have no precedence relationship")
+        }));
     }
 
     #[test]
@@ -5721,6 +5942,37 @@ mod tests {
             ))),
             b"Hello!"
         );
+    }
+
+    #[test]
+    fn pipe_and_composition_operators_evaluate_as_syntax_sugar() {
+        let parsed = parse(
+            "language g0\nid x = x\nbang x = x ++ \"!\"\nhello = \"Hello\"\npipe_section = (|> bang)\npipe_function = (|>)\ncompose_section = (>> bang)\ncompose_function = (>>)\nasm.pipe_forward = hello |> bang\nasm.pipe_backward = bang <| hello\nasm.compose_forward = (id >> bang) hello\nasm.compose_backward = (bang << id) hello\nasm.pipe_section = pipe_section hello\nasm.pipe_function = pipe_function hello bang\nasm.compose_section = (compose_section id) hello\nasm.compose_function = compose_function id bang hello\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        for path in [
+            "pipe_forward",
+            "pipe_backward",
+            "compose_forward",
+            "compose_backward",
+            "pipe_section",
+            "pipe_function",
+            "compose_section",
+            "compose_function",
+        ] {
+            assert_eq!(
+                output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                    &value,
+                    &["asm", path]
+                ))),
+                b"Hello!",
+                "{path}"
+            );
+        }
     }
 
     #[test]
