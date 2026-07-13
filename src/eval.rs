@@ -216,6 +216,16 @@ fn force_value_shell(value: &Value) -> Result<Value, EvalError> {
     Ok(current)
 }
 
+fn force_list_thunk(thunk: &Thunk) -> Result<List, EvalError> {
+    match force_value_shell(&Value::Expr(thunk.clone()))? {
+        Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
+        Value::List(list) => Ok(list),
+        other => Err(EvalError::new(format!(
+            "lazy list chunk must evaluate to a list or binary value, got {other:?}"
+        ))),
+    }
+}
+
 fn eval_apply(function: &Expr, argument: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
     let function = eval_expr(function, local_env)?;
     let argument = thunk_value(argument, local_env);
@@ -275,7 +285,7 @@ fn apply_builtin(
             let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
                 EvalError::new("append builtin received the wrong number of arguments")
             })?;
-            append_values(force_value_shell(&left)?, force_value_shell(&right)?)
+            append_values(left, right)
         }
         Builtin::Add => {
             let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
@@ -474,10 +484,10 @@ fn eval_slice_builtin(
             Ok(Value::Binary(bytes.slice(start..end)))
         }
         Value::List(list) => {
-            if end > list.len() {
+            let Some(slice) = list.try_slice(start, end, &mut force_list_thunk)? else {
                 return Err(EvalError::new("slice builtin end is out of bounds"));
-            }
-            Ok(Value::List(list.slice(start, end)))
+            };
+            Ok(Value::List(slice))
         }
         _ => Err(EvalError::new(
             "slice builtin requires a list or binary value",
@@ -519,7 +529,9 @@ fn eval_map_builtin(
 fn eval_list_len_builtin(value: &Value) -> Result<Value, EvalError> {
     match force_value_shell(value)? {
         Value::Binary(bytes) => Ok(Value::Number(Number::from_usize(bytes.len()))),
-        Value::List(list) => Ok(Value::Number(Number::from_usize(list.len()))),
+        Value::List(list) => Ok(Value::Number(Number::from_usize(
+            list.try_len(&mut force_list_thunk)?,
+        ))),
         _ => Err(EvalError::new(
             "list len builtin requires a list or binary value",
         )),
@@ -543,10 +555,9 @@ fn eval_list_split_builtin(
             ))
         }
         Value::List(list) => {
-            if index > list.len() {
+            let Some((left, right)) = list.try_split_at(index, &mut force_list_thunk)? else {
                 return Err(EvalError::new("split builtin index is out of bounds"));
-            }
-            let (left, right) = list.split_at(index);
+            };
             Ok(split_result_value(Value::List(left), Value::List(right)))
         }
         _ => Err(EvalError::new(
@@ -573,7 +584,7 @@ fn eval_list_split_end_builtin(
             ))
         }
         Value::List(list) => {
-            let Some((left, right)) = list.split_from_end(count) else {
+            let Some((left, right)) = list.try_split_from_end(count, &mut force_list_thunk)? else {
                 return Err(EvalError::new("split_end builtin count is out of bounds"));
             };
             Ok(split_result_value(Value::List(left), Value::List(right)))
@@ -1198,7 +1209,7 @@ fn annotation_error_value(message: impl Into<String>) -> Value {
 
 fn eval_deque_annotation(target: &Value) -> Result<Value, EvalError> {
     match force_value_shell(target)? {
-        Value::List(list) => Ok(Value::List(list.balanced())),
+        Value::List(list) => Ok(Value::List(list.try_balanced(&mut force_list_thunk)?)),
         other => Ok(annotation_error_value(format!(
             "`deque` annotation requires a list target, got {other:?}"
         ))),
@@ -1448,7 +1459,7 @@ fn eval_key_path_list(value: &Value, local_env: &[Value]) -> Result<Vec<Key>, Ev
     };
 
     let items = std::cell::RefCell::new(Vec::new());
-    list.for_each_segment(
+    list.try_for_each_segment(
         &mut |bytes| {
             items
                 .borrow_mut()
@@ -1462,13 +1473,14 @@ fn eval_key_path_list(value: &Value, local_env: &[Value]) -> Result<Vec<Key>, Ev
             }
             Ok(())
         },
+        &mut force_list_thunk,
     )?;
     Ok(items.into_inner())
 }
 
 fn list_to_key_items(list: &List, local_env: &[Value]) -> Result<Arc<[Key]>, EvalError> {
     let items = std::cell::RefCell::new(Vec::new());
-    list.for_each_segment(
+    list.try_for_each_segment(
         &mut |bytes| {
             items
                 .borrow_mut()
@@ -1482,13 +1494,14 @@ fn list_to_key_items(list: &List, local_env: &[Value]) -> Result<Arc<[Key]>, Eva
             }
             Ok(())
         },
+        &mut force_list_thunk,
     )?;
     Ok(Arc::from(items.into_inner()))
 }
 
 fn list_to_value_items(list: &List) -> Result<Vec<Value>, EvalError> {
     let items = std::cell::RefCell::new(Vec::new());
-    list.for_each_segment(
+    list.try_for_each_segment(
         &mut |bytes| {
             items.borrow_mut().extend(
                 bytes
@@ -1501,13 +1514,14 @@ fn list_to_value_items(list: &List) -> Result<Vec<Value>, EvalError> {
             items.borrow_mut().extend(values.iter().cloned());
             Ok(())
         },
+        &mut force_list_thunk,
     )?;
     Ok(items.into_inner())
 }
 
 fn list_to_binary_bytes(list: &List) -> Result<Vec<u8>, String> {
     let bytes = std::cell::RefCell::new(Vec::new());
-    list.for_each_segment(
+    list.try_for_each_segment(
         &mut |segment| {
             bytes.borrow_mut().extend_from_slice(segment);
             Ok::<_, String>(())
@@ -1536,6 +1550,33 @@ fn list_to_binary_bytes(list: &List) -> Result<Vec<u8>, String> {
             }
             Ok(())
         },
+        &mut |thunk| force_list_thunk(thunk).map_err(|err| err.to_string()),
+    )?;
+    Ok(bytes.into_inner())
+}
+
+pub fn list_output_bytes(list: &List) -> Result<Vec<u8>, String> {
+    let bytes = std::cell::RefCell::new(Vec::new());
+    list.try_for_each_segment(
+        &mut |segment| {
+            bytes.borrow_mut().extend_from_slice(segment);
+            Ok::<_, String>(())
+        },
+        &mut |segment| {
+            for item in segment.iter() {
+                let item = eval_value(item).map_err(|err| err.to_string())?;
+                let Value::Number(number) = item else {
+                    return Err("must contain only integers and binary segments".to_owned());
+                };
+
+                let byte = number.to_u8_if_integer().ok_or_else(|| {
+                    format!("contains number `{number}` that is not an in-range byte integer")
+                })?;
+                bytes.borrow_mut().push(byte);
+            }
+            Ok(())
+        },
+        &mut |thunk| force_list_thunk(thunk).map_err(|err| err.to_string()),
     )?;
     Ok(bytes.into_inner())
 }
@@ -1550,6 +1591,7 @@ fn append_sequence(value: Value) -> Result<List, EvalError> {
     match value {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
+        Value::Expr(thunk) => Ok(List::from_thunk(thunk)),
         _ => Err(EvalError::new(
             "append requires list or binary values on both sides",
         )),
@@ -1813,6 +1855,76 @@ mod tests {
         let value = eval_closed_expr(&expr).expect("append should evaluate");
 
         assert!(matches!(value, Value::List(_)));
+    }
+
+    #[test]
+    fn append_preserves_lazy_list_chunks_until_observed() {
+        let expr = builtin2_expr(
+            Builtin::Append,
+            Expr::Value(Value::List(List::from_values(vec![n(72)]))),
+            builtin2_expr(
+                Builtin::Append,
+                Expr::Value(Value::binary_from_text("i")),
+                Expr::Value(Value::binary_from_text("!")),
+            ),
+        );
+
+        let value = eval_closed_expr(&expr).expect("append should evaluate lazily");
+
+        let Value::List(list) = value else {
+            panic!("append should produce a list");
+        };
+        assert_eq!(list.known_len(), None);
+        assert_eq!(
+            list_output_bytes(&list).expect("lazy chunk should force"),
+            b"Hi!"
+        );
+    }
+
+    #[test]
+    fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
+        let expr = builtin2_expr(
+            Builtin::Append,
+            Expr::Value(Value::binary_from_text("Hi")),
+            builtin2_expr(Builtin::Add, Expr::Value(n(1)), Expr::Value(n(1))),
+        );
+
+        let value = eval_closed_expr(&expr).expect("append should preserve lazy chunk");
+        let Value::List(list) = value else {
+            panic!("append should produce a list");
+        };
+
+        let err = list_output_bytes(&list).expect_err("bad lazy chunk should fail when observed");
+        assert!(err.contains("lazy list chunk must evaluate to a list or binary value"));
+    }
+
+    #[test]
+    fn split_end_does_not_force_lazy_left_branch_when_suffix_is_in_right_branch() {
+        let lazy_left = List::from_thunk(Thunk {
+            expr: Arc::new(Expr::Error(Arc::from("left branch was forced"))),
+            env: Arc::from([]),
+        });
+        let list = List::concat(lazy_left, List::from_bytes(Bytes::from_static(b"abc")));
+        let split = eval_closed_expr(&builtin2_expr(
+            Builtin::ListSplitEnd,
+            Expr::Value(n(1)),
+            Expr::Value(Value::List(list)),
+        ))
+        .expect("split_end should not force left branch");
+
+        let Value::Dict(split) = split else {
+            panic!("split_end should produce a dictionary");
+        };
+        let Value::List(suffix) = split
+            .get(&Key::atom_from_text("right"))
+            .expect("split should include right suffix")
+        else {
+            panic!("right suffix should be a list");
+        };
+        assert_eq!(
+            list_output_bytes(suffix).expect("right suffix should render"),
+            b"c"
+        );
     }
 
     #[test]
@@ -2105,29 +2217,11 @@ mod tests {
         let Value::List(list) = resolved else {
             panic!("resolved result should be a list");
         };
-        let bytes = std::cell::RefCell::new(Vec::new());
-        list.for_each_segment(
-            &mut |segment| {
-                bytes.borrow_mut().extend_from_slice(segment);
-                Ok::<_, ()>(())
-            },
-            &mut |segment| {
-                for item in segment.iter() {
-                    let Value::Number(number) = item else {
-                        panic!("byte-oriented result should not contain nested values");
-                    };
-                    bytes.borrow_mut().push(
-                        number
-                            .to_u8_if_integer()
-                            .expect("byte-oriented result should contain byte integers"),
-                    );
-                }
-                Ok(())
-            },
-        )
-        .expect("should walk resolved list");
 
-        assert_eq!(bytes.into_inner(), b"Hello, World!");
+        assert_eq!(
+            list_output_bytes(&list).expect("should render resolved list"),
+            b"Hello, World!"
+        );
     }
 
     #[test]

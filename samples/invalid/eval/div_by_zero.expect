@@ -1,2 +1,2 @@
 # Required stderr substrings for runtime evaluation failure.
-error: divide builtin cannot divide by zero
+error: `asm.result` divide builtin cannot divide by zero

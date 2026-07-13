@@ -303,6 +303,7 @@ enum ListNode {
     Values(SharedSlice<Value>),
     Concat(List, List),
     Finger(FingerList),
+    Thunk(Thunk),
 }
 
 type FingerList = fingertrees::sync::FingerTree<ListChunk>;
@@ -406,7 +407,13 @@ impl Measured for ListChunk {
 
 impl PartialEq for List {
     fn eq(&self, other: &Self) -> bool {
-        if self.len() != other.len() {
+        let Some(self_len) = self.known_len() else {
+            return Arc::ptr_eq(&self.0, &other.0);
+        };
+        let Some(other_len) = other.known_len() else {
+            return Arc::ptr_eq(&self.0, &other.0);
+        };
+        if self_len != other_len {
             return false;
         }
         self.to_value_items_for_eq() == other.to_value_items_for_eq()
@@ -437,6 +444,10 @@ impl List {
         }
     }
 
+    pub fn from_thunk(thunk: Thunk) -> Self {
+        Self(Arc::new(ListNode::Thunk(thunk)))
+    }
+
     fn from_value_slice(values: SharedSlice<Value>) -> Self {
         if values.len() == 0 {
             Self::empty()
@@ -456,17 +467,46 @@ impl List {
     }
 
     pub fn len(&self) -> usize {
+        self.known_len()
+            .expect("list length requires all lazy list chunks to be forced")
+    }
+
+    pub fn known_len(&self) -> Option<usize> {
         match self.0.as_ref() {
-            ListNode::Empty => 0,
-            ListNode::Bytes(bytes) => bytes.len(),
-            ListNode::Values(values) => values.len(),
-            ListNode::Concat(left, right) => left.len() + right.len(),
-            ListNode::Finger(finger) => finger.measure().0,
+            ListNode::Empty => Some(0),
+            ListNode::Bytes(bytes) => Some(bytes.len()),
+            ListNode::Values(values) => Some(values.len()),
+            ListNode::Concat(left, right) => Some(left.known_len()? + right.known_len()?),
+            ListNode::Finger(finger) => Some(finger.measure().0),
+            ListNode::Thunk(_) => None,
+        }
+    }
+
+    pub fn try_len<E>(
+        &self,
+        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
+    ) -> Result<usize, E> {
+        match self.0.as_ref() {
+            ListNode::Empty => Ok(0),
+            ListNode::Bytes(bytes) => Ok(bytes.len()),
+            ListNode::Values(values) => Ok(values.len()),
+            ListNode::Concat(left, right) => {
+                Ok(left.try_len(force_thunk)? + right.try_len(force_thunk)?)
+            }
+            ListNode::Finger(finger) => Ok(finger.measure().0),
+            ListNode::Thunk(thunk) => force_thunk(thunk)?.try_len(force_thunk),
         }
     }
 
     pub fn balanced(&self) -> Self {
         Self::from_finger(self.to_finger())
+    }
+
+    pub fn try_balanced<E>(
+        &self,
+        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
+    ) -> Result<Self, E> {
+        Ok(Self::from_finger(self.to_finger_with(force_thunk)?))
     }
 
     pub fn slice(&self, start: usize, end: usize) -> Self {
@@ -475,13 +515,45 @@ impl List {
         self.slice_checked(start, end)
     }
 
+    pub fn try_slice<E>(
+        &self,
+        start: usize,
+        end: usize,
+        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
+    ) -> Result<Option<Self>, E> {
+        assert!(start <= end);
+        let Some((_, tail)) = self.try_split_at(start, force_thunk)? else {
+            return Ok(None);
+        };
+        let Some((middle, _)) = tail.try_split_at(end - start, force_thunk)? else {
+            return Ok(None);
+        };
+        Ok(Some(middle))
+    }
+
     pub fn split_at(&self, index: usize) -> (Self, Self) {
         assert!(index <= self.len());
         self.split_at_checked(index)
     }
 
+    pub fn try_split_at<E>(
+        &self,
+        index: usize,
+        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
+    ) -> Result<Option<(Self, Self)>, E> {
+        self.split_at_checked_with(index, force_thunk)
+    }
+
     pub fn split_from_end(&self, count: usize) -> Option<(Self, Self)> {
         self.split_from_end_checked(count)
+    }
+
+    pub fn try_split_from_end<E>(
+        &self,
+        count: usize,
+        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
+    ) -> Result<Option<(Self, Self)>, E> {
+        self.split_from_end_checked_with(count, force_thunk)
     }
 
     pub fn for_each_segment<E>(
@@ -500,6 +572,32 @@ impl List {
             ListNode::Finger(finger) => finger
                 .iter()
                 .try_for_each(|chunk| chunk.for_each_segment(on_bytes, on_values)),
+            ListNode::Thunk(_) => {
+                panic!("list segment traversal requires all lazy list chunks to be forced")
+            }
+        }
+    }
+
+    pub fn try_for_each_segment<E>(
+        &self,
+        on_bytes: &mut impl FnMut(&[u8]) -> Result<(), E>,
+        on_values: &mut impl FnMut(&[Value]) -> Result<(), E>,
+        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
+    ) -> Result<(), E> {
+        match self.0.as_ref() {
+            ListNode::Empty => Ok(()),
+            ListNode::Bytes(bytes) => on_bytes(bytes),
+            ListNode::Values(values) => on_values(values.as_slice()),
+            ListNode::Concat(left, right) => {
+                left.try_for_each_segment(on_bytes, on_values, force_thunk)?;
+                right.try_for_each_segment(on_bytes, on_values, force_thunk)
+            }
+            ListNode::Finger(finger) => finger
+                .iter()
+                .try_for_each(|chunk| chunk.for_each_segment(on_bytes, on_values)),
+            ListNode::Thunk(thunk) => {
+                force_thunk(thunk)?.try_for_each_segment(on_bytes, on_values, force_thunk)
+            }
         }
     }
 
@@ -521,6 +619,15 @@ impl List {
         finger
     }
 
+    fn to_finger_with<E>(
+        &self,
+        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
+    ) -> Result<FingerList, E> {
+        let mut finger = FingerList::new();
+        self.push_chunks_into_with(&mut finger, force_thunk)?;
+        Ok(finger)
+    }
+
     fn push_chunks_into(&self, finger: &mut FingerList) {
         match self.0.as_ref() {
             ListNode::Empty => {}
@@ -535,7 +642,35 @@ impl List {
                 right.push_chunks_into(finger);
             }
             ListNode::Finger(right) => *finger = finger.concat(right),
+            ListNode::Thunk(_) => {
+                panic!("finger-tree conversion requires all lazy list chunks to be forced")
+            }
         }
+    }
+
+    fn push_chunks_into_with<E>(
+        &self,
+        finger: &mut FingerList,
+        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
+    ) -> Result<(), E> {
+        match self.0.as_ref() {
+            ListNode::Empty => {}
+            ListNode::Bytes(bytes) => {
+                *finger = finger.push_right(ListChunk::Bytes(bytes.clone()));
+            }
+            ListNode::Values(values) => {
+                *finger = finger.push_right(ListChunk::Values(values.clone()));
+            }
+            ListNode::Concat(left, right) => {
+                left.push_chunks_into_with(finger, force_thunk)?;
+                right.push_chunks_into_with(finger, force_thunk)?;
+            }
+            ListNode::Finger(right) => *finger = finger.concat(right),
+            ListNode::Thunk(thunk) => {
+                force_thunk(thunk)?.push_chunks_into_with(finger, force_thunk)?;
+            }
+        }
+        Ok(())
     }
 
     fn to_value_items_for_eq(&self) -> Vec<Value> {
@@ -571,6 +706,9 @@ impl List {
                 Self::slice_concat(left, left.len(), right, start, end)
             }
             ListNode::Finger(finger) => Self::slice_finger(finger, start, end),
+            ListNode::Thunk(_) => {
+                panic!("list slice requires all lazy list chunks to be forced")
+            }
         }
     }
 
@@ -604,6 +742,68 @@ impl List {
                 let (left, right) = Self::split_finger_at(finger, index);
                 (Self::from_finger(left), Self::from_finger(right))
             }
+            ListNode::Thunk(_) => {
+                panic!("list split requires all lazy list chunks to be forced")
+            }
+        }
+    }
+
+    fn split_at_checked_with<E>(
+        &self,
+        index: usize,
+        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
+    ) -> Result<Option<(Self, Self)>, E> {
+        match self.0.as_ref() {
+            ListNode::Empty => Ok((index == 0).then(|| (Self::empty(), Self::empty()))),
+            ListNode::Bytes(bytes) => {
+                if index > bytes.len() {
+                    Ok(None)
+                } else {
+                    Ok(Some((
+                        Self::from_bytes(bytes.slice(0..index)),
+                        Self::from_bytes(bytes.slice(index..bytes.len())),
+                    )))
+                }
+            }
+            ListNode::Values(values) => {
+                if index > values.len() {
+                    Ok(None)
+                } else {
+                    Ok(Some((
+                        Self::from_value_slice(values.slice(0, index)),
+                        Self::from_value_slice(values.slice(index, values.len())),
+                    )))
+                }
+            }
+            ListNode::Concat(left, right) => {
+                let left_len = left.try_len(force_thunk)?;
+                if index < left_len {
+                    let Some((left_left, left_right)) =
+                        left.split_at_checked_with(index, force_thunk)?
+                    else {
+                        unreachable!("left branch should split when index is below its length");
+                    };
+                    Ok(Some((left_left, Self::concat(left_right, right.clone()))))
+                } else if index == left_len {
+                    Ok(Some((left.clone(), right.clone())))
+                } else {
+                    let Some((right_left, right_right)) =
+                        right.split_at_checked_with(index - left_len, force_thunk)?
+                    else {
+                        return Ok(None);
+                    };
+                    Ok(Some((Self::concat(left.clone(), right_left), right_right)))
+                }
+            }
+            ListNode::Finger(finger) => {
+                if index > finger.measure().0 {
+                    Ok(None)
+                } else {
+                    let (left, right) = Self::split_finger_at(finger, index);
+                    Ok(Some((Self::from_finger(left), Self::from_finger(right))))
+                }
+            }
+            ListNode::Thunk(thunk) => force_thunk(thunk)?.split_at_checked_with(index, force_thunk),
         }
     }
 
@@ -630,6 +830,46 @@ impl List {
                     None
                 } else {
                     Some(self.split_at_checked(len - count))
+                }
+            }
+        }
+    }
+
+    fn split_from_end_checked_with<E>(
+        &self,
+        count: usize,
+        force_thunk: &mut impl FnMut(&Thunk) -> Result<List, E>,
+    ) -> Result<Option<(Self, Self)>, E> {
+        match self.0.as_ref() {
+            ListNode::Concat(left, right) => {
+                let right_len = right.try_len(force_thunk)?;
+                if count < right_len {
+                    let Some((right_left, right_right)) =
+                        right.split_from_end_checked_with(count, force_thunk)?
+                    else {
+                        unreachable!("right branch should split when count is below its length");
+                    };
+                    Ok(Some((Self::concat(left.clone(), right_left), right_right)))
+                } else if count == right_len {
+                    Ok(Some((left.clone(), right.clone())))
+                } else {
+                    let Some((left_left, left_right)) =
+                        left.split_from_end_checked_with(count - right_len, force_thunk)?
+                    else {
+                        return Ok(None);
+                    };
+                    Ok(Some((left_left, Self::concat(left_right, right.clone()))))
+                }
+            }
+            ListNode::Thunk(thunk) => {
+                force_thunk(thunk)?.split_from_end_checked_with(count, force_thunk)
+            }
+            _ => {
+                let len = self.try_len(force_thunk)?;
+                if count > len {
+                    Ok(None)
+                } else {
+                    self.split_at_checked_with(len - count, force_thunk)
                 }
             }
         }

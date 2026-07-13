@@ -3500,33 +3500,7 @@ mod tests {
         match value {
             Value::Binary(bytes) => bytes.to_vec(),
             Value::List(list) => {
-                let bytes = std::cell::RefCell::new(Vec::new());
-                list.for_each_segment(
-                    &mut |segment| {
-                        bytes.borrow_mut().extend_from_slice(segment);
-                        Ok::<_, String>(())
-                    },
-                    &mut |segment| {
-                        for item in segment.iter() {
-                            let item = fully_evaluated_value(item.clone());
-                            let Value::Number(number) = item else {
-                                return Err(
-                                    "output list must contain only integers and binary segments"
-                                        .to_owned(),
-                                );
-                            };
-                            let byte = number.to_u8_if_integer().ok_or_else(|| {
-                                format!(
-                                    "output list contains number `{number}` that is not an in-range byte integer"
-                                )
-                            })?;
-                            bytes.borrow_mut().push(byte);
-                        }
-                        Ok(())
-                    },
-                )
-                .expect("output list should render as bytes");
-                bytes.into_inner()
+                crate::eval::list_output_bytes(list).expect("output list should render as bytes")
             }
             other => panic!("expected binary output value, got {other:?}"),
         }

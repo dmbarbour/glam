@@ -512,7 +512,9 @@ fn result_bytes(root: &glam::core::Value, path: &str) -> Result<Vec<u8>, String>
 fn value_bytes(value: &glam::core::Value, path: &str) -> Result<Vec<u8>, String> {
     match value {
         glam::core::Value::Binary(bytes) => Ok(bytes.to_vec()),
-        glam::core::Value::List(list) => list_bytes(list).map_err(|err| format!("`{path}` {err}")),
+        glam::core::Value::List(list) => {
+            eval::list_output_bytes(list).map_err(|err| format!("`{path}` {err}"))
+        }
         glam::core::Value::Expr(thunk) => {
             let value = eval::eval_value(&glam::core::Value::Expr(thunk.clone()))
                 .map_err(|err| err.to_string())?;
@@ -524,31 +526,6 @@ fn value_bytes(value: &glam::core::Value, path: &str) -> Result<Vec<u8>, String>
         | glam::core::Value::Closure(_)
         | glam::core::Value::Builtin(_) => Err(format!("`{path}` is not binary text data")),
     }
-}
-
-fn list_bytes(list: &glam::core::List) -> Result<Vec<u8>, String> {
-    let bytes = std::cell::RefCell::new(Vec::new());
-    list.for_each_segment(
-        &mut |segment| {
-            bytes.borrow_mut().extend_from_slice(segment);
-            Ok::<_, String>(())
-        },
-        &mut |segment| {
-            for item in segment.iter() {
-                let item = eval::eval_value(item).map_err(|err| err.to_string())?;
-                let glam::core::Value::Number(number) = item else {
-                    return Err("must contain only integers and binary segments".to_owned());
-                };
-
-                let byte = number.to_u8_if_integer().ok_or_else(|| {
-                    format!("contains number `{number}` that is not an in-range byte integer")
-                })?;
-                bytes.borrow_mut().push(byte);
-            }
-            Ok(())
-        },
-    )?;
-    Ok(bytes.into_inner())
 }
 
 fn value_at_path(root: &glam::core::Value, path: &str) -> Result<glam::core::Value, String> {
