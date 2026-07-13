@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -368,6 +369,60 @@ fn apply_builtin(
             })?;
             eval_numeric_divide_builtin(&left, &right, local_env)
         }
+        Builtin::Greater => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("greater-than builtin received the wrong number of arguments")
+            })?;
+            eval_compare_ordering_builtin("greater-than", &left, &right, local_env, |ordering| {
+                ordering == Ordering::Greater
+            })
+        }
+        Builtin::GreaterEqual => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new(
+                    "greater-than-or-equal builtin received the wrong number of arguments",
+                )
+            })?;
+            eval_compare_ordering_builtin(
+                "greater-than-or-equal",
+                &left,
+                &right,
+                local_env,
+                |ordering| ordering != Ordering::Less,
+            )
+        }
+        Builtin::Equal => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("equal builtin received the wrong number of arguments")
+            })?;
+            eval_compare_equality_builtin("equal", &left, &right, local_env, |equal| equal)
+        }
+        Builtin::NotEqual => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("not-equal builtin received the wrong number of arguments")
+            })?;
+            eval_compare_equality_builtin("not-equal", &left, &right, local_env, |equal| !equal)
+        }
+        Builtin::LessEqual => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("less-than-or-equal builtin received the wrong number of arguments")
+            })?;
+            eval_compare_ordering_builtin(
+                "less-than-or-equal",
+                &left,
+                &right,
+                local_env,
+                |ordering| ordering != Ordering::Greater,
+            )
+        }
+        Builtin::Less => {
+            let [left, right] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new("less-than builtin received the wrong number of arguments")
+            })?;
+            eval_compare_ordering_builtin("less-than", &left, &right, local_env, |ordering| {
+                ordering == Ordering::Less
+            })
+        }
         Builtin::Fixpoint => {
             let [function] = <[Value; 1]>::try_from(args).map_err(|_| {
                 EvalError::new("fixpoint builtin received the wrong number of arguments")
@@ -565,6 +620,237 @@ fn eval_numeric_mod_builtin(
         return Err(EvalError::new("mod builtin cannot divide by zero"));
     };
     Ok(Value::Number(result))
+}
+
+fn eval_compare_ordering_builtin(
+    name: &str,
+    left: &Value,
+    right: &Value,
+    local_env: &[Value],
+    predicate: impl FnOnce(Ordering) -> bool,
+) -> Result<Value, EvalError> {
+    let ordering = compare_ordered_values(left, right, local_env, name)?;
+    Ok(condition_effect_value(predicate(ordering)))
+}
+
+fn eval_compare_equality_builtin(
+    name: &str,
+    left: &Value,
+    right: &Value,
+    local_env: &[Value],
+    predicate: impl FnOnce(bool) -> bool,
+) -> Result<Value, EvalError> {
+    let equal = equal_values(left, right, local_env, name)?;
+    Ok(condition_effect_value(predicate(equal)))
+}
+
+fn condition_effect_value(success: bool) -> Value {
+    if success {
+        effect_call_expr_value("r", vec![builtin_unit_value()])
+    } else {
+        effect_call_expr_value("fail", Vec::new())
+    }
+}
+
+fn effect_call_expr_value(name: &str, arguments: Vec<Value>) -> Value {
+    let api_member = Expr::Access(
+        Arc::new(Expr::Local(0)),
+        Arc::from([KeyExpr::Key(Key::atom_from_text(name))]),
+    );
+    let body = arguments
+        .into_iter()
+        .fold(api_member, |function, argument| {
+            Expr::Apply(Arc::new(function), Arc::new(Expr::Value(argument)))
+        });
+    effect_value(Value::expr(Expr::Lambda(Arc::new(body))))
+}
+
+fn builtin_unit_value() -> Value {
+    Value::Atom(crate::core::Atom::from_key(&Key::abstract_global_path([
+        "builtin", "unit",
+    ])))
+}
+
+fn compare_ordered_values(
+    left: &Value,
+    right: &Value,
+    local_env: &[Value],
+    name: &str,
+) -> Result<Ordering, EvalError> {
+    let left = force_value_shell(left)?;
+    let right = force_value_shell(right)?;
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => Ok(left.cmp(&right)),
+        (Value::Binary(left), Value::Binary(right)) => Ok(left.cmp(&right)),
+        (Value::Binary(left), Value::List(right)) => {
+            compare_lists_ordered(List::from_bytes(left), right, local_env, name)
+        }
+        (Value::List(left), Value::Binary(right)) => {
+            compare_lists_ordered(left, List::from_bytes(right), local_env, name)
+        }
+        (Value::List(left), Value::List(right)) => {
+            compare_lists_ordered(left, right, local_env, name)
+        }
+        (Value::Dict(left), Value::Dict(right)) => {
+            let Some(left) = tuple_payload(&left) else {
+                return Err(EvalError::new(format!(
+                    "{name} builtin can only order dictionaries tagged as `tuple`"
+                )));
+            };
+            let Some(right) = tuple_payload(&right) else {
+                return Err(EvalError::new(format!(
+                    "{name} builtin can only order dictionaries tagged as `tuple`"
+                )));
+            };
+            let left = list_like_value(left, name)?;
+            let right = list_like_value(right, name)?;
+            compare_lists_ordered(left, right, local_env, name)
+        }
+        (Value::Builtin(_), _)
+        | (_, Value::Builtin(_))
+        | (Value::Closure(_), _)
+        | (_, Value::Closure(_)) => Err(EvalError::new(format!(
+            "{name} builtin cannot compare function values"
+        ))),
+        (left, right) => Err(EvalError::new(format!(
+            "{name} builtin cannot order values {left:?} and {right:?}"
+        ))),
+    }
+}
+
+fn compare_lists_ordered(
+    mut left: List,
+    mut right: List,
+    local_env: &[Value],
+    name: &str,
+) -> Result<Ordering, EvalError> {
+    loop {
+        match (
+            left.try_pop_front(&mut force_list_thunk)?,
+            right.try_pop_front(&mut force_list_thunk)?,
+        ) {
+            (None, None) => return Ok(Ordering::Equal),
+            (None, Some(_)) => return Ok(Ordering::Less),
+            (Some(_), None) => return Ok(Ordering::Greater),
+            (Some((left_head, left_tail)), Some((right_head, right_tail))) => {
+                match compare_ordered_values(&left_head, &right_head, local_env, name)? {
+                    Ordering::Equal => {
+                        left = left_tail;
+                        right = right_tail;
+                    }
+                    ordering => return Ok(ordering),
+                }
+            }
+        }
+    }
+}
+
+fn equal_values(
+    left: &Value,
+    right: &Value,
+    local_env: &[Value],
+    name: &str,
+) -> Result<bool, EvalError> {
+    let left = force_value_shell(left)?;
+    let right = force_value_shell(right)?;
+    match (left, right) {
+        (Value::Atom(left), Value::Atom(right)) => Ok(left == right),
+        (Value::Number(left), Value::Number(right)) => Ok(left == right),
+        (Value::Binary(left), Value::Binary(right)) => Ok(left == right),
+        (Value::Binary(left), Value::List(right)) => {
+            equal_lists(List::from_bytes(left), right, local_env, name)
+        }
+        (Value::List(left), Value::Binary(right)) => {
+            equal_lists(left, List::from_bytes(right), local_env, name)
+        }
+        (Value::List(left), Value::List(right)) => equal_lists(left, right, local_env, name),
+        (Value::Dict(left), Value::Dict(right)) => equal_dicts(&left, &right, local_env, name),
+        (Value::Expr(_), _) | (_, Value::Expr(_)) => {
+            unreachable!("force_value_shell removes Expr")
+        }
+        (Value::Builtin(_), _)
+        | (_, Value::Builtin(_))
+        | (Value::Closure(_), _)
+        | (_, Value::Closure(_)) => Err(EvalError::new(format!(
+            "{name} builtin cannot compare function values"
+        ))),
+        (Value::Atom(_), _)
+        | (Value::Number(_), _)
+        | (Value::Binary(_), _)
+        | (Value::List(_), _)
+        | (Value::Dict(_), _) => Ok(false),
+    }
+}
+
+fn equal_lists(
+    mut left: List,
+    mut right: List,
+    local_env: &[Value],
+    name: &str,
+) -> Result<bool, EvalError> {
+    loop {
+        match (
+            left.try_pop_front(&mut force_list_thunk)?,
+            right.try_pop_front(&mut force_list_thunk)?,
+        ) {
+            (None, None) => return Ok(true),
+            (None, Some(_)) | (Some(_), None) => return Ok(false),
+            (Some((left_head, left_tail)), Some((right_head, right_tail))) => {
+                if !equal_values(&left_head, &right_head, local_env, name)? {
+                    return Ok(false);
+                }
+                left = left_tail;
+                right = right_tail;
+            }
+        }
+    }
+}
+
+fn equal_dicts(
+    left: &crate::core::Dict,
+    right: &crate::core::Dict,
+    local_env: &[Value],
+    name: &str,
+) -> Result<bool, EvalError> {
+    let empty = Value::Dict(crate::core::Dict::new_sync());
+    for (key, left_value) in left.iter() {
+        let right_value = right.get(key).unwrap_or(&empty);
+        if !equal_values(left_value, right_value, local_env, name)? {
+            return Ok(false);
+        }
+    }
+
+    for (key, right_value) in right.iter() {
+        if left.contains_key(key) {
+            continue;
+        }
+        if !equal_values(&empty, right_value, local_env, name)? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn tuple_payload(dict: &crate::core::Dict) -> Option<Value> {
+    let tuple_key = Key::atom_from_text("tuple");
+    let payload = dict.get(&tuple_key)?;
+    if is_undefined_dict_value(payload) {
+        return None;
+    }
+    dict.iter()
+        .all(|(key, value)| *key == tuple_key || is_undefined_dict_value(value))
+        .then(|| payload.clone())
+}
+
+fn list_like_value(value: Value, name: &str) -> Result<List, EvalError> {
+    match force_value_shell(&value)? {
+        Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
+        Value::List(list) => Ok(list),
+        other => Err(EvalError::new(format!(
+            "{name} builtin requires tuple payloads to be lists or binaries, got {other:?}"
+        ))),
+    }
 }
 
 fn eval_slice_builtin(
@@ -2306,6 +2592,21 @@ mod tests {
         let value = eval_closed_expr(&expr).expect("arithmetic should evaluate");
 
         assert_eq!(value, Value::Number(Number::parse("31/5").unwrap()));
+    }
+
+    #[test]
+    fn equality_errors_when_dictionary_comparison_reaches_functions() {
+        let function = Value::expr(Expr::Lambda(Arc::new(Expr::Local(0))));
+        let left = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("f"), function.clone()));
+        let right = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("f"), function));
+        let err = eval_closed_expr(&builtin2_expr(
+            Builtin::Equal,
+            Expr::Value(left),
+            Expr::Value(right),
+        ))
+        .expect_err("function-valued fields should not be equatable");
+
+        assert!(err.to_string().contains("cannot compare function values"));
     }
 
     #[test]

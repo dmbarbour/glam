@@ -191,6 +191,8 @@ pub enum SyntaxExpr {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntaxOperator {
     Builtin(Builtin),
+    BoolAnd,
+    BoolOr,
     PipeForward,
     PipeBackward,
     ComposeForward,
@@ -690,6 +692,8 @@ fn builtin_list_module(context: &CompileContext) -> Dict {
 fn builtin_std_module(context: &CompileContext) -> Dict {
     Dict::new_sync()
         .insert(name_as_key("anno"), context.value_builtin(Builtin::Anno))
+        .insert(name_as_key("not"), builtin_not_value(context))
+        .insert(name_as_key("could"), builtin_could_value(context))
         .insert(
             name_as_key("math"),
             context.value_dict(builtin_math_module(context)),
@@ -698,6 +702,43 @@ fn builtin_std_module(context: &CompileContext) -> Dict {
             name_as_key("list"),
             context.value_dict(builtin_list_module(context)),
         )
+}
+
+fn builtin_not_value(context: &CompileContext) -> Value {
+    let condition = context.value_local(0);
+    let fail_operation = lower_effect_expr("fail", context);
+    let true_operation = effect_return_value(context.unit_value(), context);
+    let fail_if_condition_succeeds = effect_then_values(
+        condition,
+        effect_return_value(fail_operation, context),
+        context,
+    );
+    let succeed_if_condition_fails = effect_return_value(true_operation, context);
+    let select_operation = effect_call_value(
+        "cut",
+        vec![effect_call_value(
+            "alt",
+            vec![fail_if_condition_succeeds, succeed_if_condition_fails],
+            context,
+        )],
+        context,
+    );
+    let run_selected_operation = context.value_lambda(context.value_local(0));
+    context.value_lambda(effect_call_value(
+        "seq",
+        vec![select_operation, run_selected_operation],
+        context,
+    ))
+}
+
+fn builtin_could_value(context: &CompileContext) -> Value {
+    let not = builtin_not_value(context);
+    let condition = context.value_local(0);
+    context.value_lambda(context.value_apply(not.clone(), context.value_apply(not, condition)))
+}
+
+fn effect_return_value(value: Value, context: &CompileContext) -> Value {
+    context.value_apply(lower_effect_expr("r", context), value)
 }
 
 fn lower_definition(
@@ -1792,6 +1833,8 @@ fn lower_syntax_operator_expr(
         }
         SyntaxOperator::PipeForward
         | SyntaxOperator::PipeBackward
+        | SyntaxOperator::BoolAnd
+        | SyntaxOperator::BoolOr
         | SyntaxOperator::EffectBind
         | SyntaxOperator::KleisliCompose
         | SyntaxOperator::EffectThen => Ok(lower_syntax_operator_values(
@@ -1833,7 +1876,9 @@ fn lower_syntax_operator_expr(
 fn lower_syntax_operator_function(operator: SyntaxOperator, context: &CompileContext) -> Value {
     match operator {
         SyntaxOperator::Builtin(builtin) => context.value_builtin(builtin),
-        SyntaxOperator::PipeForward
+        SyntaxOperator::BoolAnd
+        | SyntaxOperator::BoolOr
+        | SyntaxOperator::PipeForward
         | SyntaxOperator::PipeBackward
         | SyntaxOperator::ComposeForward
         | SyntaxOperator::ComposeBackward
@@ -1856,6 +1901,8 @@ fn lower_syntax_operator_values(
 ) -> Value {
     match operator {
         SyntaxOperator::Builtin(builtin) => context.builtin_apply2_value(builtin, left, right),
+        SyntaxOperator::BoolAnd => effect_then_values(left, right, context),
+        SyntaxOperator::BoolOr => effect_call_value("alt", vec![left, right], context),
         SyntaxOperator::PipeForward => context.value_apply(right, left),
         SyntaxOperator::PipeBackward => context.value_apply(left, right),
         SyntaxOperator::ComposeForward => compose_values(left, right, context),
@@ -3354,13 +3401,19 @@ fn syntax_expr_parser<'src>()
     }
 
     fn infix_operator_relation(left: SyntaxOperator, right: SyntaxOperator) -> OperatorRelation {
-        use crate::core::Builtin::{Add, Append, Divide, Multiply, Subtract};
+        use crate::core::Builtin::{
+            Add, Append, Divide, Equal, Greater, GreaterEqual, Less, LessEqual, Multiply, NotEqual,
+            Subtract,
+        };
         use SyntaxOperator::{
-            Builtin, ComposeBackward, ComposeForward, EffectBind, EffectThen, KleisliCompose,
-            PipeBackward, PipeForward,
+            BoolAnd, BoolOr, Builtin, ComposeBackward, ComposeForward, EffectBind, EffectThen,
+            KleisliCompose, PipeBackward, PipeForward,
         };
 
         match (left, right) {
+            (BoolOr, BoolOr) | (BoolAnd, BoolAnd) => OperatorRelation::Same(Associativity::Left),
+            (BoolOr, BoolAnd) => OperatorRelation::Weaker,
+            (BoolAnd, BoolOr) => OperatorRelation::Stronger,
             (EffectBind, EffectBind)
             | (EffectBind, EffectThen)
             | (EffectThen, EffectBind)
@@ -3382,6 +3435,10 @@ fn syntax_expr_parser<'src>()
                 OperatorRelation::Unrelated
             }
             (Builtin(Subtract), Builtin(Subtract)) => OperatorRelation::Same(Associativity::None),
+            (
+                Builtin(Greater | GreaterEqual | Equal | NotEqual | LessEqual | Less),
+                Builtin(Greater | GreaterEqual | Equal | NotEqual | LessEqual | Less),
+            ) => OperatorRelation::Same(Associativity::None),
             (Builtin(Multiply), Builtin(Multiply))
             | (Builtin(Multiply), Builtin(Divide))
             | (Builtin(Divide), Builtin(Multiply)) => OperatorRelation::Same(Associativity::Left),
@@ -3395,30 +3452,44 @@ fn syntax_expr_parser<'src>()
     }
 
     fn operator_precedence(operator: SyntaxOperator) -> u8 {
-        use crate::core::Builtin::{Add, Append, Divide, Multiply, Subtract};
+        use crate::core::Builtin::{
+            Add, Append, Divide, Equal, Greater, GreaterEqual, Less, LessEqual, Multiply, NotEqual,
+            Subtract,
+        };
         use SyntaxOperator::{
-            Builtin, ComposeBackward, ComposeForward, EffectBind, EffectThen, KleisliCompose,
-            PipeBackward, PipeForward,
+            BoolAnd, BoolOr, Builtin, ComposeBackward, ComposeForward, EffectBind, EffectThen,
+            KleisliCompose, PipeBackward, PipeForward,
         };
 
         match operator {
-            EffectBind | EffectThen => 0,
-            PipeForward | PipeBackward => 1,
-            ComposeForward | ComposeBackward | KleisliCompose => 2,
-            Builtin(Append) => 3,
-            Builtin(Add | Subtract) => 4,
-            Builtin(Multiply | Divide) => 5,
-            Builtin(_) => 6,
+            BoolOr => 0,
+            BoolAnd => 1,
+            EffectBind | EffectThen => 2,
+            PipeForward | PipeBackward => 3,
+            ComposeForward | ComposeBackward | KleisliCompose => 4,
+            Builtin(Greater | GreaterEqual | Equal | NotEqual | LessEqual | Less) => 5,
+            Builtin(Append) => 6,
+            Builtin(Add | Subtract) => 7,
+            Builtin(Multiply | Divide) => 8,
+            Builtin(_) => 9,
         }
     }
 
     fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         match operator {
+            SyntaxOperator::BoolAnd => "and",
+            SyntaxOperator::BoolOr => "or",
             SyntaxOperator::Builtin(crate::core::Builtin::Append) => "++",
             SyntaxOperator::Builtin(crate::core::Builtin::Add) => "+",
             SyntaxOperator::Builtin(crate::core::Builtin::Subtract) => "-",
             SyntaxOperator::Builtin(crate::core::Builtin::Multiply) => "*",
             SyntaxOperator::Builtin(crate::core::Builtin::Divide) => "/",
+            SyntaxOperator::Builtin(crate::core::Builtin::Greater) => ">",
+            SyntaxOperator::Builtin(crate::core::Builtin::GreaterEqual) => ">=",
+            SyntaxOperator::Builtin(crate::core::Builtin::Equal) => "==",
+            SyntaxOperator::Builtin(crate::core::Builtin::NotEqual) => "<>",
+            SyntaxOperator::Builtin(crate::core::Builtin::LessEqual) => "=<",
+            SyntaxOperator::Builtin(crate::core::Builtin::Less) => "<",
             SyntaxOperator::PipeForward => "|>",
             SyntaxOperator::PipeBackward => "<|",
             SyntaxOperator::ComposeForward => ">>",
@@ -3465,6 +3536,12 @@ fn syntax_expr_parser<'src>()
 
     let parser = recursive(|expr| {
         let name = glam_name().boxed();
+        let expr_name = glam_name()
+            .try_map(|name, span| match name.as_str() {
+                "and" | "or" => Err(Rich::custom(span, format!("`{name}` is a keyword"))),
+                _ => Ok(name),
+            })
+            .boxed();
         let local = local_name().boxed();
 
         let single_key_expr = || {
@@ -3497,7 +3574,8 @@ fn syntax_expr_parser<'src>()
             .ignore_then(choice((
                 path_list_shorthand,
                 path_list_expr,
-                name.clone()
+                expr_name
+                    .clone()
                     .map(SyntaxKeyExpr::Atom)
                     .map(PathSuffix::Single),
             )))
@@ -3505,7 +3583,7 @@ fn syntax_expr_parser<'src>()
             .collect::<Vec<_>>();
 
         let prior_name = just('_')
-            .ignore_then(name.clone())
+            .ignore_then(expr_name.clone())
             .then(path_suffix.clone())
             .map(|(name, suffixes)| access_if_path(SyntaxExpr::PriorName(name), suffixes))
             .boxed();
@@ -3515,7 +3593,8 @@ fn syntax_expr_parser<'src>()
             .collect::<Vec<_>>()
             .then(choice((
                 expr.clone().padded().delimited_by(just('('), just(')')),
-                name.clone()
+                expr_name
+                    .clone()
                     .then(path_suffix.clone())
                     .map(|(name, suffixes)| access_if_path(SyntaxExpr::Name(name), suffixes)),
             )))
@@ -3527,7 +3606,7 @@ fn syntax_expr_parser<'src>()
                 )
             })
             .boxed();
-        let name_expr = name
+        let name_expr = expr_name
             .clone()
             .then(path_suffix.clone())
             .map(|(name, suffixes)| access_if_path(SyntaxExpr::Name(name), suffixes))
@@ -3585,15 +3664,23 @@ fn syntax_expr_parser<'src>()
             .map(SyntaxExpr::DictUnion);
 
         let infix_operator = choice((
+            text::keyword("and").to(SyntaxOperator::BoolAnd),
+            text::keyword("or").to(SyntaxOperator::BoolOr),
             just(">>=").to(SyntaxOperator::EffectBind),
             just(">=>").to(SyntaxOperator::KleisliCompose),
             just("=>>").to(SyntaxOperator::EffectThen),
+            just(">=").to(SyntaxOperator::Builtin(crate::core::Builtin::GreaterEqual)),
+            just("==").to(SyntaxOperator::Builtin(crate::core::Builtin::Equal)),
+            just("<>").to(SyntaxOperator::Builtin(crate::core::Builtin::NotEqual)),
+            just("=<").to(SyntaxOperator::Builtin(crate::core::Builtin::LessEqual)),
             just(">>")
                 .then_ignore(just('=').not())
                 .to(SyntaxOperator::ComposeForward),
             just("<<").to(SyntaxOperator::ComposeBackward),
             just("|>").to(SyntaxOperator::PipeForward),
             just("<|").to(SyntaxOperator::PipeBackward),
+            just('>').to(SyntaxOperator::Builtin(crate::core::Builtin::Greater)),
+            just('<').to(SyntaxOperator::Builtin(crate::core::Builtin::Less)),
             just("++").to(SyntaxOperator::Builtin(crate::core::Builtin::Append)),
             just('*').to(SyntaxOperator::Builtin(crate::core::Builtin::Multiply)),
             just('/').to(SyntaxOperator::Builtin(crate::core::Builtin::Divide)),
@@ -3712,9 +3799,15 @@ fn syntax_binary_expr(operator: SyntaxOperator, left: SyntaxExpr, right: SyntaxE
             crate::core::Builtin::Subtract => SyntaxExpr::Subtract(Box::new(left), Box::new(right)),
             crate::core::Builtin::Multiply => SyntaxExpr::Multiply(Box::new(left), Box::new(right)),
             crate::core::Builtin::Divide => SyntaxExpr::Divide(Box::new(left), Box::new(right)),
-            other => panic!("unexpected infix builtin in syntax parser: {other:?}"),
+            _ => SyntaxExpr::OperatorApply {
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
         },
-        SyntaxOperator::PipeForward
+        SyntaxOperator::BoolAnd
+        | SyntaxOperator::BoolOr
+        | SyntaxOperator::PipeForward
         | SyntaxOperator::PipeBackward
         | SyntaxOperator::ComposeForward
         | SyntaxOperator::ComposeBackward
@@ -4806,6 +4899,44 @@ mod tests {
                 right: Some(Box::new(SyntaxExpr::Name("k".to_owned()))),
             })
         );
+    }
+
+    #[test]
+    fn parses_comparison_and_boolean_operators() {
+        assert_eq!(
+            parse_expr("x < y"),
+            Some(SyntaxExpr::OperatorApply {
+                operator: SyntaxOperator::Builtin(Builtin::Less),
+                left: Box::new(SyntaxExpr::Name("x".to_owned())),
+                right: Box::new(SyntaxExpr::Name("y".to_owned())),
+            })
+        );
+        assert_eq!(
+            parse_expr("x >= y"),
+            Some(SyntaxExpr::OperatorApply {
+                operator: SyntaxOperator::Builtin(Builtin::GreaterEqual),
+                left: Box::new(SyntaxExpr::Name("x".to_owned())),
+                right: Box::new(SyntaxExpr::Name("y".to_owned())),
+            })
+        );
+        assert_eq!(
+            parse_expr("x and y or z"),
+            Some(SyntaxExpr::OperatorApply {
+                operator: SyntaxOperator::BoolOr,
+                left: Box::new(SyntaxExpr::OperatorApply {
+                    operator: SyntaxOperator::BoolAnd,
+                    left: Box::new(SyntaxExpr::Name("x".to_owned())),
+                    right: Box::new(SyntaxExpr::Name("y".to_owned())),
+                }),
+                right: Box::new(SyntaxExpr::Name("z".to_owned())),
+            })
+        );
+        assert_eq!(parse_expr("and"), None);
+        assert_eq!(
+            parse_expr("android"),
+            Some(SyntaxExpr::Name("android".to_owned()))
+        );
+        assert_eq!(parse_expr("'and"), Some(SyntaxExpr::Atom("and".to_owned())));
     }
 
     #[test]
@@ -6286,6 +6417,46 @@ mod tests {
     }
 
     #[test]
+    fn comparisons_and_boolean_operators_evaluate_as_effects() {
+        let parsed = parse(
+            "language g0\nimport 'std\ntuple_left = { tuple:[1,2] }\ntuple_right = { tuple:[1,3] }\nasm.gt = list.pure ((3 > 2) =>> .r \"G\")\nasm.ge = list.pure ((3 >= 3) =>> .r \"E\")\nasm.eq = list.pure ((3 == 3) =>> .r \"Q\")\nasm.ne = list.pure ((3 <> 4) =>> .r \"N\")\nasm.le = list.pure ((3 =< 3) =>> .r \"L\")\nasm.lt = list.pure ((2 < 3) =>> .r \"T\")\nasm.fail = list.pure ((3 < 2) =>> .r \"bad\")\nasm.list = list.pure (([1,2] < [1,3]) =>> .r \"S\")\nasm.binary_list = list.pure ((\"AB\" == [65,66]) =>> .r \"B\")\nasm.tuple = list.pure ((tuple_left < tuple_right) =>> .r \"U\")\nasm.dict = list.pure (({ a:1, b:{} } == { a:1 }) =>> .r \"D\")\nasm.and = list.pure ((3 > 2 and \"A\" == [65]) =>> .r \"A\")\nasm.or = list.pure ((3 < 2 or 3 == 3) =>> .r \"O\")\nasm.not_true = list.pure ((not (3 > 2)) =>> .r \"bad\")\nasm.not_false = list.pure ((not (3 < 2)) =>> .r \"F\")\nasm.could_true = list.pure ((could (.alt .fail (3 == 3))) =>> .r \"C\")\nasm.could_false = list.pure ((could .fail) =>> .r \"bad\")\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        for (path, expected) in [
+            ("gt", b"G".as_slice()),
+            ("ge", b"E"),
+            ("eq", b"Q"),
+            ("ne", b"N"),
+            ("le", b"L"),
+            ("lt", b"T"),
+            ("fail", b""),
+            ("list", b"S"),
+            ("binary_list", b"B"),
+            ("tuple", b"U"),
+            ("dict", b"D"),
+            ("and", b"A"),
+            ("or", b"O"),
+            ("not_true", b""),
+            ("not_false", b"F"),
+            ("could_true", b"C"),
+            ("could_false", b""),
+        ] {
+            assert_eq!(
+                output_binary_result_list(&fully_evaluated_value(resolved_value_at_path(
+                    &value,
+                    &["asm", path]
+                ))),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
     fn list_effect_handler_runs_standard_backtracking_effects() {
         let parsed = parse(
             "language g0\nimport 'list as list\nchoices = (.alt (.r \"A\") (.alt .fail (.r \"B\"))) >>= (\\x -> .r (x ++ \"!\"))\ncut = .cut (.alt (.r \"C\") (.r \"D\"))\ncut_bad = .cut (.alt (.r \"G\") 42)\ncut_seq_bad = .cut ((.alt (.r \"S\") 42) >>= (\\x -> .r (x ++ \"!\")))\nobject_effect = { eff:(.r \"E\").eff, meta:1 }\nfixed = .fix (\\self -> .r { text:\"F\", self:self })\nasm.choices = list.pure choices\nasm.cut = list.pure cut\nasm.cut_fail = list.pure (.cut .fail)\nasm.cut_bad = list.pure cut_bad\nasm.cut_seq_bad = list.pure cut_seq_bad\nasm.object = list.pure object_effect\nasm.fixed = (list.head (list.pure fixed)).text\nasm.head = list.head \"Hi\"\nasm.tail = list.tail \"Hi\"\n",
@@ -6554,6 +6725,8 @@ mod tests {
         .expect("list.pure import should resolve");
         let (
             anno,
+            std_not,
+            std_could,
             std_list_len,
             std_list_split,
             std_list_split_end,
@@ -6565,6 +6738,12 @@ mod tests {
                 let anno = std
                     .get(&Key::atom_from_text("anno"))
                     .expect("std import should expose anno");
+                let not = std
+                    .get(&Key::atom_from_text("not"))
+                    .expect("std import should expose not");
+                let could = std
+                    .get(&Key::atom_from_text("could"))
+                    .expect("std import should expose could");
                 let std_list = std
                     .get(&Key::atom_from_text("list"))
                     .expect("std import should expose list");
@@ -6593,6 +6772,8 @@ mod tests {
                     .expect("std.list should expose pure");
                 (
                     anno,
+                    not.clone(),
+                    could.clone(),
                     len.clone(),
                     split.clone(),
                     split_end.clone(),
@@ -6628,6 +6809,8 @@ mod tests {
         };
         assert!(matches!(std, Value::Dict(_)));
         assert!(matches!(anno, Value::Builtin(crate::core::Builtin::Anno)));
+        assert!(context.value_lambda_body(&std_not).is_some());
+        assert!(context.value_lambda_body(&std_could).is_some());
         assert!(matches!(floor, Value::Builtin(crate::core::Builtin::Floor)));
         assert!(matches!(mod_fn, Value::Builtin(crate::core::Builtin::Mod)));
         assert!(matches!(
