@@ -789,7 +789,7 @@ impl<D: Clone> RuntimeNet<D> {
         self.nodes.get_mut(&left.node()).unwrap().links[left.index() as usize] = Some(right);
         self.nodes.get_mut(&right.node()).unwrap().links[right.index() as usize] = Some(left);
         if left.is_principal() && right.is_principal() {
-            self.add_pair(left.node(), right.node());
+            self.add_active_pair(left.node(), right.node());
         }
     }
 
@@ -799,7 +799,7 @@ impl<D: Clone> RuntimeNet<D> {
             .is_some_and(|entry| port.index() < entry.node.port_count())
     }
 
-    fn add_pair(&mut self, left: NodeId, right: NodeId) -> PairId {
+    fn add_active_pair(&mut self, left: NodeId, right: NodeId) -> PairId {
         let id = PairId(self.next_active_pair_id);
         self.next_active_pair_id = self
             .next_active_pair_id
