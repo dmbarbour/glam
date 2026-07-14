@@ -1636,10 +1636,9 @@ fn syntax_expr_to_value_in_scope(
         SyntaxExpr::Let { bindings, body } => {
             lower_let_expr(bindings, body, line, context, scope, locals)?
         }
-        SyntaxExpr::Apply(function, argument) => context.value_apply(
-            syntax_expr_to_value_in_scope(function, line, context, scope, locals)?,
-            syntax_expr_to_value_in_scope(argument, line, context, scope, locals)?,
-        ),
+        SyntaxExpr::Apply(function, argument) => {
+            lower_application_expr(function, argument, line, context, scope, locals)?
+        }
         SyntaxExpr::OperatorApply {
             operator,
             left,
@@ -2118,6 +2117,30 @@ fn lower_lambda_expr(
     Ok(context.value_lambdas(params.len(), lowered))
 }
 
+fn lower_application_expr(
+    function: &SyntaxExpr,
+    argument: &SyntaxExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<Value, Diagnostic> {
+    let mut head = function;
+    let mut arguments = vec![argument];
+    while let SyntaxExpr::Apply(next, argument) = head {
+        arguments.push(argument);
+        head = next;
+    }
+    arguments.reverse();
+
+    let function = syntax_expr_to_value_in_scope(head, line, context, scope, locals)?;
+    let arguments = arguments
+        .into_iter()
+        .map(|argument| syntax_expr_to_value_in_scope(argument, line, context, scope, locals))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(context.value_apply_many(function, arguments))
+}
+
 fn lower_let_expr(
     bindings: &[(String, SyntaxExpr)],
     body: &SyntaxExpr,
@@ -2139,11 +2162,7 @@ fn lower_let_expr(
     for _ in bindings.iter().rev() {
         lowered = context.value_lambda(lowered);
     }
-    for value in values {
-        lowered = context.value_apply(lowered, value);
-    }
-
-    Ok(lowered)
+    Ok(context.value_apply_many(lowered, values))
 }
 
 fn lower_name_expr(

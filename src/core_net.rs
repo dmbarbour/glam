@@ -85,17 +85,8 @@ impl ClosedLowerer {
 
         let capture_count = lowerer.local_uses.len().saturating_sub(arity);
         let bind_count = capture_count + arity;
-        let mut binds = Vec::with_capacity(bind_count);
-        for _ in 0..bind_count {
-            binds.push(lowerer.net.bind());
-        }
-        for pair in binds.windows(2) {
-            lowerer.net.wire(pair[0][2], pair[1][0]);
-        }
-        lowerer.net.wire(
-            binds.last().expect("lambda always has one bind")[2],
-            body_boundary.input,
-        );
+        let binds = lowerer.net.bind_spine(bind_count);
+        lowerer.net.wire(binds.result, body_boundary.input);
 
         let uses = std::mem::take(&mut lowerer.local_uses);
         for index in 0..bind_count {
@@ -105,10 +96,10 @@ impl ClosedLowerer {
             } else {
                 index - arity
             };
-            lowerer.distribute(binds[bind_index][1], targets);
+            lowerer.distribute(binds.arguments[bind_index], targets);
         }
 
-        let template = lowerer.net.finish(binds[0][0]);
+        let template = lowerer.net.finish(binds.input);
         ClosedLambdaNet {
             runtime: template.instantiate_shared(),
             capture_count,
@@ -197,17 +188,10 @@ impl Lowerer {
             net: NetBuilder::new(),
             local_uses: Vec::new(),
         };
-        let mut binds = Vec::with_capacity(arity);
-        for _ in 0..arity {
-            binds.push(lowerer.net.bind());
-        }
-        for pair in binds.windows(2) {
-            lowerer.net.wire(pair[0][2], pair[1][0]);
-        }
-        lowerer.compile_into(&body, binds.last().unwrap()[2]);
-        let arguments = binds.iter().map(|bind| bind[1]).collect::<Vec<_>>();
-        lowerer.close_locals(&arguments);
-        lowerer.net.finish(binds[0][0])
+        let binds = lowerer.net.bind_spine(arity);
+        lowerer.compile_into(&body, binds.result);
+        lowerer.close_locals(&binds.arguments);
+        lowerer.net.finish(binds.input)
     }
 
     fn compile_into(&mut self, expr: &Expr, target: Port) {

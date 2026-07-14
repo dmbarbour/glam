@@ -231,10 +231,23 @@ impl CompileContext {
     }
 
     pub fn value_apply(&self, function: Value, argument: Value) -> Value {
-        Value::expr(CoreExpr::Apply(
-            Arc::new(value_to_core_expr(function)),
-            Arc::new(value_to_core_expr(argument)),
-        ))
+        self.value_apply_many(function, [argument])
+    }
+
+    pub fn value_apply_many(
+        &self,
+        function: Value,
+        arguments: impl IntoIterator<Item = Value>,
+    ) -> Value {
+        let arguments = arguments.into_iter().collect::<Vec<_>>();
+        if arguments.is_empty() {
+            return function;
+        }
+        let mut expr = value_to_core_expr(function);
+        for argument in arguments {
+            expr = CoreExpr::Apply(Arc::new(expr), Arc::new(value_to_core_expr(argument)));
+        }
+        Value::expr(expr)
     }
 
     /// Constructs one closed interaction-net value. The callback returns the
@@ -311,7 +324,7 @@ impl CompileContext {
     }
 
     pub fn builtin_apply2_value(&self, builtin: Builtin, left: Value, right: Value) -> Value {
-        self.value_apply(self.value_apply(self.value_builtin(builtin), left), right)
+        self.value_apply_many(self.value_builtin(builtin), [left, right])
     }
 
     pub fn builtin_apply3_value(
@@ -321,10 +334,7 @@ impl CompileContext {
         second: Value,
         third: Value,
     ) -> Value {
-        self.value_apply(
-            self.value_apply(self.value_apply(self.value_builtin(builtin), first), second),
-            third,
-        )
+        self.value_apply_many(self.value_builtin(builtin), [first, second, third])
     }
 
     pub fn local_module_load_args(
@@ -557,5 +567,32 @@ mod tests {
             panic!("captured lambda should retain its semantic wrapper");
         };
         assert!(!captured.is_closed_lowered());
+    }
+
+    #[test]
+    fn compile_context_builds_one_semantic_application_spine() {
+        let context = CompileContext::default();
+        let value = context.value_apply_many(
+            context.value_builtin(Builtin::Add),
+            [
+                context.value_number(1.into()),
+                context.value_number(2.into()),
+            ],
+        );
+
+        let Value::Expr(value) = value else {
+            panic!("application spine should remain a semantic expression");
+        };
+        let mut expr = value.expr().unwrap().as_ref();
+        let mut arity = 0;
+        while let CoreExpr::Apply(function, _) = expr {
+            arity += 1;
+            expr = function;
+        }
+        assert_eq!(arity, 2);
+        assert!(matches!(
+            expr,
+            CoreExpr::Value(Value::Builtin(Builtin::Add))
+        ));
     }
 }

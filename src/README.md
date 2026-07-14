@@ -31,10 +31,12 @@
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
 - `eval.rs` drives closure calls through runtime nets, turns blocked bind-data
   pairs into stable call frames, and represents builtin/list arguments as
-  memoized semantic thunks; dictionary-access closure bodies temporarily retain
-  the call-by-need compatibility path pending cross-copy demand forwarding;
-  closed net values attach their exposed ports through logical-copy cursors and
-  may normalize to either data or a non-data net frontier
+  memoized semantic thunks; contiguous application spines targeting nets share
+  one evaluator-owned caller runtime and one generic bind spine; dictionary-
+  access closure bodies temporarily retain the call-by-need compatibility path
+  pending cross-copy demand forwarding; closed net values attach their exposed
+  ports through logical-copy cursors and may normalize to either data or a
+  non-data net frontier
 - `main` expects binary `asm.result`, writes to `stdout`
 
 At the moment, even this simple case is not fully implemented. Thus, it remains the focus for now.

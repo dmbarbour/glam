@@ -105,6 +105,15 @@ cursor composition along copy provenance, not reversed dataflow. Runtime calls
 also defer capturing lazy arguments while the runtime still exposes an
 unsupplied bind from its curried spine.
 
+Application spines use the dual construction. `NetBuilder::bind_spine` is
+shared by lambda lowering and evaluator-owned caller nets. `g_syntax` lowers a
+maximal application such as `f x y z` through
+`CompileContext::value_apply_many`; the evaluator peels the left-associated
+semantic `Apply` nodes and, for a net or net-evaluable closure, installs all
+remaining lazy arguments into one caller runtime. Compatibility-only callables
+remain sequential, and a partial application that escapes its expression still
+uses cursor composition when it is called later.
+
 The topology reducer handles bind-bind, fan-fan, fan-bind, fan-data, and eraser
 interactions. `bind-data` reports `ReductionKind::Call`; `eval` consumes that
 blocked pair through a generic `CallFrame`, preserving the argument and result

@@ -95,9 +95,9 @@ This document should summarize salient, relevant points rather than asking futur
   The generic topology lives in `interaction_net.rs`; core data and expression
   lowering live in `core_net.rs`.
   `NetBuilder` is the single checked construction layer: it provides semantic
-  bind/data/copy helpers plus fallible wiring/finalization diagnostics. A
-  one-output copy is a builder-only tunnel normalized to a direct wire; it is
-  never stored in a template or runtime net.
+  bind/data/copy helpers plus a curried `bind_spine`, and fallible
+  wiring/finalization diagnostics. A one-output copy is a builder-only tunnel
+  normalized to a direct wire; it is never stored in a template or runtime net.
   Fan sites are `u64` values local to a runtime. Each logical copy translates
   source sites through a per-copy map into fresh target-local sites. Fan
   identities include dynamic duplication history; identical complete histories
@@ -134,6 +134,13 @@ This document should summarize salient, relevant points rather than asking futur
   sweep does not force strict builtin work until its result is observed. An
   imported runtime that still exposes an unsupplied bind may not detach lazy
   call arguments yet; later parameters in the same bind spine are not captures.
+- `g_syntax` and `CompileContext::value_apply_many` preserve maximal
+  left-associated application spines such as `f x y z`. The expression
+  evaluator peels such a spine before evaluation and supplies all remaining
+  arguments through one caller runtime when the callable is a net or a
+  net-evaluable closure. Arguments remain lazy semantic thunks. Access-bearing
+  closures and other compatibility callables continue sequentially; escaped
+  partial applications still rely on outward cursor composition.
 - List applications lower to callable core data and computed list elements
   become opaque lazy holes. Access applications also have semantic thunk
   support, but closure bodies containing access currently remain on the

@@ -275,6 +275,16 @@ pub struct CopyPorts {
     pub outputs: Vec<Port>,
 }
 
+/// A curried chain of bind nodes. `input` is the first principal port,
+/// `arguments` contains one first auxiliary per bind in application order,
+/// and `result` is the final bind's second auxiliary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindSpine {
+    pub input: Port,
+    pub arguments: Vec<Port>,
+    pub result: Port,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetBuildError {
     InvalidPort(Port),
@@ -347,6 +357,19 @@ impl<D> NetBuilder<D> {
             Port::auxiliary(node, 1),
             Port::auxiliary(node, 2),
         ]
+    }
+
+    pub fn bind_spine(&mut self, arity: usize) -> BindSpine {
+        assert!(arity > 0, "a bind spine must contain at least one bind");
+        let binds = (0..arity).map(|_| self.bind()).collect::<Vec<_>>();
+        for pair in binds.windows(2) {
+            self.wire(pair[0][2], pair[1][0]);
+        }
+        BindSpine {
+            input: binds[0][0],
+            arguments: binds.iter().map(|bind| bind[1]).collect(),
+            result: binds.last().unwrap()[2],
+        }
     }
 
     pub fn data(&mut self, data: D) -> Port {
@@ -1868,6 +1891,28 @@ mod tests {
             net.try_finish(exposed),
             Err(NetBuildError::PortUnwired(unwired))
         );
+    }
+
+    #[test]
+    fn bind_spine_builds_one_curried_chain() {
+        let mut builder = NetBuilder::new();
+        let spine = builder.bind_spine(3);
+        let function = builder.data(());
+        builder.wire(spine.input, function);
+        for argument in spine.arguments {
+            let data = builder.data(());
+            builder.wire(argument, data);
+        }
+        let net = builder.finish(spine.result);
+
+        assert_eq!(
+            net.nodes()
+                .iter()
+                .filter(|node| matches!(node, Node::Bind))
+                .count(),
+            3
+        );
+        assert_eq!(net.active_pairs().len(), 1);
     }
 
     #[test]

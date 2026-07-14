@@ -276,9 +276,20 @@ fn pop_list_front(list: &List) -> Result<Option<(Value, List)>, EvalError> {
 }
 
 fn eval_apply(function: &Expr, argument: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
-    let function = eval_expr(function, local_env)?;
-    let argument = thunk_value(argument, local_env);
-    apply_value(function, argument, local_env)
+    let mut head = function;
+    let mut arguments = vec![argument];
+    while let Expr::Apply(next, argument) = head {
+        arguments.push(argument);
+        head = next;
+    }
+    arguments.reverse();
+
+    let function = eval_expr(head, local_env)?;
+    let arguments = arguments
+        .into_iter()
+        .map(|argument| thunk_value(argument, local_env))
+        .collect::<Vec<_>>();
+    apply_values(function, arguments, local_env)
 }
 
 fn thunk_value(expr: &Expr, local_env: &[Value]) -> Value {
@@ -306,6 +317,28 @@ fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<
         Value::Expr(thunk) => apply_value(eval_thunk(&thunk)?, argument, local_env),
         _ => Err(EvalError::new("application requires a function value")),
     }
+}
+
+fn apply_values(
+    mut function: Value,
+    arguments: Vec<Value>,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        match function {
+            Value::Net(net) => {
+                let arguments = std::iter::once(argument).chain(arguments).collect();
+                return apply_net_many(Value::Net(net), arguments);
+            }
+            Value::Closure(closure) if net_evaluable_expr(&closure.source_body) => {
+                let arguments = std::iter::once(argument).chain(arguments).collect();
+                return apply_net_many(Value::Closure(closure), arguments);
+            }
+            other => function = apply_value(other, argument, local_env)?,
+        }
+    }
+    Ok(function)
 }
 
 fn apply_dict_value(
@@ -404,25 +437,27 @@ fn net_evaluable_expr(expr: &Expr) -> bool {
 }
 
 fn apply_closure_net(closure: &Closure, argument: Value) -> Result<Value, EvalError> {
-    let mut net = NetBuilder::new();
-    let [application, argument_port, result] = net.bind();
-    let function = net.data(CoreNetData::Value(Value::Closure(closure.clone())));
-    let argument = net.data(CoreNetData::Value(argument));
-    net.wire(application, function);
-    net.wire(argument_port, argument);
-    let runtime = net.finish(result).instantiate_shared();
-    let exposed = runtime.with(|net| net.exposed());
-    drive_core_net(runtime, exposed)
+    apply_net_many(Value::Closure(closure.clone()), vec![argument])
 }
 
 fn apply_net(function: NetValue, argument: Value) -> Result<Value, EvalError> {
+    apply_net_many(Value::Net(function), vec![argument])
+}
+
+fn apply_net_many(function: Value, arguments: Vec<Value>) -> Result<Value, EvalError> {
+    assert!(
+        !arguments.is_empty(),
+        "batched net application requires an argument"
+    );
     let mut net = NetBuilder::new();
-    let [application, argument_port, result] = net.bind();
-    let function = net.data(CoreNetData::Value(Value::Net(function)));
-    let argument = net.data(CoreNetData::Value(argument));
-    net.wire(application, function);
-    net.wire(argument_port, argument);
-    let runtime = net.finish(result).instantiate_shared();
+    let spine = net.bind_spine(arguments.len());
+    let function = net.data(CoreNetData::Value(function));
+    net.wire(spine.input, function);
+    for (argument_port, argument) in spine.arguments.into_iter().zip(arguments) {
+        let argument = net.data(CoreNetData::Value(argument));
+        net.wire(argument_port, argument);
+    }
+    let runtime = net.finish(spine.result).instantiate_shared();
     let exposed = runtime.with(|net| net.exposed());
     drive_core_net(runtime, exposed)
 }
@@ -2873,6 +2908,44 @@ mod tests {
 
         let result = context.value_apply(context.value_apply(partially_applied, n(22)), n(33));
         assert_eq!(eval_value(&result).unwrap(), n(11));
+    }
+
+    #[test]
+    fn batched_application_spine_keeps_unused_arguments_lazy() {
+        let context = CompileContext::default();
+        let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lazy_argument = |label: &'static str| {
+            let forced = forced.clone();
+            Value::expr(Expr::Deferred(Arc::new(DeferredValue::new(
+                label,
+                move || {
+                    forced.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(n(99))
+                },
+            ))))
+        };
+        let function = context.value_lambdas(3, context.value_local(2));
+        let application = context.value_apply_many(
+            function,
+            [n(11), lazy_argument("second"), lazy_argument("third")],
+        );
+
+        assert_eq!(eval_value(&application).unwrap(), n(11));
+        assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn batched_application_preserves_access_closure_compatibility() {
+        let context = CompileContext::default();
+        let key = Key::atom_from_text("answer");
+        let function = context.value_lambdas(
+            2,
+            context.value_access(context.value_local(1), vec![KeyExpr::Key(key.clone())]),
+        );
+        let dict = Value::Dict(Dict::new_sync().insert(key, n(42)));
+        let application = context.value_apply_many(function, [dict, n(0)]);
+
+        assert_eq!(eval_value(&application).unwrap(), n(42));
     }
 
     #[test]
