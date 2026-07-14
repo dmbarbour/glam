@@ -195,8 +195,8 @@ impl<D> RuntimeNode<D> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wire {
-    pub left: Port,     // port including node ID and index
-    pub right: Port,    // each port is wired to exactly one other port (except the exposed port)
+    pub left: Port,  // port including node ID and index
+    pub right: Port, // each port is wired to exactly one other port (except the exposed port)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,10 +207,10 @@ pub struct ActivePair {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractionNet<D> {
-    nodes: Arc<[Node<D>]>,              // nodes identified by index
-    wires: Arc<[Wire]>,                 // all wires between ports
-    exposed: Port,                      // closed net has one exposed port
-    active_pairs: Arc<[ActivePair]>,    // subset of wires connecting principal ports
+    nodes: Arc<[Node<D>]>,           // nodes identified by index
+    wires: Arc<[Wire]>,              // all wires between ports
+    exposed: Port,                   // closed net has one exposed port
+    active_pairs: Arc<[ActivePair]>, // subset of wires connecting principal ports
 }
 
 impl<D> InteractionNet<D> {
@@ -430,8 +430,8 @@ pub struct RuntimeNet<D> {
     instance: InstanceId,
     next_node_id: u64,
     nodes: HashMap<NodeId, RuntimeEntry<D>>,
-    next_pair_id: NonZeroU64,
-    pairs: HashMap<PairId, PairRecord>,
+    next_active_pair_id: NonZeroU64,
+    active_pairs: HashMap<PairId, PairRecord>,
     ready: VecDeque<PairId>,
 }
 
@@ -459,8 +459,8 @@ impl<D: Clone> RuntimeNet<D> {
             next_node_id: u64::try_from(net.nodes.len())
                 .expect("interaction-net node count does not fit in u64"),
             nodes,
-            next_pair_id: NonZeroU64::new(1).unwrap(),
-            pairs: HashMap::new(),
+            next_active_pair_id: NonZeroU64::new(1).unwrap(),
+            active_pairs: HashMap::new(),
             ready: VecDeque::new(),
         };
         for wire in net.wires.iter() {
@@ -475,8 +475,8 @@ impl<D: Clone> RuntimeNet<D> {
             instance,
             next_node_id: 0,
             nodes: HashMap::new(),
-            next_pair_id: NonZeroU64::new(1).unwrap(),
-            pairs: HashMap::new(),
+            next_active_pair_id: NonZeroU64::new(1).unwrap(),
+            active_pairs: HashMap::new(),
             ready: VecDeque::new(),
         }
     }
@@ -487,7 +487,7 @@ impl<D: Clone> RuntimeNet<D> {
 
     pub fn pairs(&self) -> Vec<RuntimePair> {
         let mut pairs = self
-            .pairs
+            .active_pairs
             .iter()
             .map(|(id, record)| RuntimePair {
                 id: *id,
@@ -533,7 +533,7 @@ impl<D: Clone> RuntimeNet<D> {
 
     pub fn reduce_next_with(&mut self, oracle: &impl FanOracle) -> Option<Reduction> {
         while let Some(pair_id) = self.ready.pop_front() {
-            let Some(record) = self.pairs.get(&pair_id).copied() else {
+            let Some(record) = self.active_pairs.get(&pair_id).copied() else {
                 continue;
             };
             if record.state != PairState::Ready {
@@ -800,14 +800,14 @@ impl<D: Clone> RuntimeNet<D> {
     }
 
     fn add_pair(&mut self, left: NodeId, right: NodeId) -> PairId {
-        let id = PairId(self.next_pair_id);
-        self.next_pair_id = self
-            .next_pair_id
+        let id = PairId(self.next_active_pair_id);
+        self.next_active_pair_id = self
+            .next_active_pair_id
             .checked_add(1)
             .expect("interaction-net pair ID space exhausted");
         let pair = ActivePair { left, right };
         assert!(
-            self.pairs
+            self.active_pairs
                 .insert(
                     id,
                     PairRecord {
@@ -838,7 +838,7 @@ impl<D: Clone> RuntimeNet<D> {
     }
 
     fn cancel_pair(&mut self, id: PairId) {
-        let Some(record) = self.pairs.remove(&id) else {
+        let Some(record) = self.active_pairs.remove(&id) else {
             return;
         };
         for node in [record.pair.left, record.pair.right] {
@@ -851,7 +851,7 @@ impl<D: Clone> RuntimeNet<D> {
     }
 
     fn set_pair_state(&mut self, id: PairId, state: PairState) {
-        self.pairs
+        self.active_pairs
             .get_mut(&id)
             .expect("scheduled pair must exist")
             .state = state;
