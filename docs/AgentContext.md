@@ -80,6 +80,10 @@ This document should summarize salient, relevant points rather than asking futur
 - Lambda templates contain `Bind`, binary `Fan`, `Erase`, and `Data` nodes.
   The generic topology lives in `interaction_net.rs`; core data and expression
   lowering live in `core_net.rs`.
+  `NetBuilder` is the single checked construction layer: it provides semantic
+  bind/data/copy helpers plus fallible wiring/finalization diagnostics. A
+  one-output copy is a builder-only tunnel normalized to a direct wire; it is
+  never stored in a template or runtime net.
   Fan sites are `u64` values local to a runtime. Each logical copy translates
   source sites through a per-copy map into fresh target-local sites. Fan
   identities include dynamic duplication history; identical complete histories

@@ -17,7 +17,10 @@
   shared runtime net carrying `CoreNetData`; calls can lazily copy its normalized
   frontier through evaluator-only remote cursors
 - `interaction_net.rs` provides generic `InteractionNet<Data>` topology,
-  checked construction, active-pair discovery, and mutable runtime reduction;
+  checked construction through one `NetBuilder` (including fallible
+  wiring/finalization and balanced copy helpers), active-pair discovery, and
+  mutable runtime reduction; builder-only one-output copy tunnels are spliced
+  out before a template is produced;
   runtime nodes use monotonic IDs and hash-table storage, preserve a stable
   exposed interface, and allocate fan sites locally while active pairs move
   through ready, blocked-call/cursor, and stuck scheduler collections

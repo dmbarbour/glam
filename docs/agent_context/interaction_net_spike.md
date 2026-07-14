@@ -22,11 +22,25 @@ sweep, then retries the cursor. Newly created pairs wait for a later sweep.
 Variable use is normalized during lowering:
 
 - zero uses become `Erase`
-- one use becomes a direct wire
+- one use passes through a builder-only tunnel that finalization splices into a
+  direct wire
 - multiple uses become a balanced tree of binary `Fan` nodes
 
 `interaction_net` is generic over embedded data and has no dependency on core.
 `core_net` owns `CoreNetData` and the `Expr` lowering adapter.
+
+## Checked construction
+
+`NetBuilder` is the construction representation for both compiler lowering and
+eventual replay of `interaction_net` effect operations; there is no second
+construction IR. Its semantic helpers construct `.bind`, `.data`, and balanced
+`.copy N` shapes, while `.wire` connects their ports. `try_wire` and
+`try_finish` report invalid, duplicate, exposed, or incomplete wiring without
+panicking. The infallible methods remain conveniences for trusted internal
+lowering. Builder-only copy tunnels are removed by finalization and never enter
+an immutable template or runtime net. Checkpoints and rollback are deliberately
+deferred because the source effect can return a write-only operation list for
+later replay.
 
 ## Fan history
 

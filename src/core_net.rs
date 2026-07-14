@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::core::{BuiltinCall, DeferredValue, Expr, IVar, Key, KeyExpr, Lambda, Value};
-use crate::interaction_net::{InteractionNet, NetBuilder, Node, NodeId, Port, SharedRuntimeNet};
+use crate::interaction_net::{InteractionNet, NetBuilder, Port, SharedRuntimeNet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreDataKey {
@@ -49,10 +49,10 @@ impl Lowerer {
             net: NetBuilder::new(),
             local_uses: Vec::new(),
         };
-        let root = lowerer.net.push(Node::Bind);
-        lowerer.compile_into(&body, Port::auxiliary(root, 2));
-        lowerer.close_locals(root);
-        lowerer.net.finish(Port::principal(root))
+        let [application, argument, result] = lowerer.net.bind();
+        lowerer.compile_into(&body, result);
+        lowerer.close_locals(argument);
+        lowerer.net.finish(application)
     }
 
     fn compile_into(&mut self, expr: &Expr, target: Port) {
@@ -76,10 +76,10 @@ impl Lowerer {
                 );
             }
             Expr::Apply(function, argument) => {
-                let bind = self.net.push(Node::Bind);
-                self.net.wire(Port::auxiliary(bind, 2), target);
-                self.compile_into(function, Port::principal(bind));
-                self.compile_into(argument, Port::auxiliary(bind, 1));
+                let [application, argument_port, result] = self.net.bind();
+                self.net.wire(result, target);
+                self.compile_into(function, application);
+                self.compile_into(argument, argument_port);
             }
             Expr::Lambda(lambda) => self.data_into(CoreNetData::Lambda(lambda.clone()), target),
             Expr::Local(index) => {
@@ -120,8 +120,8 @@ impl Lowerer {
     }
 
     fn data_into(&mut self, data: CoreNetData, target: Port) {
-        let node = self.net.push(Node::Data(data));
-        self.net.wire(Port::principal(node), target);
+        let data = self.net.data(data);
+        self.net.wire(data, target);
     }
 
     fn data_application_into(&mut self, data: CoreNetData, args: &[&Expr], target: Port) {
@@ -129,46 +129,35 @@ impl Lowerer {
             self.data_into(data, target);
             return;
         }
-        let function = self.net.push(Node::Data(data));
-        let mut output = Port::principal(function);
+        let mut output = self.net.data(data);
         for argument in args {
-            let bind = self.net.push(Node::Bind);
-            self.net.wire(output, Port::principal(bind));
-            self.compile_into(argument, Port::auxiliary(bind, 1));
-            output = Port::auxiliary(bind, 2);
+            let [application, argument_port, result] = self.net.bind();
+            self.net.wire(output, application);
+            self.compile_into(argument, argument_port);
+            output = result;
         }
         self.net.wire(output, target);
     }
 
-    fn close_locals(&mut self, root: NodeId) {
+    fn close_locals(&mut self, argument: Port) {
         let uses = std::mem::take(&mut self.local_uses);
         let max_index = uses.len().max(1);
         for index in 0..max_index {
             let targets = uses.get(index).map(Vec::as_slice).unwrap_or_default();
             let source = if index == 0 {
-                Port::auxiliary(root, 1)
+                argument
             } else {
-                let capture = self.net.push(Node::Data(CoreNetData::Capture(index - 1)));
-                Port::principal(capture)
+                self.net.data(CoreNetData::Capture(index - 1))
             };
             self.distribute(source, targets);
         }
     }
 
     fn distribute(&mut self, source: Port, targets: &[Port]) {
-        match targets {
-            [] => {
-                let erase = self.net.push(Node::Erase);
-                self.net.wire(source, Port::principal(erase));
-            }
-            [target] => self.net.wire(source, *target),
-            _ => {
-                let fan = self.net.push_fan();
-                self.net.wire(source, Port::principal(fan));
-                let middle = targets.len() / 2;
-                self.distribute(Port::auxiliary(fan, 1), &targets[..middle]);
-                self.distribute(Port::auxiliary(fan, 2), &targets[middle..]);
-            }
+        let copy = self.net.copy(targets.len());
+        self.net.wire(source, copy.input);
+        for (output, target) in copy.outputs.into_iter().zip(targets) {
+            self.net.wire(output, *target);
         }
     }
 }
@@ -177,6 +166,7 @@ impl Lowerer {
 mod tests {
     use super::*;
     use crate::core::Dict;
+    use crate::interaction_net::Node;
 
     fn unit() -> Value {
         Value::Dict(Dict::new_sync())

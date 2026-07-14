@@ -9,7 +9,7 @@ use crate::core::{
     Builtin, BuiltinCall, Closure, DeferredValue, Expr, IVar, Key, KeyExpr, List, Thunk, Value,
 };
 use crate::core_net::{CoreDataKey, CoreNetData};
-use crate::interaction_net::{BlockedCall, NetBuilder, Node, Port, ReductionKind};
+use crate::interaction_net::{BlockedCall, NetBuilder, Port, ReductionKind};
 use crate::list::ListItem;
 use crate::number::Number;
 
@@ -393,14 +393,12 @@ fn net_evaluable_expr(expr: &Expr) -> bool {
 
 fn apply_closure_net(closure: &Closure, argument: Value) -> Result<Value, EvalError> {
     let mut net = NetBuilder::new();
-    let bind = net.push(Node::Bind);
-    let function = net.push(Node::Data(CoreNetData::Value(Value::Closure(
-        closure.clone(),
-    ))));
-    let argument = net.push(Node::Data(CoreNetData::Value(argument)));
-    net.wire(Port::principal(bind), Port::principal(function));
-    net.wire(Port::auxiliary(bind, 1), Port::principal(argument));
-    let runtime = net.finish(Port::auxiliary(bind, 2)).instantiate_shared();
+    let [application, argument_port, result] = net.bind();
+    let function = net.data(CoreNetData::Value(Value::Closure(closure.clone())));
+    let argument = net.data(CoreNetData::Value(argument));
+    net.wire(application, function);
+    net.wire(argument_port, argument);
+    let runtime = net.finish(result).instantiate_shared();
     let exposed = runtime.with(|net| net.exposed());
     drive_core_net(runtime, exposed)
 }
