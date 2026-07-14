@@ -352,7 +352,8 @@ Nodes interact only when principal ports connect.
 - bind-data: call function, stuck otherwise
 - copy-data: dup
 - copy-copy: join paired residuals of one duplication process, dup otherwise
-  - pairing is an oracle decision, not equality of one permanent node UID
+  - pairing follows complete dynamic duplication identity, not equality of one
+    permanent node UID
   - lowered templates use local fan sites; runtime instantiation supplies one
     namespace for the whole template
   - dynamic duplication history distinguishes residual fans within a namespace

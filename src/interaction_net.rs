@@ -333,35 +333,14 @@ impl<D> NetBuilder<D> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FanRelationship {
-    Paired,
-    Independent,
-}
-
-/// The oracle is deliberately explicit: fan pairing is not raw label equality.
-pub trait FanOracle {
-    fn relationship(&self, left: &FanIdentity, right: &FanIdentity) -> FanRelationship;
-}
-
-/// A direct representation of duplication history. This avoids global fan
-/// relabelling now and provides the semantic reference for a future local
-/// bracket/croissant implementation of the same oracle.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct HistoryOracle;
-
-impl FanOracle for HistoryOracle {
-    fn relationship(&self, left: &FanIdentity, right: &FanIdentity) -> FanRelationship {
-        if left == right {
-            FanRelationship::Paired
-        } else {
-            FanRelationship::Independent
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reduction {
+    pub pair: ActivePair,
+    pub kind: ReductionKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reduction {
+pub enum ReductionKind {
     BindJoin,
     FanJoin {
         identity: FanIdentity,
@@ -377,37 +356,23 @@ pub enum Reduction {
         identity: FanIdentity,
     },
     Erase,
-    Call,
-    Stuck,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PairId(NonZeroU64);
-
-impl PairId {
-    pub fn get(self) -> NonZeroU64 {
-        self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PairState {
-    Ready,
-    Blocked,
+    Call {
+        bind: NodeId,
+        data: NodeId,
+    },
     Stuck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RuntimePair {
-    pub id: PairId,
+pub struct BlockedCall {
     pub pair: ActivePair,
-    pub state: PairState,
+    pub bind: NodeId,
+    pub data: NodeId,
 }
 
 struct RuntimeEntry<D> {
     node: RuntimeNode<D>,
     links: [Option<Port>; 3],
-    principal_pair: Option<PairId>,
 }
 
 impl<D> RuntimeEntry<D> {
@@ -415,24 +380,17 @@ impl<D> RuntimeEntry<D> {
         Self {
             node,
             links: [None; 3],
-            principal_pair: None,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PairRecord {
-    pair: ActivePair,
-    state: PairState,
 }
 
 pub struct RuntimeNet<D> {
     instance: InstanceId,
     next_node_id: u64,
     nodes: HashMap<NodeId, RuntimeEntry<D>>,
-    next_active_pair_id: NonZeroU64,
-    active_pairs: HashMap<PairId, PairRecord>,
-    ready: VecDeque<PairId>,
+    ready: VecDeque<ActivePair>,
+    calls: VecDeque<BlockedCall>,
+    stuck: Vec<ActivePair>,
 }
 
 impl<D: Clone> RuntimeNet<D> {
@@ -459,9 +417,9 @@ impl<D: Clone> RuntimeNet<D> {
             next_node_id: u64::try_from(net.nodes.len())
                 .expect("interaction-net node count does not fit in u64"),
             nodes,
-            next_active_pair_id: NonZeroU64::new(1).unwrap(),
-            active_pairs: HashMap::new(),
             ready: VecDeque::new(),
+            calls: VecDeque::new(),
+            stuck: Vec::new(),
         };
         for wire in net.wires.iter() {
             runtime.connect(wire.left, wire.right);
@@ -475,9 +433,9 @@ impl<D: Clone> RuntimeNet<D> {
             instance,
             next_node_id: 0,
             nodes: HashMap::new(),
-            next_active_pair_id: NonZeroU64::new(1).unwrap(),
-            active_pairs: HashMap::new(),
             ready: VecDeque::new(),
+            calls: VecDeque::new(),
+            stuck: Vec::new(),
         }
     }
 
@@ -485,42 +443,25 @@ impl<D: Clone> RuntimeNet<D> {
         self.instance
     }
 
-    pub fn pairs(&self) -> Vec<RuntimePair> {
-        let mut pairs = self
-            .active_pairs
-            .iter()
-            .map(|(id, record)| RuntimePair {
-                id: *id,
-                pair: record.pair,
-                state: record.state,
-            })
-            .collect::<Vec<_>>();
-        pairs.sort_by_key(|pair| pair.id);
-        pairs
-    }
-
     pub fn active_pairs(&self) -> Vec<ActivePair> {
-        self.pairs().into_iter().map(|record| record.pair).collect()
-    }
-
-    pub fn ready_pairs(&self) -> Vec<ActivePair> {
-        self.pairs_with_state(PairState::Ready)
-    }
-
-    pub fn blocked_pairs(&self) -> Vec<ActivePair> {
-        self.pairs_with_state(PairState::Blocked)
-    }
-
-    pub fn stuck_pairs(&self) -> Vec<ActivePair> {
-        self.pairs_with_state(PairState::Stuck)
-    }
-
-    fn pairs_with_state(&self, state: PairState) -> Vec<ActivePair> {
-        self.pairs()
-            .into_iter()
-            .filter(|record| record.state == state)
-            .map(|record| record.pair)
+        self.ready
+            .iter()
+            .copied()
+            .chain(self.calls.iter().map(|call| call.pair))
+            .chain(self.stuck.iter().copied())
             .collect()
+    }
+
+    pub fn ready_pairs(&self) -> &VecDeque<ActivePair> {
+        &self.ready
+    }
+
+    pub fn blocked_calls(&self) -> &VecDeque<BlockedCall> {
+        &self.calls
+    }
+
+    pub fn stuck_pairs(&self) -> &[ActivePair] {
+        &self.stuck
     }
 
     pub fn node(&self, id: NodeId) -> Option<&RuntimeNode<D>> {
@@ -528,92 +469,101 @@ impl<D: Clone> RuntimeNet<D> {
     }
 
     pub fn reduce_next(&mut self) -> Option<Reduction> {
-        self.reduce_next_with(&HistoryOracle)
-    }
-
-    pub fn reduce_next_with(&mut self, oracle: &impl FanOracle) -> Option<Reduction> {
-        while let Some(pair_id) = self.ready.pop_front() {
-            let Some(record) = self.active_pairs.get(&pair_id).copied() else {
-                continue;
-            };
-            if record.state != PairState::Ready {
-                continue;
+        let pair = self.ready.pop_front()?;
+        let left_port = Port::principal(pair.left);
+        let right_port = Port::principal(pair.right);
+        assert_eq!(
+            self.neighbor(left_port),
+            Some(right_port),
+            "ready pair must still connect both principal ports"
+        );
+        let left = self
+            .node(pair.left)
+            .expect("ready pair left node must exist")
+            .clone();
+        let right = self
+            .node(pair.right)
+            .expect("ready pair right node must exist")
+            .clone();
+        let kind = match (&left, &right) {
+            (RuntimeNode::Bind, RuntimeNode::Bind) => {
+                self.join(pair.left, pair.right, 2);
+                ReductionKind::BindJoin
             }
-            let pair = record.pair;
-            let left_port = Port::principal(pair.left);
-            let right_port = Port::principal(pair.right);
-            if self.neighbor(left_port) != Some(right_port) {
-                self.cancel_pair(pair_id);
-                continue;
-            }
-            let left = self.node(pair.left)?.clone();
-            let right = self.node(pair.right)?.clone();
-            return Some(match (&left, &right) {
-                (RuntimeNode::Bind, RuntimeNode::Bind) => {
+            (RuntimeNode::Fan { identity: left }, RuntimeNode::Fan { identity: right }) => {
+                if left == right {
                     self.join(pair.left, pair.right, 2);
-                    Reduction::BindJoin
-                }
-                (RuntimeNode::Fan { identity: left }, RuntimeNode::Fan { identity: right }) => {
-                    match oracle.relationship(left, right) {
-                        FanRelationship::Paired => {
-                            self.join(pair.left, pair.right, 2);
-                            Reduction::FanJoin {
-                                identity: left.clone(),
-                            }
-                        }
-                        FanRelationship::Independent => {
-                            self.commute_fans(pair.left, left, pair.right, right);
-                            Reduction::FanCommute {
-                                left: left.clone(),
-                                right: right.clone(),
-                            }
-                        }
+                    ReductionKind::FanJoin {
+                        identity: left.clone(),
+                    }
+                } else {
+                    self.commute_fans(pair.left, left, pair.right, right);
+                    ReductionKind::FanCommute {
+                        left: left.clone(),
+                        right: right.clone(),
                     }
                 }
-                (RuntimeNode::Fan { identity }, RuntimeNode::Data(_)) => {
-                    self.duplicate_data(pair.left, pair.right);
-                    Reduction::FanData {
-                        identity: identity.clone(),
-                    }
+            }
+            (RuntimeNode::Fan { identity }, RuntimeNode::Data(_)) => {
+                self.duplicate_data(pair.left, pair.right);
+                ReductionKind::FanData {
+                    identity: identity.clone(),
                 }
-                (RuntimeNode::Data(_), RuntimeNode::Fan { identity }) => {
-                    self.duplicate_data(pair.right, pair.left);
-                    Reduction::FanData {
-                        identity: identity.clone(),
-                    }
+            }
+            (RuntimeNode::Data(_), RuntimeNode::Fan { identity }) => {
+                self.duplicate_data(pair.right, pair.left);
+                ReductionKind::FanData {
+                    identity: identity.clone(),
                 }
-                (RuntimeNode::Fan { identity }, RuntimeNode::Bind) => {
-                    self.duplicate_bind(pair.left, identity, pair.right);
-                    Reduction::FanBind {
-                        identity: identity.clone(),
-                    }
+            }
+            (RuntimeNode::Fan { identity }, RuntimeNode::Bind) => {
+                self.duplicate_bind(pair.left, identity, pair.right);
+                ReductionKind::FanBind {
+                    identity: identity.clone(),
                 }
-                (RuntimeNode::Bind, RuntimeNode::Fan { identity }) => {
-                    self.duplicate_bind(pair.right, identity, pair.left);
-                    Reduction::FanBind {
-                        identity: identity.clone(),
-                    }
+            }
+            (RuntimeNode::Bind, RuntimeNode::Fan { identity }) => {
+                self.duplicate_bind(pair.right, identity, pair.left);
+                ReductionKind::FanBind {
+                    identity: identity.clone(),
                 }
-                (RuntimeNode::Erase, _) => {
-                    self.erase(pair.left, pair.right);
-                    Reduction::Erase
+            }
+            (RuntimeNode::Erase, _) => {
+                self.erase(pair.left, pair.right);
+                ReductionKind::Erase
+            }
+            (_, RuntimeNode::Erase) => {
+                self.erase(pair.right, pair.left);
+                ReductionKind::Erase
+            }
+            (RuntimeNode::Bind, RuntimeNode::Data(_)) => {
+                self.calls.push_back(BlockedCall {
+                    pair,
+                    bind: pair.left,
+                    data: pair.right,
+                });
+                ReductionKind::Call {
+                    bind: pair.left,
+                    data: pair.right,
                 }
-                (_, RuntimeNode::Erase) => {
-                    self.erase(pair.right, pair.left);
-                    Reduction::Erase
+            }
+            (RuntimeNode::Data(_), RuntimeNode::Bind) => {
+                self.calls.push_back(BlockedCall {
+                    pair,
+                    bind: pair.right,
+                    data: pair.left,
+                });
+                ReductionKind::Call {
+                    bind: pair.right,
+                    data: pair.left,
                 }
-                (RuntimeNode::Bind, RuntimeNode::Data(_))
-                | (RuntimeNode::Data(_), RuntimeNode::Bind) => {
-                    self.set_pair_state(pair_id, PairState::Blocked);
-                    Reduction::Call
-                }
-                (RuntimeNode::Data(_), RuntimeNode::Data(_)) => {
-                    self.set_pair_state(pair_id, PairState::Stuck);
-                    Reduction::Stuck
-                }
-            });
-        }
-        None
+            }
+            (RuntimeNode::Data(_), RuntimeNode::Data(_)) => {
+                self.stuck.push(pair);
+                ReductionKind::Stuck
+            }
+        };
+        Some(Reduction { pair, kind })
     }
 
     fn join(&mut self, left: NodeId, right: NodeId, auxiliaries: u32) {
@@ -751,7 +701,6 @@ impl<D: Clone> RuntimeNet<D> {
     fn remove_node(&mut self, node: NodeId) -> RuntimeNode<D> {
         let entry = self.nodes.remove(&node).expect("removed node must exist");
         assert!(entry.links.iter().all(Option::is_none));
-        assert!(entry.principal_pair.is_none());
         entry.node
     }
 
@@ -765,12 +714,6 @@ impl<D: Clone> RuntimeNet<D> {
 
     fn disconnect(&mut self, port: Port) -> Option<Port> {
         let neighbor = self.neighbor(port)?;
-        if port.is_principal() && neighbor.is_principal() {
-            let pair = self.nodes[&port.node()]
-                .principal_pair
-                .expect("connected principal ports must own an active pair");
-            self.cancel_pair(pair);
-        }
         self.nodes
             .get_mut(&port.node())
             .expect("disconnected node must exist")
@@ -789,7 +732,10 @@ impl<D: Clone> RuntimeNet<D> {
         self.nodes.get_mut(&left.node()).unwrap().links[left.index() as usize] = Some(right);
         self.nodes.get_mut(&right.node()).unwrap().links[right.index() as usize] = Some(left);
         if left.is_principal() && right.is_principal() {
-            self.add_active_pair(left.node(), right.node());
+            self.ready.push_back(ActivePair {
+                left: left.node(),
+                right: right.node(),
+            });
         }
     }
 
@@ -797,64 +743,6 @@ impl<D: Clone> RuntimeNet<D> {
         self.nodes
             .get(&port.node())
             .is_some_and(|entry| port.index() < entry.node.port_count())
-    }
-
-    fn add_active_pair(&mut self, left: NodeId, right: NodeId) -> PairId {
-        let id = PairId(self.next_active_pair_id);
-        self.next_active_pair_id = self
-            .next_active_pair_id
-            .checked_add(1)
-            .expect("interaction-net pair ID space exhausted");
-        let pair = ActivePair { left, right };
-        assert!(
-            self.active_pairs
-                .insert(
-                    id,
-                    PairRecord {
-                        pair,
-                        state: PairState::Ready,
-                    },
-                )
-                .is_none()
-        );
-        assert!(
-            self.nodes
-                .get_mut(&left)
-                .unwrap()
-                .principal_pair
-                .replace(id)
-                .is_none()
-        );
-        assert!(
-            self.nodes
-                .get_mut(&right)
-                .unwrap()
-                .principal_pair
-                .replace(id)
-                .is_none()
-        );
-        self.ready.push_back(id);
-        id
-    }
-
-    fn cancel_pair(&mut self, id: PairId) {
-        let Some(record) = self.active_pairs.remove(&id) else {
-            return;
-        };
-        for node in [record.pair.left, record.pair.right] {
-            if let Some(entry) = self.nodes.get_mut(&node) {
-                if entry.principal_pair == Some(id) {
-                    entry.principal_pair = None;
-                }
-            }
-        }
-    }
-
-    fn set_pair_state(&mut self, id: PairId, state: PairState) {
-        self.active_pairs
-            .get_mut(&id)
-            .expect("scheduled pair must exist")
-            .state = state;
     }
 }
 
@@ -920,13 +808,20 @@ mod tests {
     }
 
     #[test]
-    fn oracle_pairs_identical_fan_histories() {
+    fn identical_fan_histories_join() {
         let fan = identity(7, 3);
         let mut net = fan_pair(fan.clone(), fan.clone());
+        let pair = ActivePair {
+            left: NodeId(0),
+            right: NodeId(1),
+        };
         assert_eq!(
             net.reduce_next(),
-            Some(Reduction::FanJoin {
-                identity: fan.clone()
+            Some(Reduction {
+                pair,
+                kind: ReductionKind::FanJoin {
+                    identity: fan.clone()
+                }
             })
         );
         assert!(net.node(NodeId(0)).is_none());
@@ -939,11 +834,18 @@ mod tests {
         let left = identity(7, 3);
         let right = identity(8, 3);
         let mut net = fan_pair(left.clone(), right.clone());
+        let pair = ActivePair {
+            left: NodeId(0),
+            right: NodeId(1),
+        };
         assert_eq!(
             net.reduce_next(),
-            Some(Reduction::FanCommute {
-                left: left.clone(),
-                right: right.clone()
+            Some(Reduction {
+                pair,
+                kind: ReductionKind::FanCommute {
+                    left: left.clone(),
+                    right: right.clone()
+                }
             })
         );
         assert_eq!(net.active_pairs().len(), 4);
@@ -956,7 +858,10 @@ mod tests {
         let mut net = fan_pair(left.clone(), right.clone());
         assert!(matches!(
             net.reduce_next(),
-            Some(Reduction::FanCommute { .. })
+            Some(Reduction {
+                kind: ReductionKind::FanCommute { .. },
+                ..
+            })
         ));
         let residuals = net
             .nodes
@@ -985,19 +890,98 @@ mod tests {
         let bind = calls.add_node(RuntimeNode::Bind);
         let data = calls.add_node(RuntimeNode::Data(()));
         calls.connect(Port::principal(bind), Port::principal(data));
-        assert_eq!(calls.reduce_next(), Some(Reduction::Call));
+        let call_pair = ActivePair {
+            left: bind,
+            right: data,
+        };
+        assert_eq!(
+            calls.reduce_next(),
+            Some(Reduction {
+                pair: call_pair,
+                kind: ReductionKind::Call { bind, data },
+            })
+        );
         assert!(calls.ready_pairs().is_empty());
-        assert_eq!(calls.blocked_pairs().len(), 1);
+        assert_eq!(
+            calls.blocked_calls(),
+            &VecDeque::from([BlockedCall {
+                pair: call_pair,
+                bind,
+                data,
+            }])
+        );
         assert_eq!(calls.reduce_next(), None);
 
         let mut stuck = RuntimeNet::empty(InstanceId::from_raw(2));
         let left = stuck.add_node(RuntimeNode::Data(()));
         let right = stuck.add_node(RuntimeNode::Data(()));
         stuck.connect(Port::principal(left), Port::principal(right));
-        assert_eq!(stuck.reduce_next(), Some(Reduction::Stuck));
+        let stuck_pair = ActivePair { left, right };
+        assert_eq!(
+            stuck.reduce_next(),
+            Some(Reduction {
+                pair: stuck_pair,
+                kind: ReductionKind::Stuck,
+            })
+        );
         assert!(stuck.ready_pairs().is_empty());
-        assert_eq!(stuck.stuck_pairs().len(), 1);
+        assert_eq!(stuck.stuck_pairs(), &[stuck_pair]);
         assert_eq!(stuck.reduce_next(), None);
+    }
+
+    #[test]
+    fn scheduler_collections_partition_principal_connections() {
+        let mut net = RuntimeNet::empty(InstanceId::from_raw(1));
+        let bind = net.add_node(RuntimeNode::Bind);
+        let call_data = net.add_node(RuntimeNode::Data(()));
+        let stuck_left = net.add_node(RuntimeNode::Data(()));
+        let stuck_right = net.add_node(RuntimeNode::Data(()));
+        let ready_fan = net.add_node(RuntimeNode::Fan {
+            identity: identity(1, 0),
+        });
+        let ready_data = net.add_node(RuntimeNode::Data(()));
+        net.connect(Port::principal(bind), Port::principal(call_data));
+        net.connect(Port::principal(stuck_left), Port::principal(stuck_right));
+        net.connect(Port::principal(ready_fan), Port::principal(ready_data));
+
+        assert!(matches!(
+            net.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::Call { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            net.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::Stuck,
+                ..
+            })
+        ));
+
+        let mut graph_pairs = net
+            .nodes
+            .keys()
+            .filter_map(|node| {
+                let neighbor = net.neighbor(Port::principal(*node))?;
+                (neighbor.is_principal() && node.get() < neighbor.node().get())
+                    .then_some((node.get(), neighbor.node().get()))
+            })
+            .collect::<Vec<_>>();
+        graph_pairs.sort_unstable();
+
+        let mut scheduled_pairs = net
+            .active_pairs()
+            .into_iter()
+            .map(|pair| {
+                let left = pair.left.get();
+                let right = pair.right.get();
+                (left.min(right), left.max(right))
+            })
+            .collect::<Vec<_>>();
+        scheduled_pairs.sort_unstable();
+
+        assert_eq!(scheduled_pairs, graph_pairs);
     }
 
     #[test]

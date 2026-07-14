@@ -81,19 +81,19 @@ This document should summarize salient, relevant points rather than asking futur
   The generic topology lives in `interaction_net.rs`; core data and expression
   lowering live in `core_net.rs`.
   Fan sites are local to a template; one process-global `InstanceId` qualifies
-  the entire runtime instance. Fan pairing goes through an oracle and includes
-  dynamic duplication history rather than comparing permanent global UIDs.
-- `HistoryOracle` is a correctness-oriented direct-history implementation and
-  the reference semantics for later Lamping bracket/croissant control nodes; it
-  is not itself the final local, optimal oracle.
-- Runtime nets use monotonically allocated `u64` node and pair IDs backed by
-  hash tables. Ports pack a node ID and two-bit port index into one nonzero
-  word; each node stores three inline links. IDs are not reused. Erase
+  the entire runtime instance. Fan identities include dynamic duplication
+  history; identical complete histories join and other fans commute.
+- The direct-history fan representation is correctness-oriented. Replacing it
+  with Lamping bracket/croissant control nodes requires replacing fan identity
+  construction and rewrite rules together, not implementing an oracle hook.
+- Runtime nets use monotonically allocated `u64` node IDs backed by a hash
+  table. Ports pack a node ID and two-bit port index into one nonzero word; each
+  node stores three inline links. IDs are not reused. Erase
   interactions and other rewrites remove nodes explicitly rather than relying
   on reachability collection.
-- Principal-principal connections own pair records. Runnable pairs are queued;
-  unresolved calls become blocked and invalid data-data interactions become
-  stuck for later evaluation or reflection handling.
+- Principal-principal connections appear in exactly one scheduler collection:
+  ready, blocked call, or stuck. Reduction results retain their `ActivePair`;
+  calls also identify their bind and data nodes for later completion.
 - The topology reducer implements bind/fan join, fan commutation, duplication,
   and erasure rules. Core
   evaluation still has a compatibility bridge while `bind-data` calls are being

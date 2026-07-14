@@ -17,7 +17,8 @@
   shared interaction-net template carrying `CoreNetData`
 - `interaction_net.rs` provides generic `InteractionNet<Data>` topology,
   checked construction, active-pair discovery, and mutable runtime reduction;
-  runtime nodes and scheduled pairs use monotonic IDs and hash-table storage
+  runtime nodes use monotonic IDs and hash-table storage while active pairs move
+  through ready, blocked-call, and stuck scheduler collections
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
 - `eval.rs` retains the call-by-need compatibility evaluator while core
