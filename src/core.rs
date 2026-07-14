@@ -6,7 +6,7 @@ use bytes::Bytes;
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
-use crate::core_net::{CoreInteractionNet, lower_lambda};
+use crate::core_net::{CoreRuntimeNet, lower_lambda};
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +31,7 @@ impl Expr {
 #[derive(Debug)]
 pub struct Lambda {
     body: Arc<Expr>,
-    interaction_net: OnceLock<Arc<CoreInteractionNet>>,
+    interaction_net: OnceLock<CoreRuntimeNet>,
 }
 
 impl Lambda {
@@ -46,9 +46,9 @@ impl Lambda {
         &self.body
     }
 
-    pub fn interaction_net(&self) -> Arc<CoreInteractionNet> {
+    pub fn interaction_net(&self) -> CoreRuntimeNet {
         self.interaction_net
-            .get_or_init(|| Arc::new(lower_lambda(self.body.clone())))
+            .get_or_init(|| lower_lambda(self.body.clone()).instantiate_shared())
             .clone()
     }
 
@@ -267,12 +267,20 @@ pub enum Value {
     Expr(Thunk),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Closure {
-    pub interaction_net: Arc<CoreInteractionNet>,
+    pub interaction_net: CoreRuntimeNet,
     pub env: Arc<[Value]>,
     pub(crate) source_body: Arc<Expr>,
 }
+
+impl PartialEq for Closure {
+    fn eq(&self, other: &Self) -> bool {
+        self.env == other.env && self.source_body == other.source_body
+    }
+}
+
+impl Eq for Closure {}
 
 #[derive(Clone)]
 pub struct Thunk {

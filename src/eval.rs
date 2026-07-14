@@ -2279,7 +2279,7 @@ mod tests {
         let (Value::Closure(first), Value::Closure(second)) = (first, second) else {
             panic!("lambda evaluations should produce closures");
         };
-        assert!(Arc::ptr_eq(&first.interaction_net, &second.interaction_net));
+        assert!(first.interaction_net.ptr_eq(&second.interaction_net));
     }
 
     #[test]

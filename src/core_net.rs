@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::core::{DeferredValue, Expr, IVar, Key, KeyExpr, Lambda, Value};
-use crate::interaction_net::{InteractionNet, NetBuilder, Node, NodeId, Port};
+use crate::interaction_net::{InteractionNet, NetBuilder, Node, NodeId, Port, SharedRuntimeNet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreDataKey {
@@ -25,6 +25,7 @@ pub enum CoreNetData {
 }
 
 pub type CoreInteractionNet = InteractionNet<CoreNetData>;
+pub type CoreRuntimeNet = SharedRuntimeNet<CoreNetData>;
 
 pub fn lower_lambda(body: Arc<Expr>) -> CoreInteractionNet {
     Lowerer::lower_lambda(body)

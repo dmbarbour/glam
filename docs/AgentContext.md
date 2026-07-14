@@ -73,16 +73,17 @@ This document should summarize salient, relevant points rather than asking futur
 - Core lists alias `list::List<Value, Thunk>`. `list.rs` preserves `Bytes` as
   compact leaves and treats thunks as opaque lazy holes; evaluator code supplies
   forcing and converts individual observed bytes to core number values.
-- Each `core::Lambda` owns a once-initialized interaction net. Closure creation
-  reuses that template and captures only its environment; applying a closure
-  must not re-lower its body. Runtime reconstruction may copy topology with new
-  node IDs. Nested lambdas stay unlowered until reached.
+- Each `core::Lambda` owns a once-initialized shared runtime net. Closure
+  creation reuses it and captures only its environment; applying a closure must
+  not re-lower its body. Logical copies materialize nodes lazily through remote
+  cursors. Nested lambdas stay unlowered until reached.
 - Lambda templates contain `Bind`, binary `Fan`, `Erase`, and `Data` nodes.
   The generic topology lives in `interaction_net.rs`; core data and expression
   lowering live in `core_net.rs`.
-  Fan sites are local to a template; one process-global `InstanceId` qualifies
-  the entire runtime instance. Fan identities include dynamic duplication
-  history; identical complete histories join and other fans commute.
+  Fan sites are `u64` values local to a runtime. Each logical copy translates
+  source sites through a per-copy map into fresh target-local sites. Fan
+  identities include dynamic duplication history; identical complete histories
+  join and other fans commute.
 - The direct-history fan representation is correctness-oriented. Replacing it
   with Lamping bracket/croissant control nodes requires replacing fan identity
   construction and rewrite rules together, not implementing an oracle hook.
@@ -92,8 +93,16 @@ This document should summarize salient, relevant points rather than asking futur
   interactions and other rewrites remove nodes explicitly rather than relying
   on reachability collection.
 - Principal-principal connections appear in exactly one scheduler collection:
-  ready, blocked call, or stuck. Reduction results retain their `ActivePair`;
-  calls also identify their bind and data nodes for later completion.
+  ready, blocked call, blocked remote cursor, or stuck. Reduction results retain
+  their `ActivePair`; calls also identify their bind and data nodes for later
+  completion.
+- Runtime instantiation wires the template's exposed port to a stable,
+  evaluator-only interface anchor. A `RemoteCursor { copy, remote }` is a
+  one-way suspended wire: `copy` selects target-owned shared copy state and
+  `remote` identifies an interface or migrated auxiliary port in the source.
+  A cursor materializes a node only when that source frontier faces its
+  principal port. If it faces an auxiliary, one conservative sweep reduces
+  every pair that was ready at the start of the sweep.
 - The topology reducer implements bind/fan join, fan commutation, duplication,
   and erasure rules. Core
   evaluation still has a compatibility bridge while `bind-data` calls are being

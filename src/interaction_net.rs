@@ -1,16 +1,13 @@
 //! Generic port-and-wire interaction-net topology and reduction.
 //!
-//! Embedded data is supplied by the client. Immutable templates use local fan
-//! sites; instantiation allocates one process-global namespace for the whole
-//! graph. Runtime fan identities carry duplication history behind an explicit
-//! oracle boundary, the direct-history stepping stone toward Lamping's local
-//! bracket/croissant oracle.
+//! Embedded data is supplied by the client. Immutable templates and runtime
+//! nets allocate fan sites locally. Lazy copies translate source sites into
+//! fresh target sites while preserving the complete residual history.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 const PORT_BITS: u32 = 2;
 const PORT_MASK: u64 = (1 << PORT_BITS) - 1;
@@ -33,39 +30,16 @@ impl NodeId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FanSite(u32);
+pub struct FanSite(u64);
 
 impl FanSite {
-    pub fn get(self) -> u32 {
-        self.0
-    }
-
-    #[cfg(test)]
-    const fn from_raw(site: u32) -> Self {
-        Self(site)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InstanceId(u64);
-
-impl InstanceId {
-    fn fresh() -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-        let id = NEXT_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .expect("interaction-net instance ID space exhausted");
-        Self(id)
-    }
-
     pub fn get(self) -> u64 {
         self.0
     }
 
     #[cfg(test)]
-    const fn from_raw(id: u64) -> Self {
-        Self(id)
+    const fn from_raw(site: u64) -> Self {
+        Self(site)
     }
 }
 
@@ -77,15 +51,13 @@ pub struct DuplicationStep {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FanIdentity {
-    pub instance: InstanceId,
     pub site: FanSite,
     pub context: Arc<[DuplicationStep]>,
 }
 
 impl FanIdentity {
-    fn root(instance: InstanceId, site: FanSite) -> Self {
+    fn root(site: FanSite) -> Self {
         Self {
-            instance,
             site,
             context: Arc::from([]),
         }
@@ -98,7 +70,6 @@ impl FanIdentity {
             branch,
         });
         Self {
-            instance: self.instance,
             site: self.site,
             context: Arc::from(context),
         }
@@ -179,17 +150,36 @@ impl<D> Node<D> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeNode<D> {
     Bind,
-    Fan { identity: FanIdentity },
+    Fan {
+        identity: FanIdentity,
+    },
     Erase,
     Data(D),
+    /// Stable, evaluator-only anchor for a runtime net's exposed port.
+    Interface,
+    /// Evaluator-only one-way wire into a logical copy of another runtime net.
+    RemoteCursor {
+        copy: CopyId,
+        remote: Port,
+    },
 }
 
 impl<D> RuntimeNode<D> {
     fn port_count(&self) -> u32 {
         match self {
             Self::Bind | Self::Fan { .. } => 3,
-            Self::Erase | Self::Data(_) => 1,
+            Self::Interface => 2,
+            Self::Erase | Self::Data(_) | Self::RemoteCursor { .. } => 1,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CopyId(u64);
+
+impl CopyId {
+    pub fn get(self) -> u64 {
+        self.0
     }
 }
 
@@ -233,7 +223,11 @@ impl<D> InteractionNet<D> {
 
 impl<D: Clone> InteractionNet<D> {
     pub fn instantiate(&self) -> RuntimeNet<D> {
-        RuntimeNet::new(self, InstanceId::fresh())
+        RuntimeNet::new(self)
+    }
+
+    pub fn instantiate_shared(&self) -> SharedRuntimeNet<D> {
+        SharedRuntimeNet::new(self.instantiate())
     }
 }
 
@@ -241,7 +235,7 @@ impl<D: Clone> InteractionNet<D> {
 pub struct NetBuilder<D> {
     nodes: Vec<Node<D>>,
     wires: Vec<Wire>,
-    next_fan_site: u32,
+    next_fan_site: u64,
 }
 
 impl<D> Default for NetBuilder<D> {
@@ -360,7 +354,19 @@ pub enum ReductionKind {
         bind: NodeId,
         data: NodeId,
     },
+    RemoteCursor {
+        cursor: NodeId,
+        progress: CursorProgress,
+    },
     Stuck,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorProgress {
+    Materialized { node: NodeId },
+    Joined,
+    SourceSweep { reductions: usize },
+    Blocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,6 +374,70 @@ pub struct BlockedCall {
     pub pair: ActivePair,
     pub bind: NodeId,
     pub data: NodeId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockedCursor {
+    pub pair: ActivePair,
+    pub cursor: NodeId,
+}
+
+pub struct SharedRuntimeNet<D> {
+    inner: Arc<Mutex<RuntimeNet<D>>>,
+}
+
+impl<D> SharedRuntimeNet<D> {
+    pub fn new(runtime: RuntimeNet<D>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(runtime)),
+        }
+    }
+
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<D>) -> R) -> R {
+        let runtime = self.inner.lock().expect("shared runtime net was poisoned");
+        inspect(&runtime)
+    }
+
+    pub fn with_mut<R>(&self, update: impl FnOnce(&mut RuntimeNet<D>) -> R) -> R {
+        let mut runtime = self.inner.lock().expect("shared runtime net was poisoned");
+        update(&mut runtime)
+    }
+}
+
+impl<D> Clone for SharedRuntimeNet<D> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<D> fmt::Debug for SharedRuntimeNet<D> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("SharedRuntimeNet")
+            .field(&Arc::as_ptr(&self.inner))
+            .finish()
+    }
+}
+
+impl<D> PartialEq for SharedRuntimeNet<D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr_eq(other)
+    }
+}
+
+impl<D> Eq for SharedRuntimeNet<D> {}
+
+struct CopyState<D> {
+    source: SharedRuntimeNet<D>,
+    mapped_nodes: HashMap<NodeId, NodeId>,
+    frontiers: HashMap<Port, NodeId>,
+    fan_sites: HashMap<FanSite, FanSite>,
 }
 
 struct RuntimeEntry<D> {
@@ -385,16 +455,20 @@ impl<D> RuntimeEntry<D> {
 }
 
 pub struct RuntimeNet<D> {
-    instance: InstanceId,
     next_node_id: u64,
+    next_fan_site: u64,
+    exposed: Option<Port>,
     nodes: HashMap<NodeId, RuntimeEntry<D>>,
+    next_copy_id: u64,
+    copies: HashMap<CopyId, CopyState<D>>,
     ready: VecDeque<ActivePair>,
     calls: VecDeque<BlockedCall>,
+    blocked_cursors: VecDeque<BlockedCursor>,
     stuck: Vec<ActivePair>,
 }
 
 impl<D: Clone> RuntimeNet<D> {
-    fn new(net: &InteractionNet<D>, instance: InstanceId) -> Self {
+    fn new(net: &InteractionNet<D>) -> Self {
         let nodes = net
             .nodes
             .iter()
@@ -404,7 +478,7 @@ impl<D: Clone> RuntimeNet<D> {
                 let node = match node {
                     Node::Bind => RuntimeNode::Bind,
                     Node::Fan { site } => RuntimeNode::Fan {
-                        identity: FanIdentity::root(instance, *site),
+                        identity: FanIdentity::root(*site),
                     },
                     Node::Erase => RuntimeNode::Erase,
                     Node::Data(data) => RuntimeNode::Data(data.clone()),
@@ -412,35 +486,55 @@ impl<D: Clone> RuntimeNet<D> {
                 (id, RuntimeEntry::new(node))
             })
             .collect();
+        let next_fan_site = net
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                Node::Fan { site } => Some(site.get()),
+                _ => None,
+            })
+            .max()
+            .map_or(0, |site| {
+                site.checked_add(1)
+                    .expect("interaction-net fan site space exhausted")
+            });
         let mut runtime = Self {
-            instance,
             next_node_id: u64::try_from(net.nodes.len())
                 .expect("interaction-net node count does not fit in u64"),
+            next_fan_site,
+            exposed: None,
             nodes,
+            next_copy_id: 0,
+            copies: HashMap::new(),
             ready: VecDeque::new(),
             calls: VecDeque::new(),
+            blocked_cursors: VecDeque::new(),
             stuck: Vec::new(),
         };
         for wire in net.wires.iter() {
             runtime.connect(wire.left, wire.right);
         }
+        let interface = runtime.add_node(RuntimeNode::Interface);
+        let exposed = Port::auxiliary(interface, 1);
+        runtime.connect(exposed, net.exposed);
+        runtime.exposed = Some(exposed);
         runtime
     }
 
     #[cfg(test)]
-    fn empty(instance: InstanceId) -> Self {
+    fn empty() -> Self {
         Self {
-            instance,
             next_node_id: 0,
+            next_fan_site: 0,
+            exposed: None,
             nodes: HashMap::new(),
+            next_copy_id: 0,
+            copies: HashMap::new(),
             ready: VecDeque::new(),
             calls: VecDeque::new(),
+            blocked_cursors: VecDeque::new(),
             stuck: Vec::new(),
         }
-    }
-
-    pub fn instance(&self) -> InstanceId {
-        self.instance
     }
 
     pub fn active_pairs(&self) -> Vec<ActivePair> {
@@ -448,8 +542,15 @@ impl<D: Clone> RuntimeNet<D> {
             .iter()
             .copied()
             .chain(self.calls.iter().map(|call| call.pair))
+            .chain(self.blocked_cursors.iter().map(|cursor| cursor.pair))
             .chain(self.stuck.iter().copied())
             .collect()
+    }
+
+    /// Stable evaluator-owned anchor wired to the net's exposed template port.
+    pub fn exposed(&self) -> Port {
+        self.exposed
+            .expect("runtime net was constructed without an exposed port")
     }
 
     pub fn ready_pairs(&self) -> &VecDeque<ActivePair> {
@@ -460,12 +561,24 @@ impl<D: Clone> RuntimeNet<D> {
         &self.calls
     }
 
+    pub fn blocked_cursors(&self) -> &VecDeque<BlockedCursor> {
+        &self.blocked_cursors
+    }
+
     pub fn stuck_pairs(&self) -> &[ActivePair] {
         &self.stuck
     }
 
     pub fn node(&self, id: NodeId) -> Option<&RuntimeNode<D>> {
         self.nodes.get(&id).map(|entry| &entry.node)
+    }
+
+    pub fn wake_blocked_cursors(&mut self) {
+        while let Some(blocked) = self.blocked_cursors.pop_front() {
+            if self.principals_connect(blocked.pair) {
+                self.ready.push_back(blocked.pair);
+            }
+        }
     }
 
     pub fn reduce_next(&mut self) -> Option<Reduction> {
@@ -485,6 +598,36 @@ impl<D: Clone> RuntimeNet<D> {
             .node(pair.right)
             .expect("ready pair right node must exist")
             .clone();
+        let cursor = match (&left, &right) {
+            (RuntimeNode::RemoteCursor { .. }, _) => Some(pair.left),
+            (_, RuntimeNode::RemoteCursor { .. }) => Some(pair.right),
+            _ => None,
+        };
+        if let Some(cursor) = cursor {
+            let eraser = match (&left, &right) {
+                (RuntimeNode::Erase, RuntimeNode::RemoteCursor { .. }) => Some(pair.left),
+                (RuntimeNode::RemoteCursor { .. }, RuntimeNode::Erase) => Some(pair.right),
+                _ => None,
+            };
+            if let Some(eraser) = eraser {
+                self.erase_remote_cursor(eraser, cursor);
+                return Some(Reduction {
+                    pair,
+                    kind: ReductionKind::Erase,
+                });
+            }
+            let progress = self.advance_remote_cursor(cursor);
+            if progress == CursorProgress::Blocked {
+                self.blocked_cursors
+                    .push_back(BlockedCursor { pair, cursor });
+            } else if matches!(progress, CursorProgress::SourceSweep { .. }) {
+                self.ready.push_back(pair);
+            }
+            return Some(Reduction {
+                pair,
+                kind: ReductionKind::RemoteCursor { cursor, progress },
+            });
+        }
         let kind = match (&left, &right) {
             (RuntimeNode::Bind, RuntimeNode::Bind) => {
                 self.join(pair.left, pair.right, 2);
@@ -562,8 +705,264 @@ impl<D: Clone> RuntimeNet<D> {
                 self.stuck.push(pair);
                 ReductionKind::Stuck
             }
+            (RuntimeNode::Interface, _)
+            | (_, RuntimeNode::Interface)
+            | (RuntimeNode::RemoteCursor { .. }, _)
+            | (_, RuntimeNode::RemoteCursor { .. }) => {
+                unreachable!("evaluator-only nodes do not use ordinary interaction rules")
+            }
         };
         Some(Reduction { pair, kind })
+    }
+
+    /// Starts one logical copy and returns its initially unwired remote cursor.
+    pub fn begin_copy(&mut self, source: SharedRuntimeNet<D>) -> NodeId {
+        let remote = source.with(RuntimeNet::exposed);
+        let copy = CopyId(self.next_copy_id);
+        self.next_copy_id = self
+            .next_copy_id
+            .checked_add(1)
+            .expect("interaction-net copy ID space exhausted");
+        assert!(
+            self.copies
+                .insert(
+                    copy,
+                    CopyState {
+                        source,
+                        mapped_nodes: HashMap::new(),
+                        frontiers: HashMap::new(),
+                        fan_sites: HashMap::new(),
+                    },
+                )
+                .is_none()
+        );
+        let cursor = self.add_node(RuntimeNode::RemoteCursor { copy, remote });
+        self.copies
+            .get_mut(&copy)
+            .unwrap()
+            .frontiers
+            .insert(remote, cursor);
+        cursor
+    }
+
+    /// Replaces a blocked bind-data call with a cursor into a shared net.
+    pub fn resume_call_with_copy(
+        &mut self,
+        call: BlockedCall,
+        source: SharedRuntimeNet<D>,
+    ) -> NodeId {
+        let Some(index) = self.calls.iter().position(|blocked| *blocked == call) else {
+            panic!("resumed interaction-net call must still be blocked");
+        };
+        self.calls.remove(index);
+        assert_eq!(
+            self.disconnect(Port::principal(call.bind)),
+            Some(Port::principal(call.data))
+        );
+        assert!(matches!(self.remove_node(call.data), RuntimeNode::Data(_)));
+        let cursor = self.begin_copy(source);
+        self.connect(Port::principal(call.bind), Port::principal(cursor));
+        cursor
+    }
+
+    fn advance_remote_cursor(&mut self, cursor: NodeId) -> CursorProgress {
+        let RuntimeNode::RemoteCursor { copy, remote } = self
+            .node(cursor)
+            .expect("advanced remote cursor must exist")
+            .clone()
+        else {
+            panic!("advanced runtime node must be a remote cursor");
+        };
+        let source_handle = self
+            .copies
+            .get(&copy)
+            .expect("remote cursor must reference a live copy")
+            .source
+            .clone();
+        let mut source = source_handle
+            .inner
+            .lock()
+            .expect("shared runtime net was poisoned");
+        let neighbor = source
+            .neighbor(remote)
+            .expect("remote cursor anchor must remain wired in its source");
+
+        if self
+            .copies
+            .get(&copy)
+            .unwrap()
+            .mapped_nodes
+            .contains_key(&neighbor.node())
+        {
+            drop(source);
+            return self.join_remote_frontiers(copy, cursor, remote, neighbor);
+        }
+
+        if neighbor.is_principal() {
+            let source_node = source
+                .node(neighbor.node())
+                .expect("remote cursor neighbor must exist")
+                .clone();
+            drop(source);
+            return self.materialize_remote_node(
+                copy,
+                cursor,
+                remote,
+                neighbor.node(),
+                source_node,
+            );
+        }
+
+        let ready = source.ready.len();
+        if ready == 0 {
+            return CursorProgress::Blocked;
+        }
+        let mut reductions = 0;
+        for _ in 0..ready {
+            if source.reduce_next().is_some() {
+                reductions += 1;
+            }
+        }
+        CursorProgress::SourceSweep { reductions }
+    }
+
+    fn erase_remote_cursor(&mut self, eraser: NodeId, cursor: NodeId) {
+        let RuntimeNode::RemoteCursor { copy, remote } = self
+            .node(cursor)
+            .expect("erased remote cursor must exist")
+            .clone()
+        else {
+            unreachable!();
+        };
+        self.disconnect(Port::principal(eraser));
+        self.remove_node(eraser);
+        self.remove_node(cursor);
+        let state = self
+            .copies
+            .get_mut(&copy)
+            .expect("erased remote cursor must reference a live copy");
+        assert_eq!(state.frontiers.remove(&remote), Some(cursor));
+        if state.frontiers.is_empty() {
+            self.copies.remove(&copy);
+        }
+    }
+
+    fn materialize_remote_node(
+        &mut self,
+        copy: CopyId,
+        cursor: NodeId,
+        remote: Port,
+        source_node: NodeId,
+        node: RuntimeNode<D>,
+    ) -> CursorProgress {
+        let mut state = self
+            .copies
+            .remove(&copy)
+            .expect("materialized cursor must reference a live copy");
+        let node = match node {
+            RuntimeNode::Bind => RuntimeNode::Bind,
+            RuntimeNode::Fan { identity } => RuntimeNode::Fan {
+                identity: self.translate_fan_identity(&mut state, &identity),
+            },
+            RuntimeNode::Erase => RuntimeNode::Erase,
+            RuntimeNode::Data(data) => RuntimeNode::Data(data),
+            RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => {
+                self.copies.insert(copy, state);
+                return CursorProgress::Blocked;
+            }
+        };
+        let auxiliaries = match &node {
+            RuntimeNode::Bind | RuntimeNode::Fan { .. } => 2,
+            RuntimeNode::Erase | RuntimeNode::Data(_) => 0,
+            RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => unreachable!(),
+        };
+
+        let local = self
+            .disconnect(Port::principal(cursor))
+            .expect("active remote cursor must face the local net");
+        self.remove_node(cursor);
+        assert_eq!(state.frontiers.remove(&remote), Some(cursor));
+
+        let target = self.add_node(node);
+        assert!(state.mapped_nodes.insert(source_node, target).is_none());
+        self.connect(Port::principal(target), local);
+        for index in 1..=auxiliaries {
+            let source_anchor = Port::auxiliary(source_node, index);
+            let next = self.add_node(RuntimeNode::RemoteCursor {
+                copy,
+                remote: source_anchor,
+            });
+            assert!(state.frontiers.insert(source_anchor, next).is_none());
+            self.connect(Port::auxiliary(target, index), Port::principal(next));
+        }
+        self.copies.insert(copy, state);
+        CursorProgress::Materialized { node: target }
+    }
+
+    fn join_remote_frontiers(
+        &mut self,
+        copy: CopyId,
+        cursor: NodeId,
+        remote: Port,
+        neighbor: Port,
+    ) -> CursorProgress {
+        let (peer, copy_finished) = {
+            let state = self
+                .copies
+                .get_mut(&copy)
+                .expect("joined cursor must reference a live copy");
+            let Some(peer) = state.frontiers.remove(&neighbor) else {
+                return CursorProgress::Blocked;
+            };
+            assert_eq!(state.frontiers.remove(&remote), Some(cursor));
+            (peer, state.frontiers.is_empty())
+        };
+        assert_ne!(
+            cursor, peer,
+            "a remote wire cannot join one cursor to itself"
+        );
+
+        let left = self
+            .disconnect(Port::principal(cursor))
+            .expect("remote cursor must face the local net");
+        let right = self
+            .disconnect(Port::principal(peer))
+            .expect("peer remote cursor must face the local net");
+        self.remove_node(cursor);
+        self.unschedule_node(peer);
+        self.remove_node(peer);
+        self.connect(left, right);
+        if copy_finished {
+            self.copies.remove(&copy);
+        }
+        CursorProgress::Joined
+    }
+
+    fn translate_fan_identity(
+        &mut self,
+        state: &mut CopyState<D>,
+        identity: &FanIdentity,
+    ) -> FanIdentity {
+        let site = *state.fan_sites.entry(identity.site).or_insert_with(|| {
+            let site = FanSite(self.next_fan_site);
+            self.next_fan_site = self
+                .next_fan_site
+                .checked_add(1)
+                .expect("interaction-net fan site space exhausted");
+            site
+        });
+        let context = identity
+            .context
+            .iter()
+            .map(|step| DuplicationStep {
+                through: self.translate_fan_identity(state, &step.through),
+                branch: step.branch,
+            })
+            .collect::<Vec<_>>();
+        FanIdentity {
+            site,
+            context: Arc::from(context),
+        }
     }
 
     fn join(&mut self, left: NodeId, right: NodeId, auxiliaries: u32) {
@@ -669,6 +1068,9 @@ impl<D: Clone> RuntimeNet<D> {
         let auxiliaries = match self.node(other).expect("erased node must exist") {
             RuntimeNode::Bind | RuntimeNode::Fan { .. } => 2,
             RuntimeNode::Erase | RuntimeNode::Data(_) => 0,
+            RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => {
+                unreachable!("evaluator-only nodes are not erased as ordinary agents")
+            }
         };
         let targets = self.take_auxiliaries(other, auxiliaries);
         self.remove_node(eraser);
@@ -702,6 +1104,17 @@ impl<D: Clone> RuntimeNet<D> {
         let entry = self.nodes.remove(&node).expect("removed node must exist");
         assert!(entry.links.iter().all(Option::is_none));
         entry.node
+    }
+
+    fn unschedule_node(&mut self, node: NodeId) {
+        self.ready
+            .retain(|pair| pair.left != node && pair.right != node);
+        self.calls
+            .retain(|call| call.pair.left != node && call.pair.right != node);
+        self.blocked_cursors
+            .retain(|cursor| cursor.pair.left != node && cursor.pair.right != node);
+        self.stuck
+            .retain(|pair| pair.left != node && pair.right != node);
     }
 
     fn neighbor(&self, port: Port) -> Option<Port> {
@@ -744,14 +1157,18 @@ impl<D: Clone> RuntimeNet<D> {
             .get(&port.node())
             .is_some_and(|entry| port.index() < entry.node.port_count())
     }
+
+    fn principals_connect(&self, pair: ActivePair) -> bool {
+        self.neighbor(Port::principal(pair.left)) == Some(Port::principal(pair.right))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn identity(instance: u64, site: u32) -> FanIdentity {
-        FanIdentity::root(InstanceId::from_raw(instance), FanSite::from_raw(site))
+    fn identity(site: u64) -> FanIdentity {
+        FanIdentity::root(FanSite::from_raw(site))
     }
 
     fn duplicated_argument_template() -> InteractionNet<()> {
@@ -769,30 +1186,18 @@ mod tests {
     }
 
     #[test]
-    fn instantiation_freshens_one_namespace_not_every_fan_site() {
+    fn runtime_remembers_a_stable_anchor_for_the_exposed_port() {
         let net = duplicated_argument_template();
-        let first = net.instantiate();
-        let second = net.instantiate();
-        assert_ne!(first.instance(), second.instance());
-        let fan = |runtime: &RuntimeNet<()>| {
-            runtime
-                .nodes
-                .values()
-                .find_map(|entry| match &entry.node {
-                    RuntimeNode::Fan { identity } => Some(identity.clone()),
-                    _ => None,
-                })
-                .unwrap()
-        };
-        let first_fan = fan(&first);
-        let second_fan = fan(&second);
-        assert_eq!(first_fan.site, second_fan.site);
-        assert_ne!(first_fan.instance, second_fan.instance);
+        let runtime = net.instantiate();
+        assert!(matches!(
+            runtime.node(runtime.exposed().node()),
+            Some(RuntimeNode::Interface)
+        ));
+        assert_eq!(runtime.neighbor(runtime.exposed()), Some(net.exposed()));
     }
 
     fn fan_pair(left: FanIdentity, right: FanIdentity) -> RuntimeNet<()> {
-        let instance = left.instance;
-        let mut runtime = RuntimeNet::empty(instance);
+        let mut runtime = RuntimeNet::empty();
         let left = runtime.add_node(RuntimeNode::Fan { identity: left });
         let right = runtime.add_node(RuntimeNode::Fan { identity: right });
         let left_1 = runtime.add_node(RuntimeNode::Data(()));
@@ -809,7 +1214,7 @@ mod tests {
 
     #[test]
     fn identical_fan_histories_join() {
-        let fan = identity(7, 3);
+        let fan = identity(3);
         let mut net = fan_pair(fan.clone(), fan.clone());
         let pair = ActivePair {
             left: NodeId(0),
@@ -830,9 +1235,9 @@ mod tests {
     }
 
     #[test]
-    fn equal_template_sites_from_different_instances_do_not_pair() {
-        let left = identity(7, 3);
-        let right = identity(8, 3);
+    fn different_runtime_local_fan_sites_do_not_pair() {
+        let left = identity(3);
+        let right = identity(4);
         let mut net = fan_pair(left.clone(), right.clone());
         let pair = ActivePair {
             left: NodeId(0),
@@ -853,8 +1258,8 @@ mod tests {
 
     #[test]
     fn fan_commutation_records_dynamic_duplication_history() {
-        let left = identity(7, 3);
-        let right = identity(7, 4);
+        let left = identity(3);
+        let right = identity(4);
         let mut net = fan_pair(left.clone(), right.clone());
         assert!(matches!(
             net.reduce_next(),
@@ -886,7 +1291,7 @@ mod tests {
 
     #[test]
     fn blocked_and_stuck_pairs_leave_the_ready_queue() {
-        let mut calls = RuntimeNet::empty(InstanceId::from_raw(1));
+        let mut calls = RuntimeNet::empty();
         let bind = calls.add_node(RuntimeNode::Bind);
         let data = calls.add_node(RuntimeNode::Data(()));
         calls.connect(Port::principal(bind), Port::principal(data));
@@ -912,7 +1317,7 @@ mod tests {
         );
         assert_eq!(calls.reduce_next(), None);
 
-        let mut stuck = RuntimeNet::empty(InstanceId::from_raw(2));
+        let mut stuck = RuntimeNet::empty();
         let left = stuck.add_node(RuntimeNode::Data(()));
         let right = stuck.add_node(RuntimeNode::Data(()));
         stuck.connect(Port::principal(left), Port::principal(right));
@@ -931,13 +1336,13 @@ mod tests {
 
     #[test]
     fn scheduler_collections_partition_principal_connections() {
-        let mut net = RuntimeNet::empty(InstanceId::from_raw(1));
+        let mut net = RuntimeNet::empty();
         let bind = net.add_node(RuntimeNode::Bind);
         let call_data = net.add_node(RuntimeNode::Data(()));
         let stuck_left = net.add_node(RuntimeNode::Data(()));
         let stuck_right = net.add_node(RuntimeNode::Data(()));
         let ready_fan = net.add_node(RuntimeNode::Fan {
-            identity: identity(1, 0),
+            identity: identity(0),
         });
         let ready_data = net.add_node(RuntimeNode::Data(()));
         net.connect(Port::principal(bind), Port::principal(call_data));
@@ -984,9 +1389,259 @@ mod tests {
         assert_eq!(scheduled_pairs, graph_pairs);
     }
 
+    fn source_requiring_one_sweep() -> InteractionNet<&'static str> {
+        let mut net = NetBuilder::new();
+        let left = net.push(Node::Bind);
+        let right = net.push(Node::Bind);
+        let left_result = net.push(Node::Data("left-result"));
+        let exposed_result = net.push(Node::Data("exposed-result"));
+        let right_result = net.push(Node::Data("right-result"));
+        net.wire(Port::principal(left), Port::principal(right));
+        net.wire(Port::auxiliary(left, 2), Port::principal(left_result));
+        net.wire(Port::auxiliary(right, 1), Port::principal(exposed_result));
+        net.wire(Port::auxiliary(right, 2), Port::principal(right_result));
+        net.finish(Port::auxiliary(left, 1))
+    }
+
+    fn target_waiting_on(source: SharedRuntimeNet<&'static str>) -> RuntimeNet<&'static str> {
+        let mut target = RuntimeNet::empty();
+        let local = target.add_node(RuntimeNode::Data("local"));
+        let cursor = target.begin_copy(source);
+        target.connect(Port::principal(local), Port::principal(cursor));
+        target
+    }
+
+    #[test]
+    fn remote_cursor_sweeps_shared_source_once_then_materializes() {
+        let source = source_requiring_one_sweep().instantiate_shared();
+        let mut first = target_waiting_on(source.clone());
+
+        assert!(matches!(
+            first.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::RemoteCursor {
+                    progress: CursorProgress::SourceSweep { reductions: 1 },
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            first.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::RemoteCursor {
+                    progress: CursorProgress::Materialized { .. },
+                    ..
+                },
+                ..
+            })
+        ));
+        // The sweep advances only the pairs that were ready when it began.
+        // Newly exposed, unrelated pairs remain lazy in the shared source.
+        assert_eq!(source.with(|runtime| runtime.ready_pairs().len()), 1);
+
+        let mut second = target_waiting_on(source);
+        assert!(matches!(
+            second.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::RemoteCursor {
+                    progress: CursorProgress::Materialized { .. },
+                    ..
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn materializing_a_root_creates_lazy_auxiliary_cursors() {
+        let source = duplicated_argument_template().instantiate_shared();
+        let source_nodes = source.with(|runtime| runtime.nodes.len());
+        let mut target = RuntimeNet::empty();
+        let local = target.add_node(RuntimeNode::Data(()));
+        let cursor = target.begin_copy(source.clone());
+        target.connect(Port::principal(local), Port::principal(cursor));
+
+        assert!(matches!(
+            target.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::RemoteCursor {
+                    progress: CursorProgress::Materialized { .. },
+                    ..
+                },
+                ..
+            })
+        ));
+        let cursors = target
+            .nodes
+            .values()
+            .filter(|entry| matches!(entry.node, RuntimeNode::RemoteCursor { .. }))
+            .count();
+        assert_eq!(cursors, 2);
+        assert_eq!(source.with(|runtime| runtime.nodes.len()), source_nodes);
+    }
+
+    #[test]
+    fn resuming_a_call_materializes_only_the_root_bind() {
+        let source = duplicated_argument_template().instantiate_shared();
+        let mut caller = RuntimeNet::empty();
+        let bind = caller.add_node(RuntimeNode::Bind);
+        let function = caller.add_node(RuntimeNode::Data(()));
+        let argument = caller.add_node(RuntimeNode::Data(()));
+        let result = caller.add_node(RuntimeNode::Data(()));
+        caller.connect(Port::principal(bind), Port::principal(function));
+        caller.connect(Port::auxiliary(bind, 1), Port::principal(argument));
+        caller.connect(Port::auxiliary(bind, 2), Port::principal(result));
+
+        let Some(Reduction {
+            kind: ReductionKind::Call { .. },
+            ..
+        }) = caller.reduce_next()
+        else {
+            panic!("bind-data must block as a call");
+        };
+        let call = caller.blocked_calls()[0];
+        caller.resume_call_with_copy(call, source);
+        assert!(matches!(
+            caller.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::RemoteCursor {
+                    progress: CursorProgress::Materialized { .. },
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            caller.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::BindJoin,
+                ..
+            })
+        ));
+        assert_eq!(
+            caller
+                .nodes
+                .values()
+                .filter(|entry| matches!(entry.node, RuntimeNode::RemoteCursor { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn converging_frontiers_join_without_leaving_a_stale_cursor_pair() {
+        let mut template = NetBuilder::new();
+        let root = template.push(Node::Bind);
+        template.wire(Port::auxiliary(root, 1), Port::auxiliary(root, 2));
+        let source = template.finish(Port::principal(root)).instantiate_shared();
+
+        let mut caller = RuntimeNet::empty();
+        let bind = caller.add_node(RuntimeNode::Bind);
+        let function = caller.add_node(RuntimeNode::Data(()));
+        let left = caller.add_node(RuntimeNode::Data(()));
+        let right = caller.add_node(RuntimeNode::Data(()));
+        caller.connect(Port::principal(bind), Port::principal(function));
+        caller.connect(Port::auxiliary(bind, 1), Port::principal(left));
+        caller.connect(Port::auxiliary(bind, 2), Port::principal(right));
+
+        caller.reduce_next();
+        let call = caller.blocked_calls()[0];
+        caller.resume_call_with_copy(call, source);
+        caller.reduce_next();
+        caller.reduce_next();
+        assert!(matches!(
+            caller.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::RemoteCursor {
+                    progress: CursorProgress::Joined,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(caller.copies.is_empty());
+        assert!(matches!(
+            caller.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::Stuck,
+                ..
+            })
+        ));
+        assert!(caller.reduce_next().is_none());
+    }
+
+    #[test]
+    fn separate_logical_copies_rebase_fans_to_distinct_local_sites() {
+        let mut template = NetBuilder::new();
+        let fan = template.push_fan();
+        let left = template.push(Node::Data(()));
+        let right = template.push(Node::Data(()));
+        template.wire(Port::auxiliary(fan, 1), Port::principal(left));
+        template.wire(Port::auxiliary(fan, 2), Port::principal(right));
+        let source = template.finish(Port::principal(fan)).instantiate_shared();
+
+        let mut target = RuntimeNet::empty();
+        for _ in 0..2 {
+            let local = target.add_node(RuntimeNode::Data(()));
+            let cursor = target.begin_copy(source.clone());
+            target.connect(Port::principal(local), Port::principal(cursor));
+        }
+        assert!(matches!(
+            target.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::RemoteCursor {
+                    progress: CursorProgress::Materialized { .. },
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            target.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::RemoteCursor {
+                    progress: CursorProgress::Materialized { .. },
+                    ..
+                },
+                ..
+            })
+        ));
+        let mut sites = target
+            .nodes
+            .values()
+            .filter_map(|entry| match &entry.node {
+                RuntimeNode::Fan { identity } => Some(identity.site.get()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        sites.sort_unstable();
+        assert_eq!(sites, vec![0, 1]);
+    }
+
+    #[test]
+    fn erasing_a_remote_cursor_does_not_materialize_its_source() {
+        let source = duplicated_argument_template().instantiate_shared();
+        let source_nodes = source.with(|runtime| runtime.nodes.len());
+        let mut target = RuntimeNet::empty();
+        let eraser = target.add_node(RuntimeNode::Erase);
+        let cursor = target.begin_copy(source.clone());
+        target.connect(Port::principal(eraser), Port::principal(cursor));
+
+        assert!(matches!(
+            target.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::Erase,
+                ..
+            })
+        ));
+        assert_eq!(source.with(|runtime| runtime.nodes.len()), source_nodes);
+        assert!(target.copies.is_empty());
+    }
+
     #[test]
     fn removed_node_ids_are_not_reused() {
-        let mut net = RuntimeNet::empty(InstanceId::from_raw(1));
+        let mut net = RuntimeNet::empty();
         let first = net.add_node(RuntimeNode::Data(()));
         let second = net.add_node(RuntimeNode::Data(()));
         assert!(matches!(net.remove_node(first), RuntimeNode::Data(())));
