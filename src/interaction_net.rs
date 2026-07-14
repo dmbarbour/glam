@@ -221,13 +221,24 @@ impl<D> InteractionNet<D> {
     }
 }
 
-impl<D: Clone> InteractionNet<D> {
+impl<D: Clone + 'static> InteractionNet<D> {
     pub fn instantiate(&self) -> RuntimeNet<D> {
-        RuntimeNet::new(self)
+        self.instantiate_with(Arc::new(D::clone))
+    }
+
+    pub fn instantiate_with(&self, map_data: Arc<dyn Fn(&D) -> D + Send + Sync>) -> RuntimeNet<D> {
+        RuntimeNet::new(self, map_data)
     }
 
     pub fn instantiate_shared(&self) -> SharedRuntimeNet<D> {
         SharedRuntimeNet::new(self.instantiate())
+    }
+
+    pub fn instantiate_shared_with(
+        &self,
+        map_data: Arc<dyn Fn(&D) -> D + Send + Sync>,
+    ) -> SharedRuntimeNet<D> {
+        SharedRuntimeNet::new(self.instantiate_with(map_data))
     }
 }
 
@@ -364,6 +375,7 @@ pub enum ReductionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorProgress {
     Materialized { node: NodeId },
+    MaterializedPair { left: NodeId, right: NodeId },
     Joined,
     SourceSweep { reductions: usize },
     Blocked,
@@ -374,6 +386,13 @@ pub struct BlockedCall {
     pub pair: ActivePair,
     pub bind: NodeId,
     pub data: NodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallFrame<D> {
+    pub callable: D,
+    pub argument: Port,
+    pub result: Port,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -435,6 +454,7 @@ impl<D> Eq for SharedRuntimeNet<D> {}
 
 struct CopyState<D> {
     source: SharedRuntimeNet<D>,
+    map_data: Arc<dyn Fn(&D) -> D + Send + Sync>,
     mapped_nodes: HashMap<NodeId, NodeId>,
     frontiers: HashMap<Port, NodeId>,
     fan_sites: HashMap<FanSite, FanSite>,
@@ -460,6 +480,7 @@ pub struct RuntimeNet<D> {
     exposed: Option<Port>,
     nodes: HashMap<NodeId, RuntimeEntry<D>>,
     next_copy_id: u64,
+    has_imported_copy: bool,
     copies: HashMap<CopyId, CopyState<D>>,
     ready: VecDeque<ActivePair>,
     calls: VecDeque<BlockedCall>,
@@ -467,8 +488,8 @@ pub struct RuntimeNet<D> {
     stuck: Vec<ActivePair>,
 }
 
-impl<D: Clone> RuntimeNet<D> {
-    fn new(net: &InteractionNet<D>) -> Self {
+impl<D: Clone + 'static> RuntimeNet<D> {
+    fn new(net: &InteractionNet<D>, map_data: Arc<dyn Fn(&D) -> D + Send + Sync>) -> Self {
         let nodes = net
             .nodes
             .iter()
@@ -481,7 +502,7 @@ impl<D: Clone> RuntimeNet<D> {
                         identity: FanIdentity::root(*site),
                     },
                     Node::Erase => RuntimeNode::Erase,
-                    Node::Data(data) => RuntimeNode::Data(data.clone()),
+                    Node::Data(data) => RuntimeNode::Data(map_data(data)),
                 };
                 (id, RuntimeEntry::new(node))
             })
@@ -505,6 +526,7 @@ impl<D: Clone> RuntimeNet<D> {
             exposed: None,
             nodes,
             next_copy_id: 0,
+            has_imported_copy: false,
             copies: HashMap::new(),
             ready: VecDeque::new(),
             calls: VecDeque::new(),
@@ -514,9 +536,7 @@ impl<D: Clone> RuntimeNet<D> {
         for wire in net.wires.iter() {
             runtime.connect(wire.left, wire.right);
         }
-        let interface = runtime.add_node(RuntimeNode::Interface);
-        let exposed = Port::auxiliary(interface, 1);
-        runtime.connect(exposed, net.exposed);
+        let exposed = runtime.add_interface(net.exposed);
         runtime.exposed = Some(exposed);
         runtime
     }
@@ -529,6 +549,7 @@ impl<D: Clone> RuntimeNet<D> {
             exposed: None,
             nodes: HashMap::new(),
             next_copy_id: 0,
+            has_imported_copy: false,
             copies: HashMap::new(),
             ready: VecDeque::new(),
             calls: VecDeque::new(),
@@ -565,12 +586,94 @@ impl<D: Clone> RuntimeNet<D> {
         &self.blocked_cursors
     }
 
+    pub fn blocked_cursor_sources(&self) -> Vec<SharedRuntimeNet<D>> {
+        self.blocked_cursors
+            .iter()
+            .filter_map(|blocked| {
+                let RuntimeNode::RemoteCursor { copy, .. } = self.node(blocked.cursor)? else {
+                    return None;
+                };
+                self.copies.get(copy).map(|state| state.source.clone())
+            })
+            .collect()
+    }
+
     pub fn stuck_pairs(&self) -> &[ActivePair] {
         &self.stuck
     }
 
+    /// Whether this runtime has ever imported a logical copy. This remains
+    /// true after its copy frontiers converge, so evaluator-owned suspended
+    /// wires can be distinguished from an unsupplied canonical root.
+    pub fn has_imported_copy(&self) -> bool {
+        self.has_imported_copy
+    }
+
     pub fn node(&self, id: NodeId) -> Option<&RuntimeNode<D>> {
         self.nodes.get(&id).map(|entry| &entry.node)
+    }
+
+    pub fn call_data(&self, call: BlockedCall) -> &D {
+        assert!(self.calls.contains(&call), "call must still be blocked");
+        match self.node(call.data) {
+            Some(RuntimeNode::Data(data)) => data,
+            _ => panic!("blocked call data node must exist"),
+        }
+    }
+
+    pub fn call_argument_data(&self, call: BlockedCall) -> Option<&D> {
+        assert!(self.calls.contains(&call), "call must still be blocked");
+        let argument = self.neighbor(Port::auxiliary(call.bind, 1))?;
+        if !argument.is_principal() {
+            return None;
+        }
+        match self.node(argument.node())? {
+            RuntimeNode::Data(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    pub fn demand_call_argument(&mut self, call: BlockedCall) -> Option<CursorProgress> {
+        assert!(self.calls.contains(&call), "call must still be blocked");
+        self.demand_cursor_across(Port::auxiliary(call.bind, 1))
+    }
+
+    pub fn call_argument_cursor_source(&self, call: BlockedCall) -> Option<SharedRuntimeNet<D>> {
+        assert!(self.calls.contains(&call), "call must still be blocked");
+        self.cursor_source_across(Port::auxiliary(call.bind, 1))
+    }
+
+    pub fn interface_data(&self, interface: Port) -> Option<&D> {
+        self.assert_interface(interface);
+        let neighbor = self.neighbor(interface)?;
+        if !neighbor.is_principal() {
+            return None;
+        }
+        match self.node(neighbor.node())? {
+            RuntimeNode::Data(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    pub fn interface_neighbor(&self, interface: Port) -> Option<Port> {
+        self.assert_interface(interface);
+        self.neighbor(interface)
+    }
+
+    /// Returns the port wired to `port`, for evaluator diagnostics and demand
+    /// propagation across evaluator-owned interfaces.
+    pub fn port_neighbor(&self, port: Port) -> Option<Port> {
+        self.neighbor(port)
+    }
+
+    pub fn demand_interface(&mut self, interface: Port) -> Option<CursorProgress> {
+        self.assert_interface(interface);
+        self.demand_cursor_across(interface)
+    }
+
+    pub fn interface_cursor_source(&self, interface: Port) -> Option<SharedRuntimeNet<D>> {
+        self.assert_interface(interface);
+        self.cursor_source_across(interface)
     }
 
     pub fn wake_blocked_cursors(&mut self) {
@@ -717,6 +820,15 @@ impl<D: Clone> RuntimeNet<D> {
 
     /// Starts one logical copy and returns its initially unwired remote cursor.
     pub fn begin_copy(&mut self, source: SharedRuntimeNet<D>) -> NodeId {
+        self.begin_copy_with(source, Arc::new(D::clone))
+    }
+
+    pub fn begin_copy_with(
+        &mut self,
+        source: SharedRuntimeNet<D>,
+        map_data: Arc<dyn Fn(&D) -> D + Send + Sync>,
+    ) -> NodeId {
+        self.has_imported_copy = true;
         let remote = source.with(RuntimeNet::exposed);
         let copy = CopyId(self.next_copy_id);
         self.next_copy_id = self
@@ -729,6 +841,7 @@ impl<D: Clone> RuntimeNet<D> {
                     copy,
                     CopyState {
                         source,
+                        map_data,
                         mapped_nodes: HashMap::new(),
                         frontiers: HashMap::new(),
                         fan_sites: HashMap::new(),
@@ -763,6 +876,80 @@ impl<D: Clone> RuntimeNet<D> {
         let cursor = self.begin_copy(source);
         self.connect(Port::principal(call.bind), Port::principal(cursor));
         cursor
+    }
+
+    pub fn resume_call_with_copy_map(
+        &mut self,
+        call: BlockedCall,
+        source: SharedRuntimeNet<D>,
+        map_data: Arc<dyn Fn(&D) -> D + Send + Sync>,
+    ) -> NodeId {
+        let Some(index) = self.calls.iter().position(|blocked| *blocked == call) else {
+            panic!("resumed interaction-net call must still be blocked");
+        };
+        self.calls.remove(index);
+        assert_eq!(
+            self.disconnect(Port::principal(call.bind)),
+            Some(Port::principal(call.data))
+        );
+        assert!(matches!(self.remove_node(call.data), RuntimeNode::Data(_)));
+        let cursor = self.begin_copy_with(source, map_data);
+        self.connect(Port::principal(call.bind), Port::principal(cursor));
+        cursor
+    }
+
+    /// Removes a blocked bind-data pair and preserves its argument and result
+    /// wires behind stable evaluator interfaces.
+    pub fn take_call(&mut self, call: BlockedCall) -> CallFrame<D> {
+        let Some(index) = self.calls.iter().position(|blocked| *blocked == call) else {
+            panic!("taken interaction-net call must still be blocked");
+        };
+        self.calls.remove(index);
+        assert_eq!(
+            self.disconnect(Port::principal(call.bind)),
+            Some(Port::principal(call.data))
+        );
+        let RuntimeNode::Data(callable) = self.remove_node(call.data) else {
+            unreachable!();
+        };
+        let mut auxiliaries = self.take_auxiliaries(call.bind, 2).into_iter();
+        let argument = auxiliaries.next().unwrap();
+        let result = auxiliaries.next().unwrap();
+        self.remove_node(call.bind);
+        CallFrame {
+            callable,
+            argument: self.add_interface(argument),
+            result: self.add_interface(result),
+        }
+    }
+
+    /// Consumes an interface whose neighbor is embedded data.
+    pub fn take_interface_data(&mut self, interface: Port) -> Option<D> {
+        self.assert_interface(interface);
+        let neighbor = self.neighbor(interface)?;
+        if !neighbor.is_principal()
+            || !matches!(self.node(neighbor.node()), Some(RuntimeNode::Data(_)))
+        {
+            return None;
+        }
+        self.disconnect(interface);
+        self.remove_node(interface.node());
+        let RuntimeNode::Data(data) = self.remove_node(neighbor.node()) else {
+            unreachable!();
+        };
+        Some(data)
+    }
+
+    /// Replaces an evaluator interface with one embedded data node.
+    pub fn complete_interface_with_data(&mut self, interface: Port, data: D) -> NodeId {
+        self.assert_interface(interface);
+        let target = self
+            .disconnect(interface)
+            .expect("completed interaction-net interface must remain wired");
+        self.remove_node(interface.node());
+        let node = self.add_node(RuntimeNode::Data(data));
+        self.connect(Port::principal(node), target);
+        node
     }
 
     fn advance_remote_cursor(&mut self, cursor: NodeId) -> CursorProgress {
@@ -813,6 +1000,34 @@ impl<D: Clone> RuntimeNet<D> {
             );
         }
 
+        let source_node = neighbor.node();
+        let principal = Port::principal(source_node);
+        if let Some(partner) = source
+            .neighbor(principal)
+            .filter(|port| port.is_principal())
+        {
+            let pair_is_blocked = source.calls.iter().any(|call| {
+                (call.pair.left == source_node && call.pair.right == partner.node())
+                    || (call.pair.right == source_node && call.pair.left == partner.node())
+            }) || source.stuck.iter().any(|pair| {
+                (pair.left == source_node && pair.right == partner.node())
+                    || (pair.right == source_node && pair.left == partner.node())
+            });
+            if pair_is_blocked {
+                let left = source
+                    .node(source_node)
+                    .expect("blocked remote pair left node must exist")
+                    .clone();
+                let right = source
+                    .node(partner.node())
+                    .expect("blocked remote pair right node must exist")
+                    .clone();
+                drop(source);
+                return self
+                    .materialize_remote_pair(copy, cursor, remote, neighbor, left, partner, right);
+            }
+        }
+
         let ready = source.ready.len();
         if ready == 0 {
             return CursorProgress::Blocked;
@@ -824,6 +1039,27 @@ impl<D: Clone> RuntimeNet<D> {
             }
         }
         CursorProgress::SourceSweep { reductions }
+    }
+
+    fn demand_cursor_across(&mut self, local: Port) -> Option<CursorProgress> {
+        let neighbor = self.neighbor(local)?;
+        if !neighbor.is_principal()
+            || !matches!(
+                self.node(neighbor.node()),
+                Some(RuntimeNode::RemoteCursor { .. })
+            )
+        {
+            return None;
+        }
+        Some(self.advance_remote_cursor(neighbor.node()))
+    }
+
+    fn cursor_source_across(&self, local: Port) -> Option<SharedRuntimeNet<D>> {
+        let neighbor = self.neighbor(local)?;
+        let RuntimeNode::RemoteCursor { copy, .. } = self.node(neighbor.node())? else {
+            return None;
+        };
+        self.copies.get(copy).map(|state| state.source.clone())
     }
 
     fn erase_remote_cursor(&mut self, eraser: NodeId, cursor: NodeId) {
@@ -865,7 +1101,7 @@ impl<D: Clone> RuntimeNet<D> {
                 identity: self.translate_fan_identity(&mut state, &identity),
             },
             RuntimeNode::Erase => RuntimeNode::Erase,
-            RuntimeNode::Data(data) => RuntimeNode::Data(data),
+            RuntimeNode::Data(data) => RuntimeNode::Data((state.map_data)(&data)),
             RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => {
                 self.copies.insert(copy, state);
                 return CursorProgress::Blocked;
@@ -897,6 +1133,123 @@ impl<D: Clone> RuntimeNet<D> {
         }
         self.copies.insert(copy, state);
         CursorProgress::Materialized { node: target }
+    }
+
+    fn materialize_remote_pair(
+        &mut self,
+        copy: CopyId,
+        cursor: NodeId,
+        remote: Port,
+        entered: Port,
+        entered_node: RuntimeNode<D>,
+        partner: Port,
+        partner_node: RuntimeNode<D>,
+    ) -> CursorProgress {
+        let mut state = self
+            .copies
+            .remove(&copy)
+            .expect("materialized cursor pair must reference a live copy");
+        let Some((entered_node, entered_auxiliaries)) =
+            self.copy_remote_node(&mut state, entered_node)
+        else {
+            self.copies.insert(copy, state);
+            return CursorProgress::Blocked;
+        };
+        let Some((partner_node, partner_auxiliaries)) =
+            self.copy_remote_node(&mut state, partner_node)
+        else {
+            self.copies.insert(copy, state);
+            return CursorProgress::Blocked;
+        };
+
+        let local = self
+            .disconnect(Port::principal(cursor))
+            .expect("active remote cursor must face the local net");
+        self.remove_node(cursor);
+        assert_eq!(state.frontiers.remove(&remote), Some(cursor));
+
+        let entered_target = self.add_node(entered_node);
+        let partner_target = self.add_node(partner_node);
+        assert!(
+            state
+                .mapped_nodes
+                .insert(entered.node(), entered_target)
+                .is_none()
+        );
+        assert!(
+            state
+                .mapped_nodes
+                .insert(partner.node(), partner_target)
+                .is_none()
+        );
+        self.connect(
+            Port::principal(entered_target),
+            Port::principal(partner_target),
+        );
+
+        for index in 1..=entered_auxiliaries {
+            let source_anchor = Port::auxiliary(entered.node(), index);
+            if index == entered.index() {
+                self.connect(Port::auxiliary(entered_target, index), local);
+            } else {
+                self.add_remote_frontier(
+                    copy,
+                    &mut state,
+                    source_anchor,
+                    Port::auxiliary(entered_target, index),
+                );
+            }
+        }
+        for index in 1..=partner_auxiliaries {
+            self.add_remote_frontier(
+                copy,
+                &mut state,
+                Port::auxiliary(partner.node(), index),
+                Port::auxiliary(partner_target, index),
+            );
+        }
+        self.copies.insert(copy, state);
+        CursorProgress::MaterializedPair {
+            left: entered_target,
+            right: partner_target,
+        }
+    }
+
+    fn copy_remote_node(
+        &mut self,
+        state: &mut CopyState<D>,
+        node: RuntimeNode<D>,
+    ) -> Option<(RuntimeNode<D>, u32)> {
+        let node = match node {
+            RuntimeNode::Bind => RuntimeNode::Bind,
+            RuntimeNode::Fan { identity } => RuntimeNode::Fan {
+                identity: self.translate_fan_identity(state, &identity),
+            },
+            RuntimeNode::Erase => RuntimeNode::Erase,
+            RuntimeNode::Data(data) => RuntimeNode::Data((state.map_data)(&data)),
+            RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => return None,
+        };
+        let auxiliaries = match &node {
+            RuntimeNode::Bind | RuntimeNode::Fan { .. } => 2,
+            RuntimeNode::Erase | RuntimeNode::Data(_) => 0,
+            RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => unreachable!(),
+        };
+        Some((node, auxiliaries))
+    }
+
+    fn add_remote_frontier(
+        &mut self,
+        copy: CopyId,
+        state: &mut CopyState<D>,
+        source_anchor: Port,
+        target: Port,
+    ) {
+        let cursor = self.add_node(RuntimeNode::RemoteCursor {
+            copy,
+            remote: source_anchor,
+        });
+        assert!(state.frontiers.insert(source_anchor, cursor).is_none());
+        self.connect(target, Port::principal(cursor));
     }
 
     fn join_remote_frontiers(
@@ -1088,6 +1441,21 @@ impl<D: Clone> RuntimeNet<D> {
                     .expect("interaction auxiliary port must be wired")
             })
             .collect()
+    }
+
+    fn add_interface(&mut self, target: Port) -> Port {
+        let interface = self.add_node(RuntimeNode::Interface);
+        let port = Port::auxiliary(interface, 1);
+        self.connect(port, target);
+        port
+    }
+
+    fn assert_interface(&self, interface: Port) {
+        assert_eq!(interface.index(), 1, "interface must use its boundary port");
+        assert!(matches!(
+            self.node(interface.node()),
+            Some(RuntimeNode::Interface)
+        ));
     }
 
     fn add_node(&mut self, node: RuntimeNode<D>) -> NodeId {

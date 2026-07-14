@@ -227,10 +227,13 @@ impl CompileContext {
         let Value::Expr(thunk) = value else {
             return None;
         };
-        if !thunk.env.is_empty() {
+        let Some(env) = thunk.env() else {
+            return None;
+        };
+        if !env.is_empty() {
             return None;
         }
-        let CoreExpr::Lambda(body) = thunk.expr.as_ref() else {
+        let CoreExpr::Lambda(body) = thunk.expr()?.as_ref() else {
             return None;
         };
         Some(Value::expr(body.body().as_ref().clone()))
@@ -315,7 +318,9 @@ impl CompileContext {
 
 fn value_to_core_expr(value: Value) -> CoreExpr {
     match value {
-        Value::Expr(thunk) if thunk.env.is_empty() => thunk.expr.as_ref().clone(),
+        Value::Expr(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
+            thunk.expr().unwrap().as_ref().clone()
+        }
         value => CoreExpr::Value(value),
     }
 }

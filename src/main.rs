@@ -496,7 +496,7 @@ fn instantiate_module(context: &CompileContext, definitions: &Value) -> Value {
     let Value::Expr(thunk) = &context.final_defs else {
         panic!("CompileContext.final_defs must be a future expression");
     };
-    let CoreExpr::Future(ivar) = &(*thunk.expr) else {
+    let CoreExpr::Future(ivar) = thunk.expr().unwrap().as_ref() else {
         panic!("CompileContext.final_defs must be a future expression");
     };
     ivar.set(definitions.clone())
@@ -515,16 +515,16 @@ fn value_bytes(value: &glam::core::Value, path: &str) -> Result<Vec<u8>, String>
         glam::core::Value::List(list) => {
             eval::list_output_bytes(list).map_err(|err| format!("`{path}` {err}"))
         }
-        glam::core::Value::Expr(thunk) => {
-            let value = eval::eval_value(&glam::core::Value::Expr(thunk.clone()))
-                .map_err(|err| err.to_string())?;
+        glam::core::Value::Expr(_) => {
+            let value = eval::eval_value(value).map_err(|err| err.to_string())?;
             value_bytes(&value, path)
         }
         glam::core::Value::Atom(_)
         | glam::core::Value::Dict(_)
         | glam::core::Value::Number(_)
         | glam::core::Value::Closure(_)
-        | glam::core::Value::Builtin(_) => Err(format!("`{path}` is not binary text data")),
+        | glam::core::Value::Builtin(_)
+        | glam::core::Value::PartialBuiltin(_) => Err(format!("`{path}` is not binary text data")),
     }
 }
 

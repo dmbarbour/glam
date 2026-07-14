@@ -69,7 +69,24 @@ collector.
 ## Remaining evaluator bridge
 
 The topology reducer handles bind-bind, fan-fan, fan-bind, fan-data, and eraser
-interactions. `bind-data` still reports `ReductionKind::Call`; ordinary assembly
-evaluation uses the prior call-by-need evaluator through `Closure::source_body`.
-Do not expose the `interaction_net` source keyword until calls and observation
-run demand-first through runtime nets.
+interactions. `bind-data` reports `ReductionKind::Call`; `eval` consumes that
+blocked pair through a generic `CallFrame`, preserving the argument and result
+wires behind stable interfaces. A runtime remembers whether it imported a
+logical copy, because only an instance may detach a lazy argument wire. Doing
+that in the canonical lambda runtime would capture its unsupplied root.
+
+Core thunks can be backed by an expression, a runtime/interface pair, or a
+semantic builtin/access/list-item computation. All forms share one memoized
+result. Builtins are callable `CoreNetData`, partial applications retain shared
+thunks, and saturated calls emit a semantic thunk so conservative source sweeps
+do not force strict work before its result is demanded. List lowering similarly
+retains computed elements as opaque lazy list holes.
+
+Closure application runs through the core runtime driver for lambda bodies made
+from values, applications, locals, nested lambdas, lists, deferred values,
+futures, and errors. Dictionary access is the remaining compatibility boundary:
+a copied access can expose a demanded local through a second logical-copy
+boundary, but demand is not yet forwarded from that cursor to the caller-side
+frontier. Such closures retain `Closure::source_body` and use the expression
+evaluator. Do not expose the `interaction_net` source keyword until that
+cross-copy demand edge and general effect blocking are represented explicitly.

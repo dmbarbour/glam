@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::core::{DeferredValue, Expr, IVar, Key, KeyExpr, Lambda, Value};
+use crate::core::{BuiltinCall, DeferredValue, Expr, IVar, Key, KeyExpr, Lambda, Value};
 use crate::interaction_net::{InteractionNet, NetBuilder, Node, NodeId, Port, SharedRuntimeNet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,10 +15,17 @@ pub enum CoreDataKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreNetData {
     Value(Value),
+    Builtin(BuiltinCall),
     Lambda(Arc<Lambda>),
     Capture(usize),
-    List(usize),
-    Access(Arc<[CoreDataKey]>),
+    List {
+        arity: usize,
+        arguments: Arc<[Value]>,
+    },
+    Access {
+        path: Arc<[CoreDataKey]>,
+        arguments: Arc<[Value]>,
+    },
     Deferred(Arc<DeferredValue>),
     Future(IVar),
     Error(Arc<str>),
@@ -50,10 +57,23 @@ impl Lowerer {
 
     fn compile_into(&mut self, expr: &Expr, target: Port) {
         match expr {
+            Expr::Value(Value::Builtin(builtin)) => {
+                self.data_into(CoreNetData::Builtin(BuiltinCall::new(*builtin)), target)
+            }
+            Expr::Value(Value::PartialBuiltin(call)) => {
+                self.data_into(CoreNetData::Builtin(call.clone()), target)
+            }
             Expr::Value(value) => self.data_into(CoreNetData::Value(value.clone()), target),
             Expr::List(items) => {
                 let args = items.iter().map(Arc::as_ref).collect::<Vec<_>>();
-                self.data_application_into(CoreNetData::List(items.len()), &args, target);
+                self.data_application_into(
+                    CoreNetData::List {
+                        arity: items.len(),
+                        arguments: Arc::from([]),
+                    },
+                    &args,
+                    target,
+                );
             }
             Expr::Apply(function, argument) => {
                 let bind = self.net.push(Node::Bind);
@@ -84,7 +104,14 @@ impl Lowerer {
                         }
                     })
                     .collect::<Vec<_>>();
-                self.data_application_into(CoreNetData::Access(Arc::from(keys)), &args, target);
+                self.data_application_into(
+                    CoreNetData::Access {
+                        path: Arc::from(keys),
+                        arguments: Arc::from([]),
+                    },
+                    &args,
+                    target,
+                );
             }
             Expr::Deferred(value) => self.data_into(CoreNetData::Deferred(value.clone()), target),
             Expr::Future(value) => self.data_into(CoreNetData::Future(value.clone()), target),

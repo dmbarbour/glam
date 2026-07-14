@@ -103,11 +103,23 @@ This document should summarize salient, relevant points rather than asking futur
   A cursor materializes a node only when that source frontier faces its
   principal port. If it faces an auxiliary, one conservative sweep reduces
   every pair that was ready at the start of the sweep.
+- A blocked bind-data pair can be consumed as a generic `CallFrame`; its
+  argument and result survive behind independently stable interfaces. Core
+  thunks may name one of those runtime/interface pairs, and memoize both values
+  and errors without introducing a new language-level `Value` variant.
+- The core runtime driver interprets closures and builtins outside the generic
+  topology reducer. Partial builtins retain shared lazy arguments. Saturated
+  builtins become memoized semantic thunks, so the conservative active-pair
+  sweep does not force strict builtin work until its result is observed.
+- List applications lower to callable core data and computed list elements
+  become opaque lazy holes. Access applications also have semantic thunk
+  support, but closure bodies containing access currently remain on the
+  compatibility evaluator: nested logical copies still need an explicit way to
+  forward demand to the caller-side argument frontier.
 - The topology reducer implements bind/fan join, fan commutation, duplication,
   and erasure rules. Core
-  evaluation still has a compatibility bridge while `bind-data` calls are being
-  moved to demand-driven net evaluation. Complete that before exposing the
-  `interaction_net` keyword.
+  evaluation retains only the access-related compatibility bridge described
+  above. Complete that before exposing the `interaction_net` keyword.
 
 ### Configuration Fixtures
 

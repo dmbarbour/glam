@@ -23,8 +23,10 @@
   through ready, blocked-call/cursor, and stuck scheduler collections
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
-- `eval.rs` retains the call-by-need compatibility evaluator while core
-  `bind-data` operations migrate to demand-driven net reduction
+- `eval.rs` drives closure calls through runtime nets, turns blocked bind-data
+  pairs into stable call frames, and represents builtin/list arguments as
+  memoized semantic thunks; dictionary-access closure bodies temporarily retain
+  the call-by-need compatibility path pending cross-copy demand forwarding
 - `main` expects binary `asm.result`, writes to `stdout`
 
 At the moment, even this simple case is not fully implemented. Thus, it remains the focus for now.
@@ -33,6 +35,7 @@ The current interaction-net slice establishes the lambda-to-shared-net boundary
 without exposing syntax. Templates use local fan sites and each runtime graph
 gets one fresh namespace. The current oracle records dynamic duplication paths
 directly; it provides reference semantics for replacing those histories with
-Lamping-style bracket/croissant control interactions. The general construction
-effects and complete `bind-data` evaluator still belong before adding the
-`interaction_net` keyword.
+Lamping-style bracket/croissant control interactions. Core bind-data calls,
+closure capture, builtin currying, and lazy list construction now cross the net
+runtime boundary. Cross-copy access demand and general construction effects
+still belong before adding the `interaction_net` keyword.

@@ -958,9 +958,9 @@ fn shift_name_scope_locals(scope: &NameScope, amount: usize) -> NameScope {
 
 fn shift_value_locals(value: &Value, amount: usize, cutoff: usize) -> Value {
     match value {
-        Value::Expr(thunk) if thunk.env.is_empty() => {
-            Value::expr(shift_expr_locals(thunk.expr.as_ref(), amount, cutoff))
-        }
+        Value::Expr(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => Value::expr(
+            shift_expr_locals(thunk.expr().unwrap().as_ref(), amount, cutoff),
+        ),
         other => other.clone(),
     }
 }
@@ -4560,14 +4560,14 @@ mod tests {
         let Value::Expr(thunk) = &context.final_defs else {
             panic!("final module binding should be a lazy expression");
         };
-        CoreExpr::Access(thunk.expr.clone(), Arc::from(path))
+        CoreExpr::Access(thunk.expr().unwrap().clone(), Arc::from(path))
     }
 
     fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> Value {
         let Value::Expr(thunk) = &context.final_defs else {
             panic!("final module binding should be a lazy expression");
         };
-        let crate::core::Expr::Future(ivar) = &(*thunk.expr) else {
+        let crate::core::Expr::Future(ivar) = thunk.expr().unwrap().as_ref() else {
             panic!("final module binding should be a future expression");
         };
         ivar.set(lowered.definitions.clone())

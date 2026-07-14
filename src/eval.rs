@@ -5,7 +5,11 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::core::{Builtin, Closure, DeferredValue, Expr, IVar, Key, KeyExpr, List, Thunk, Value};
+use crate::core::{
+    Builtin, BuiltinCall, Closure, DeferredValue, Expr, IVar, Key, KeyExpr, List, Thunk, Value,
+};
+use crate::core_net::{CoreDataKey, CoreNetData};
+use crate::interaction_net::{BlockedCall, NetBuilder, Node, Port, ReductionKind};
 use crate::list::ListItem;
 use crate::number::Number;
 
@@ -47,7 +51,7 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
         }
         Expr::Apply(function, argument) => eval_apply(function, argument, local_env),
         Expr::Lambda(lambda) => Ok(Value::Closure(Closure {
-            interaction_net: lambda.interaction_net(),
+            interaction_net: lambda.runtime_with_captures(Arc::from(local_env.to_vec())),
             env: Arc::from(local_env.to_vec()),
             source_body: lambda.body().clone(),
         })),
@@ -78,11 +82,35 @@ pub fn eval_value(value: &Value) -> Result<Value, EvalError> {
 }
 
 fn eval_thunk(thunk: &Thunk) -> Result<Value, EvalError> {
-    if let Some(value) = thunk.cached() {
-        return Ok(value);
+    if let Some(result) = thunk.cached() {
+        return result.map_err(|message| EvalError::new(message.as_ref()));
     }
-    let value = eval_expr(thunk.expr.as_ref(), &thunk.env)?;
-    Ok(thunk.cache(value))
+    let result = if let Some(net) = thunk.net() {
+        drive_core_net(net.runtime.clone(), net.interface)
+    } else if let Some((path, arguments)) = thunk.access() {
+        resolve_core_access(arguments, path)
+    } else if let Some(item) = thunk.list_item() {
+        eval_thunk(item).map(|value| Value::List(list_literal_segment(value)))
+    } else if let Some(call) = thunk.builtin() {
+        let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
+        let argument = arguments
+            .pop()
+            .expect("saturated builtin thunk must contain an argument");
+        apply_builtin(call.builtin, arguments, argument, &[])
+    } else {
+        eval_expr(
+            thunk
+                .expr()
+                .expect("expression thunk must have an expression"),
+            thunk
+                .env()
+                .expect("expression thunk must have an environment"),
+        )
+    }
+    .map_err(|error| Arc::<str>::from(error.to_string()));
+    thunk
+        .cache(result)
+        .map_err(|message| EvalError::new(message.as_ref()))
 }
 
 pub fn eval_key(value: &Value) -> Result<Key, EvalError> {
@@ -152,7 +180,7 @@ fn value_to_key(value: &Value, local_env: &[Value]) -> Result<Key, EvalError> {
                 .flatten()
                 .collect::<Vec<_>>(),
         ))),
-        Value::Builtin(_) => Err(EvalError::new(
+        Value::Builtin(_) | Value::PartialBuiltin(_) => Err(EvalError::new(
             "dictionary keys must evaluate to keyable values",
         )),
         Value::Closure(_) => Err(EvalError::new(
@@ -221,8 +249,8 @@ fn force_dict_shell(
 
 fn force_value_shell(value: &Value) -> Result<Value, EvalError> {
     let mut current = eval_value(value)?;
-    while let Value::Expr(thunk) = current {
-        current = eval_value(&Value::Expr(thunk))?;
+    while matches!(current, Value::Expr(_)) {
+        current = eval_value(&current)?;
     }
     Ok(current)
 }
@@ -268,21 +296,15 @@ fn thunk_value(expr: &Expr, local_env: &[Value]) -> Value {
 fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<Value, EvalError> {
     match function {
         Value::Builtin(builtin) => apply_builtin(builtin, Vec::new(), argument, local_env),
+        Value::PartialBuiltin(call) => apply_builtin(
+            call.builtin,
+            call.arguments.iter().cloned().collect(),
+            argument,
+            local_env,
+        ),
         Value::Closure(closure) => apply_closure(&closure, argument),
         Value::Dict(dict) => apply_dict_value(&dict, argument, local_env),
-        Value::Expr(thunk) => {
-            if let Some((builtin, args)) = builtin_application_spine(thunk.expr.as_ref()) {
-                apply_builtin(builtin, args, argument, local_env)
-            } else {
-                Ok(Value::Expr(Thunk::new(
-                    Arc::new(Expr::Apply(
-                        thunk.expr.clone(),
-                        Arc::new(Expr::Value(argument)),
-                    )),
-                    thunk.env.clone(),
-                )))
-            }
-        }
+        Value::Expr(thunk) => apply_value(eval_thunk(&thunk)?, argument, local_env),
         _ => Err(EvalError::new("application requires a function value")),
     }
 }
@@ -344,11 +366,452 @@ fn effect_value(function: Value) -> Value {
 }
 
 fn apply_closure(closure: &Closure, argument: Value) -> Result<Value, EvalError> {
+    if net_evaluable_expr(&closure.source_body) {
+        return apply_closure_net(closure, argument);
+    }
     let mut extended = closure.env.iter().cloned().collect::<Vec<_>>();
     extended.push(argument);
-    // TODO: replace this compatibility bridge with demand-driven reduction of
-    // bind-data calls after all core operators have data-call implementations.
     eval_expr(&closure.source_body, &extended)
+}
+
+fn net_evaluable_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Value(_) | Expr::Local(_) | Expr::Error(_) => true,
+        Expr::Apply(function, argument) => {
+            net_evaluable_expr(function) && net_evaluable_expr(argument)
+        }
+        Expr::Lambda(lambda) => net_evaluable_expr(lambda.body()),
+        Expr::List(items) => items.iter().all(|item| net_evaluable_expr(item)),
+        // A copied access can currently expose a demanded local through a
+        // second logical-copy boundary. Until that demand is forwarded to the
+        // caller-side frontier, evaluating it would pull on the canonical
+        // lambda root, which is deliberately unsupplied.
+        Expr::Access(_, _) => false,
+        Expr::Deferred(_) | Expr::Future(_) => true,
+    }
+}
+
+fn apply_closure_net(closure: &Closure, argument: Value) -> Result<Value, EvalError> {
+    let mut net = NetBuilder::new();
+    let bind = net.push(Node::Bind);
+    let function = net.push(Node::Data(CoreNetData::Value(Value::Closure(
+        closure.clone(),
+    ))));
+    let argument = net.push(Node::Data(CoreNetData::Value(argument)));
+    net.wire(Port::principal(bind), Port::principal(function));
+    net.wire(Port::auxiliary(bind, 1), Port::principal(argument));
+    let runtime = net.finish(Port::auxiliary(bind, 2)).instantiate_shared();
+    let exposed = runtime.with(|net| net.exposed());
+    drive_core_net(runtime, exposed)
+}
+
+fn drive_core_net(
+    runtime: crate::core_net::CoreRuntimeNet,
+    interface: Port,
+) -> Result<Value, EvalError> {
+    loop {
+        if runtime.with(|net| net.interface_data(interface).is_some()) {
+            let data = runtime
+                .with_mut(|net| net.take_interface_data(interface))
+                .expect("observed interaction-net interface must contain data");
+            return observe_core_data(data);
+        }
+
+        if let Some(progress) = runtime.with_mut(|net| net.demand_interface(interface)) {
+            if !matches!(progress, crate::interaction_net::CursorProgress::Blocked) {
+                continue;
+            }
+            if let Some(source) = runtime.with(|net| net.interface_cursor_source(interface)) {
+                if progress_core_net(&source)? {
+                    continue;
+                }
+            }
+        }
+
+        let reduction = runtime.with_mut(|net| net.reduce_next());
+        if let Some(reduction) = reduction {
+            if matches!(reduction.kind, ReductionKind::Stuck) {
+                return Err(EvalError::new(
+                    "interaction net reached a stuck active pair",
+                ));
+            }
+            continue;
+        }
+
+        if progress_core_net(&runtime)? {
+            continue;
+        }
+
+        let sources = runtime.with(|net| net.blocked_cursor_sources());
+        let mut source_progress = false;
+        for source in sources {
+            source_progress |= progress_core_net(&source)?;
+        }
+        if source_progress {
+            runtime.with_mut(|net| net.wake_blocked_cursors());
+            continue;
+        }
+
+        let detail = runtime.with(|net| {
+            let neighbor = net.interface_neighbor(interface);
+            let node = neighbor.and_then(|port| net.node(port.node()));
+            let principal_neighbor = neighbor
+                .and_then(|port| net.port_neighbor(Port::principal(port.node())));
+            let principal_neighbor_node =
+                principal_neighbor.and_then(|port| net.node(port.node()));
+            format!(
+                "neighbor={neighbor:?}, node={node:?}, principal_neighbor={principal_neighbor:?}/{principal_neighbor_node:?}, calls={}, cursors={}, stuck={}",
+                net.blocked_calls().len(),
+                net.blocked_cursors().len(),
+                net.stuck_pairs().len()
+            )
+        });
+        return Err(EvalError::new(format!(
+            "interaction net became quiescent before producing a value ({detail})"
+        )));
+    }
+}
+
+fn progress_core_net(runtime: &crate::core_net::CoreRuntimeNet) -> Result<bool, EvalError> {
+    if runtime.with_mut(|net| net.reduce_next()).is_some() {
+        return Ok(true);
+    }
+    let calls = runtime.with(|net| net.blocked_calls().iter().copied().collect::<Vec<_>>());
+    for call in calls.iter().copied() {
+        let callable_captures_lazy_argument = runtime.with(|net| {
+            matches!(
+                net.call_data(call),
+                CoreNetData::Builtin(_)
+                    | CoreNetData::Value(Value::Builtin(_))
+                    | CoreNetData::Value(Value::PartialBuiltin(_))
+                    | CoreNetData::List { .. }
+            )
+        });
+        let argument_is_data = runtime.with(|net| {
+            net.call_argument_data(call).is_some_and(|data| {
+                net.has_imported_copy()
+                    || !matches!(data, CoreNetData::Capture(_) | CoreNetData::Lambda(_))
+            })
+        });
+        if callable_captures_lazy_argument
+            && !argument_is_data
+            && runtime.with(|net| net.call_argument_cursor_source(call).is_some())
+        {
+            if let Some(progress) = runtime.with_mut(|net| net.demand_call_argument(call)) {
+                if !matches!(progress, crate::interaction_net::CursorProgress::Blocked) {
+                    return Ok(true);
+                }
+            }
+        }
+        // A builtin may capture an unforced argument only after the call has
+        // crossed into a logical copy. Detaching the same call in the
+        // canonical lambda runtime would capture its unsupplied root boundary
+        // and make the cached reduction depend on a future caller.
+        let call_is_instanced =
+            callable_captures_lazy_argument && runtime.with(|net| net.has_imported_copy());
+        if argument_is_data || call_is_instanced {
+            handle_core_call(runtime, call)?;
+            return Ok(true);
+        }
+    }
+    for call in calls {
+        if let Some(progress) = runtime.with_mut(|net| net.demand_call_argument(call)) {
+            if !matches!(progress, crate::interaction_net::CursorProgress::Blocked) {
+                return Ok(true);
+            }
+            if let Some(source) = runtime.with(|net| net.call_argument_cursor_source(call)) {
+                if progress_core_net(&source)? {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
+    match data {
+        CoreNetData::Value(value) => eval_value(&value),
+        CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
+        CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
+        CoreNetData::Lambda(lambda) => Ok(Value::Closure(Closure {
+            interaction_net: lambda.interaction_net(),
+            env: Arc::from([]),
+            source_body: lambda.body().clone(),
+        })),
+        CoreNetData::List { arity: 0, .. } => Ok(Value::List(List::empty())),
+        CoreNetData::Deferred(value) => value
+            .force()
+            .map_err(|message| EvalError::new(message.as_ref())),
+        CoreNetData::Future(value) => value
+            .get()
+            .cloned()
+            .ok_or_else(|| EvalError::new("future was observed before initialization")),
+        CoreNetData::Error(message) => Err(EvalError::new(message.as_ref())),
+        CoreNetData::Capture(_) | CoreNetData::List { .. } | CoreNetData::Access { .. } => Err(
+            EvalError::new("unsupported core data escaped interaction-net evaluation"),
+        ),
+    }
+}
+
+fn handle_core_call(
+    runtime: &crate::core_net::CoreRuntimeNet,
+    call: BlockedCall,
+) -> Result<(), EvalError> {
+    let callable = runtime.with(|net| net.call_data(call).clone());
+    match callable {
+        CoreNetData::Builtin(builtin) => return handle_core_builtin_call(runtime, call, builtin),
+        CoreNetData::Value(Value::Builtin(builtin)) => {
+            return handle_core_builtin_call(runtime, call, BuiltinCall::new(builtin));
+        }
+        CoreNetData::Value(Value::PartialBuiltin(builtin)) => {
+            return handle_core_builtin_call(runtime, call, builtin);
+        }
+        CoreNetData::List { arity, arguments } => {
+            return handle_core_list_call(runtime, call, arity, arguments);
+        }
+        CoreNetData::Access { path, arguments } => {
+            return handle_core_access_call(runtime, call, path, arguments);
+        }
+        _ => {}
+    }
+    let argument = runtime.with(|net| net.call_argument_data(call).cloned());
+    let Some(argument) = argument else {
+        return Err(EvalError::new(
+            "interaction-net call argument did not reduce to embedded data",
+        ));
+    };
+    let argument = core_data_to_lazy_value(argument)?;
+
+    match callable {
+        CoreNetData::Value(Value::Closure(closure)) => {
+            let mut environment = closure.env.iter().cloned().collect::<Vec<_>>();
+            environment.push(argument);
+            let map_data = core_copy_mapper(Arc::from(environment));
+            runtime.with_mut(|net| {
+                net.resume_call_with_copy_map(call, closure.interaction_net.clone(), map_data);
+            });
+            Ok(())
+        }
+        CoreNetData::Builtin(_) => unreachable!(),
+        CoreNetData::Value(function) => {
+            let value = apply_value(function, argument, &[])?;
+            complete_core_call(runtime, call, CoreNetData::Value(value));
+            Ok(())
+        }
+        CoreNetData::Lambda(lambda) => {
+            let closure = Closure {
+                interaction_net: lambda.interaction_net(),
+                env: Arc::from([]),
+                source_body: lambda.body().clone(),
+            };
+            let mut environment = vec![argument];
+            let map_data = core_copy_mapper(Arc::from(std::mem::take(&mut environment)));
+            runtime.with_mut(|net| {
+                net.resume_call_with_copy_map(call, closure.interaction_net, map_data);
+            });
+            Ok(())
+        }
+        CoreNetData::Capture(_)
+        | CoreNetData::List { .. }
+        | CoreNetData::Access { .. }
+        | CoreNetData::Deferred(_)
+        | CoreNetData::Future(_)
+        | CoreNetData::Error(_) => Err(EvalError::new(
+            "interaction-net data is not callable in this evaluator slice",
+        )),
+    }
+}
+
+fn handle_core_builtin_call(
+    runtime: &crate::core_net::CoreRuntimeNet,
+    call: BlockedCall,
+    mut builtin: BuiltinCall,
+) -> Result<(), EvalError> {
+    let (frame, argument) = take_core_call_argument(runtime, call)?;
+    let mut arguments = builtin.arguments.iter().cloned().collect::<Vec<_>>();
+    arguments.push(argument);
+    if arguments.len() < builtin.builtin.arity() {
+        builtin.arguments = Arc::from(arguments);
+        runtime.with_mut(|net| {
+            net.complete_interface_with_data(frame.result, CoreNetData::Builtin(builtin));
+        });
+        return Ok(());
+    }
+    builtin.arguments = Arc::from(arguments);
+    let value = Value::Expr(Thunk::from_builtin(builtin));
+    runtime.with_mut(|net| {
+        net.complete_interface_with_data(frame.result, CoreNetData::Value(value));
+    });
+    Ok(())
+}
+
+fn handle_core_list_call(
+    runtime: &crate::core_net::CoreRuntimeNet,
+    call: BlockedCall,
+    arity: usize,
+    supplied: Arc<[Value]>,
+) -> Result<(), EvalError> {
+    let (frame, argument) = take_core_call_argument(runtime, call)?;
+    let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
+    arguments.push(argument);
+    let result = if arguments.len() < arity {
+        CoreNetData::List {
+            arity,
+            arguments: Arc::from(arguments),
+        }
+    } else {
+        let list = arguments.into_iter().fold(List::empty(), |list, value| {
+            let segment = match value {
+                Value::Binary(bytes) => List::from_bytes(bytes),
+                Value::List(list) => list,
+                Value::Expr(thunk) => List::from_thunk(Thunk::from_list_item(thunk)),
+                other => Value::singleton_list(other),
+            };
+            List::concat(list, segment)
+        });
+        CoreNetData::Value(Value::List(list))
+    };
+    runtime.with_mut(|net| net.complete_interface_with_data(frame.result, result));
+    Ok(())
+}
+
+fn handle_core_access_call(
+    runtime: &crate::core_net::CoreRuntimeNet,
+    call: BlockedCall,
+    path: Arc<[crate::core_net::CoreDataKey]>,
+    supplied: Arc<[Value]>,
+) -> Result<(), EvalError> {
+    let (frame, argument) = take_core_call_argument(runtime, call)?;
+    let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
+    arguments.push(argument);
+    let arity = 1 + path
+        .iter()
+        .filter(|key| !matches!(key, crate::core_net::CoreDataKey::Key(_)))
+        .count();
+    let result = if arguments.len() < arity {
+        CoreNetData::Access {
+            path,
+            arguments: Arc::from(arguments),
+        }
+    } else {
+        CoreNetData::Value(Value::Expr(Thunk::from_access(path, Arc::from(arguments))))
+    };
+    runtime.with_mut(|net| net.complete_interface_with_data(frame.result, result));
+    Ok(())
+}
+
+fn take_core_call_argument(
+    runtime: &crate::core_net::CoreRuntimeNet,
+    call: BlockedCall,
+) -> Result<(crate::interaction_net::CallFrame<CoreNetData>, Value), EvalError> {
+    let embedded_argument = runtime.with(|net| net.call_argument_data(call).cloned());
+    let frame = runtime.with_mut(|net| net.take_call(call));
+    let argument = if let Some(data) = embedded_argument {
+        runtime
+            .with_mut(|net| net.take_interface_data(frame.argument))
+            .expect("observed core argument must remain embedded data");
+        core_data_to_lazy_value(data)?
+    } else {
+        Value::Expr(Thunk::from_net(runtime.clone(), frame.argument))
+    };
+    Ok((frame, argument))
+}
+
+fn resolve_core_access(arguments: &[Value], path: &[CoreDataKey]) -> Result<Value, EvalError> {
+    let mut current = arguments
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("interaction-net access is missing its base value"))?;
+    let mut dynamic = arguments[1..].iter();
+    for part in path {
+        let keys = match part {
+            CoreDataKey::Key(key) => vec![key.clone()],
+            CoreDataKey::Index => {
+                let value = dynamic.next().expect("lowered access index must exist");
+                let value = force_value_shell(value)?;
+                vec![value_to_key(&value, &[])?]
+            }
+            CoreDataKey::PathIndex => eval_key_path_list(
+                dynamic
+                    .next()
+                    .expect("lowered access path index must exist"),
+                &[],
+            )?,
+        };
+        for key in keys {
+            let value = force_value_shell(&current)?;
+            let Value::Dict(dict) = value else {
+                return Err(EvalError::new(
+                    "interaction-net access base is not a dictionary",
+                ));
+            };
+            current = dict
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
+        }
+    }
+    eval_value(&current)
+}
+
+fn core_data_to_lazy_value(data: CoreNetData) -> Result<Value, EvalError> {
+    match data {
+        CoreNetData::Value(value) => Ok(value),
+        CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
+        CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
+        CoreNetData::Lambda(lambda) => Ok(Value::Closure(Closure {
+            interaction_net: lambda.interaction_net(),
+            env: Arc::from([]),
+            source_body: lambda.body().clone(),
+        })),
+        CoreNetData::List {
+            arity: 0,
+            arguments,
+        } if arguments.is_empty() => Ok(Value::List(List::empty())),
+        CoreNetData::Deferred(value) => Ok(Value::expr(Expr::Deferred(value))),
+        CoreNetData::Future(value) => Ok(Value::expr(Expr::Future(value))),
+        CoreNetData::Error(message) => Ok(Value::expr(Expr::Error(message))),
+        unsupported @ (CoreNetData::Capture(_)
+        | CoreNetData::List { .. }
+        | CoreNetData::Access { .. }) => Err(EvalError::new(format!(
+            "unsupported core data was used as a lazy argument: {unsupported:?}"
+        ))),
+    }
+}
+
+fn complete_core_call(
+    runtime: &crate::core_net::CoreRuntimeNet,
+    call: BlockedCall,
+    result: CoreNetData,
+) {
+    runtime.with_mut(|net| {
+        let frame = net.take_call(call);
+        net.take_interface_data(frame.argument)
+            .expect("core call argument must remain embedded data");
+        net.complete_interface_with_data(frame.result, result);
+    });
+}
+
+fn core_copy_mapper(
+    environment: Arc<[Value]>,
+) -> Arc<dyn Fn(&CoreNetData) -> CoreNetData + Send + Sync> {
+    Arc::new(move |data| match data {
+        CoreNetData::Lambda(lambda) => CoreNetData::Value(Value::Closure(Closure {
+            interaction_net: lambda.runtime_with_captures(environment.clone()),
+            env: environment.clone(),
+            source_body: lambda.body().clone(),
+        })),
+        CoreNetData::Capture(index) => {
+            let value = environment
+                .len()
+                .checked_sub(index + 1)
+                .and_then(|index| environment.get(index))
+                .expect("logical-copy capture must exist");
+            CoreNetData::Value(value.clone())
+        }
+        other => other.clone(),
+    })
 }
 
 fn apply_builtin(
@@ -359,7 +822,10 @@ fn apply_builtin(
 ) -> Result<Value, EvalError> {
     args.push(argument);
     if args.len() < builtin.arity() {
-        return Ok(partial_builtin_value(builtin, &args));
+        return Ok(Value::PartialBuiltin(BuiltinCall {
+            builtin,
+            arguments: Arc::from(args),
+        }));
     }
 
     match builtin {
@@ -732,6 +1198,8 @@ fn compare_ordered_values(
         }
         (Value::Builtin(_), _)
         | (_, Value::Builtin(_))
+        | (Value::PartialBuiltin(_), _)
+        | (_, Value::PartialBuiltin(_))
         | (Value::Closure(_), _)
         | (_, Value::Closure(_)) => Err(EvalError::new(format!(
             "{name} builtin cannot compare function values"
@@ -787,10 +1255,12 @@ fn equal_values(
         (Value::List(left), Value::List(right)) => equal_lists(left, right, local_env, name),
         (Value::Dict(left), Value::Dict(right)) => equal_dicts(&left, &right, local_env, name),
         (Value::Expr(_), _) | (_, Value::Expr(_)) => {
-            unreachable!("force_value_shell removes Expr")
+            unreachable!("force_value_shell removes suspended values")
         }
         (Value::Builtin(_), _)
         | (_, Value::Builtin(_))
+        | (Value::PartialBuiltin(_), _)
+        | (_, Value::PartialBuiltin(_))
         | (Value::Closure(_), _)
         | (_, Value::Closure(_)) => Err(EvalError::new(format!(
             "{name} builtin cannot compare function values"
@@ -1244,14 +1714,6 @@ fn eval_index_number(
     })
 }
 
-fn partial_builtin_value(builtin: Builtin, args: &[Value]) -> Value {
-    let expr = args.iter().cloned().fold(
-        Expr::Value(Value::Builtin(builtin)),
-        |function, argument| Expr::Apply(Arc::new(function), Arc::new(Expr::Value(argument))),
-    );
-    Value::Expr(Thunk::new(Arc::new(expr), Arc::from([])))
-}
-
 fn builtin2_expr(builtin: Builtin, left: Expr, right: Expr) -> Expr {
     Expr::Apply(
         Arc::new(Expr::Apply(
@@ -1260,21 +1722,6 @@ fn builtin2_expr(builtin: Builtin, left: Expr, right: Expr) -> Expr {
         )),
         Arc::new(right),
     )
-}
-
-fn builtin_application_spine(expr: &Expr) -> Option<(Builtin, Vec<Value>)> {
-    match expr {
-        Expr::Value(Value::Builtin(builtin)) => Some((*builtin, Vec::new())),
-        Expr::Apply(function, argument) => {
-            let (builtin, mut args) = builtin_application_spine(function.as_ref())?;
-            let Expr::Value(argument) = argument.as_ref() else {
-                return None;
-            };
-            args.push(argument.clone());
-            Some((builtin, args))
-        }
-        _ => None,
-    }
 }
 
 fn eval_singleton_builtin(
@@ -2077,7 +2524,7 @@ fn is_expr_value(value: &Value) -> bool {
 }
 
 fn is_error_expr_value(value: &Value) -> bool {
-    matches!(value, Value::Expr(thunk) if matches!(thunk.expr.as_ref(), Expr::Error(_)))
+    matches!(value, Value::Expr(thunk) if matches!(thunk.expr().map(Arc::as_ref), Some(Expr::Error(_))))
 }
 
 fn is_undefined_dict_value(value: &Value) -> bool {
@@ -2394,7 +2841,9 @@ mod tests {
                 }
                 expr
             }
-            Value::Expr(thunk) if thunk.env.is_empty() => thunk.expr.as_ref().clone(),
+            Value::Expr(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
+                thunk.expr().unwrap().as_ref().clone()
+            }
             _ => Expr::Value(value.clone()),
         }
     }
@@ -2833,6 +3282,49 @@ mod tests {
         let value = eval_closed_expr(&expr).expect("nested closures should evaluate");
 
         assert_eq!(value, n(42));
+    }
+
+    #[test]
+    fn net_partial_builtins_escape_and_share_lazy_arguments() {
+        let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = force_count.clone();
+        let argument = Expr::Deferred(Arc::new(DeferredValue::new(
+            "partial argument",
+            move || {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(n(40))
+            },
+        )));
+        let make_partial = Expr::lambda(Arc::new(Expr::Apply(
+            Arc::new(Expr::Value(Value::Builtin(Builtin::Add))),
+            Arc::new(Expr::Local(0)),
+        )));
+        let partial = eval_closed_expr(&Expr::Apply(Arc::new(make_partial), Arc::new(argument)))
+            .expect("a net builtin should escape while retaining its argument lazily");
+
+        assert!(matches!(partial, Value::PartialBuiltin(_)));
+        assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(apply_value(partial.clone(), n(2), &[]).unwrap(), n(42));
+        assert_eq!(apply_value(partial, n(3), &[]).unwrap(), n(43));
+        assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn net_list_literals_retain_computed_items_as_lazy_holes() {
+        let expression = Expr::Apply(
+            Arc::new(Expr::lambda(Arc::new(Expr::List(Arc::from([Arc::new(
+                Expr::Local(0),
+            )]))))),
+            Arc::new(Expr::Value(n(42))),
+        );
+        let Value::List(list) = eval_closed_expr(&expression).unwrap() else {
+            panic!("net-backed list literal should produce a list");
+        };
+        let Some((item, tail)) = pop_list_front(&list).unwrap() else {
+            panic!("net-backed list literal should contain its argument");
+        };
+        assert_eq!(item, n(42));
+        assert!(pop_list_front(&tail).unwrap().is_none());
     }
 
     #[test]
@@ -3566,13 +4058,10 @@ mod tests {
         .expect("partial builtin application should not force its first argument");
 
         match partial {
-            Value::Expr(thunk) => {
-                let Some((builtin, args)) = builtin_application_spine(thunk.expr.as_ref()) else {
-                    panic!("expected builtin application spine");
-                };
-                assert_eq!(builtin, Builtin::Append);
-                assert_eq!(args.len(), 1);
-                assert!(matches!(&args[0], Value::Expr(_)));
+            Value::PartialBuiltin(call) => {
+                assert_eq!(call.builtin, Builtin::Append);
+                assert_eq!(call.arguments.len(), 1);
+                assert!(matches!(&call.arguments[0], Value::Expr(_)));
             }
             other => panic!("expected partial builtin, got {other:?}"),
         }

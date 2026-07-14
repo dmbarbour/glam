@@ -6,7 +6,8 @@ use bytes::Bytes;
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
-use crate::core_net::{CoreRuntimeNet, lower_lambda};
+use crate::core_net::{CoreDataKey, CoreInteractionNet, CoreNetData, CoreRuntimeNet, lower_lambda};
+use crate::interaction_net::Port;
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +32,8 @@ impl Expr {
 #[derive(Debug)]
 pub struct Lambda {
     body: Arc<Expr>,
-    interaction_net: OnceLock<CoreRuntimeNet>,
+    interaction_net: OnceLock<Arc<CoreInteractionNet>>,
+    closed_runtime: OnceLock<CoreRuntimeNet>,
 }
 
 impl Lambda {
@@ -39,6 +41,7 @@ impl Lambda {
         Self {
             body,
             interaction_net: OnceLock::new(),
+            closed_runtime: OnceLock::new(),
         }
     }
 
@@ -47,9 +50,32 @@ impl Lambda {
     }
 
     pub fn interaction_net(&self) -> CoreRuntimeNet {
-        self.interaction_net
-            .get_or_init(|| lower_lambda(self.body.clone()).instantiate_shared())
+        self.closed_runtime
+            .get_or_init(|| self.lowered().instantiate_shared())
             .clone()
+    }
+
+    pub fn runtime_with_captures(&self, captures: Arc<[Value]>) -> CoreRuntimeNet {
+        if captures.is_empty() {
+            return self.interaction_net();
+        }
+        self.lowered()
+            .instantiate_shared_with(Arc::new(move |data| match data {
+                CoreNetData::Capture(index) => {
+                    let capture = captures
+                        .len()
+                        .checked_sub(index + 1)
+                        .and_then(|index| captures.get(index))
+                        .expect("lowered lambda capture must exist");
+                    CoreNetData::Value(capture.clone())
+                }
+                other => other.clone(),
+            }))
+    }
+
+    fn lowered(&self) -> &Arc<CoreInteractionNet> {
+        self.interaction_net
+            .get_or_init(|| Arc::new(lower_lambda(self.body.clone())))
     }
 
     #[cfg(test)]
@@ -202,7 +228,7 @@ impl Key {
                     .flatten()
                     .collect::<Vec<_>>(),
             ))),
-            Value::Builtin(_) => None,
+            Value::Builtin(_) | Value::PartialBuiltin(_) => None,
             Value::Closure(_) => None,
             Value::Expr(_) => None,
         }
@@ -263,8 +289,24 @@ pub enum Value {
     List(List),
     Dict(Dict),
     Builtin(Builtin),
+    PartialBuiltin(BuiltinCall),
     Closure(Closure),
     Expr(Thunk),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinCall {
+    pub builtin: Builtin,
+    pub arguments: Arc<[Value]>,
+}
+
+impl BuiltinCall {
+    pub fn new(builtin: Builtin) -> Self {
+        Self {
+            builtin,
+            arguments: Arc::from([]),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -283,37 +325,168 @@ impl PartialEq for Closure {
 impl Eq for Closure {}
 
 #[derive(Clone)]
+pub struct NetThunk {
+    pub(crate) runtime: CoreRuntimeNet,
+    pub(crate) interface: Port,
+}
+
+impl NetThunk {
+    pub(crate) fn new(runtime: CoreRuntimeNet, interface: Port) -> Self {
+        Self { runtime, interface }
+    }
+}
+
+impl PartialEq for NetThunk {
+    fn eq(&self, other: &Self) -> bool {
+        self.runtime.ptr_eq(&other.runtime) && self.interface == other.interface
+    }
+}
+
+impl Eq for NetThunk {}
+
+impl fmt::Debug for NetThunk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NetThunk")
+            .field("runtime", &self.runtime)
+            .field("interface", &self.interface)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
 pub struct Thunk {
-    pub expr: Arc<Expr>,
-    pub env: Arc<[Value]>,
-    result: Arc<OnceLock<Value>>,
+    source: ThunkSource,
+    result: Arc<OnceLock<Result<Value, Arc<str>>>>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum ThunkSource {
+    Expr {
+        expr: Arc<Expr>,
+        env: Arc<[Value]>,
+    },
+    Net(NetThunk),
+    Access {
+        path: Arc<[CoreDataKey]>,
+        arguments: Arc<[Value]>,
+    },
+    ListItem(Arc<Thunk>),
+    Builtin(BuiltinCall),
 }
 
 impl Thunk {
     pub fn new(expr: Arc<Expr>, env: Arc<[Value]>) -> Self {
         Self {
-            expr,
-            env,
+            source: ThunkSource::Expr { expr, env },
             result: Arc::new(OnceLock::new()),
         }
     }
 
-    pub fn cached(&self) -> Option<Value> {
+    pub(crate) fn from_net(runtime: CoreRuntimeNet, interface: Port) -> Self {
+        Self {
+            source: ThunkSource::Net(NetThunk::new(runtime, interface)),
+            result: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn from_access(path: Arc<[CoreDataKey]>, arguments: Arc<[Value]>) -> Self {
+        Self {
+            source: ThunkSource::Access { path, arguments },
+            result: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn from_list_item(thunk: Thunk) -> Self {
+        Self {
+            source: ThunkSource::ListItem(Arc::new(thunk)),
+            result: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn from_builtin(call: BuiltinCall) -> Self {
+        Self {
+            source: ThunkSource::Builtin(call),
+            result: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub fn expr(&self) -> Option<&Arc<Expr>> {
+        match &self.source {
+            ThunkSource::Expr { expr, .. } => Some(expr),
+            ThunkSource::Net(_)
+            | ThunkSource::Access { .. }
+            | ThunkSource::ListItem(_)
+            | ThunkSource::Builtin(_) => None,
+        }
+    }
+
+    pub fn env(&self) -> Option<&Arc<[Value]>> {
+        match &self.source {
+            ThunkSource::Expr { env, .. } => Some(env),
+            ThunkSource::Net(_)
+            | ThunkSource::Access { .. }
+            | ThunkSource::ListItem(_)
+            | ThunkSource::Builtin(_) => None,
+        }
+    }
+
+    pub fn cached(&self) -> Option<Result<Value, Arc<str>>> {
         self.result.get().cloned()
     }
 
-    pub fn cache(&self, value: Value) -> Value {
+    pub fn cache(&self, value: Result<Value, Arc<str>>) -> Result<Value, Arc<str>> {
         let _ = self.result.set(value);
         self.result
             .get()
             .expect("thunk cache should contain a value after set")
             .clone()
     }
+
+    pub(crate) fn net(&self) -> Option<&NetThunk> {
+        match &self.source {
+            ThunkSource::Net(thunk) => Some(thunk),
+            ThunkSource::Expr { .. }
+            | ThunkSource::Access { .. }
+            | ThunkSource::ListItem(_)
+            | ThunkSource::Builtin(_) => None,
+        }
+    }
+
+    pub(crate) fn access(&self) -> Option<(&[CoreDataKey], &[Value])> {
+        match &self.source {
+            ThunkSource::Access { path, arguments } => Some((path, arguments)),
+            ThunkSource::Expr { .. }
+            | ThunkSource::Net(_)
+            | ThunkSource::ListItem(_)
+            | ThunkSource::Builtin(_) => None,
+        }
+    }
+
+    pub(crate) fn list_item(&self) -> Option<&Thunk> {
+        match &self.source {
+            ThunkSource::ListItem(thunk) => Some(thunk),
+            ThunkSource::Expr { .. }
+            | ThunkSource::Net(_)
+            | ThunkSource::Access { .. }
+            | ThunkSource::Builtin(_) => None,
+        }
+    }
+
+    pub(crate) fn builtin(&self) -> Option<&BuiltinCall> {
+        match &self.source {
+            ThunkSource::Builtin(call) => Some(call),
+            ThunkSource::Expr { .. }
+            | ThunkSource::Net(_)
+            | ThunkSource::Access { .. }
+            | ThunkSource::ListItem(_) => None,
+        }
+    }
 }
 
 impl PartialEq for Thunk {
     fn eq(&self, other: &Self) -> bool {
-        self.expr == other.expr && self.env == other.env
+        self.source == other.source
     }
 }
 
@@ -321,10 +494,21 @@ impl Eq for Thunk {}
 
 impl fmt::Debug for Thunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Thunk")
-            .field("expr", &self.expr)
-            .field("env", &self.env)
-            .finish_non_exhaustive()
+        match &self.source {
+            ThunkSource::Expr { expr, env } => f
+                .debug_struct("Thunk")
+                .field("expr", expr)
+                .field("env", env)
+                .finish_non_exhaustive(),
+            ThunkSource::Net(thunk) => thunk.fmt(f),
+            ThunkSource::Access { path, arguments } => f
+                .debug_struct("AccessThunk")
+                .field("path", path)
+                .field("arguments", arguments)
+                .finish_non_exhaustive(),
+            ThunkSource::ListItem(thunk) => f.debug_tuple("ListItemThunk").field(thunk).finish(),
+            ThunkSource::Builtin(call) => f.debug_tuple("BuiltinThunk").field(call).finish(),
+        }
     }
 }
 
@@ -465,6 +649,7 @@ impl Value {
                 | Value::List(_)
                 | Value::Closure(_)
                 | Value::Builtin(_)
+                | Value::PartialBuiltin(_)
                 | Value::Expr(_) => None,
             },
         }
