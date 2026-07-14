@@ -157,7 +157,7 @@ impl fmt::Debug for Port {
 /// Immutable nodes in a reusable interaction-net template.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node<D> {
-    /// Ports: `[ap*, arg, result]`.
+    /// Function or application constructor. Ports: `[ap*, arg, result]`.
     Bind,
     /// Binary Lamping-style fan. Ports: `[input*, left, right]`.
     Fan { site: FanSite },
@@ -195,8 +195,8 @@ impl<D> RuntimeNode<D> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wire {
-    pub left: Port,
-    pub right: Port,
+    pub left: Port,     // port including node ID and index
+    pub right: Port,    // each port is wired to exactly one other port (except the exposed port)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,10 +207,10 @@ pub struct ActivePair {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractionNet<D> {
-    nodes: Arc<[Node<D>]>,
-    wires: Arc<[Wire]>,
-    exposed: Port,
-    active_pairs: Arc<[ActivePair]>,
+    nodes: Arc<[Node<D>]>,              // nodes identified by index
+    wires: Arc<[Wire]>,                 // all wires between ports
+    exposed: Port,                      // closed net has one exposed port
+    active_pairs: Arc<[ActivePair]>,    // subset of wires connecting principal ports
 }
 
 impl<D> InteractionNet<D> {
@@ -382,10 +382,10 @@ pub enum Reduction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PairId(u64);
+pub struct PairId(NonZeroU64);
 
 impl PairId {
-    pub fn get(self) -> u64 {
+    pub fn get(self) -> NonZeroU64 {
         self.0
     }
 }
@@ -430,7 +430,7 @@ pub struct RuntimeNet<D> {
     instance: InstanceId,
     next_node_id: u64,
     nodes: HashMap<NodeId, RuntimeEntry<D>>,
-    next_pair_id: u64,
+    next_pair_id: NonZeroU64,
     pairs: HashMap<PairId, PairRecord>,
     ready: VecDeque<PairId>,
 }
@@ -459,7 +459,7 @@ impl<D: Clone> RuntimeNet<D> {
             next_node_id: u64::try_from(net.nodes.len())
                 .expect("interaction-net node count does not fit in u64"),
             nodes,
-            next_pair_id: 0,
+            next_pair_id: NonZeroU64::new(1).unwrap(),
             pairs: HashMap::new(),
             ready: VecDeque::new(),
         };
@@ -475,7 +475,7 @@ impl<D: Clone> RuntimeNet<D> {
             instance,
             next_node_id: 0,
             nodes: HashMap::new(),
-            next_pair_id: 0,
+            next_pair_id: NonZeroU64::new(1).unwrap(),
             pairs: HashMap::new(),
             ready: VecDeque::new(),
         }
