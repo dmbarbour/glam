@@ -1259,6 +1259,50 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             return self.join_remote_frontiers(copy, cursor, remote, neighbor);
         }
 
+        if neighbor.is_principal()
+            && matches!(
+                source.node(neighbor.node()),
+                Some(RuntimeNode::RemoteCursor { .. })
+            )
+        {
+            // A logical copy may itself be copied after partial application.
+            // Its outward cursor is an evaluator boundary, not a node that can
+            // migrate into this target. Drive that intermediate source cursor
+            // toward its own source, then retry this cursor. Copy provenance
+            // is outward-only, so this never gives the inner source a
+            // reference back into either caller.
+            let nested_cursor = neighbor.node();
+            let progress = source.advance_remote_cursor(nested_cursor);
+            source.unschedule_node(nested_cursor);
+            if matches!(
+                source.node(nested_cursor),
+                Some(RuntimeNode::RemoteCursor { .. })
+            ) {
+                let local = source
+                    .neighbor(Port::principal(nested_cursor))
+                    .expect("suspended source cursor must remain wired");
+                if local.is_principal() {
+                    let pair = ActivePair {
+                        left: nested_cursor,
+                        right: local.node(),
+                    };
+                    if matches!(progress, CursorProgress::Blocked) {
+                        source.blocked_cursors.push_back(BlockedCursor {
+                            pair,
+                            cursor: nested_cursor,
+                        });
+                    } else if matches!(progress, CursorProgress::SourceSweep { .. }) {
+                        source.ready.push_back(pair);
+                    }
+                }
+            }
+            return if matches!(progress, CursorProgress::Blocked) {
+                CursorProgress::Blocked
+            } else {
+                CursorProgress::SourceSweep { reductions: 1 }
+            };
+        }
+
         if neighbor.is_principal() {
             let source_node = source
                 .node(neighbor.node())

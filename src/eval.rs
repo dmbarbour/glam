@@ -495,6 +495,19 @@ fn drive_core_net_inner(
             continue;
         }
 
+        let exposes_bind = runtime.with(|net| {
+            net.interface_neighbor(interface).is_some_and(|port| {
+                port.is_principal()
+                    && matches!(
+                        net.node(port.node()),
+                        Some(crate::interaction_net::RuntimeNode::Bind)
+                    )
+            })
+        });
+        if exposes_bind {
+            return Ok(normal_form.unwrap_or_else(|| Value::Net(NetValue::new(runtime))));
+        }
+
         let scheduler_is_empty = runtime.with(|net| {
             net.blocked_calls().is_empty()
                 && net.blocked_cursors().is_empty()
@@ -503,18 +516,6 @@ fn drive_core_net_inner(
         if scheduler_is_empty {
             if let Some(normal_form) = normal_form {
                 return Ok(normal_form);
-            }
-            let exposes_bind = runtime.with(|net| {
-                net.interface_neighbor(interface).is_some_and(|port| {
-                    port.is_principal()
-                        && matches!(
-                            net.node(port.node()),
-                            Some(crate::interaction_net::RuntimeNode::Bind)
-                        )
-                })
-            });
-            if exposes_bind {
-                return Ok(Value::Net(NetValue::new(runtime)));
             }
         }
 
@@ -542,6 +543,15 @@ fn progress_core_net(runtime: &crate::core_net::CoreRuntimeNet) -> Result<bool, 
     if runtime.with_mut(|net| net.reduce_next()).is_some() {
         return Ok(true);
     }
+    let exposes_unsupplied_bind = runtime.with(|net| {
+        net.port_neighbor(net.exposed()).is_some_and(|port| {
+            port.is_principal()
+                && matches!(
+                    net.node(port.node()),
+                    Some(crate::interaction_net::RuntimeNode::Bind)
+                )
+        })
+    });
     let calls = runtime.with(|net| net.blocked_calls().iter().copied().collect::<Vec<_>>());
     for call in calls.iter().copied() {
         let callable_is_net =
@@ -579,8 +589,9 @@ fn progress_core_net(runtime: &crate::core_net::CoreRuntimeNet) -> Result<bool, 
         // crossed into a logical copy. Detaching the same call in the
         // canonical lambda runtime would capture its unsupplied root boundary
         // and make the cached reduction depend on a future caller.
-        let call_is_instanced =
-            callable_captures_lazy_argument && runtime.with(|net| net.has_imported_copy());
+        let call_is_instanced = callable_captures_lazy_argument
+            && !exposes_unsupplied_bind
+            && runtime.with(|net| net.has_imported_copy());
         if argument_is_data || call_is_instanced {
             handle_core_call(runtime, call)?;
             return Ok(true);
@@ -2785,6 +2796,7 @@ mod tests {
 
     use bytes::Bytes;
 
+    use crate::compiler::CompileContext;
     use crate::core::{Dict, Expr, IVar, Lambda, Thunk, Value};
     use crate::number::Number;
 
@@ -2849,6 +2861,18 @@ mod tests {
             panic!("leaf lambda evaluations should produce closed nets");
         };
         assert!(first.runtime().ptr_eq(second.runtime()));
+    }
+
+    #[test]
+    fn curried_lambda_partial_application_exposes_the_next_bind() {
+        let context = CompileContext::default();
+        let function = context.value_lambdas(3, context.value_local(2));
+        let partially_applied = eval_value(&context.value_apply(function, n(11)))
+            .expect("first application should expose the remaining bind chain");
+        assert!(matches!(partially_applied, Value::Net(_)));
+
+        let result = context.value_apply(context.value_apply(partially_applied, n(22)), n(33));
+        assert_eq!(eval_value(&result).unwrap(), n(11));
     }
 
     #[test]

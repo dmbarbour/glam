@@ -2112,14 +2112,10 @@ fn lower_lambda_expr(
 ) -> Result<Value, Diagnostic> {
     let base_len = locals.len();
     locals.extend(params.iter().map(|param| local_name_metadata(param)));
-    let mut lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals)?;
+    let lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
-    for _ in params.iter().rev() {
-        lowered = context.value_lambda(lowered);
-    }
-
-    Ok(lowered)
+    Ok(context.value_lambdas(params.len(), lowered))
 }
 
 fn lower_let_expr(
@@ -6843,6 +6839,25 @@ mod tests {
     fn lowers_lambda_and_application_expressions_to_core_terms() {
         let parsed =
             parse("language g0\nd = { tail:\"Hello, World!\" }\nasm.result = (\\x -> x.tail) d\n");
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn lowers_multi_argument_lambda_to_one_curried_net() {
+        let parsed = parse(
+            "language g0\nfirst = \\x _y _z -> x\nasm.result = first \"Hello, World!\" {} {}\n",
+        );
         let context = CompileContext::default();
         let lowered = lower_to_core_with_context(&parsed, &context);
         assert_eq!(lowered.diagnostics, []);

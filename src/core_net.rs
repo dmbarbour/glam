@@ -52,6 +52,17 @@ pub(crate) fn lower_closed_lambda(body: Arc<Expr>) -> ClosedLambdaNet {
     ClosedLowerer::lower_lambda(body)
 }
 
+/// Returns the body and arity of the maximal leading curried lambda spine.
+/// The outer `Lambda` owning the supplied body accounts for the first bind.
+fn lambda_spine(mut body: Arc<Expr>) -> (usize, Arc<Expr>) {
+    let mut arity = 1;
+    while let Expr::Lambda(lambda) = body.as_ref() {
+        arity += 1;
+        body = lambda.body().clone();
+    }
+    (arity, body)
+}
+
 struct Lowerer {
     net: NetBuilder<CoreNetData>,
     local_uses: Vec<Vec<Port>>,
@@ -64,6 +75,7 @@ struct ClosedLowerer {
 
 impl ClosedLowerer {
     fn lower_lambda(body: Arc<Expr>) -> ClosedLambdaNet {
+        let (arity, body) = lambda_spine(body);
         let mut lowerer = Self {
             net: NetBuilder::new(),
             local_uses: Vec::new(),
@@ -71,9 +83,10 @@ impl ClosedLowerer {
         let body_boundary = lowerer.net.copy(1);
         lowerer.compile_into(&body, body_boundary.outputs[0]);
 
-        let capture_count = lowerer.local_uses.len().saturating_sub(1);
-        let mut binds = Vec::with_capacity(capture_count + 1);
-        for _ in 0..=capture_count {
+        let capture_count = lowerer.local_uses.len().saturating_sub(arity);
+        let bind_count = capture_count + arity;
+        let mut binds = Vec::with_capacity(bind_count);
+        for _ in 0..bind_count {
             binds.push(lowerer.net.bind());
         }
         for pair in binds.windows(2) {
@@ -85,9 +98,13 @@ impl ClosedLowerer {
         );
 
         let uses = std::mem::take(&mut lowerer.local_uses);
-        for index in 0..=capture_count {
+        for index in 0..bind_count {
             let targets = uses.get(index).map(Vec::as_slice).unwrap_or_default();
-            let bind_index = if index == 0 { capture_count } else { index - 1 };
+            let bind_index = if index < arity {
+                capture_count + arity - index - 1
+            } else {
+                index - arity
+            };
             lowerer.distribute(binds[bind_index][1], targets);
         }
 
@@ -175,14 +192,22 @@ impl ClosedLowerer {
 
 impl Lowerer {
     fn lower_lambda(body: Arc<Expr>) -> CoreInteractionNet {
+        let (arity, body) = lambda_spine(body);
         let mut lowerer = Self {
             net: NetBuilder::new(),
             local_uses: Vec::new(),
         };
-        let [application, argument, result] = lowerer.net.bind();
-        lowerer.compile_into(&body, result);
-        lowerer.close_locals(argument);
-        lowerer.net.finish(application)
+        let mut binds = Vec::with_capacity(arity);
+        for _ in 0..arity {
+            binds.push(lowerer.net.bind());
+        }
+        for pair in binds.windows(2) {
+            lowerer.net.wire(pair[0][2], pair[1][0]);
+        }
+        lowerer.compile_into(&body, binds.last().unwrap()[2]);
+        let arguments = binds.iter().map(|bind| bind[1]).collect::<Vec<_>>();
+        lowerer.close_locals(&arguments);
+        lowerer.net.finish(binds[0][0])
     }
 
     fn compile_into(&mut self, expr: &Expr, target: Port) {
@@ -269,15 +294,16 @@ impl Lowerer {
         self.net.wire(output, target);
     }
 
-    fn close_locals(&mut self, argument: Port) {
+    fn close_locals(&mut self, arguments: &[Port]) {
         let uses = std::mem::take(&mut self.local_uses);
-        let max_index = uses.len().max(1);
+        let arity = arguments.len();
+        let max_index = uses.len().max(arity);
         for index in 0..max_index {
             let targets = uses.get(index).map(Vec::as_slice).unwrap_or_default();
-            let source = if index == 0 {
-                argument
+            let source = if index < arity {
+                arguments[arity - index - 1]
             } else {
-                self.net.data(CoreNetData::Capture(index - 1))
+                self.net.data(CoreNetData::Capture(index - arity))
             };
             self.distribute(source, targets);
         }
@@ -337,6 +363,25 @@ mod tests {
     }
 
     #[test]
+    fn curried_lambda_spine_lowers_to_one_bind_chain() {
+        let inner = Arc::new(Lambda::new(Arc::new(Expr::Local(1))));
+        let net = lower_lambda(Arc::new(Expr::Lambda(inner)));
+
+        assert_eq!(
+            net.nodes()
+                .iter()
+                .filter(|node| matches!(node, Node::Bind))
+                .count(),
+            2
+        );
+        assert!(
+            !net.nodes()
+                .iter()
+                .any(|node| matches!(node, Node::Data(CoreNetData::Lambda(_))))
+        );
+    }
+
+    #[test]
     fn closed_lowering_lifts_free_locals_into_leading_binds() {
         let closed = lower_closed_lambda(Arc::new(Expr::Local(1)));
 
@@ -345,5 +390,13 @@ mod tests {
             .runtime
             .with(|runtime| runtime.interface_neighbor(runtime.exposed()));
         assert!(exposed_neighbor.is_some_and(Port::is_principal));
+    }
+
+    #[test]
+    fn closed_lowering_counts_lambda_spine_locals_as_arguments() {
+        let inner = Arc::new(Lambda::new(Arc::new(Expr::Local(1))));
+        let closed = lower_closed_lambda(Arc::new(Expr::Lambda(inner)));
+
+        assert_eq!(closed.capture_count, 0);
     }
 }

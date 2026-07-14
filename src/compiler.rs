@@ -261,12 +261,26 @@ impl CompileContext {
     }
 
     pub fn value_lambda(&self, body: Value) -> Value {
-        let body = Arc::new(value_to_core_expr(body));
-        let lambda = Arc::new(Lambda::new(body.clone()));
-        if closed_net_lambda_body(&body) {
+        self.value_lambdas(1, body)
+    }
+
+    /// Constructs one curried function without preparing an intermediate net
+    /// for every syntactic parameter. The semantic expression remains a
+    /// lambda spine during the migration away from `CoreExpr::Lambda`, while
+    /// interaction-net lowering treats that entire spine as one bind chain.
+    pub fn value_lambdas(&self, arity: usize, body: Value) -> Value {
+        assert!(arity > 0, "a lambda must bind at least one parameter");
+        let mut expr = value_to_core_expr(body);
+        for _ in 0..arity {
+            expr = CoreExpr::Lambda(Arc::new(Lambda::new(Arc::new(expr))));
+        }
+        let CoreExpr::Lambda(lambda) = &expr else {
+            unreachable!();
+        };
+        if closed_net_lambda_body(lambda.body()) {
             lambda.prepare_closed_net();
         }
-        Value::expr(CoreExpr::Lambda(lambda))
+        Value::expr(expr)
     }
 
     pub fn value_local(&self, index: usize) -> Value {
@@ -383,6 +397,16 @@ fn value_to_core_expr(value: Value) -> CoreExpr {
 }
 
 fn closed_net_lambda_body(expr: &CoreExpr) -> bool {
+    let mut arity = 1;
+    let mut body = expr;
+    while let CoreExpr::Lambda(lambda) = body {
+        arity += 1;
+        body = lambda.body();
+    }
+    closed_net_expr(body, arity)
+}
+
+fn closed_net_expr(expr: &CoreExpr, arity: usize) -> bool {
     match expr {
         CoreExpr::Value(value) => matches!(
             value,
@@ -393,11 +417,11 @@ fn closed_net_lambda_body(expr: &CoreExpr) -> bool {
                 | Value::Net(_)
         ),
         CoreExpr::Deferred(_) | CoreExpr::Future(_) | CoreExpr::Error(_) => true,
-        CoreExpr::List(items) => items.iter().all(|item| closed_net_lambda_body(item)),
+        CoreExpr::List(items) => items.iter().all(|item| closed_net_expr(item, arity)),
         CoreExpr::Apply(function, argument) => {
-            closed_net_lambda_body(function) && closed_net_lambda_body(argument)
+            closed_net_expr(function, arity) && closed_net_expr(argument, arity)
         }
-        CoreExpr::Local(index) => *index == 0,
+        CoreExpr::Local(index) => *index < arity,
         CoreExpr::Lambda(_) | CoreExpr::Access(_, _) => false,
     }
 }
@@ -500,6 +524,38 @@ mod tests {
         };
 
         assert!(closed.is_closed_lowered());
+        assert!(!captured.is_closed_lowered());
+    }
+
+    #[test]
+    fn compile_context_prepares_one_net_for_a_lambda_spine() {
+        let context = CompileContext::default();
+        let grouped = context.value_lambdas(3, context.value_local(2));
+
+        let Value::Expr(grouped) = grouped else {
+            panic!("lambda compiler term should remain inspectable during migration");
+        };
+        let CoreExpr::Lambda(outer) = grouped.expr().unwrap().as_ref() else {
+            panic!("grouped lambda should retain its semantic wrapper");
+        };
+        let CoreExpr::Lambda(middle) = outer.body().as_ref() else {
+            panic!("grouped lambda should retain its middle semantic wrapper");
+        };
+        let CoreExpr::Lambda(inner) = middle.body().as_ref() else {
+            panic!("grouped lambda should retain its inner semantic wrapper");
+        };
+
+        assert!(outer.is_closed_lowered());
+        assert!(!middle.is_closed_lowered());
+        assert!(!inner.is_closed_lowered());
+
+        let captured = context.value_lambdas(3, context.value_local(3));
+        let Value::Expr(captured) = captured else {
+            panic!("captured lambda should remain a compatibility expression");
+        };
+        let CoreExpr::Lambda(captured) = captured.expr().unwrap().as_ref() else {
+            panic!("captured lambda should retain its semantic wrapper");
+        };
         assert!(!captured.is_closed_lowered());
     }
 }

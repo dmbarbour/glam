@@ -76,7 +76,9 @@ This document should summarize salient, relevant points rather than asking futur
 - Each `core::Lambda` owns a once-initialized shared runtime net. Closure
   creation reuses it and captures only its environment; applying a closure must
   not re-lower its body. Logical copies materialize nodes lazily through remote
-  cursors. Nested lambdas stay unlowered until reached.
+  cursors. A maximal leading curried spine such as `\x y z -> ...` lowers to
+  one net with a bind chain; nested function values inside the final body stay
+  unlowered until reached.
 - `Value::Net` is a first-class closed net containing only a
   `SharedRuntimeNet<CoreNetData>`. Observing it may produce ordinary data or
   preserve a non-data normal-form net; applying it attaches the exposed port
@@ -84,11 +86,11 @@ This document should summarize salient, relevant points rather than asking futur
   Rust construction entry point and discards the immutable template after
   instantiation.
 - As an incremental syntax-to-net transition, `CompileContext` precompiles
-  closed leaf lambdas with no captures, nested lambdas, or accesses. They
-  evaluate directly to `Value::Net`. Captured, nested-dependent, and
-  access-containing lambdas deliberately retain `Value::Closure`, capture
-  mapping, and expression evaluation until demand can cross the second
-  logical-copy argument frontier.
+  closed lambda spines with no captures, nested function values, or accesses.
+  `g_syntax` constructs a multi-parameter lambda through one batched compiler
+  call, so intermediate semantic lambda wrappers do not each prepare a net.
+  Captured, nested-dependent, and access-containing lambdas deliberately retain
+  `Value::Closure`, capture mapping, and expression evaluation.
 - Lambda templates contain `Bind`, binary `Fan`, `Erase`, and `Data` nodes.
   The generic topology lives in `interaction_net.rs`; core data and expression
   lowering live in `core_net.rs`.
@@ -118,7 +120,10 @@ This document should summarize salient, relevant points rather than asking futur
   `remote` identifies an interface or migrated auxiliary port in the source.
   A cursor materializes a node only when that source frontier faces its
   principal port. If it faces an auxiliary, one conservative sweep reduces
-  every pair that was ready at the start of the sweep.
+  every pair that was ready at the start of the sweep. Copying a partially
+  applied net may encounter a cursor in the intermediate source; demand advances
+  that intermediate cursor outward toward its own source, then retries. It does
+  not reverse cursor flow or give an inner source a caller reference.
 - A blocked bind-data pair can be consumed as a generic `CallFrame`; its
   argument and result survive behind independently stable interfaces. Core
   thunks may name one of those runtime/interface pairs, and memoize both values
@@ -126,7 +131,9 @@ This document should summarize salient, relevant points rather than asking futur
 - The core runtime driver interprets closures and builtins outside the generic
   topology reducer. Partial builtins retain shared lazy arguments. Saturated
   builtins become memoized semantic thunks, so the conservative active-pair
-  sweep does not force strict builtin work until its result is observed.
+  sweep does not force strict builtin work until its result is observed. An
+  imported runtime that still exposes an unsupplied bind may not detach lazy
+  call arguments yet; later parameters in the same bind spine are not captures.
 - List applications lower to callable core data and computed list elements
   become opaque lazy holes. Access applications also have semantic thunk
   support, but closure bodies containing access currently remain on the

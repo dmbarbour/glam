@@ -89,12 +89,21 @@ may produce ordinary data rather than a bind, attachment is not intrinsically
 a call. `CompileContext::value_net` provides checked construction for Rust
 front ends and drops the immutable template after instantiation.
 
-During migration, CompileContext prepares only closed leaf lambdas with no
-captures, nested lambdas, or dictionary access. These evaluate as
-`Value::Net`. Other lambdas retain the compatibility closure path. The closed
-lowerer has a lambda-lifting foundation, but captured and nested functions must
-not use it yet: forcing lazy data through the resulting second logical copy can
-still reach an unsupplied source argument frontier.
+During migration, CompileContext prepares closed curried lambda spines with no
+captures, nested function values, or dictionary access. A source lambda such as
+`\x y z -> ...` is constructed in one compiler call and lowers to one runtime
+net containing three leading binds, rather than preparing a net per semantic
+lambda wrapper. Partial application exposes the next bind in that same net.
+Other lambdas retain the compatibility closure path.
+
+Remote cursors remain strictly outward, from a source net into a logical copy;
+an inner net cannot retain a cursor back to an outer capture. A logical copy of
+a partially applied net can nevertheless encounter a remote cursor already
+present in its intermediate source. In that case demand advances the
+intermediate cursor toward its own source and retries the outer copy. This is
+cursor composition along copy provenance, not reversed dataflow. Runtime calls
+also defer capturing lazy arguments while the runtime still exposes an
+unsupplied bind from its curried spine.
 
 The topology reducer handles bind-bind, fan-fan, fan-bind, fan-data, and eraser
 interactions. `bind-data` reports `ReductionKind::Call`; `eval` consumes that
