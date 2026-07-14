@@ -164,7 +164,8 @@ mod tests {
                 .any(|node| matches!(node, Node::Fan { .. }))
         );
         assert!(!net.nodes().iter().any(|node| matches!(node, Node::Erase)));
-        assert_eq!(net.exposed(), Port::principal(0));
+        assert!(net.exposed().is_principal());
+        assert_eq!(net.exposed().node().get(), 0);
         assert_eq!(net.wires().len(), 1);
     }
 

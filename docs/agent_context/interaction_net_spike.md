@@ -34,6 +34,19 @@ The intended next representation replaces explicit histories with local
 bracket/croissant control nodes that encode the same enclosure transitions.
 Keep `FanOracle` as the comparison seam while validating that local encoding.
 
+## Runtime identity and scheduling
+
+Runtime node and pair IDs are monotonically allocated `u64` values stored in
+hash tables and never reused. A `Port` packs its node ID and two-bit port index
+into one nonzero word, so `Port` and `Option<Port>` are both one word. Node
+records keep all three possible links inline.
+
+Every principal-principal connection owns an explicit pair record. Ready pairs
+are queued, unresolved calls transition to blocked, and data-data type errors
+transition to stuck. Cancelled queue IDs cannot alias later pairs because pair
+IDs are monotonic. Interaction rules, especially erasure, explicitly remove
+nodes; there is no separate reachability collector in this representation.
+
 ## Remaining evaluator bridge
 
 The topology reducer handles bind-bind, fan-fan, fan-bind, fan-data, and eraser

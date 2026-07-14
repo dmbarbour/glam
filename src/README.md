@@ -16,7 +16,8 @@
 - `core_net.rs` lowers each reached core lambda body once into an immutable,
   shared interaction-net template carrying `CoreNetData`
 - `interaction_net.rs` provides generic `InteractionNet<Data>` topology,
-  checked construction, active-pair discovery, and mutable runtime reduction
+  checked construction, active-pair discovery, and mutable runtime reduction;
+  runtime nodes and scheduled pairs use monotonic IDs and hash-table storage
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
 - `eval.rs` retains the call-by-need compatibility evaluator while core

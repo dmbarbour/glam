@@ -6,11 +6,31 @@
 //! oracle boundary, the direct-history stepping stone toward Lamping's local
 //! bracket/croissant oracle.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::fmt;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub type NodeId = usize;
+const PORT_BITS: u32 = 2;
+const PORT_MASK: u64 = (1 << PORT_BITS) - 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NodeId(u64);
+
+impl NodeId {
+    fn from_index(index: usize) -> Self {
+        Self(u64::try_from(index).expect("interaction-net node index does not fit in u64"))
+    }
+
+    fn index(self) -> usize {
+        usize::try_from(self.0).expect("interaction-net node ID does not fit in usize")
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FanSite(u32);
@@ -85,23 +105,52 @@ impl FanIdentity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Port {
-    pub node: NodeId,
-    pub index: u32,
-}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Port(NonZeroU64);
 
 impl Port {
-    pub const fn principal(node: NodeId) -> Self {
-        Self { node, index: 0 }
+    pub fn principal(node: NodeId) -> Self {
+        Self::new(node, 0)
     }
 
-    pub const fn auxiliary(node: NodeId, index: u32) -> Self {
-        Self { node, index }
+    pub fn auxiliary(node: NodeId, index: u32) -> Self {
+        assert!(
+            (1..=2).contains(&index),
+            "auxiliary port index must be 1 or 2"
+        );
+        Self::new(node, index)
     }
 
-    pub const fn is_principal(self) -> bool {
-        self.index == 0
+    fn new(node: NodeId, index: u32) -> Self {
+        let index = u64::from(index);
+        let max_node = (u64::MAX - index - 1) >> PORT_BITS;
+        assert!(
+            node.0 <= max_node,
+            "interaction-net packed port space exhausted"
+        );
+        let tagged = (node.0 << PORT_BITS) + index + 1;
+        Self(NonZeroU64::new(tagged).expect("packed port is always nonzero"))
+    }
+
+    pub fn node(self) -> NodeId {
+        NodeId((self.0.get() - 1) >> PORT_BITS)
+    }
+
+    pub fn index(self) -> u32 {
+        ((self.0.get() - 1) & PORT_MASK) as u32
+    }
+
+    pub fn is_principal(self) -> bool {
+        self.index() == 0
+    }
+}
+
+impl fmt::Debug for Port {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Port")
+            .field("node", &self.node())
+            .field("index", &self.index())
+            .finish()
     }
 }
 
@@ -211,7 +260,7 @@ impl<D> NetBuilder<D> {
     }
 
     pub fn push(&mut self, node: Node<D>) -> NodeId {
-        let id = self.nodes.len();
+        let id = NodeId::from_index(self.nodes.len());
         self.nodes.push(node);
         id
     }
@@ -236,8 +285,8 @@ impl<D> NetBuilder<D> {
             .iter()
             .filter(|wire| wire.left.is_principal() && wire.right.is_principal())
             .map(|wire| ActivePair {
-                left: wire.left.node,
-                right: wire.right.node,
+                left: wire.left.node(),
+                right: wire.right.node(),
             })
             .collect::<Vec<_>>();
         InteractionNet {
@@ -258,8 +307,8 @@ impl<D> NetBuilder<D> {
             for port in [wire.left, wire.right] {
                 assert_ne!(port, exposed, "the exposed port must remain unwired");
                 let Some(slot) = wired
-                    .get_mut(port.node)
-                    .and_then(|ports| ports.get_mut(port.index as usize))
+                    .get_mut(port.node().index())
+                    .and_then(|ports| ports.get_mut(port.index() as usize))
                 else {
                     panic!("wire references an invalid interaction-net port");
                 };
@@ -269,9 +318,11 @@ impl<D> NetBuilder<D> {
         }
         for (node_id, ports) in wired.iter().enumerate() {
             for (index, is_wired) in ports.iter().enumerate() {
-                let port = Port {
-                    node: node_id,
-                    index: index as u32,
+                let node = NodeId::from_index(node_id);
+                let port = if index == 0 {
+                    Port::principal(node)
+                } else {
+                    Port::auxiliary(node, index as u32)
                 };
                 assert!(
                     *is_wired || port == exposed,
@@ -330,11 +381,58 @@ pub enum Reduction {
     Stuck,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PairId(u64);
+
+impl PairId {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairState {
+    Ready,
+    Blocked,
+    Stuck,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimePair {
+    pub id: PairId,
+    pub pair: ActivePair,
+    pub state: PairState,
+}
+
+struct RuntimeEntry<D> {
+    node: RuntimeNode<D>,
+    links: [Option<Port>; 3],
+    principal_pair: Option<PairId>,
+}
+
+impl<D> RuntimeEntry<D> {
+    fn new(node: RuntimeNode<D>) -> Self {
+        Self {
+            node,
+            links: [None; 3],
+            principal_pair: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PairRecord {
+    pair: ActivePair,
+    state: PairState,
+}
+
 pub struct RuntimeNet<D> {
     instance: InstanceId,
-    nodes: Vec<Option<RuntimeNode<D>>>,
-    links: Vec<Vec<Option<Port>>>,
-    active: VecDeque<ActivePair>,
+    next_node_id: u64,
+    nodes: HashMap<NodeId, RuntimeEntry<D>>,
+    next_pair_id: u64,
+    pairs: HashMap<PairId, PairRecord>,
+    ready: VecDeque<PairId>,
 }
 
 impl<D: Clone> RuntimeNet<D> {
@@ -342,25 +440,28 @@ impl<D: Clone> RuntimeNet<D> {
         let nodes = net
             .nodes
             .iter()
-            .map(|node| {
-                Some(match node {
+            .enumerate()
+            .map(|(index, node)| {
+                let id = NodeId::from_index(index);
+                let node = match node {
                     Node::Bind => RuntimeNode::Bind,
                     Node::Fan { site } => RuntimeNode::Fan {
                         identity: FanIdentity::root(instance, *site),
                     },
                     Node::Erase => RuntimeNode::Erase,
                     Node::Data(data) => RuntimeNode::Data(data.clone()),
-                })
+                };
+                (id, RuntimeEntry::new(node))
             })
-            .collect::<Vec<_>>();
+            .collect();
         let mut runtime = Self {
             instance,
-            links: nodes
-                .iter()
-                .map(|node| vec![None; node.as_ref().unwrap().port_count() as usize])
-                .collect(),
+            next_node_id: u64::try_from(net.nodes.len())
+                .expect("interaction-net node count does not fit in u64"),
             nodes,
-            active: VecDeque::new(),
+            next_pair_id: 0,
+            pairs: HashMap::new(),
+            ready: VecDeque::new(),
         };
         for wire in net.wires.iter() {
             runtime.connect(wire.left, wire.right);
@@ -368,27 +469,62 @@ impl<D: Clone> RuntimeNet<D> {
         runtime
     }
 
+    #[cfg(test)]
+    fn empty(instance: InstanceId) -> Self {
+        Self {
+            instance,
+            next_node_id: 0,
+            nodes: HashMap::new(),
+            next_pair_id: 0,
+            pairs: HashMap::new(),
+            ready: VecDeque::new(),
+        }
+    }
+
     pub fn instance(&self) -> InstanceId {
         self.instance
     }
 
-    pub fn active_pairs(&self) -> Vec<ActivePair> {
-        self.nodes
+    pub fn pairs(&self) -> Vec<RuntimePair> {
+        let mut pairs = self
+            .pairs
             .iter()
-            .enumerate()
-            .filter_map(|(left, node)| {
-                node.as_ref()?;
-                let right = self.neighbor(Port::principal(left))?;
-                (right.is_principal() && left < right.node).then_some(ActivePair {
-                    left,
-                    right: right.node,
-                })
+            .map(|(id, record)| RuntimePair {
+                id: *id,
+                pair: record.pair,
+                state: record.state,
             })
+            .collect::<Vec<_>>();
+        pairs.sort_by_key(|pair| pair.id);
+        pairs
+    }
+
+    pub fn active_pairs(&self) -> Vec<ActivePair> {
+        self.pairs().into_iter().map(|record| record.pair).collect()
+    }
+
+    pub fn ready_pairs(&self) -> Vec<ActivePair> {
+        self.pairs_with_state(PairState::Ready)
+    }
+
+    pub fn blocked_pairs(&self) -> Vec<ActivePair> {
+        self.pairs_with_state(PairState::Blocked)
+    }
+
+    pub fn stuck_pairs(&self) -> Vec<ActivePair> {
+        self.pairs_with_state(PairState::Stuck)
+    }
+
+    fn pairs_with_state(&self, state: PairState) -> Vec<ActivePair> {
+        self.pairs()
+            .into_iter()
+            .filter(|record| record.state == state)
+            .map(|record| record.pair)
             .collect()
     }
 
     pub fn node(&self, id: NodeId) -> Option<&RuntimeNode<D>> {
-        self.nodes.get(id).and_then(Option::as_ref)
+        self.nodes.get(&id).map(|entry| &entry.node)
     }
 
     pub fn reduce_next(&mut self) -> Option<Reduction> {
@@ -396,10 +532,18 @@ impl<D: Clone> RuntimeNet<D> {
     }
 
     pub fn reduce_next_with(&mut self, oracle: &impl FanOracle) -> Option<Reduction> {
-        while let Some(pair) = self.active.pop_front() {
+        while let Some(pair_id) = self.ready.pop_front() {
+            let Some(record) = self.pairs.get(&pair_id).copied() else {
+                continue;
+            };
+            if record.state != PairState::Ready {
+                continue;
+            }
+            let pair = record.pair;
             let left_port = Port::principal(pair.left);
             let right_port = Port::principal(pair.right);
             if self.neighbor(left_port) != Some(right_port) {
+                self.cancel_pair(pair_id);
                 continue;
             }
             let left = self.node(pair.left)?.clone();
@@ -459,8 +603,14 @@ impl<D: Clone> RuntimeNet<D> {
                     Reduction::Erase
                 }
                 (RuntimeNode::Bind, RuntimeNode::Data(_))
-                | (RuntimeNode::Data(_), RuntimeNode::Bind) => Reduction::Call,
-                (RuntimeNode::Data(_), RuntimeNode::Data(_)) => Reduction::Stuck,
+                | (RuntimeNode::Data(_), RuntimeNode::Bind) => {
+                    self.set_pair_state(pair_id, PairState::Blocked);
+                    Reduction::Call
+                }
+                (RuntimeNode::Data(_), RuntimeNode::Data(_)) => {
+                    self.set_pair_state(pair_id, PairState::Stuck);
+                    Reduction::Stuck
+                }
             });
         }
         None
@@ -480,11 +630,9 @@ impl<D: Clone> RuntimeNet<D> {
     fn duplicate_data(&mut self, fan: NodeId, data: NodeId) {
         self.disconnect(Port::principal(fan));
         let targets = self.take_auxiliaries(fan, 2);
-        let RuntimeNode::Data(payload) = self.nodes[data].take().expect("data node must exist")
-        else {
+        let RuntimeNode::Data(payload) = self.remove_node(data) else {
             unreachable!();
         };
-        self.links[data].clear();
         self.remove_node(fan);
         for target in targets {
             let clone = self.add_node(RuntimeNode::Data(payload.clone()));
@@ -591,41 +739,122 @@ impl<D: Clone> RuntimeNet<D> {
     }
 
     fn add_node(&mut self, node: RuntimeNode<D>) -> NodeId {
-        let id = self.nodes.len();
-        self.links.push(vec![None; node.port_count() as usize]);
-        self.nodes.push(Some(node));
+        let id = NodeId(self.next_node_id);
+        self.next_node_id = self
+            .next_node_id
+            .checked_add(1)
+            .expect("interaction-net node ID space exhausted");
+        assert!(self.nodes.insert(id, RuntimeEntry::new(node)).is_none());
         id
     }
 
-    fn remove_node(&mut self, node: NodeId) {
-        self.nodes[node] = None;
-        self.links[node].clear();
+    fn remove_node(&mut self, node: NodeId) -> RuntimeNode<D> {
+        let entry = self.nodes.remove(&node).expect("removed node must exist");
+        assert!(entry.links.iter().all(Option::is_none));
+        assert!(entry.principal_pair.is_none());
+        entry.node
     }
 
     fn neighbor(&self, port: Port) -> Option<Port> {
-        self.links
-            .get(port.node)?
-            .get(port.index as usize)
-            .copied()
-            .flatten()
+        let entry = self.nodes.get(&port.node())?;
+        if port.index() >= entry.node.port_count() {
+            return None;
+        }
+        entry.links[port.index() as usize]
     }
 
     fn disconnect(&mut self, port: Port) -> Option<Port> {
-        let neighbor = self.links[port.node][port.index as usize].take()?;
-        self.links[neighbor.node][neighbor.index as usize] = None;
+        let neighbor = self.neighbor(port)?;
+        if port.is_principal() && neighbor.is_principal() {
+            let pair = self.nodes[&port.node()]
+                .principal_pair
+                .expect("connected principal ports must own an active pair");
+            self.cancel_pair(pair);
+        }
+        self.nodes
+            .get_mut(&port.node())
+            .expect("disconnected node must exist")
+            .links[port.index() as usize] = None;
+        self.nodes
+            .get_mut(&neighbor.node())
+            .expect("neighbor node must exist")
+            .links[neighbor.index() as usize] = None;
         Some(neighbor)
     }
 
     fn connect(&mut self, left: Port, right: Port) {
+        assert_ne!(left, right, "an interaction-net port cannot wire to itself");
+        assert!(self.valid_port(left) && self.valid_port(right));
         assert!(self.neighbor(left).is_none() && self.neighbor(right).is_none());
-        self.links[left.node][left.index as usize] = Some(right);
-        self.links[right.node][right.index as usize] = Some(left);
+        self.nodes.get_mut(&left.node()).unwrap().links[left.index() as usize] = Some(right);
+        self.nodes.get_mut(&right.node()).unwrap().links[right.index() as usize] = Some(left);
         if left.is_principal() && right.is_principal() {
-            self.active.push_back(ActivePair {
-                left: left.node,
-                right: right.node,
-            });
+            self.add_pair(left.node(), right.node());
         }
+    }
+
+    fn valid_port(&self, port: Port) -> bool {
+        self.nodes
+            .get(&port.node())
+            .is_some_and(|entry| port.index() < entry.node.port_count())
+    }
+
+    fn add_pair(&mut self, left: NodeId, right: NodeId) -> PairId {
+        let id = PairId(self.next_pair_id);
+        self.next_pair_id = self
+            .next_pair_id
+            .checked_add(1)
+            .expect("interaction-net pair ID space exhausted");
+        let pair = ActivePair { left, right };
+        assert!(
+            self.pairs
+                .insert(
+                    id,
+                    PairRecord {
+                        pair,
+                        state: PairState::Ready,
+                    },
+                )
+                .is_none()
+        );
+        assert!(
+            self.nodes
+                .get_mut(&left)
+                .unwrap()
+                .principal_pair
+                .replace(id)
+                .is_none()
+        );
+        assert!(
+            self.nodes
+                .get_mut(&right)
+                .unwrap()
+                .principal_pair
+                .replace(id)
+                .is_none()
+        );
+        self.ready.push_back(id);
+        id
+    }
+
+    fn cancel_pair(&mut self, id: PairId) {
+        let Some(record) = self.pairs.remove(&id) else {
+            return;
+        };
+        for node in [record.pair.left, record.pair.right] {
+            if let Some(entry) = self.nodes.get_mut(&node) {
+                if entry.principal_pair == Some(id) {
+                    entry.principal_pair = None;
+                }
+            }
+        }
+    }
+
+    fn set_pair_state(&mut self, id: PairId, state: PairState) {
+        self.pairs
+            .get_mut(&id)
+            .expect("scheduled pair must exist")
+            .state = state;
     }
 }
 
@@ -660,8 +889,8 @@ mod tests {
         let fan = |runtime: &RuntimeNet<()>| {
             runtime
                 .nodes
-                .iter()
-                .find_map(|node| match node.as_ref()? {
+                .values()
+                .find_map(|entry| match &entry.node {
                     RuntimeNode::Fan { identity } => Some(identity.clone()),
                     _ => None,
                 })
@@ -675,28 +904,18 @@ mod tests {
 
     fn fan_pair(left: FanIdentity, right: FanIdentity) -> RuntimeNet<()> {
         let instance = left.instance;
-        let nodes = vec![
-            Some(RuntimeNode::Fan { identity: left }),
-            Some(RuntimeNode::Fan { identity: right }),
-            Some(RuntimeNode::Data(())),
-            Some(RuntimeNode::Data(())),
-            Some(RuntimeNode::Data(())),
-            Some(RuntimeNode::Data(())),
-        ];
-        let mut runtime = RuntimeNet {
-            instance,
-            links: nodes
-                .iter()
-                .map(|node| vec![None; node.as_ref().unwrap().port_count() as usize])
-                .collect(),
-            nodes,
-            active: VecDeque::new(),
-        };
-        runtime.connect(Port::principal(0), Port::principal(1));
-        runtime.connect(Port::auxiliary(0, 1), Port::principal(2));
-        runtime.connect(Port::auxiliary(0, 2), Port::principal(3));
-        runtime.connect(Port::auxiliary(1, 1), Port::principal(4));
-        runtime.connect(Port::auxiliary(1, 2), Port::principal(5));
+        let mut runtime = RuntimeNet::empty(instance);
+        let left = runtime.add_node(RuntimeNode::Fan { identity: left });
+        let right = runtime.add_node(RuntimeNode::Fan { identity: right });
+        let left_1 = runtime.add_node(RuntimeNode::Data(()));
+        let left_2 = runtime.add_node(RuntimeNode::Data(()));
+        let right_1 = runtime.add_node(RuntimeNode::Data(()));
+        let right_2 = runtime.add_node(RuntimeNode::Data(()));
+        runtime.connect(Port::principal(left), Port::principal(right));
+        runtime.connect(Port::auxiliary(left, 1), Port::principal(left_1));
+        runtime.connect(Port::auxiliary(left, 2), Port::principal(left_2));
+        runtime.connect(Port::auxiliary(right, 1), Port::principal(right_1));
+        runtime.connect(Port::auxiliary(right, 2), Port::principal(right_2));
         runtime
     }
 
@@ -710,8 +929,8 @@ mod tests {
                 identity: fan.clone()
             })
         );
-        assert!(net.node(0).is_none());
-        assert!(net.node(1).is_none());
+        assert!(net.node(NodeId(0)).is_none());
+        assert!(net.node(NodeId(1)).is_none());
         assert_eq!(net.active_pairs().len(), 2);
     }
 
@@ -741,13 +960,55 @@ mod tests {
         ));
         let residuals = net
             .nodes
-            .iter()
-            .filter_map(|node| match node.as_ref()? {
+            .values()
+            .filter_map(|entry| match &entry.node {
                 RuntimeNode::Fan { identity } => Some(identity),
                 _ => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(residuals.len(), 4);
         assert!(residuals.iter().all(|fan| fan.context.len() == 1));
+    }
+
+    #[test]
+    fn ports_and_optional_ports_are_one_word() {
+        assert_eq!(std::mem::size_of::<Port>(), std::mem::size_of::<u64>());
+        assert_eq!(
+            std::mem::size_of::<Option<Port>>(),
+            std::mem::size_of::<u64>()
+        );
+    }
+
+    #[test]
+    fn blocked_and_stuck_pairs_leave_the_ready_queue() {
+        let mut calls = RuntimeNet::empty(InstanceId::from_raw(1));
+        let bind = calls.add_node(RuntimeNode::Bind);
+        let data = calls.add_node(RuntimeNode::Data(()));
+        calls.connect(Port::principal(bind), Port::principal(data));
+        assert_eq!(calls.reduce_next(), Some(Reduction::Call));
+        assert!(calls.ready_pairs().is_empty());
+        assert_eq!(calls.blocked_pairs().len(), 1);
+        assert_eq!(calls.reduce_next(), None);
+
+        let mut stuck = RuntimeNet::empty(InstanceId::from_raw(2));
+        let left = stuck.add_node(RuntimeNode::Data(()));
+        let right = stuck.add_node(RuntimeNode::Data(()));
+        stuck.connect(Port::principal(left), Port::principal(right));
+        assert_eq!(stuck.reduce_next(), Some(Reduction::Stuck));
+        assert!(stuck.ready_pairs().is_empty());
+        assert_eq!(stuck.stuck_pairs().len(), 1);
+        assert_eq!(stuck.reduce_next(), None);
+    }
+
+    #[test]
+    fn removed_node_ids_are_not_reused() {
+        let mut net = RuntimeNet::empty(InstanceId::from_raw(1));
+        let first = net.add_node(RuntimeNode::Data(()));
+        let second = net.add_node(RuntimeNode::Data(()));
+        assert!(matches!(net.remove_node(first), RuntimeNode::Data(())));
+        let third = net.add_node(RuntimeNode::Data(()));
+        assert_eq!(first.get(), 0);
+        assert_eq!(second.get(), 1);
+        assert_eq!(third.get(), 2);
     }
 }

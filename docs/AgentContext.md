@@ -86,6 +86,14 @@ This document should summarize salient, relevant points rather than asking futur
 - `HistoryOracle` is a correctness-oriented direct-history implementation and
   the reference semantics for later Lamping bracket/croissant control nodes; it
   is not itself the final local, optimal oracle.
+- Runtime nets use monotonically allocated `u64` node and pair IDs backed by
+  hash tables. Ports pack a node ID and two-bit port index into one nonzero
+  word; each node stores three inline links. IDs are not reused. Erase
+  interactions and other rewrites remove nodes explicitly rather than relying
+  on reachability collection.
+- Principal-principal connections own pair records. Runnable pairs are queued;
+  unresolved calls become blocked and invalid data-data interactions become
+  stuck for later evaluation or reflection handling.
 - The topology reducer implements bind/fan join, fan commutation, duplication,
   and erasure rules. Core
   evaluation still has a compatibility bridge while `bind-data` calls are being
