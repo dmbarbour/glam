@@ -6,7 +6,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::core::{
-    Builtin, BuiltinCall, Closure, DeferredValue, Expr, IVar, Key, KeyExpr, List, Thunk, Value,
+    Builtin, BuiltinCall, Closure, DeferredValue, Expr, IVar, Key, KeyExpr, List, NetValue, Thunk,
+    Value,
 };
 use crate::core_net::{CoreDataKey, CoreNetData};
 use crate::interaction_net::{BlockedCall, NetBuilder, Port, ReductionKind};
@@ -50,11 +51,7 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::List(list))
         }
         Expr::Apply(function, argument) => eval_apply(function, argument, local_env),
-        Expr::Lambda(lambda) => Ok(Value::Closure(Closure {
-            interaction_net: lambda.runtime_with_captures(Arc::from(local_env.to_vec())),
-            env: Arc::from(local_env.to_vec()),
-            source_body: lambda.body().clone(),
-        })),
+        Expr::Lambda(lambda) => Ok(compiled_lambda_value(lambda, Arc::from(local_env.to_vec()))),
         Expr::Local(index) => eval_local(*index, local_env),
         Expr::Access(base, path) => {
             let base = eval_expr(base, local_env)?;
@@ -77,6 +74,7 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
 pub fn eval_value(value: &Value) -> Result<Value, EvalError> {
     match value {
         Value::Expr(thunk) => eval_thunk(thunk),
+        Value::Net(net) => observe_net(net.clone()),
         other => Ok(other.clone()),
     }
 }
@@ -180,7 +178,7 @@ fn value_to_key(value: &Value, local_env: &[Value]) -> Result<Key, EvalError> {
                 .flatten()
                 .collect::<Vec<_>>(),
         ))),
-        Value::Builtin(_) | Value::PartialBuiltin(_) => Err(EvalError::new(
+        Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Net(_) => Err(EvalError::new(
             "dictionary keys must evaluate to keyable values",
         )),
         Value::Closure(_) => Err(EvalError::new(
@@ -302,6 +300,7 @@ fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<
             argument,
             local_env,
         ),
+        Value::Net(net) => apply_net(net, argument),
         Value::Closure(closure) => apply_closure(&closure, argument),
         Value::Dict(dict) => apply_dict_value(&dict, argument, local_env),
         Value::Expr(thunk) => apply_value(eval_thunk(&thunk)?, argument, local_env),
@@ -374,6 +373,19 @@ fn apply_closure(closure: &Closure, argument: Value) -> Result<Value, EvalError>
     eval_expr(&closure.source_body, &extended)
 }
 
+fn compiled_lambda_value(lambda: &Arc<crate::core::Lambda>, environment: Arc<[Value]>) -> Value {
+    if let Some(closed) = lambda.closed_net() {
+        debug_assert_eq!(closed.capture_count, 0);
+        Value::Net(NetValue::new(closed.runtime))
+    } else {
+        Value::Closure(Closure {
+            interaction_net: lambda.runtime_with_captures(environment.clone()),
+            env: environment,
+            source_body: lambda.body().clone(),
+        })
+    }
+}
+
 fn net_evaluable_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Value(_) | Expr::Local(_) | Expr::Error(_) => true,
@@ -403,15 +415,48 @@ fn apply_closure_net(closure: &Closure, argument: Value) -> Result<Value, EvalEr
     drive_core_net(runtime, exposed)
 }
 
+fn apply_net(function: NetValue, argument: Value) -> Result<Value, EvalError> {
+    let mut net = NetBuilder::new();
+    let [application, argument_port, result] = net.bind();
+    let function = net.data(CoreNetData::Value(Value::Net(function)));
+    let argument = net.data(CoreNetData::Value(argument));
+    net.wire(application, function);
+    net.wire(argument_port, argument);
+    let runtime = net.finish(result).instantiate_shared();
+    let exposed = runtime.with(|net| net.exposed());
+    drive_core_net(runtime, exposed)
+}
+
+fn observe_net(net: NetValue) -> Result<Value, EvalError> {
+    let runtime = net.runtime().clone();
+    let exposed = runtime.with(|runtime| runtime.exposed());
+    drive_core_net_inner(runtime, exposed, false, Some(Value::Net(net)))
+}
+
 fn drive_core_net(
     runtime: crate::core_net::CoreRuntimeNet,
     interface: Port,
 ) -> Result<Value, EvalError> {
+    drive_core_net_inner(runtime, interface, true, None)
+}
+
+fn drive_core_net_inner(
+    runtime: crate::core_net::CoreRuntimeNet,
+    interface: Port,
+    consume_data: bool,
+    normal_form: Option<Value>,
+) -> Result<Value, EvalError> {
     loop {
         if runtime.with(|net| net.interface_data(interface).is_some()) {
-            let data = runtime
-                .with_mut(|net| net.take_interface_data(interface))
-                .expect("observed interaction-net interface must contain data");
+            let data = if consume_data {
+                runtime
+                    .with_mut(|net| net.take_interface_data(interface))
+                    .expect("observed interaction-net interface must contain data")
+            } else {
+                runtime
+                    .with(|net| net.interface_data(interface).cloned())
+                    .expect("observed interaction-net interface must contain data")
+            };
             return observe_core_data(data);
         }
 
@@ -450,6 +495,29 @@ fn drive_core_net(
             continue;
         }
 
+        let scheduler_is_empty = runtime.with(|net| {
+            net.blocked_calls().is_empty()
+                && net.blocked_cursors().is_empty()
+                && net.stuck_pairs().is_empty()
+        });
+        if scheduler_is_empty {
+            if let Some(normal_form) = normal_form {
+                return Ok(normal_form);
+            }
+            let exposes_bind = runtime.with(|net| {
+                net.interface_neighbor(interface).is_some_and(|port| {
+                    port.is_principal()
+                        && matches!(
+                            net.node(port.node()),
+                            Some(crate::interaction_net::RuntimeNode::Bind)
+                        )
+                })
+            });
+            if exposes_bind {
+                return Ok(Value::Net(NetValue::new(runtime)));
+            }
+        }
+
         let detail = runtime.with(|net| {
             let neighbor = net.interface_neighbor(interface);
             let node = neighbor.and_then(|port| net.node(port.node()));
@@ -476,6 +544,8 @@ fn progress_core_net(runtime: &crate::core_net::CoreRuntimeNet) -> Result<bool, 
     }
     let calls = runtime.with(|net| net.blocked_calls().iter().copied().collect::<Vec<_>>());
     for call in calls.iter().copied() {
+        let callable_is_net =
+            runtime.with(|net| matches!(net.call_data(call), CoreNetData::Value(Value::Net(_))));
         let callable_captures_lazy_argument = runtime.with(|net| {
             matches!(
                 net.call_data(call),
@@ -491,6 +561,10 @@ fn progress_core_net(runtime: &crate::core_net::CoreRuntimeNet) -> Result<bool, 
                     || !matches!(data, CoreNetData::Capture(_) | CoreNetData::Lambda(_))
             })
         });
+        if callable_is_net && argument_is_data {
+            handle_core_call(runtime, call)?;
+            return Ok(true);
+        }
         if callable_captures_lazy_argument
             && !argument_is_data
             && runtime.with(|net| net.call_argument_cursor_source(call).is_some())
@@ -532,11 +606,7 @@ fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
         CoreNetData::Value(value) => eval_value(&value),
         CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
         CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
-        CoreNetData::Lambda(lambda) => Ok(Value::Closure(Closure {
-            interaction_net: lambda.interaction_net(),
-            env: Arc::from([]),
-            source_body: lambda.body().clone(),
-        })),
+        CoreNetData::Lambda(lambda) => Ok(compiled_lambda_value(&lambda, Arc::from([]))),
         CoreNetData::List { arity: 0, .. } => Ok(Value::List(List::empty())),
         CoreNetData::Deferred(value) => value
             .force()
@@ -558,6 +628,12 @@ fn handle_core_call(
 ) -> Result<(), EvalError> {
     let callable = runtime.with(|net| net.call_data(call).clone());
     match callable {
+        CoreNetData::Value(Value::Net(net)) => {
+            runtime.with_mut(|runtime| {
+                runtime.resume_call_with_copy(call, net.into_runtime());
+            });
+            return Ok(());
+        }
         CoreNetData::Builtin(builtin) => return handle_core_builtin_call(runtime, call, builtin),
         CoreNetData::Value(Value::Builtin(builtin)) => {
             return handle_core_builtin_call(runtime, call, BuiltinCall::new(builtin));
@@ -598,10 +674,15 @@ fn handle_core_call(
             Ok(())
         }
         CoreNetData::Lambda(lambda) => {
-            let closure = Closure {
-                interaction_net: lambda.interaction_net(),
-                env: Arc::from([]),
-                source_body: lambda.body().clone(),
+            let function = compiled_lambda_value(&lambda, Arc::from([]));
+            if let Value::Net(net) = function {
+                runtime.with_mut(|runtime| {
+                    runtime.resume_call_with_copy(call, net.into_runtime());
+                });
+                return Ok(());
+            }
+            let Value::Closure(closure) = function else {
+                unreachable!();
             };
             let mut environment = vec![argument];
             let map_data = core_copy_mapper(Arc::from(std::mem::take(&mut environment)));
@@ -758,11 +839,7 @@ fn core_data_to_lazy_value(data: CoreNetData) -> Result<Value, EvalError> {
         CoreNetData::Value(value) => Ok(value),
         CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
         CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
-        CoreNetData::Lambda(lambda) => Ok(Value::Closure(Closure {
-            interaction_net: lambda.interaction_net(),
-            env: Arc::from([]),
-            source_body: lambda.body().clone(),
-        })),
+        CoreNetData::Lambda(lambda) => Ok(compiled_lambda_value(&lambda, Arc::from([]))),
         CoreNetData::List {
             arity: 0,
             arguments,
@@ -795,11 +872,9 @@ fn core_copy_mapper(
     environment: Arc<[Value]>,
 ) -> Arc<dyn Fn(&CoreNetData) -> CoreNetData + Send + Sync> {
     Arc::new(move |data| match data {
-        CoreNetData::Lambda(lambda) => CoreNetData::Value(Value::Closure(Closure {
-            interaction_net: lambda.runtime_with_captures(environment.clone()),
-            env: environment.clone(),
-            source_body: lambda.body().clone(),
-        })),
+        CoreNetData::Lambda(lambda) => {
+            CoreNetData::Value(compiled_lambda_value(lambda, environment.clone()))
+        }
         CoreNetData::Capture(index) => {
             let value = environment
                 .len()
@@ -1198,6 +1273,8 @@ fn compare_ordered_values(
         | (_, Value::Builtin(_))
         | (Value::PartialBuiltin(_), _)
         | (_, Value::PartialBuiltin(_))
+        | (Value::Net(_), _)
+        | (_, Value::Net(_))
         | (Value::Closure(_), _)
         | (_, Value::Closure(_)) => Err(EvalError::new(format!(
             "{name} builtin cannot compare function values"
@@ -1259,6 +1336,8 @@ fn equal_values(
         | (_, Value::Builtin(_))
         | (Value::PartialBuiltin(_), _)
         | (_, Value::PartialBuiltin(_))
+        | (Value::Net(_), _)
+        | (_, Value::Net(_))
         | (Value::Closure(_), _)
         | (_, Value::Closure(_)) => Err(EvalError::new(format!(
             "{name} builtin cannot compare function values"
@@ -1784,13 +1863,13 @@ fn eval_dict_update_builtin(
 
 fn eval_fixpoint_builtin(function: &Value) -> Result<Value, EvalError> {
     let function = eval_value(function)?;
-    let Value::Closure(function) = function else {
+    if !matches!(function, Value::Net(_) | Value::Closure(_)) {
         return Err(EvalError::new("fixpoint builtin requires a lambda value"));
-    };
+    }
 
     let handle = IVar::new();
     let marker = Value::expr(Expr::Future(handle.clone()));
-    let value = apply_closure(&function, marker.clone())?;
+    let value = apply_value(function, marker.clone(), &[])?;
     handle
         .set(value.clone())
         .map_err(|_| EvalError::new("fixpoint builtin initialized twice"))?;
@@ -2711,20 +2790,65 @@ mod tests {
 
     use super::*;
 
+    fn closed_net(build: impl FnOnce(&mut NetBuilder<CoreNetData>) -> Port) -> NetValue {
+        let mut builder = NetBuilder::new();
+        let exposed = build(&mut builder);
+        NetValue::new(builder.finish(exposed).instantiate_shared())
+    }
+
     #[test]
-    fn each_lambda_lowers_to_one_shared_interaction_net() {
+    fn closed_net_values_can_expose_ordinary_data_repeatedly() {
+        let net = closed_net(|builder| builder.data(CoreNetData::Value(n(42))));
+        let value = Value::Net(net);
+
+        assert_eq!(eval_value(&value).unwrap(), n(42));
+        assert_eq!(eval_value(&value).unwrap(), n(42));
+    }
+
+    #[test]
+    fn closed_net_values_attach_to_applications_through_cursors() {
+        let identity = closed_net(|builder| {
+            let [application, argument, result] = builder.bind();
+            builder.wire(argument, result);
+            application
+        });
+        let expression = Expr::Apply(
+            Arc::new(Expr::Value(Value::Net(identity))),
+            Arc::new(Expr::Value(n(42))),
+        );
+
+        assert_eq!(eval_closed_expr(&expression).unwrap(), n(42));
+    }
+
+    #[test]
+    fn observing_a_function_net_preserves_the_net_value() {
+        let identity = closed_net(|builder| {
+            let [application, argument, result] = builder.bind();
+            builder.wire(argument, result);
+            application
+        });
+        let expected = identity.clone();
+
+        assert_eq!(
+            eval_value(&Value::Net(identity)).unwrap(),
+            Value::Net(expected)
+        );
+    }
+
+    #[test]
+    fn compiler_prepared_leaf_lambda_reuses_one_shared_interaction_net() {
         let lambda = Arc::new(Lambda::new(Arc::new(Expr::Local(0))));
+        assert!(!lambda.is_closed_lowered());
+        lambda.prepare_closed_net();
         let expr = Expr::Lambda(lambda.clone());
-
-        assert!(!lambda.is_lowered());
-        let first = eval_closed_expr(&expr).expect("lambda should evaluate to a closure");
+        let first = eval_closed_expr(&expr).expect("lambda should evaluate to a net");
         let second = eval_closed_expr(&expr).expect("lambda should reuse its lowered net");
-        assert!(lambda.is_lowered());
+        assert!(lambda.is_closed_lowered());
 
-        let (Value::Closure(first), Value::Closure(second)) = (first, second) else {
-            panic!("lambda evaluations should produce closures");
+        let (Value::Net(first), Value::Net(second)) = (first, second) else {
+            panic!("leaf lambda evaluations should produce closed nets");
         };
-        assert!(first.interaction_net.ptr_eq(&second.interaction_net));
+        assert!(first.runtime().ptr_eq(second.runtime()));
     }
 
     #[test]

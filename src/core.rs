@@ -6,7 +6,10 @@ use bytes::Bytes;
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
-use crate::core_net::{CoreDataKey, CoreInteractionNet, CoreNetData, CoreRuntimeNet, lower_lambda};
+use crate::core_net::{
+    ClosedLambdaNet, CoreDataKey, CoreInteractionNet, CoreNetData, CoreRuntimeNet,
+    lower_closed_lambda, lower_lambda,
+};
 use crate::interaction_net::Port;
 use crate::number::Number;
 
@@ -34,6 +37,7 @@ pub struct Lambda {
     body: Arc<Expr>,
     interaction_net: OnceLock<Arc<CoreInteractionNet>>,
     closed_runtime: OnceLock<CoreRuntimeNet>,
+    closed_net: OnceLock<ClosedLambdaNet>,
 }
 
 impl Lambda {
@@ -42,6 +46,7 @@ impl Lambda {
             body,
             interaction_net: OnceLock::new(),
             closed_runtime: OnceLock::new(),
+            closed_net: OnceLock::new(),
         }
     }
 
@@ -73,6 +78,15 @@ impl Lambda {
             }))
     }
 
+    pub(crate) fn prepare_closed_net(&self) {
+        self.closed_net
+            .get_or_init(|| lower_closed_lambda(self.body.clone()));
+    }
+
+    pub(crate) fn closed_net(&self) -> Option<ClosedLambdaNet> {
+        self.closed_net.get().cloned()
+    }
+
     fn lowered(&self) -> &Arc<CoreInteractionNet> {
         self.interaction_net
             .get_or_init(|| Arc::new(lower_lambda(self.body.clone())))
@@ -81,6 +95,11 @@ impl Lambda {
     #[cfg(test)]
     pub(crate) fn is_lowered(&self) -> bool {
         self.interaction_net.get().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_closed_lowered(&self) -> bool {
+        self.closed_net.get().is_some()
     }
 }
 
@@ -228,7 +247,7 @@ impl Key {
                     .flatten()
                     .collect::<Vec<_>>(),
             ))),
-            Value::Builtin(_) | Value::PartialBuiltin(_) => None,
+            Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Net(_) => None,
             Value::Closure(_) => None,
             Value::Expr(_) => None,
         }
@@ -290,8 +309,31 @@ pub enum Value {
     Dict(Dict),
     Builtin(Builtin),
     PartialBuiltin(BuiltinCall),
+    /// A closed interaction net with one designated exposed port.
+    Net(NetValue),
+    /// Temporary expression-evaluator compatibility for lambda bodies that
+    /// still contain dictionary access.
     Closure(Closure),
     Expr(Thunk),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetValue {
+    runtime: CoreRuntimeNet,
+}
+
+impl NetValue {
+    pub fn new(runtime: CoreRuntimeNet) -> Self {
+        Self { runtime }
+    }
+
+    pub fn runtime(&self) -> &CoreRuntimeNet {
+        &self.runtime
+    }
+
+    pub fn into_runtime(self) -> CoreRuntimeNet {
+        self.runtime
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -647,6 +689,7 @@ impl Value {
                 | Value::Number(_)
                 | Value::Binary(_)
                 | Value::List(_)
+                | Value::Net(_)
                 | Value::Closure(_)
                 | Value::Builtin(_)
                 | Value::PartialBuiltin(_)

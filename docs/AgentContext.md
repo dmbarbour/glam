@@ -77,6 +77,18 @@ This document should summarize salient, relevant points rather than asking futur
   creation reuses it and captures only its environment; applying a closure must
   not re-lower its body. Logical copies materialize nodes lazily through remote
   cursors. Nested lambdas stay unlowered until reached.
+- `Value::Net` is a first-class closed net containing only a
+  `SharedRuntimeNet<CoreNetData>`. Observing it may produce ordinary data or
+  preserve a non-data normal-form net; applying it attaches the exposed port
+  through a logical-copy cursor. `CompileContext::value_net` is the checked
+  Rust construction entry point and discards the immutable template after
+  instantiation.
+- As an incremental syntax-to-net transition, `CompileContext` precompiles
+  closed leaf lambdas with no captures, nested lambdas, or accesses. They
+  evaluate directly to `Value::Net`. Captured, nested-dependent, and
+  access-containing lambdas deliberately retain `Value::Closure`, capture
+  mapping, and expression evaluation until demand can cross the second
+  logical-copy argument frontier.
 - Lambda templates contain `Bind`, binary `Fan`, `Erase`, and `Data` nodes.
   The generic topology lives in `interaction_net.rs`; core data and expression
   lowering live in `core_net.rs`.
@@ -120,6 +132,8 @@ This document should summarize salient, relevant points rather than asking futur
   support, but closure bodies containing access currently remain on the
   compatibility evaluator: nested logical copies still need an explicit way to
   forward demand to the caller-side argument frontier.
+- Preserve the current dictionary/access compatibility evaluator while a
+  persistent lazy dictionary representation is designed separately.
 - The topology reducer implements bind/fan join, fan commutation, duplication,
   and erasure rules. Core
   evaluation retains only the access-related compatibility bridge described

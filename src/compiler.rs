@@ -1,14 +1,43 @@
 use std::borrow::Cow;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::core::Builtin;
 use crate::core::{
-    Atom, DeferredValue, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value,
+    Atom, DeferredValue, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Lambda, NetValue,
+    Value,
 };
+use crate::core_net::CoreNetData;
+use crate::interaction_net::{NetBuildError, NetBuilder, Node, Port};
 use crate::number::Number;
 
 pub type ModuleLoader = Arc<dyn Fn(ModuleLoadArgs) -> Result<Value, String> + Send + Sync>;
 pub type BinaryFileLoader = Arc<dyn Fn(BinaryLoadArgs) -> Result<Value, String> + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompileNetError {
+    Build(NetBuildError),
+    OpenData,
+}
+
+impl fmt::Display for CompileNetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Build(error) => error.fmt(formatter),
+            Self::OpenData => formatter.write_str(
+                "closed interaction-net construction cannot embed lambda or capture placeholders",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CompileNetError {}
+
+impl From<NetBuildError> for CompileNetError {
+    fn from(error: NetBuildError) -> Self {
+        Self::Build(error)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryLoadArgs {
@@ -208,8 +237,36 @@ impl CompileContext {
         ))
     }
 
+    /// Constructs one closed interaction-net value. The callback returns the
+    /// net's sole exposed port; all other ports must be wired before it
+    /// returns. The immutable template exists only long enough to instantiate
+    /// the shared runtime.
+    pub fn value_net(
+        &self,
+        build: impl FnOnce(&mut NetBuilder<CoreNetData>) -> Result<Port, NetBuildError>,
+    ) -> Result<Value, CompileNetError> {
+        let mut builder = NetBuilder::new();
+        let exposed = build(&mut builder)?;
+        let template = builder.try_finish(exposed)?;
+        if template.nodes().iter().any(|node| {
+            matches!(
+                node,
+                Node::Data(CoreNetData::Lambda(_) | CoreNetData::Capture(_))
+            )
+        }) {
+            return Err(CompileNetError::OpenData);
+        }
+        let runtime = template.instantiate_shared();
+        Ok(Value::Net(NetValue::new(runtime)))
+    }
+
     pub fn value_lambda(&self, body: Value) -> Value {
-        Value::expr(CoreExpr::lambda(Arc::new(value_to_core_expr(body))))
+        let body = Arc::new(value_to_core_expr(body));
+        let lambda = Arc::new(Lambda::new(body.clone()));
+        if closed_net_lambda_body(&body) {
+            lambda.prepare_closed_net();
+        }
+        Value::expr(CoreExpr::Lambda(lambda))
     }
 
     pub fn value_local(&self, index: usize) -> Value {
@@ -325,6 +382,26 @@ fn value_to_core_expr(value: Value) -> CoreExpr {
     }
 }
 
+fn closed_net_lambda_body(expr: &CoreExpr) -> bool {
+    match expr {
+        CoreExpr::Value(value) => matches!(
+            value,
+            Value::Atom(_)
+                | Value::Number(_)
+                | Value::Binary(_)
+                | Value::Builtin(_)
+                | Value::Net(_)
+        ),
+        CoreExpr::Deferred(_) | CoreExpr::Future(_) | CoreExpr::Error(_) => true,
+        CoreExpr::List(items) => items.iter().all(|item| closed_net_lambda_body(item)),
+        CoreExpr::Apply(function, argument) => {
+            closed_net_lambda_body(function) && closed_net_lambda_body(argument)
+        }
+        CoreExpr::Local(index) => *index == 0,
+        CoreExpr::Lambda(_) | CoreExpr::Access(_, _) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +435,71 @@ mod tests {
             context.abstract_global_path_value(&["builtin".to_owned(), "unit".to_owned()])
         );
         assert_ne!(unit, forged);
+    }
+
+    #[test]
+    fn compile_context_constructs_a_closed_net_value() {
+        let context = CompileContext::default();
+        let value = context
+            .value_net(|builder| {
+                let [application, argument, result] = builder.bind();
+                builder.try_wire(argument, result)?;
+                Ok(application)
+            })
+            .unwrap();
+
+        let Value::Net(net) = value else {
+            panic!("closed net construction should produce a net value");
+        };
+        assert_eq!(net.runtime().with(|runtime| runtime.exposed().index()), 1);
+    }
+
+    #[test]
+    fn compile_context_reports_incomplete_net_construction() {
+        let context = CompileContext::default();
+        let error = context
+            .value_net(|builder| {
+                let [application, _, _] = builder.bind();
+                Ok(application)
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CompileNetError::Build(NetBuildError::PortUnwired(_))
+        ));
+    }
+
+    #[test]
+    fn compile_context_rejects_open_net_placeholders() {
+        let context = CompileContext::default();
+        let error = context
+            .value_net(|builder| Ok(builder.data(CoreNetData::Capture(0))))
+            .unwrap_err();
+
+        assert_eq!(error, CompileNetError::OpenData);
+    }
+
+    #[test]
+    fn compile_context_prepares_only_closed_leaf_lambdas_as_nets() {
+        let context = CompileContext::default();
+        let closed = context.value_lambda(context.value_local(0));
+        let captured = context.value_lambda(context.value_local(1));
+
+        let Value::Expr(closed) = closed else {
+            panic!("lambda compiler term should remain inspectable during migration");
+        };
+        let CoreExpr::Lambda(closed) = closed.expr().unwrap().as_ref() else {
+            panic!("lambda compiler term should retain its semantic wrapper");
+        };
+        let Value::Expr(captured) = captured else {
+            panic!("captured lambda should remain a compatibility expression");
+        };
+        let CoreExpr::Lambda(captured) = captured.expr().unwrap().as_ref() else {
+            panic!("captured lambda should retain its semantic wrapper");
+        };
+
+        assert!(closed.is_closed_lowered());
+        assert!(!captured.is_closed_lowered());
     }
 }

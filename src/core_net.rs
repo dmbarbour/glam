@@ -34,13 +34,143 @@ pub enum CoreNetData {
 pub type CoreInteractionNet = InteractionNet<CoreNetData>;
 pub type CoreRuntimeNet = SharedRuntimeNet<CoreNetData>;
 
+#[derive(Debug, Clone)]
+pub struct ClosedLambdaNet {
+    pub runtime: CoreRuntimeNet,
+    pub capture_count: usize,
+}
+
 pub fn lower_lambda(body: Arc<Expr>) -> CoreInteractionNet {
     Lowerer::lower_lambda(body)
+}
+
+/// Lambda-lifts every free local into an explicit leading bind, leaving one
+/// closed shared net. The original lambda argument is the final bind. Nested
+/// lambdas remain on the compatibility lowering until demand can cross a
+/// second logical-copy argument frontier.
+pub(crate) fn lower_closed_lambda(body: Arc<Expr>) -> ClosedLambdaNet {
+    ClosedLowerer::lower_lambda(body)
 }
 
 struct Lowerer {
     net: NetBuilder<CoreNetData>,
     local_uses: Vec<Vec<Port>>,
+}
+
+struct ClosedLowerer {
+    net: NetBuilder<CoreNetData>,
+    local_uses: Vec<Vec<Port>>,
+}
+
+impl ClosedLowerer {
+    fn lower_lambda(body: Arc<Expr>) -> ClosedLambdaNet {
+        let mut lowerer = Self {
+            net: NetBuilder::new(),
+            local_uses: Vec::new(),
+        };
+        let body_boundary = lowerer.net.copy(1);
+        lowerer.compile_into(&body, body_boundary.outputs[0]);
+
+        let capture_count = lowerer.local_uses.len().saturating_sub(1);
+        let mut binds = Vec::with_capacity(capture_count + 1);
+        for _ in 0..=capture_count {
+            binds.push(lowerer.net.bind());
+        }
+        for pair in binds.windows(2) {
+            lowerer.net.wire(pair[0][2], pair[1][0]);
+        }
+        lowerer.net.wire(
+            binds.last().expect("lambda always has one bind")[2],
+            body_boundary.input,
+        );
+
+        let uses = std::mem::take(&mut lowerer.local_uses);
+        for index in 0..=capture_count {
+            let targets = uses.get(index).map(Vec::as_slice).unwrap_or_default();
+            let bind_index = if index == 0 { capture_count } else { index - 1 };
+            lowerer.distribute(binds[bind_index][1], targets);
+        }
+
+        let template = lowerer.net.finish(binds[0][0]);
+        ClosedLambdaNet {
+            runtime: template.instantiate_shared(),
+            capture_count,
+        }
+    }
+
+    fn compile_into(&mut self, expr: &Expr, target: Port) {
+        match expr {
+            Expr::Value(Value::Builtin(builtin)) => {
+                self.data_into(CoreNetData::Builtin(BuiltinCall::new(*builtin)), target)
+            }
+            Expr::Value(Value::PartialBuiltin(call)) => {
+                self.data_into(CoreNetData::Builtin(call.clone()), target)
+            }
+            Expr::Value(value) => self.data_into(CoreNetData::Value(value.clone()), target),
+            Expr::List(items) => {
+                let args = items.iter().map(Arc::as_ref).collect::<Vec<_>>();
+                self.data_application_into(
+                    CoreNetData::List {
+                        arity: items.len(),
+                        arguments: Arc::from([]),
+                    },
+                    &args,
+                    target,
+                );
+            }
+            Expr::Apply(function, argument) => {
+                let [application, argument_port, result] = self.net.bind();
+                self.net.wire(result, target);
+                self.compile_into(function, application);
+                self.compile_into(argument, argument_port);
+            }
+            Expr::Lambda(_) => {
+                unreachable!("nested lambdas remain on the compatibility evaluator")
+            }
+            Expr::Local(index) => self.use_local(*index, target),
+            Expr::Access(_, _) => {
+                unreachable!("dictionary access remains on the compatibility evaluator")
+            }
+            Expr::Deferred(value) => self.data_into(CoreNetData::Deferred(value.clone()), target),
+            Expr::Future(value) => self.data_into(CoreNetData::Future(value.clone()), target),
+            Expr::Error(message) => self.data_into(CoreNetData::Error(message.clone()), target),
+        }
+    }
+
+    fn use_local(&mut self, index: usize, target: Port) {
+        if self.local_uses.len() <= index {
+            self.local_uses.resize_with(index + 1, Vec::new);
+        }
+        self.local_uses[index].push(target);
+    }
+
+    fn data_into(&mut self, data: CoreNetData, target: Port) {
+        let data = self.net.data(data);
+        self.net.wire(data, target);
+    }
+
+    fn data_application_into(&mut self, data: CoreNetData, args: &[&Expr], target: Port) {
+        if args.is_empty() {
+            self.data_into(data, target);
+            return;
+        }
+        let mut output = self.net.data(data);
+        for argument in args {
+            let [application, argument_port, result] = self.net.bind();
+            self.net.wire(output, application);
+            self.compile_into(argument, argument_port);
+            output = result;
+        }
+        self.net.wire(output, target);
+    }
+
+    fn distribute(&mut self, source: Port, targets: &[Port]) {
+        let copy = self.net.copy(targets.len());
+        self.net.wire(source, copy.input);
+        for (output, target) in copy.outputs.into_iter().zip(targets) {
+            self.net.wire(output, *target);
+        }
+    }
 }
 
 impl Lowerer {
@@ -204,5 +334,16 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn closed_lowering_lifts_free_locals_into_leading_binds() {
+        let closed = lower_closed_lambda(Arc::new(Expr::Local(1)));
+
+        assert_eq!(closed.capture_count, 1);
+        let exposed_neighbor = closed
+            .runtime
+            .with(|runtime| runtime.interface_neighbor(runtime.exposed()));
+        assert!(exposed_neighbor.is_some_and(Port::is_principal));
     }
 }

@@ -15,7 +15,9 @@
 - `main.rs` applies one temporary top-level fixpoint to the anonymous assembly module
 - `core_net.rs` lowers each reached core lambda body once, then instantiates one
   shared runtime net carrying `CoreNetData`; calls can lazily copy its normalized
-  frontier through evaluator-only remote cursors
+  frontier through evaluator-only remote cursors; CompileContext-prepared closed
+  leaf lambdas evaluate as `Value::Net`, while captured, nested-dependent, and
+  access-bearing lambdas retain the compatibility path
 - `interaction_net.rs` provides generic `InteractionNet<Data>` topology,
   checked construction through one `NetBuilder` (including fallible
   wiring/finalization and balanced copy helpers), active-pair discovery, and
@@ -29,7 +31,9 @@
 - `eval.rs` drives closure calls through runtime nets, turns blocked bind-data
   pairs into stable call frames, and represents builtin/list arguments as
   memoized semantic thunks; dictionary-access closure bodies temporarily retain
-  the call-by-need compatibility path pending cross-copy demand forwarding
+  the call-by-need compatibility path pending cross-copy demand forwarding;
+  closed net values attach their exposed ports through logical-copy cursors and
+  may normalize to either data or a non-data net frontier
 - `main` expects binary `asm.result`, writes to `stdout`
 
 At the moment, even this simple case is not fully implemented. Thus, it remains the focus for now.

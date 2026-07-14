@@ -82,6 +82,20 @@ collector.
 
 ## Remaining evaluator bridge
 
+`Value::Net` represents one closed net solely by its shared runtime; it stores
+no immutable template, capture environment, or lambda body. Nets compose by
+attaching exposed ports through remote cursors. Because an exposed computation
+may produce ordinary data rather than a bind, attachment is not intrinsically
+a call. `CompileContext::value_net` provides checked construction for Rust
+front ends and drops the immutable template after instantiation.
+
+During migration, CompileContext prepares only closed leaf lambdas with no
+captures, nested lambdas, or dictionary access. These evaluate as
+`Value::Net`. Other lambdas retain the compatibility closure path. The closed
+lowerer has a lambda-lifting foundation, but captured and nested functions must
+not use it yet: forcing lazy data through the resulting second logical copy can
+still reach an unsupplied source argument frontier.
+
 The topology reducer handles bind-bind, fan-fan, fan-bind, fan-data, and eraser
 interactions. `bind-data` reports `ReductionKind::Call`; `eval` consumes that
 blocked pair through a generic `CallFrame`, preserving the argument and result
@@ -104,3 +118,5 @@ boundary, but demand is not yet forwarded from that cursor to the caller-side
 frontier. Such closures retain `Closure::source_body` and use the expression
 evaluator. Do not expose the `interaction_net` source keyword until that
 cross-copy demand edge and general effect blocking are represented explicitly.
+The dictionary compatibility path is intentionally unchanged pending a
+separate persistent lazy dictionary design.
