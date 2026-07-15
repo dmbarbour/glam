@@ -86,9 +86,7 @@ fn eval_thunk(thunk: &Thunk) -> Result<Value, EvalError> {
     if let Some(result) = thunk.cached() {
         return result.map_err(|message| EvalError::new(message.as_ref()));
     }
-    let result = if let Some(net) = thunk.net() {
-        drive_core_net(net.runtime.clone(), net.interface)
-    } else if let Some((path, arguments)) = thunk.access() {
+    let result = if let Some((path, arguments)) = thunk.access() {
         resolve_core_access(arguments, path)
     } else if let Some(call) = thunk.builtin() {
         let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
@@ -517,6 +515,7 @@ fn drive_core_net_inner(
             net.blocked_calls().is_empty()
                 && net.claimed_host_calls().is_empty()
                 && net.blocked_cursors().is_empty()
+                && net.claimed_pairs().next().is_none()
                 && net.stuck_pairs().next().is_none()
         });
         if scheduler_is_empty {
@@ -650,80 +649,81 @@ fn progress_exact_core_pair(
     Ok(false)
 }
 
+enum LoweredCoreApplicable {
+    Net(crate::core_net::CoreRuntimeNet),
+    HostFn(HostFn<CoreNetData>),
+}
+
+fn lower_core_applicable(data: CoreNetData) -> Result<LoweredCoreApplicable, EvalError> {
+    match data {
+        CoreNetData::Value(value) => lower_core_applicable_value(value),
+        CoreNetData::Builtin(call) => Ok(LoweredCoreApplicable::HostFn(builtin_host_fn(call))),
+        CoreNetData::Deferred(value) => {
+            let value = value
+                .force()
+                .map_err(|message| EvalError::new(message.as_ref()))?;
+            lower_core_applicable_value(value)
+        }
+        CoreNetData::Future(value) => {
+            let value = value
+                .get()
+                .cloned()
+                .ok_or_else(|| EvalError::new("future was observed before initialization"))?;
+            lower_core_applicable_value(value)
+        }
+        CoreNetData::Error(message) => Err(EvalError::new(message.as_ref())),
+    }
+}
+
+fn lower_core_applicable_value(value: Value) -> Result<LoweredCoreApplicable, EvalError> {
+    let value = if matches!(value, Value::Expr(_)) {
+        force_value_shell(&value)?
+    } else {
+        value
+    };
+    match value {
+        Value::Net(net) => Ok(LoweredCoreApplicable::Net(net.into_runtime())),
+        Value::Builtin(builtin) => Ok(LoweredCoreApplicable::HostFn(builtin_host_fn(
+            BuiltinCall::new(builtin),
+        ))),
+        Value::PartialBuiltin(call) => Ok(LoweredCoreApplicable::HostFn(builtin_host_fn(call))),
+        value @ (Value::Closure(_) | Value::Dict(_)) => Ok(LoweredCoreApplicable::HostFn(
+            core_applicable_host_fn(value),
+        )),
+        Value::Atom(_) | Value::Number(_) | Value::Binary(_) | Value::List(_) => {
+            Err(EvalError::new("application requires a function value"))
+        }
+        Value::Expr(_) => unreachable!("callable value shell must be fully forced"),
+    }
+}
+
 fn progress_exact_core_call(
     runtime: &crate::core_net::CoreRuntimeNet,
     call: BlockedCall,
 ) -> Result<bool, EvalError> {
-    let callable_is_net =
-        runtime.with(|net| matches!(net.call_data(call), CoreNetData::Value(Value::Net(_))));
-    if callable_is_net {
-        handle_core_call(runtime, call)?;
-        return Ok(true);
-    }
-
-    let callable_captures_lazy_argument = runtime.with(|net| {
-        matches!(
-            net.call_data(call),
-            CoreNetData::Builtin(_)
-                | CoreNetData::Value(Value::Builtin(_))
-                | CoreNetData::Value(Value::PartialBuiltin(_))
-        )
-    });
-    let argument_is_embedded_data =
-        runtime.with(|net| net.compatibility_call_argument_data(call).is_some());
-    if callable_captures_lazy_argument
-        && !argument_is_embedded_data
-        && runtime.with(|net| net.compatibility_call_argument_cursor(call).is_some())
-    {
-        if let Some(progress) = runtime.with_mut(|net| net.compatibility_demand_call_argument(call))
-        {
-            let cursor = runtime.with(|net| net.compatibility_call_argument_cursor(call));
-            let progress = finish_core_cursor_claim(
-                runtime,
-                cursor.expect("demanded call cursor must exist"),
-                progress,
-            );
-            if !matches!(progress, crate::interaction_net::CursorProgress::Blocked) {
-                return Ok(true);
-            }
-            if let Some(cursor) = cursor {
-                if progress_cursor_dependency(runtime, cursor, 0)? {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-
-    let exposes_unsupplied_bind = runtime.with(|net| {
-        net.port_neighbor(net.exposed()).is_some_and(|port| {
-            port.is_principal()
-                && matches!(
-                    net.node(port.node()),
-                    Some(crate::interaction_net::RuntimeNode::Bind)
-                )
-        })
-    });
-    let may_detach_lazy_argument = callable_captures_lazy_argument && !exposes_unsupplied_bind;
-    if argument_is_embedded_data || may_detach_lazy_argument {
-        handle_core_call(runtime, call)?;
-        return Ok(true);
-    }
-
-    if let Some(progress) = runtime.with_mut(|net| net.compatibility_demand_call_argument(call)) {
-        let cursor = runtime.with(|net| net.compatibility_call_argument_cursor(call));
-        let progress = finish_core_cursor_claim(
-            runtime,
-            cursor.expect("demanded call cursor must exist"),
-            progress,
-        );
-        if !matches!(progress, crate::interaction_net::CursorProgress::Blocked) {
+    let Some(callable) = runtime.with_mut(|net| net.claim_call(call)) else {
+        return Ok(false);
+    };
+    match lower_core_applicable(callable) {
+        Ok(LoweredCoreApplicable::Net(source)) => {
+            runtime.with_mut(|net| {
+                net.resume_claimed_call_with_copy(call, source);
+            });
             return Ok(true);
         }
-        if let Some(cursor) = cursor {
-            return progress_cursor_dependency(runtime, cursor, 0);
+        Ok(LoweredCoreApplicable::HostFn(host_fn)) => {
+            runtime.with_mut(|net| {
+                net.resume_claimed_call_with_host_fn(call, host_fn);
+            });
+            return Ok(true);
+        }
+        Err(error) => {
+            runtime.with_mut(|net| {
+                net.fail_claimed_call(call, Arc::<str>::from(error.to_string()));
+            });
+            return Err(error);
         }
     }
-    Ok(false)
 }
 
 fn handle_core_reduction(
@@ -831,88 +831,6 @@ fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
     }
 }
 
-fn handle_core_call(
-    runtime: &crate::core_net::CoreRuntimeNet,
-    call: BlockedCall,
-) -> Result<(), EvalError> {
-    let callable = runtime.with(|net| net.call_data(call).clone());
-    match callable {
-        CoreNetData::Value(Value::Net(net)) => {
-            runtime.with_mut(|runtime| {
-                runtime.resume_call_with_copy(call, net.into_runtime());
-            });
-            return Ok(());
-        }
-        CoreNetData::Builtin(builtin) => return handle_core_builtin_call(runtime, call, builtin),
-        CoreNetData::Value(Value::Builtin(builtin)) => {
-            return handle_core_builtin_call(runtime, call, BuiltinCall::new(builtin));
-        }
-        CoreNetData::Value(Value::PartialBuiltin(builtin)) => {
-            return handle_core_builtin_call(runtime, call, builtin);
-        }
-        _ => {}
-    }
-    let argument = runtime.with(|net| net.compatibility_call_argument_data(call).cloned());
-    let Some(argument) = argument else {
-        return Err(EvalError::new(
-            "interaction-net call argument did not reduce to embedded data",
-        ));
-    };
-    let argument = core_data_to_lazy_value(argument)?;
-
-    match callable {
-        CoreNetData::Builtin(_) => unreachable!(),
-        CoreNetData::Value(function) => {
-            let value = apply_value(function, argument, &[])?;
-            complete_core_call(runtime, call, CoreNetData::Value(value));
-            Ok(())
-        }
-        CoreNetData::Deferred(_) | CoreNetData::Future(_) | CoreNetData::Error(_) => Err(
-            EvalError::new("interaction-net data is not callable in this evaluator slice"),
-        ),
-    }
-}
-
-fn handle_core_builtin_call(
-    runtime: &crate::core_net::CoreRuntimeNet,
-    call: BlockedCall,
-    mut builtin: BuiltinCall,
-) -> Result<(), EvalError> {
-    let (frame, argument) = take_core_call_argument(runtime, call)?;
-    let mut arguments = builtin.arguments.iter().cloned().collect::<Vec<_>>();
-    arguments.push(argument);
-    if arguments.len() < builtin.builtin.arity() {
-        builtin.arguments = Arc::from(arguments);
-        runtime.with_mut(|net| {
-            net.complete_interface_with_data(frame.result, CoreNetData::Builtin(builtin));
-        });
-        return Ok(());
-    }
-    builtin.arguments = Arc::from(arguments);
-    let value = Value::Expr(Thunk::from_builtin(builtin));
-    runtime.with_mut(|net| {
-        net.complete_interface_with_data(frame.result, CoreNetData::Value(value));
-    });
-    Ok(())
-}
-
-fn take_core_call_argument(
-    runtime: &crate::core_net::CoreRuntimeNet,
-    call: BlockedCall,
-) -> Result<(crate::interaction_net::CallFrame<CoreNetData>, Value), EvalError> {
-    let embedded_argument = runtime.with(|net| net.compatibility_call_argument_data(call).cloned());
-    let frame = runtime.with_mut(|net| net.take_call(call));
-    let argument = if let Some(data) = embedded_argument {
-        runtime
-            .with_mut(|net| net.take_interface_data(frame.argument))
-            .expect("observed core argument must remain embedded data");
-        core_data_to_lazy_value(data)?
-    } else {
-        Value::Expr(Thunk::from_net(runtime.clone(), frame.argument))
-    };
-    Ok((frame, argument))
-}
-
 fn resolve_core_access(arguments: &[Value], path: &[CoreDataKey]) -> Result<Value, EvalError> {
     let mut current = arguments
         .first()
@@ -986,6 +904,16 @@ pub(crate) fn builtin_host_fn(call: BuiltinCall) -> HostFn<CoreNetData> {
     })
 }
 
+fn core_applicable_host_fn(function: Value) -> HostFn<CoreNetData> {
+    HostFn::new("core applicable", move |data: &CoreNetData| {
+        let argument = core_data_to_lazy_value(data.clone())
+            .map_err(|error| Arc::<str>::from(error.to_string()))?;
+        let result = apply_value(function.clone(), argument, &[])
+            .map_err(|error| Arc::<str>::from(error.to_string()))?;
+        Ok(HostFnYield::Data(CoreNetData::Value(result)))
+    })
+}
+
 pub(crate) fn list_host_fn(arity: usize, supplied: Arc<[Value]>) -> HostFn<CoreNetData> {
     assert!(supplied.len() < arity);
     HostFn::new("list literal", move |data: &CoreNetData| {
@@ -1030,19 +958,6 @@ pub(crate) fn access_host_fn(
             Thunk::from_access(path.clone(), Arc::from(arguments)),
         ))))
     })
-}
-
-fn complete_core_call(
-    runtime: &crate::core_net::CoreRuntimeNet,
-    call: BlockedCall,
-    result: CoreNetData,
-) {
-    runtime.with_mut(|net| {
-        let frame = net.take_call(call);
-        net.take_interface_data(frame.argument)
-            .expect("core call argument must remain embedded data");
-        net.complete_interface_with_data(frame.result, result);
-    });
 }
 
 fn apply_builtin(
@@ -3636,7 +3551,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_partial_builtins_share_lazy_arguments() {
+    fn net_partial_builtins_share_lazy_arguments() {
         let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = force_count.clone();
         let argument = Expr::Deferred(Arc::new(DeferredValue::new(
@@ -3653,7 +3568,7 @@ mod tests {
         let partial = eval_closed_expr(&Expr::Apply(Arc::new(make_partial), Arc::new(argument)))
             .expect("a partial builtin should retain its argument lazily");
 
-        assert!(matches!(partial, Value::PartialBuiltin(_)));
+        assert!(matches!(partial, Value::Net(_)));
         assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(apply_value(partial.clone(), n(2), &[]).unwrap(), n(42));
         assert_eq!(apply_value(partial, n(3), &[]).unwrap(), n(43));

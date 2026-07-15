@@ -77,7 +77,10 @@ fn closed_expr_is_net_safe(expr: &Expr, arity: usize) -> bool {
             .iter()
             .all(|item| closed_expr_is_net_safe(item, arity)),
         Expr::Local(index) => *index < arity,
-        Expr::Apply(_, _) | Expr::Lambda(_) | Expr::Access(_, _) => false,
+        Expr::Apply(function, argument) => {
+            closed_expr_is_net_safe(function, arity) && closed_expr_is_net_safe(argument, arity)
+        }
+        Expr::Lambda(_) | Expr::Access(_, _) => false,
     }
 }
 

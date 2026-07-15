@@ -7,7 +7,6 @@ use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
 use crate::core_net::{ClosedLambdaNet, CoreDataKey, CoreRuntimeNet, lower_closed_lambda};
-use crate::interaction_net::Port;
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,36 +324,6 @@ impl PartialEq for Closure {
 impl Eq for Closure {}
 
 #[derive(Clone)]
-pub struct NetThunk {
-    pub(crate) runtime: CoreRuntimeNet,
-    pub(crate) interface: Port,
-}
-
-impl NetThunk {
-    pub(crate) fn new(runtime: CoreRuntimeNet, interface: Port) -> Self {
-        Self { runtime, interface }
-    }
-}
-
-impl PartialEq for NetThunk {
-    fn eq(&self, other: &Self) -> bool {
-        self.runtime.ptr_eq(&other.runtime) && self.interface == other.interface
-    }
-}
-
-impl Eq for NetThunk {}
-
-impl fmt::Debug for NetThunk {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("NetThunk")
-            .field("runtime", &self.runtime)
-            .field("interface", &self.interface)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone)]
 pub struct Thunk {
     source: ThunkSource,
     result: Arc<OnceLock<Result<Value, Arc<str>>>>,
@@ -366,7 +335,6 @@ enum ThunkSource {
         expr: Arc<Expr>,
         env: Arc<[Value]>,
     },
-    Net(NetThunk),
     Access {
         path: Arc<[CoreDataKey]>,
         arguments: Arc<[Value]>,
@@ -378,13 +346,6 @@ impl Thunk {
     pub fn new(expr: Arc<Expr>, env: Arc<[Value]>) -> Self {
         Self {
             source: ThunkSource::Expr { expr, env },
-            result: Arc::new(OnceLock::new()),
-        }
-    }
-
-    pub(crate) fn from_net(runtime: CoreRuntimeNet, interface: Port) -> Self {
-        Self {
-            source: ThunkSource::Net(NetThunk::new(runtime, interface)),
             result: Arc::new(OnceLock::new()),
         }
     }
@@ -406,14 +367,14 @@ impl Thunk {
     pub fn expr(&self) -> Option<&Arc<Expr>> {
         match &self.source {
             ThunkSource::Expr { expr, .. } => Some(expr),
-            ThunkSource::Net(_) | ThunkSource::Access { .. } | ThunkSource::Builtin(_) => None,
+            ThunkSource::Access { .. } | ThunkSource::Builtin(_) => None,
         }
     }
 
     pub fn env(&self) -> Option<&Arc<[Value]>> {
         match &self.source {
             ThunkSource::Expr { env, .. } => Some(env),
-            ThunkSource::Net(_) | ThunkSource::Access { .. } | ThunkSource::Builtin(_) => None,
+            ThunkSource::Access { .. } | ThunkSource::Builtin(_) => None,
         }
     }
 
@@ -429,24 +390,17 @@ impl Thunk {
             .clone()
     }
 
-    pub(crate) fn net(&self) -> Option<&NetThunk> {
-        match &self.source {
-            ThunkSource::Net(thunk) => Some(thunk),
-            ThunkSource::Expr { .. } | ThunkSource::Access { .. } | ThunkSource::Builtin(_) => None,
-        }
-    }
-
     pub(crate) fn access(&self) -> Option<(&[CoreDataKey], &[Value])> {
         match &self.source {
             ThunkSource::Access { path, arguments } => Some((path, arguments)),
-            ThunkSource::Expr { .. } | ThunkSource::Net(_) | ThunkSource::Builtin(_) => None,
+            ThunkSource::Expr { .. } | ThunkSource::Builtin(_) => None,
         }
     }
 
     pub(crate) fn builtin(&self) -> Option<&BuiltinCall> {
         match &self.source {
             ThunkSource::Builtin(call) => Some(call),
-            ThunkSource::Expr { .. } | ThunkSource::Net(_) | ThunkSource::Access { .. } => None,
+            ThunkSource::Expr { .. } | ThunkSource::Access { .. } => None,
         }
     }
 }
@@ -467,7 +421,6 @@ impl fmt::Debug for Thunk {
                 .field("expr", expr)
                 .field("env", env)
                 .finish_non_exhaustive(),
-            ThunkSource::Net(thunk) => thunk.fmt(f),
             ThunkSource::Access { path, arguments } => f
                 .debug_struct("AccessThunk")
                 .field("path", path)

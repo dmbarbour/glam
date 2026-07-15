@@ -94,8 +94,8 @@ a call. `CompileContext::value_net` provides checked construction for Rust
 front ends and drops the immutable template after instantiation.
 
 During migration, CompileContext prepares closed curried lambda spines with no
-captures, nested function values, dictionary access, or general application
-bodies. A source lambda such as
+captures, nested function values, or dictionary access. General application
+bodies lower recursively to Bind topology. A source lambda such as
 `\x y z -> ...` is constructed in one compiler call and lowers to one runtime
 net containing three leading binds, rather than preparing a net per semantic
 lambda wrapper. Partial application exposes the next bind in that same net.
@@ -128,8 +128,8 @@ mutex while the active pair is claimed. Success emits Data or a new HostFn
 automatically wrapped behind a Bind; failure retains the intact pair and
 diagnostic in keyed stuck state. There is no retryable HostFn outcome. Core
 builtin expressions lowered into nets use this path, although saturated work
-remains a memoized semantic thunk and direct evaluator builtin values retain a
-compatibility path.
+remains a memoized semantic thunk. Dynamically obtained builtins and partial
+builtins are also converted to an explicit Bind backed by HostFn.
 
 Application spines use the dual construction. `NetBuilder::bind_spine` is
 shared by lambda lowering and evaluator-owned caller nets. `g_syntax` lowers a
@@ -140,19 +140,19 @@ runtime for `Value::Net`. Closures and other compatibility-only callables remain
 sequential.
 
 The topology reducer handles bind-bind, fan-fan, fan-bind, fan-data, and eraser
-interactions. `bind-data` reports `ReductionKind::Call`; `eval` consumes that
-blocked pair through a generic `CallFrame`, preserving the argument and result
-wires behind stable interfaces. Whether lazy arguments may detach is determined
-from the current exposed bind topology, not historical imported-copy state.
-Source `Data >< Bind` calls remain exact source dependencies and are never
-copied. `compatibility_call_argument_data` remains the only content inspection
-through an ordinary auxiliary port, confined to target-local evaluator calls.
+interactions. `bind-data` reports `ReductionKind::Call`; `eval` claims that exact
+pair and lowers only its callable data outside the runtime lock. A net
+loads through a cursor, while a builtin head becomes Bind/HostFn and proceeds
+through the ordinary bind join. Compatibility closures and dict applicables
+become the same Bind/HostFn shape using a host applicable callback. No path
+inspects or detaches the argument. Source `Data >< Bind` calls remain exact
+source dependencies and are never copied.
 
-Core thunks can be backed by an expression, a runtime/interface pair, or a
-semantic builtin/access computation. All forms share one memoized
-result. Builtins are callable `CoreNetData`, partial applications retain shared
-thunks, and saturated calls emit a semantic thunk so unrelated source-pair
-progress does not force strict work before its result is demanded. List and
+Core thunks can be backed by an expression or a semantic builtin/access
+computation. All forms share one memoized result. Partial builtin application
+now produces a closed net and retains shared thunks; saturated calls emit a
+semantic thunk so unrelated source-pair progress does not force strict work
+before its result is demanded. List and
 Access lowering use HostFn chains. A list HostFn can store an embedded lazy
 `Value`, including `Value::Net`, but cannot export a list hole backed by a
 runtime/interface wire. More generally, the core HostFn boundary rejects any
@@ -162,10 +162,10 @@ permanently stuck.
 Only `Value::Net` uses cursor application. Compatibility closures retain
 `Closure::source_body` and use the expression evaluator; they no longer carry a
 compatibility runtime or data-mapping capture substitution. Automatic closed-
-net preparation currently excludes general application bodies because the
-remaining composition/effect compatibility path can form a blocked-call/cursor
-dependency cycle. This is evaluator policy work rather than missing cursor
-provenance. Do not expose the `interaction_net` source keyword until that policy
-and general effect blocking are represented explicitly.
+net preparation now includes general application bodies. Applicable lowering
+resolves the former composition dependency cycle without moving
+an active pair or caller-specific argument into the shared source. Do not expose
+the `interaction_net` source keyword until general construction effects are
+represented explicitly.
 The dictionary compatibility path is intentionally unchanged pending a
 separate persistent lazy dictionary design.

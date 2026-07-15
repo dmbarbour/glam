@@ -86,8 +86,8 @@ This document should summarize salient, relevant points rather than asking futur
   Rust construction entry point and discards the immutable template after
   instantiation.
 - As an incremental syntax-to-net transition, `CompileContext` precompiles
-  closed lambda spines with no captures, nested function values, accesses, or
-  general application bodies.
+  closed lambda spines with no captures, nested function values, or accesses.
+  General application bodies lower recursively to `Bind` topology.
   `g_syntax` constructs a multi-parameter lambda through one batched compiler
   call, so intermediate semantic lambda wrappers do not each prepare a net.
   Captured, nested-dependent, and access-containing lambdas deliberately retain
@@ -142,14 +142,14 @@ This document should summarize salient, relevant points rather than asking futur
   after which the ordinary Erase rule handles the copied agent. When an
   auxiliary has no corresponding local principal cursor yet, dependency
   inspection follows the source principal chain to an exact active pair.
-- A blocked bind-data pair can be consumed as a generic `CallFrame`; its
-  argument and result survive behind independently stable interfaces. Core
-  thunks may name one of those runtime/interface pairs, and memoize both values
-  and errors without introducing a new language-level `Value` variant. A
-  `Data >< Bind` and every other source active pair remain source dependencies;
-  active pairs are never copied across a cursor boundary.
-  `compatibility_call_argument_data` remains a target-local evaluator bridge
-  and the sole content inspection through an ordinary auxiliary port.
+- A blocked `Data >< Bind` pair claims its exact pair while `eval` lowers only
+  the callable data to an applicable agent outside the runtime lock. A `Value::Net`
+  loads through a cursor without inspecting the argument. Builtins and partial
+  builtins lower to an explicit unary `Bind` backed by `HostFn`, after which the
+  ordinary bind-join rule applies. Compatibility closures and dict applicables
+  lower to the same shape using a host applicable callback. Source active pairs
+  remain exact dependencies and are never copied across a cursor boundary; the
+  evaluator no longer inspects an application argument through `Bind.aux1`.
 - `HostFn<Data>` is a generic unary agent with a principal data input and one
   result auxiliary. Its active pair is claimed while its callback runs outside
   the runtime mutex. The callback either emits `Data`, emits another
@@ -157,10 +157,9 @@ This document should summarize salient, relevant points rather than asking futur
   with a diagnostic; there is no retryable blocking state. Core builtin
   expressions lowered into nets use HostFn currying. Saturated builtins still emit
   memoized semantic thunks, so unrelated exact source-pair progress does not
-  force strict builtin work until its result is observed. Direct evaluator
-  builtin values retain the compatibility path. A runtime that still exposes
-  an unsupplied bind may not detach lazy call arguments yet; later parameters
-  in the same bind spine are not captures.
+  force strict builtin work until its result is observed. Dynamically obtained
+  builtin values also lower to the same Bind/HostFn form; applicable lowering
+  never detaches an argument from shared topology.
 - `g_syntax` and `CompileContext::value_apply_many` preserve maximal
   left-associated application spines such as `f x y z`. The expression
   evaluator peels such a spine before evaluation and supplies all remaining
@@ -171,18 +170,17 @@ This document should summarize salient, relevant points rather than asking futur
   `Data`. A list HostFn accepts only embedded values and stores lazy values as
   ordinary list values; it never exports a runtime/interface-backed list hole.
   The core HostFn boundary rejects any returned `Value::List` that already
-  contains a structural lazy hole, leaving the call permanently stuck.
-  General application bodies are temporarily excluded from automatic closed-
-  net preparation. After repairing cursor erasure and principal-chain demand,
-  re-enabling them still exposes a blocked-call/cursor dependency cycle in the
-  remaining composition/effect compatibility path. Treat that as evaluator
-  policy work, not missing cursor provenance or mapped-node bookkeeping.
+  contains a structural lazy hole, leaving the call permanently stuck. General
+  application bodies are enabled for automatic closed-net preparation; lowering
+  a lazy callable before touching its argument resolves the former composition
+  cursor dependency cycle.
 - Preserve the current dictionary/access compatibility evaluator while a
   persistent lazy dictionary representation is designed separately.
 - The topology reducer implements bind/fan join, fan commutation, duplication,
   and erasure rules. Core
-  evaluation retains only the access-related compatibility bridge described
-  above. Complete that before exposing the `interaction_net` keyword.
+  evaluation retains the applicable lowering bridge described above.
+  Complete the remaining syntax transition before exposing the
+  `interaction_net` keyword.
 
 ### Configuration Fixtures
 

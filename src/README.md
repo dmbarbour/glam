@@ -57,11 +57,10 @@ The current interaction-net slice establishes the lambda-to-shared-net boundary
 without exposing syntax. Templates use local fan sites and each runtime graph
 gets one fresh namespace. The current oracle records dynamic duplication paths
 directly; it provides reference semantics for replacing those histories with
-Lamping-style bracket/croissant control interactions. Builtin currying and
-closed list construction now cross the net runtime boundary. General
-application bodies remain on compatibility evaluation while the remaining
-composition/effect path can form a blocked-call/cursor dependency cycle. Cursor
-erasure now uses ordinary materialization and Erase interactions; no erased
-frontier state or mapped-node history is required. The evaluator policy for
-that cycle and general construction effects still belong before adding the
-`interaction_net` keyword.
+Lamping-style bracket/croissant control interactions. Builtin currying, closed
+list construction, and general application bodies now cross the net runtime
+boundary. Blocked callable data is claimed and lowered without touching its
+argument: nets load through cursors, while builtins lower to Bind/HostFn
+topology. Cursor erasure uses ordinary materialization and Erase interactions;
+no erased frontier state or mapped-node history is required. General
+construction effects still belong before adding the `interaction_net` keyword.

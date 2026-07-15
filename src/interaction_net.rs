@@ -825,13 +825,6 @@ pub struct StuckPair {
     pub reason: StuckReason,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallFrame<D> {
-    pub callable: D,
-    pub argument: Port,
-    pub result: Port,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockedCursor {
     pub pair: ActivePairKey,
@@ -960,6 +953,7 @@ pub struct RuntimeNet<D> {
     // both deterministic next-work selection and exact dependency progress.
     ready: BTreeSet<ActivePairKey>,
     calls: BTreeMap<ActivePairKey, BlockedCall>,
+    claimed_calls: BTreeMap<ActivePairKey, BlockedCall>,
     claimed_host_calls: BTreeMap<ActivePairKey, HostCall>,
     blocked_cursors: BTreeMap<ActivePairKey, BlockedCursor>,
     stuck: BTreeMap<ActivePairKey, StuckReason>,
@@ -1009,6 +1003,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             claimed_cursors: BTreeMap::new(),
             ready: BTreeSet::new(),
             calls: BTreeMap::new(),
+            claimed_calls: BTreeMap::new(),
             claimed_host_calls: BTreeMap::new(),
             blocked_cursors: BTreeMap::new(),
             stuck: BTreeMap::new(),
@@ -1034,6 +1029,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             claimed_cursors: BTreeMap::new(),
             ready: BTreeSet::new(),
             calls: BTreeMap::new(),
+            claimed_calls: BTreeMap::new(),
             claimed_host_calls: BTreeMap::new(),
             blocked_cursors: BTreeMap::new(),
             stuck: BTreeMap::new(),
@@ -1045,6 +1041,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             .iter()
             .copied()
             .chain(self.calls.keys().copied())
+            .chain(self.claimed_calls.keys().copied())
             .chain(self.claimed_host_calls.keys().copied())
             .chain(self.blocked_cursors.keys().copied())
             .chain(self.claimed_cursors.values().copied().flatten())
@@ -1081,9 +1078,10 @@ impl<D: Clone + 'static> RuntimeNet<D> {
     /// Active pairs temporarily removed from scheduler ownership while work
     /// proceeds without holding this runtime's mutex.
     pub fn claimed_pairs(&self) -> impl Iterator<Item = ActivePairKey> + '_ {
-        self.claimed_host_calls
+        self.claimed_calls
             .keys()
             .copied()
+            .chain(self.claimed_host_calls.keys().copied())
             .chain(self.claimed_cursors.values().copied().flatten())
     }
 
@@ -1119,57 +1117,35 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         self.nodes.get(&id).map(|entry| &entry.node)
     }
 
-    pub fn call_data(&self, call: BlockedCall) -> &D {
-        assert_eq!(
-            self.calls.get(&call.pair),
-            Some(&call),
-            "call must still be blocked"
-        );
-        match self.node(call.data) {
-            Some(RuntimeNode::Data(data)) => data,
-            _ => panic!("blocked call data node must exist"),
-        }
-    }
-
-    /// Compatibility bridge for evaluator-owned Bind/Data calls. This is the
-    /// sole remaining content inspection through an ordinary agent auxiliary;
-    /// an explicit lazy-argument agent should eventually replace it.
-    pub fn compatibility_call_argument_data(&self, call: BlockedCall) -> Option<&D> {
-        assert_eq!(
-            self.calls.get(&call.pair),
-            Some(&call),
-            "call must still be blocked"
-        );
-        let argument = self.neighbor(Port::auxiliary(call.bind, 1))?;
-        if !argument.is_principal() {
+    /// Claims one call while its callable data is lowered to an applicable
+    /// without holding the runtime lock. The topology remains intact and the
+    /// pair stays visible through `claimed_pairs`.
+    pub fn claim_call(&mut self, call: BlockedCall) -> Option<D> {
+        if self.calls.get(&call.pair) != Some(&call) {
             return None;
         }
-        match self.node(argument.node())? {
-            RuntimeNode::Data(data) => Some(data),
-            _ => None,
-        }
+        let callable = match self.node(call.data) {
+            Some(RuntimeNode::Data(data)) => data.clone(),
+            _ => panic!("blocked call data node must exist"),
+        };
+        assert_eq!(self.calls.remove(&call.pair), Some(call));
+        assert!(self.claimed_calls.insert(call.pair, call).is_none());
+        Some(callable)
     }
 
-    pub fn compatibility_demand_call_argument(
-        &mut self,
-        call: BlockedCall,
-    ) -> Option<CursorProgress> {
+    /// Leaves a claimed call permanently stuck after applicable lowering
+    /// fails.
+    pub fn fail_claimed_call(&mut self, call: BlockedCall, error: Arc<str>) {
         assert_eq!(
-            self.calls.get(&call.pair),
-            Some(&call),
-            "call must still be blocked"
+            self.claimed_calls.remove(&call.pair),
+            Some(call),
+            "failed call must still be claimed"
         );
-        let cursor = self.cursor_across(Port::auxiliary(call.bind, 1))?;
-        self.begin_cursor_claim(cursor, None)
-    }
-
-    pub fn compatibility_call_argument_cursor(&self, call: BlockedCall) -> Option<NodeId> {
-        assert_eq!(
-            self.calls.get(&call.pair),
-            Some(&call),
-            "call must still be blocked"
+        assert!(
+            self.stuck
+                .insert(call.pair, StuckReason::HostError(error))
+                .is_none()
         );
-        self.cursor_across(Port::auxiliary(call.bind, 1))
     }
 
     /// Clones a pending host transition so the host callback can run without
@@ -1497,6 +1473,25 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             Some(call),
             "resumed interaction-net call must still be blocked"
         );
+        self.attach_call_to_copy(call, source)
+    }
+
+    /// Completes claimed applicable lowering by loading the
+    /// resulting closed net at the original application's principal port.
+    pub fn resume_claimed_call_with_copy(
+        &mut self,
+        call: BlockedCall,
+        source: SharedRuntimeNet<D>,
+    ) -> NodeId {
+        assert_eq!(
+            self.claimed_calls.remove(&call.pair),
+            Some(call),
+            "resumed interaction-net call must still be claimed"
+        );
+        self.attach_call_to_copy(call, source)
+    }
+
+    fn attach_call_to_copy(&mut self, call: BlockedCall, source: SharedRuntimeNet<D>) -> NodeId {
         assert_eq!(
             self.disconnect(Port::principal(call.bind)),
             Some(Port::principal(call.data))
@@ -1507,30 +1502,31 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         cursor
     }
 
-    /// Removes a blocked bind-data pair and preserves its argument and result
-    /// wires behind stable evaluator interfaces.
-    pub fn take_call(&mut self, call: BlockedCall) -> CallFrame<D> {
+    /// Completes applicable lowering by replacing callable data with
+    /// an explicit unary function net. The newly introduced Bind then joins
+    /// the original application Bind through the ordinary interaction rule.
+    pub fn resume_claimed_call_with_host_fn(
+        &mut self,
+        call: BlockedCall,
+        host_fn: HostFn<D>,
+    ) -> NodeId {
         assert_eq!(
-            self.calls.remove(&call.pair),
+            self.claimed_calls.remove(&call.pair),
             Some(call),
-            "taken interaction-net call must still be blocked"
+            "lowered host call must still be claimed"
         );
         assert_eq!(
             self.disconnect(Port::principal(call.bind)),
             Some(Port::principal(call.data))
         );
-        let RuntimeNode::Data(callable) = self.remove_node(call.data) else {
-            unreachable!();
-        };
-        let mut auxiliaries = self.take_auxiliaries(call.bind, 2).into_iter();
-        let argument = auxiliaries.next().unwrap();
-        let result = auxiliaries.next().unwrap();
-        self.remove_node(call.bind);
-        CallFrame {
-            callable,
-            argument: self.add_interface(argument),
-            result: self.add_interface(result),
-        }
+        assert!(matches!(self.remove_node(call.data), RuntimeNode::Data(_)));
+
+        let function = self.add_node(RuntimeNode::Bind);
+        let host = self.add_node(RuntimeNode::HostFn(host_fn));
+        self.connect(Port::principal(call.bind), Port::principal(function));
+        self.connect(Port::auxiliary(function, 1), Port::principal(host));
+        self.connect(Port::auxiliary(function, 2), Port::auxiliary(host, 1));
+        function
     }
 
     /// Consumes an interface whose neighbor is embedded data.
@@ -2111,6 +2107,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         };
         self.ready.remove(&pair);
         self.calls.remove(&pair);
+        self.claimed_calls.remove(&pair);
         self.claimed_host_calls.remove(&pair);
         self.blocked_cursors.remove(&pair);
         self.stuck.remove(&pair);
@@ -2522,6 +2519,58 @@ mod tests {
             }]
         );
         assert_eq!(stuck.reduce_next(), None);
+    }
+
+    #[test]
+    fn claimed_callable_data_lowers_to_an_explicit_host_function_bind() {
+        let mut net = RuntimeNet::empty();
+        let application = net.add_node(RuntimeNode::Bind);
+        let callable = net.add_node(RuntimeNode::Data(0));
+        let argument = net.add_node(RuntimeNode::Data(41));
+        let interface = net.add_node(RuntimeNode::Interface);
+        let result = Port::auxiliary(interface, 1);
+        net.connect(Port::principal(application), Port::principal(callable));
+        net.connect(Port::auxiliary(application, 1), Port::principal(argument));
+        net.connect(Port::auxiliary(application, 2), result);
+
+        let reduction = net.reduce_next().expect("bind-data must block as a call");
+        let ReductionKind::Call { bind, data } = reduction.kind else {
+            panic!("expected a blocked call");
+        };
+        let call = BlockedCall {
+            pair: reduction.pair,
+            bind,
+            data,
+        };
+        assert_eq!(net.claim_call(call), Some(0));
+        assert_eq!(net.claimed_pairs().collect::<Vec<_>>(), vec![call.pair]);
+
+        net.resume_claimed_call_with_host_fn(
+            call,
+            HostFn::new("increment", |value| Ok(HostFnYield::Data(value + 1))),
+        );
+        assert!(net.claimed_pairs().next().is_none());
+        assert!(matches!(
+            net.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::BindJoin,
+                ..
+            })
+        ));
+        let host_call = match net.reduce_next() {
+            Some(Reduction {
+                kind: ReductionKind::HostCall { host_fn, data },
+                pair,
+            }) => HostCall {
+                pair,
+                host_fn,
+                data,
+            },
+            other => panic!("expected host call, got {other:?}"),
+        };
+        let (host_fn, data) = net.host_call_parts(host_call);
+        net.complete_host_call(host_call, host_fn.apply(&data).unwrap());
+        assert_eq!(net.interface_data(result), Some(&42));
     }
 
     fn host_call_net(host_fn: HostFn<i32>, input: i32) -> (RuntimeNet<i32>, HostCall, Port) {
