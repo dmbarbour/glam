@@ -18,7 +18,9 @@ node remains in place and cannot enter a later source-local active pair.
 When a demanded cursor faces a source auxiliary whose node belongs to an active
 pair, the cursor records that pair's lower-node key. The evaluator reduces only
 that exact source pair and then retries the cursor; unrelated source work stays
-lazy.
+lazy. If the node is inactive, the cursor instead depends on the target-local
+cursor facing its principal. No node and no active pair is copied through an
+auxiliary frontier.
 
 Variable use is normalized during lowering:
 
@@ -92,7 +94,8 @@ a call. `CompileContext::value_net` provides checked construction for Rust
 front ends and drops the immutable template after instantiation.
 
 During migration, CompileContext prepares closed curried lambda spines with no
-captures, nested function values, or dictionary access. A source lambda such as
+captures, nested function values, dictionary access, or general application
+bodies. A source lambda such as
 `\x y z -> ...` is constructed in one compiler call and lowers to one runtime
 net containing three leading binds, rather than preparing a net per semantic
 lambda wrapper. Partial application exposes the next bind in that same net.
@@ -108,9 +111,7 @@ specific cursor or pair transitively and retries the outer copy, without a broad
 source sweep. This is cursor composition along copy provenance, not reversed
 dataflow. Cursor progress claims its target pair before releasing the target
 mutex, inspects the source frontier under only the source mutex, and then
-finishes under only the target mutex. Runtime calls also defer capturing lazy
-arguments while the runtime still exposes an unsupplied bind from its curried
-spine.
+finishes under only the target mutex.
 
 `HostFn<Data>` is a unary runtime agent whose principal consumes Data and whose
 auxiliary is its result continuation. Host callbacks execute outside the net
@@ -125,36 +126,35 @@ Application spines use the dual construction. `NetBuilder::bind_spine` is
 shared by lambda lowering and evaluator-owned caller nets. `g_syntax` lowers a
 maximal application such as `f x y z` through
 `CompileContext::value_apply_many`; the evaluator peels the left-associated
-semantic `Apply` nodes and, for a net or net-evaluable closure, installs all
-remaining lazy arguments into one caller runtime. Compatibility-only callables
-remain sequential, and a partial application that escapes its expression still
-uses cursor composition when it is called later.
+semantic `Apply` nodes and installs all remaining lazy arguments into one caller
+runtime for `Value::Net`. Closures and other compatibility-only callables remain
+sequential.
 
 The topology reducer handles bind-bind, fan-fan, fan-bind, fan-data, and eraser
 interactions. `bind-data` reports `ReductionKind::Call`; `eval` consumes that
 blocked pair through a generic `CallFrame`, preserving the argument and result
 wires behind stable interfaces. Whether lazy arguments may detach is determined
 from the current exposed bind topology, not historical imported-copy state.
-The legacy Bind/Data call is the only active pair that cursor materialization
-still copies; the source call is claimed while its two-node frontier is copied.
-`compatibility_call_argument_data` is the only remaining content inspection
-through an ordinary auxiliary port. Removing both exceptions depends on giving
-List/Access/Closure explicit lazy-argument agents.
+Source `Data >< Bind` calls remain exact source dependencies and are never
+copied. `compatibility_call_argument_data` remains the only content inspection
+through an ordinary auxiliary port, confined to target-local evaluator calls.
 
 Core thunks can be backed by an expression, a runtime/interface pair, or a
-semantic builtin/access/list-item computation. All forms share one memoized
+semantic builtin/access computation. All forms share one memoized
 result. Builtins are callable `CoreNetData`, partial applications retain shared
 thunks, and saturated calls emit a semantic thunk so unrelated source-pair
-progress does not force strict work before its result is demanded. List lowering similarly
-retains computed elements as opaque lazy list holes.
+progress does not force strict work before its result is demanded. List and
+Access lowering use HostFn chains. A list HostFn can store an embedded lazy
+`Value`, including `Value::Net`, but cannot export a list hole backed by a
+runtime/interface wire. More generally, the core HostFn boundary rejects any
+`Value::List` containing a structural lazy hole; such a call becomes
+permanently stuck.
 
-Closure application runs through the core runtime driver for lambda bodies made
-from values, applications, locals, nested lambdas, lists, deferred values,
-futures, and errors. Dictionary access is the remaining compatibility boundary:
-a copied access can expose a demanded local through a second logical-copy
-boundary, but demand is not yet forwarded from that cursor to the caller-side
-frontier. Such closures retain `Closure::source_body` and use the expression
-evaluator. Do not expose the `interaction_net` source keyword until that
-cross-copy demand edge and general effect blocking are represented explicitly.
+Only `Value::Net` uses cursor application. Compatibility closures retain
+`Closure::source_body` and use the expression evaluator. Automatic closed-net
+preparation currently excludes general application bodies: cyclic copy paths
+need persistent per-port provenance after a materialized target node reduces
+away. Do not expose the `interaction_net` source keyword until that provenance
+and general effect blocking are represented explicitly.
 The dictionary compatibility path is intentionally unchanged pending a
 separate persistent lazy dictionary design.

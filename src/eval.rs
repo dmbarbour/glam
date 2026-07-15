@@ -9,10 +9,10 @@ use crate::core::{
     Builtin, BuiltinCall, Closure, DeferredValue, Expr, IVar, Key, KeyExpr, List, NetValue, Thunk,
     Value,
 };
-use crate::core_net::{CoreDataKey, CoreNetData};
+use crate::core_net::{CoreDataKey, CoreNetData, closed_lambda_body_is_net_safe};
 use crate::interaction_net::{
-    ActivePairKey, BlockedCall, CursorDependencyTarget, HostFn, HostFnYield, NetBuilder, Port,
-    Reduction, ReductionKind, StuckReason,
+    ActivePairKey, BlockedCall, CursorDependency, HostFn, HostFnYield, NetBuilder, Port, Reduction,
+    ReductionKind, StuckReason,
 };
 use crate::list::ListItem;
 use crate::number::Number;
@@ -90,8 +90,6 @@ fn eval_thunk(thunk: &Thunk) -> Result<Value, EvalError> {
         drive_core_net(net.runtime.clone(), net.interface)
     } else if let Some((path, arguments)) = thunk.access() {
         resolve_core_access(arguments, path)
-    } else if let Some(item) = thunk.list_item() {
-        eval_thunk(item).map(|value| Value::List(list_literal_segment(value)))
     } else if let Some(call) = thunk.builtin() {
         let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
         let argument = arguments
@@ -334,10 +332,6 @@ fn apply_values(
                 let arguments = std::iter::once(argument).chain(arguments).collect();
                 return apply_net_many(Value::Net(net), arguments);
             }
-            Value::Closure(closure) if net_evaluable_expr(&closure.source_body) => {
-                let arguments = std::iter::once(argument).chain(arguments).collect();
-                return apply_net_many(Value::Closure(closure), arguments);
-            }
             other => function = apply_value(other, argument, local_env)?,
         }
     }
@@ -401,15 +395,18 @@ fn effect_value(function: Value) -> Value {
 }
 
 fn apply_closure(closure: &Closure, argument: Value) -> Result<Value, EvalError> {
-    if net_evaluable_expr(&closure.source_body) {
-        return apply_closure_net(closure, argument);
-    }
     let mut extended = closure.env.iter().cloned().collect::<Vec<_>>();
     extended.push(argument);
     eval_expr(&closure.source_body, &extended)
 }
 
 fn compiled_lambda_value(lambda: &Arc<crate::core::Lambda>, environment: Arc<[Value]>) -> Value {
+    if environment.is_empty()
+        && lambda.closed_net().is_none()
+        && closed_lambda_body_is_net_safe(lambda.body())
+    {
+        lambda.prepare_closed_net();
+    }
     if let Some(closed) = lambda.closed_net() {
         debug_assert_eq!(closed.capture_count, 0);
         Value::Net(NetValue::new(closed.runtime))
@@ -420,27 +417,6 @@ fn compiled_lambda_value(lambda: &Arc<crate::core::Lambda>, environment: Arc<[Va
             source_body: lambda.body().clone(),
         })
     }
-}
-
-fn net_evaluable_expr(expr: &Expr) -> bool {
-    match expr {
-        Expr::Value(_) | Expr::Local(_) | Expr::Error(_) => true,
-        Expr::Apply(function, argument) => {
-            net_evaluable_expr(function) && net_evaluable_expr(argument)
-        }
-        Expr::Lambda(lambda) => net_evaluable_expr(lambda.body()),
-        Expr::List(items) => items.iter().all(|item| net_evaluable_expr(item)),
-        // A copied access can currently expose a demanded local through a
-        // second logical-copy boundary. Until that demand is forwarded to the
-        // caller-side frontier, evaluating it would pull on the canonical
-        // lambda root, which is deliberately unsupplied.
-        Expr::Access(_, _) => false,
-        Expr::Deferred(_) | Expr::Future(_) => true,
-    }
-}
-
-fn apply_closure_net(closure: &Closure, argument: Value) -> Result<Value, EvalError> {
-    apply_net_many(Value::Closure(closure.clone()), vec![argument])
 }
 
 fn apply_net(function: NetValue, argument: Value) -> Result<Value, EvalError> {
@@ -610,32 +586,37 @@ fn progress_cursor_dependency(
     let Some(dependency) = runtime.with(|net| net.cursor_dependency(cursor)) else {
         return Ok(false);
     };
-    match dependency.target {
-        CursorDependencyTarget::Cursor(source_cursor) => {
-            let progress = dependency
-                .source
-                .with_mut(|source| source.claim_dependent_cursor(source_cursor));
-            let progress = progress.map(|progress| {
-                finish_core_cursor_claim(&dependency.source, source_cursor, progress)
-            });
-            match progress {
-                Some(crate::interaction_net::CursorProgress::Blocked) => {
-                    let progressed =
-                        progress_cursor_dependency(&dependency.source, source_cursor, depth + 1)?;
-                    if progressed {
-                        dependency
-                            .source
-                            .with_mut(|source| source.retry_blocked_cursor(source_cursor));
-                    }
-                    Ok(progressed)
-                }
-                Some(_) => Ok(true),
-                None => Ok(false),
+    match dependency {
+        CursorDependency::LocalCursor(local_cursor) => {
+            progress_dependent_cursor(runtime, local_cursor, depth)
+        }
+        CursorDependency::SourceCursor {
+            source,
+            cursor: source_cursor,
+        } => progress_dependent_cursor(&source, source_cursor, depth),
+        CursorDependency::SourcePair { source, pair } => {
+            progress_exact_core_pair(&source, pair, depth + 1)
+        }
+    }
+}
+
+fn progress_dependent_cursor(
+    runtime: &crate::core_net::CoreRuntimeNet,
+    cursor: crate::interaction_net::NodeId,
+    depth: usize,
+) -> Result<bool, EvalError> {
+    let progress = runtime.with_mut(|source| source.claim_dependent_cursor(cursor));
+    let progress = progress.map(|progress| finish_core_cursor_claim(runtime, cursor, progress));
+    match progress {
+        Some(crate::interaction_net::CursorProgress::Blocked) => {
+            let progressed = progress_cursor_dependency(runtime, cursor, depth + 1)?;
+            if progressed {
+                runtime.with_mut(|source| source.retry_blocked_cursor(cursor));
             }
+            Ok(progressed)
         }
-        CursorDependencyTarget::Pair(pair) => {
-            progress_exact_core_pair(&dependency.source, pair, depth + 1)
-        }
+        Some(_) => Ok(true),
+        None => Ok(false),
     }
 }
 
@@ -687,7 +668,6 @@ fn progress_exact_core_call(
             CoreNetData::Builtin(_)
                 | CoreNetData::Value(Value::Builtin(_))
                 | CoreNetData::Value(Value::PartialBuiltin(_))
-                | CoreNetData::List { .. }
         )
     });
     let argument_is_embedded_data = runtime.with(|net| {
@@ -813,7 +793,7 @@ fn progress_core_host_call(
     call: crate::interaction_net::HostCall,
 ) -> Result<bool, EvalError> {
     let (host_fn, data) = runtime.with(|net| net.host_call_parts(call));
-    match host_fn.apply(&data) {
+    match host_fn.apply(&data).and_then(validate_core_host_yield) {
         Ok(result) => runtime.with_mut(|net| {
             net.complete_host_call(call, result);
         }),
@@ -827,13 +807,23 @@ fn progress_core_host_call(
     Ok(true)
 }
 
+fn validate_core_host_yield(
+    result: HostFnYield<CoreNetData>,
+) -> Result<HostFnYield<CoreNetData>, Arc<str>> {
+    if let HostFnYield::Data(CoreNetData::Value(Value::List(list))) = &result {
+        if list.known_len().is_none() {
+            return Err("host function cannot export a list with structural lazy holes".into());
+        }
+    }
+    Ok(result)
+}
+
 fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
     match data {
         CoreNetData::Value(value) => eval_value(&value),
         CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
         CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
         CoreNetData::Lambda(lambda) => Ok(compiled_lambda_value(&lambda, Arc::from([]))),
-        CoreNetData::List { arity: 0, .. } => Ok(Value::List(List::empty())),
         CoreNetData::Deferred(value) => value
             .force()
             .map_err(|message| EvalError::new(message.as_ref())),
@@ -842,9 +832,9 @@ fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
             .cloned()
             .ok_or_else(|| EvalError::new("future was observed before initialization")),
         CoreNetData::Error(message) => Err(EvalError::new(message.as_ref())),
-        CoreNetData::Capture(_) | CoreNetData::List { .. } | CoreNetData::Access { .. } => Err(
-            EvalError::new("unsupported core data escaped interaction-net evaluation"),
-        ),
+        CoreNetData::Capture(_) => Err(EvalError::new(
+            "unsupported core data escaped interaction-net evaluation",
+        )),
     }
 }
 
@@ -866,12 +856,6 @@ fn handle_core_call(
         }
         CoreNetData::Value(Value::PartialBuiltin(builtin)) => {
             return handle_core_builtin_call(runtime, call, builtin);
-        }
-        CoreNetData::List { arity, arguments } => {
-            return handle_core_list_call(runtime, call, arity, arguments);
-        }
-        CoreNetData::Access { path, arguments } => {
-            return handle_core_access_call(runtime, call, path, arguments);
         }
         _ => {}
     }
@@ -918,8 +902,6 @@ fn handle_core_call(
             Ok(())
         }
         CoreNetData::Capture(_)
-        | CoreNetData::List { .. }
-        | CoreNetData::Access { .. }
         | CoreNetData::Deferred(_)
         | CoreNetData::Future(_)
         | CoreNetData::Error(_) => Err(EvalError::new(
@@ -948,61 +930,6 @@ fn handle_core_builtin_call(
     runtime.with_mut(|net| {
         net.complete_interface_with_data(frame.result, CoreNetData::Value(value));
     });
-    Ok(())
-}
-
-fn handle_core_list_call(
-    runtime: &crate::core_net::CoreRuntimeNet,
-    call: BlockedCall,
-    arity: usize,
-    supplied: Arc<[Value]>,
-) -> Result<(), EvalError> {
-    let (frame, argument) = take_core_call_argument(runtime, call)?;
-    let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
-    arguments.push(argument);
-    let result = if arguments.len() < arity {
-        CoreNetData::List {
-            arity,
-            arguments: Arc::from(arguments),
-        }
-    } else {
-        let list = arguments.into_iter().fold(List::empty(), |list, value| {
-            let segment = match value {
-                Value::Binary(bytes) => List::from_bytes(bytes),
-                Value::List(list) => list,
-                Value::Expr(thunk) => List::from_thunk(Thunk::from_list_item(thunk)),
-                other => Value::singleton_list(other),
-            };
-            List::concat(list, segment)
-        });
-        CoreNetData::Value(Value::List(list))
-    };
-    runtime.with_mut(|net| net.complete_interface_with_data(frame.result, result));
-    Ok(())
-}
-
-fn handle_core_access_call(
-    runtime: &crate::core_net::CoreRuntimeNet,
-    call: BlockedCall,
-    path: Arc<[crate::core_net::CoreDataKey]>,
-    supplied: Arc<[Value]>,
-) -> Result<(), EvalError> {
-    let (frame, argument) = take_core_call_argument(runtime, call)?;
-    let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
-    arguments.push(argument);
-    let arity = 1 + path
-        .iter()
-        .filter(|key| !matches!(key, crate::core_net::CoreDataKey::Key(_)))
-        .count();
-    let result = if arguments.len() < arity {
-        CoreNetData::Access {
-            path,
-            arguments: Arc::from(arguments),
-        }
-    } else {
-        CoreNetData::Value(Value::Expr(Thunk::from_access(path, Arc::from(arguments))))
-    };
-    runtime.with_mut(|net| net.complete_interface_with_data(frame.result, result));
     Ok(())
 }
 
@@ -1066,16 +993,10 @@ fn core_data_to_lazy_value(data: CoreNetData) -> Result<Value, EvalError> {
         CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
         CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
         CoreNetData::Lambda(lambda) => Ok(compiled_lambda_value(&lambda, Arc::from([]))),
-        CoreNetData::List {
-            arity: 0,
-            arguments,
-        } if arguments.is_empty() => Ok(Value::List(List::empty())),
         CoreNetData::Deferred(value) => Ok(Value::expr(Expr::Deferred(value))),
         CoreNetData::Future(value) => Ok(Value::expr(Expr::Future(value))),
         CoreNetData::Error(message) => Ok(Value::expr(Expr::Error(message))),
-        unsupported @ (CoreNetData::Capture(_)
-        | CoreNetData::List { .. }
-        | CoreNetData::Access { .. }) => Err(EvalError::new(format!(
+        unsupported @ CoreNetData::Capture(_) => Err(EvalError::new(format!(
             "unsupported core data was used as a lazy argument: {unsupported:?}"
         ))),
     }
@@ -1102,6 +1023,52 @@ pub(crate) fn builtin_host_fn(call: BuiltinCall) -> HostFn<CoreNetData> {
                 builtin: call.builtin,
                 arguments: Arc::from(arguments),
             }),
+        ))))
+    })
+}
+
+pub(crate) fn list_host_fn(arity: usize, supplied: Arc<[Value]>) -> HostFn<CoreNetData> {
+    assert!(supplied.len() < arity);
+    HostFn::new("list literal", move |data: &CoreNetData| {
+        let argument = core_data_to_lazy_value(data.clone())
+            .map_err(|error| Arc::<str>::from(error.to_string()))?;
+        let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
+        arguments.push(argument);
+        if arguments.len() < arity {
+            return Ok(HostFnYield::HostFn(list_host_fn(
+                arity,
+                Arc::from(arguments),
+            )));
+        }
+        let list = arguments.into_iter().fold(List::empty(), |list, value| {
+            List::concat(list, list_literal_segment(value))
+        });
+        Ok(HostFnYield::Data(CoreNetData::Value(Value::List(list))))
+    })
+}
+
+pub(crate) fn access_host_fn(
+    path: Arc<[CoreDataKey]>,
+    supplied: Arc<[Value]>,
+) -> HostFn<CoreNetData> {
+    let arity = 1 + path
+        .iter()
+        .filter(|key| !matches!(key, CoreDataKey::Key(_)))
+        .count();
+    assert!(supplied.len() < arity);
+    HostFn::new("dictionary access", move |data: &CoreNetData| {
+        let argument = core_data_to_lazy_value(data.clone())
+            .map_err(|error| Arc::<str>::from(error.to_string()))?;
+        let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
+        arguments.push(argument);
+        if arguments.len() < arity {
+            return Ok(HostFnYield::HostFn(access_host_fn(
+                path.clone(),
+                Arc::from(arguments),
+            )));
+        }
+        Ok(HostFnYield::Data(CoreNetData::Value(Value::Expr(
+            Thunk::from_access(path.clone(), Arc::from(arguments)),
         ))))
     })
 }
@@ -3181,9 +3148,9 @@ mod tests {
         let outer = Arc::new(Lambda::new(Arc::new(Expr::Lambda(inner.clone()))));
 
         let value = eval_closed_expr(&Expr::Lambda(outer.clone()))
-            .expect("outer lambda should become a closure");
-        assert!(matches!(value, Value::Closure(_)));
-        assert!(outer.is_lowered());
+            .expect("outer lambda spine should become a closed net");
+        assert!(matches!(value, Value::Net(_)));
+        assert!(outer.is_closed_lowered());
         assert!(!inner.is_lowered());
     }
 
@@ -3729,7 +3696,7 @@ mod tests {
     }
 
     #[test]
-    fn host_fn_partial_builtins_escape_as_nets_and_share_lazy_arguments() {
+    fn compatibility_partial_builtins_share_lazy_arguments() {
         let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = force_count.clone();
         let argument = Expr::Deferred(Arc::new(DeferredValue::new(
@@ -3744,9 +3711,9 @@ mod tests {
             Arc::new(Expr::Local(0)),
         )));
         let partial = eval_closed_expr(&Expr::Apply(Arc::new(make_partial), Arc::new(argument)))
-            .expect("a net builtin should escape while retaining its argument lazily");
+            .expect("a partial builtin should retain its argument lazily");
 
-        assert!(matches!(partial, Value::Net(_)));
+        assert!(matches!(partial, Value::PartialBuiltin(_)));
         assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(apply_value(partial.clone(), n(2), &[]).unwrap(), n(42));
         assert_eq!(apply_value(partial, n(3), &[]).unwrap(), n(43));
@@ -3754,21 +3721,53 @@ mod tests {
     }
 
     #[test]
-    fn net_list_literals_retain_computed_items_as_lazy_holes() {
+    fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
+        let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = force_count.clone();
         let expression = Expr::Apply(
             Arc::new(Expr::lambda(Arc::new(Expr::List(Arc::from([Arc::new(
                 Expr::Local(0),
             )]))))),
-            Arc::new(Expr::Value(n(42))),
+            Arc::new(Expr::Deferred(Arc::new(DeferredValue::new(
+                "list value",
+                move || {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(n(42))
+                },
+            )))),
         );
         let Value::List(list) = eval_closed_expr(&expression).unwrap() else {
             panic!("net-backed list literal should produce a list");
         };
-        let Some((item, tail)) = pop_list_front(&list).unwrap() else {
+        let Some((item, tail)) = list
+            .try_pop_front(&mut |_| -> Result<_, EvalError> {
+                panic!("embedded lazy value must not become a list hole")
+            })
+            .unwrap()
+        else {
             panic!("net-backed list literal should contain its argument");
         };
-        assert_eq!(item, n(42));
+        let ListItem::Value(item) = item else {
+            panic!("lazy argument should remain an ordinary list value")
+        };
+        assert!(matches!(item, Value::Expr(_)));
+        assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(eval_value(&item).unwrap(), n(42));
+        assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(pop_list_front(&tail).unwrap().is_none());
+    }
+
+    #[test]
+    fn host_functions_reject_lists_with_structural_lazy_holes() {
+        let hole = Thunk::new(Arc::new(Expr::Value(n(42))), Arc::from([]));
+        let result = HostFnYield::Data(CoreNetData::Value(Value::List(List::from_thunk(hole))));
+
+        let error = validate_core_host_yield(result).unwrap_err();
+
+        assert_eq!(
+            error.as_ref(),
+            "host function cannot export a list with structural lazy holes"
+        );
     }
 
     #[test]

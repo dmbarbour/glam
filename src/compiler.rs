@@ -7,7 +7,7 @@ use crate::core::{
     Atom, DeferredValue, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Lambda, NetValue,
     Value,
 };
-use crate::core_net::CoreNetData;
+use crate::core_net::{CoreNetData, closed_lambda_body_is_net_safe};
 use crate::interaction_net::{NetBuildError, NetBuilder, Node, Port};
 use crate::number::Number;
 
@@ -290,7 +290,7 @@ impl CompileContext {
         let CoreExpr::Lambda(lambda) = &expr else {
             unreachable!();
         };
-        if closed_net_lambda_body(lambda.body()) {
+        if closed_lambda_body_is_net_safe(lambda.body()) {
             lambda.prepare_closed_net();
         }
         Value::expr(expr)
@@ -403,36 +403,6 @@ fn value_to_core_expr(value: Value) -> CoreExpr {
             thunk.expr().unwrap().as_ref().clone()
         }
         value => CoreExpr::Value(value),
-    }
-}
-
-fn closed_net_lambda_body(expr: &CoreExpr) -> bool {
-    let mut arity = 1;
-    let mut body = expr;
-    while let CoreExpr::Lambda(lambda) = body {
-        arity += 1;
-        body = lambda.body();
-    }
-    closed_net_expr(body, arity)
-}
-
-fn closed_net_expr(expr: &CoreExpr, arity: usize) -> bool {
-    match expr {
-        CoreExpr::Value(value) => matches!(
-            value,
-            Value::Atom(_)
-                | Value::Number(_)
-                | Value::Binary(_)
-                | Value::Builtin(_)
-                | Value::Net(_)
-        ),
-        CoreExpr::Deferred(_) | CoreExpr::Future(_) | CoreExpr::Error(_) => true,
-        CoreExpr::List(items) => items.iter().all(|item| closed_net_expr(item, arity)),
-        CoreExpr::Apply(function, argument) => {
-            closed_net_expr(function, arity) && closed_net_expr(argument, arity)
-        }
-        CoreExpr::Local(index) => *index < arity,
-        CoreExpr::Lambda(_) | CoreExpr::Access(_, _) => false,
     }
 }
 

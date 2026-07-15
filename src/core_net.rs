@@ -18,14 +18,6 @@ pub enum CoreNetData {
     Builtin(BuiltinCall),
     Lambda(Arc<Lambda>),
     Capture(usize),
-    List {
-        arity: usize,
-        arguments: Arc<[Value]>,
-    },
-    Access {
-        path: Arc<[CoreDataKey]>,
-        arguments: Arc<[Value]>,
-    },
     Deferred(Arc<DeferredValue>),
     Future(IVar),
     Error(Arc<str>),
@@ -61,6 +53,38 @@ fn lambda_spine(mut body: Arc<Expr>) -> (usize, Arc<Expr>) {
         body = lambda.body().clone();
     }
     (arity, body)
+}
+
+/// Whether an existing semantic lambda can be lowered as a closed shared net
+/// without relying on compatibility captures or cursor cycles whose copied
+/// ports have not yet acquired persistent provenance.
+pub(crate) fn closed_lambda_body_is_net_safe(expr: &Expr) -> bool {
+    let mut arity = 1;
+    let mut body = expr;
+    while let Expr::Lambda(lambda) = body {
+        arity += 1;
+        body = lambda.body();
+    }
+    closed_expr_is_net_safe(body, arity)
+}
+
+fn closed_expr_is_net_safe(expr: &Expr, arity: usize) -> bool {
+    match expr {
+        Expr::Value(value) => matches!(
+            value,
+            Value::Atom(_)
+                | Value::Number(_)
+                | Value::Binary(_)
+                | Value::Builtin(_)
+                | Value::Net(_)
+        ),
+        Expr::Deferred(_) | Expr::Future(_) | Expr::Error(_) => true,
+        Expr::List(items) => items
+            .iter()
+            .all(|item| closed_expr_is_net_safe(item, arity)),
+        Expr::Local(index) => *index < arity,
+        Expr::Apply(_, _) | Expr::Lambda(_) | Expr::Access(_, _) => false,
+    }
 }
 
 struct Lowerer {
@@ -118,14 +142,18 @@ impl ClosedLowerer {
             Expr::Value(value) => self.data_into(CoreNetData::Value(value.clone()), target),
             Expr::List(items) => {
                 let args = items.iter().map(Arc::as_ref).collect::<Vec<_>>();
-                self.data_application_into(
-                    CoreNetData::List {
-                        arity: items.len(),
-                        arguments: Arc::from([]),
-                    },
-                    &args,
-                    target,
-                );
+                if args.is_empty() {
+                    self.data_into(
+                        CoreNetData::Value(Value::List(crate::core::List::empty())),
+                        target,
+                    );
+                } else {
+                    self.host_application_into(
+                        crate::eval::list_host_fn(args.len(), Arc::from([])),
+                        &args,
+                        target,
+                    );
+                }
             }
             Expr::Apply(function, argument) => {
                 let [application, argument_port, result] = self.net.bind();
@@ -163,12 +191,13 @@ impl ClosedLowerer {
         self.net.wire(function, target);
     }
 
-    fn data_application_into(&mut self, data: CoreNetData, args: &[&Expr], target: Port) {
-        if args.is_empty() {
-            self.data_into(data, target);
-            return;
-        }
-        let mut output = self.net.data(data);
+    fn host_application_into(
+        &mut self,
+        host_fn: HostFn<CoreNetData>,
+        args: &[&Expr],
+        target: Port,
+    ) {
+        let mut output = self.net.unary_host_fn(host_fn);
         for argument in args {
             let [application, argument_port, result] = self.net.bind();
             self.net.wire(output, application);
@@ -212,14 +241,18 @@ impl Lowerer {
             Expr::Value(value) => self.data_into(CoreNetData::Value(value.clone()), target),
             Expr::List(items) => {
                 let args = items.iter().map(Arc::as_ref).collect::<Vec<_>>();
-                self.data_application_into(
-                    CoreNetData::List {
-                        arity: items.len(),
-                        arguments: Arc::from([]),
-                    },
-                    &args,
-                    target,
-                );
+                if args.is_empty() {
+                    self.data_into(
+                        CoreNetData::Value(Value::List(crate::core::List::empty())),
+                        target,
+                    );
+                } else {
+                    self.host_application_into(
+                        crate::eval::list_host_fn(args.len(), Arc::from([])),
+                        &args,
+                        target,
+                    );
+                }
             }
             Expr::Apply(function, argument) => {
                 let [application, argument_port, result] = self.net.bind();
@@ -250,11 +283,8 @@ impl Lowerer {
                         }
                     })
                     .collect::<Vec<_>>();
-                self.data_application_into(
-                    CoreNetData::Access {
-                        path: Arc::from(keys),
-                        arguments: Arc::from([]),
-                    },
+                self.host_application_into(
+                    crate::eval::access_host_fn(Arc::from(keys), Arc::from([])),
                     &args,
                     target,
                 );
@@ -275,12 +305,13 @@ impl Lowerer {
         self.net.wire(function, target);
     }
 
-    fn data_application_into(&mut self, data: CoreNetData, args: &[&Expr], target: Port) {
-        if args.is_empty() {
-            self.data_into(data, target);
-            return;
-        }
-        let mut output = self.net.data(data);
+    fn host_application_into(
+        &mut self,
+        host_fn: HostFn<CoreNetData>,
+        args: &[&Expr],
+        target: Port,
+    ) {
+        let mut output = self.net.unary_host_fn(host_fn);
         for argument in args {
             let [application, argument_port, result] = self.net.bind();
             self.net.wire(output, application);
@@ -375,6 +406,33 @@ mod tests {
                 .iter()
                 .any(|node| matches!(node, Node::Data(CoreNetData::Lambda(_))))
         );
+    }
+
+    #[test]
+    fn list_application_lowers_to_host_functions_not_callable_data() {
+        let net = lower_lambda(Arc::new(Expr::List(Arc::from([Arc::new(Expr::Local(0))]))));
+
+        assert!(
+            net.nodes()
+                .iter()
+                .any(|node| matches!(node, Node::HostFn(_)))
+        );
+        assert!(!net.nodes().iter().any(|node| matches!(node, Node::Data(_))));
+    }
+
+    #[test]
+    fn access_application_lowers_to_host_functions_not_callable_data() {
+        let net = lower_lambda(Arc::new(Expr::Access(
+            Arc::new(Expr::Local(0)),
+            Arc::from([KeyExpr::Key(Key::atom_from_text("answer"))]),
+        )));
+
+        assert!(
+            net.nodes()
+                .iter()
+                .any(|node| matches!(node, Node::HostFn(_)))
+        );
+        assert!(!net.nodes().iter().any(|node| matches!(node, Node::Data(_))));
     }
 
     #[test]

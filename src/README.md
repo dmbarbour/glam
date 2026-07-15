@@ -29,21 +29,24 @@
   its lower node ID, with ready work in an ordered set and suspended/stuck work
   in exact keyed maps; claimed cursor and host work can release the runtime
   mutex without surrendering pair ownership; layered cursors expose a precise
-  source cursor or pair dependency instead of scanning or sweeping scheduler
-  collections, and source-frontier inspection never nests target/source locks
+  local cursor, source cursor, or source pair dependency instead of scanning or
+  sweeping scheduler collections; nodes materialize only through principal
+  frontiers, active pairs never cross cursor boundaries, and source-frontier
+  inspection never nests target/source locks
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
-- `eval.rs` drives closure calls through runtime nets, turns blocked bind-data
-  pairs into stable call frames, and executes generic unary `HostFn` requests
+- `eval.rs` keeps compatibility closures on semantic evaluation, turns target-
+  local blocked bind-data pairs into stable call frames, and executes generic unary `HostFn` requests
   outside runtime locks; HostFn failures become permanently stuck pairs rather
   than an underspecified retry state; net-lowered builtins curry by returning
   another bind-wrapped HostFn and retain saturated work as memoized semantic thunks;
-  contiguous application spines targeting nets share
-  one evaluator-owned caller runtime and one generic bind spine; dictionary-
-  access closure bodies temporarily retain the call-by-need compatibility path
-  pending cross-copy demand forwarding; closed net values attach their exposed
-  ports through logical-copy cursors and may normalize to either data or a
-  non-data net frontier
+  contiguous application spines targeting `Value::Net` share one evaluator-
+  owned caller runtime and one generic bind spine; List and Access lower through
+  HostFn chains, with embedded lazy list values stored as values rather than
+  exported runtime-backed holes; the core HostFn boundary rejects returned
+  lists containing structural holes; closed net values attach their exposed
+  ports through logical-copy cursors and may normalize to either data or a non-
+  data net frontier
 - `main` expects binary `asm.result`, writes to `stdout`
 
 At the moment, even this simple case is not fully implemented. Thus, it remains the focus for now.
@@ -52,7 +55,9 @@ The current interaction-net slice establishes the lambda-to-shared-net boundary
 without exposing syntax. Templates use local fan sites and each runtime graph
 gets one fresh namespace. The current oracle records dynamic duplication paths
 directly; it provides reference semantics for replacing those histories with
-Lamping-style bracket/croissant control interactions. Core bind-data calls,
-closure capture, builtin currying, and lazy list construction now cross the net
-runtime boundary. Cross-copy access demand and general construction effects
-still belong before adding the `interaction_net` keyword.
+Lamping-style bracket/croissant control interactions. Builtin currying and
+closed list construction now cross the net runtime boundary. General
+application bodies remain on compatibility evaluation until logical copies
+retain per-port provenance after imported nodes reduce away. That provenance
+and general construction effects still belong before adding the
+`interaction_net` keyword.

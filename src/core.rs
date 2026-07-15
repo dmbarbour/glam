@@ -413,7 +413,6 @@ enum ThunkSource {
         path: Arc<[CoreDataKey]>,
         arguments: Arc<[Value]>,
     },
-    ListItem(Arc<Thunk>),
     Builtin(BuiltinCall),
 }
 
@@ -439,13 +438,6 @@ impl Thunk {
         }
     }
 
-    pub(crate) fn from_list_item(thunk: Thunk) -> Self {
-        Self {
-            source: ThunkSource::ListItem(Arc::new(thunk)),
-            result: Arc::new(OnceLock::new()),
-        }
-    }
-
     pub(crate) fn from_builtin(call: BuiltinCall) -> Self {
         Self {
             source: ThunkSource::Builtin(call),
@@ -456,20 +448,14 @@ impl Thunk {
     pub fn expr(&self) -> Option<&Arc<Expr>> {
         match &self.source {
             ThunkSource::Expr { expr, .. } => Some(expr),
-            ThunkSource::Net(_)
-            | ThunkSource::Access { .. }
-            | ThunkSource::ListItem(_)
-            | ThunkSource::Builtin(_) => None,
+            ThunkSource::Net(_) | ThunkSource::Access { .. } | ThunkSource::Builtin(_) => None,
         }
     }
 
     pub fn env(&self) -> Option<&Arc<[Value]>> {
         match &self.source {
             ThunkSource::Expr { env, .. } => Some(env),
-            ThunkSource::Net(_)
-            | ThunkSource::Access { .. }
-            | ThunkSource::ListItem(_)
-            | ThunkSource::Builtin(_) => None,
+            ThunkSource::Net(_) | ThunkSource::Access { .. } | ThunkSource::Builtin(_) => None,
         }
     }
 
@@ -488,40 +474,21 @@ impl Thunk {
     pub(crate) fn net(&self) -> Option<&NetThunk> {
         match &self.source {
             ThunkSource::Net(thunk) => Some(thunk),
-            ThunkSource::Expr { .. }
-            | ThunkSource::Access { .. }
-            | ThunkSource::ListItem(_)
-            | ThunkSource::Builtin(_) => None,
+            ThunkSource::Expr { .. } | ThunkSource::Access { .. } | ThunkSource::Builtin(_) => None,
         }
     }
 
     pub(crate) fn access(&self) -> Option<(&[CoreDataKey], &[Value])> {
         match &self.source {
             ThunkSource::Access { path, arguments } => Some((path, arguments)),
-            ThunkSource::Expr { .. }
-            | ThunkSource::Net(_)
-            | ThunkSource::ListItem(_)
-            | ThunkSource::Builtin(_) => None,
-        }
-    }
-
-    pub(crate) fn list_item(&self) -> Option<&Thunk> {
-        match &self.source {
-            ThunkSource::ListItem(thunk) => Some(thunk),
-            ThunkSource::Expr { .. }
-            | ThunkSource::Net(_)
-            | ThunkSource::Access { .. }
-            | ThunkSource::Builtin(_) => None,
+            ThunkSource::Expr { .. } | ThunkSource::Net(_) | ThunkSource::Builtin(_) => None,
         }
     }
 
     pub(crate) fn builtin(&self) -> Option<&BuiltinCall> {
         match &self.source {
             ThunkSource::Builtin(call) => Some(call),
-            ThunkSource::Expr { .. }
-            | ThunkSource::Net(_)
-            | ThunkSource::Access { .. }
-            | ThunkSource::ListItem(_) => None,
+            ThunkSource::Expr { .. } | ThunkSource::Net(_) | ThunkSource::Access { .. } => None,
         }
     }
 }
@@ -548,7 +515,6 @@ impl fmt::Debug for Thunk {
                 .field("path", path)
                 .field("arguments", arguments)
                 .finish_non_exhaustive(),
-            ThunkSource::ListItem(thunk) => f.debug_tuple("ListItemThunk").field(thunk).finish(),
             ThunkSource::Builtin(call) => f.debug_tuple("BuiltinThunk").field(call).finish(),
         }
     }

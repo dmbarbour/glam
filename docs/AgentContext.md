@@ -86,7 +86,8 @@ This document should summarize salient, relevant points rather than asking futur
   Rust construction entry point and discards the immutable template after
   instantiation.
 - As an incremental syntax-to-net transition, `CompileContext` precompiles
-  closed lambda spines with no captures, nested function values, or accesses.
+  closed lambda spines with no captures, nested function values, accesses, or
+  general application bodies.
   `g_syntax` constructs a multi-parameter lambda through one batched compiler
   call, so intermediate semantic lambda wrappers do not each prepare a net.
   Captured, nested-dependent, and access-containing lambdas deliberately retain
@@ -123,10 +124,12 @@ This document should summarize salient, relevant points rather than asking futur
   A cursor materializes a node only when that source frontier faces its
   principal port. If it enters an auxiliary whose node belongs to an active
   pair, it records that exact lower-node pair key and reduces only that pair in
-  the source. Copying a partially applied net may instead encounter a cursor in
-  the intermediate source; that exact cursor is driven transitively before the
-  outer cursor retries. This does not reverse cursor flow or copy directly
-  across an intermediate net. Cursor progress first claims the cursor pair,
+  the source. An inactive auxiliary frontier records the target-local cursor
+  facing that node's principal and drives that cursor instead; it never copies
+  the node through its auxiliary. Copying a partially applied net may instead
+  encounter a cursor in the intermediate source; that exact cursor is driven
+  transitively before the outer cursor retries. This does not reverse cursor
+  flow or copy directly across an intermediate net. Cursor progress first claims the cursor pair,
   releases the target mutex, inspects the source frontier, then reacquires only
   the target mutex to finish. A converging cursor will not remove a peer while
   that peer is claimed.
@@ -134,20 +137,16 @@ This document should summarize salient, relevant points rather than asking futur
   argument and result survive behind independently stable interfaces. Core
   thunks may name one of those runtime/interface pairs, and memoize both values
   and errors without introducing a new language-level `Value` variant. A
-  blocked legacy Bind/Data call is also the sole remaining active-pair copying
-  exception at a cursor boundary, pending explicit List/Access/Closure agents.
-  Its source pair is claimed for the short interval in which the cursor copies
-  its two-node frontier, so the snapshot cannot race source evaluation.
-  `compatibility_call_argument_data` is correspondingly the sole remaining
-  content inspection through an ordinary auxiliary port; keep it isolated
-  until a lazy-argument agent replaces this bridge.
+  `Data >< Bind` and every other source active pair remain source dependencies;
+  active pairs are never copied across a cursor boundary.
+  `compatibility_call_argument_data` remains a target-local evaluator bridge
+  and the sole content inspection through an ordinary auxiliary port.
 - `HostFn<Data>` is a generic unary agent with a principal data input and one
   result auxiliary. Its active pair is claimed while its callback runs outside
   the runtime mutex. The callback either emits `Data`, emits another
   automatically bind-wrapped `HostFn`, or leaves the pair permanently stuck
   with a diagnostic; there is no retryable blocking state. Core builtin
-  expressions lowered into nets use HostFn currying; partial builtins therefore
-  escape as ordinary `Value::Net` functions. Saturated builtins still emit
+  expressions lowered into nets use HostFn currying. Saturated builtins still emit
   memoized semantic thunks, so unrelated exact source-pair progress does not
   force strict builtin work until its result is observed. Direct evaluator
   builtin values retain the compatibility path. A runtime that still exposes
@@ -156,15 +155,17 @@ This document should summarize salient, relevant points rather than asking futur
 - `g_syntax` and `CompileContext::value_apply_many` preserve maximal
   left-associated application spines such as `f x y z`. The expression
   evaluator peels such a spine before evaluation and supplies all remaining
-  arguments through one caller runtime when the callable is a net or a
-  net-evaluable closure. Arguments remain lazy semantic thunks. Access-bearing
-  closures and other compatibility callables continue sequentially; escaped
-  partial applications still rely on outward cursor composition.
-- List applications lower to callable core data and computed list elements
-  become opaque lazy holes. Access applications also have semantic thunk
-  support, but closure bodies containing access currently remain on the
-  compatibility evaluator: nested logical copies still need an explicit way to
-  forward demand to the caller-side argument frontier.
+  arguments through one caller runtime only when the callable is `Value::Net`.
+  Closures remain on the semantic compatibility evaluator until they can be
+  represented as genuinely closed nets.
+- List and Access applications lower to HostFn chains rather than callable
+  `Data`. A list HostFn accepts only embedded values and stores lazy values as
+  ordinary list values; it never exports a runtime/interface-backed list hole.
+  The core HostFn boundary rejects any returned `Value::List` that already
+  contains a structural lazy hole, leaving the call permanently stuck.
+  General application bodies are temporarily excluded from automatic closed-
+  net preparation because cycles need persistent per-port copy provenance
+  after imported nodes reduce away.
 - Preserve the current dictionary/access compatibility evaluator while a
   persistent lazy dictionary representation is designed separately.
 - The topology reducer implements bind/fan join, fan commutation, duplication,
