@@ -80,7 +80,7 @@ This document should summarize salient, relevant points rather than asking futur
   curried stage is another shared runtime. Logical copies materialize nodes
   lazily through remote cursors.
 - `Value::Net` is a first-class closed net containing only a
-  `SharedRuntimeNet<CoreNetData>`. Observing it may produce ordinary data or
+  `SharedRuntimeNet<CoreSpecialization>`. Observing it may produce ordinary data or
   preserve a non-data normal-form net; applying it attaches the exposed port
   through a logical-copy cursor. `CompileContext::value_net` is the checked
   Rust construction entry point and discards the immutable template after
@@ -137,40 +137,42 @@ This document should summarize salient, relevant points rather than asking futur
   after which the ordinary Erase rule handles the copied agent. When an
   auxiliary has no corresponding local principal cursor yet, dependency
   inspection follows the source principal chain to an exact active pair.
-- A blocked `Data >< Bind` pair is resolved through the generic `CallableData`
-  policy. `SharedRuntimeNet` claims its exact pair, releases the runtime lock,
-  asks the client data to produce either a shared net or `HostFn`, then briefly
+- A blocked `Data >< Bind` pair is resolved through the net's
+  `NetSpecialization::callable` policy. `SharedRuntimeNet` claims its exact pair,
+  releases the runtime lock, asks the specialization to produce either a shared
+  net or `Operator`, then briefly
   reacquires the lock to install that topology or mark the pair stuck. Core
-  implements the policy in `eval`; call and host reductions are handled
+  implements the policy in `eval`; call and operator reductions are handled
   immediately rather than rediscovered by scanning scheduler collections. A raw
   `Value::Net` loads through a cursor without inspecting the argument. Builtins and partial
-  builtins lower to an explicit unary `Bind` backed by `HostFn`, after which the
+  builtins lower to an explicit unary `Bind` backed by `CoreOperator`, after which the
   ordinary bind-join rule applies. Dictionary applicables lower to the same
-  shape using a host applicable callback. Ordinary `Value::Function`
-  application instead uses the semantic data-consuming HostFn described below.
+  shape using an applicable operator. Ordinary `Value::Function`
+  application instead uses the semantic data-consuming operator described below.
   Source active pairs
   remain exact dependencies and are never copied across a cursor boundary; the
   evaluator no longer inspects an application argument through `Bind.aux1`.
-- `HostFn<Data>` is a generic unary agent with a principal data input and one
-  result auxiliary. Its active pair is claimed while its callback runs outside
-  the runtime mutex. The callback either emits `Data`, emits another
-  automatically bind-wrapped `HostFn`, or leaves the pair permanently stuck
-  with a diagnostic; there is no retryable blocking state. Core builtin
-  expressions lowered into nets use HostFn currying. Saturated builtins still emit
+- `Operator<S::Operator>` is a generic unary agent with a principal data input
+  and one result auxiliary. Its active pair is claimed while
+  `NetSpecialization::apply_operator` runs outside the runtime mutex. The rule
+  either emits `Data`, emits another automatically bind-wrapped `Operator`, or
+  leaves the pair permanently stuck with a diagnostic; there is no retryable
+  blocking state. Core uses an explicit `CoreOperator` enum rather than opaque
+  Rust closures. Saturated builtins still emit
   memoized semantic thunks, so unrelated exact source-pair progress does not
   force strict builtin work until its result is observed. Dynamically obtained
-  builtin values also lower to the same Bind/HostFn form; applicable lowering
+  builtin values also lower to the same Bind/Operator form; applicable lowering
   never detaches an argument from shared topology.
 - `g_syntax` and `CompileContext::value_apply_many` preserve maximal
   left-associated application spines such as `f x y z`. Net lowering represents
-  an ordinary application as a data-consuming HostFn chain whose operands are
+  an ordinary application as a data-consuming operator chain whose operands are
   closed lazy values. When the head is a `Value::Function`, all currently
   available arguments attach to its stage together. An undersaturated call
   produces another shared `FunctionValue`; a saturated call produces a
   memoized function-call thunk. This preserves sharing when arguments trickle
   in without exposing linear binds as host functions.
-- List, dictionary, and Access applications lower to HostFn chains rather than
-  callable `Data`. Aggregate HostFns store lazy members as ordinary closed
+- List, dictionary, and Access applications lower to operator chains rather than
+  callable `Data`. Aggregate operators store lazy members as ordinary closed
   values/computation thunks; they do not turn network interfaces into list
   holes. Existing host-level structural list holes remain observable through
   the list evaluator.

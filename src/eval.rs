@@ -9,10 +9,12 @@ use crate::core::{
     Builtin, BuiltinCall, DeferredValue, Expr, FunctionCode, FunctionValue, IVar, Key, KeyExpr,
     List, NetValue, Thunk, Value,
 };
-use crate::core_net::{CoreDataKey, CoreNetData, lower_closed_function_value};
+use crate::core_net::{
+    CoreDataKey, CoreNetData, CoreOperator, CoreSpecialization, lower_closed_function_value,
+};
 use crate::interaction_net::{
-    ActivePairKey, Call, Callable, CallableData, CursorDependency, HostFn, HostFnYield, NetBuilder,
-    Port, Reduction, ReductionKind, StuckReason,
+    ActivePairKey, Call, Callable, CursorDependency, NetBuilder, NetSpecialization, OperatorCall,
+    OperatorYield, Port, Reduction, ReductionKind, StuckReason,
 };
 use crate::list::ListItem;
 use crate::number::Number;
@@ -694,18 +696,41 @@ fn progress_exact_core_pair(
     Ok(false)
 }
 
-impl CallableData for CoreNetData {
+impl NetSpecialization for CoreSpecialization {
+    type Data = CoreNetData;
+    type Operator = CoreOperator;
     type Error = EvalError;
 
-    fn into_callable(self) -> Result<Callable<Self>, EvalError> {
-        lower_core_callable(self)
+    fn callable(data: Self::Data) -> Result<Callable<Self>, Self::Error> {
+        lower_core_callable(data)
+    }
+
+    fn apply_operator(
+        operator: &Self::Operator,
+        data: &Self::Data,
+    ) -> Result<OperatorYield<Self>, Self::Error> {
+        apply_core_operator(operator, data)
+    }
+
+    fn operator_name(operator: &Self::Operator) -> &str {
+        match operator {
+            CoreOperator::ApplyArity { .. } => "semantic apply",
+            CoreOperator::FunctionCaptures { .. } => "function captures",
+            CoreOperator::ComputationCaptures { .. } => "computation captures",
+            CoreOperator::Dict { .. } => "dictionary literal",
+            CoreOperator::Builtin(_) => "builtin",
+            CoreOperator::Applicable(_) => "core applicable",
+            CoreOperator::List { .. } => "list literal",
+            CoreOperator::Access { .. } => "dictionary access",
+            CoreOperator::Error(_) => "error",
+        }
     }
 }
 
-fn lower_core_callable(data: CoreNetData) -> Result<Callable<CoreNetData>, EvalError> {
+fn lower_core_callable(data: CoreNetData) -> Result<Callable<CoreSpecialization>, EvalError> {
     match data {
         CoreNetData::Value(value) => lower_core_callable_value(value),
-        CoreNetData::Builtin(call) => Ok(Callable::HostFn(builtin_host_fn(call))),
+        CoreNetData::Builtin(call) => Ok(Callable::Operator(builtin_operator(call))),
         CoreNetData::Deferred(value) => {
             let value = value
                 .force()
@@ -719,11 +744,10 @@ fn lower_core_callable(data: CoreNetData) -> Result<Callable<CoreNetData>, EvalE
                 .ok_or_else(|| EvalError::new("future was observed before initialization"))?;
             lower_core_callable_value(value)
         }
-        CoreNetData::Error(message) => Err(EvalError::new(message.as_ref())),
     }
 }
 
-fn lower_core_callable_value(value: Value) -> Result<Callable<CoreNetData>, EvalError> {
+fn lower_core_callable_value(value: Value) -> Result<Callable<CoreSpecialization>, EvalError> {
     let value = if matches!(value, Value::Expr(_)) {
         force_value_shell(&value)?
     } else {
@@ -731,9 +755,11 @@ fn lower_core_callable_value(value: Value) -> Result<Callable<CoreNetData>, Eval
     };
     match value {
         Value::Net(net) => Ok(Callable::Net(net.into_runtime())),
-        Value::Builtin(builtin) => Ok(Callable::HostFn(builtin_host_fn(BuiltinCall::new(builtin)))),
-        Value::PartialBuiltin(call) => Ok(Callable::HostFn(builtin_host_fn(call))),
-        value @ Value::Dict(_) => Ok(Callable::HostFn(core_applicable_host_fn(value))),
+        Value::Builtin(builtin) => Ok(Callable::Operator(builtin_operator(BuiltinCall::new(
+            builtin,
+        )))),
+        Value::PartialBuiltin(call) => Ok(Callable::Operator(builtin_operator(call))),
+        value @ Value::Dict(_) => Ok(Callable::Operator(applicable_operator(value))),
         Value::Atom(_)
         | Value::Number(_)
         | Value::Binary(_)
@@ -767,14 +793,16 @@ fn handle_core_reduction(
             }
             Ok(())
         }
-        ReductionKind::HostCall { host_fn, data } => {
-            let call = crate::interaction_net::HostCall {
+        ReductionKind::OperatorCall { operator, data } => {
+            let call = OperatorCall {
                 pair: reduction.pair,
-                host_fn,
+                operator,
                 data,
             };
-            if !progress_core_host_call(runtime, call)? {
-                return Err(EvalError::new("interaction-net host call lost its claim"));
+            if !progress_core_operator_call(runtime, call)? {
+                return Err(EvalError::new(
+                    "interaction-net operator call lost its claim",
+                ));
             }
             Ok(())
         }
@@ -810,7 +838,7 @@ fn stuck_pair_error(runtime: &crate::core_net::CoreRuntimeNet, pair: ActivePairK
     runtime.with(|net| {
         let reason = net.stuck_reason(pair);
         match reason {
-            Some(StuckReason::HostError(error)) => EvalError::new(error.as_ref()),
+            Some(StuckReason::SpecializationError(error)) => EvalError::new(error.as_ref()),
             Some(StuckReason::NoRule) | None => match net.active_pair_nodes(pair) {
                 Some((left, right)) => EvalError::new(format!(
                     "interaction net reached a stuck active pair: {:?} >< {:?}",
@@ -823,19 +851,20 @@ fn stuck_pair_error(runtime: &crate::core_net::CoreRuntimeNet, pair: ActivePairK
     })
 }
 
-fn progress_core_host_call(
+fn progress_core_operator_call(
     runtime: &crate::core_net::CoreRuntimeNet,
-    call: crate::interaction_net::HostCall,
+    call: OperatorCall,
 ) -> Result<bool, EvalError> {
-    let (host_fn, data) = runtime.with(|net| net.host_call_parts(call));
-    match host_fn.apply(&data) {
+    let (operator, data) = runtime.with(|net| net.operator_call_parts(call));
+    match CoreSpecialization::apply_operator(&operator, &data) {
         Ok(result) => runtime.with_mut(|net| {
-            net.complete_host_call(call, result);
+            net.complete_operator_call(call, result);
         }),
         Err(error) => {
-            let error: Arc<str> = format!("{}: {error}", host_fn.name()).into();
+            let error: Arc<str> =
+                format!("{}: {error}", CoreSpecialization::operator_name(&operator)).into();
             runtime.with_mut(|net| {
-                net.fail_host_call(call, error.clone());
+                net.fail_operator_call(call, error.clone());
             });
             return Err(EvalError::new(error.as_ref()));
         }
@@ -855,7 +884,6 @@ fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
             .get()
             .cloned()
             .ok_or_else(|| EvalError::new("future was observed before initialization")),
-        CoreNetData::Error(message) => Err(EvalError::new(message.as_ref())),
     }
 }
 
@@ -903,40 +931,12 @@ fn core_data_to_lazy_value(data: CoreNetData) -> Result<Value, EvalError> {
         CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
         CoreNetData::Deferred(value) => Ok(Value::expr(Expr::Deferred(value))),
         CoreNetData::Future(value) => Ok(Value::expr(Expr::Future(value))),
-        CoreNetData::Error(message) => Ok(Value::expr(Expr::Error(message))),
     }
 }
 
-pub(crate) fn apply_host_fn(operand_count: usize, supplied: Arc<[Value]>) -> HostFn<CoreNetData> {
-    assert!(
-        operand_count >= 2,
-        "apply requires a function and an argument"
-    );
-    assert!(supplied.len() < operand_count);
-    HostFn::new("semantic apply", move |data: &CoreNetData| {
-        let operand = core_data_to_lazy_value(data.clone())
-            .map_err(|error| Arc::<str>::from(error.to_string()))?;
-        let mut operands = supplied.iter().cloned().collect::<Vec<_>>();
-        operands.push(operand);
-        if operands.len() < operand_count {
-            return Ok(HostFnYield::HostFn(apply_host_fn(
-                operand_count,
-                Arc::from(operands),
-            )));
-        }
-        let function = operands.remove(0);
-        let result = match function {
-            Value::Builtin(builtin) => apply_builtin_values_lazily(builtin, Vec::new(), operands),
-            Value::PartialBuiltin(call) => apply_builtin_values_lazily(
-                call.builtin,
-                call.arguments.iter().cloned().collect(),
-                operands,
-            ),
-            function => apply_values(function, operands, &[]),
-        }
-        .map_err(|error| Arc::<str>::from(error.to_string()))?;
-        Ok(HostFnYield::Data(CoreNetData::Value(result)))
-    })
+pub(crate) fn apply_arity_operator(arity: usize, supplied: Arc<[Value]>) -> CoreOperator {
+    assert!(supplied.len() < arity + 1);
+    CoreOperator::ApplyArity { arity, supplied }
 }
 
 /// Builds the semantic value for builtin application without executing a
@@ -972,158 +972,188 @@ fn apply_builtin_values_lazily(
     }
 }
 
-pub(crate) fn function_capture_host_fn(
+pub(crate) fn function_capture_operator(
     code: Arc<FunctionCode>,
     supplied: Arc<[Value]>,
-) -> HostFn<CoreNetData> {
+) -> CoreOperator {
     assert!(code.capture_count() > 0);
     assert!(supplied.len() < code.capture_count());
-    HostFn::new("function captures", move |data: &CoreNetData| {
-        let capture = core_data_to_lazy_value(data.clone())
-            .map_err(|error| Arc::<str>::from(error.to_string()))?;
-        let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
-        captures.push(capture);
-        if captures.len() < code.capture_count() {
-            return Ok(HostFnYield::HostFn(function_capture_host_fn(
-                code.clone(),
-                Arc::from(captures),
-            )));
-        }
-        let function = instantiate_function(&code, captures)
-            .map_err(|error| Arc::<str>::from(error.to_string()))?;
-        Ok(HostFnYield::Data(CoreNetData::Value(function)))
-    })
+    CoreOperator::FunctionCaptures { code, supplied }
 }
 
-pub(crate) fn computation_capture_host_fn(
+pub(crate) fn computation_capture_operator(
     code: Arc<FunctionCode>,
     supplied: Arc<[Value]>,
-) -> HostFn<CoreNetData> {
+) -> CoreOperator {
     assert_eq!(code.arity(), 0);
     assert!(code.capture_count() > 0);
     assert!(supplied.len() < code.capture_count());
-    HostFn::new("computation captures", move |data: &CoreNetData| {
-        let capture = core_data_to_lazy_value(data.clone())
-            .map_err(|error| Arc::<str>::from(error.to_string()))?;
-        let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
-        captures.push(capture);
-        if captures.len() < code.capture_count() {
-            return Ok(HostFnYield::HostFn(computation_capture_host_fn(
-                code.clone(),
-                Arc::from(captures),
-            )));
-        }
-        let stage = attach_net_many(Value::Net(NetValue::new(code.runtime().clone())), captures);
-        Ok(HostFnYield::Data(CoreNetData::Value(Value::Expr(
-            Thunk::from_net(stage),
-        ))))
-    })
+    CoreOperator::ComputationCaptures { code, supplied }
 }
 
-pub(crate) fn dict_host_fn(keys: Arc<[Key]>, supplied: Arc<[Value]>) -> HostFn<CoreNetData> {
+pub(crate) fn dict_operator(keys: Arc<[Key]>, supplied: Arc<[Value]>) -> CoreOperator {
     assert!(!keys.is_empty());
     assert!(supplied.len() < keys.len());
-    HostFn::new("dictionary literal", move |data: &CoreNetData| {
-        let value = core_data_to_lazy_value(data.clone())
-            .map_err(|error| Arc::<str>::from(error.to_string()))?;
-        let mut values = supplied.iter().cloned().collect::<Vec<_>>();
-        values.push(value);
-        if values.len() < keys.len() {
-            return Ok(HostFnYield::HostFn(dict_host_fn(
-                keys.clone(),
-                Arc::from(values),
-            )));
-        }
-        let dict = keys
-            .iter()
-            .cloned()
-            .zip(values)
-            .fold(crate::core::Dict::new_sync(), |dict, (key, value)| {
-                dict.insert(key, value)
-            });
-        Ok(HostFnYield::Data(CoreNetData::Value(Value::Dict(dict))))
-    })
+    CoreOperator::Dict { keys, supplied }
 }
 
-pub(crate) fn builtin_host_fn(call: BuiltinCall) -> HostFn<CoreNetData> {
-    let name: Arc<str> = format!("builtin::{:?}", call.builtin).into();
-    HostFn::new(name, move |data: &CoreNetData| {
-        let argument = core_data_to_lazy_value(data.clone())
-            .map_err(|error| Arc::<str>::from(error.to_string()))?;
-        let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
-        arguments.push(argument);
-        if arguments.len() < call.builtin.arity() {
-            return Ok(HostFnYield::HostFn(builtin_host_fn(BuiltinCall {
-                builtin: call.builtin,
-                arguments: Arc::from(arguments),
-            })));
-        }
-        if arguments.len() > call.builtin.arity() {
-            return Err("builtin host function received too many arguments".into());
-        }
-        Ok(HostFnYield::Data(CoreNetData::Value(Value::Expr(
-            Thunk::from_builtin(BuiltinCall {
-                builtin: call.builtin,
-                arguments: Arc::from(arguments),
-            }),
-        ))))
-    })
+pub(crate) fn builtin_operator(call: BuiltinCall) -> CoreOperator {
+    CoreOperator::Builtin(call)
 }
 
-fn core_applicable_host_fn(function: Value) -> HostFn<CoreNetData> {
-    HostFn::new("core applicable", move |data: &CoreNetData| {
-        let argument = core_data_to_lazy_value(data.clone())
-            .map_err(|error| Arc::<str>::from(error.to_string()))?;
-        let result = apply_value(function.clone(), argument, &[])
-            .map_err(|error| Arc::<str>::from(error.to_string()))?;
-        Ok(HostFnYield::Data(CoreNetData::Value(result)))
-    })
+fn applicable_operator(function: Value) -> CoreOperator {
+    CoreOperator::Applicable(function)
 }
 
-pub(crate) fn list_host_fn(arity: usize, supplied: Arc<[Value]>) -> HostFn<CoreNetData> {
+pub(crate) fn list_operator(arity: usize, supplied: Arc<[Value]>) -> CoreOperator {
     assert!(supplied.len() < arity);
-    HostFn::new("list literal", move |data: &CoreNetData| {
-        let argument = core_data_to_lazy_value(data.clone())
-            .map_err(|error| Arc::<str>::from(error.to_string()))?;
-        let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
-        arguments.push(argument);
-        if arguments.len() < arity {
-            return Ok(HostFnYield::HostFn(list_host_fn(
-                arity,
-                Arc::from(arguments),
-            )));
-        }
-        let list = arguments.into_iter().fold(List::empty(), |list, value| {
-            List::concat(list, list_literal_segment(value))
-        });
-        Ok(HostFnYield::Data(CoreNetData::Value(Value::List(list))))
-    })
+    CoreOperator::List { arity, supplied }
 }
 
-pub(crate) fn access_host_fn(
-    path: Arc<[CoreDataKey]>,
-    supplied: Arc<[Value]>,
-) -> HostFn<CoreNetData> {
+pub(crate) fn access_operator(path: Arc<[CoreDataKey]>, supplied: Arc<[Value]>) -> CoreOperator {
     let arity = 1 + path
         .iter()
         .filter(|key| !matches!(key, CoreDataKey::Key(_)))
         .count();
     assert!(supplied.len() < arity);
-    HostFn::new("dictionary access", move |data: &CoreNetData| {
-        let argument = core_data_to_lazy_value(data.clone())
-            .map_err(|error| Arc::<str>::from(error.to_string()))?;
-        let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
-        arguments.push(argument);
-        if arguments.len() < arity {
-            return Ok(HostFnYield::HostFn(access_host_fn(
-                path.clone(),
-                Arc::from(arguments),
-            )));
+    CoreOperator::Access { path, supplied }
+}
+
+fn apply_core_operator(
+    operator: &CoreOperator,
+    data: &CoreNetData,
+) -> Result<OperatorYield<CoreSpecialization>, EvalError> {
+    let operand = core_data_to_lazy_value(data.clone())?;
+    match operator {
+        CoreOperator::ApplyArity { arity, supplied } => {
+            let mut operands = supplied.iter().cloned().collect::<Vec<_>>();
+            operands.push(operand);
+            if operands.len() < *arity + 1 {
+                return Ok(OperatorYield::Operator(apply_arity_operator(
+                    *arity,
+                    Arc::from(operands),
+                )));
+            }
+            let function = operands.remove(0);
+            if *arity == 0 {
+                return Ok(OperatorYield::Data(CoreNetData::Value(function)));
+            }
+            let result = match function {
+                Value::Builtin(builtin) => {
+                    apply_builtin_values_lazily(builtin, Vec::new(), operands)
+                }
+                Value::PartialBuiltin(call) => apply_builtin_values_lazily(
+                    call.builtin,
+                    call.arguments.iter().cloned().collect(),
+                    operands,
+                ),
+                function => apply_values(function, operands, &[]),
+            }?;
+            Ok(OperatorYield::Data(CoreNetData::Value(result)))
         }
-        Ok(HostFnYield::Data(CoreNetData::Value(Value::Expr(
-            Thunk::from_access(path.clone(), Arc::from(arguments)),
-        ))))
-    })
+        CoreOperator::FunctionCaptures { code, supplied } => {
+            let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
+            captures.push(operand);
+            if captures.len() < code.capture_count() {
+                return Ok(OperatorYield::Operator(function_capture_operator(
+                    code.clone(),
+                    Arc::from(captures),
+                )));
+            }
+            Ok(OperatorYield::Data(CoreNetData::Value(
+                instantiate_function(code, captures)?,
+            )))
+        }
+        CoreOperator::ComputationCaptures { code, supplied } => {
+            let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
+            captures.push(operand);
+            if captures.len() < code.capture_count() {
+                return Ok(OperatorYield::Operator(computation_capture_operator(
+                    code.clone(),
+                    Arc::from(captures),
+                )));
+            }
+            let stage =
+                attach_net_many(Value::Net(NetValue::new(code.runtime().clone())), captures);
+            Ok(OperatorYield::Data(CoreNetData::Value(Value::Expr(
+                Thunk::from_net(stage),
+            ))))
+        }
+        CoreOperator::Dict { keys, supplied } => {
+            let mut values = supplied.iter().cloned().collect::<Vec<_>>();
+            values.push(operand);
+            if values.len() < keys.len() {
+                return Ok(OperatorYield::Operator(dict_operator(
+                    keys.clone(),
+                    Arc::from(values),
+                )));
+            }
+            let dict = keys
+                .iter()
+                .cloned()
+                .zip(values)
+                .fold(crate::core::Dict::new_sync(), |dict, (key, value)| {
+                    dict.insert(key, value)
+                });
+            Ok(OperatorYield::Data(CoreNetData::Value(Value::Dict(dict))))
+        }
+        CoreOperator::Builtin(call) => {
+            let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
+            arguments.push(operand);
+            if arguments.len() < call.builtin.arity() {
+                return Ok(OperatorYield::Operator(builtin_operator(BuiltinCall {
+                    builtin: call.builtin,
+                    arguments: Arc::from(arguments),
+                })));
+            }
+            if arguments.len() > call.builtin.arity() {
+                return Err(EvalError::new(
+                    "builtin operator received too many arguments",
+                ));
+            }
+            Ok(OperatorYield::Data(CoreNetData::Value(Value::Expr(
+                Thunk::from_builtin(BuiltinCall {
+                    builtin: call.builtin,
+                    arguments: Arc::from(arguments),
+                }),
+            ))))
+        }
+        CoreOperator::Applicable(function) => Ok(OperatorYield::Data(CoreNetData::Value(
+            apply_value(function.clone(), operand, &[])?,
+        ))),
+        CoreOperator::List { arity, supplied } => {
+            let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
+            arguments.push(operand);
+            if arguments.len() < *arity {
+                return Ok(OperatorYield::Operator(list_operator(
+                    *arity,
+                    Arc::from(arguments),
+                )));
+            }
+            let list = arguments.into_iter().fold(List::empty(), |list, value| {
+                List::concat(list, list_literal_segment(value))
+            });
+            Ok(OperatorYield::Data(CoreNetData::Value(Value::List(list))))
+        }
+        CoreOperator::Access { path, supplied } => {
+            let arity = 1 + path
+                .iter()
+                .filter(|key| !matches!(key, CoreDataKey::Key(_)))
+                .count();
+            let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
+            arguments.push(operand);
+            if arguments.len() < arity {
+                return Ok(OperatorYield::Operator(access_operator(
+                    path.clone(),
+                    Arc::from(arguments),
+                )));
+            }
+            Ok(OperatorYield::Data(CoreNetData::Value(Value::Expr(
+                Thunk::from_access(path.clone(), Arc::from(arguments)),
+            ))))
+        }
+        CoreOperator::Error(message) => Err(EvalError::new(message.as_ref())),
+    }
 }
 
 fn apply_builtin(
@@ -3028,7 +3058,7 @@ mod tests {
 
     use super::*;
 
-    fn closed_net(build: impl FnOnce(&mut NetBuilder<CoreNetData>) -> Port) -> NetValue {
+    fn closed_net(build: impl FnOnce(&mut NetBuilder<CoreSpecialization>) -> Port) -> NetValue {
         let mut builder = NetBuilder::new();
         let exposed = build(&mut builder);
         NetValue::new(builder.finish(exposed).instantiate_shared())
@@ -3070,6 +3100,17 @@ mod tests {
         assert_eq!(
             eval_value(&Value::Net(identity)).unwrap(),
             Value::Net(expected)
+        );
+    }
+
+    #[test]
+    fn zero_arity_apply_operator_is_data_identity() {
+        let operator = apply_arity_operator(0, Arc::from([]));
+        let data = CoreNetData::Value(n(42));
+
+        assert_eq!(
+            CoreSpecialization::apply_operator(&operator, &data).unwrap(),
+            OperatorYield::Data(data)
         );
     }
 

@@ -6,7 +6,7 @@ use crate::core::{
     BuiltinCall, DeferredValue, Expr, FunctionCode, FunctionValue, IVar, Key, KeyExpr, NetValue,
     Value,
 };
-use crate::interaction_net::{HostFn, InteractionNet, NetBuilder, Port, SharedRuntimeNet};
+use crate::interaction_net::{InteractionNet, NetBuilder, Port, SharedRuntimeNet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreDataKey {
@@ -21,11 +21,44 @@ pub enum CoreNetData {
     Builtin(BuiltinCall),
     Deferred(Arc<DeferredValue>),
     Future(IVar),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreOperator {
+    ApplyArity {
+        arity: usize,
+        supplied: Arc<[Value]>,
+    },
+    FunctionCaptures {
+        code: Arc<FunctionCode>,
+        supplied: Arc<[Value]>,
+    },
+    ComputationCaptures {
+        code: Arc<FunctionCode>,
+        supplied: Arc<[Value]>,
+    },
+    Dict {
+        keys: Arc<[Key]>,
+        supplied: Arc<[Value]>,
+    },
+    Builtin(BuiltinCall),
+    Applicable(Value),
+    List {
+        arity: usize,
+        supplied: Arc<[Value]>,
+    },
+    Access {
+        path: Arc<[CoreDataKey]>,
+        supplied: Arc<[Value]>,
+    },
     Error(Arc<str>),
 }
 
-pub type CoreInteractionNet = InteractionNet<CoreNetData>;
-pub type CoreRuntimeNet = SharedRuntimeNet<CoreNetData>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoreSpecialization;
+
+pub type CoreInteractionNet = InteractionNet<CoreSpecialization>;
+pub type CoreRuntimeNet = SharedRuntimeNet<CoreSpecialization>;
 
 #[derive(Debug, Clone)]
 pub struct LiftedFunctionNet {
@@ -59,7 +92,7 @@ pub(crate) fn lower_closed_function_value(arity: usize, body: Expr) -> Value {
 }
 
 struct ClosedLowerer {
-    net: NetBuilder<CoreNetData>,
+    net: NetBuilder<CoreSpecialization>,
     local_uses: Vec<Vec<Port>>,
 }
 
@@ -114,8 +147,8 @@ impl ClosedLowerer {
                     .into_iter()
                     .map(|(_, value)| value)
                     .collect::<Vec<_>>();
-                self.lazy_host_application_into(
-                    crate::eval::dict_host_fn(Arc::from(keys), Arc::from([])),
+                self.lazy_operator_application_into(
+                    crate::eval::dict_operator(Arc::from(keys), Arc::from([])),
                     &values,
                     target,
                 );
@@ -129,8 +162,8 @@ impl ClosedLowerer {
                         target,
                     );
                 } else {
-                    self.host_application_into(
-                        crate::eval::list_host_fn(args.len(), Arc::from([])),
+                    self.operator_application_into(
+                        crate::eval::list_operator(args.len(), Arc::from([])),
                         &args,
                         target,
                     );
@@ -152,8 +185,8 @@ impl ClosedLowerer {
                     );
                 } else {
                     let captures = captures.iter().map(Arc::as_ref).collect::<Vec<_>>();
-                    self.host_application_into(
-                        crate::eval::function_capture_host_fn(code.clone(), Arc::from([])),
+                    self.operator_application_into(
+                        crate::eval::function_capture_operator(code.clone(), Arc::from([])),
                         &captures,
                         target,
                     );
@@ -176,15 +209,22 @@ impl ClosedLowerer {
                         }
                     })
                     .collect::<Vec<_>>();
-                self.host_application_into(
-                    crate::eval::access_host_fn(Arc::from(keys), Arc::from([])),
+                self.operator_application_into(
+                    crate::eval::access_operator(Arc::from(keys), Arc::from([])),
                     &args,
                     target,
                 );
             }
             Expr::Deferred(value) => self.data_into(CoreNetData::Deferred(value.clone()), target),
             Expr::Future(value) => self.data_into(CoreNetData::Future(value.clone()), target),
-            Expr::Error(message) => self.data_into(CoreNetData::Error(message.clone()), target),
+            Expr::Error(message) => {
+                let [input, output] = self.net.operator(CoreOperator::Error(message.clone()));
+                let trigger = self.net.data(CoreNetData::Value(Value::Dict(
+                    crate::core::Dict::new_sync(),
+                )));
+                self.net.wire(input, trigger);
+                self.net.wire(output, target);
+            }
         }
     }
 
@@ -200,13 +240,8 @@ impl ClosedLowerer {
         self.net.wire(data, target);
     }
 
-    fn host_application_into(
-        &mut self,
-        host_fn: HostFn<CoreNetData>,
-        args: &[&Expr],
-        target: Port,
-    ) {
-        let mut output = self.net.unary_host_fn(host_fn);
+    fn operator_application_into(&mut self, operator: CoreOperator, args: &[&Expr], target: Port) {
+        let mut output = self.net.unary_operator(operator);
         for argument in args {
             let [application, argument_port, result] = self.net.bind();
             self.net.wire(output, application);
@@ -216,13 +251,13 @@ impl ClosedLowerer {
         self.net.wire(output, target);
     }
 
-    fn lazy_host_application_into(
+    fn lazy_operator_application_into(
         &mut self,
-        host_fn: HostFn<CoreNetData>,
+        operator: CoreOperator,
         args: &[&Value],
         target: Port,
     ) {
-        let mut output = self.net.unary_host_fn(host_fn);
+        let mut output = self.net.unary_operator(operator);
         for argument in args {
             let [application, argument_port, result] = self.net.bind();
             self.net.wire(output, application);
@@ -233,8 +268,8 @@ impl ClosedLowerer {
     }
 
     fn semantic_application_into(&mut self, function: &Expr, arguments: &[&Expr], target: Port) {
-        let mut output = self.net.unary_host_fn(crate::eval::apply_host_fn(
-            arguments.len() + 1,
+        let mut output = self.net.unary_operator(crate::eval::apply_arity_operator(
+            arguments.len(),
             Arc::from([]),
         ));
         let [application, function_port, result] = self.net.bind();
@@ -282,8 +317,8 @@ impl ClosedLowerer {
             .map(Expr::Local)
             .collect::<Vec<_>>();
         let captures = captures.iter().collect::<Vec<_>>();
-        self.host_application_into(
-            crate::eval::computation_capture_host_fn(code, Arc::from([])),
+        self.operator_application_into(
+            crate::eval::computation_capture_operator(code, Arc::from([])),
             &captures,
             target,
         );
@@ -399,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn list_application_lowers_to_host_functions_not_callable_data() {
+    fn list_application_lowers_to_operators_not_callable_data() {
         let (net, _) = ClosedLowerer::lower_template(
             1,
             Arc::new(Expr::List(Arc::from([Arc::new(Expr::Local(0))]))),
@@ -408,13 +443,13 @@ mod tests {
         assert!(
             net.nodes()
                 .iter()
-                .any(|node| matches!(node, Node::HostFn(_)))
+                .any(|node| matches!(node, Node::Operator(_)))
         );
         assert!(!net.nodes().iter().any(|node| matches!(node, Node::Data(_))));
     }
 
     #[test]
-    fn access_application_lowers_to_host_functions_not_callable_data() {
+    fn access_application_lowers_to_operators_not_callable_data() {
         let (net, _) = ClosedLowerer::lower_template(
             1,
             Arc::new(Expr::Access(
@@ -426,9 +461,23 @@ mod tests {
         assert!(
             net.nodes()
                 .iter()
-                .any(|node| matches!(node, Node::HostFn(_)))
+                .any(|node| matches!(node, Node::Operator(_)))
         );
         assert!(!net.nodes().iter().any(|node| matches!(node, Node::Data(_))));
+    }
+
+    #[test]
+    fn error_lowering_builds_an_operator_that_can_only_get_stuck() {
+        let (net, _) = ClosedLowerer::lower_template(
+            0,
+            Arc::new(Expr::Error(Arc::from("deliberate failure"))),
+        );
+
+        assert!(net.nodes().iter().any(|node| matches!(
+            node,
+            Node::Operator(CoreOperator::Error(message)) if message.as_ref() == "deliberate failure"
+        )));
+        assert_eq!(net.active_pairs().len(), 1);
     }
 
     #[test]

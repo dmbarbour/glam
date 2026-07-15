@@ -6,7 +6,7 @@ use crate::core::Builtin;
 use crate::core::{
     Atom, DeferredValue, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, NetValue, Value,
 };
-use crate::core_net::{CoreNetData, lower_function_code};
+use crate::core_net::{CoreSpecialization, lower_function_code};
 use crate::interaction_net::{NetBuildError, NetBuilder, Port};
 use crate::number::Number;
 
@@ -251,7 +251,7 @@ impl CompileContext {
     /// the shared runtime.
     pub fn value_net(
         &self,
-        build: impl FnOnce(&mut NetBuilder<CoreNetData>) -> Result<Port, NetBuildError>,
+        build: impl FnOnce(&mut NetBuilder<CoreSpecialization>) -> Result<Port, NetBuildError>,
     ) -> Result<Value, CompileNetError> {
         let mut builder = NetBuilder::new();
         let exposed = build(&mut builder)?;

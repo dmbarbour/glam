@@ -21,7 +21,9 @@
   result as `FunctionCode`, while each evaluated `FunctionValue` names a shared
   curried runtime stage. Calls lazily copy the runtime frontier through
   evaluator-only remote cursors
-- `interaction_net.rs` provides generic `InteractionNet<Data>` topology,
+- `interaction_net.rs` provides generic `InteractionNet<Specialization>`
+  topology. A specialization supplies cloneable `Data` and unary `Operator`
+  values plus the rules for callable data and `Operator >< Data`;
   checked construction through one `NetBuilder` (including fallible
   wiring/finalization and balanced copy helpers), active-pair discovery, and
   mutable runtime reduction; builder-only one-output copy tunnels are spliced
@@ -29,7 +31,7 @@
   runtime nodes use monotonic IDs and hash-table storage, preserve a stable
   exposed interface, and allocate fan sites locally; an active pair is keyed by
   its lower node ID, with one ordered tree recording ready, claimed, cursor-
-  blocked, and stuck states; claimed cursor and host work can release the
+  blocked, and stuck states; claimed cursor and operator work can release the
   runtime mutex without surrendering pair ownership; layered cursors expose a precise
   local cursor, source cursor, or source pair dependency instead of scanning or
   sweeping scheduler collections; nodes materialize only through principal
@@ -42,16 +44,16 @@
 - `eval.rs` contains no lambda or closure representation. Source functions are
   ordinary, observable `Value::Function` data; partial application derives and
   shares another curried runtime stage. Saturated calls are memoized thunks.
-  Source-level application lowers through a data-consuming `HostFn`, while raw
+  Source-level application lowers through a data-consuming `CoreOperator`, while raw
   `Value::Net` remains the explicit callable-data/cursor path. The evaluator
   implements generic callable-data policy for target-local blocked bind-data
-  pairs and executes generic unary `HostFn` requests
-  outside runtime locks; HostFn failures become permanently stuck pairs rather
+  pairs and executes generic unary operator requests
+  outside runtime locks; operator failures become permanently stuck pairs rather
   than an underspecified retry state; net-lowered builtins curry by returning
-  another bind-wrapped HostFn and retain saturated work as memoized semantic thunks;
-  contiguous application spines are represented by one semantic HostFn chain;
+  another bind-wrapped operator and retain saturated work as memoized semantic thunks;
+  contiguous application spines are represented by one semantic operator chain;
   function stages attach all presently available arguments together. List,
-  dictionary, and Access construction lower through HostFn chains, with lazy
+  dictionary, and Access construction lower through operator chains, with lazy
   aggregate members represented as closed value/computation thunks rather than
   exported runtime-backed holes; closed net values attach their exposed
   ports through logical-copy cursors and may normalize to either data or a non-
@@ -67,7 +69,7 @@ directly; it provides reference semantics for replacing those histories with
 Lamping-style bracket/croissant control interactions. Builtin currying, closed
 list construction, and general application bodies now cross the net runtime
 boundary. Callable data is claimed and lowered immediately without touching its
-argument: nets load through cursors, while builtins lower to Bind/HostFn
+argument: nets load through cursors, while builtins lower to Bind/Operator
 topology. Cursor erasure uses ordinary materialization and Erase interactions;
 no erased frontier state or mapped-node history is required. General
 construction effects still belong before adding the `interaction_net` keyword.

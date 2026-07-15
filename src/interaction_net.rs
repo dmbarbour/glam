@@ -76,89 +76,41 @@ impl FanIdentity {
     }
 }
 
-/// A host-provided unary data transition.
+/// Client semantics embedded in otherwise generic interaction-net topology.
 ///
-/// The principal port consumes [`Node::Data`]. Its sole auxiliary port is the
-/// result continuation. Returning another `HostFn` installs it behind a fresh
-/// [`Node::Bind`], preserving ordinary unary function topology.
-pub struct HostFn<D> {
-    name: Arc<str>,
-    implementation: Arc<dyn Fn(&D) -> HostFnResult<D> + Send + Sync>,
+/// `Operator` values are immutable unary agents. Their principal port consumes
+/// `Data`, and their sole auxiliary port is the result continuation. Both
+/// callable-data interpretation and operator execution happen outside the
+/// runtime-net mutex.
+pub trait NetSpecialization: Clone + fmt::Debug + PartialEq + Eq + Sized + 'static {
+    type Data: Clone + fmt::Debug + PartialEq + Eq + 'static;
+    type Operator: Clone + fmt::Debug + PartialEq + Eq + 'static;
+    type Error: fmt::Display;
+
+    fn callable(data: Self::Data) -> Result<Callable<Self>, Self::Error>;
+
+    fn apply_operator(
+        operator: &Self::Operator,
+        data: &Self::Data,
+    ) -> Result<OperatorYield<Self>, Self::Error>;
+
+    fn operator_name(operator: &Self::Operator) -> &str;
 }
-
-impl<D> HostFn<D> {
-    pub fn new(
-        name: impl Into<Arc<str>>,
-        implementation: impl Fn(&D) -> HostFnResult<D> + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            implementation: Arc::new(implementation),
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn apply(&self, data: &D) -> HostFnResult<D> {
-        (self.implementation)(data)
-    }
-}
-
-impl<D> Clone for HostFn<D> {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            implementation: self.implementation.clone(),
-        }
-    }
-}
-
-impl<D> fmt::Debug for HostFn<D> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("HostFn")
-            .field("name", &self.name)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<D> PartialEq for HostFn<D> {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.implementation, &other.implementation)
-    }
-}
-
-impl<D> Eq for HostFn<D> {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostFnYield<D> {
-    Data(D),
-    HostFn(HostFn<D>),
+pub enum OperatorYield<S: NetSpecialization> {
+    Data(S::Data),
+    Operator(S::Operator),
 }
-
-pub type HostFnResult<D> = Result<HostFnYield<D>, Arc<str>>;
 
 /// The topology that callable data exposes when it meets a [`Node::Bind`].
 ///
-/// A shared net is loaded through a lazy logical copy. A host function is
+/// A shared net is loaded through a lazy logical copy. An operator is
 /// installed behind a fresh bind so the ordinary bind-join rule performs the
 /// application.
-pub enum Callable<D> {
-    Net(SharedRuntimeNet<D>),
-    HostFn(HostFn<D>),
-}
-
-/// Client policy for interpreting embedded data as a callable agent.
-///
-/// Implementations may force client-owned lazy values, so this method is
-/// always invoked without holding the target runtime-net mutex. Returning an
-/// error leaves the original `Data >< Bind` pair permanently stuck.
-pub trait CallableData: Clone + 'static {
-    type Error: fmt::Display;
-
-    fn into_callable(self) -> Result<Callable<Self>, Self::Error>;
+pub enum Callable<S: NetSpecialization> {
+    Net(SharedRuntimeNet<S>),
+    Operator(S::Operator),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -212,7 +164,7 @@ impl fmt::Debug for Port {
 
 /// Immutable nodes in a reusable interaction-net template.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Node<D> {
+pub enum Node<S: NetSpecialization> {
     /// Function or application constructor. Ports: `[ap*, arg, result]`.
     Bind,
     /// Binary Lamping-style fan. Ports: `[input*, left, right]`.
@@ -220,30 +172,30 @@ pub enum Node<D> {
     /// Eraser for a value used zero times. Port: `[input*]`.
     Erase,
     /// Client-defined embedded data. Port: `[data*]`.
-    Data(D),
-    /// Host-provided unary data transition. Ports: `[input*, result]`.
-    HostFn(HostFn<D>),
+    Data(S::Data),
+    /// Client-defined unary data transition. Ports: `[input*, result]`.
+    Operator(S::Operator),
 }
 
-impl<D> Node<D> {
+impl<S: NetSpecialization> Node<S> {
     fn port_count(&self) -> u32 {
         match self {
             Self::Bind | Self::Fan { .. } => 3,
-            Self::HostFn(_) => 2,
+            Self::Operator(_) => 2,
             Self::Erase | Self::Data(_) => 1,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeNode<D> {
+pub enum RuntimeNode<S: NetSpecialization> {
     Bind,
     Fan {
         identity: FanIdentity,
     },
     Erase,
-    Data(D),
-    HostFn(HostFn<D>),
+    Data(S::Data),
+    Operator(S::Operator),
     /// Stable, evaluator-only anchor for a runtime net's exposed port.
     Interface,
     /// Evaluator-only one-way wire into a logical copy of another runtime net.
@@ -253,11 +205,11 @@ pub enum RuntimeNode<D> {
     },
 }
 
-impl<D> RuntimeNode<D> {
+impl<S: NetSpecialization> RuntimeNode<S> {
     fn port_count(&self) -> u32 {
         match self {
             Self::Bind | Self::Fan { .. } => 3,
-            Self::HostFn(_) | Self::Interface => 2,
+            Self::Operator(_) | Self::Interface => 2,
             Self::Erase | Self::Data(_) | Self::RemoteCursor { .. } => 1,
         }
     }
@@ -297,15 +249,15 @@ impl ActivePairKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InteractionNet<D> {
-    nodes: Arc<[Node<D>]>,              // nodes identified by index
+pub struct InteractionNet<S: NetSpecialization> {
+    nodes: Arc<[Node<S>]>,              // nodes identified by index
     wires: Arc<[Wire]>,                 // all wires between ports
     exposed: Port,                      // closed net has one exposed port
     active_pairs: Arc<[ActivePairKey]>, // subset of wires connecting principal ports
 }
 
-impl<D> InteractionNet<D> {
-    pub fn nodes(&self) -> &[Node<D>] {
+impl<S: NetSpecialization> InteractionNet<S> {
+    pub fn nodes(&self) -> &[Node<S>] {
         &self.nodes
     }
 
@@ -322,31 +274,31 @@ impl<D> InteractionNet<D> {
     }
 }
 
-impl<D: Clone + 'static> InteractionNet<D> {
-    pub fn instantiate(&self) -> RuntimeNet<D> {
+impl<S: NetSpecialization> InteractionNet<S> {
+    pub fn instantiate(&self) -> RuntimeNet<S> {
         RuntimeNet::new(self)
     }
 
-    pub fn instantiate_shared(&self) -> SharedRuntimeNet<D> {
+    pub fn instantiate_shared(&self) -> SharedRuntimeNet<S> {
         SharedRuntimeNet::new(self.instantiate())
     }
 }
 
 /// Checked construction of a reusable net template.
-pub struct NetBuilder<D> {
-    nodes: Vec<BuilderNode<D>>,
+pub struct NetBuilder<S: NetSpecialization> {
+    nodes: Vec<BuilderNode<S>>,
     wires: Vec<Wire>,
     next_fan_site: u64,
 }
 
-enum BuilderNode<D> {
-    Runtime(Node<D>),
+enum BuilderNode<S: NetSpecialization> {
+    Runtime(Node<S>),
     /// Builder-only two-ended alias used to represent `.copy 1`. Finalization
     /// splices it out, so tunnels never enter an immutable template.
     Tunnel,
 }
 
-impl<D> BuilderNode<D> {
+impl<S: NetSpecialization> BuilderNode<S> {
     fn port_count(&self) -> u32 {
         match self {
             Self::Runtime(node) => node.port_count(),
@@ -419,13 +371,13 @@ impl fmt::Display for NetBuildError {
 
 impl std::error::Error for NetBuildError {}
 
-impl<D> Default for NetBuilder<D> {
+impl<S: NetSpecialization> Default for NetBuilder<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<D> NetBuilder<D> {
+impl<S: NetSpecialization> NetBuilder<S> {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
@@ -434,7 +386,7 @@ impl<D> NetBuilder<D> {
         }
     }
 
-    pub fn push(&mut self, node: Node<D>) -> NodeId {
+    pub fn push(&mut self, node: Node<S>) -> NodeId {
         let id = NodeId::from_index(self.nodes.len());
         self.nodes.push(BuilderNode::Runtime(node));
         id
@@ -462,22 +414,22 @@ impl<D> NetBuilder<D> {
         }
     }
 
-    pub fn data(&mut self, data: D) -> Port {
+    pub fn data(&mut self, data: S::Data) -> Port {
         let node = self.push(Node::Data(data));
         Port::principal(node)
     }
 
-    pub fn host_fn(&mut self, host_fn: HostFn<D>) -> [Port; 2] {
-        let node = self.push(Node::HostFn(host_fn));
+    pub fn operator(&mut self, operator: S::Operator) -> [Port; 2] {
+        let node = self.push(Node::Operator(operator));
         [Port::principal(node), Port::auxiliary(node, 1)]
     }
 
-    /// Constructs a unary function from an ordinary bind and a host function.
+    /// Constructs a unary function from an ordinary bind and an operator.
     /// The returned ports are the exposed function port and its internal result
-    /// port, which is already wired to the host function continuation.
-    pub fn unary_host_fn(&mut self, host_fn: HostFn<D>) -> Port {
+    /// port, which is already wired to the operator continuation.
+    pub fn unary_operator(&mut self, operator: S::Operator) -> Port {
         let [function, argument, result] = self.bind();
-        let [input, output] = self.host_fn(host_fn);
+        let [input, output] = self.operator(operator);
         self.wire(argument, input);
         self.wire(result, output);
         function
@@ -559,17 +511,17 @@ impl<D> NetBuilder<D> {
             .expect("invalid interaction-net wire")
     }
 
-    pub fn finish(self, exposed: Port) -> InteractionNet<D> {
+    pub fn finish(self, exposed: Port) -> InteractionNet<S> {
         self.try_finish(exposed)
             .expect("invalid interaction-net template")
     }
 
-    pub fn try_finish(self, exposed: Port) -> Result<InteractionNet<D>, NetBuildError> {
+    pub fn try_finish(self, exposed: Port) -> Result<InteractionNet<S>, NetBuildError> {
         self.validate(exposed)?;
         self.normalize(exposed)
     }
 
-    fn normalize(self, exposed: Port) -> Result<InteractionNet<D>, NetBuildError> {
+    fn normalize(self, exposed: Port) -> Result<InteractionNet<S>, NetBuildError> {
         let is_tunnel = self
             .nodes
             .iter()
@@ -760,7 +712,7 @@ pub enum ReductionKind {
     FanBind {
         identity: FanIdentity,
     },
-    FanHostFn {
+    FanOperator {
         identity: FanIdentity,
     },
     Erase,
@@ -768,8 +720,8 @@ pub enum ReductionKind {
         bind: NodeId,
         data: NodeId,
     },
-    HostCall {
-        host_fn: NodeId,
+    OperatorCall {
+        operator: NodeId,
         data: NodeId,
     },
     RemoteCursor {
@@ -788,19 +740,19 @@ pub enum CursorProgress {
 }
 
 #[derive(Clone)]
-pub enum CursorDependency<D> {
+pub enum CursorDependency<S: NetSpecialization> {
     LocalCursor(NodeId),
     SourceCursor {
-        source: SharedRuntimeNet<D>,
+        source: SharedRuntimeNet<S>,
         cursor: NodeId,
     },
     SourcePair {
-        source: SharedRuntimeNet<D>,
+        source: SharedRuntimeNet<S>,
         pair: ActivePairKey,
     },
 }
 
-impl<D> fmt::Debug for CursorDependency<D> {
+impl<S: NetSpecialization> fmt::Debug for CursorDependency<S> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::LocalCursor(cursor) => {
@@ -828,16 +780,16 @@ pub struct Call {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HostCall {
+pub struct OperatorCall {
     pub pair: ActivePairKey,
-    pub host_fn: NodeId,
+    pub operator: NodeId,
     pub data: NodeId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StuckReason {
     NoRule,
-    HostError(Arc<str>),
+    SpecializationError(Arc<str>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -860,12 +812,12 @@ enum ActivePairState {
     Stuck(StuckReason),
 }
 
-pub struct SharedRuntimeNet<D> {
-    inner: Arc<Mutex<RuntimeNet<D>>>,
+pub struct SharedRuntimeNet<S: NetSpecialization> {
+    inner: Arc<Mutex<RuntimeNet<S>>>,
 }
 
-impl<D> SharedRuntimeNet<D> {
-    pub fn new(runtime: RuntimeNet<D>) -> Self {
+impl<S: NetSpecialization> SharedRuntimeNet<S> {
+    pub fn new(runtime: RuntimeNet<S>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(runtime)),
         }
@@ -875,18 +827,18 @@ impl<D> SharedRuntimeNet<D> {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    pub fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<D>) -> R) -> R {
+    pub fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<S>) -> R) -> R {
         let runtime = self.inner.lock().expect("shared runtime net was poisoned");
         inspect(&runtime)
     }
 
-    pub fn with_mut<R>(&self, update: impl FnOnce(&mut RuntimeNet<D>) -> R) -> R {
+    pub fn with_mut<R>(&self, update: impl FnOnce(&mut RuntimeNet<S>) -> R) -> R {
         let mut runtime = self.inner.lock().expect("shared runtime net was poisoned");
         update(&mut runtime)
     }
 }
 
-impl<D: Clone + 'static> SharedRuntimeNet<D> {
+impl<S: NetSpecialization> SharedRuntimeNet<S> {
     /// Inspects and advances a previously claimed cursor without holding target
     /// and source runtime locks at the same time.
     pub fn advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
@@ -897,23 +849,23 @@ impl<D: Clone + 'static> SharedRuntimeNet<D> {
     }
 }
 
-impl<D: CallableData> SharedRuntimeNet<D> {
+impl<S: NetSpecialization> SharedRuntimeNet<S> {
     /// Resolves one exact claimed `Data >< Bind` pair using client callable
     /// policy. Claiming and finishing each take a short target lock; callable
     /// conversion itself runs without holding the runtime mutex.
-    pub fn resolve_call(&self, call: Call) -> Result<bool, D::Error> {
+    pub fn resolve_call(&self, call: Call) -> Result<bool, S::Error> {
         let Some(data) = self.with_mut(|runtime| runtime.claim_call(call)) else {
             return Ok(false);
         };
 
-        match data.into_callable() {
+        match S::callable(data) {
             Ok(Callable::Net(source)) => {
                 self.with_mut(|runtime| runtime.resume_claimed_call_with_copy(call, source));
                 Ok(true)
             }
-            Ok(Callable::HostFn(host_fn)) => {
+            Ok(Callable::Operator(operator)) => {
                 self.with_mut(|runtime| {
-                    runtime.resume_claimed_call_with_host_fn(call, host_fn);
+                    runtime.resume_claimed_call_with_operator(call, operator);
                 });
                 Ok(true)
             }
@@ -927,7 +879,7 @@ impl<D: CallableData> SharedRuntimeNet<D> {
     }
 }
 
-impl<D> Clone for SharedRuntimeNet<D> {
+impl<S: NetSpecialization> Clone for SharedRuntimeNet<S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -935,7 +887,7 @@ impl<D> Clone for SharedRuntimeNet<D> {
     }
 }
 
-impl<D> fmt::Debug for SharedRuntimeNet<D> {
+impl<S: NetSpecialization> fmt::Debug for SharedRuntimeNet<S> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_tuple("SharedRuntimeNet")
@@ -944,33 +896,33 @@ impl<D> fmt::Debug for SharedRuntimeNet<D> {
     }
 }
 
-impl<D> PartialEq for SharedRuntimeNet<D> {
+impl<S: NetSpecialization> PartialEq for SharedRuntimeNet<S> {
     fn eq(&self, other: &Self) -> bool {
         self.ptr_eq(other)
     }
 }
 
-impl<D> Eq for SharedRuntimeNet<D> {}
+impl<S: NetSpecialization> Eq for SharedRuntimeNet<S> {}
 
-struct CopyState<D> {
-    source: SharedRuntimeNet<D>,
+struct CopyState<S: NetSpecialization> {
+    source: SharedRuntimeNet<S>,
     frontiers: HashMap<Port, NodeId>,
     fan_sites: HashMap<FanSite, FanSite>,
 }
 
 #[derive(Clone)]
-struct CursorClaim<D> {
+struct CursorClaim<S: NetSpecialization> {
     cursor: NodeId,
     pair: Option<ActivePairKey>,
     copy: CopyId,
     remote: Port,
-    source: SharedRuntimeNet<D>,
+    source: SharedRuntimeNet<S>,
 }
 
-enum SourceFrontier<D> {
+enum SourceFrontier<S: NetSpecialization> {
     Principal {
         port: Port,
-        node: RuntimeNode<D>,
+        node: RuntimeNode<S>,
     },
     StableAuxiliary {
         port: Port,
@@ -983,13 +935,13 @@ enum SourceFrontier<D> {
     },
 }
 
-struct RuntimeEntry<D> {
-    node: RuntimeNode<D>,
+struct RuntimeEntry<S: NetSpecialization> {
+    node: RuntimeNode<S>,
     links: [Option<Port>; 3],
 }
 
-impl<D> RuntimeEntry<D> {
-    fn new(node: RuntimeNode<D>) -> Self {
+impl<S: NetSpecialization> RuntimeEntry<S> {
+    fn new(node: RuntimeNode<S>) -> Self {
         Self {
             node,
             links: [None; 3],
@@ -997,14 +949,14 @@ impl<D> RuntimeEntry<D> {
     }
 }
 
-pub struct RuntimeNet<D> {
+pub struct RuntimeNet<S: NetSpecialization> {
     next_node_id: u64,
     next_fan_site: u64,
     exposed: Option<Port>,
-    nodes: HashMap<NodeId, RuntimeEntry<D>>,
+    nodes: HashMap<NodeId, RuntimeEntry<S>>,
     next_copy_id: u64,
-    copies: HashMap<CopyId, CopyState<D>>,
-    cursor_dependencies: HashMap<NodeId, CursorDependency<D>>,
+    copies: HashMap<CopyId, CopyState<S>>,
+    cursor_dependencies: HashMap<NodeId, CursorDependency<S>>,
 
     // Every live principal-principal wire has exactly one authoritative state.
     // External work changes Ready to Claimed while the runtime lock is held,
@@ -1012,8 +964,8 @@ pub struct RuntimeNet<D> {
     active: BTreeMap<ActivePairKey, ActivePairState>,
 }
 
-impl<D: Clone + 'static> RuntimeNet<D> {
-    fn new(net: &InteractionNet<D>) -> Self {
+impl<S: NetSpecialization> RuntimeNet<S> {
+    fn new(net: &InteractionNet<S>) -> Self {
         let nodes = net
             .nodes
             .iter()
@@ -1027,7 +979,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                     },
                     Node::Erase => RuntimeNode::Erase,
                     Node::Data(data) => RuntimeNode::Data(data.clone()),
-                    Node::HostFn(host_fn) => RuntimeNode::HostFn(host_fn.clone()),
+                    Node::Operator(operator) => RuntimeNode::Operator(operator.clone()),
                 };
                 (id, RuntimeEntry::new(node))
             })
@@ -1126,7 +1078,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         }
     }
 
-    pub fn cursor_dependency(&self, cursor: NodeId) -> Option<CursorDependency<D>> {
+    pub fn cursor_dependency(&self, cursor: NodeId) -> Option<CursorDependency<S>> {
         self.cursor_dependencies.get(&cursor).cloned()
     }
 
@@ -1152,12 +1104,12 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         }
     }
 
-    pub fn node(&self, id: NodeId) -> Option<&RuntimeNode<D>> {
+    pub fn node(&self, id: NodeId) -> Option<&RuntimeNode<S>> {
         self.nodes.get(&id).map(|entry| &entry.node)
     }
 
     /// Reads callable data from an active pair already claimed by reduction.
-    fn claim_call(&mut self, call: Call) -> Option<D> {
+    fn claim_call(&mut self, call: Call) -> Option<S::Data> {
         if self.active.get(&call.pair) != Some(&ActivePairState::Claimed) {
             return None;
         }
@@ -1174,59 +1126,63 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         assert_eq!(
             self.active.insert(
                 call.pair,
-                ActivePairState::Stuck(StuckReason::HostError(error))
+                ActivePairState::Stuck(StuckReason::SpecializationError(error))
             ),
             Some(ActivePairState::Claimed),
             "failed call must still be claimed"
         );
     }
 
-    /// Clones a pending host transition so the host callback can run without
+    /// Clones a pending operator transition so specialization code can run without
     /// holding the shared runtime-net mutex.
-    pub fn host_call_parts(&self, call: HostCall) -> (HostFn<D>, D) {
+    pub fn operator_call_parts(&self, call: OperatorCall) -> (S::Operator, S::Data) {
         assert_eq!(self.active.get(&call.pair), Some(&ActivePairState::Claimed));
-        let host_fn = match self.node(call.host_fn) {
-            Some(RuntimeNode::HostFn(host_fn)) => host_fn.clone(),
-            _ => panic!("pending host call function must exist"),
+        let operator = match self.node(call.operator) {
+            Some(RuntimeNode::Operator(operator)) => operator.clone(),
+            _ => panic!("pending operator call agent must exist"),
         };
         let data = match self.node(call.data) {
             Some(RuntimeNode::Data(data)) => data.clone(),
-            _ => panic!("pending host call data must exist"),
+            _ => panic!("pending operator call data must exist"),
         };
-        (host_fn, data)
+        (operator, data)
     }
 
-    pub fn complete_host_call(&mut self, call: HostCall, result: HostFnYield<D>) -> NodeId {
-        let target = self.take_host_call(call);
+    pub fn complete_operator_call(
+        &mut self,
+        call: OperatorCall,
+        result: OperatorYield<S>,
+    ) -> NodeId {
+        let target = self.take_operator_call(call);
         match result {
-            HostFnYield::Data(data) => {
+            OperatorYield::Data(data) => {
                 let node = self.add_node(RuntimeNode::Data(data));
                 self.connect(Port::principal(node), target);
                 node
             }
-            HostFnYield::HostFn(host_fn) => {
+            OperatorYield::Operator(operator) => {
                 let bind = self.add_node(RuntimeNode::Bind);
-                let host = self.add_node(RuntimeNode::HostFn(host_fn));
+                let operator = self.add_node(RuntimeNode::Operator(operator));
                 self.connect(Port::principal(bind), target);
-                self.connect(Port::auxiliary(bind, 1), Port::principal(host));
-                self.connect(Port::auxiliary(bind, 2), Port::auxiliary(host, 1));
+                self.connect(Port::auxiliary(bind, 1), Port::principal(operator));
+                self.connect(Port::auxiliary(bind, 2), Port::auxiliary(operator, 1));
                 bind
             }
         }
     }
 
-    pub fn fail_host_call(&mut self, call: HostCall, error: Arc<str>) {
+    pub fn fail_operator_call(&mut self, call: OperatorCall, error: Arc<str>) {
         assert_eq!(
             self.active.insert(
                 call.pair,
-                ActivePairState::Stuck(StuckReason::HostError(error))
+                ActivePairState::Stuck(StuckReason::SpecializationError(error))
             ),
             Some(ActivePairState::Claimed),
-            "failed host call must still be claimed"
+            "failed operator call must still be claimed"
         );
     }
 
-    pub fn interface_data(&self, interface: Port) -> Option<&D> {
+    pub fn interface_data(&self, interface: Port) -> Option<&S::Data> {
         self.assert_interface(interface);
         let neighbor = self.neighbor(interface)?;
         if !neighbor.is_principal() {
@@ -1376,15 +1332,15 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                     identity: identity.clone(),
                 }
             }
-            (RuntimeNode::Fan { identity }, RuntimeNode::HostFn(_)) => {
-                self.duplicate_host_fn(left_id, identity, right_id);
-                ReductionKind::FanHostFn {
+            (RuntimeNode::Fan { identity }, RuntimeNode::Operator(_)) => {
+                self.duplicate_operator(left_id, identity, right_id);
+                ReductionKind::FanOperator {
                     identity: identity.clone(),
                 }
             }
-            (RuntimeNode::HostFn(_), RuntimeNode::Fan { identity }) => {
-                self.duplicate_host_fn(right_id, identity, left_id);
-                ReductionKind::FanHostFn {
+            (RuntimeNode::Operator(_), RuntimeNode::Fan { identity }) => {
+                self.duplicate_operator(right_id, identity, left_id);
+                ReductionKind::FanOperator {
                     identity: identity.clone(),
                 }
             }
@@ -1404,19 +1360,19 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                 bind: right_id,
                 data: left_id,
             },
-            (RuntimeNode::HostFn(_), RuntimeNode::Data(_)) => ReductionKind::HostCall {
-                host_fn: left_id,
+            (RuntimeNode::Operator(_), RuntimeNode::Data(_)) => ReductionKind::OperatorCall {
+                operator: left_id,
                 data: right_id,
             },
-            (RuntimeNode::Data(_), RuntimeNode::HostFn(_)) => ReductionKind::HostCall {
-                host_fn: right_id,
+            (RuntimeNode::Data(_), RuntimeNode::Operator(_)) => ReductionKind::OperatorCall {
+                operator: right_id,
                 data: left_id,
             },
             (RuntimeNode::Data(_), RuntimeNode::Data(_)) => {
                 *self.active.get_mut(&pair).unwrap() = ActivePairState::Stuck(StuckReason::NoRule);
                 ReductionKind::Stuck
             }
-            (RuntimeNode::HostFn(_), _) | (_, RuntimeNode::HostFn(_)) => {
+            (RuntimeNode::Operator(_), _) | (_, RuntimeNode::Operator(_)) => {
                 *self.active.get_mut(&pair).unwrap() = ActivePairState::Stuck(StuckReason::NoRule);
                 ReductionKind::Stuck
             }
@@ -1430,7 +1386,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         if !matches!(
             kind,
             ReductionKind::Call { .. }
-                | ReductionKind::HostCall { .. }
+                | ReductionKind::OperatorCall { .. }
                 | ReductionKind::RemoteCursor { .. }
                 | ReductionKind::Stuck
         ) {
@@ -1440,7 +1396,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
     }
 
     /// Starts one logical copy and returns its initially unwired remote cursor.
-    pub fn begin_copy(&mut self, source: SharedRuntimeNet<D>) -> NodeId {
+    pub fn begin_copy(&mut self, source: SharedRuntimeNet<S>) -> NodeId {
         let remote = source.with(RuntimeNet::exposed);
         let copy = CopyId(self.next_copy_id);
         self.next_copy_id = self
@@ -1470,11 +1426,11 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 
     /// Completes claimed applicable lowering by loading the
     /// resulting closed net at the original application's principal port.
-    fn resume_claimed_call_with_copy(&mut self, call: Call, source: SharedRuntimeNet<D>) -> NodeId {
+    fn resume_claimed_call_with_copy(&mut self, call: Call, source: SharedRuntimeNet<S>) -> NodeId {
         self.attach_call_to_copy(call, source)
     }
 
-    fn attach_call_to_copy(&mut self, call: Call, source: SharedRuntimeNet<D>) -> NodeId {
+    fn attach_call_to_copy(&mut self, call: Call, source: SharedRuntimeNet<S>) -> NodeId {
         assert_eq!(
             self.active.remove(&call.pair),
             Some(ActivePairState::Claimed),
@@ -1493,11 +1449,11 @@ impl<D: Clone + 'static> RuntimeNet<D> {
     /// Completes applicable lowering by replacing callable data with
     /// an explicit unary function net. The newly introduced Bind then joins
     /// the original application Bind through the ordinary interaction rule.
-    fn resume_claimed_call_with_host_fn(&mut self, call: Call, host_fn: HostFn<D>) -> NodeId {
+    fn resume_claimed_call_with_operator(&mut self, call: Call, operator: S::Operator) -> NodeId {
         assert_eq!(
             self.active.remove(&call.pair),
             Some(ActivePairState::Claimed),
-            "lowered host call must still be claimed"
+            "lowered operator call must still be claimed"
         );
         assert_eq!(
             self.disconnect(Port::principal(call.bind)),
@@ -1506,15 +1462,15 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         assert!(matches!(self.remove_node(call.data), RuntimeNode::Data(_)));
 
         let function = self.add_node(RuntimeNode::Bind);
-        let host = self.add_node(RuntimeNode::HostFn(host_fn));
+        let operator = self.add_node(RuntimeNode::Operator(operator));
         self.connect(Port::principal(call.bind), Port::principal(function));
-        self.connect(Port::auxiliary(function, 1), Port::principal(host));
-        self.connect(Port::auxiliary(function, 2), Port::auxiliary(host, 1));
+        self.connect(Port::auxiliary(function, 1), Port::principal(operator));
+        self.connect(Port::auxiliary(function, 2), Port::auxiliary(operator, 1));
         function
     }
 
     /// Consumes an interface whose neighbor is embedded data.
-    pub fn take_interface_data(&mut self, interface: Port) -> Option<D> {
+    pub fn take_interface_data(&mut self, interface: Port) -> Option<S::Data> {
         self.assert_interface(interface);
         let neighbor = self.neighbor(interface)?;
         if !neighbor.is_principal()
@@ -1531,7 +1487,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
     }
 
     /// Replaces an evaluator interface with one embedded data node.
-    pub fn complete_interface_with_data(&mut self, interface: Port, data: D) -> NodeId {
+    pub fn complete_interface_with_data(&mut self, interface: Port, data: S::Data) -> NodeId {
         self.assert_interface(interface);
         let target = self
             .disconnect(interface)
@@ -1542,28 +1498,28 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         node
     }
 
-    fn take_host_call(&mut self, call: HostCall) -> Port {
-        self.remove_pending_host_call(call);
+    fn take_operator_call(&mut self, call: OperatorCall) -> Port {
+        self.remove_pending_operator_call(call);
         assert_eq!(
-            self.disconnect(Port::principal(call.host_fn)),
+            self.disconnect(Port::principal(call.operator)),
             Some(Port::principal(call.data))
         );
         let target = self
-            .disconnect(Port::auxiliary(call.host_fn, 1))
-            .expect("host function result must remain wired");
+            .disconnect(Port::auxiliary(call.operator, 1))
+            .expect("operator result must remain wired");
         assert!(matches!(
-            self.remove_node(call.host_fn),
-            RuntimeNode::HostFn(_)
+            self.remove_node(call.operator),
+            RuntimeNode::Operator(_)
         ));
         assert!(matches!(self.remove_node(call.data), RuntimeNode::Data(_)));
         target
     }
 
-    fn remove_pending_host_call(&mut self, call: HostCall) {
+    fn remove_pending_operator_call(&mut self, call: OperatorCall) {
         assert_eq!(
             self.active.remove(&call.pair),
             Some(ActivePairState::Claimed),
-            "completed host call must still be pending"
+            "completed operator call must still be pending"
         );
     }
 
@@ -1590,7 +1546,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         Some(CursorProgress::Claimed)
     }
 
-    fn cursor_claim(&self, cursor: NodeId) -> Option<CursorClaim<D>> {
+    fn cursor_claim(&self, cursor: NodeId) -> Option<CursorClaim<S>> {
         let pair = self.active_pair_key(cursor);
         if pair.is_some_and(|pair| self.active.get(&pair) != Some(&ActivePairState::Claimed)) {
             return None;
@@ -1608,7 +1564,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         })
     }
 
-    fn inspect_source_frontier(&self, remote: Port) -> SourceFrontier<D> {
+    fn inspect_source_frontier(&self, remote: Port) -> SourceFrontier<S> {
         let port = self
             .neighbor(remote)
             .expect("remote cursor anchor must remain wired in its source");
@@ -1651,8 +1607,8 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 
     fn finish_cursor_claim(
         &mut self,
-        claim: CursorClaim<D>,
-        frontier: SourceFrontier<D>,
+        claim: CursorClaim<S>,
+        frontier: SourceFrontier<S>,
     ) -> CursorProgress {
         if let Some(pair) = claim.pair {
             assert_eq!(self.active.get(&pair), Some(&ActivePairState::Claimed));
@@ -1776,7 +1732,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         cursor: NodeId,
         remote: Port,
         source_node: NodeId,
-        node: RuntimeNode<D>,
+        node: RuntimeNode<S>,
     ) -> CursorProgress {
         let mut state = self
             .copies
@@ -1789,7 +1745,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             },
             RuntimeNode::Erase => RuntimeNode::Erase,
             RuntimeNode::Data(data) => RuntimeNode::Data(data.clone()),
-            RuntimeNode::HostFn(host_fn) => RuntimeNode::HostFn(host_fn),
+            RuntimeNode::Operator(operator) => RuntimeNode::Operator(operator),
             RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => {
                 self.copies.insert(copy, state);
                 return CursorProgress::Blocked;
@@ -1797,7 +1753,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         };
         let auxiliaries = match &node {
             RuntimeNode::Bind | RuntimeNode::Fan { .. } => 2,
-            RuntimeNode::HostFn(_) => 1,
+            RuntimeNode::Operator(_) => 1,
             RuntimeNode::Erase | RuntimeNode::Data(_) => 0,
             RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => unreachable!(),
         };
@@ -1881,7 +1837,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 
     fn translate_fan_identity(
         &mut self,
-        state: &mut CopyState<D>,
+        state: &mut CopyState<S>,
         identity: &FanIdentity,
     ) -> FanIdentity {
         let site = *state.fan_sites.entry(identity.site).or_insert_with(|| {
@@ -1959,19 +1915,19 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         }
     }
 
-    fn duplicate_host_fn(&mut self, fan: NodeId, identity: &FanIdentity, host_fn: NodeId) {
+    fn duplicate_operator(&mut self, fan: NodeId, identity: &FanIdentity, operator: NodeId) {
         self.disconnect(Port::principal(fan));
         let fan_targets = self.take_auxiliaries(fan, 2);
-        let [result] = <[Port; 1]>::try_from(self.take_auxiliaries(host_fn, 1)).unwrap();
-        let RuntimeNode::HostFn(host_fn) = self.remove_node(host_fn) else {
+        let [result] = <[Port; 1]>::try_from(self.take_auxiliaries(operator, 1)).unwrap();
+        let RuntimeNode::Operator(operator) = self.remove_node(operator) else {
             unreachable!();
         };
         self.remove_node(fan);
 
-        let hosts = fan_targets
+        let operators = fan_targets
             .into_iter()
             .map(|target| {
-                let node = self.add_node(RuntimeNode::HostFn(host_fn.clone()));
+                let node = self.add_node(RuntimeNode::Operator(operator.clone()));
                 self.connect(Port::principal(node), target);
                 node
             })
@@ -1980,10 +1936,10 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             identity: identity.clone(),
         });
         self.connect(Port::principal(residual), result);
-        for (branch, host) in hosts.into_iter().enumerate() {
+        for (branch, operator) in operators.into_iter().enumerate() {
             self.connect(
                 Port::auxiliary(residual, branch as u32 + 1),
-                Port::auxiliary(host, 1),
+                Port::auxiliary(operator, 1),
             );
         }
     }
@@ -2037,7 +1993,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         self.disconnect(Port::principal(eraser));
         let auxiliaries = match self.node(other).expect("erased node must exist") {
             RuntimeNode::Bind | RuntimeNode::Fan { .. } => 2,
-            RuntimeNode::HostFn(_) => 1,
+            RuntimeNode::Operator(_) => 1,
             RuntimeNode::Erase | RuntimeNode::Data(_) => 0,
             RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => {
                 unreachable!("evaluator-only nodes are not erased as ordinary agents")
@@ -2076,7 +2032,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         ));
     }
 
-    fn add_node(&mut self, node: RuntimeNode<D>) -> NodeId {
+    fn add_node(&mut self, node: RuntimeNode<S>) -> NodeId {
         let id = NodeId(self.next_node_id);
         self.next_node_id = self
             .next_node_id
@@ -2086,7 +2042,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         id
     }
 
-    fn remove_node(&mut self, node: NodeId) -> RuntimeNode<D> {
+    fn remove_node(&mut self, node: NodeId) -> RuntimeNode<S> {
         self.cursor_dependencies.remove(&node);
         let entry = self.nodes.remove(&node).expect("removed node must exist");
         assert!(entry.links.iter().all(Option::is_none));
@@ -2177,7 +2133,81 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 mod tests {
     use super::*;
 
-    fn finish_claimed_cursor<D: Clone + 'static>(
+    pub trait TestData: Clone + fmt::Debug + PartialEq + Eq + 'static {}
+
+    impl TestData for () {}
+    impl TestData for i32 {}
+    impl TestData for &'static str {}
+
+    pub struct TestOperator<D: TestData> {
+        name: &'static str,
+        implementation: Arc<dyn Fn(&D) -> Result<OperatorYield<D>, Arc<str>> + Send + Sync>,
+    }
+
+    impl<D: TestData> TestOperator<D> {
+        fn new(
+            name: &'static str,
+            implementation: impl Fn(&D) -> Result<OperatorYield<D>, Arc<str>> + Send + Sync + 'static,
+        ) -> Self {
+            Self {
+                name,
+                implementation: Arc::new(implementation),
+            }
+        }
+
+        fn apply(&self, data: &D) -> Result<OperatorYield<D>, Arc<str>> {
+            (self.implementation)(data)
+        }
+    }
+
+    impl<D: TestData> Clone for TestOperator<D> {
+        fn clone(&self) -> Self {
+            Self {
+                name: self.name,
+                implementation: self.implementation.clone(),
+            }
+        }
+    }
+
+    impl<D: TestData> fmt::Debug for TestOperator<D> {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_tuple("TestOperator")
+                .field(&self.name)
+                .finish()
+        }
+    }
+
+    impl<D: TestData> PartialEq for TestOperator<D> {
+        fn eq(&self, other: &Self) -> bool {
+            Arc::ptr_eq(&self.implementation, &other.implementation)
+        }
+    }
+
+    impl<D: TestData> Eq for TestOperator<D> {}
+
+    impl<D: TestData> NetSpecialization for D {
+        type Data = D;
+        type Operator = TestOperator<D>;
+        type Error = Arc<str>;
+
+        fn callable(_data: D) -> Result<Callable<Self>, Self::Error> {
+            Err(Arc::from("test data is not callable"))
+        }
+
+        fn apply_operator(
+            operator: &Self::Operator,
+            data: &D,
+        ) -> Result<OperatorYield<Self>, Self::Error> {
+            operator.apply(data)
+        }
+
+        fn operator_name(operator: &Self::Operator) -> &str {
+            operator.name
+        }
+    }
+
+    fn finish_claimed_cursor<D: TestData>(
         target: &mut RuntimeNet<D>,
         cursor: NodeId,
     ) -> CursorProgress {
@@ -2190,9 +2220,7 @@ mod tests {
         target.finish_cursor_claim(claim, frontier)
     }
 
-    fn reduce_next_cursor<D: Clone + 'static>(
-        target: &mut RuntimeNet<D>,
-    ) -> (NodeId, CursorProgress) {
+    fn reduce_next_cursor<D: TestData>(target: &mut RuntimeNet<D>) -> (NodeId, CursorProgress) {
         let Some(Reduction {
             kind:
                 ReductionKind::RemoteCursor {
@@ -2208,7 +2236,7 @@ mod tests {
         (cursor, progress)
     }
 
-    fn reduce_pair_cursor<D: Clone + 'static>(
+    fn reduce_pair_cursor<D: TestData>(
         target: &mut RuntimeNet<D>,
         pair: ActivePairKey,
     ) -> (NodeId, CursorProgress) {
@@ -2246,7 +2274,7 @@ mod tests {
 
     #[test]
     fn bind_spine_builds_one_curried_chain() {
-        let mut builder = NetBuilder::new();
+        let mut builder = NetBuilder::<()>::new();
         let spine = builder.bind_spine(3);
         let function = builder.data(());
         builder.wire(spine.input, function);
@@ -2268,7 +2296,7 @@ mod tests {
 
     #[test]
     fn builder_rejects_a_wired_exposed_port() {
-        let mut net = NetBuilder::new();
+        let mut net = NetBuilder::<()>::new();
         let left = net.data(());
         let right = net.data(());
         net.try_wire(left, right).unwrap();
@@ -2281,9 +2309,9 @@ mod tests {
 
     #[test]
     fn builder_rejects_ports_from_another_builder() {
-        let mut net = NetBuilder::new();
+        let mut net = NetBuilder::<()>::new();
         let exposed = net.data(());
-        let mut other = NetBuilder::new();
+        let mut other = NetBuilder::<()>::new();
         other.data(());
         let foreign = other.data(());
 
@@ -2306,7 +2334,7 @@ mod tests {
 
     #[test]
     fn one_way_copy_is_normalized_out_of_the_template() {
-        let mut builder = NetBuilder::new();
+        let mut builder = NetBuilder::<&'static str>::new();
         let copy = builder.copy(1);
         let data = builder.data("value");
         builder.wire(copy.outputs[0], data);
@@ -2319,7 +2347,7 @@ mod tests {
 
     #[test]
     fn many_way_copy_builds_a_balanced_binary_fan_tree() {
-        let mut builder = NetBuilder::new();
+        let mut builder = NetBuilder::<()>::new();
         let copy = builder.copy(5);
         for output in copy.outputs.iter().copied() {
             let data = builder.data(());
@@ -2462,7 +2490,7 @@ mod tests {
 
     #[test]
     fn active_pair_key_is_the_lower_node_id_and_recovers_its_partner() {
-        let mut net = RuntimeNet::empty();
+        let mut net = RuntimeNet::<()>::empty();
         let lower = net.add_node(RuntimeNode::Data(()));
         let higher = net.add_node(RuntimeNode::Data(()));
         net.connect(Port::principal(higher), Port::principal(lower));
@@ -2474,7 +2502,7 @@ mod tests {
 
     #[test]
     fn claimed_and_stuck_pairs_remain_in_the_active_tree() {
-        let mut calls = RuntimeNet::empty();
+        let mut calls = RuntimeNet::<()>::empty();
         let bind = calls.add_node(RuntimeNode::Bind);
         let data = calls.add_node(RuntimeNode::Data(()));
         calls.connect(Port::principal(bind), Port::principal(data));
@@ -2493,7 +2521,7 @@ mod tests {
         );
         assert_eq!(calls.reduce_next(), None);
 
-        let mut stuck = RuntimeNet::empty();
+        let mut stuck = RuntimeNet::<()>::empty();
         let left = stuck.add_node(RuntimeNode::Data(()));
         let right = stuck.add_node(RuntimeNode::Data(()));
         stuck.connect(Port::principal(left), Port::principal(right));
@@ -2517,8 +2545,8 @@ mod tests {
     }
 
     #[test]
-    fn claimed_callable_data_lowers_to_an_explicit_host_function_bind() {
-        let mut net = RuntimeNet::empty();
+    fn claimed_callable_data_lowers_to_an_explicit_operator_bind() {
+        let mut net = RuntimeNet::<i32>::empty();
         let application = net.add_node(RuntimeNode::Bind);
         let callable = net.add_node(RuntimeNode::Data(0));
         let argument = net.add_node(RuntimeNode::Data(41));
@@ -2540,9 +2568,9 @@ mod tests {
         assert_eq!(net.claim_call(call), Some(0));
         assert_eq!(net.active.get(&call.pair), Some(&ActivePairState::Claimed));
 
-        net.resume_claimed_call_with_host_fn(
+        net.resume_claimed_call_with_operator(
             call,
-            HostFn::new("increment", |value| Ok(HostFnYield::Data(value + 1))),
+            TestOperator::new("increment", |value| Ok(OperatorYield::Data(value + 1))),
         );
         assert_ne!(net.active.get(&call.pair), Some(&ActivePairState::Claimed));
         assert!(matches!(
@@ -2552,25 +2580,28 @@ mod tests {
                 ..
             })
         ));
-        let host_call = match net.reduce_next() {
+        let operator_call = match net.reduce_next() {
             Some(Reduction {
-                kind: ReductionKind::HostCall { host_fn, data },
+                kind: ReductionKind::OperatorCall { operator, data },
                 pair,
-            }) => HostCall {
+            }) => OperatorCall {
                 pair,
-                host_fn,
+                operator,
                 data,
             },
-            other => panic!("expected host call, got {other:?}"),
+            other => panic!("expected operator call, got {other:?}"),
         };
-        let (host_fn, data) = net.host_call_parts(host_call);
-        net.complete_host_call(host_call, host_fn.apply(&data).unwrap());
+        let (operator, data) = net.operator_call_parts(operator_call);
+        net.complete_operator_call(operator_call, operator.apply(&data).unwrap());
         assert_eq!(net.interface_data(result), Some(&42));
     }
 
-    fn host_call_net(host_fn: HostFn<i32>, input: i32) -> (RuntimeNet<i32>, HostCall, Port) {
-        let mut net = RuntimeNet::empty();
-        let host = net.add_node(RuntimeNode::HostFn(host_fn));
+    fn operator_call_net(
+        operator: TestOperator<i32>,
+        input: i32,
+    ) -> (RuntimeNet<i32>, OperatorCall, Port) {
+        let mut net = RuntimeNet::<i32>::empty();
+        let host = net.add_node(RuntimeNode::Operator(operator));
         let data = net.add_node(RuntimeNode::Data(input));
         let interface = net.add_node(RuntimeNode::Interface);
         let result = Port::auxiliary(interface, 1);
@@ -2580,15 +2611,15 @@ mod tests {
         assert!(matches!(
             net.reduce_next(),
             Some(Reduction {
-                kind: ReductionKind::HostCall { .. },
+                kind: ReductionKind::OperatorCall { .. },
                 ..
             })
         ));
         (
             net,
-            HostCall {
+            OperatorCall {
                 pair,
-                host_fn: host,
+                operator: host,
                 data,
             },
             result,
@@ -2596,37 +2627,37 @@ mod tests {
     }
 
     #[test]
-    fn host_fn_consumes_data_and_emits_data() {
-        let (mut net, call, result) = host_call_net(
-            HostFn::new("increment", |value| Ok(HostFnYield::Data(value + 1))),
+    fn operator_consumes_data_and_emits_data() {
+        let (mut net, call, result) = operator_call_net(
+            TestOperator::new("increment", |value| Ok(OperatorYield::Data(value + 1))),
             41,
         );
-        let (host_fn, data) = net.host_call_parts(call);
-        let outcome = host_fn.apply(&data).unwrap();
+        let (operator, data) = net.operator_call_parts(call);
+        let outcome = operator.apply(&data).unwrap();
 
-        net.complete_host_call(call, outcome);
+        net.complete_operator_call(call, outcome);
 
         assert_eq!(net.interface_data(result), Some(&42));
         assert!(!net.active.contains_key(&call.pair));
     }
 
     #[test]
-    fn returned_host_fn_is_wrapped_as_a_unary_function() {
-        let next = HostFn::new("increment", |value| Ok(HostFnYield::Data(value + 1)));
-        let (mut net, call, result) = host_call_net(
-            HostFn::new("curry", move |_| Ok(HostFnYield::HostFn(next.clone()))),
+    fn returned_operator_is_wrapped_as_a_unary_function() {
+        let next = TestOperator::new("increment", |value| Ok(OperatorYield::Data(value + 1)));
+        let (mut net, call, result) = operator_call_net(
+            TestOperator::new("curry", move |_| Ok(OperatorYield::Operator(next.clone()))),
             0,
         );
-        let (host_fn, data) = net.host_call_parts(call);
-        let outcome = host_fn.apply(&data).unwrap();
+        let (operator, data) = net.operator_call_parts(call);
+        let outcome = operator.apply(&data).unwrap();
 
-        let bind = net.complete_host_call(call, outcome);
+        let bind = net.complete_operator_call(call, outcome);
 
         assert_eq!(net.interface_neighbor(result), Some(Port::principal(bind)));
         let host = net.port_neighbor(Port::auxiliary(bind, 1)).unwrap();
         assert!(matches!(
             net.node(host.node()),
-            Some(RuntimeNode::HostFn(_))
+            Some(RuntimeNode::Operator(_))
         ));
         assert_eq!(
             net.port_neighbor(Port::auxiliary(bind, 2)),
@@ -2635,16 +2666,16 @@ mod tests {
     }
 
     #[test]
-    fn host_fn_error_preserves_the_stuck_active_pair() {
-        let (mut failed, call, _) = host_call_net(
-            HostFn::new("failed", |_| Err(Arc::from("invalid input"))),
+    fn operator_error_preserves_the_stuck_active_pair() {
+        let (mut failed, call, _) = operator_call_net(
+            TestOperator::new("failed", |_| Err(Arc::from("invalid input"))),
             0,
         );
-        let (host_fn, data) = failed.host_call_parts(call);
-        let Err(error) = host_fn.apply(&data) else {
-            panic!("host function should fail");
+        let (operator, data) = failed.operator_call_parts(call);
+        let Err(error) = operator.apply(&data) else {
+            panic!("operator should fail");
         };
-        failed.fail_host_call(call, error);
+        failed.fail_operator_call(call, error);
         assert!(matches!(
             failed.active.get(&call.pair),
             Some(ActivePairState::Stuck(_))
@@ -2653,7 +2684,7 @@ mod tests {
             failed.stuck_pairs().collect::<Vec<_>>(),
             vec![StuckPair {
                 pair: call.pair,
-                reason: StuckReason::HostError(Arc::from("invalid input")),
+                reason: StuckReason::SpecializationError(Arc::from("invalid input")),
             }]
         );
         assert!(failed.principals_connect(call.pair));
@@ -2661,7 +2692,7 @@ mod tests {
 
     #[test]
     fn active_tree_tracks_every_principal_connection_once() {
-        let mut net = RuntimeNet::empty();
+        let mut net = RuntimeNet::<()>::empty();
         let bind = net.add_node(RuntimeNode::Bind);
         let call_data = net.add_node(RuntimeNode::Data(()));
         let stuck_left = net.add_node(RuntimeNode::Data(()));
@@ -2860,9 +2891,10 @@ mod tests {
     fn auxiliary_cursor_drives_the_local_cursor_facing_the_principal() {
         let mut source: RuntimeNet<&'static str> = RuntimeNet::empty();
         let root = source.add_node(RuntimeNode::Bind);
-        let host = source.add_node(RuntimeNode::HostFn(HostFn::new("identity", |data| {
-            Ok(HostFnYield::Data(*data))
-        })));
+        let host = source.add_node(RuntimeNode::Operator(TestOperator::new(
+            "identity",
+            |data| Ok(OperatorYield::Data(*data)),
+        )));
         let exposed = source.add_interface(Port::principal(root));
         source.connect(Port::auxiliary(root, 1), Port::principal(host));
         source.connect(Port::auxiliary(root, 2), Port::auxiliary(host, 1));
@@ -3032,7 +3064,7 @@ mod tests {
 
     #[test]
     fn converging_frontiers_join_without_leaving_a_stale_cursor_pair() {
-        let mut template = NetBuilder::new();
+        let mut template = NetBuilder::<()>::new();
         let root = template.push(Node::Bind);
         template.wire(Port::auxiliary(root, 1), Port::auxiliary(root, 2));
         let source = template.finish(Port::principal(root)).instantiate_shared();
@@ -3077,7 +3109,7 @@ mod tests {
 
     #[test]
     fn converging_frontier_waits_for_a_claimed_peer() {
-        let mut template = NetBuilder::new();
+        let mut template = NetBuilder::<()>::new();
         let root = template.push(Node::Bind);
         template.wire(Port::auxiliary(root, 1), Port::auxiliary(root, 2));
         let source = template.finish(Port::principal(root)).instantiate_shared();
@@ -3154,7 +3186,7 @@ mod tests {
 
     #[test]
     fn separate_logical_copies_rebase_fans_to_distinct_local_sites() {
-        let mut template = NetBuilder::new();
+        let mut template = NetBuilder::<()>::new();
         let fan = template.push_fan();
         let left = template.push(Node::Data(()));
         let right = template.push(Node::Data(()));
@@ -3214,7 +3246,7 @@ mod tests {
 
     #[test]
     fn removed_node_ids_are_not_reused() {
-        let mut net = RuntimeNet::empty();
+        let mut net = RuntimeNet::<()>::empty();
         let first = net.add_node(RuntimeNode::Data(()));
         let second = net.add_node(RuntimeNode::Data(()));
         assert!(matches!(net.remove_node(first), RuntimeNode::Data(())));

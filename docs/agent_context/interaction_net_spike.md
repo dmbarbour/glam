@@ -3,7 +3,7 @@
 ## Shared runtime and lazy copies
 
 `core_net` lowers an explicit function arity and body through an immutable
-checked template, then instantiates one `SharedRuntimeNet<CoreNetData>`.
+checked template, then instantiates one `SharedRuntimeNet<CoreSpecialization>`.
 Capture locals become leading binds and are supplied by the enclosing semantic
 expression. Runtime instantiation preserves the exposed port behind a stable
 evaluator-only interface anchor.
@@ -120,20 +120,20 @@ uses the ordinary Erase interaction. If an auxiliary-side cursor has no local
 cursor facing the relevant principal yet, source inspection follows that
 principal chain to an exact active pair rather than scanning scheduler queues.
 
-`HostFn<Data>` is a unary runtime agent whose principal consumes Data and whose
-auxiliary is its result continuation. Host callbacks execute outside the net
-mutex while the active pair is claimed. Success emits Data or a new HostFn
-automatically wrapped behind a Bind; failure retains the intact pair and
-diagnostic in the pair's stuck state. There is no retryable HostFn outcome. Core
-builtin expressions lowered into nets use this path, although saturated work
-remains a memoized semantic thunk. Dynamically obtained builtins and partial
-builtins are also converted to an explicit Bind backed by HostFn.
+`Operator<S::Operator>` is a unary runtime agent whose principal consumes Data
+and whose auxiliary is its result continuation. `NetSpecialization` owns both
+callable-data interpretation and operator execution. Specialization code runs
+outside the net mutex while the active pair is claimed. Success emits Data or a
+new Operator automatically wrapped behind a Bind; failure retains the intact
+pair and diagnostic in the pair's stuck state. Core uses inspectable
+`CoreOperator` enum values rather than opaque Rust closures. `Error` lowering
+uses a dedicated operator whose only activated outcome is a stuck pair.
 
 Application spines use the dual construction. `NetBuilder::bind_spine` is
 shared by function lowering and evaluator-owned caller nets. `g_syntax` lowers
 a maximal application such as `f x y z` through
 `CompileContext::value_apply_many`. Ordinary semantic application becomes a
-data-consuming HostFn chain with closed lazy operands. A `Value::Function`
+data-consuming operator chain with closed lazy operands. A `Value::Function`
 attaches all currently supplied arguments to its shared stage together;
 undersaturation returns another shared function stage and saturation returns a
 memoized call thunk. Raw `Value::Net` remains the explicit cursor-callable path.
@@ -141,9 +141,9 @@ memoized call thunk. Raw `Value::Net` remains the explicit cursor-callable path.
 The topology reducer handles bind-bind, fan-fan, fan-bind, fan-data, and eraser
 interactions. `bind-data` reports `ReductionKind::Call`; `eval` claims that exact
 pair and lowers only its callable data outside the runtime lock. A net
-loads through a cursor, while a builtin head becomes Bind/HostFn and proceeds
+loads through a cursor, while a builtin head becomes Bind/Operator and proceeds
 through the ordinary bind join. Dictionary applicables become the same
-Bind/HostFn shape using a host applicable callback. No path
+Bind/Operator shape using an applicable operator. No path
 inspects or detaches the argument. Source `Data >< Bind` calls remain exact
 source dependencies and are never copied.
 
@@ -151,13 +151,13 @@ Core thunks can be backed by an expression, builtin/access computation, a
 closed arity-zero runtime computation, or a saturated function call. All forms
 share one memoized result. Saturated calls emit a semantic thunk so unrelated
 source-pair progress does not force strict work before its result is demanded.
-List, dictionary, and Access lowering use HostFn chains and store closed lazy
+List, dictionary, and Access lowering use operator chains and store closed lazy
 members as ordinary values rather than exporting runtime/interface wires as
 aggregate holes.
 
 Only raw `Value::Net` uses callable-data cursor application. Ordinary functions
 remain independently observable host values backed by shared curried stages;
-their semantic HostFn application never reifies a linear `Bind`. Do not expose
+their semantic operator application never reifies a linear `Bind`. Do not expose
 the `interaction_net` source keyword until general construction effects are
 represented explicitly.
 The dictionary compatibility path is intentionally unchanged pending a
