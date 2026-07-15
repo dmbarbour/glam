@@ -76,11 +76,10 @@ nonzero word, so `Port` and `Option<Port>` are both one word. Node records keep
 all three possible links inline.
 
 Every principal-principal connection is named by an `ActivePairKey` containing
-its lower `NodeId`; the partner is recovered from the principal neighbor. Ready
-keys live in an ordered set, while unresolved bind calls, claimed host calls,
-blocked cursors, and stuck diagnostics use maps keyed the same way. Claimed
-pairs are temporarily absent from scheduler ownership but remain explicitly
-enumerable for diagnostics. Completion and targeted source progress are exact
+its lower `NodeId`; the partner is recovered from the principal neighbor. One
+ordered tree retains every active pair and records whether it is ready, claimed,
+blocked on a cursor dependency, or stuck. Claiming is an in-place state change
+under the runtime mutex. Completion and targeted source progress are exact
 lookups rather than queue scans. Interaction rules, especially erasure,
 explicitly remove nodes; there is no separate reachability collector.
 
@@ -126,7 +125,7 @@ principal chain to an exact active pair rather than scanning scheduler queues.
 auxiliary is its result continuation. Host callbacks execute outside the net
 mutex while the active pair is claimed. Success emits Data or a new HostFn
 automatically wrapped behind a Bind; failure retains the intact pair and
-diagnostic in keyed stuck state. There is no retryable HostFn outcome. Core
+diagnostic in the pair's stuck state. There is no retryable HostFn outcome. Core
 builtin expressions lowered into nets use this path, although saturated work
 remains a memoized semantic thunk. Dynamically obtained builtins and partial
 builtins are also converted to an explicit Bind backed by HostFn.

@@ -26,9 +26,9 @@
   out before a template is produced;
   runtime nodes use monotonic IDs and hash-table storage, preserve a stable
   exposed interface, and allocate fan sites locally; an active pair is keyed by
-  its lower node ID, with ready work in an ordered set and suspended/stuck work
-  in exact keyed maps; claimed cursor and host work can release the runtime
-  mutex without surrendering pair ownership; layered cursors expose a precise
+  its lower node ID, with one ordered tree recording ready, claimed, cursor-
+  blocked, and stuck states; claimed cursor and host work can release the
+  runtime mutex without surrendering pair ownership; layered cursors expose a precise
   local cursor, source cursor, or source pair dependency instead of scanning or
   sweeping scheduler collections; nodes materialize only through principal
   frontiers, active pairs never cross cursor boundaries, and source-frontier
@@ -60,7 +60,7 @@ gets one fresh namespace. The current oracle records dynamic duplication paths
 directly; it provides reference semantics for replacing those histories with
 Lamping-style bracket/croissant control interactions. Builtin currying, closed
 list construction, and general application bodies now cross the net runtime
-boundary. Blocked callable data is claimed and lowered without touching its
+boundary. Callable data is claimed and lowered immediately without touching its
 argument: nets load through cursors, while builtins lower to Bind/HostFn
 topology. Cursor erasure uses ordinary materialization and Erase interactions;
 no erased frontier state or mapped-node history is required. General

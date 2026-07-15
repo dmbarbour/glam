@@ -114,11 +114,11 @@ This document should summarize salient, relevant points rather than asking futur
   interactions and other rewrites remove nodes explicitly rather than relying
   on reachability collection.
 - A principal-principal connection is keyed by its lower `NodeId`; the other
-  endpoint is recovered from that node's principal neighbor. Ready work uses an
-  ordered set and suspended/stuck states use keyed maps, so exact completion and
-  cursor demand never search or remove from the middle of a queue. Calls also
-  identify their participating nodes for completion. Stuck pairs retain either
-  a no-rule reason or a permanent host error.
+  endpoint is recovered from that node's principal neighbor. One ordered active-
+  pair tree records every pair as ready, claimed, cursor-blocked, or stuck.
+  External work claims a pair by changing its state in place while holding the
+  runtime mutex; completion removes or updates that same entry. Stuck pairs
+  retain either a no-rule reason or a permanent host error.
 - Runtime instantiation wires the template's exposed port to a stable,
   evaluator-only interface anchor. A `RemoteCursor { copy, remote }` is a
   one-way suspended wire: `copy` selects target-owned shared copy state and
@@ -146,8 +146,8 @@ This document should summarize salient, relevant points rather than asking futur
   policy. `SharedRuntimeNet` claims its exact pair, releases the runtime lock,
   asks the client data to produce either a shared net or `HostFn`, then briefly
   reacquires the lock to install that topology or mark the pair stuck. Core
-  implements the policy in `eval`; the generic runtime keeps claim/resume
-  bookkeeping private. A `Value::Net`
+  implements the policy in `eval`; call and host reductions are handled
+  immediately rather than rediscovered by scanning scheduler collections. A `Value::Net`
   loads through a cursor without inspecting the argument. Builtins and partial
   builtins lower to an explicit unary `Bind` backed by `HostFn`, after which the
   ordinary bind-join rule applies. Compatibility closures and dict applicables

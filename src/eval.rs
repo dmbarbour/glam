@@ -11,8 +11,8 @@ use crate::core::{
 };
 use crate::core_net::{CoreDataKey, CoreNetData, closed_lambda_body_is_net_safe};
 use crate::interaction_net::{
-    ActivePairKey, BlockedCall, Callable, CallableData, CursorDependency, HostFn, HostFnYield,
-    NetBuilder, Port, Reduction, ReductionKind, StuckReason,
+    ActivePairKey, Call, Callable, CallableData, CursorDependency, HostFn, HostFnYield, NetBuilder,
+    Port, Reduction, ReductionKind, StuckReason,
 };
 use crate::list::ListItem;
 use crate::number::Number;
@@ -511,13 +511,7 @@ fn drive_core_net_inner(
             return Ok(normal_form.unwrap_or_else(|| Value::Net(NetValue::new(runtime))));
         }
 
-        let scheduler_is_empty = runtime.with(|net| {
-            net.blocked_calls().is_empty()
-                && net.claimed_host_calls().is_empty()
-                && net.blocked_cursors().is_empty()
-                && net.claimed_pairs().next().is_none()
-                && net.stuck_pairs().next().is_none()
-        });
+        let scheduler_is_empty = runtime.with(|net| net.active_pairs().len() == 0);
         if scheduler_is_empty {
             if let Some(normal_form) = normal_form {
                 return Ok(normal_form);
@@ -542,9 +536,8 @@ fn drive_core_net_inner(
                 })
                 .collect::<Vec<_>>();
             format!(
-                "neighbor={neighbor:?}, node={node:?}, principal_neighbor={principal_neighbor:?}/{principal_neighbor_node:?}, calls={}, host_calls={}, cursors={cursor_dependencies:?}, stuck={}",
-                net.blocked_calls().len(),
-                net.claimed_host_calls().len(),
+                "neighbor={neighbor:?}, node={node:?}, principal_neighbor={principal_neighbor:?}/{principal_neighbor_node:?}, active={}, cursors={cursor_dependencies:?}, stuck={}",
+                net.active_pairs().len(),
                 net.stuck_pairs().count()
             )
         });
@@ -555,18 +548,9 @@ fn drive_core_net_inner(
 }
 
 fn progress_core_net(runtime: &crate::core_net::CoreRuntimeNet) -> Result<bool, EvalError> {
-    if progress_next_core_host_call(runtime)? {
-        return Ok(true);
-    }
     if let Some(reduction) = runtime.with_mut(|net| net.reduce_next()) {
         handle_core_reduction(runtime, reduction)?;
         return Ok(true);
-    }
-    let calls = runtime.with(|net| net.blocked_calls().values().copied().collect::<Vec<_>>());
-    for call in calls {
-        if progress_exact_core_call(runtime, call)? {
-            return Ok(true);
-        }
     }
     Ok(false)
 }
@@ -627,9 +611,6 @@ fn progress_exact_core_pair(
         handle_core_reduction(runtime, reduction)?;
         return Ok(true);
     }
-    if let Some(call) = runtime.with(|net| net.claimed_host_call(pair)) {
-        return progress_core_host_call(runtime, call);
-    }
     if let Some(blocked) = runtime.with(|net| net.blocked_cursor(pair)) {
         let progressed = progress_cursor_dependency(runtime, blocked.cursor, depth)?;
         if progressed {
@@ -639,12 +620,6 @@ fn progress_exact_core_pair(
     }
     if runtime.with(|net| net.stuck_reason(pair).is_some()) {
         return Err(stuck_pair_error(runtime, pair));
-    }
-    // A compatibility bind-data call may already have claimed this exact pair.
-    // Progressing it remains evaluator policy, but no scheduler collection is
-    // searched to discover some other candidate.
-    if let Some(call) = runtime.with(|net| net.blocked_call(pair)) {
-        return progress_exact_core_call(runtime, call);
     }
     Ok(false)
 }
@@ -700,7 +675,7 @@ fn lower_core_callable_value(value: Value) -> Result<Callable<CoreNetData>, Eval
 
 fn progress_exact_core_call(
     runtime: &crate::core_net::CoreRuntimeNet,
-    call: BlockedCall,
+    call: Call,
 ) -> Result<bool, EvalError> {
     runtime.resolve_call(call)
 }
@@ -711,6 +686,28 @@ fn handle_core_reduction(
 ) -> Result<(), EvalError> {
     match reduction.kind {
         ReductionKind::Stuck => Err(stuck_pair_error(runtime, reduction.pair)),
+        ReductionKind::Call { bind, data } => {
+            let call = Call {
+                pair: reduction.pair,
+                bind,
+                data,
+            };
+            if !progress_exact_core_call(runtime, call)? {
+                return Err(EvalError::new("interaction-net call lost its claim"));
+            }
+            Ok(())
+        }
+        ReductionKind::HostCall { host_fn, data } => {
+            let call = crate::interaction_net::HostCall {
+                pair: reduction.pair,
+                host_fn,
+                data,
+            };
+            if !progress_core_host_call(runtime, call)? {
+                return Err(EvalError::new("interaction-net host call lost its claim"));
+            }
+            Ok(())
+        }
         ReductionKind::RemoteCursor { cursor, progress } => {
             let progress = finish_core_cursor_claim(runtime, cursor, progress);
             if progress != crate::interaction_net::CursorProgress::Blocked {
@@ -749,19 +746,6 @@ fn stuck_pair_error(runtime: &crate::core_net::CoreRuntimeNet, pair: ActivePairK
             }
         }
     })
-}
-
-fn progress_next_core_host_call(
-    runtime: &crate::core_net::CoreRuntimeNet,
-) -> Result<bool, EvalError> {
-    let Some(call) = runtime.with(|net| {
-        net.claimed_host_calls()
-            .first_key_value()
-            .map(|(_, call)| *call)
-    }) else {
-        return Ok(false);
-    };
-    progress_core_host_call(runtime, call)
 }
 
 fn progress_core_host_call(

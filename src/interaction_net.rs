@@ -4,7 +4,7 @@
 //! nets allocate fan sites locally. Lazy copies translate source sites into
 //! fresh target sites while preserving the complete residual history.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
@@ -821,7 +821,7 @@ impl<D> fmt::Debug for CursorDependency<D> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlockedCall {
+pub struct Call {
     pub pair: ActivePairKey,
     pub bind: NodeId,
     pub data: NodeId,
@@ -850,6 +850,14 @@ pub struct StuckPair {
 pub struct BlockedCursor {
     pub pair: ActivePairKey,
     pub cursor: NodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ActivePairState {
+    Ready,
+    Claimed,
+    BlockedCursor { cursor: NodeId },
+    Stuck(StuckReason),
 }
 
 pub struct SharedRuntimeNet<D> {
@@ -890,10 +898,10 @@ impl<D: Clone + 'static> SharedRuntimeNet<D> {
 }
 
 impl<D: CallableData> SharedRuntimeNet<D> {
-    /// Resolves one exact blocked `Data >< Bind` pair using client callable
+    /// Resolves one exact claimed `Data >< Bind` pair using client callable
     /// policy. Claiming and finishing each take a short target lock; callable
     /// conversion itself runs without holding the runtime mutex.
-    pub fn resolve_call(&self, call: BlockedCall) -> Result<bool, D::Error> {
+    pub fn resolve_call(&self, call: Call) -> Result<bool, D::Error> {
         let Some(data) = self.with_mut(|runtime| runtime.claim_call(call)) else {
             return Ok(false);
         };
@@ -997,17 +1005,11 @@ pub struct RuntimeNet<D> {
     next_copy_id: u64,
     copies: HashMap<CopyId, CopyState<D>>,
     cursor_dependencies: HashMap<NodeId, CursorDependency<D>>,
-    claimed_cursors: BTreeMap<NodeId, Option<ActivePairKey>>,
 
-    // Each live principal-principal wire is keyed by its lower node ID and
-    // occurs in exactly one scheduler collection. Keyed collections support
-    // both deterministic next-work selection and exact dependency progress.
-    ready: BTreeSet<ActivePairKey>,
-    calls: BTreeMap<ActivePairKey, BlockedCall>,
-    claimed_calls: BTreeMap<ActivePairKey, BlockedCall>,
-    claimed_host_calls: BTreeMap<ActivePairKey, HostCall>,
-    blocked_cursors: BTreeMap<ActivePairKey, BlockedCursor>,
-    stuck: BTreeMap<ActivePairKey, StuckReason>,
+    // Every live principal-principal wire has exactly one authoritative state.
+    // External work changes Ready to Claimed while the runtime lock is held,
+    // then completes as a rewrite, a blocked cursor, or a permanent error.
+    active: BTreeMap<ActivePairKey, ActivePairState>,
 }
 
 impl<D: Clone + 'static> RuntimeNet<D> {
@@ -1051,13 +1053,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             next_copy_id: 0,
             copies: HashMap::new(),
             cursor_dependencies: HashMap::new(),
-            claimed_cursors: BTreeMap::new(),
-            ready: BTreeSet::new(),
-            calls: BTreeMap::new(),
-            claimed_calls: BTreeMap::new(),
-            claimed_host_calls: BTreeMap::new(),
-            blocked_cursors: BTreeMap::new(),
-            stuck: BTreeMap::new(),
+            active: BTreeMap::new(),
         };
         for wire in net.wires.iter() {
             runtime.connect(wire.left, wire.right);
@@ -1077,27 +1073,12 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             next_copy_id: 0,
             copies: HashMap::new(),
             cursor_dependencies: HashMap::new(),
-            claimed_cursors: BTreeMap::new(),
-            ready: BTreeSet::new(),
-            calls: BTreeMap::new(),
-            claimed_calls: BTreeMap::new(),
-            claimed_host_calls: BTreeMap::new(),
-            blocked_cursors: BTreeMap::new(),
-            stuck: BTreeMap::new(),
+            active: BTreeMap::new(),
         }
     }
 
-    pub fn active_pairs(&self) -> Vec<ActivePairKey> {
-        self.ready
-            .iter()
-            .copied()
-            .chain(self.calls.keys().copied())
-            .chain(self.claimed_calls.keys().copied())
-            .chain(self.claimed_host_calls.keys().copied())
-            .chain(self.blocked_cursors.keys().copied())
-            .chain(self.claimed_cursors.values().copied().flatten())
-            .chain(self.stuck.keys().copied())
-            .collect()
+    pub fn active_pairs(&self) -> impl ExactSizeIterator<Item = ActivePairKey> + '_ {
+        self.active.keys().copied()
     }
 
     /// Stable evaluator-owned anchor wired to the net's exposed template port.
@@ -1106,42 +1087,38 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             .expect("runtime net was constructed without an exposed port")
     }
 
-    pub fn ready_pairs(&self) -> &BTreeSet<ActivePairKey> {
-        &self.ready
+    #[cfg(test)]
+    fn ready_pairs(&self) -> Vec<ActivePairKey> {
+        self.active
+            .iter()
+            .filter_map(|(pair, state)| matches!(state, ActivePairState::Ready).then_some(*pair))
+            .collect()
     }
 
-    pub fn blocked_calls(&self) -> &BTreeMap<ActivePairKey, BlockedCall> {
-        &self.calls
-    }
-
-    pub fn blocked_call(&self, pair: ActivePairKey) -> Option<BlockedCall> {
-        self.calls.get(&pair).copied()
-    }
-
-    pub fn claimed_host_calls(&self) -> &BTreeMap<ActivePairKey, HostCall> {
-        &self.claimed_host_calls
-    }
-
-    pub fn claimed_host_call(&self, pair: ActivePairKey) -> Option<HostCall> {
-        self.claimed_host_calls.get(&pair).copied()
-    }
-
-    /// Active pairs temporarily removed from scheduler ownership while work
-    /// proceeds without holding this runtime's mutex.
-    pub fn claimed_pairs(&self) -> impl Iterator<Item = ActivePairKey> + '_ {
-        self.claimed_calls
-            .keys()
-            .copied()
-            .chain(self.claimed_host_calls.keys().copied())
-            .chain(self.claimed_cursors.values().copied().flatten())
-    }
-
-    pub fn blocked_cursors(&self) -> &BTreeMap<ActivePairKey, BlockedCursor> {
-        &self.blocked_cursors
+    pub fn blocked_cursors(&self) -> BTreeMap<ActivePairKey, BlockedCursor> {
+        self.active
+            .iter()
+            .filter_map(|(pair, state)| match state {
+                ActivePairState::BlockedCursor { cursor } => Some((
+                    *pair,
+                    BlockedCursor {
+                        pair: *pair,
+                        cursor: *cursor,
+                    },
+                )),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn blocked_cursor(&self, pair: ActivePairKey) -> Option<BlockedCursor> {
-        self.blocked_cursors.get(&pair).copied()
+        match self.active.get(&pair) {
+            Some(ActivePairState::BlockedCursor { cursor }) => Some(BlockedCursor {
+                pair,
+                cursor: *cursor,
+            }),
+            _ => None,
+        }
     }
 
     pub fn cursor_dependency(&self, cursor: NodeId) -> Option<CursorDependency<D>> {
@@ -1154,59 +1131,55 @@ impl<D: Clone + 'static> RuntimeNet<D> {
     }
 
     pub fn stuck_pairs(&self) -> impl Iterator<Item = StuckPair> + '_ {
-        self.stuck.iter().map(|(pair, reason)| StuckPair {
-            pair: *pair,
-            reason: reason.clone(),
+        self.active.iter().filter_map(|(pair, state)| match state {
+            ActivePairState::Stuck(reason) => Some(StuckPair {
+                pair: *pair,
+                reason: reason.clone(),
+            }),
+            _ => None,
         })
     }
 
     pub fn stuck_reason(&self, pair: ActivePairKey) -> Option<&StuckReason> {
-        self.stuck.get(&pair)
+        match self.active.get(&pair) {
+            Some(ActivePairState::Stuck(reason)) => Some(reason),
+            _ => None,
+        }
     }
 
     pub fn node(&self, id: NodeId) -> Option<&RuntimeNode<D>> {
         self.nodes.get(&id).map(|entry| &entry.node)
     }
 
-    /// Claims one call while its callable data is lowered to an applicable
-    /// without holding the runtime lock. The topology remains intact and the
-    /// pair stays visible through `claimed_pairs`.
-    fn claim_call(&mut self, call: BlockedCall) -> Option<D> {
-        if self.calls.get(&call.pair) != Some(&call) {
+    /// Reads callable data from an active pair already claimed by reduction.
+    fn claim_call(&mut self, call: Call) -> Option<D> {
+        if self.active.get(&call.pair) != Some(&ActivePairState::Claimed) {
             return None;
         }
         let callable = match self.node(call.data) {
             Some(RuntimeNode::Data(data)) => data.clone(),
-            _ => panic!("blocked call data node must exist"),
+            _ => panic!("claimed call data node must exist"),
         };
-        assert_eq!(self.calls.remove(&call.pair), Some(call));
-        assert!(self.claimed_calls.insert(call.pair, call).is_none());
         Some(callable)
     }
 
     /// Leaves a claimed call permanently stuck after applicable lowering
     /// fails.
-    fn fail_claimed_call(&mut self, call: BlockedCall, error: Arc<str>) {
+    fn fail_claimed_call(&mut self, call: Call, error: Arc<str>) {
         assert_eq!(
-            self.claimed_calls.remove(&call.pair),
-            Some(call),
+            self.active.insert(
+                call.pair,
+                ActivePairState::Stuck(StuckReason::HostError(error))
+            ),
+            Some(ActivePairState::Claimed),
             "failed call must still be claimed"
-        );
-        assert!(
-            self.stuck
-                .insert(call.pair, StuckReason::HostError(error))
-                .is_none()
         );
     }
 
     /// Clones a pending host transition so the host callback can run without
     /// holding the shared runtime-net mutex.
     pub fn host_call_parts(&self, call: HostCall) -> (HostFn<D>, D) {
-        assert_eq!(
-            self.claimed_host_calls.get(&call.pair),
-            Some(&call),
-            "host call must be pending"
-        );
+        assert_eq!(self.active.get(&call.pair), Some(&ActivePairState::Claimed));
         let host_fn = match self.node(call.host_fn) {
             Some(RuntimeNode::HostFn(host_fn)) => host_fn.clone(),
             _ => panic!("pending host call function must exist"),
@@ -1238,11 +1211,13 @@ impl<D: Clone + 'static> RuntimeNet<D> {
     }
 
     pub fn fail_host_call(&mut self, call: HostCall, error: Arc<str>) {
-        self.remove_pending_host_call(call);
-        assert!(
-            self.stuck
-                .insert(call.pair, StuckReason::HostError(error))
-                .is_none()
+        assert_eq!(
+            self.active.insert(
+                call.pair,
+                ActivePairState::Stuck(StuckReason::HostError(error))
+            ),
+            Some(ActivePairState::Claimed),
+            "failed host call must still be claimed"
         );
     }
 
@@ -1287,25 +1262,31 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         let Some(pair) = self.active_pair_key(cursor) else {
             return false;
         };
-        let Some(blocked) = self.blocked_cursors.remove(&pair) else {
+        if !matches!(
+            self.active.get(&pair),
+            Some(ActivePairState::BlockedCursor { cursor: blocked }) if *blocked == cursor
+        ) {
             return false;
-        };
-        assert_eq!(blocked.cursor, cursor);
-        assert!(self.ready.insert(pair));
+        }
+        self.active.insert(pair, ActivePairState::Ready);
         true
     }
 
     pub fn reduce_next(&mut self) -> Option<Reduction> {
-        let pair = self.ready.first().copied()?;
+        let pair = self
+            .active
+            .iter()
+            .find_map(|(pair, state)| matches!(state, ActivePairState::Ready).then_some(*pair))?;
         self.reduce_pair(pair)
     }
 
     /// Reduces one exact ready pair. Cursor demand uses this to make progress
     /// in the source runtime without searching or sweeping unrelated work.
     pub fn reduce_pair(&mut self, pair: ActivePairKey) -> Option<Reduction> {
-        if !self.ready.remove(&pair) {
+        if self.active.get(&pair) != Some(&ActivePairState::Ready) {
             return None;
         }
+        *self.active.get_mut(&pair).unwrap() = ActivePairState::Claimed;
         let (left_id, right_id) = self
             .pair_nodes(pair)
             .expect("ready pair key must identify a principal-principal wire");
@@ -1394,84 +1375,28 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                 self.erase(right_id, left_id);
                 ReductionKind::Erase
             }
-            (RuntimeNode::Bind, RuntimeNode::Data(_)) => {
-                assert!(
-                    self.calls
-                        .insert(
-                            pair,
-                            BlockedCall {
-                                pair,
-                                bind: left_id,
-                                data: right_id,
-                            },
-                        )
-                        .is_none()
-                );
-                ReductionKind::Call {
-                    bind: left_id,
-                    data: right_id,
-                }
-            }
-            (RuntimeNode::Data(_), RuntimeNode::Bind) => {
-                assert!(
-                    self.calls
-                        .insert(
-                            pair,
-                            BlockedCall {
-                                pair,
-                                bind: right_id,
-                                data: left_id,
-                            },
-                        )
-                        .is_none()
-                );
-                ReductionKind::Call {
-                    bind: right_id,
-                    data: left_id,
-                }
-            }
-            (RuntimeNode::HostFn(_), RuntimeNode::Data(_)) => {
-                assert!(
-                    self.claimed_host_calls
-                        .insert(
-                            pair,
-                            HostCall {
-                                pair,
-                                host_fn: left_id,
-                                data: right_id,
-                            },
-                        )
-                        .is_none()
-                );
-                ReductionKind::HostCall {
-                    host_fn: left_id,
-                    data: right_id,
-                }
-            }
-            (RuntimeNode::Data(_), RuntimeNode::HostFn(_)) => {
-                assert!(
-                    self.claimed_host_calls
-                        .insert(
-                            pair,
-                            HostCall {
-                                pair,
-                                host_fn: right_id,
-                                data: left_id,
-                            },
-                        )
-                        .is_none()
-                );
-                ReductionKind::HostCall {
-                    host_fn: right_id,
-                    data: left_id,
-                }
-            }
+            (RuntimeNode::Bind, RuntimeNode::Data(_)) => ReductionKind::Call {
+                bind: left_id,
+                data: right_id,
+            },
+            (RuntimeNode::Data(_), RuntimeNode::Bind) => ReductionKind::Call {
+                bind: right_id,
+                data: left_id,
+            },
+            (RuntimeNode::HostFn(_), RuntimeNode::Data(_)) => ReductionKind::HostCall {
+                host_fn: left_id,
+                data: right_id,
+            },
+            (RuntimeNode::Data(_), RuntimeNode::HostFn(_)) => ReductionKind::HostCall {
+                host_fn: right_id,
+                data: left_id,
+            },
             (RuntimeNode::Data(_), RuntimeNode::Data(_)) => {
-                assert!(self.stuck.insert(pair, StuckReason::NoRule).is_none());
+                *self.active.get_mut(&pair).unwrap() = ActivePairState::Stuck(StuckReason::NoRule);
                 ReductionKind::Stuck
             }
             (RuntimeNode::HostFn(_), _) | (_, RuntimeNode::HostFn(_)) => {
-                assert!(self.stuck.insert(pair, StuckReason::NoRule).is_none());
+                *self.active.get_mut(&pair).unwrap() = ActivePairState::Stuck(StuckReason::NoRule);
                 ReductionKind::Stuck
             }
             (RuntimeNode::Interface, _)
@@ -1481,6 +1406,15 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                 unreachable!("evaluator-only nodes do not use ordinary interaction rules")
             }
         };
+        if !matches!(
+            kind,
+            ReductionKind::Call { .. }
+                | ReductionKind::HostCall { .. }
+                | ReductionKind::RemoteCursor { .. }
+                | ReductionKind::Stuck
+        ) {
+            assert_eq!(self.active.remove(&pair), Some(ActivePairState::Claimed));
+        }
         Some(Reduction { pair, kind })
     }
 
@@ -1513,36 +1447,18 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         cursor
     }
 
-    /// Replaces a blocked bind-data call with a cursor into a shared net.
-    pub fn resume_call_with_copy(
-        &mut self,
-        call: BlockedCall,
-        source: SharedRuntimeNet<D>,
-    ) -> NodeId {
-        assert_eq!(
-            self.calls.remove(&call.pair),
-            Some(call),
-            "resumed interaction-net call must still be blocked"
-        );
-        self.attach_call_to_copy(call, source)
-    }
-
     /// Completes claimed applicable lowering by loading the
     /// resulting closed net at the original application's principal port.
-    fn resume_claimed_call_with_copy(
-        &mut self,
-        call: BlockedCall,
-        source: SharedRuntimeNet<D>,
-    ) -> NodeId {
-        assert_eq!(
-            self.claimed_calls.remove(&call.pair),
-            Some(call),
-            "resumed interaction-net call must still be claimed"
-        );
+    fn resume_claimed_call_with_copy(&mut self, call: Call, source: SharedRuntimeNet<D>) -> NodeId {
         self.attach_call_to_copy(call, source)
     }
 
-    fn attach_call_to_copy(&mut self, call: BlockedCall, source: SharedRuntimeNet<D>) -> NodeId {
+    fn attach_call_to_copy(&mut self, call: Call, source: SharedRuntimeNet<D>) -> NodeId {
+        assert_eq!(
+            self.active.remove(&call.pair),
+            Some(ActivePairState::Claimed),
+            "resumed interaction-net call must still be claimed"
+        );
         assert_eq!(
             self.disconnect(Port::principal(call.bind)),
             Some(Port::principal(call.data))
@@ -1556,14 +1472,10 @@ impl<D: Clone + 'static> RuntimeNet<D> {
     /// Completes applicable lowering by replacing callable data with
     /// an explicit unary function net. The newly introduced Bind then joins
     /// the original application Bind through the ordinary interaction rule.
-    fn resume_claimed_call_with_host_fn(
-        &mut self,
-        call: BlockedCall,
-        host_fn: HostFn<D>,
-    ) -> NodeId {
+    fn resume_claimed_call_with_host_fn(&mut self, call: Call, host_fn: HostFn<D>) -> NodeId {
         assert_eq!(
-            self.claimed_calls.remove(&call.pair),
-            Some(call),
+            self.active.remove(&call.pair),
+            Some(ActivePairState::Claimed),
             "lowered host call must still be claimed"
         );
         assert_eq!(
@@ -1628,8 +1540,8 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 
     fn remove_pending_host_call(&mut self, call: HostCall) {
         assert_eq!(
-            self.claimed_host_calls.remove(&call.pair),
-            Some(call),
+            self.active.remove(&call.pair),
+            Some(ActivePairState::Claimed),
             "completed host call must still be pending"
         );
     }
@@ -1639,24 +1551,29 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         cursor: NodeId,
         expected_pair: Option<ActivePairKey>,
     ) -> Option<CursorProgress> {
-        if self.claimed_cursors.contains_key(&cursor) {
-            return None;
-        }
         let pair = expected_pair.or_else(|| self.active_pair_key(cursor));
         if let Some(expected) = expected_pair {
             assert_eq!(pair, Some(expected));
         }
         if let Some(pair) = pair {
-            self.ready.remove(&pair);
-            self.blocked_cursors.remove(&pair);
+            match self.active.get_mut(&pair) {
+                Some(state @ ActivePairState::Ready)
+                | Some(state @ ActivePairState::BlockedCursor { .. }) => {
+                    *state = ActivePairState::Claimed;
+                }
+                Some(ActivePairState::Claimed) if expected_pair == Some(pair) => {}
+                _ => return None,
+            }
         }
         self.cursor_dependencies.remove(&cursor);
-        assert!(self.claimed_cursors.insert(cursor, pair).is_none());
         Some(CursorProgress::Claimed)
     }
 
     fn cursor_claim(&self, cursor: NodeId) -> Option<CursorClaim<D>> {
-        let pair = *self.claimed_cursors.get(&cursor)?;
+        let pair = self.active_pair_key(cursor);
+        if pair.is_some_and(|pair| self.active.get(&pair) != Some(&ActivePairState::Claimed)) {
+            return None;
+        }
         let RuntimeNode::RemoteCursor { copy, remote } = self.node(cursor)?.clone() else {
             return None;
         };
@@ -1716,11 +1633,9 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         claim: CursorClaim<D>,
         frontier: SourceFrontier<D>,
     ) -> CursorProgress {
-        assert_eq!(
-            self.claimed_cursors.remove(&claim.cursor),
-            Some(claim.pair),
-            "completed cursor must still be claimed"
-        );
+        if let Some(pair) = claim.pair {
+            assert_eq!(self.active.get(&pair), Some(&ActivePairState::Claimed));
+        }
         assert!(matches!(
             self.node(claim.cursor),
             Some(RuntimeNode::RemoteCursor { copy, remote })
@@ -1809,17 +1724,13 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 
         if progress == CursorProgress::Blocked {
             if let Some(pair) = claim.pair {
-                assert!(
-                    self.blocked_cursors
-                        .insert(
-                            pair,
-                            BlockedCursor {
-                                pair,
-                                cursor: claim.cursor,
-                            },
-                        )
-                        .is_none()
-                );
+                *self.active.get_mut(&pair).unwrap() = ActivePairState::BlockedCursor {
+                    cursor: claim.cursor,
+                };
+            }
+        } else if let Some(pair) = claim.pair {
+            if self.active.get(&pair) == Some(&ActivePairState::Claimed) {
+                self.active.remove(&pair);
             }
         }
         progress
@@ -1898,24 +1809,33 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         remote: Port,
         neighbor: Port,
     ) -> CursorProgress {
-        let (peer, copy_finished) = {
+        let peer = {
             let state = self
                 .copies
-                .get_mut(&copy)
+                .get(&copy)
                 .expect("joined cursor must reference a live copy");
             let Some(peer) = state.frontiers.get(&neighbor).copied() else {
                 return CursorProgress::Blocked;
             };
-            // A converging frontier may be inspected concurrently from its
-            // other end. Leave both frontier records intact until that claim
-            // is released; otherwise the peer would finish against a cursor
-            // that this join removed underneath it.
-            if self.claimed_cursors.contains_key(&peer) {
-                return CursorProgress::Blocked;
-            }
+            peer
+        };
+        // A converging frontier may be inspected concurrently from its other
+        // end. Leave both frontier records intact until that active-pair claim
+        // is released.
+        if self
+            .active_pair_key(peer)
+            .is_some_and(|pair| self.active.get(&pair) == Some(&ActivePairState::Claimed))
+        {
+            return CursorProgress::Blocked;
+        }
+        let copy_finished = {
+            let state = self
+                .copies
+                .get_mut(&copy)
+                .expect("joined cursor must reference a live copy");
             assert_eq!(state.frontiers.remove(&neighbor), Some(peer));
             assert_eq!(state.frontiers.remove(&remote), Some(cursor));
-            (peer, state.frontiers.is_empty())
+            state.frontiers.is_empty()
         };
         assert_ne!(
             cursor, peer,
@@ -2156,12 +2076,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         let Some(pair) = self.active_pair_key(node) else {
             return;
         };
-        self.ready.remove(&pair);
-        self.calls.remove(&pair);
-        self.claimed_calls.remove(&pair);
-        self.claimed_host_calls.remove(&pair);
-        self.blocked_cursors.remove(&pair);
-        self.stuck.remove(&pair);
+        self.active.remove(&pair);
     }
 
     fn neighbor(&self, port: Port) -> Option<Port> {
@@ -2193,7 +2108,19 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         self.nodes.get_mut(&right.node()).unwrap().links[right.index() as usize] = Some(left);
         if left.is_principal() && right.is_principal() {
             let pair = ActivePairKey::new(left.node(), right.node());
-            assert!(self.ready.insert(pair), "active pair must be new");
+            match self.active.entry(pair) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(ActivePairState::Ready);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry)
+                    if entry.get() == &ActivePairState::Claimed =>
+                {
+                    *entry.get_mut() = ActivePairState::Ready;
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    panic!("active pair must be new")
+                }
+            }
         }
     }
 
@@ -2525,7 +2452,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_and_stuck_pairs_leave_the_ready_queue() {
+    fn claimed_and_stuck_pairs_remain_in_the_active_tree() {
         let mut calls = RuntimeNet::empty();
         let bind = calls.add_node(RuntimeNode::Bind);
         let data = calls.add_node(RuntimeNode::Data(()));
@@ -2540,12 +2467,8 @@ mod tests {
         );
         assert!(calls.ready_pairs().is_empty());
         assert_eq!(
-            calls.blocked_calls().get(&call_pair),
-            Some(&BlockedCall {
-                pair: call_pair,
-                bind,
-                data,
-            })
+            calls.active.get(&call_pair),
+            Some(&ActivePairState::Claimed)
         );
         assert_eq!(calls.reduce_next(), None);
 
@@ -2586,21 +2509,21 @@ mod tests {
 
         let reduction = net.reduce_next().expect("bind-data must block as a call");
         let ReductionKind::Call { bind, data } = reduction.kind else {
-            panic!("expected a blocked call");
+            panic!("expected a claimed call");
         };
-        let call = BlockedCall {
+        let call = Call {
             pair: reduction.pair,
             bind,
             data,
         };
         assert_eq!(net.claim_call(call), Some(0));
-        assert_eq!(net.claimed_pairs().collect::<Vec<_>>(), vec![call.pair]);
+        assert_eq!(net.active.get(&call.pair), Some(&ActivePairState::Claimed));
 
         net.resume_claimed_call_with_host_fn(
             call,
             HostFn::new("increment", |value| Ok(HostFnYield::Data(value + 1))),
         );
-        assert!(net.claimed_pairs().next().is_none());
+        assert_ne!(net.active.get(&call.pair), Some(&ActivePairState::Claimed));
         assert!(matches!(
             net.reduce_next(),
             Some(Reduction {
@@ -2663,7 +2586,7 @@ mod tests {
         net.complete_host_call(call, outcome);
 
         assert_eq!(net.interface_data(result), Some(&42));
-        assert!(net.claimed_host_calls().is_empty());
+        assert!(!net.active.contains_key(&call.pair));
     }
 
     #[test]
@@ -2701,7 +2624,10 @@ mod tests {
             panic!("host function should fail");
         };
         failed.fail_host_call(call, error);
-        assert!(failed.claimed_host_calls().is_empty());
+        assert!(matches!(
+            failed.active.get(&call.pair),
+            Some(ActivePairState::Stuck(_))
+        ));
         assert_eq!(
             failed.stuck_pairs().collect::<Vec<_>>(),
             vec![StuckPair {
@@ -2713,7 +2639,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_collections_partition_principal_connections() {
+    fn active_tree_tracks_every_principal_connection_once() {
         let mut net = RuntimeNet::empty();
         let bind = net.add_node(RuntimeNode::Bind);
         let call_data = net.add_node(RuntimeNode::Data(()));
@@ -2860,8 +2786,7 @@ mod tests {
         assert!(dependency_source.ptr_eq(&source));
         assert_eq!(dependency_pair, pair);
         source.with(|source| {
-            assert!(source.blocked_call(pair).is_some());
-            assert!(source.claimed_pairs().next().is_none());
+            assert_eq!(source.active.get(&pair), Some(&ActivePairState::Claimed));
         });
         assert!(
             !target
@@ -3055,14 +2980,14 @@ mod tests {
         caller.connect(Port::auxiliary(bind, 2), Port::principal(result));
 
         let Some(Reduction {
-            kind: ReductionKind::Call { .. },
-            ..
+            pair,
+            kind: ReductionKind::Call { bind, data },
         }) = caller.reduce_next()
         else {
             panic!("bind-data must block as a call");
         };
-        let call = *caller.blocked_calls().values().next().unwrap();
-        caller.resume_call_with_copy(call, source);
+        let call = Call { pair, bind, data };
+        caller.resume_claimed_call_with_copy(call, source);
         assert!(matches!(
             reduce_next_cursor(&mut caller).1,
             CursorProgress::Materialized { .. }
@@ -3100,9 +3025,15 @@ mod tests {
         caller.connect(Port::auxiliary(bind, 1), Port::principal(left));
         caller.connect(Port::auxiliary(bind, 2), Port::principal(right));
 
-        caller.reduce_next();
-        let call = *caller.blocked_calls().values().next().unwrap();
-        caller.resume_call_with_copy(call, source);
+        let Some(Reduction {
+            pair,
+            kind: ReductionKind::Call { bind, data },
+        }) = caller.reduce_next()
+        else {
+            panic!("bind-data must become a call");
+        };
+        let call = Call { pair, bind, data };
+        caller.resume_claimed_call_with_copy(call, source);
         assert!(matches!(
             reduce_next_cursor(&mut caller).1,
             CursorProgress::Materialized { .. }
@@ -3139,9 +3070,15 @@ mod tests {
         caller.connect(Port::auxiliary(bind, 1), Port::principal(left));
         caller.connect(Port::auxiliary(bind, 2), Port::principal(right));
 
-        caller.reduce_next();
-        let call = *caller.blocked_calls().values().next().unwrap();
-        caller.resume_call_with_copy(call, source);
+        let Some(Reduction {
+            pair,
+            kind: ReductionKind::Call { bind, data },
+        }) = caller.reduce_next()
+        else {
+            panic!("bind-data must become a call");
+        };
+        let call = Call { pair, bind, data };
+        caller.resume_claimed_call_with_copy(call, source);
         assert!(matches!(
             reduce_next_cursor(&mut caller).1,
             CursorProgress::Materialized { .. }
@@ -3186,7 +3123,12 @@ mod tests {
         );
         assert!(caller.copies.is_empty());
         assert!(caller.blocked_cursors().is_empty());
-        assert!(caller.claimed_pairs().next().is_none());
+        assert!(
+            caller
+                .active
+                .values()
+                .all(|state| state != &ActivePairState::Claimed)
+        );
     }
 
     #[test]
