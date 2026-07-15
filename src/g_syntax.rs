@@ -12,7 +12,7 @@ use crate::number::Number;
 
 mod resolved;
 
-use resolved::{BindingId, ResolvedExpr};
+use resolved::{BindingId, ResolvedExpr, ResolvedPathPart};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFile {
@@ -259,6 +259,7 @@ struct LocalName {
     raw: String,
     canonical: Option<String>,
     suppress_unused_warning: bool,
+    binding: Option<BindingId>,
 }
 
 /// Per-lowering lexical state. Binding identities are meaningful only within
@@ -277,6 +278,21 @@ impl ResolverContext {
             .checked_add(1)
             .expect("g-syntax binding ID space exhausted");
         binding
+    }
+
+    fn push_binding(&mut self, raw: &str) -> BindingId {
+        let binding = self.fresh_binding();
+        let mut local = local_name_metadata(raw);
+        local.binding = Some(binding);
+        self.locals.push(local);
+        binding
+    }
+
+    fn extend_bindings<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) -> Vec<BindingId> {
+        names
+            .into_iter()
+            .map(|name| self.push_binding(name))
+            .collect()
     }
 }
 
@@ -309,6 +325,86 @@ mod resolver_context_tests {
 
         assert_eq!(left_first, right_first);
         assert_ne!(left_first, left_second);
+    }
+
+    #[test]
+    fn lambda_locals_remain_stable_resolved_bindings() {
+        let context = CompileContext::default();
+        let scope = NameScope::module(&context, context.empty_dict_value());
+        let mut resolver = ResolverContext::default();
+        let syntax = SyntaxExpr::Lambda(
+            vec!["x".to_owned()],
+            Box::new(SyntaxExpr::Name("x".to_owned())),
+        );
+
+        let resolved =
+            syntax_expr_to_resolved_in_scope(&syntax, 1, &context, &scope, &mut resolver).unwrap();
+
+        assert!(matches!(
+            resolved,
+            ResolvedExpr::Lambda { parameters, body }
+                if matches!(body.as_ref(), ResolvedExpr::Local(binding)
+                    if *binding == parameters[0])
+        ));
+    }
+
+    #[test]
+    fn direct_lambda_application_uses_the_fused_resolved_form() {
+        let context = CompileContext::default();
+        let scope = NameScope::module(&context, context.empty_dict_value());
+        let mut resolver = ResolverContext::default();
+        let syntax = SyntaxExpr::Apply(
+            Box::new(SyntaxExpr::Lambda(
+                vec!["x".to_owned()],
+                Box::new(SyntaxExpr::Name("x".to_owned())),
+            )),
+            Box::new(SyntaxExpr::Unit),
+        );
+
+        let resolved =
+            syntax_expr_to_resolved_in_scope(&syntax, 1, &context, &scope, &mut resolver).unwrap();
+
+        assert!(matches!(
+            resolved,
+            ResolvedExpr::ApplyLambda {
+                parameters,
+                body,
+                arguments,
+            } if matches!(body.as_ref(), ResolvedExpr::Local(binding)
+                if *binding == parameters[0])
+                && matches!(arguments.as_ref(), [ResolvedExpr::Embedded(Value::Atom(_))])
+        ));
+    }
+
+    #[test]
+    fn lists_and_accesses_keep_local_binding_identity() {
+        let context = CompileContext::default();
+        let scope = NameScope::module(&context, context.empty_dict_value());
+        let mut resolver = ResolverContext::default();
+        let syntax = SyntaxExpr::Lambda(
+            vec!["x".to_owned()],
+            Box::new(SyntaxExpr::List(vec![
+                SyntaxExpr::Name("x".to_owned()),
+                SyntaxExpr::Access(
+                    Box::new(SyntaxExpr::Name("x".to_owned())),
+                    vec![SyntaxKeyExpr::Atom("field".to_owned())],
+                ),
+            ])),
+        );
+
+        let resolved =
+            syntax_expr_to_resolved_in_scope(&syntax, 1, &context, &scope, &mut resolver).unwrap();
+
+        assert!(matches!(
+            resolved,
+            ResolvedExpr::Lambda { parameters, body }
+                if matches!(body.as_ref(), ResolvedExpr::List(items)
+                    if matches!(&items[0], ResolvedExpr::Local(binding)
+                        if *binding == parameters[0])
+                    && matches!(&items[1], ResolvedExpr::Access { base, .. }
+                        if matches!(base.as_ref(), ResolvedExpr::Local(binding)
+                            if *binding == parameters[0])))
+        ));
     }
 }
 
@@ -1106,67 +1202,108 @@ fn lower_lambda_value(arity: usize, body: Value, context: &CompileContext) -> Va
     )
 }
 
+fn resolved_expr_to_value_in_resolver(
+    expr: ResolvedExpr<Value>,
+    context: &CompileContext,
+    resolver: &ResolverContext,
+) -> Value {
+    let mut bindings = resolver
+        .iter()
+        .filter_map(|local| local.binding)
+        .collect::<Vec<_>>();
+
+    lower_resolved_expr_compat(expr, context, &mut bindings)
+}
+
 /// Temporary endpoint from the g-syntax resolved IR into the existing Core
 /// expression backend. Direct interaction-net emission will replace this one
 /// adapter; resolved-expression construction must not depend on CoreExpr.
-fn resolved_expr_to_value(expr: ResolvedExpr<Value>, context: &CompileContext) -> Value {
-    fn lower(
-        expr: ResolvedExpr<Value>,
-        context: &CompileContext,
-        bindings: &mut Vec<BindingId>,
-    ) -> Value {
-        match expr {
-            ResolvedExpr::Opaque(value) => value,
-            ResolvedExpr::Local(binding) => {
-                let position = bindings
-                    .iter()
-                    .rposition(|candidate| *candidate == binding)
-                    .expect("resolved local must have an enclosing binding");
-                context.value_local(bindings.len() - position - 1)
-            }
-            ResolvedExpr::Lambda { parameters, body } => {
-                let base_len = bindings.len();
-                bindings.extend(parameters.iter().copied());
-                let body = lower(Arc::unwrap_or_clone(body), context, bindings);
-                bindings.truncate(base_len);
-                lower_lambda_value(parameters.len(), body, context)
-            }
-            ResolvedExpr::Apply {
-                function,
-                arguments,
-            } => {
-                let function = lower(Arc::unwrap_or_clone(function), context, bindings);
-                let arguments = arguments
-                    .iter()
-                    .cloned()
-                    .map(|argument| lower(argument, context, bindings))
-                    .collect::<Vec<_>>();
-                context.value_apply_many(function, arguments)
-            }
-            ResolvedExpr::ApplyLambda {
-                parameters,
-                body,
-                arguments,
-            } => {
-                // Compatibility behavior still constructs and applies the
-                // function. The direct net emitter will instead wire these
-                // arguments into the lambda-local bind spine in one net.
-                let base_len = bindings.len();
-                bindings.extend(parameters.iter().copied());
-                let body = lower(Arc::unwrap_or_clone(body), context, bindings);
-                bindings.truncate(base_len);
-                let function = lower_lambda_value(parameters.len(), body, context);
-                let arguments = arguments
-                    .iter()
-                    .cloned()
-                    .map(|argument| lower(argument, context, bindings))
-                    .collect::<Vec<_>>();
-                context.value_apply_many(function, arguments)
-            }
+fn lower_resolved_expr_compat(
+    expr: ResolvedExpr<Value>,
+    context: &CompileContext,
+    bindings: &mut Vec<BindingId>,
+) -> Value {
+    match expr {
+        ResolvedExpr::Embedded(value) => {
+            debug_assert!(
+                !matches!(value, Value::Expr(_)),
+                "resolved embedded data cannot contain a Core expression"
+            );
+            value
+        }
+        ResolvedExpr::Provided(value) | ResolvedExpr::Legacy(value) => value,
+        ResolvedExpr::Local(binding) => {
+            let position = bindings
+                .iter()
+                .rposition(|candidate| *candidate == binding)
+                .expect("resolved local must have an enclosing binding");
+            context.value_local(bindings.len() - position - 1)
+        }
+        ResolvedExpr::List(items) => context.value_list(
+            items
+                .iter()
+                .cloned()
+                .map(|item| lower_resolved_expr_compat(item, context, bindings))
+                .collect(),
+        ),
+        ResolvedExpr::Access { base, path } => {
+            let base = lower_resolved_expr_compat(Arc::unwrap_or_clone(base), context, bindings);
+            let path = path
+                .iter()
+                .cloned()
+                .map(|part| match part {
+                    ResolvedPathPart::Key(key) => context.key_expr_key(key),
+                    ResolvedPathPart::Index(expr) => context.key_expr_index(
+                        lower_resolved_expr_compat(Arc::unwrap_or_clone(expr), context, bindings),
+                    ),
+                    ResolvedPathPart::PathIndex(expr) => context.key_expr_path_index(
+                        lower_resolved_expr_compat(Arc::unwrap_or_clone(expr), context, bindings),
+                    ),
+                })
+                .collect();
+            context.value_access(base, path)
+        }
+        ResolvedExpr::Lambda { parameters, body } => {
+            let base_len = bindings.len();
+            bindings.extend(parameters.iter().copied());
+            let body = lower_resolved_expr_compat(Arc::unwrap_or_clone(body), context, bindings);
+            bindings.truncate(base_len);
+            lower_lambda_value(parameters.len(), body, context)
+        }
+        ResolvedExpr::Apply {
+            function,
+            arguments,
+        } => {
+            let function =
+                lower_resolved_expr_compat(Arc::unwrap_or_clone(function), context, bindings);
+            let arguments = arguments
+                .iter()
+                .cloned()
+                .map(|argument| lower_resolved_expr_compat(argument, context, bindings))
+                .collect::<Vec<_>>();
+            context.value_apply_many(function, arguments)
+        }
+        ResolvedExpr::ApplyLambda {
+            parameters,
+            body,
+            arguments,
+        } => {
+            // Compatibility behavior still constructs and applies the
+            // function. The direct net emitter will instead wire these
+            // arguments into the lambda-local bind spine in one net.
+            let base_len = bindings.len();
+            bindings.extend(parameters.iter().copied());
+            let body = lower_resolved_expr_compat(Arc::unwrap_or_clone(body), context, bindings);
+            bindings.truncate(base_len);
+            let function = lower_lambda_value(parameters.len(), body, context);
+            let arguments = arguments
+                .iter()
+                .cloned()
+                .map(|argument| lower_resolved_expr_compat(argument, context, bindings))
+                .collect::<Vec<_>>();
+            context.value_apply_many(function, arguments)
         }
     }
-
-    lower(expr, context, &mut Vec::new())
 }
 
 fn semantic_value_to_expr(value: Value) -> CoreExpr {
@@ -1575,7 +1712,7 @@ fn lower_update_definition(
     }
 
     let base_len = locals.len();
-    locals.extend(params.iter().map(|param| local_name_metadata(param)));
+    locals.extend_bindings(params.iter().map(String::as_str));
     let lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals);
     locals.truncate(base_len);
     let lowered = lowered?;
@@ -1892,77 +2029,122 @@ fn syntax_expr_to_value_in_scope(
     scope: &NameScope,
     locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
+    let resolved = syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals)?;
+    Ok(resolved_expr_to_value_in_resolver(
+        resolved, context, locals,
+    ))
+}
+
+fn syntax_expr_to_resolved_in_scope(
+    expr: &SyntaxExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     Ok(match expr {
-        SyntaxExpr::Unit => context.unit_value(),
-        SyntaxExpr::Number(number) => context.value_number(number.clone()),
-        SyntaxExpr::Text(text) => context.value_binary(text),
-        SyntaxExpr::Atom(name) => context.value_atom(atom_from_str(name)),
-        SyntaxExpr::Effect(name) => lower_effect_expr(name, context),
-        SyntaxExpr::SingletonDict(key, value) => context.builtin_apply2_value(
-            Builtin::DictSingleton,
-            syntax_key_expr_to_value(key, line, context, scope, locals)?,
-            syntax_expr_to_value_in_scope(value, line, context, scope, locals)?,
+        SyntaxExpr::Unit => ResolvedExpr::Embedded(context.unit_value()),
+        SyntaxExpr::Number(number) => ResolvedExpr::Embedded(context.value_number(number.clone())),
+        SyntaxExpr::Text(text) => ResolvedExpr::Embedded(context.value_binary(text)),
+        SyntaxExpr::Atom(name) => ResolvedExpr::Embedded(context.value_atom(atom_from_str(name))),
+        SyntaxExpr::Effect(name) => lower_effect_expr_resolved(name, context, locals),
+        SyntaxExpr::SingletonDict(key, value) => ResolvedExpr::apply(
+            ResolvedExpr::Embedded(context.value_builtin(Builtin::DictSingleton)),
+            [
+                syntax_key_expr_to_resolved_value(key, line, context, scope, locals)?,
+                syntax_expr_to_resolved_in_scope(value, line, context, scope, locals)?,
+            ],
         ),
-        SyntaxExpr::DictUnion(items) => lower_dict_union(items, line, context, scope, locals)?,
-        SyntaxExpr::Name(name) => lower_name_expr(name, context, scope, locals),
-        SyntaxExpr::PriorName(name) => lower_prior_name_expr(name, line, context, scope)?,
+        SyntaxExpr::DictUnion(items) => {
+            lower_dict_union_resolved(items, line, context, scope, locals)?
+        }
+        SyntaxExpr::Name(name) => lower_name_expr_resolved(name, context, scope, locals),
+        SyntaxExpr::PriorName(name) => lower_prior_name_expr_resolved(name, line, context, scope)?,
         SyntaxExpr::Escape(depth, expr) => {
             let escaped_scope = escaped_name_scope(scope, *depth, line)?;
-            syntax_expr_to_value_in_scope(expr, line, context, &escaped_scope, locals)?
+            syntax_expr_to_resolved_in_scope(expr, line, context, &escaped_scope, locals)?
         }
-        SyntaxExpr::Access(base, parts) => context.value_access(
-            syntax_expr_to_value_in_scope(base, line, context, scope, locals)?,
-            parts
-                .iter()
-                .map(|part| syntax_key_expr_to_core(part, line, context, scope, locals))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        SyntaxExpr::Object(object) => lower_object_expr(object, line, context, scope, locals)?,
-        SyntaxExpr::With { base, alias, body } => {
-            lower_dict_with_expr(base, alias.as_deref(), body, line, context, scope, locals)?
+        SyntaxExpr::Access(base, parts) => ResolvedExpr::Access {
+            base: Arc::new(syntax_expr_to_resolved_in_scope(
+                base, line, context, scope, locals,
+            )?),
+            path: Arc::from(
+                parts
+                    .iter()
+                    .map(|part| {
+                        syntax_key_expr_to_resolved_path(part, line, context, scope, locals)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        },
+        SyntaxExpr::Object(object) => {
+            ResolvedExpr::Legacy(lower_object_expr(object, line, context, scope, locals)?)
         }
-        SyntaxExpr::List(items) => context.value_list(
+        SyntaxExpr::With { base, alias, body } => ResolvedExpr::Legacy(lower_dict_with_expr(
+            base,
+            alias.as_deref(),
+            body,
+            line,
+            context,
+            scope,
+            locals,
+        )?),
+        SyntaxExpr::List(items) => ResolvedExpr::List(Arc::from(
             items
                 .iter()
-                .map(|expr| syntax_expr_to_value_in_scope(expr, line, context, scope, locals))
+                .map(|expr| syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals))
                 .collect::<Result<Vec<_>, _>>()?,
-        ),
+        )),
         SyntaxExpr::Lambda(params, body) => {
-            lower_lambda_expr(params, body, line, context, scope, locals)?
+            lower_lambda_expr_resolved(params, body, line, context, scope, locals)?
         }
         SyntaxExpr::Let { bindings, body } => {
-            lower_let_expr(bindings, body, line, context, scope, locals)?
+            lower_let_expr_resolved(bindings, body, line, context, scope, locals)?
         }
         SyntaxExpr::Apply(function, argument) => {
-            lower_application_expr(function, argument, line, context, scope, locals)?
+            lower_application_expr_resolved(function, argument, line, context, scope, locals)?
         }
         SyntaxExpr::OperatorApply {
             operator,
             left,
             right,
-        } => lower_syntax_operator_expr(*operator, left, right, line, context, scope, locals)?,
+        } => lower_syntax_operator_expr_resolved(
+            *operator, left, right, line, context, scope, locals,
+        )?,
         SyntaxExpr::ComparisonChain { first, rest } => {
-            lower_comparison_chain(first, rest, line, context, scope, locals)?
+            lower_comparison_chain_resolved(first, rest, line, context, scope, locals)?
         }
         SyntaxExpr::OperatorSection {
             operator,
             left,
             right,
-        } => lower_operator_section(*operator, left, right, line, context, scope, locals)?,
-        SyntaxExpr::Multiply(left, right) => {
-            lower_builtin_expr(Builtin::Multiply, left, right, line, context, scope, locals)?
-        }
+        } => lower_operator_section_resolved(*operator, left, right, line, context, scope, locals)?,
+        SyntaxExpr::Multiply(left, right) => lower_builtin_expr_resolved(
+            Builtin::Multiply,
+            left,
+            right,
+            line,
+            context,
+            scope,
+            locals,
+        )?,
         SyntaxExpr::Divide(left, right) => {
-            lower_builtin_expr(Builtin::Divide, left, right, line, context, scope, locals)?
+            lower_builtin_expr_resolved(Builtin::Divide, left, right, line, context, scope, locals)?
         }
         SyntaxExpr::Add(left, right) => {
-            lower_builtin_expr(Builtin::Add, left, right, line, context, scope, locals)?
+            lower_builtin_expr_resolved(Builtin::Add, left, right, line, context, scope, locals)?
         }
-        SyntaxExpr::Subtract(left, right) => {
-            lower_builtin_expr(Builtin::Subtract, left, right, line, context, scope, locals)?
-        }
+        SyntaxExpr::Subtract(left, right) => lower_builtin_expr_resolved(
+            Builtin::Subtract,
+            left,
+            right,
+            line,
+            context,
+            scope,
+            locals,
+        )?,
         SyntaxExpr::Append(left, right) => {
-            lower_builtin_expr(Builtin::Append, left, right, line, context, scope, locals)?
+            lower_builtin_expr_resolved(Builtin::Append, left, right, line, context, scope, locals)?
         }
     })
 }
@@ -2066,7 +2248,7 @@ fn dict_with_body_scope(
     }
 }
 
-fn lower_builtin_expr(
+fn lower_builtin_expr_resolved(
     builtin: Builtin,
     left: &SyntaxExpr,
     right: &SyntaxExpr,
@@ -2074,11 +2256,13 @@ fn lower_builtin_expr(
     context: &CompileContext,
     scope: &NameScope,
     locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    Ok(context.builtin_apply2_value(
-        builtin,
-        syntax_expr_to_value_in_scope(left, line, context, scope, locals)?,
-        syntax_expr_to_value_in_scope(right, line, context, scope, locals)?,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    Ok(ResolvedExpr::apply(
+        ResolvedExpr::Embedded(context.value_builtin(builtin)),
+        [
+            syntax_expr_to_resolved_in_scope(left, line, context, scope, locals)?,
+            syntax_expr_to_resolved_in_scope(right, line, context, scope, locals)?,
+        ],
     ))
 }
 
@@ -2094,7 +2278,29 @@ fn lower_effect_expr(name: &str, context: &CompileContext) -> Value {
     )
 }
 
-fn lower_operator_section(
+fn lower_effect_expr_resolved(
+    name: &str,
+    context: &CompileContext,
+    locals: &mut ResolverContext,
+) -> ResolvedExpr<Value> {
+    let base_len = locals.len();
+    let api = locals.push_binding("<effect-api>");
+    let body = ResolvedExpr::Access {
+        base: Arc::new(ResolvedExpr::Local(api)),
+        path: Arc::from([ResolvedPathPart::Key(Key::atom_from_text(name))]),
+    };
+    locals.truncate(base_len);
+
+    ResolvedExpr::apply(
+        ResolvedExpr::Embedded(context.value_builtin(Builtin::DictSingleton)),
+        [
+            ResolvedExpr::Embedded(context.value_atom(atom_from_str("eff"))),
+            ResolvedExpr::lambda(Arc::from([api]), body),
+        ],
+    )
+}
+
+fn lower_operator_section_resolved(
     operator: SyntaxOperator,
     left: &Option<Box<SyntaxExpr>>,
     right: &Option<Box<SyntaxExpr>>,
@@ -2102,57 +2308,46 @@ fn lower_operator_section(
     context: &CompileContext,
     scope: &NameScope,
     locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     match (left, right) {
-        (None, None) => return Ok(lower_syntax_operator_function(operator, context)),
+        (None, None) => {
+            return Ok(lower_syntax_operator_function_resolved(
+                operator, context, locals,
+            ));
+        }
         (Some(left), Some(right)) => {
-            return lower_syntax_operator_expr(operator, left, right, line, context, scope, locals);
+            return lower_syntax_operator_expr_resolved(
+                operator, left, right, line, context, scope, locals,
+            );
         }
         _ => {}
     }
 
-    let shifted_scope = shift_name_scope_locals(scope, 1);
     let base_len = locals.len();
-    locals.push(LocalName {
-        raw: "<operator-section>".to_owned(),
-        canonical: None,
-        suppress_unused_warning: true,
-    });
-    let lowered_left = match left {
-        Some(expr) => {
-            match syntax_expr_to_value_in_scope(expr, line, context, &shifted_scope, locals) {
-                Ok(value) => Some(value),
-                Err(err) => {
-                    locals.truncate(base_len);
-                    return Err(err);
-                }
-            }
+    let parameter = locals.push_binding("<operator-section>");
+    let left = left
+        .as_deref()
+        .map(|expr| syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals))
+        .transpose()?;
+    let right = right
+        .as_deref()
+        .map(|expr| syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals))
+        .transpose()?;
+    let argument = ResolvedExpr::Local(parameter);
+    let body = match (left, right) {
+        (None, Some(right)) => {
+            lower_syntax_operator_values_resolved(operator, argument, right, context, locals)
         }
-        None => None,
-    };
-    let lowered_right = match right {
-        Some(expr) => {
-            match syntax_expr_to_value_in_scope(expr, line, context, &shifted_scope, locals) {
-                Ok(value) => Some(value),
-                Err(err) => {
-                    locals.truncate(base_len);
-                    return Err(err);
-                }
-            }
+        (Some(left), None) => {
+            lower_syntax_operator_values_resolved(operator, left, argument, context, locals)
         }
-        None => None,
-    };
-    locals.truncate(base_len);
-    let section_arg = context.value_local(0);
-    let body = match (lowered_left, lowered_right) {
-        (None, Some(right)) => lower_syntax_operator_values(operator, section_arg, right, context),
-        (Some(left), None) => lower_syntax_operator_values(operator, left, section_arg, context),
         _ => unreachable!("operator section arity was handled before lowering operands"),
     };
-    Ok(lower_lambda_value(1, body, context))
+    locals.truncate(base_len);
+    Ok(ResolvedExpr::lambda(Arc::from([parameter]), body))
 }
 
-fn lower_syntax_operator_expr(
+fn lower_syntax_operator_expr_resolved(
     operator: SyntaxOperator,
     left: &SyntaxExpr,
     right: &SyntaxExpr,
@@ -2160,62 +2355,148 @@ fn lower_syntax_operator_expr(
     context: &CompileContext,
     scope: &NameScope,
     locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let left = syntax_expr_to_resolved_in_scope(left, line, context, scope, locals)?;
+    let right = syntax_expr_to_resolved_in_scope(right, line, context, scope, locals)?;
+    Ok(lower_syntax_operator_values_resolved(
+        operator, left, right, context, locals,
+    ))
+}
+
+fn lower_syntax_operator_function_resolved(
+    operator: SyntaxOperator,
+    context: &CompileContext,
+    locals: &mut ResolverContext,
+) -> ResolvedExpr<Value> {
+    if let SyntaxOperator::Builtin(builtin) = operator {
+        return ResolvedExpr::Embedded(context.value_builtin(builtin));
+    }
+
+    let base_len = locals.len();
+    let left = locals.push_binding("<operator-left>");
+    let right = locals.push_binding("<operator-right>");
+    let body = lower_syntax_operator_values_resolved(
+        operator,
+        ResolvedExpr::Local(left),
+        ResolvedExpr::Local(right),
+        context,
+        locals,
+    );
+    locals.truncate(base_len);
+    ResolvedExpr::lambda(Arc::from([left, right]), body)
+}
+
+fn lower_syntax_operator_values_resolved(
+    operator: SyntaxOperator,
+    left: ResolvedExpr<Value>,
+    right: ResolvedExpr<Value>,
+    context: &CompileContext,
+    locals: &mut ResolverContext,
+) -> ResolvedExpr<Value> {
     match operator {
-        SyntaxOperator::Builtin(builtin) => {
-            lower_builtin_expr(builtin, left, right, line, context, scope, locals)
-        }
-        SyntaxOperator::PipeForward
-        | SyntaxOperator::PipeBackward
-        | SyntaxOperator::BoolAnd
-        | SyntaxOperator::BoolOr
-        | SyntaxOperator::EffectBind
-        | SyntaxOperator::KleisliCompose
-        | SyntaxOperator::EffectThen => Ok(lower_syntax_operator_values(
-            operator,
-            syntax_expr_to_value_in_scope(left, line, context, scope, locals)?,
-            syntax_expr_to_value_in_scope(right, line, context, scope, locals)?,
-            context,
-        )),
-        SyntaxOperator::ComposeForward | SyntaxOperator::ComposeBackward => {
-            let shifted_scope = shift_name_scope_locals(scope, 1);
-            let base_len = locals.len();
-            locals.push(LocalName {
-                raw: "<composition>".to_owned(),
-                canonical: None,
-                suppress_unused_warning: true,
-            });
-            let left =
-                match syntax_expr_to_value_in_scope(left, line, context, &shifted_scope, locals) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        locals.truncate(base_len);
-                        return Err(err);
-                    }
-                };
-            let right =
-                match syntax_expr_to_value_in_scope(right, line, context, &shifted_scope, locals) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        locals.truncate(base_len);
-                        return Err(err);
-                    }
-                };
-            locals.truncate(base_len);
-            Ok(lower_syntax_operator_values(operator, left, right, context))
-        }
+        SyntaxOperator::Builtin(builtin) => ResolvedExpr::apply(
+            ResolvedExpr::Embedded(context.value_builtin(builtin)),
+            [left, right],
+        ),
+        SyntaxOperator::BoolAnd => effect_then_resolved(left, right, context, locals),
+        SyntaxOperator::BoolOr => effect_call_resolved("alt", [left, right], context, locals),
+        SyntaxOperator::PipeForward => ResolvedExpr::apply(right, [left]),
+        SyntaxOperator::PipeBackward => ResolvedExpr::apply(left, [right]),
+        SyntaxOperator::ComposeForward => compose_resolved(left, right, locals),
+        SyntaxOperator::ComposeBackward => compose_resolved(right, left, locals),
+        SyntaxOperator::EffectBind => effect_call_resolved("seq", [left, right], context, locals),
+        SyntaxOperator::KleisliCompose => kleisli_compose_resolved(left, right, context, locals),
+        SyntaxOperator::EffectThen => effect_then_resolved(left, right, context, locals),
     }
 }
 
-fn lower_comparison_chain(
+fn compose_resolved(
+    first: ResolvedExpr<Value>,
+    second: ResolvedExpr<Value>,
+    locals: &mut ResolverContext,
+) -> ResolvedExpr<Value> {
+    let base_len = locals.len();
+    let input = locals.push_binding("<composition-input>");
+    let body = ResolvedExpr::apply(
+        second,
+        [ResolvedExpr::apply(first, [ResolvedExpr::Local(input)])],
+    );
+    locals.truncate(base_len);
+    ResolvedExpr::lambda(Arc::from([input]), body)
+}
+
+fn kleisli_compose_resolved(
+    first: ResolvedExpr<Value>,
+    second: ResolvedExpr<Value>,
+    context: &CompileContext,
+    locals: &mut ResolverContext,
+) -> ResolvedExpr<Value> {
+    let base_len = locals.len();
+    let input = locals.push_binding("<kleisli-input>");
+    let operation = ResolvedExpr::apply(first, [ResolvedExpr::Local(input)]);
+    let body = effect_call_resolved("seq", [operation, second], context, locals);
+    locals.truncate(base_len);
+    ResolvedExpr::lambda(Arc::from([input]), body)
+}
+
+fn effect_then_resolved(
+    operation: ResolvedExpr<Value>,
+    next: ResolvedExpr<Value>,
+    context: &CompileContext,
+    locals: &mut ResolverContext,
+) -> ResolvedExpr<Value> {
+    let base_len = locals.len();
+    let result = locals.push_binding("<effect-result>");
+    let body = annotate_assert_unit_resolved(ResolvedExpr::Local(result), next, context);
+    let continuation = ResolvedExpr::lambda(Arc::from([result]), body);
+    locals.truncate(base_len);
+    effect_call_resolved("seq", [operation, continuation], context, locals)
+}
+
+fn effect_call_resolved(
+    name: &str,
+    arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
+    context: &CompileContext,
+    locals: &mut ResolverContext,
+) -> ResolvedExpr<Value> {
+    ResolvedExpr::apply(lower_effect_expr_resolved(name, context, locals), arguments)
+}
+
+fn annotate_assert_unit_resolved(
+    value: ResolvedExpr<Value>,
+    target: ResolvedExpr<Value>,
+    context: &CompileContext,
+) -> ResolvedExpr<Value> {
+    let singleton = || ResolvedExpr::Embedded(context.value_builtin(Builtin::DictSingleton));
+    let payload = ResolvedExpr::apply(
+        singleton(),
+        [
+            ResolvedExpr::Embedded(context.value_atom(atom_from_str("value"))),
+            value,
+        ],
+    );
+    let annotation = ResolvedExpr::apply(
+        singleton(),
+        [
+            ResolvedExpr::Embedded(context.value_atom(atom_from_str("assert_unit"))),
+            payload,
+        ],
+    );
+    ResolvedExpr::apply(
+        ResolvedExpr::Embedded(context.value_builtin(Builtin::Anno)),
+        [annotation, target],
+    )
+}
+
+fn lower_comparison_chain_resolved(
     first: &SyntaxExpr,
     rest: &[(SyntaxOperator, SyntaxExpr)],
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
     locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    let left = syntax_expr_to_value_in_scope(first, line, context, scope, locals)?;
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let left = syntax_expr_to_resolved_in_scope(first, line, context, scope, locals)?;
     let rest = rest
         .iter()
         .map(|(operator, expr)| {
@@ -2227,105 +2508,58 @@ fn lower_comparison_chain(
             }
             Ok((
                 *operator,
-                syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?,
+                syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals)?,
             ))
         })
         .collect::<Result<Vec<_>, Diagnostic>>()?;
-    Ok(lower_comparison_chain_values(left, &rest, context))
+    Ok(lower_comparison_chain_values_resolved(
+        left, &rest, context, locals,
+    ))
 }
 
-fn lower_comparison_chain_values(
-    left: Value,
-    rest: &[(SyntaxOperator, Value)],
+fn lower_comparison_chain_values_resolved(
+    left: ResolvedExpr<Value>,
+    rest: &[(SyntaxOperator, ResolvedExpr<Value>)],
     context: &CompileContext,
-) -> Value {
+    locals: &mut ResolverContext,
+) -> ResolvedExpr<Value> {
     let Some((operator, right)) = rest.first() else {
         return left;
     };
-
     if rest.len() == 1 {
-        return lower_syntax_operator_values(*operator, left, right.clone(), context);
+        return lower_syntax_operator_values_resolved(
+            *operator,
+            left,
+            right.clone(),
+            context,
+            locals,
+        );
     }
 
-    let right_local = context.value_local(0);
-    let first_condition = lower_syntax_operator_values(
+    let base_len = locals.len();
+    let right_binding = locals.push_binding("<comparison-right>");
+    let right_local = ResolvedExpr::Local(right_binding);
+    let first_condition = lower_syntax_operator_values_resolved(
         *operator,
-        shift_value_locals(&left, 1, 0),
+        left,
         right_local.clone(),
         context,
+        locals,
     );
-    let shifted_rest = rest[1..]
-        .iter()
-        .map(|(operator, value)| (*operator, shift_value_locals(value, 1, 0)))
-        .collect::<Vec<_>>();
-    let remaining_condition = lower_comparison_chain_values(right_local, &shifted_rest, context);
-    let body = lower_syntax_operator_values(
+    let remaining_condition =
+        lower_comparison_chain_values_resolved(right_local, &rest[1..], context, locals);
+    let body = lower_syntax_operator_values_resolved(
         SyntaxOperator::BoolAnd,
         first_condition,
         remaining_condition,
         context,
+        locals,
     );
-    context.value_apply(lower_lambda_value(1, body, context), right.clone())
-}
-
-fn lower_syntax_operator_function(operator: SyntaxOperator, context: &CompileContext) -> Value {
-    match operator {
-        SyntaxOperator::Builtin(builtin) => context.value_builtin(builtin),
-        SyntaxOperator::BoolAnd
-        | SyntaxOperator::BoolOr
-        | SyntaxOperator::PipeForward
-        | SyntaxOperator::PipeBackward
-        | SyntaxOperator::ComposeForward
-        | SyntaxOperator::ComposeBackward
-        | SyntaxOperator::EffectBind
-        | SyntaxOperator::KleisliCompose
-        | SyntaxOperator::EffectThen => {
-            let left = context.value_local(1);
-            let right = context.value_local(0);
-            let body = lower_syntax_operator_values(operator, left, right, context);
-            lower_lambda_value(2, body, context)
-        }
-    }
-}
-
-fn lower_syntax_operator_values(
-    operator: SyntaxOperator,
-    left: Value,
-    right: Value,
-    context: &CompileContext,
-) -> Value {
-    match operator {
-        SyntaxOperator::Builtin(builtin) => context.builtin_apply2_value(builtin, left, right),
-        SyntaxOperator::BoolAnd => effect_then_values(left, right, context),
-        SyntaxOperator::BoolOr => effect_call_value("alt", vec![left, right], context),
-        SyntaxOperator::PipeForward => context.value_apply(right, left),
-        SyntaxOperator::PipeBackward => context.value_apply(left, right),
-        SyntaxOperator::ComposeForward => compose_values(left, right, context),
-        SyntaxOperator::ComposeBackward => compose_values(right, left, context),
-        SyntaxOperator::EffectBind => effect_call_value("seq", vec![left, right], context),
-        SyntaxOperator::KleisliCompose => kleisli_compose_values(left, right, context),
-        SyntaxOperator::EffectThen => effect_then_values(left, right, context),
-    }
-}
-
-fn compose_values(first: Value, second: Value, context: &CompileContext) -> Value {
-    let input = context.value_local(0);
-    let first = shift_value_locals(&first, 1, 0);
-    let second = shift_value_locals(&second, 1, 0);
-    lower_lambda_value(
-        1,
-        context.value_apply(second, context.value_apply(first, input)),
-        context,
+    locals.truncate(base_len);
+    ResolvedExpr::apply(
+        ResolvedExpr::lambda(Arc::from([right_binding]), body),
+        [right.clone()],
     )
-}
-
-fn kleisli_compose_values(first: Value, second: Value, context: &CompileContext) -> Value {
-    let input = context.value_local(0);
-    let first = shift_value_locals(&first, 1, 0);
-    let second = shift_value_locals(&second, 1, 0);
-    let operation = context.value_apply(first, input);
-    let body = effect_call_value("seq", vec![operation, second], context);
-    lower_lambda_value(1, body, context)
 }
 
 fn effect_then_values(operation: Value, next: Value, context: &CompileContext) -> Value {
@@ -2358,60 +2592,68 @@ fn annotate_assert_unit_value(value: Value, target: Value, context: &CompileCont
     context.builtin_apply2_value(Builtin::Anno, annotation, target)
 }
 
-fn syntax_key_expr_to_value(
+fn syntax_key_expr_to_resolved_value(
     key: &SyntaxKeyExpr,
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
     locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    Ok(match key {
-        SyntaxKeyExpr::Atom(name) => context.value_atom(atom_from_str(name)),
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    match key {
+        SyntaxKeyExpr::Atom(name) => Ok(ResolvedExpr::Embedded(
+            context.value_atom(atom_from_str(name)),
+        )),
         SyntaxKeyExpr::Index(expr) => {
-            syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?
+            syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals)
         }
-        SyntaxKeyExpr::PathIndex(_) => {
-            return Err(Diagnostic::error(
-                line,
-                "list-valued path expressions are not valid dictionary keys",
-            ));
-        }
+        SyntaxKeyExpr::PathIndex(_) => Err(Diagnostic::error(
+            line,
+            "list-valued path expressions are not valid dictionary keys",
+        )),
+    }
+}
+
+fn syntax_key_expr_to_resolved_path(
+    key: &SyntaxKeyExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedPathPart<Value>, Diagnostic> {
+    Ok(match key {
+        SyntaxKeyExpr::Atom(name) => ResolvedPathPart::Key(name_as_key(name)),
+        SyntaxKeyExpr::Index(expr) => ResolvedPathPart::Index(Arc::new(
+            syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals)?,
+        )),
+        SyntaxKeyExpr::PathIndex(expr) => ResolvedPathPart::PathIndex(Arc::new(
+            syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals)?,
+        )),
     })
 }
 
-fn lower_dict_union(
+fn lower_dict_union_resolved(
     items: &[SyntaxExpr],
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
     locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let mut items = items.iter();
     let Some(first) = items.next() else {
-        return Ok(context.empty_dict_value());
+        return Ok(ResolvedExpr::Embedded(context.empty_dict_value()));
     };
 
-    let mut value = syntax_expr_to_value_in_scope(first, line, context, scope, locals)?;
+    let mut value = syntax_expr_to_resolved_in_scope(first, line, context, scope, locals)?;
     for item in items {
-        value = context.builtin_apply2_value(
-            Builtin::DictUnion,
-            value,
-            syntax_expr_to_value_in_scope(item, line, context, scope, locals)?,
+        value = ResolvedExpr::apply(
+            ResolvedExpr::Embedded(context.value_builtin(Builtin::DictUnion)),
+            [
+                value,
+                syntax_expr_to_resolved_in_scope(item, line, context, scope, locals)?,
+            ],
         );
     }
     Ok(value)
-}
-
-fn lower_lambda_expr(
-    params: &[String],
-    body: &SyntaxExpr,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    let resolved = lower_lambda_expr_resolved(params, body, line, context, scope, locals)?;
-    Ok(resolved_expr_to_value(resolved, context))
 }
 
 fn lower_lambda_expr_resolved(
@@ -2422,30 +2664,22 @@ fn lower_lambda_expr_resolved(
     scope: &NameScope,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let parameters = Arc::from(
-        (0..params.len())
-            .map(|_| locals.fresh_binding())
-            .collect::<Vec<_>>(),
-    );
     let base_len = locals.len();
-    locals.extend(params.iter().map(|param| local_name_metadata(param)));
-    let lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals)?;
+    let parameters = Arc::from(locals.extend_bindings(params.iter().map(String::as_str)));
+    let lowered = syntax_expr_to_resolved_in_scope(body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
-    Ok(ResolvedExpr::lambda(
-        parameters,
-        ResolvedExpr::Opaque(lowered),
-    ))
+    Ok(ResolvedExpr::lambda(parameters, lowered))
 }
 
-fn lower_application_expr(
+fn lower_application_expr_resolved(
     function: &SyntaxExpr,
     argument: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
     locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let mut head = function;
     let mut arguments = vec![argument];
     while let SyntaxExpr::Apply(next, argument) = head {
@@ -2458,41 +2692,38 @@ fn lower_application_expr(
         SyntaxExpr::Lambda(params, body) => {
             lower_lambda_expr_resolved(params, body, line, context, scope, locals)?
         }
-        head => ResolvedExpr::Opaque(syntax_expr_to_value_in_scope(
-            head, line, context, scope, locals,
-        )?),
+        head => syntax_expr_to_resolved_in_scope(head, line, context, scope, locals)?,
     };
     let arguments = arguments
         .into_iter()
-        .map(|argument| syntax_expr_to_value_in_scope(argument, line, context, scope, locals))
-        .map(|argument| argument.map(ResolvedExpr::Opaque))
+        .map(|argument| syntax_expr_to_resolved_in_scope(argument, line, context, scope, locals))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(resolved_expr_to_value(
-        ResolvedExpr::apply(function, arguments),
-        context,
-    ))
+    Ok(ResolvedExpr::apply(function, arguments))
 }
 
-fn lower_let_expr(
+fn lower_let_expr_resolved(
     bindings: &[(String, SyntaxExpr)],
     body: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
     locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let values = bindings
         .iter()
-        .map(|(_, expr)| syntax_expr_to_value_in_scope(expr, line, context, scope, locals))
+        .map(|(_, expr)| syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals))
         .collect::<Result<Vec<_>, _>>()?;
 
     let base_len = locals.len();
-    locals.extend(bindings.iter().map(|(name, _)| local_name_metadata(name)));
-    let mut lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals)?;
+    let parameters =
+        Arc::from(locals.extend_bindings(bindings.iter().map(|(name, _)| name.as_str())));
+    let lowered = syntax_expr_to_resolved_in_scope(body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
-    lowered = lower_lambda_value(bindings.len(), lowered, context);
-    Ok(context.value_apply_many(lowered, values))
+    Ok(ResolvedExpr::apply(
+        ResolvedExpr::lambda(parameters, lowered),
+        values,
+    ))
 }
 
 fn lower_name_expr(
@@ -2527,12 +2758,55 @@ fn lower_name_expr(
     context.value_local(local_index)
 }
 
-fn lower_prior_name_expr(
+fn lower_name_expr_resolved(
+    name: &str,
+    _context: &CompileContext,
+    scope: &NameScope,
+    locals: &ResolverContext,
+) -> ResolvedExpr<Value> {
+    match name {
+        "module" => return ResolvedExpr::Provided(scope.module_final_defs.clone()),
+        "self" => {
+            return ResolvedExpr::Provided(
+                scope
+                    .object_final_defs
+                    .clone()
+                    .unwrap_or_else(|| scope.module_final_defs.clone()),
+            );
+        }
+        _ => {}
+    }
+
+    if let Some(local) = locals
+        .iter()
+        .rev()
+        .find(|candidate| candidate.canonical.as_deref() == Some(name))
+    {
+        return ResolvedExpr::Local(
+            local
+                .binding
+                .expect("lowering locals must have stable binding identities"),
+        );
+    }
+
+    if scope.object_alias.as_deref() == Some(name)
+        && let Some(object_final_defs) = &scope.object_final_defs
+    {
+        return ResolvedExpr::Provided(object_final_defs.clone());
+    }
+
+    ResolvedExpr::Access {
+        base: Arc::new(ResolvedExpr::Provided(scope.final_defs.clone())),
+        path: Arc::from([ResolvedPathPart::Key(Key::atom_from_text(name))]),
+    }
+}
+
+fn lower_prior_name_expr_resolved(
     name: &str,
     line: usize,
-    context: &CompileContext,
+    _context: &CompileContext,
     scope: &NameScope,
-) -> Result<Value, Diagnostic> {
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     if name.is_empty() {
         return Err(Diagnostic::error(
             line,
@@ -2541,26 +2815,28 @@ fn lower_prior_name_expr(
     }
 
     match name {
-        "module" => return Ok(scope.module_prior_defs.clone()),
+        "module" => return Ok(ResolvedExpr::Provided(scope.module_prior_defs.clone())),
         "self" => {
-            return Ok(scope
-                .object_prior_defs
-                .clone()
-                .unwrap_or_else(|| scope.module_prior_defs.clone()));
+            return Ok(ResolvedExpr::Provided(
+                scope
+                    .object_prior_defs
+                    .clone()
+                    .unwrap_or_else(|| scope.module_prior_defs.clone()),
+            ));
         }
         _ => {}
     }
 
-    if scope.object_alias.as_deref() == Some(name) {
-        if let Some(object_prior_defs) = &scope.object_prior_defs {
-            return Ok(object_prior_defs.clone());
-        }
+    if scope.object_alias.as_deref() == Some(name)
+        && let Some(object_prior_defs) = &scope.object_prior_defs
+    {
+        return Ok(ResolvedExpr::Provided(object_prior_defs.clone()));
     }
 
-    Ok(context.value_access(
-        scope.prior_defs.clone(),
-        vec![context.key_expr_key(Key::atom_from_text(name))],
-    ))
+    Ok(ResolvedExpr::Access {
+        base: Arc::new(ResolvedExpr::Provided(scope.prior_defs.clone())),
+        path: Arc::from([ResolvedPathPart::Key(Key::atom_from_text(name))]),
+    })
 }
 
 fn escaped_name_scope(
@@ -2597,16 +2873,19 @@ fn local_name_metadata(raw: &str) -> LocalName {
             raw: raw.to_owned(),
             canonical: None,
             suppress_unused_warning: true,
+            binding: None,
         },
         suppressed if suppressed.starts_with('_') => LocalName {
             raw: suppressed.to_owned(),
             canonical: Some(suppressed[1..].to_owned()),
             suppress_unused_warning: true,
+            binding: None,
         },
         name => LocalName {
             raw: name.to_owned(),
             canonical: Some(name.to_owned()),
             suppress_unused_warning: false,
+            binding: None,
         },
     }
 }

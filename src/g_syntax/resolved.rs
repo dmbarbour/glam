@@ -20,14 +20,24 @@ impl BindingId {
 
 /// Syntax-independent expressions resolved by the g-syntax front end.
 ///
-/// `Opaque` is the compatibility seam used while expression forms migrate off
-/// Core. Direct net lowering will ultimately consume the remaining variants
-/// without constructing a Core expression.
+/// `Legacy` is the explicit compatibility seam used while the remaining
+/// expression families migrate off Core. Direct net lowering will ultimately
+/// consume the structural variants without constructing a Core expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ResolvedExpr<V> {
-    Opaque(V),
-    #[allow(dead_code)] // Constructed as lexical lowering migrates off CoreExpr.
+    /// Closed ordinary data, including literal and builtin values.
+    Embedded(V),
+    /// An opaque value supplied by an assembler capability, such as a module
+    /// environment or import result.
+    Provided(V),
+    /// Temporary compatibility for a value still backed by CoreExpr.
+    Legacy(V),
     Local(BindingId),
+    List(Arc<[Self]>),
+    Access {
+        base: Arc<Self>,
+        path: Arc<[ResolvedPathPart<V>]>,
+    },
     Lambda {
         parameters: Arc<[BindingId]>,
         body: Arc<Self>,
@@ -47,6 +57,13 @@ pub(super) enum ResolvedExpr<V> {
         body: Arc<Self>,
         arguments: Arc<[Self]>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ResolvedPathPart<V> {
+    Key(crate::core::Key),
+    Index(Arc<ResolvedExpr<V>>),
+    PathIndex(Arc<ResolvedExpr<V>>),
 }
 
 impl<V: Clone> ResolvedExpr<V> {
@@ -112,9 +129,25 @@ impl<V: Clone> ResolvedExpr<V> {
     #[allow(dead_code)]
     fn collect_free_bindings(&self, free: &mut BTreeSet<BindingId>) {
         match self {
-            Self::Opaque(_) => {}
+            Self::Embedded(_) | Self::Provided(_) | Self::Legacy(_) => {}
             Self::Local(binding) => {
                 free.insert(*binding);
+            }
+            Self::List(items) => {
+                for item in items.iter() {
+                    item.collect_free_bindings(free);
+                }
+            }
+            Self::Access { base, path } => {
+                base.collect_free_bindings(free);
+                for part in path.iter() {
+                    match part {
+                        ResolvedPathPart::Key(_) => {}
+                        ResolvedPathPart::Index(expr) | ResolvedPathPart::PathIndex(expr) => {
+                            expr.collect_free_bindings(free);
+                        }
+                    }
+                }
             }
             Self::Lambda { parameters, body } => {
                 let mut body_free = body.free_bindings();
@@ -165,11 +198,11 @@ mod tests {
 
     #[test]
     fn application_spines_are_grouped() {
-        let function = ResolvedExpr::Opaque("f");
-        let first = ResolvedExpr::apply(function, [ResolvedExpr::Opaque("x")]);
+        let function = ResolvedExpr::Embedded("f");
+        let first = ResolvedExpr::apply(function, [ResolvedExpr::Embedded("x")]);
         let grouped = ResolvedExpr::apply(
             first,
-            [ResolvedExpr::Opaque("y"), ResolvedExpr::Opaque("z")],
+            [ResolvedExpr::Embedded("y"), ResolvedExpr::Embedded("z")],
         );
 
         assert!(matches!(
@@ -182,7 +215,7 @@ mod tests {
     fn every_literal_lambda_application_is_marked_for_local_fusion() {
         let parameter = TestResolver::default().fresh_binding();
         let lambda = ResolvedExpr::lambda(Arc::from([parameter]), ResolvedExpr::Local(parameter));
-        let applied = ResolvedExpr::apply(lambda, [ResolvedExpr::Opaque("argument")]);
+        let applied = ResolvedExpr::apply(lambda, [ResolvedExpr::Embedded("argument")]);
 
         assert!(matches!(applied, ResolvedExpr::ApplyLambda { .. }));
     }
