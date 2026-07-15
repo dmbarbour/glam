@@ -805,14 +805,13 @@ fn lower_definition_with_locals(
         return Ok(());
     };
 
-    let value = syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?;
     let target_scope = definition_target_scope(scope, definitions.clone());
     let value = match definition.kind {
         DefinitionKind::Introduce => annotate_definition_value(
             BuiltinAssertion::Undefined,
             &definition.target,
             definitions.clone(),
-            value,
+            syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?,
             line,
             context,
             &target_scope,
@@ -822,7 +821,7 @@ fn lower_definition_with_locals(
             BuiltinAssertion::Defined,
             &definition.target,
             definitions.clone(),
-            value,
+            syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?,
             line,
             context,
             &target_scope,
@@ -831,7 +830,7 @@ fn lower_definition_with_locals(
         DefinitionKind::Update => lower_update_definition(
             &definition.target,
             definitions.clone(),
-            value,
+            expr,
             definition_param_count(definition, declaration_text, line)?,
             line,
             context,
@@ -978,9 +977,9 @@ fn shift_expr_locals(expr: &CoreExpr, amount: usize, cutoff: usize) -> CoreExpr 
             Arc::new(shift_expr_locals(function, amount, cutoff)),
             Arc::new(shift_expr_locals(argument, amount, cutoff)),
         ),
-        CoreExpr::Lambda(body) => {
-            CoreExpr::lambda(Arc::new(shift_expr_locals(body.body(), amount, cutoff + 1)))
-        }
+        CoreExpr::Lambda(lambda) => CoreExpr::Lambda(Arc::new(crate::core::Lambda::new(Arc::new(
+            shift_expr_locals(lambda.body(), amount, cutoff + 1),
+        )))),
         CoreExpr::Local(index) if *index >= cutoff => CoreExpr::Local(index + amount),
         CoreExpr::Local(index) => CoreExpr::Local(*index),
         CoreExpr::Access(base, path) => CoreExpr::Access(
@@ -1260,7 +1259,7 @@ fn compose_object_defs(
 fn lower_update_definition(
     target: &str,
     visible_definitions: Value,
-    update: Value,
+    update: &SyntaxExpr,
     sugar_param_count: usize,
     line: usize,
     context: &CompileContext,
@@ -1269,25 +1268,31 @@ fn lower_update_definition(
 ) -> Result<Value, Diagnostic> {
     let prior =
         definition_target_access_value(target, visible_definitions, line, context, scope, locals)?;
-    let mut lowered = update;
-
-    for _ in 0..sugar_param_count {
-        let Some(body) = context.value_lambda_body(&lowered) else {
-            return Err(Diagnostic::error(
-                line,
-                "internal error lowering update definition arguments",
-            ));
-        };
-        lowered = body;
+    if sugar_param_count == 0 {
+        let update = syntax_expr_to_value_in_scope(update, line, context, scope, locals)?;
+        return Ok(context.value_apply(update, prior));
     }
 
-    lowered = context.value_apply(lowered, prior);
-
-    for _ in 0..sugar_param_count {
-        lowered = context.value_lambda(lowered);
+    let SyntaxExpr::Lambda(params, body) = update else {
+        return Err(Diagnostic::error(
+            line,
+            "internal error lowering update definition arguments",
+        ));
+    };
+    if params.len() != sugar_param_count {
+        return Err(Diagnostic::error(
+            line,
+            "internal error counting update definition arguments",
+        ));
     }
 
-    Ok(lowered)
+    let base_len = locals.len();
+    locals.extend(params.iter().map(|param| local_name_metadata(param)));
+    let lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals);
+    locals.truncate(base_len);
+    let lowered = lowered?;
+    let prior = shift_value_locals(&prior, sugar_param_count, 0);
+    Ok(context.value_lambdas(sugar_param_count, context.value_apply(lowered, prior)))
 }
 
 #[derive(Clone, Copy)]
@@ -7503,8 +7508,14 @@ mod tests {
         };
         assert!(matches!(std, Value::Dict(_)));
         assert!(matches!(anno, Value::Builtin(crate::core::Builtin::Anno)));
-        assert!(context.value_lambda_body(&std_not).is_some());
-        assert!(context.value_lambda_body(&std_could).is_some());
+        assert!(matches!(
+            crate::eval::eval_value(&std_not).unwrap(),
+            Value::Net(_) | Value::Closure(_)
+        ));
+        assert!(matches!(
+            crate::eval::eval_value(&std_could).unwrap(),
+            Value::Net(_) | Value::Closure(_)
+        ));
         assert!(matches!(floor, Value::Builtin(crate::core::Builtin::Floor)));
         assert!(matches!(mod_fn, Value::Builtin(crate::core::Builtin::Mod)));
         assert!(matches!(

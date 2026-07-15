@@ -1081,6 +1081,11 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         self.active.keys().copied()
     }
 
+    /// Recovers both endpoints of an active-pair key from the live graph.
+    pub fn active_pair_nodes(&self, pair: ActivePairKey) -> Option<(NodeId, NodeId)> {
+        self.pair_nodes(pair)
+    }
+
     /// Stable evaluator-owned anchor wired to the net's exposed template port.
     pub fn exposed(&self) -> Port {
         self.exposed

@@ -11,14 +11,16 @@
   - prior module value for future mixin-style compilation
   - abstract module path for namespace-relative identities such as `abstract_global_path`
 - `g_syntax.rs` parses file.g through compile-time context, sourcing bytes and reporting diagnostics there
-- `g_syntax.rs` lowers AST to a module lambda body expression, plus lowering diagnostics, through compile-time context and a core-facing interface
+- `g_syntax.rs` lowers AST through compile-time context and a core-facing
+  interface; source lambdas remain syntax, and update sugar is rewritten before
+  semantic lowering
 - `main.rs` applies one temporary top-level fixpoint to the anonymous assembly module
-- `core_net.rs` lowers each reached core lambda body once, collapsing a maximal
-  leading curried lambda spine into one bind chain, then instantiates one shared
-  runtime net carrying `CoreNetData`; calls can lazily copy its normalized
-  frontier through evaluator-only remote cursors; CompileContext-prepared closed
-  lambda spines evaluate as `Value::Net`, while captured, nested-dependent, and
-  access-bearing lambdas retain the compatibility path
+- `core_net.rs` lowers an explicit `(arity, body)` directly to one bind chain
+  and shared runtime carrying `CoreNetData`; free locals become leading capture
+  binds that the enclosing semantic expression supplies once. Calls lazily copy
+  the runtime frontier through evaluator-only remote cursors. Functions that
+  can cross only data-only HostFn/dictionary boundaries retain the explicitly
+  transitional core lambda/closure path
 - `interaction_net.rs` provides generic `InteractionNet<Data>` topology,
   checked construction through one `NetBuilder` (including fallible
   wiring/finalization and balanced copy helpers), active-pair discovery, and
@@ -37,7 +39,9 @@
   fan sites are translated per logical copy
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
-- `eval.rs` keeps compatibility closures on semantic evaluation, implements
+- `eval.rs` no longer constructs lambda expressions for its helper functions;
+  it requests function lowering from `core_net`. It still evaluates the
+  compatibility closures selected at the construction boundary, implements
   generic callable-data policy for target-local blocked bind-data pairs, and
   executes generic unary `HostFn` requests
   outside runtime locks; HostFn failures become permanently stuck pairs rather

@@ -6,7 +6,7 @@ use bytes::Bytes;
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
-use crate::core_net::{ClosedLambdaNet, CoreDataKey, CoreRuntimeNet, lower_closed_lambda};
+use crate::core_net::{CoreDataKey, CoreRuntimeNet};
 use crate::number::Number;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +14,8 @@ pub enum Expr {
     Value(Value),
     List(Arc<[Arc<Expr>]>),
     Apply(Arc<Expr>, Arc<Expr>),
+    /// Transitional fallback for functions that must cross a data-only host
+    /// boundary. New net-safe functions are lowered before reaching core.
     Lambda(Arc<Lambda>),
     Local(usize),
     Access(Arc<Expr>, Arc<[KeyExpr]>),
@@ -28,46 +30,20 @@ impl Expr {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lambda {
     body: Arc<Expr>,
-    closed_net: OnceLock<ClosedLambdaNet>,
 }
 
 impl Lambda {
     pub fn new(body: Arc<Expr>) -> Self {
-        Self {
-            body,
-            closed_net: OnceLock::new(),
-        }
+        Self { body }
     }
 
     pub fn body(&self) -> &Arc<Expr> {
         &self.body
     }
-
-    pub(crate) fn prepare_closed_net(&self) {
-        self.closed_net
-            .get_or_init(|| lower_closed_lambda(self.body.clone()));
-    }
-
-    pub(crate) fn closed_net(&self) -> Option<ClosedLambdaNet> {
-        self.closed_net.get().cloned()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_closed_lowered(&self) -> bool {
-        self.closed_net.get().is_some()
-    }
 }
-
-impl PartialEq for Lambda {
-    fn eq(&self, other: &Self) -> bool {
-        self.body == other.body
-    }
-}
-
-impl Eq for Lambda {}
 
 #[derive(Clone)]
 pub struct DeferredValue {
@@ -205,8 +181,9 @@ impl Key {
                     .flatten()
                     .collect::<Vec<_>>(),
             ))),
-            Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Net(_) => None,
-            Value::Closure(_) => None,
+            Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Net(_) | Value::Closure(_) => {
+                None
+            }
             Value::Expr(_) => None,
         }
     }
@@ -269,11 +246,25 @@ pub enum Value {
     PartialBuiltin(BuiltinCall),
     /// A closed interaction net with one designated exposed port.
     Net(NetValue),
-    /// Temporary expression-evaluator compatibility for lambda bodies that
-    /// still contain dictionary access.
+    /// Transitional evaluator value for lambdas that cross legacy data-only
+    /// host boundaries.
     Closure(Closure),
     Expr(Thunk),
 }
+
+#[derive(Debug, Clone)]
+pub struct Closure {
+    pub env: Arc<[Value]>,
+    pub(crate) source_body: Arc<Expr>,
+}
+
+impl PartialEq for Closure {
+    fn eq(&self, other: &Self) -> bool {
+        self.env == other.env && self.source_body == other.source_body
+    }
+}
+
+impl Eq for Closure {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetValue {
@@ -308,20 +299,6 @@ impl BuiltinCall {
         }
     }
 }
-
-#[derive(Debug, Clone)]
-pub struct Closure {
-    pub env: Arc<[Value]>,
-    pub(crate) source_body: Arc<Expr>,
-}
-
-impl PartialEq for Closure {
-    fn eq(&self, other: &Self) -> bool {
-        self.env == other.env && self.source_body == other.source_body
-    }
-}
-
-impl Eq for Closure {}
 
 #[derive(Clone)]
 pub struct Thunk {

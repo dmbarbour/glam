@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use crate::core::Builtin;
 use crate::core::{
-    Atom, DeferredValue, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Lambda, NetValue,
-    Value,
+    Atom, DeferredValue, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, NetValue, Value,
 };
-use crate::core_net::{CoreNetData, closed_lambda_body_is_net_safe};
+use crate::core_net::{
+    CoreNetData, function_body_is_net_safe, lower_function, lower_function_value,
+};
 use crate::interaction_net::{NetBuildError, NetBuilder, Port};
 use crate::number::Number;
 
@@ -265,23 +266,21 @@ impl CompileContext {
         self.value_lambdas(1, body)
     }
 
-    /// Constructs one curried function without preparing an intermediate net
-    /// for every syntactic parameter. The semantic expression remains a
-    /// lambda spine during the migration away from `CoreExpr::Lambda`, while
-    /// interaction-net lowering treats that entire spine as one bind chain.
+    /// Constructs one closed curried function net. Locals outside `arity` are
+    /// lifted into leading capture binds and immediately supplied from the
+    /// enclosing semantic expression.
     pub fn value_lambdas(&self, arity: usize, body: Value) -> Value {
         assert!(arity > 0, "a lambda must bind at least one parameter");
-        let mut expr = value_to_core_expr(body);
-        for _ in 0..arity {
-            expr = CoreExpr::Lambda(Arc::new(Lambda::new(Arc::new(expr))));
+        let body = value_to_core_expr(body);
+        if !function_body_is_net_safe(&body, arity) {
+            return lower_function_value(arity, body);
         }
-        let CoreExpr::Lambda(lambda) = &expr else {
-            unreachable!();
-        };
-        if closed_lambda_body_is_net_safe(lambda.body()) {
-            lambda.prepare_closed_net();
+        let lifted = lower_function(arity, Arc::new(body));
+        let mut function = Value::Net(NetValue::new(lifted.runtime));
+        for capture in 0..lifted.capture_count {
+            function = self.value_apply(function, self.value_local(capture));
         }
-        Value::expr(expr)
+        function
     }
 
     pub fn value_local(&self, index: usize) -> Value {
@@ -293,22 +292,6 @@ impl CompileContext {
             Arc::new(value_to_core_expr(base)),
             Arc::from(path),
         ))
-    }
-
-    pub fn value_lambda_body(&self, value: &Value) -> Option<Value> {
-        let Value::Expr(thunk) = value else {
-            return None;
-        };
-        let Some(env) = thunk.env() else {
-            return None;
-        };
-        if !env.is_empty() {
-            return None;
-        }
-        let CoreExpr::Lambda(body) = thunk.expr()?.as_ref() else {
-            return None;
-        };
-        Some(Value::expr(body.body().as_ref().clone()))
     }
 
     pub fn builtin_apply2_value(&self, builtin: Builtin, left: Value, right: Value) -> Value {
@@ -463,58 +446,28 @@ mod tests {
     }
 
     #[test]
-    fn compile_context_prepares_only_closed_leaf_lambdas_as_nets() {
+    fn compile_context_builds_closed_functions_and_explicit_capture_applications() {
         let context = CompileContext::default();
         let closed = context.value_lambda(context.value_local(0));
         let captured = context.value_lambda(context.value_local(1));
 
-        let Value::Expr(closed) = closed else {
-            panic!("lambda compiler term should remain inspectable during migration");
-        };
-        let CoreExpr::Lambda(closed) = closed.expr().unwrap().as_ref() else {
-            panic!("lambda compiler term should retain its semantic wrapper");
-        };
-        let Value::Expr(captured) = captured else {
-            panic!("captured lambda should remain a compatibility expression");
-        };
-        let CoreExpr::Lambda(captured) = captured.expr().unwrap().as_ref() else {
-            panic!("captured lambda should retain its semantic wrapper");
-        };
-
-        assert!(closed.is_closed_lowered());
-        assert!(!captured.is_closed_lowered());
+        assert!(matches!(closed, Value::Net(_)));
+        assert!(matches!(
+            captured,
+            Value::Expr(ref thunk)
+                if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Apply(_, argument))
+                    if matches!(argument.as_ref(), CoreExpr::Local(0)))
+        ));
     }
 
     #[test]
-    fn compile_context_prepares_one_net_for_a_lambda_spine() {
+    fn compile_context_builds_one_net_for_a_function_arity() {
         let context = CompileContext::default();
         let grouped = context.value_lambdas(3, context.value_local(2));
-
-        let Value::Expr(grouped) = grouped else {
-            panic!("lambda compiler term should remain inspectable during migration");
-        };
-        let CoreExpr::Lambda(outer) = grouped.expr().unwrap().as_ref() else {
-            panic!("grouped lambda should retain its semantic wrapper");
-        };
-        let CoreExpr::Lambda(middle) = outer.body().as_ref() else {
-            panic!("grouped lambda should retain its middle semantic wrapper");
-        };
-        let CoreExpr::Lambda(inner) = middle.body().as_ref() else {
-            panic!("grouped lambda should retain its inner semantic wrapper");
-        };
-
-        assert!(outer.is_closed_lowered());
-        assert!(!middle.is_closed_lowered());
-        assert!(!inner.is_closed_lowered());
+        assert!(matches!(grouped, Value::Net(_)));
 
         let captured = context.value_lambdas(3, context.value_local(3));
-        let Value::Expr(captured) = captured else {
-            panic!("captured lambda should remain a compatibility expression");
-        };
-        let CoreExpr::Lambda(captured) = captured.expr().unwrap().as_ref() else {
-            panic!("captured lambda should retain its semantic wrapper");
-        };
-        assert!(!captured.is_closed_lowered());
+        assert!(matches!(captured, Value::Expr(_)));
     }
 
     #[test]

@@ -25,44 +25,41 @@ pub type CoreInteractionNet = InteractionNet<CoreNetData>;
 pub type CoreRuntimeNet = SharedRuntimeNet<CoreNetData>;
 
 #[derive(Debug, Clone)]
-pub struct ClosedLambdaNet {
+pub struct LiftedFunctionNet {
     pub runtime: CoreRuntimeNet,
     pub capture_count: usize,
 }
 
-/// Lambda-lifts every free local into an explicit leading bind, leaving one
-/// closed shared net. The original lambda argument is the final bind. Nested
-/// lambdas remain on the compatibility lowering until demand can cross a
-/// second logical-copy argument frontier.
-pub(crate) fn lower_closed_lambda(body: Arc<Expr>) -> ClosedLambdaNet {
-    ClosedLowerer::lower_lambda(body)
+/// Lambda-lifts every local outside `arity` into an explicit leading bind,
+/// leaving one closed shared net. Capture binds precede the function's ordinary
+/// argument binds and are supplied immediately by the enclosing lowerer.
+pub(crate) fn lower_function(arity: usize, body: Arc<Expr>) -> LiftedFunctionNet {
+    assert!(arity > 0, "a function must bind at least one argument");
+    ClosedLowerer::lower_function(arity, body)
 }
 
-/// Returns the body and arity of the maximal leading curried lambda spine.
-/// The outer `Lambda` owning the supplied body accounts for the first bind.
-fn lambda_spine(mut body: Arc<Expr>) -> (usize, Arc<Expr>) {
-    let mut arity = 1;
-    while let Expr::Lambda(lambda) = body.as_ref() {
-        arity += 1;
-        body = lambda.body().clone();
+/// Lowers net-safe functions immediately and confines the remaining
+/// data-boundary compatibility representation to this construction boundary.
+pub(crate) fn lower_function_value(arity: usize, body: Expr) -> Value {
+    assert!(arity > 0, "a function must bind at least one argument");
+    if function_body_is_net_safe(&body, arity) {
+        let lifted = lower_function(arity, Arc::new(body));
+        debug_assert_eq!(lifted.capture_count, 0);
+        return Value::Net(crate::core::NetValue::new(lifted.runtime));
     }
-    (arity, body)
-}
 
-/// Whether an existing semantic lambda can be lowered as a closed shared net
-/// without relying on compatibility captures or cursor cycles whose copied
-/// ports have not yet acquired persistent provenance.
-pub(crate) fn closed_lambda_body_is_net_safe(expr: &Expr) -> bool {
-    let mut arity = 1;
-    let mut body = expr;
-    while let Expr::Lambda(lambda) = body {
-        arity += 1;
-        body = lambda.body();
+    let mut expression = body;
+    for _ in 0..arity {
+        expression = Expr::Lambda(Arc::new(crate::core::Lambda::new(Arc::new(expression))));
     }
-    closed_expr_is_net_safe(body, arity)
+    Value::expr(expression)
 }
 
-fn closed_expr_is_net_safe(expr: &Expr, arity: usize) -> bool {
+/// Transitional safety boundary for legacy host callbacks that can consume
+/// only embedded data. Structural functions passed to those callbacks cannot
+/// yet be reified as data, so expressions involving access, aggregates, or
+/// nested functions retain evaluator compatibility lowering for now.
+pub(crate) fn function_body_is_net_safe(expr: &Expr, arity: usize) -> bool {
     match expr {
         Expr::Value(value) => matches!(
             value,
@@ -75,10 +72,10 @@ fn closed_expr_is_net_safe(expr: &Expr, arity: usize) -> bool {
         Expr::Deferred(_) | Expr::Future(_) | Expr::Error(_) => true,
         Expr::List(items) => items
             .iter()
-            .all(|item| closed_expr_is_net_safe(item, arity)),
-        Expr::Local(index) => *index < arity,
+            .all(|item| function_body_is_net_safe(item, arity)),
+        Expr::Local(_) => true,
         Expr::Apply(function, argument) => {
-            closed_expr_is_net_safe(function, arity) && closed_expr_is_net_safe(argument, arity)
+            function_body_is_net_safe(function, arity) && function_body_is_net_safe(argument, arity)
         }
         Expr::Lambda(_) | Expr::Access(_, _) => false,
     }
@@ -90,16 +87,15 @@ struct ClosedLowerer {
 }
 
 impl ClosedLowerer {
-    fn lower_lambda(body: Arc<Expr>) -> ClosedLambdaNet {
-        let (template, capture_count) = Self::lower_template(body);
-        ClosedLambdaNet {
+    fn lower_function(arity: usize, body: Arc<Expr>) -> LiftedFunctionNet {
+        let (template, capture_count) = Self::lower_template(arity, body);
+        LiftedFunctionNet {
             runtime: template.instantiate_shared(),
             capture_count,
         }
     }
 
-    fn lower_template(body: Arc<Expr>) -> (CoreInteractionNet, usize) {
-        let (arity, body) = lambda_spine(body);
+    fn lower_template(arity: usize, body: Arc<Expr>) -> (CoreInteractionNet, usize) {
         let mut lowerer = Self {
             net: NetBuilder::new(),
             local_uses: Vec::new(),
@@ -158,7 +154,7 @@ impl ClosedLowerer {
                 self.compile_into(argument, argument_port);
             }
             Expr::Lambda(_) => {
-                unreachable!("nested lambdas remain on the compatibility evaluator")
+                unreachable!("nested compatibility lambdas are excluded from net lowering")
             }
             Expr::Local(index) => self.use_local(*index, target),
             Expr::Access(base, path) => {
@@ -234,7 +230,7 @@ impl ClosedLowerer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Dict, Lambda};
+    use crate::core::Dict;
     use crate::interaction_net::Node;
 
     fn unit() -> Value {
@@ -243,7 +239,7 @@ mod tests {
 
     #[test]
     fn identity_uses_a_direct_wire_without_a_fan() {
-        let (net, _) = ClosedLowerer::lower_template(Arc::new(Expr::Local(0)));
+        let (net, _) = ClosedLowerer::lower_template(1, Arc::new(Expr::Local(0)));
         assert!(matches!(net.nodes()[0], Node::Bind));
         assert!(
             !net.nodes()
@@ -258,14 +254,14 @@ mod tests {
 
     #[test]
     fn unused_argument_lowers_to_eraser() {
-        let (net, _) = ClosedLowerer::lower_template(Arc::new(Expr::Value(unit())));
+        let (net, _) = ClosedLowerer::lower_template(1, Arc::new(Expr::Value(unit())));
         assert!(net.nodes().iter().any(|node| matches!(node, Node::Erase)));
     }
 
     #[test]
     fn repeated_argument_lowers_to_one_binary_fan() {
         let body = Expr::Apply(Arc::new(Expr::Local(0)), Arc::new(Expr::Local(0)));
-        let (net, _) = ClosedLowerer::lower_template(Arc::new(body));
+        let (net, _) = ClosedLowerer::lower_template(1, Arc::new(body));
         assert_eq!(
             net.nodes()
                 .iter()
@@ -276,9 +272,8 @@ mod tests {
     }
 
     #[test]
-    fn curried_lambda_spine_lowers_to_one_bind_chain() {
-        let inner = Arc::new(Lambda::new(Arc::new(Expr::Local(1))));
-        let (net, _) = ClosedLowerer::lower_template(Arc::new(Expr::Lambda(inner)));
+    fn curried_function_lowers_to_one_bind_chain() {
+        let (net, _) = ClosedLowerer::lower_template(2, Arc::new(Expr::Local(1)));
 
         assert_eq!(
             net.nodes()
@@ -291,9 +286,10 @@ mod tests {
 
     #[test]
     fn list_application_lowers_to_host_functions_not_callable_data() {
-        let (net, _) = ClosedLowerer::lower_template(Arc::new(Expr::List(Arc::from([Arc::new(
-            Expr::Local(0),
-        )]))));
+        let (net, _) = ClosedLowerer::lower_template(
+            1,
+            Arc::new(Expr::List(Arc::from([Arc::new(Expr::Local(0))]))),
+        );
 
         assert!(
             net.nodes()
@@ -305,10 +301,13 @@ mod tests {
 
     #[test]
     fn access_application_lowers_to_host_functions_not_callable_data() {
-        let (net, _) = ClosedLowerer::lower_template(Arc::new(Expr::Access(
-            Arc::new(Expr::Local(0)),
-            Arc::from([KeyExpr::Key(Key::atom_from_text("answer"))]),
-        )));
+        let (net, _) = ClosedLowerer::lower_template(
+            1,
+            Arc::new(Expr::Access(
+                Arc::new(Expr::Local(0)),
+                Arc::from([KeyExpr::Key(Key::atom_from_text("answer"))]),
+            )),
+        );
 
         assert!(
             net.nodes()
@@ -320,7 +319,7 @@ mod tests {
 
     #[test]
     fn closed_lowering_lifts_free_locals_into_leading_binds() {
-        let closed = lower_closed_lambda(Arc::new(Expr::Local(1)));
+        let closed = lower_function(1, Arc::new(Expr::Local(1)));
 
         assert_eq!(closed.capture_count, 1);
         let exposed_neighbor = closed
@@ -330,9 +329,8 @@ mod tests {
     }
 
     #[test]
-    fn closed_lowering_counts_lambda_spine_locals_as_arguments() {
-        let inner = Arc::new(Lambda::new(Arc::new(Expr::Local(1))));
-        let closed = lower_closed_lambda(Arc::new(Expr::Lambda(inner)));
+    fn function_arity_distinguishes_arguments_from_captures() {
+        let closed = lower_function(2, Arc::new(Expr::Local(1)));
 
         assert_eq!(closed.capture_count, 0);
     }

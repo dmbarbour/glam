@@ -2,10 +2,10 @@
 
 ## Shared runtime and lazy copies
 
-`core::Lambda` owns one once-initialized `SharedRuntimeNet<CoreNetData>`.
-`core_net` still lowers through an immutable checked template, but instantiates
-that template once; closures for the same lambda share its partially normalized
-runtime. Runtime instantiation preserves the exposed port behind a stable
+`core_net` lowers an explicit function arity and body through an immutable
+checked template, then instantiates one `SharedRuntimeNet<CoreNetData>`.
+Capture locals become leading binds and are supplied by the enclosing semantic
+expression. Runtime instantiation preserves the exposed port behind a stable
 evaluator-only interface anchor.
 
 A logical copy is target-owned state selected by `CopyId`. Its
@@ -92,13 +92,13 @@ may produce ordinary data rather than a bind, attachment is not intrinsically
 a call. `CompileContext::value_net` provides checked construction for Rust
 front ends and drops the immutable template after instantiation.
 
-During migration, CompileContext prepares closed curried lambda spines with no
-captures, nested function values, or dictionary access. General application
-bodies lower recursively to Bind topology. A source lambda such as
-`\x y z -> ...` is constructed in one compiler call and lowers to one runtime
-net containing three leading binds, rather than preparing a net per semantic
-lambda wrapper. Partial application exposes the next bind in that same net.
-Other lambdas retain the compatibility closure path.
+During migration, CompileContext lowers a net-safe source function directly by
+arity. A source lambda such as `\x y z -> ...` becomes one runtime net containing
+three argument binds (plus any leading capture binds), rather than a semantic
+lambda spine. Partial application exposes the next bind in that same net. The
+residual compatibility closure path is reserved for bodies involving nested
+functions, dictionary access, or opaque aggregate data that can still carry a
+function across a data-only host boundary.
 
 Remote cursors remain strictly outward, from a source net into a logical copy;
 an inner net cannot retain a cursor back to an outer capture. A logical copy of
@@ -158,7 +158,7 @@ runtime/interface wire. More generally, the core HostFn boundary rejects any
 `Value::List` containing a structural lazy hole; such a call becomes
 permanently stuck.
 
-Only `Value::Net` uses cursor application. Compatibility closures retain
+Only `Value::Net` uses cursor application. Transitional compatibility closures retain
 `Closure::source_body` and use the expression evaluator; they no longer carry a
 compatibility runtime or data-mapping capture substitution. Automatic closed-
 net preparation now includes general application bodies. Applicable lowering

@@ -73,27 +73,24 @@ This document should summarize salient, relevant points rather than asking futur
 - Core lists alias `list::List<Value, Thunk>`. `list.rs` preserves `Bytes` as
   compact leaves and treats thunks as opaque lazy holes; evaluator code supplies
   forcing and converts individual observed bytes to core number values.
-- Each `core::Lambda` owns a once-initialized shared runtime net. Closure
-  creation reuses it and captures only its environment; applying a closure must
-  not re-lower its body. Logical copies materialize nodes lazily through remote
-  cursors. A maximal leading curried spine such as `\x y z -> ...` lowers to
-  one net with a bind chain; nested function values inside the final body stay
-  unlowered until reached.
+- `core_net::lower_function` accepts `(arity, body)` and produces one shared
+  runtime with one bind chain. Locals outside the arity become leading capture
+  binds and `CompileContext` supplies those captures with ordinary semantic
+  applications. Logical copies materialize nodes lazily through remote cursors.
 - `Value::Net` is a first-class closed net containing only a
   `SharedRuntimeNet<CoreNetData>`. Observing it may produce ordinary data or
   preserve a non-data normal-form net; applying it attaches the exposed port
   through a logical-copy cursor. `CompileContext::value_net` is the checked
   Rust construction entry point and discards the immutable template after
   instantiation.
-- As an incremental syntax-to-net transition, `CompileContext` precompiles
-  closed lambda spines with no captures, nested function values, or accesses.
-  General application bodies lower recursively to `Bind` topology.
-  `g_syntax` constructs a multi-parameter lambda through one batched compiler
-  call, so intermediate semantic lambda wrappers do not each prepare a net.
-  Captured, nested-dependent, and access-containing lambdas deliberately retain
-  `Value::Closure` and expression evaluation; compatibility closures no longer
-  carry a separately lowered runtime or substitute capture placeholders while
-  copying.
+- Source lambdas exist in `g_syntax`; net-safe functions are lowered directly
+  through one batched compiler call, including capture lifting, without first
+  constructing core lambda wrappers. Update-definition parameter sugar is also
+  rewritten while still syntax. The residual `core::Lambda`/`Value::Closure`
+  path is restricted to bodies that may send structural functions through the
+  legacy data-only HostFn/dictionary compatibility boundary. `eval.rs` does not
+  construct lambdas for its helper functions; it uses the same centralized
+  function-lowering entry point.
 - Lambda templates contain `Bind`, binary `Fan`, `Erase`, and `Data` nodes.
   The generic topology lives in `interaction_net.rs`; core data and expression
   lowering live in `core_net.rs`.

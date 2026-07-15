@@ -9,7 +9,7 @@ use crate::core::{
     Builtin, BuiltinCall, Closure, DeferredValue, Expr, IVar, Key, KeyExpr, List, NetValue, Thunk,
     Value,
 };
-use crate::core_net::{CoreDataKey, CoreNetData, closed_lambda_body_is_net_safe};
+use crate::core_net::{CoreDataKey, CoreNetData, lower_function_value};
 use crate::interaction_net::{
     ActivePairKey, Call, Callable, CallableData, CursorDependency, HostFn, HostFnYield, NetBuilder,
     Port, Reduction, ReductionKind, StuckReason,
@@ -379,13 +379,16 @@ fn dict_effect_function(dict: &crate::core::Dict) -> Option<Value> {
 }
 
 fn apply_effect_function_value(function: Value, argument: Value) -> Value {
-    Value::expr(Expr::lambda(Arc::new(Expr::Apply(
-        Arc::new(Expr::Apply(
-            Arc::new(Expr::Value(function)),
-            Arc::new(Expr::Local(0)),
-        )),
-        Arc::new(Expr::Value(argument)),
-    ))))
+    closed_function_value(
+        1,
+        Expr::Apply(
+            Arc::new(Expr::Apply(
+                Arc::new(Expr::Value(function)),
+                Arc::new(Expr::Local(0)),
+            )),
+            Arc::new(Expr::Value(argument)),
+        ),
+    )
 }
 
 fn effect_value(function: Value) -> Value {
@@ -399,21 +402,14 @@ fn apply_closure(closure: &Closure, argument: Value) -> Result<Value, EvalError>
 }
 
 fn compiled_lambda_value(lambda: &Arc<crate::core::Lambda>, environment: Arc<[Value]>) -> Value {
-    if environment.is_empty()
-        && lambda.closed_net().is_none()
-        && closed_lambda_body_is_net_safe(lambda.body())
-    {
-        lambda.prepare_closed_net();
-    }
-    if let Some(closed) = lambda.closed_net() {
-        debug_assert_eq!(closed.capture_count, 0);
-        Value::Net(NetValue::new(closed.runtime))
-    } else {
-        Value::Closure(Closure {
-            env: environment,
-            source_body: lambda.body().clone(),
-        })
-    }
+    Value::Closure(Closure {
+        env: environment,
+        source_body: lambda.body().clone(),
+    })
+}
+
+fn closed_function_value(arity: usize, body: Expr) -> Value {
+    lower_function_value(arity, body)
 }
 
 fn apply_net(function: NetValue, argument: Value) -> Result<Value, EvalError> {
@@ -741,9 +737,14 @@ fn stuck_pair_error(runtime: &crate::core_net::CoreRuntimeNet, pair: ActivePairK
         let reason = net.stuck_reason(pair);
         match reason {
             Some(StuckReason::HostError(error)) => EvalError::new(error.as_ref()),
-            Some(StuckReason::NoRule) | None => {
-                EvalError::new("interaction net reached a stuck active pair")
-            }
+            Some(StuckReason::NoRule) | None => match net.active_pair_nodes(pair) {
+                Some((left, right)) => EvalError::new(format!(
+                    "interaction net reached a stuck active pair: {:?} >< {:?}",
+                    net.node(left),
+                    net.node(right)
+                )),
+                None => EvalError::new("interaction net reached a stale stuck active pair"),
+            },
         }
     })
 }
@@ -1261,7 +1262,7 @@ fn effect_call_expr_value(name: &str, arguments: Vec<Value>) -> Value {
         .fold(api_member, |function, argument| {
             Expr::Apply(Arc::new(function), Arc::new(Expr::Value(argument)))
         });
-    effect_value(Value::expr(Expr::lambda(Arc::new(body))))
+    effect_value(closed_function_value(1, body))
 }
 
 fn builtin_unit_value() -> Value {
@@ -2006,17 +2007,17 @@ fn object_spec_dict(spec: &Value) -> Result<crate::core::Dict, EvalError> {
 }
 
 fn dict_object_spec(dict: crate::core::Dict) -> Value {
-    let defs = Expr::lambda(Arc::new(Expr::lambda(Arc::new(dict_union_expr(
-        Expr::Local(1),
-        Expr::Value(Value::Dict(dict)),
-    )))));
+    let defs = closed_function_value(
+        2,
+        dict_union_expr(Expr::Local(1), Expr::Value(Value::Dict(dict))),
+    );
     let spec = crate::core::Dict::new_sync()
         .insert(
             Key::atom_from_text("name"),
             Value::Dict(crate::core::Dict::new_sync()),
         )
         .insert(Key::atom_from_text("deps"), Value::List(List::empty()))
-        .insert(Key::atom_from_text("defs"), Value::expr(defs));
+        .insert(Key::atom_from_text("defs"), defs);
     Value::Dict(spec)
 }
 
@@ -2199,9 +2200,7 @@ fn object_dep_specs(deps: &Value) -> Result<Vec<Value>, EvalError> {
 }
 
 fn default_object_defs_value() -> Value {
-    Value::expr(Expr::lambda(Arc::new(Expr::lambda(Arc::new(Expr::Local(
-        1,
-    ))))))
+    closed_function_value(2, Expr::Local(1))
 }
 
 fn eval_anno_builtin(
@@ -2822,7 +2821,7 @@ mod tests {
     use bytes::Bytes;
 
     use crate::compiler::CompileContext;
-    use crate::core::{Dict, Expr, IVar, Lambda, Thunk, Value};
+    use crate::core::{Dict, Expr, IVar, Thunk, Value};
     use crate::number::Number;
 
     use super::*;
@@ -2873,17 +2872,11 @@ mod tests {
     }
 
     #[test]
-    fn compiler_prepared_leaf_lambda_reuses_one_shared_interaction_net() {
-        let lambda = Arc::new(Lambda::new(Arc::new(Expr::Local(0))));
-        assert!(!lambda.is_closed_lowered());
-        lambda.prepare_closed_net();
-        let expr = Expr::Lambda(lambda.clone());
-        let first = eval_closed_expr(&expr).expect("lambda should evaluate to a net");
-        let second = eval_closed_expr(&expr).expect("lambda should reuse its lowered net");
-        assert!(lambda.is_closed_lowered());
-
-        let (Value::Net(first), Value::Net(second)) = (first, second) else {
-            panic!("leaf lambda evaluations should produce closed nets");
+    fn compiled_function_values_reuse_one_shared_interaction_net() {
+        let context = CompileContext::default();
+        let function = context.value_lambdas(1, context.value_local(0));
+        let (Value::Net(first), Value::Net(second)) = (function.clone(), function) else {
+            panic!("closed functions should compile directly to net values");
         };
         assert!(first.runtime().ptr_eq(second.runtime()));
     }
@@ -2959,21 +2952,18 @@ mod tests {
     }
 
     #[test]
-    fn lowering_an_outer_lambda_does_not_lower_unreached_nested_lambdas() {
-        let inner = Arc::new(Lambda::new(Arc::new(Expr::Error(Arc::from(
-            "unreached body",
-        )))));
-        let outer = Arc::new(Lambda::new(Arc::new(Expr::Lambda(inner.clone()))));
+    fn compiling_a_function_does_not_evaluate_its_body() {
+        let function = closed_function_value(1, Expr::Error(Arc::from("unreached body")));
 
-        let value = eval_closed_expr(&Expr::Lambda(outer.clone()))
-            .expect("outer lambda spine should become a closed net");
-        assert!(matches!(value, Value::Net(_)));
-        assert!(outer.is_closed_lowered());
-        assert!(!inner.is_closed_lowered());
+        assert!(matches!(function, Value::Net(_)));
     }
 
     fn n(value: i64) -> Value {
         Value::Number(value.into())
+    }
+
+    fn function_expr(arity: usize, body: Expr) -> Expr {
+        Expr::Value(closed_function_value(arity, body))
     }
 
     fn k(value: i64) -> Key {
@@ -3080,9 +3070,7 @@ mod tests {
     fn fixpoint_dict(dict: Dict) -> Expr {
         Expr::Apply(
             Arc::new(Expr::Value(Value::Builtin(Builtin::Fixpoint))),
-            Arc::new(Expr::lambda(Arc::new(module_value_expr(&Value::Dict(
-                dict,
-            ))))),
+            Arc::new(function_expr(1, module_value_expr(&Value::Dict(dict)))),
         )
     }
 
@@ -3310,11 +3298,10 @@ mod tests {
             Ok(n(2))
         })));
         let expr = Expr::Apply(
-            Arc::new(Expr::lambda(Arc::new(builtin2_expr(
-                Builtin::Add,
-                Expr::Local(0),
-                Expr::Local(0),
-            )))),
+            Arc::new(function_expr(
+                1,
+                builtin2_expr(Builtin::Add, Expr::Local(0), Expr::Local(0)),
+            )),
             Arc::new(counted),
         );
 
@@ -3326,7 +3313,7 @@ mod tests {
 
     #[test]
     fn equality_errors_when_dictionary_comparison_reaches_functions() {
-        let function = Value::expr(Expr::lambda(Arc::new(Expr::Local(0))));
+        let function = closed_function_value(1, Expr::Local(0));
         let left = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("f"), function.clone()));
         let right = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("f"), function));
         let err = eval_closed_expr(&builtin2_expr(
@@ -3368,13 +3355,16 @@ mod tests {
         .expect("slice should evaluate");
         let mapped = eval_closed_expr(&builtin2_expr(
             Builtin::Map,
-            Expr::lambda(Arc::new(Expr::Apply(
-                Arc::new(Expr::Apply(
-                    Arc::new(Expr::Value(Value::Builtin(Builtin::Add))),
-                    Arc::new(Expr::Local(0)),
-                )),
-                Arc::new(Expr::Value(n(1))),
-            ))),
+            function_expr(
+                1,
+                Expr::Apply(
+                    Arc::new(Expr::Apply(
+                        Arc::new(Expr::Value(Value::Builtin(Builtin::Add))),
+                        Arc::new(Expr::Local(0)),
+                    )),
+                    Arc::new(Expr::Value(n(1))),
+                ),
+            ),
             Expr::Value(Value::List(List::from_values(vec![n(1), n(2), n(3)]))),
         ))
         .expect("map should evaluate");
@@ -3482,7 +3472,7 @@ mod tests {
     #[test]
     fn evaluates_lambda_application_lazily() {
         let expr = Expr::Apply(
-            Arc::new(Expr::lambda(Arc::new(Expr::Local(0)))),
+            Arc::new(function_expr(1, Expr::Local(0))),
             Arc::new(builtin2_expr(
                 Builtin::Add,
                 Expr::Value(n(1)),
@@ -3497,18 +3487,12 @@ mod tests {
 
     #[test]
     fn closures_capture_outer_locals() {
-        let expr = Expr::Apply(
-            Arc::new(Expr::lambda(Arc::new(Expr::Apply(
-                Arc::new(Expr::lambda(Arc::new(Expr::Apply(
-                    Arc::new(Expr::Local(0)),
-                    Arc::new(Expr::Value(n(0))),
-                )))),
-                Arc::new(Expr::lambda(Arc::new(Expr::Local(1)))),
-            )))),
-            Arc::new(Expr::Value(n(42))),
-        );
-
-        let value = eval_closed_expr(&expr).expect("nested closures should evaluate");
+        let context = CompileContext::default();
+        let invoke = context.value_lambda(context.value_apply(context.value_local(0), n(0)));
+        let returns_outer = context.value_lambda(context.value_local(1));
+        let outer = context.value_lambda(context.value_apply(invoke, returns_outer));
+        let value = eval_value(&context.value_apply(outer, n(42)))
+            .expect("nested functions should evaluate");
 
         assert_eq!(value, n(42));
     }
@@ -3524,10 +3508,13 @@ mod tests {
                 Ok(n(40))
             },
         )));
-        let make_partial = Expr::lambda(Arc::new(Expr::Apply(
-            Arc::new(Expr::Value(Value::Builtin(Builtin::Add))),
-            Arc::new(Expr::Local(0)),
-        )));
+        let make_partial = function_expr(
+            1,
+            Expr::Apply(
+                Arc::new(Expr::Value(Value::Builtin(Builtin::Add))),
+                Arc::new(Expr::Local(0)),
+            ),
+        );
         let partial = eval_closed_expr(&Expr::Apply(Arc::new(make_partial), Arc::new(argument)))
             .expect("a partial builtin should retain its argument lazily");
 
@@ -3543,9 +3530,10 @@ mod tests {
         let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = force_count.clone();
         let expression = Expr::Apply(
-            Arc::new(Expr::lambda(Arc::new(Expr::List(Arc::from([Arc::new(
-                Expr::Local(0),
-            )]))))),
+            Arc::new(function_expr(
+                1,
+                Expr::List(Arc::from([Arc::new(Expr::Local(0))])),
+            )),
             Arc::new(Expr::Deferred(Arc::new(DeferredValue::new(
                 "list value",
                 move || {
@@ -3590,17 +3578,10 @@ mod tests {
 
     #[test]
     fn dropped_arguments_do_not_prevent_later_locals_from_resolving() {
-        let expr = Expr::Apply(
-            Arc::new(Expr::Apply(
-                Arc::new(Expr::lambda(Arc::new(Expr::lambda(Arc::new(Expr::Local(
-                    0,
-                )))))),
-                Arc::new(Expr::Value(n(1))),
-            )),
-            Arc::new(Expr::Value(n(42))),
-        );
-
-        let value = eval_closed_expr(&expr).expect("lambda with dropped argument should evaluate");
+        let context = CompileContext::default();
+        let function = context.value_lambdas(2, context.value_local(0));
+        let value = eval_value(&context.value_apply_many(function, [n(1), n(42)]))
+            .expect("function with dropped argument should evaluate");
 
         assert_eq!(value, n(42));
     }
@@ -3609,11 +3590,10 @@ mod tests {
     fn method_objects_apply_via_apply_member() {
         let method = Value::Dict(Dict::new_sync().insert(
             Key::atom_from_text("apply"),
-            Value::expr(Expr::lambda(Arc::new(builtin2_expr(
-                Builtin::Add,
-                Expr::Local(0),
-                Expr::Value(n(1)),
-            )))),
+            closed_function_value(
+                1,
+                builtin2_expr(Builtin::Add, Expr::Local(0), Expr::Value(n(1))),
+            ),
         ));
         let value = eval_closed_expr(&Expr::Apply(
             Arc::new(Expr::Value(method)),
@@ -3626,10 +3606,13 @@ mod tests {
 
     #[test]
     fn effect_values_apply_by_extending_the_effect_function() {
-        let effect = effect_value(Value::expr(Expr::lambda(Arc::new(Expr::Access(
-            Arc::new(Expr::Local(0)),
-            Arc::from([KeyExpr::Key(Key::atom_from_text("op"))]),
-        )))));
+        let effect = effect_value(closed_function_value(
+            1,
+            Expr::Access(
+                Arc::new(Expr::Local(0)),
+                Arc::from([KeyExpr::Key(Key::atom_from_text("op"))]),
+            ),
+        ));
         let applied = eval_closed_expr(&Expr::Apply(
             Arc::new(Expr::Value(effect)),
             Arc::new(Expr::Value(n(41))),
@@ -3644,11 +3627,10 @@ mod tests {
             .clone();
         let api = Value::Dict(Dict::new_sync().insert(
             Key::atom_from_text("op"),
-            Value::expr(Expr::lambda(Arc::new(builtin2_expr(
-                Builtin::Add,
-                Expr::Local(0),
-                Expr::Value(n(1)),
-            )))),
+            closed_function_value(
+                1,
+                builtin2_expr(Builtin::Add, Expr::Local(0), Expr::Value(n(1))),
+            ),
         ));
 
         let value = apply_value(eval_value(&function).unwrap(), api, &[])
@@ -3662,7 +3644,7 @@ mod tests {
             Dict::new_sync()
                 .insert(
                     Key::atom_from_text("eff"),
-                    Value::expr(Expr::lambda(Arc::new(Expr::Local(0)))),
+                    closed_function_value(1, Expr::Local(0)),
                 )
                 .insert(Key::atom_from_text("extra"), n(1)),
         );
@@ -3682,10 +3664,13 @@ mod tests {
             Value::binary_from_text("World"),
         ));
         let expr = Expr::Apply(
-            Arc::new(Expr::lambda(Arc::new(Expr::Access(
-                Arc::new(Expr::Local(0)),
-                Arc::from([KeyExpr::Key(Key::atom_from_text("tail"))]),
-            )))),
+            Arc::new(function_expr(
+                1,
+                Expr::Access(
+                    Arc::new(Expr::Local(0)),
+                    Arc::from([KeyExpr::Key(Key::atom_from_text("tail"))]),
+                ),
+            )),
             Arc::new(Expr::Value(dict)),
         );
 
