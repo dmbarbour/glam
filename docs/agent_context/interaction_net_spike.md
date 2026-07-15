@@ -15,9 +15,10 @@ materialized into that copy. A source node is copied only when its principal
 faces the cursor. Its auxiliaries become new cursors, while the canonical source
 node remains in place and cannot enter a later source-local active pair.
 
-When a demanded cursor faces a source auxiliary port, the conservative initial
-scheduler reduces each pair that was ready at the beginning of one source
-sweep, then retries the cursor. Newly created pairs wait for a later sweep.
+When a demanded cursor faces a source auxiliary whose node belongs to an active
+pair, the cursor records that pair's lower-node key. The evaluator reduces only
+that exact source pair and then retries the cursor; unrelated source work stays
+lazy.
 
 Variable use is normalized during lowering:
 
@@ -72,13 +73,13 @@ and never reused. A `Port` packs its node ID and two-bit port index into one
 nonzero word, so `Port` and `Option<Port>` are both one word. Node records keep
 all three possible links inline.
 
-Every principal-principal connection appears in exactly one scheduler
-collection. New pairs enter the ready queue; unresolved bind calls, pending or
-blocked host calls, and remote cursors move to their respective queues; and
-no-rule pairs or permanent host errors move to the diagnostic-bearing stuck
-list. Reduction results retain the originating pair and calls identify the node
-roles needed for later completion. Interaction rules, especially erasure,
-explicitly remove nodes; there is no separate reachability collector.
+Every principal-principal connection is named by an `ActivePairKey` containing
+its lower `NodeId`; the partner is recovered from the principal neighbor. Ready
+keys live in an ordered set, while unresolved bind calls, pending/blocked host
+calls, blocked cursors, and stuck diagnostics use maps keyed the same way.
+Completion and targeted source progress are exact lookups rather than queue
+scans. Interaction rules, especially erasure, explicitly remove nodes; there is
+no separate reachability collector.
 
 ## Remaining evaluator bridge
 
@@ -100,17 +101,21 @@ Remote cursors remain strictly outward, from a source net into a logical copy;
 an inner net cannot retain a cursor back to an outer capture. A logical copy of
 a partially applied net can nevertheless encounter a remote cursor already
 present in its intermediate source. The outer cursor records the exact source
-runtime and intermediate cursor as its dependency. The evaluator releases the
-outer lock, drives that cursor transitively, and retries the outer copy. This is
-cursor composition along copy provenance, not reversed dataflow, and avoids
-holding nested runtime locks. Runtime calls also defer capturing lazy arguments
-while the runtime still exposes an unsupplied bind from its curried spine.
+runtime and intermediate cursor as its dependency. An auxiliary blocked by a
+source active pair records that exact pair key instead. The evaluator drives the
+specific cursor or pair transitively and retries the outer copy, without a broad
+source sweep. This is cursor composition along copy provenance, not reversed
+dataflow. Initial frontier inspection still nests target/source locks and is a
+remaining concurrency cleanup. Runtime calls also defer capturing lazy
+arguments while the runtime still exposes an unsupplied bind from its curried
+spine.
 
 `HostFn<Data>` is a unary runtime agent whose principal consumes Data and whose
 auxiliary is its result continuation. Host callbacks execute outside the net
 mutex. Success emits Data or a new HostFn automatically wrapped behind a Bind;
-retryable blocks keep their active pair in a blocked queue, while permanent
-errors retain the intact pair and diagnostic in the stuck collection. Core
+retryable blocks keep their active pair in keyed blocked state until an explicit
+retry, while permanent errors retain the intact pair and diagnostic in keyed
+stuck state. Core
 builtin expressions lowered into nets use this path, although saturated work
 remains a memoized semantic thunk and direct evaluator builtin values retain a
 compatibility path.
@@ -129,13 +134,15 @@ interactions. `bind-data` reports `ReductionKind::Call`; `eval` consumes that
 blocked pair through a generic `CallFrame`, preserving the argument and result
 wires behind stable interfaces. A runtime remembers whether it imported a
 logical copy, because only an instance may detach a lazy argument wire. Doing
-that in the canonical lambda runtime would capture its unsupplied root.
+that in the canonical lambda runtime would capture its unsupplied root. This
+legacy Bind/Data call is the only active pair that cursor materialization still
+copies; removing it depends on giving List/Access/Closure explicit agents.
 
 Core thunks can be backed by an expression, a runtime/interface pair, or a
 semantic builtin/access/list-item computation. All forms share one memoized
 result. Builtins are callable `CoreNetData`, partial applications retain shared
-thunks, and saturated calls emit a semantic thunk so conservative source sweeps
-do not force strict work before its result is demanded. List lowering similarly
+thunks, and saturated calls emit a semantic thunk so unrelated source-pair
+progress does not force strict work before its result is demanded. List lowering similarly
 retains computed elements as opaque lazy list holes.
 
 Closure application runs through the core runtime driver for lambda bodies made

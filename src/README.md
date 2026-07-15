@@ -25,10 +25,10 @@
   mutable runtime reduction; builder-only one-output copy tunnels are spliced
   out before a template is produced;
   runtime nodes use monotonic IDs and hash-table storage, preserve a stable
-  exposed interface, and allocate fan sites locally while active pairs move
-  through ready, blocked bind/host/cursor, and diagnostic-bearing stuck
-  scheduler collections; layered cursors expose precise dependencies that the
-  evaluator drives without nested runtime locks
+  exposed interface, and allocate fan sites locally; an active pair is keyed by
+  its lower node ID, with ready work in an ordered set and suspended/stuck work
+  in exact keyed maps; layered cursors expose a precise source cursor or pair
+  dependency instead of scanning or sweeping scheduler collections
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
 - `eval.rs` drives closure calls through runtime nets, turns blocked bind-data

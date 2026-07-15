@@ -110,34 +110,37 @@ This document should summarize salient, relevant points rather than asking futur
   node stores three inline links. IDs are not reused. Erase
   interactions and other rewrites remove nodes explicitly rather than relying
   on reachability collection.
-- Principal-principal connections appear in exactly one scheduler collection:
-  ready, blocked bind call, pending/blocked host call, blocked remote cursor, or
-  stuck. Reduction results retain their `ActivePair`; calls also identify their
-  participating nodes for later completion. Stuck pairs retain either a
-  no-rule reason or a permanent host error.
+- A principal-principal connection is keyed by its lower `NodeId`; the other
+  endpoint is recovered from that node's principal neighbor. Ready work uses an
+  ordered set and suspended/stuck states use keyed maps, so exact completion and
+  cursor demand never search or remove from the middle of a queue. Calls also
+  identify their participating nodes for completion. Stuck pairs retain either
+  a no-rule reason or a permanent host error.
 - Runtime instantiation wires the template's exposed port to a stable,
   evaluator-only interface anchor. A `RemoteCursor { copy, remote }` is a
   one-way suspended wire: `copy` selects target-owned shared copy state and
   `remote` identifies an interface or migrated auxiliary port in the source.
   A cursor materializes a node only when that source frontier faces its
-  principal port. If it faces an auxiliary, one conservative sweep reduces
-  every pair that was ready at the start of the sweep. Copying a partially
-  applied net may encounter a cursor in the intermediate source. The outer
-  cursor records that precise `(source runtime, source cursor)` dependency; the
-  evaluator releases its current lock, drives the dependency transitively, and
-  then retries. It does not reverse cursor flow, copy directly across an
-  intermediate net, or hold nested runtime locks.
+  principal port. If it enters an auxiliary whose node belongs to an active
+  pair, it records that exact lower-node pair key and reduces only that pair in
+  the source. Copying a partially applied net may instead encounter a cursor in
+  the intermediate source; that exact cursor is driven transitively before the
+  outer cursor retries. This does not reverse cursor flow or copy directly
+  across an intermediate net. Initial source-frontier inspection still takes a
+  nested target/source lock and remains cleanup work.
 - A blocked bind-data pair can be consumed as a generic `CallFrame`; its
   argument and result survive behind independently stable interfaces. Core
   thunks may name one of those runtime/interface pairs, and memoize both values
-  and errors without introducing a new language-level `Value` variant.
+  and errors without introducing a new language-level `Value` variant. A
+  blocked legacy Bind/Data call is also the sole remaining active-pair copying
+  exception at a cursor boundary, pending explicit List/Access/Closure agents.
 - `HostFn<Data>` is a generic unary agent with a principal data input and one
   result auxiliary. Its callback runs outside the runtime mutex and may emit
   `Data`, emit another automatically bind-wrapped `HostFn`, block for an
   explicit retry, or become permanently stuck with a diagnostic. Core builtin
   expressions lowered into nets use HostFn currying; partial builtins therefore
   escape as ordinary `Value::Net` functions. Saturated builtins still emit
-  memoized semantic thunks, so the conservative active-pair sweep does not
+  memoized semantic thunks, so unrelated exact source-pair progress does not
   force strict builtin work until its result is observed. Direct evaluator
   builtin values retain the compatibility path. An
   imported runtime that still exposes an unsupplied bind may not detach lazy
