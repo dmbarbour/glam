@@ -32,7 +32,9 @@
   local cursor, source cursor, or source pair dependency instead of scanning or
   sweeping scheduler collections; nodes materialize only through principal
   frontiers, active pairs never cross cursor boundaries, and source-frontier
-  inspection never nests target/source locks
+  inspection never nests target/source locks; per-copy frontier cursors are the
+  only port provenance, embedded data is cloned without transformation, and
+  fan sites are translated per logical copy
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
 - `eval.rs` keeps compatibility closures on semantic evaluation, turns target-
@@ -58,6 +60,6 @@ directly; it provides reference semantics for replacing those histories with
 Lamping-style bracket/croissant control interactions. Builtin currying and
 closed list construction now cross the net runtime boundary. General
 application bodies remain on compatibility evaluation until logical copies
-retain per-port provenance after imported nodes reduce away. That provenance
-and general construction effects still belong before adding the
-`interaction_net` keyword.
+retain an erased frontier outcome long enough for a later cursor at the other
+end of the source wire to converge. That state and general construction effects
+still belong before adding the `interaction_net` keyword.

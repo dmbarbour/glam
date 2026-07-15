@@ -91,7 +91,9 @@ This document should summarize salient, relevant points rather than asking futur
   `g_syntax` constructs a multi-parameter lambda through one batched compiler
   call, so intermediate semantic lambda wrappers do not each prepare a net.
   Captured, nested-dependent, and access-containing lambdas deliberately retain
-  `Value::Closure`, capture mapping, and expression evaluation.
+  `Value::Closure` and expression evaluation; compatibility closures no longer
+  carry a separately lowered runtime or substitute capture placeholders while
+  copying.
 - Lambda templates contain `Bind`, binary `Fan`, `Erase`, and `Data` nodes.
   The generic topology lives in `interaction_net.rs`; core data and expression
   lowering live in `core_net.rs`.
@@ -132,7 +134,10 @@ This document should summarize salient, relevant points rather than asking futur
   flow or copy directly across an intermediate net. Cursor progress first claims the cursor pair,
   releases the target mutex, inspects the source frontier, then reacquires only
   the target mutex to finish. A converging cursor will not remove a peer while
-  that peer is claimed.
+  that peer is claimed. Per-copy `frontiers` are the authoritative reverse map
+  from stable source ports to live local cursors; there is no historical
+  source-node to target-node map. Embedded data is copied with `Clone`; only
+  fan-site translation and frontier state vary per logical copy.
 - A blocked bind-data pair can be consumed as a generic `CallFrame`; its
   argument and result survive behind independently stable interfaces. Core
   thunks may name one of those runtime/interface pairs, and memoize both values
@@ -164,8 +169,10 @@ This document should summarize salient, relevant points rather than asking futur
   The core HostFn boundary rejects any returned `Value::List` that already
   contains a structural lazy hole, leaving the call permanently stuck.
   General application bodies are temporarily excluded from automatic closed-
-  net preparation because cycles need persistent per-port copy provenance
-  after imported nodes reduce away.
+  net preparation. Re-enabling them demonstrated that erasing a frontier cursor
+  can discard the convergence witness before the cursor at the opposite end of
+  the source wire arrives. Represent that erased frontier outcome explicitly;
+  do not restore historical mapped-node bookkeeping.
 - Preserve the current dictionary/access compatibility evaluator while a
   persistent lazy dictionary representation is designed separately.
 - The topology reducer implements bind/fan join, fan commutation, duplication,

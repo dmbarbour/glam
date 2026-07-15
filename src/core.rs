@@ -6,10 +6,7 @@ use bytes::Bytes;
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
-use crate::core_net::{
-    ClosedLambdaNet, CoreDataKey, CoreInteractionNet, CoreNetData, CoreRuntimeNet,
-    lower_closed_lambda, lower_lambda,
-};
+use crate::core_net::{ClosedLambdaNet, CoreDataKey, CoreRuntimeNet, lower_closed_lambda};
 use crate::interaction_net::Port;
 use crate::number::Number;
 
@@ -35,8 +32,6 @@ impl Expr {
 #[derive(Debug)]
 pub struct Lambda {
     body: Arc<Expr>,
-    interaction_net: OnceLock<Arc<CoreInteractionNet>>,
-    closed_runtime: OnceLock<CoreRuntimeNet>,
     closed_net: OnceLock<ClosedLambdaNet>,
 }
 
@@ -44,38 +39,12 @@ impl Lambda {
     pub fn new(body: Arc<Expr>) -> Self {
         Self {
             body,
-            interaction_net: OnceLock::new(),
-            closed_runtime: OnceLock::new(),
             closed_net: OnceLock::new(),
         }
     }
 
     pub fn body(&self) -> &Arc<Expr> {
         &self.body
-    }
-
-    pub fn interaction_net(&self) -> CoreRuntimeNet {
-        self.closed_runtime
-            .get_or_init(|| self.lowered().instantiate_shared())
-            .clone()
-    }
-
-    pub fn runtime_with_captures(&self, captures: Arc<[Value]>) -> CoreRuntimeNet {
-        if captures.is_empty() {
-            return self.interaction_net();
-        }
-        self.lowered()
-            .instantiate_shared_with(Arc::new(move |data| match data {
-                CoreNetData::Capture(index) => {
-                    let capture = captures
-                        .len()
-                        .checked_sub(index + 1)
-                        .and_then(|index| captures.get(index))
-                        .expect("lowered lambda capture must exist");
-                    CoreNetData::Value(capture.clone())
-                }
-                other => other.clone(),
-            }))
     }
 
     pub(crate) fn prepare_closed_net(&self) {
@@ -85,16 +54,6 @@ impl Lambda {
 
     pub(crate) fn closed_net(&self) -> Option<ClosedLambdaNet> {
         self.closed_net.get().cloned()
-    }
-
-    fn lowered(&self) -> &Arc<CoreInteractionNet> {
-        self.interaction_net
-            .get_or_init(|| Arc::new(lower_lambda(self.body.clone())))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_lowered(&self) -> bool {
-        self.interaction_net.get().is_some()
     }
 
     #[cfg(test)]
@@ -353,7 +312,6 @@ impl BuiltinCall {
 
 #[derive(Debug, Clone)]
 pub struct Closure {
-    pub interaction_net: CoreRuntimeNet,
     pub env: Arc<[Value]>,
     pub(crate) source_body: Arc<Expr>,
 }

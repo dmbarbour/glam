@@ -412,7 +412,6 @@ fn compiled_lambda_value(lambda: &Arc<crate::core::Lambda>, environment: Arc<[Va
         Value::Net(NetValue::new(closed.runtime))
     } else {
         Value::Closure(Closure {
-            interaction_net: lambda.runtime_with_captures(environment.clone()),
             env: environment,
             source_body: lambda.body().clone(),
         })
@@ -670,10 +669,8 @@ fn progress_exact_core_call(
                 | CoreNetData::Value(Value::PartialBuiltin(_))
         )
     });
-    let argument_is_embedded_data = runtime.with(|net| {
-        net.compatibility_call_argument_data(call)
-            .is_some_and(|data| !matches!(data, CoreNetData::Capture(_) | CoreNetData::Lambda(_)))
-    });
+    let argument_is_embedded_data =
+        runtime.with(|net| net.compatibility_call_argument_data(call).is_some());
     if callable_captures_lazy_argument
         && !argument_is_embedded_data
         && runtime.with(|net| net.compatibility_call_argument_cursor(call).is_some())
@@ -823,7 +820,6 @@ fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
         CoreNetData::Value(value) => eval_value(&value),
         CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
         CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
-        CoreNetData::Lambda(lambda) => Ok(compiled_lambda_value(&lambda, Arc::from([]))),
         CoreNetData::Deferred(value) => value
             .force()
             .map_err(|message| EvalError::new(message.as_ref())),
@@ -832,9 +828,6 @@ fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
             .cloned()
             .ok_or_else(|| EvalError::new("future was observed before initialization")),
         CoreNetData::Error(message) => Err(EvalError::new(message.as_ref())),
-        CoreNetData::Capture(_) => Err(EvalError::new(
-            "unsupported core data escaped interaction-net evaluation",
-        )),
     }
 }
 
@@ -868,45 +861,15 @@ fn handle_core_call(
     let argument = core_data_to_lazy_value(argument)?;
 
     match callable {
-        CoreNetData::Value(Value::Closure(closure)) => {
-            let mut environment = closure.env.iter().cloned().collect::<Vec<_>>();
-            environment.push(argument);
-            let map_data = core_copy_mapper(Arc::from(environment));
-            runtime.with_mut(|net| {
-                net.resume_call_with_copy_map(call, closure.interaction_net.clone(), map_data);
-            });
-            Ok(())
-        }
         CoreNetData::Builtin(_) => unreachable!(),
         CoreNetData::Value(function) => {
             let value = apply_value(function, argument, &[])?;
             complete_core_call(runtime, call, CoreNetData::Value(value));
             Ok(())
         }
-        CoreNetData::Lambda(lambda) => {
-            let function = compiled_lambda_value(&lambda, Arc::from([]));
-            if let Value::Net(net) = function {
-                runtime.with_mut(|runtime| {
-                    runtime.resume_call_with_copy(call, net.into_runtime());
-                });
-                return Ok(());
-            }
-            let Value::Closure(closure) = function else {
-                unreachable!();
-            };
-            let mut environment = vec![argument];
-            let map_data = core_copy_mapper(Arc::from(std::mem::take(&mut environment)));
-            runtime.with_mut(|net| {
-                net.resume_call_with_copy_map(call, closure.interaction_net, map_data);
-            });
-            Ok(())
-        }
-        CoreNetData::Capture(_)
-        | CoreNetData::Deferred(_)
-        | CoreNetData::Future(_)
-        | CoreNetData::Error(_) => Err(EvalError::new(
-            "interaction-net data is not callable in this evaluator slice",
-        )),
+        CoreNetData::Deferred(_) | CoreNetData::Future(_) | CoreNetData::Error(_) => Err(
+            EvalError::new("interaction-net data is not callable in this evaluator slice"),
+        ),
     }
 }
 
@@ -992,13 +955,9 @@ fn core_data_to_lazy_value(data: CoreNetData) -> Result<Value, EvalError> {
         CoreNetData::Value(value) => Ok(value),
         CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
         CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
-        CoreNetData::Lambda(lambda) => Ok(compiled_lambda_value(&lambda, Arc::from([]))),
         CoreNetData::Deferred(value) => Ok(Value::expr(Expr::Deferred(value))),
         CoreNetData::Future(value) => Ok(Value::expr(Expr::Future(value))),
         CoreNetData::Error(message) => Ok(Value::expr(Expr::Error(message))),
-        unsupported @ CoreNetData::Capture(_) => Err(EvalError::new(format!(
-            "unsupported core data was used as a lazy argument: {unsupported:?}"
-        ))),
     }
 }
 
@@ -1084,25 +1043,6 @@ fn complete_core_call(
             .expect("core call argument must remain embedded data");
         net.complete_interface_with_data(frame.result, result);
     });
-}
-
-fn core_copy_mapper(
-    environment: Arc<[Value]>,
-) -> Arc<dyn Fn(&CoreNetData) -> CoreNetData + Send + Sync> {
-    Arc::new(move |data| match data {
-        CoreNetData::Lambda(lambda) => {
-            CoreNetData::Value(compiled_lambda_value(lambda, environment.clone()))
-        }
-        CoreNetData::Capture(index) => {
-            let value = environment
-                .len()
-                .checked_sub(index + 1)
-                .and_then(|index| environment.get(index))
-                .expect("logical-copy capture must exist");
-            CoreNetData::Value(value.clone())
-        }
-        other => other.clone(),
-    })
 }
 
 fn apply_builtin(
@@ -3151,7 +3091,7 @@ mod tests {
             .expect("outer lambda spine should become a closed net");
         assert!(matches!(value, Value::Net(_)));
         assert!(outer.is_closed_lowered());
-        assert!(!inner.is_lowered());
+        assert!(!inner.is_closed_lowered());
     }
 
     fn n(value: i64) -> Value {

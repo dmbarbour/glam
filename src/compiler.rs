@@ -8,7 +8,7 @@ use crate::core::{
     Value,
 };
 use crate::core_net::{CoreNetData, closed_lambda_body_is_net_safe};
-use crate::interaction_net::{NetBuildError, NetBuilder, Node, Port};
+use crate::interaction_net::{NetBuildError, NetBuilder, Port};
 use crate::number::Number;
 
 pub type ModuleLoader = Arc<dyn Fn(ModuleLoadArgs) -> Result<Value, String> + Send + Sync>;
@@ -17,16 +17,12 @@ pub type BinaryFileLoader = Arc<dyn Fn(BinaryLoadArgs) -> Result<Value, String> 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileNetError {
     Build(NetBuildError),
-    OpenData,
 }
 
 impl fmt::Display for CompileNetError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Build(error) => error.fmt(formatter),
-            Self::OpenData => formatter.write_str(
-                "closed interaction-net construction cannot embed lambda or capture placeholders",
-            ),
         }
     }
 }
@@ -261,14 +257,6 @@ impl CompileContext {
         let mut builder = NetBuilder::new();
         let exposed = build(&mut builder)?;
         let template = builder.try_finish(exposed)?;
-        if template.nodes().iter().any(|node| {
-            matches!(
-                node,
-                Node::Data(CoreNetData::Lambda(_) | CoreNetData::Capture(_))
-            )
-        }) {
-            return Err(CompileNetError::OpenData);
-        }
         let runtime = template.instantiate_shared();
         Ok(Value::Net(NetValue::new(runtime)))
     }
@@ -472,16 +460,6 @@ mod tests {
             error,
             CompileNetError::Build(NetBuildError::PortUnwired(_))
         ));
-    }
-
-    #[test]
-    fn compile_context_rejects_open_net_placeholders() {
-        let context = CompileContext::default();
-        let error = context
-            .value_net(|builder| Ok(builder.data(CoreNetData::Capture(0))))
-            .unwrap_err();
-
-        assert_eq!(error, CompileNetError::OpenData);
     }
 
     #[test]

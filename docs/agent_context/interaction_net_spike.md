@@ -113,6 +113,14 @@ dataflow. Cursor progress claims its target pair before releasing the target
 mutex, inspects the source frontier under only the source mutex, and then
 finishes under only the target mutex.
 
+Each logical copy keeps an authoritative `frontiers` reverse map from stable
+source ports to live local cursors plus fan-site translation. Data is ordinary
+`Clone` data; copies do not transform it, and there is no historical source-node
+to target-node map. A remaining limitation is erasure: removing a frontier
+cursor can currently discard the witness needed if the opposite end of that
+source wire is reached later. General application lowering remains gated until
+that erased frontier outcome is represented explicitly.
+
 `HostFn<Data>` is a unary runtime agent whose principal consumes Data and whose
 auxiliary is its result continuation. Host callbacks execute outside the net
 mutex while the active pair is claimed. Success emits Data or a new HostFn
@@ -151,10 +159,11 @@ runtime/interface wire. More generally, the core HostFn boundary rejects any
 permanently stuck.
 
 Only `Value::Net` uses cursor application. Compatibility closures retain
-`Closure::source_body` and use the expression evaluator. Automatic closed-net
-preparation currently excludes general application bodies: cyclic copy paths
-need persistent per-port provenance after a materialized target node reduces
-away. Do not expose the `interaction_net` source keyword until that provenance
-and general effect blocking are represented explicitly.
+`Closure::source_body` and use the expression evaluator; they no longer carry a
+compatibility runtime or data-mapping capture substitution. Automatic closed-
+net preparation currently excludes general application bodies because erased
+frontier outcomes are not yet retained for later convergence. Do not expose the
+`interaction_net` source keyword until that state and general effect blocking
+are represented explicitly.
 The dictionary compatibility path is intentionally unchanged pending a
 separate persistent lazy dictionary design.

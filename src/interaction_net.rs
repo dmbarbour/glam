@@ -303,22 +303,11 @@ impl<D> InteractionNet<D> {
 
 impl<D: Clone + 'static> InteractionNet<D> {
     pub fn instantiate(&self) -> RuntimeNet<D> {
-        self.instantiate_with(Arc::new(D::clone))
-    }
-
-    pub fn instantiate_with(&self, map_data: Arc<dyn Fn(&D) -> D + Send + Sync>) -> RuntimeNet<D> {
-        RuntimeNet::new(self, map_data)
+        RuntimeNet::new(self)
     }
 
     pub fn instantiate_shared(&self) -> SharedRuntimeNet<D> {
         SharedRuntimeNet::new(self.instantiate())
-    }
-
-    pub fn instantiate_shared_with(
-        &self,
-        map_data: Arc<dyn Fn(&D) -> D + Send + Sync>,
-    ) -> SharedRuntimeNet<D> {
-        SharedRuntimeNet::new(self.instantiate_with(map_data))
     }
 }
 
@@ -913,8 +902,6 @@ impl<D> Eq for SharedRuntimeNet<D> {}
 
 struct CopyState<D> {
     source: SharedRuntimeNet<D>,
-    map_data: Arc<dyn Fn(&D) -> D + Send + Sync>,
-    mapped_nodes: HashMap<NodeId, NodeId>,
     frontiers: HashMap<Port, NodeId>,
     fan_sites: HashMap<FanSite, FanSite>,
 }
@@ -978,7 +965,7 @@ pub struct RuntimeNet<D> {
 }
 
 impl<D: Clone + 'static> RuntimeNet<D> {
-    fn new(net: &InteractionNet<D>, map_data: Arc<dyn Fn(&D) -> D + Send + Sync>) -> Self {
+    fn new(net: &InteractionNet<D>) -> Self {
         let nodes = net
             .nodes
             .iter()
@@ -991,7 +978,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                         identity: FanIdentity::root(*site),
                     },
                     Node::Erase => RuntimeNode::Erase,
-                    Node::Data(data) => RuntimeNode::Data(map_data(data)),
+                    Node::Data(data) => RuntimeNode::Data(data.clone()),
                     Node::HostFn(host_fn) => RuntimeNode::HostFn(host_fn.clone()),
                 };
                 (id, RuntimeEntry::new(node))
@@ -1483,14 +1470,6 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 
     /// Starts one logical copy and returns its initially unwired remote cursor.
     pub fn begin_copy(&mut self, source: SharedRuntimeNet<D>) -> NodeId {
-        self.begin_copy_with(source, Arc::new(D::clone))
-    }
-
-    pub fn begin_copy_with(
-        &mut self,
-        source: SharedRuntimeNet<D>,
-        map_data: Arc<dyn Fn(&D) -> D + Send + Sync>,
-    ) -> NodeId {
         let remote = source.with(RuntimeNet::exposed);
         let copy = CopyId(self.next_copy_id);
         self.next_copy_id = self
@@ -1503,8 +1482,6 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                     copy,
                     CopyState {
                         source,
-                        map_data,
-                        mapped_nodes: HashMap::new(),
                         frontiers: HashMap::new(),
                         fan_sites: HashMap::new(),
                     },
@@ -1537,27 +1514,6 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         );
         assert!(matches!(self.remove_node(call.data), RuntimeNode::Data(_)));
         let cursor = self.begin_copy(source);
-        self.connect(Port::principal(call.bind), Port::principal(cursor));
-        cursor
-    }
-
-    pub fn resume_call_with_copy_map(
-        &mut self,
-        call: BlockedCall,
-        source: SharedRuntimeNet<D>,
-        map_data: Arc<dyn Fn(&D) -> D + Send + Sync>,
-    ) -> NodeId {
-        assert_eq!(
-            self.calls.remove(&call.pair),
-            Some(call),
-            "resumed interaction-net call must still be blocked"
-        );
-        assert_eq!(
-            self.disconnect(Port::principal(call.bind)),
-            Some(Port::principal(call.data))
-        );
-        assert!(matches!(self.remove_node(call.data), RuntimeNode::Data(_)));
-        let cursor = self.begin_copy_with(source, map_data);
         self.connect(Port::principal(call.bind), Port::principal(cursor));
         cursor
     }
@@ -1724,13 +1680,20 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             SourceFrontier::ActiveAuxiliary { entered, .. } => *entered,
         };
 
-        let progress = if self
+        let converging_cursor = self
             .copies
             .get(&claim.copy)
             .expect("claimed cursor must reference a live copy")
-            .mapped_nodes
-            .contains_key(&frontier_port.node())
-        {
+            .frontiers
+            .get(&frontier_port)
+            .copied();
+        let progress = if let Some(peer) = converging_cursor {
+            assert_ne!(peer, claim.cursor, "a frontier cannot converge with itself");
+            assert!(matches!(
+                self.node(peer),
+                Some(RuntimeNode::RemoteCursor { copy, remote })
+                    if *copy == claim.copy && *remote == frontier_port
+            ));
             self.join_remote_frontiers(claim.copy, claim.cursor, claim.remote, frontier_port)
         } else {
             match frontier {
@@ -1852,7 +1815,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                 identity: self.translate_fan_identity(&mut state, &identity),
             },
             RuntimeNode::Erase => RuntimeNode::Erase,
-            RuntimeNode::Data(data) => RuntimeNode::Data((state.map_data)(&data)),
+            RuntimeNode::Data(data) => RuntimeNode::Data(data.clone()),
             RuntimeNode::HostFn(host_fn) => RuntimeNode::HostFn(host_fn),
             RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => {
                 self.copies.insert(copy, state);
@@ -1873,7 +1836,6 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         assert_eq!(state.frontiers.remove(&remote), Some(cursor));
 
         let target = self.add_node(node);
-        assert!(state.mapped_nodes.insert(source_node, target).is_none());
         self.connect(Port::principal(target), local);
         for index in 1..=auxiliaries {
             let source_anchor = Port::auxiliary(source_node, index);
