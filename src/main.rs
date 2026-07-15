@@ -167,7 +167,7 @@ fn assemble_inputs(inputs: &[AssemblyInput], cli_args: &[String]) -> ExitCode {
         };
 
         // TODO: move printing errors into CompileContext, so a common logger can be used
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
 
         for diagnostic in &lowered.diagnostics {
             eprintln!(
@@ -253,7 +253,7 @@ fn load_configuration(
             .with_local_binary_loader(binary_loader.clone())
             .with_source_binary(source.text.as_bytes());
         let parsed = source.parse_with_context(&context);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
 
         for diagnostic in &lowered.diagnostics {
             eprintln!(
@@ -446,7 +446,7 @@ fn load_local_module(args: ModuleLoadArgs) -> Result<Value, String> {
         .with_local_binary_loader(local_binary_loader())
         .with_source_binary(source.text.as_bytes());
     let parsed = source.parse_with_context(&context);
-    let lowered = lower_to_core_with_context(&parsed, &context);
+    let lowered = lower_to_core_with_context(parsed, &context);
 
     for diagnostic in &lowered.diagnostics {
         eprintln!(

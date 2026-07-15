@@ -37,20 +37,20 @@ impl SourceFile {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ParsedSource {
     pub declarations: Vec<Declaration>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Declaration {
     pub line: usize,
     pub kind: DeclarationKind,
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DeclarationKind {
     Language(LanguageDecl),
     Import(ImportDecl),
@@ -75,7 +75,7 @@ pub struct ImportDecl {
     pub placement: ImportPlacement,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ObjectDecl {
     pub target: String,
     pub alias: Option<String>,
@@ -83,14 +83,14 @@ pub struct ObjectDecl {
     pub body: Vec<ObjectBodyDefinition>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ObjectBodyDefinition {
     pub line: usize,
     pub text: String,
     pub kind: ObjectBodyDefinitionKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ObjectBodyDefinitionKind {
     Definition(DefinitionDecl),
     Object(ObjectDecl),
@@ -112,14 +112,14 @@ impl ObjectBodyDefinition {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ObjectExtendDecl {
     pub target: String,
     pub alias: Option<String>,
     pub body: Vec<ObjectBodyDefinition>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ObjectExpr {
     pub name: Option<Box<SyntaxExpr>>,
     pub alias: Option<String>,
@@ -140,7 +140,7 @@ pub enum ImportPlacement {
     At(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct DefinitionDecl {
     pub target: String,
     pub kind: DefinitionKind,
@@ -155,7 +155,7 @@ pub enum DefinitionKind {
     Update,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum SyntaxExpr {
     Unit,
     Number(Number),
@@ -216,7 +216,7 @@ pub enum SyntaxOperator {
     EffectThen,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum SyntaxKeyExpr {
     Atom(String),
     Index(Box<SyntaxExpr>),
@@ -237,7 +237,7 @@ fn is_comparison_operator(operator: SyntaxOperator) -> bool {
     )
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum PathSuffix {
     Single(SyntaxKeyExpr),
     Expand(Vec<SyntaxKeyExpr>),
@@ -700,15 +700,15 @@ pub fn parse_source_with_context(source: &SourceFile, context: &CompileContext) 
     }
 }
 
-pub fn lower_to_core_with_context(
-    parsed: &ParsedSource,
-    context: &CompileContext,
-) -> LoweredSource {
+pub fn lower_to_core_with_context(parsed: ParsedSource, context: &CompileContext) -> LoweredSource {
     // note: we'll extend 'prior' within the 'body' of an implicit lambda
     let mut definitions = context.prior_defs.clone();
-    let mut diagnostics = parsed.diagnostics.clone();
+    let ParsedSource {
+        declarations,
+        mut diagnostics,
+    } = parsed;
 
-    for declaration in &parsed.declarations {
+    for declaration in &declarations {
         match &declaration.kind {
             DeclarationKind::Import(import) => {
                 if let Err(diagnostic) =
@@ -5329,7 +5329,7 @@ fn syntax_expr_parser<'src>()
         });
         let text = quoted_text().map(SyntaxExpr::Text);
         let atom_literal = just('\'').ignore_then(name.clone()).map(SyntaxExpr::Atom);
-        let unit = just("()").to(SyntaxExpr::Unit);
+        let unit = just("()").map(|_| SyntaxExpr::Unit);
 
         let list = expr
             .clone()
@@ -5781,7 +5781,7 @@ mod tests {
     fn lower_with_module_path(text: &str, module_path: &[&str]) -> LoweredSource {
         let parsed = parse(text);
         let context = CompileContext::from_module_path(module_path.iter().copied());
-        lower_to_core_with_context(&parsed, &context)
+        lower_to_core_with_context(parsed, &context)
     }
 
     fn abstract_path_atom(parts: &[&str]) -> Value {
@@ -7251,7 +7251,7 @@ mod tests {
     fn lowers_list_expressions_to_core_terms() {
         let parsed = parse("language g0\nasm.result = [72, 101] ++ [108, 108, 111]\n");
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7270,7 +7270,7 @@ mod tests {
             "language g0\nasm.result = hello ++ \", \" ++ world ++ \"!\"\nhello = \"Hello\"\nworld = \"World\"\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7292,7 +7292,7 @@ mod tests {
                 Value::binary_from_text("Hello"),
             ),
         ));
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7311,7 +7311,7 @@ mod tests {
             "language g0\nobject hello with\n  text = \"Hello, World!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7330,7 +7330,7 @@ mod tests {
             "language g0\nhello = object \"hello\" with\n  text = \"Hello, World!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7349,7 +7349,7 @@ mod tests {
             "language g0\nobject base with\n  text = hello ++ \", \" ++ target ++ \"!\"\n  hello = \"Hello\"\n  target = \"Base\"\nobject child extends base with\n  target := \"World\"\nasm.result = child.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7368,7 +7368,7 @@ mod tests {
             "language g0\nbase = object \"base\" with\n  text = hello ++ \", \" ++ target ++ \"!\"\n  hello = \"Hello\"\n  target = \"Base\"\nhello = object \"hello\" extends base with\n  target := \"World\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7387,7 +7387,7 @@ mod tests {
             "language g0\nprefix = \"Hello\"\nhello = object \"hello\" as _h with\n  target = \"World\"\n  text = prefix ++ \", \" ++ h.target ++ \"!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7406,7 +7406,7 @@ mod tests {
             "language g0\nhello = \"Hello\"\nworld = \"World\"\nasm.result = self.hello ++ \", \" ++ module.world ++ \"!\"\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7425,7 +7425,7 @@ mod tests {
             "language g0\nhello = \"Hello\"\nworld = \"World\"\nhello := _self.hello ++ \", \" ++ _module.world ++ \"!\"\nasm.result = hello\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7444,7 +7444,7 @@ mod tests {
             "language g0\nprefix = \"Hello\"\nobject hello as self with\n  prefix = \"Nope\"\n  target = \"World\"\n  text = module.prefix ++ \", \" ++ self.target ++ \"!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7463,7 +7463,7 @@ mod tests {
             "language g0\nobject hello with\n  text = \"Hello, World\"\n  text := _self.text ++ \"!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7482,7 +7482,7 @@ mod tests {
             "language g0\nobject base with\n  text = \"Hello, World\"\nobject child extends base with\n  text := _text ++ \"!\"\nasm.result = child.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7501,7 +7501,7 @@ mod tests {
             "language g0\nobject root with\n  code = \"root\"\nobject left extends root with\n  code := _code ++ \"L\"\nobject right extends root with\n  code := _code ++ \"R\"\nobject child extends left, right with\n  code := _code ++ \"C\"\nasm.result = child.code\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7520,7 +7520,7 @@ mod tests {
             "language g0\nbase = { hello:\"Hello\", target:\"Base\" }\nobject child extends base with\n  target := \"World\"\n  text = hello ++ \", \" ++ target ++ \"!\"\nasm.result = child.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7539,7 +7539,7 @@ mod tests {
             "language g0\nidx = 42\n.[idx] = \"Hello\"\nasm.result = module.[idx] ++ \", World!\"\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7558,7 +7558,7 @@ mod tests {
             "language g0\nroot.(['hello, 'target]) = \"World\"\nroot.hello.prefix = \"Hello\"\nasm.result = root.hello.prefix ++ \", \" ++ root.hello.target ++ \"!\"\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7577,7 +7577,7 @@ mod tests {
             "language g0\nidx = 42\nobject hello as self with\n  .[idx] = \"Hello\"\n  text = self.[idx] ++ \", World!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7596,7 +7596,7 @@ mod tests {
             "language g0\nobject parent with\n  prefix = \"Hello\"\n  object child with\n    text = ^prefix ++ \", World!\"\nasm.result = parent.child.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7615,7 +7615,7 @@ mod tests {
             "language g0\nobject parent with\n  object base with\n    text = \"Hello, World\"\n  object child extends base with\n    text := _text ++ \"!\"\nasm.result = parent.child.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7634,7 +7634,7 @@ mod tests {
             "language g0\nobject parent with\n  prefix = \"Hello\"\nextend parent with\n  object child with\n    text = ^prefix ++ \", World!\"\nasm.result = parent.child.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7653,7 +7653,7 @@ mod tests {
             "language g0\nobject left with\n  object helper with\n    left = \"Hello\"\nobject right with\n  object helper with\n    right = \"World\"\nobject child extends left.helper, right.helper with\n  text = left ++ \", \" ++ right ++ \"!\"\nasm.result = child.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7672,7 +7672,7 @@ mod tests {
             "language g0\nobject base with\n  count = 0\ninc = object _ with\n  count := _count + 1\nobject child extends inc, inc, inc, base with\nasm.result = child.count\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7688,7 +7688,7 @@ mod tests {
             "language g0\nobject base with\n  code = \"B\"\nadd_a = object _ with\n  code := _code ++ \"A\"\nadd_m = object _ extends add_a, base with\n  code := _code ++ \"M\"\nobject child extends add_m with\n  code := _code ++ \"C\"\nasm.result = child.code\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7707,7 +7707,7 @@ mod tests {
             "language g0\nobject base with\n  code = \"\"\nadd_a = object _ with\n  code := _code ++ \"A\"\nadd_b = object _ with\n  code := _code ++ \"B\"\nobject child extends add_a, add_b, base with\nasm.result = child.code\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7726,7 +7726,7 @@ mod tests {
             "language g0\nobject hello with\n  text = \"Hello, World\"\nextend hello with\n  text := _text ++ \"!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7745,7 +7745,7 @@ mod tests {
             "language g0\nobject hello with\n  spec = { bad:\"bad\" }\n  text = { [{}]:\"Hello, World!\" }.[_spec]\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7764,7 +7764,7 @@ mod tests {
             "language g0\nprefix = \"Hello\"\nseparator = \", \"\nobject hello with\n  target = \"World\"\n  text = ^(prefix ++ separator) ++ target ++ \"!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7781,7 +7781,7 @@ mod tests {
     fn excessive_scope_escapes_report_lowering_errors() {
         let parsed = parse("language g0\nasm.result = ^foo\nobject hello with\n  text = ^^foo\n");
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
 
         assert_eq!(lowered.diagnostics.len(), 2);
         assert!(lowered.diagnostics.iter().all(|diag| {
@@ -7796,7 +7796,7 @@ mod tests {
             "language g0\nprefix = \"Hello\"\nobject hello as h with\n  target = \"World\"\n  text = prefix ++ \", \" ++ h.target ++ \"!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7815,7 +7815,7 @@ mod tests {
             "language g0\nprefix = \"Hello\"\nobject hello as _h with\n  target = \"World\"\n  text = prefix ++ \", \" ++ h.target ++ \"!\"\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7834,7 +7834,7 @@ mod tests {
             "language g0\nsuffix = \"!\"\nobject hello with\n  text = \"Hello, World\"\nextend hello as h with\n  text := _h.text ++ suffix\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7853,7 +7853,7 @@ mod tests {
             "language g0\nsuffix = \"!\"\nobject hello with\n  text = \"Hello, World\"\nextend hello as _h with\n  text := _h.text ++ suffix\nasm.result = hello.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7872,7 +7872,7 @@ mod tests {
             "language g0\nhello = \"Hello\"\nworld = \"World\"\nd = { hello:\"Nope\", world:\"Nope\" } with\n  hello := \"Still Nope\"\n  text = hello ++ \", \" ++ world ++ \"!\"\nasm.result = d.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7891,7 +7891,7 @@ mod tests {
             "language g0\nsuffix = \"!\"\nbase = { text:\"Hello, World\" }\nd = base as b with\n  text := _b.text ++ suffix\n  result = b.text\nasm.result = d.result\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7910,7 +7910,7 @@ mod tests {
             "language g0\nsuffix = \"!\"\nbase = { text:\"Hello, World\" }\nd = base as _b with\n  text := _b.text ++ suffix\n  result = b.text\nasm.result = d.result\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7949,7 +7949,7 @@ mod tests {
             "language g0\nsuffix = \"!\"\nbase = { text:\"Hello, World\" }\nd = base as self with\n  text := _text ++ ^suffix\nasm.result = d.text\n",
         );
         let context = CompileContext::from_module_path(["assembly"]);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7967,7 +7967,7 @@ mod tests {
         let parsed =
             parse("language g0\nd = { tail:\"Hello, World!\" }\nasm.result = (\\x -> x.tail) d\n");
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -7986,7 +7986,7 @@ mod tests {
             "language g0\nfirst = \\x _y _z -> x\nasm.result = first \"Hello, World!\" {} {}\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8005,7 +8005,7 @@ mod tests {
             "language g0\nmake = \\x -> \\_ignored -> x\nasm.result = make \"Hello, World!\" {}\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8024,7 +8024,7 @@ mod tests {
             "language g0\nasm.result = let hello = \"Hello\"; world = \"World\" in hello ++ \", \" ++ world ++ \"!\"\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8043,7 +8043,7 @@ mod tests {
             "language g0\nasm.result = hello ++ \", \" ++ world ++ \"!\" where hello = \"Hello\"; world = \"World\"\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8062,7 +8062,7 @@ mod tests {
             "language g0\nasm.result =\n  let hello = \"Hello\"\n      world = \"World\"\n  hello ++ \", \" ++ world ++ \"!\"\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8081,7 +8081,7 @@ mod tests {
             "language g0\napi = { emit:(\\x -> x ++ \"!\") }\neffect = .emit \"Hi\"\nasm.result = effect.eff api\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8100,7 +8100,7 @@ mod tests {
             "language g0\nmethod = { apply:(\\x -> x ++ \"!\") }\nasm.result = method \"Hi\"\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8119,7 +8119,7 @@ mod tests {
             "language g0\nadd_answer = (+ 42)\nsub_from_answer = (42 -)\nadd = (+)\nappend = (++)\nasm.sum = add_answer 8\nasm.diff = sub_from_answer 8\nasm.full_sum = add 8 42\nasm.full_append = append \"Hello\" \"!\"\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8150,7 +8150,7 @@ mod tests {
             "language g0\nid x = x\nbang x = x ++ \"!\"\nhello = \"Hello\"\npipe_section = (|> bang)\npipe_function = (|>)\ncompose_section = (>> bang)\ncompose_function = (>>)\nasm.pipe_forward = hello |> bang\nasm.pipe_backward = bang <| hello\nasm.compose_forward = (id >> bang) hello\nasm.compose_backward = (bang << id) hello\nasm.pipe_section = pipe_section hello\nasm.pipe_function = pipe_function hello bang\nasm.compose_section = (compose_section id) hello\nasm.compose_function = compose_function id bang hello\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8181,7 +8181,7 @@ mod tests {
             "language g0\napi = { r:(\\x -> x), seq:(\\op k -> (k (op.eff api)).eff api) }\nop = .r \"Hello\"\nk x = .r (x ++ \", World!\")\nf x = .r (x ++ \", World\")\ng x = .r (x ++ \"!\")\nop_unit = .r ()\nbind_section = (>>= k)\nbind_function = (>>=)\nthen_function = (=>>)\nkleisli_function = (>=>)\nasm.bind = (op >>= k).eff api\nasm.bind_section = (bind_section op).eff api\nasm.bind_function = (bind_function op k).eff api\nasm.kleisli = ((f >=> g) \"Hello\").eff api\nasm.kleisli_function = (kleisli_function f g \"Hello\").eff api\nasm.then = (op_unit =>> .r \"Hello, World!\").eff api\nasm.then_function = (then_function op_unit (.r \"Hello, World!\")).eff api\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8211,7 +8211,7 @@ mod tests {
             "language g0\napi = { r:(\\x -> x), seq:(\\op k -> (k (op.eff api)).eff api) }\nbad = .r \"not unit\" =>> .r \"unreachable\"\nasm.result = bad.eff api\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8236,7 +8236,7 @@ mod tests {
             "language g0\nimport 'std\ntuple_left = { tuple:[1,2] }\ntuple_right = { tuple:[1,3] }\nasm.gt = list.pure ((3 > 2) =>> .r \"G\")\nasm.ge = list.pure ((3 >= 3) =>> .r \"E\")\nasm.eq = list.pure ((3 == 3) =>> .r \"Q\")\nasm.ne = list.pure ((3 <> 4) =>> .r \"N\")\nasm.le = list.pure ((3 =< 3) =>> .r \"L\")\nasm.lt = list.pure ((2 < 3) =>> .r \"T\")\nasm.fail = list.pure ((3 < 2) =>> .r \"bad\")\nasm.chain = list.pure ((1 < 2 =< 2 <> 3) =>> .r \"H\")\nasm.chain_fail = list.pure ((1 < 3 < 2) =>> .r \"bad\")\nasm.chain_raw = 1 < (2 + 0) < 3\nasm.list = list.pure (([1,2] < [1,3]) =>> .r \"S\")\nasm.binary_list = list.pure ((\"AB\" == [65,66]) =>> .r \"B\")\nasm.tuple = list.pure ((tuple_left < tuple_right) =>> .r \"U\")\nasm.dict = list.pure (({ a:1, b:{} } == { a:1 }) =>> .r \"D\")\nasm.and = list.pure ((3 > 2 and \"A\" == [65]) =>> .r \"A\")\nasm.or = list.pure ((3 < 2 or 3 == 3) =>> .r \"O\")\nasm.not_true = list.pure ((not (3 > 2)) =>> .r \"bad\")\nasm.not_false = list.pure ((not (3 < 2)) =>> .r \"F\")\nasm.could_true = list.pure ((could (.alt .fail (3 == 3))) =>> .r \"C\")\nasm.could_false = list.pure ((could .fail) =>> .r \"bad\")\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8280,7 +8280,7 @@ mod tests {
             "language g0\nimport 'list as list\nchoices = (.alt (.r \"A\") (.alt .fail (.r \"B\"))) >>= (\\x -> .r (x ++ \"!\"))\ncut = .cut (.alt (.r \"C\") (.r \"D\"))\ncut_bad = .cut (.alt (.r \"G\") 42)\ncut_seq_bad = .cut ((.alt (.r \"S\") 42) >>= (\\x -> .r (x ++ \"!\")))\nobject_effect = { eff:(.r \"E\").eff, meta:1 }\nfixed = .fix (\\self -> .r { text:\"F\", self:self })\nasm.choices = list.pure choices\nasm.cut = list.pure cut\nasm.cut_fail = list.pure (.cut .fail)\nasm.cut_bad = list.pure cut_bad\nasm.cut_seq_bad = list.pure cut_seq_bad\nasm.object = list.pure object_effect\nasm.fixed = (list.head (list.pure fixed)).text\nasm.head = list.head \"Hi\"\nasm.tail = list.tail \"Hi\"\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8352,7 +8352,7 @@ mod tests {
             "language g0\nsuffix = \"!\"\nadd_suffix = (++ suffix)\nasm.result = add_suffix \"Hello\"\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8369,7 +8369,7 @@ mod tests {
     fn lowers_definition_argument_sugar_to_lambda_terms() {
         let parsed = parse("language g0\nid x = x\nasm.result = id \"Hello, World!\"\n");
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8388,7 +8388,7 @@ mod tests {
             "language g0\nhello who = \"Hello, \" ++ who\nhello who ::= \\prior -> prior who ++ \"!\"\nasm.result = hello \"World\"\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8405,7 +8405,7 @@ mod tests {
     fn prior_names_observe_prior_module_state_within_current_module_scope() {
         let parsed = parse("language g0\nhello = \"Hello\"\nasm.result = _hello ++ \", World!\"\n");
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8423,7 +8423,7 @@ mod tests {
         let parsed =
             parse("language g0\nkeep _value = value\nasm.result = keep \"Hello, World!\"\n");
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8442,7 +8442,7 @@ mod tests {
             "language g0\nd = { hello:\"Hello\", world:other ++ \"!\" }\nother = \"World\"\n",
         );
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8472,7 +8472,7 @@ mod tests {
                 Value::binary_from_text("Hello"),
             ),
         ));
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8490,7 +8490,7 @@ mod tests {
     fn lowers_builtin_imports_to_module_dictionaries() {
         let parsed = parse("language g0\nimport 'std as std\nimport 'math\nimport 'list as list\n");
         let context = CompileContext::default();
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8761,7 +8761,7 @@ mod tests {
     fn inline_builtin_imports_follow_ordered_module_updates() {
         let context = CompileContext::default();
         let parsed = parse("language g0\nmath.answer = 42\nimport 'std\n");
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8795,7 +8795,7 @@ mod tests {
     fn introduce_and_override_checks_are_deferred_until_observed() {
         let context = CompileContext::default();
         let parsed = parse("language g0\nfoo := 1\nok = \"ok\"\n");
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8824,7 +8824,7 @@ mod tests {
     fn duplicate_introductions_fail_lazily_against_prior_module_updates() {
         let context = CompileContext::default();
         let parsed = parse("language g0\nfoo = 1\nfoo = 2\nok = \"ok\"\n");
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8853,7 +8853,7 @@ mod tests {
     fn update_definitions_observe_prior_module_state() {
         let context = CompileContext::default();
         let parsed = parse("language g0\nfoo = 1\nfoo ::= \\prior -> prior + 1\n");
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8867,7 +8867,7 @@ mod tests {
     fn update_definitions_can_use_named_updater_functions() {
         let context = CompileContext::default();
         let parsed = parse("language g0\ninc prior = prior + 1\nfoo = 1\nfoo ::= inc\n");
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);
@@ -8883,7 +8883,7 @@ mod tests {
             Dict::new_sync().insert(Key::atom_from_text("foo"), Value::Number(1.into())),
         ));
         let parsed = parse("language g0\nfoo := 2\n");
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_eq!(lowered.diagnostics, []);
 
         let value = evaluated_module_value(&context, &lowered);

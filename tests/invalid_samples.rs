@@ -26,7 +26,7 @@ fn invalid_syntax_samples_report_expected_diagnostics() {
         let context = CompileContext::for_assembly_file(&source.path)
             .with_source_binary(source.text.as_bytes());
         let parsed = source.parse_with_context(&context);
-        let lowered = lower_to_core_with_context(&parsed, &context);
+        let lowered = lower_to_core_with_context(parsed, &context);
         assert_expectations(
             &source_path,
             &parse_expectations(&expect_path, &expect_text),
