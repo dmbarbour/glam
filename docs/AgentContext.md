@@ -142,8 +142,12 @@ This document should summarize salient, relevant points rather than asking futur
   after which the ordinary Erase rule handles the copied agent. When an
   auxiliary has no corresponding local principal cursor yet, dependency
   inspection follows the source principal chain to an exact active pair.
-- A blocked `Data >< Bind` pair claims its exact pair while `eval` lowers only
-  the callable data to an applicable agent outside the runtime lock. A `Value::Net`
+- A blocked `Data >< Bind` pair is resolved through the generic `CallableData`
+  policy. `SharedRuntimeNet` claims its exact pair, releases the runtime lock,
+  asks the client data to produce either a shared net or `HostFn`, then briefly
+  reacquires the lock to install that topology or mark the pair stuck. Core
+  implements the policy in `eval`; the generic runtime keeps claim/resume
+  bookkeeping private. A `Value::Net`
   loads through a cursor without inspecting the argument. Builtins and partial
   builtins lower to an explicit unary `Bind` backed by `HostFn`, after which the
   ordinary bind-join rule applies. Compatibility closures and dict applicables

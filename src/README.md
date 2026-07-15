@@ -37,8 +37,9 @@
   fan sites are translated per logical copy
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
-- `eval.rs` keeps compatibility closures on semantic evaluation, turns target-
-  local blocked bind-data pairs into stable call frames, and executes generic unary `HostFn` requests
+- `eval.rs` keeps compatibility closures on semantic evaluation, implements
+  generic callable-data policy for target-local blocked bind-data pairs, and
+  executes generic unary `HostFn` requests
   outside runtime locks; HostFn failures become permanently stuck pairs rather
   than an underspecified retry state; net-lowered builtins curry by returning
   another bind-wrapped HostFn and retain saturated work as memoized semantic thunks;

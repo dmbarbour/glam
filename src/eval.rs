@@ -11,8 +11,8 @@ use crate::core::{
 };
 use crate::core_net::{CoreDataKey, CoreNetData, closed_lambda_body_is_net_safe};
 use crate::interaction_net::{
-    ActivePairKey, BlockedCall, CursorDependency, HostFn, HostFnYield, NetBuilder, Port, Reduction,
-    ReductionKind, StuckReason,
+    ActivePairKey, BlockedCall, Callable, CallableData, CursorDependency, HostFn, HostFnYield,
+    NetBuilder, Port, Reduction, ReductionKind, StuckReason,
 };
 use crate::list::ListItem;
 use crate::number::Number;
@@ -649,47 +649,48 @@ fn progress_exact_core_pair(
     Ok(false)
 }
 
-enum LoweredCoreApplicable {
-    Net(crate::core_net::CoreRuntimeNet),
-    HostFn(HostFn<CoreNetData>),
+impl CallableData for CoreNetData {
+    type Error = EvalError;
+
+    fn into_callable(self) -> Result<Callable<Self>, EvalError> {
+        lower_core_callable(self)
+    }
 }
 
-fn lower_core_applicable(data: CoreNetData) -> Result<LoweredCoreApplicable, EvalError> {
+fn lower_core_callable(data: CoreNetData) -> Result<Callable<CoreNetData>, EvalError> {
     match data {
-        CoreNetData::Value(value) => lower_core_applicable_value(value),
-        CoreNetData::Builtin(call) => Ok(LoweredCoreApplicable::HostFn(builtin_host_fn(call))),
+        CoreNetData::Value(value) => lower_core_callable_value(value),
+        CoreNetData::Builtin(call) => Ok(Callable::HostFn(builtin_host_fn(call))),
         CoreNetData::Deferred(value) => {
             let value = value
                 .force()
                 .map_err(|message| EvalError::new(message.as_ref()))?;
-            lower_core_applicable_value(value)
+            lower_core_callable_value(value)
         }
         CoreNetData::Future(value) => {
             let value = value
                 .get()
                 .cloned()
                 .ok_or_else(|| EvalError::new("future was observed before initialization"))?;
-            lower_core_applicable_value(value)
+            lower_core_callable_value(value)
         }
         CoreNetData::Error(message) => Err(EvalError::new(message.as_ref())),
     }
 }
 
-fn lower_core_applicable_value(value: Value) -> Result<LoweredCoreApplicable, EvalError> {
+fn lower_core_callable_value(value: Value) -> Result<Callable<CoreNetData>, EvalError> {
     let value = if matches!(value, Value::Expr(_)) {
         force_value_shell(&value)?
     } else {
         value
     };
     match value {
-        Value::Net(net) => Ok(LoweredCoreApplicable::Net(net.into_runtime())),
-        Value::Builtin(builtin) => Ok(LoweredCoreApplicable::HostFn(builtin_host_fn(
-            BuiltinCall::new(builtin),
-        ))),
-        Value::PartialBuiltin(call) => Ok(LoweredCoreApplicable::HostFn(builtin_host_fn(call))),
-        value @ (Value::Closure(_) | Value::Dict(_)) => Ok(LoweredCoreApplicable::HostFn(
-            core_applicable_host_fn(value),
-        )),
+        Value::Net(net) => Ok(Callable::Net(net.into_runtime())),
+        Value::Builtin(builtin) => Ok(Callable::HostFn(builtin_host_fn(BuiltinCall::new(builtin)))),
+        Value::PartialBuiltin(call) => Ok(Callable::HostFn(builtin_host_fn(call))),
+        value @ (Value::Closure(_) | Value::Dict(_)) => {
+            Ok(Callable::HostFn(core_applicable_host_fn(value)))
+        }
         Value::Atom(_) | Value::Number(_) | Value::Binary(_) | Value::List(_) => {
             Err(EvalError::new("application requires a function value"))
         }
@@ -701,29 +702,7 @@ fn progress_exact_core_call(
     runtime: &crate::core_net::CoreRuntimeNet,
     call: BlockedCall,
 ) -> Result<bool, EvalError> {
-    let Some(callable) = runtime.with_mut(|net| net.claim_call(call)) else {
-        return Ok(false);
-    };
-    match lower_core_applicable(callable) {
-        Ok(LoweredCoreApplicable::Net(source)) => {
-            runtime.with_mut(|net| {
-                net.resume_claimed_call_with_copy(call, source);
-            });
-            return Ok(true);
-        }
-        Ok(LoweredCoreApplicable::HostFn(host_fn)) => {
-            runtime.with_mut(|net| {
-                net.resume_claimed_call_with_host_fn(call, host_fn);
-            });
-            return Ok(true);
-        }
-        Err(error) => {
-            runtime.with_mut(|net| {
-                net.fail_claimed_call(call, Arc::<str>::from(error.to_string()));
-            });
-            return Err(error);
-        }
-    }
+    runtime.resolve_call(call)
 }
 
 fn handle_core_reduction(

@@ -140,6 +140,27 @@ pub enum HostFnYield<D> {
 
 pub type HostFnResult<D> = Result<HostFnYield<D>, Arc<str>>;
 
+/// The topology that callable data exposes when it meets a [`Node::Bind`].
+///
+/// A shared net is loaded through a lazy logical copy. A host function is
+/// installed behind a fresh bind so the ordinary bind-join rule performs the
+/// application.
+pub enum Callable<D> {
+    Net(SharedRuntimeNet<D>),
+    HostFn(HostFn<D>),
+}
+
+/// Client policy for interpreting embedded data as a callable agent.
+///
+/// Implementations may force client-owned lazy values, so this method is
+/// always invoked without holding the target runtime-net mutex. Returning an
+/// error leaves the original `Data >< Bind` pair permanently stuck.
+pub trait CallableData: Clone + 'static {
+    type Error: fmt::Display;
+
+    fn into_callable(self) -> Result<Callable<Self>, Self::Error>;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Port(NonZeroU64);
 
@@ -868,6 +889,36 @@ impl<D: Clone + 'static> SharedRuntimeNet<D> {
     }
 }
 
+impl<D: CallableData> SharedRuntimeNet<D> {
+    /// Resolves one exact blocked `Data >< Bind` pair using client callable
+    /// policy. Claiming and finishing each take a short target lock; callable
+    /// conversion itself runs without holding the runtime mutex.
+    pub fn resolve_call(&self, call: BlockedCall) -> Result<bool, D::Error> {
+        let Some(data) = self.with_mut(|runtime| runtime.claim_call(call)) else {
+            return Ok(false);
+        };
+
+        match data.into_callable() {
+            Ok(Callable::Net(source)) => {
+                self.with_mut(|runtime| runtime.resume_claimed_call_with_copy(call, source));
+                Ok(true)
+            }
+            Ok(Callable::HostFn(host_fn)) => {
+                self.with_mut(|runtime| {
+                    runtime.resume_claimed_call_with_host_fn(call, host_fn);
+                });
+                Ok(true)
+            }
+            Err(error) => {
+                self.with_mut(|runtime| {
+                    runtime.fail_claimed_call(call, Arc::<str>::from(error.to_string()));
+                });
+                Err(error)
+            }
+        }
+    }
+}
+
 impl<D> Clone for SharedRuntimeNet<D> {
     fn clone(&self) -> Self {
         Self {
@@ -1120,7 +1171,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
     /// Claims one call while its callable data is lowered to an applicable
     /// without holding the runtime lock. The topology remains intact and the
     /// pair stays visible through `claimed_pairs`.
-    pub fn claim_call(&mut self, call: BlockedCall) -> Option<D> {
+    fn claim_call(&mut self, call: BlockedCall) -> Option<D> {
         if self.calls.get(&call.pair) != Some(&call) {
             return None;
         }
@@ -1135,7 +1186,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 
     /// Leaves a claimed call permanently stuck after applicable lowering
     /// fails.
-    pub fn fail_claimed_call(&mut self, call: BlockedCall, error: Arc<str>) {
+    fn fail_claimed_call(&mut self, call: BlockedCall, error: Arc<str>) {
         assert_eq!(
             self.claimed_calls.remove(&call.pair),
             Some(call),
@@ -1478,7 +1529,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 
     /// Completes claimed applicable lowering by loading the
     /// resulting closed net at the original application's principal port.
-    pub fn resume_claimed_call_with_copy(
+    fn resume_claimed_call_with_copy(
         &mut self,
         call: BlockedCall,
         source: SharedRuntimeNet<D>,
@@ -1505,7 +1556,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
     /// Completes applicable lowering by replacing callable data with
     /// an explicit unary function net. The newly introduced Bind then joins
     /// the original application Bind through the ordinary interaction rule.
-    pub fn resume_claimed_call_with_host_fn(
+    fn resume_claimed_call_with_host_fn(
         &mut self,
         call: BlockedCall,
         host_fn: HostFn<D>,
