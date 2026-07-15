@@ -111,9 +111,10 @@ This document should summarize salient, relevant points rather than asking futur
   interactions and other rewrites remove nodes explicitly rather than relying
   on reachability collection.
 - Principal-principal connections appear in exactly one scheduler collection:
-  ready, blocked call, blocked remote cursor, or stuck. Reduction results retain
-  their `ActivePair`; calls also identify their bind and data nodes for later
-  completion.
+  ready, blocked bind call, pending/blocked host call, blocked remote cursor, or
+  stuck. Reduction results retain their `ActivePair`; calls also identify their
+  participating nodes for later completion. Stuck pairs retain either a
+  no-rule reason or a permanent host error.
 - Runtime instantiation wires the template's exposed port to a stable,
   evaluator-only interface anchor. A `RemoteCursor { copy, remote }` is a
   one-way suspended wire: `copy` selects target-owned shared copy state and
@@ -121,17 +122,24 @@ This document should summarize salient, relevant points rather than asking futur
   A cursor materializes a node only when that source frontier faces its
   principal port. If it faces an auxiliary, one conservative sweep reduces
   every pair that was ready at the start of the sweep. Copying a partially
-  applied net may encounter a cursor in the intermediate source; demand advances
-  that intermediate cursor outward toward its own source, then retries. It does
-  not reverse cursor flow or give an inner source a caller reference.
+  applied net may encounter a cursor in the intermediate source. The outer
+  cursor records that precise `(source runtime, source cursor)` dependency; the
+  evaluator releases its current lock, drives the dependency transitively, and
+  then retries. It does not reverse cursor flow, copy directly across an
+  intermediate net, or hold nested runtime locks.
 - A blocked bind-data pair can be consumed as a generic `CallFrame`; its
   argument and result survive behind independently stable interfaces. Core
   thunks may name one of those runtime/interface pairs, and memoize both values
   and errors without introducing a new language-level `Value` variant.
-- The core runtime driver interprets closures and builtins outside the generic
-  topology reducer. Partial builtins retain shared lazy arguments. Saturated
-  builtins become memoized semantic thunks, so the conservative active-pair
-  sweep does not force strict builtin work until its result is observed. An
+- `HostFn<Data>` is a generic unary agent with a principal data input and one
+  result auxiliary. Its callback runs outside the runtime mutex and may emit
+  `Data`, emit another automatically bind-wrapped `HostFn`, block for an
+  explicit retry, or become permanently stuck with a diagnostic. Core builtin
+  expressions lowered into nets use HostFn currying; partial builtins therefore
+  escape as ordinary `Value::Net` functions. Saturated builtins still emit
+  memoized semantic thunks, so the conservative active-pair sweep does not
+  force strict builtin work until its result is observed. Direct evaluator
+  builtin values retain the compatibility path. An
   imported runtime that still exposes an unsupplied bind may not detach lazy
   call arguments yet; later parameters in the same bind spine are not captures.
 - `g_syntax` and `CompileContext::value_apply_many` preserve maximal

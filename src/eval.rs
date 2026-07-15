@@ -10,7 +10,9 @@ use crate::core::{
     Value,
 };
 use crate::core_net::{CoreDataKey, CoreNetData};
-use crate::interaction_net::{BlockedCall, NetBuilder, Port, ReductionKind};
+use crate::interaction_net::{
+    BlockedCall, HostFn, HostFnStop, HostFnYield, NetBuilder, Port, ReductionKind, StuckReason,
+};
 use crate::list::ListItem;
 use crate::number::Number;
 
@@ -499,8 +501,8 @@ fn drive_core_net_inner(
             if !matches!(progress, crate::interaction_net::CursorProgress::Blocked) {
                 continue;
             }
-            if let Some(source) = runtime.with(|net| net.interface_cursor_source(interface)) {
-                if progress_core_net(&source)? {
+            if let Some(cursor) = runtime.with(|net| net.interface_cursor(interface)) {
+                if progress_cursor_dependency(&runtime, cursor, 0)? {
                     continue;
                 }
             }
@@ -509,10 +511,9 @@ fn drive_core_net_inner(
         let reduction = runtime.with_mut(|net| net.reduce_next());
         if let Some(reduction) = reduction {
             if matches!(reduction.kind, ReductionKind::Stuck) {
-                return Err(EvalError::new(
-                    "interaction net reached a stuck active pair",
-                ));
+                return Err(stuck_pair_error(&runtime, reduction.pair));
             }
+            runtime.with_mut(|net| net.wake_blocked_host_calls());
             continue;
         }
 
@@ -520,13 +521,21 @@ fn drive_core_net_inner(
             continue;
         }
 
-        let sources = runtime.with(|net| net.blocked_cursor_sources());
-        let mut source_progress = false;
-        for source in sources {
-            source_progress |= progress_core_net(&source)?;
+        let cursors = runtime.with(|net| {
+            net.blocked_cursors()
+                .iter()
+                .map(|blocked| blocked.cursor)
+                .collect::<Vec<_>>()
+        });
+        let mut cursor_progress = false;
+        for cursor in cursors {
+            cursor_progress |= progress_cursor_dependency(&runtime, cursor, 0)?;
         }
-        if source_progress {
-            runtime.with_mut(|net| net.wake_blocked_cursors());
+        if cursor_progress {
+            runtime.with_mut(|net| {
+                net.wake_blocked_cursors();
+                net.wake_blocked_host_calls();
+            });
             continue;
         }
 
@@ -545,6 +554,8 @@ fn drive_core_net_inner(
 
         let scheduler_is_empty = runtime.with(|net| {
             net.blocked_calls().is_empty()
+                && net.host_calls().is_empty()
+                && net.blocked_host_calls().is_empty()
                 && net.blocked_cursors().is_empty()
                 && net.stuck_pairs().is_empty()
         });
@@ -561,10 +572,21 @@ fn drive_core_net_inner(
                 .and_then(|port| net.port_neighbor(Port::principal(port.node())));
             let principal_neighbor_node =
                 principal_neighbor.and_then(|port| net.node(port.node()));
+            let cursor_dependencies = net
+                .blocked_cursors()
+                .iter()
+                .map(|blocked| {
+                    (
+                        blocked.cursor,
+                        net.cursor_dependency(blocked.cursor),
+                    )
+                })
+                .collect::<Vec<_>>();
             format!(
-                "neighbor={neighbor:?}, node={node:?}, principal_neighbor={principal_neighbor:?}/{principal_neighbor_node:?}, calls={}, cursors={}, stuck={}",
+                "neighbor={neighbor:?}, node={node:?}, principal_neighbor={principal_neighbor:?}/{principal_neighbor_node:?}, calls={}, host_calls={}/{}, cursors={cursor_dependencies:?}, stuck={}",
                 net.blocked_calls().len(),
-                net.blocked_cursors().len(),
+                net.host_calls().len(),
+                net.blocked_host_calls().len(),
                 net.stuck_pairs().len()
             )
         });
@@ -575,7 +597,14 @@ fn drive_core_net_inner(
 }
 
 fn progress_core_net(runtime: &crate::core_net::CoreRuntimeNet) -> Result<bool, EvalError> {
-    if runtime.with_mut(|net| net.reduce_next()).is_some() {
+    if progress_core_host_call(runtime)? {
+        return Ok(true);
+    }
+    if let Some(reduction) = runtime.with_mut(|net| net.reduce_next()) {
+        if matches!(reduction.kind, ReductionKind::Stuck) {
+            return Err(stuck_pair_error(runtime, reduction.pair));
+        }
+        runtime.with_mut(|net| net.wake_blocked_host_calls());
         return Ok(true);
     }
     let exposes_unsupplied_bind = runtime.with(|net| {
@@ -600,23 +629,31 @@ fn progress_core_net(runtime: &crate::core_net::CoreRuntimeNet) -> Result<bool, 
                     | CoreNetData::List { .. }
             )
         });
-        let argument_is_data = runtime.with(|net| {
+        if callable_is_net {
+            handle_core_call(runtime, call)?;
+            return Ok(true);
+        }
+        // Only legacy bind-data callables still inspect an argument auxiliary.
+        // Value::Net and HostFn application are authorized by their principal
+        // interactions and never enter this compatibility predicate.
+        let argument_is_embedded_data = runtime.with(|net| {
             net.call_argument_data(call).is_some_and(|data| {
                 net.has_imported_copy()
                     || !matches!(data, CoreNetData::Capture(_) | CoreNetData::Lambda(_))
             })
         });
-        if callable_is_net && argument_is_data {
-            handle_core_call(runtime, call)?;
-            return Ok(true);
-        }
         if callable_captures_lazy_argument
-            && !argument_is_data
-            && runtime.with(|net| net.call_argument_cursor_source(call).is_some())
+            && !argument_is_embedded_data
+            && runtime.with(|net| net.call_argument_cursor(call).is_some())
         {
             if let Some(progress) = runtime.with_mut(|net| net.demand_call_argument(call)) {
                 if !matches!(progress, crate::interaction_net::CursorProgress::Blocked) {
                     return Ok(true);
+                }
+                if let Some(cursor) = runtime.with(|net| net.call_argument_cursor(call)) {
+                    if progress_cursor_dependency(runtime, cursor, 0)? {
+                        return Ok(true);
+                    }
                 }
             }
         }
@@ -627,7 +664,7 @@ fn progress_core_net(runtime: &crate::core_net::CoreRuntimeNet) -> Result<bool, 
         let call_is_instanced = callable_captures_lazy_argument
             && !exposes_unsupplied_bind
             && runtime.with(|net| net.has_imported_copy());
-        if argument_is_data || call_is_instanced {
+        if argument_is_embedded_data || call_is_instanced {
             handle_core_call(runtime, call)?;
             return Ok(true);
         }
@@ -637,14 +674,126 @@ fn progress_core_net(runtime: &crate::core_net::CoreRuntimeNet) -> Result<bool, 
             if !matches!(progress, crate::interaction_net::CursorProgress::Blocked) {
                 return Ok(true);
             }
-            if let Some(source) = runtime.with(|net| net.call_argument_cursor_source(call)) {
-                if progress_core_net(&source)? {
+            if let Some(cursor) = runtime.with(|net| net.call_argument_cursor(call)) {
+                if progress_cursor_dependency(runtime, cursor, 0)? {
                     return Ok(true);
                 }
             }
         }
     }
     Ok(false)
+}
+
+fn progress_cursor_dependency(
+    runtime: &crate::core_net::CoreRuntimeNet,
+    cursor: crate::interaction_net::NodeId,
+    depth: usize,
+) -> Result<bool, EvalError> {
+    if depth >= 1024 {
+        return Err(EvalError::new(
+            "interaction-net cursor dependency chain is too deep",
+        ));
+    }
+    let Some(dependency) = runtime.with(|net| net.cursor_dependency(cursor)) else {
+        return Ok(false);
+    };
+    let Some(source_cursor) = dependency.cursor else {
+        let blocked = dependency.source.with(|source| {
+            source
+                .blocked_cursors()
+                .iter()
+                .map(|blocked| blocked.cursor)
+                .collect::<Vec<_>>()
+        });
+        for blocked_cursor in blocked {
+            if progress_cursor_dependency(&dependency.source, blocked_cursor, depth + 1)? {
+                dependency
+                    .source
+                    .with_mut(|source| source.wake_blocked_cursors());
+                return Ok(true);
+            }
+        }
+        return progress_core_net_sweep(&dependency.source);
+    };
+    let progress = dependency
+        .source
+        .with_mut(|source| source.drive_cursor(source_cursor));
+    match progress {
+        Some(crate::interaction_net::CursorProgress::Blocked) => {
+            let progressed =
+                progress_cursor_dependency(&dependency.source, source_cursor, depth + 1)?;
+            if progressed {
+                dependency
+                    .source
+                    .with_mut(|source| source.wake_blocked_cursors());
+            }
+            Ok(progressed)
+        }
+        Some(_) => Ok(true),
+        None => Ok(false),
+    }
+}
+
+fn progress_core_net_sweep(runtime: &crate::core_net::CoreRuntimeNet) -> Result<bool, EvalError> {
+    let ready = runtime.with(|net| net.ready_pairs().len());
+    if ready == 0 {
+        return progress_core_net(runtime);
+    }
+    let mut progressed = false;
+    for _ in 0..ready {
+        let Some(reduction) = runtime.with_mut(|net| net.reduce_next()) else {
+            break;
+        };
+        if matches!(reduction.kind, ReductionKind::Stuck) {
+            return Err(stuck_pair_error(runtime, reduction.pair));
+        }
+        progressed = true;
+    }
+    if progressed {
+        runtime.with_mut(|net| net.wake_blocked_host_calls());
+    }
+    Ok(progressed)
+}
+
+fn stuck_pair_error(
+    runtime: &crate::core_net::CoreRuntimeNet,
+    pair: crate::interaction_net::ActivePair,
+) -> EvalError {
+    runtime.with(|net| {
+        let reason = net
+            .stuck_pairs()
+            .iter()
+            .find(|stuck| stuck.pair == pair)
+            .map(|stuck| &stuck.reason);
+        match reason {
+            Some(StuckReason::HostError(error)) => EvalError::new(error.as_ref()),
+            Some(StuckReason::NoRule) | None => {
+                EvalError::new("interaction net reached a stuck active pair")
+            }
+        }
+    })
+}
+
+fn progress_core_host_call(runtime: &crate::core_net::CoreRuntimeNet) -> Result<bool, EvalError> {
+    let Some(call) = runtime.with(|net| net.host_calls().front().copied()) else {
+        return Ok(false);
+    };
+    let (host_fn, data) = runtime.with(|net| net.host_call_parts(call));
+    match host_fn.apply(&data) {
+        Ok(result) => runtime.with_mut(|net| {
+            net.complete_host_call(call, result);
+        }),
+        Err(HostFnStop::Block(reason)) => runtime.with_mut(|net| {
+            net.block_host_call(call, reason);
+        }),
+        Err(HostFnStop::Error(error)) => {
+            runtime.with_mut(|net| {
+                net.fail_host_call(call, error.clone());
+            });
+            return Err(EvalError::new(error.as_ref()));
+        }
+    }
+    Ok(true)
 }
 
 fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
@@ -899,6 +1048,33 @@ fn core_data_to_lazy_value(data: CoreNetData) -> Result<Value, EvalError> {
             "unsupported core data was used as a lazy argument: {unsupported:?}"
         ))),
     }
+}
+
+pub(crate) fn builtin_host_fn(call: BuiltinCall) -> HostFn<CoreNetData> {
+    let name: Arc<str> = format!("builtin::{:?}", call.builtin).into();
+    HostFn::new(name, move |data: &CoreNetData| {
+        let argument = core_data_to_lazy_value(data.clone())
+            .map_err(|error| HostFnStop::Error(error.to_string().into()))?;
+        let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
+        arguments.push(argument);
+        if arguments.len() < call.builtin.arity() {
+            return Ok(HostFnYield::HostFn(builtin_host_fn(BuiltinCall {
+                builtin: call.builtin,
+                arguments: Arc::from(arguments),
+            })));
+        }
+        if arguments.len() > call.builtin.arity() {
+            return Err(HostFnStop::Error(
+                "builtin host function received too many arguments".into(),
+            ));
+        }
+        Ok(HostFnYield::Data(CoreNetData::Value(Value::Expr(
+            Thunk::from_builtin(BuiltinCall {
+                builtin: call.builtin,
+                arguments: Arc::from(arguments),
+            }),
+        ))))
+    })
 }
 
 fn complete_core_call(
@@ -2911,6 +3087,26 @@ mod tests {
     }
 
     #[test]
+    fn net_application_accepts_a_cursor_backed_function_argument_without_forcing_it() {
+        let context = CompileContext::default();
+        let ignores_first = context.value_lambdas(2, context.value_local(0));
+        let forwards_argument = context.value_lambdas(
+            1,
+            context.value_apply(ignores_first, context.value_local(0)),
+        );
+        let unresolved_function = context.value_lambdas(1, context.value_local(0));
+
+        let partial = eval_value(&context.value_apply(forwards_argument, unresolved_function))
+            .expect("net attachment must not demand a callable argument as embedded data");
+        assert!(matches!(partial, Value::Net(_)));
+
+        assert_eq!(
+            eval_value(&context.value_apply(partial, n(42))).unwrap(),
+            n(42)
+        );
+    }
+
+    #[test]
     fn batched_application_spine_keeps_unused_arguments_lazy() {
         let context = CompileContext::default();
         let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3504,7 +3700,7 @@ mod tests {
     }
 
     #[test]
-    fn net_partial_builtins_escape_and_share_lazy_arguments() {
+    fn host_fn_partial_builtins_escape_as_nets_and_share_lazy_arguments() {
         let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = force_count.clone();
         let argument = Expr::Deferred(Arc::new(DeferredValue::new(
@@ -3521,7 +3717,7 @@ mod tests {
         let partial = eval_closed_expr(&Expr::Apply(Arc::new(make_partial), Arc::new(argument)))
             .expect("a net builtin should escape while retaining its argument lazily");
 
-        assert!(matches!(partial, Value::PartialBuiltin(_)));
+        assert!(matches!(partial, Value::Net(_)));
         assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(apply_value(partial.clone(), n(2), &[]).unwrap(), n(42));
         assert_eq!(apply_value(partial, n(3), &[]).unwrap(), n(43));

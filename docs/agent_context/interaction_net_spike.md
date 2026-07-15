@@ -73,12 +73,12 @@ nonzero word, so `Port` and `Option<Port>` are both one word. Node records keep
 all three possible links inline.
 
 Every principal-principal connection appears in exactly one scheduler
-collection. New pairs enter the ready queue, unresolved calls and remote
-cursors move to their blocked queues, and data-data type errors move to the
-stuck list. Reduction results retain the originating pair, and calls identify
-the bind and data node roles needed for later completion. Interaction rules,
-especially erasure, explicitly remove nodes; there is no separate reachability
-collector.
+collection. New pairs enter the ready queue; unresolved bind calls, pending or
+blocked host calls, and remote cursors move to their respective queues; and
+no-rule pairs or permanent host errors move to the diagnostic-bearing stuck
+list. Reduction results retain the originating pair and calls identify the node
+roles needed for later completion. Interaction rules, especially erasure,
+explicitly remove nodes; there is no separate reachability collector.
 
 ## Remaining evaluator bridge
 
@@ -99,11 +99,21 @@ Other lambdas retain the compatibility closure path.
 Remote cursors remain strictly outward, from a source net into a logical copy;
 an inner net cannot retain a cursor back to an outer capture. A logical copy of
 a partially applied net can nevertheless encounter a remote cursor already
-present in its intermediate source. In that case demand advances the
-intermediate cursor toward its own source and retries the outer copy. This is
-cursor composition along copy provenance, not reversed dataflow. Runtime calls
-also defer capturing lazy arguments while the runtime still exposes an
-unsupplied bind from its curried spine.
+present in its intermediate source. The outer cursor records the exact source
+runtime and intermediate cursor as its dependency. The evaluator releases the
+outer lock, drives that cursor transitively, and retries the outer copy. This is
+cursor composition along copy provenance, not reversed dataflow, and avoids
+holding nested runtime locks. Runtime calls also defer capturing lazy arguments
+while the runtime still exposes an unsupplied bind from its curried spine.
+
+`HostFn<Data>` is a unary runtime agent whose principal consumes Data and whose
+auxiliary is its result continuation. Host callbacks execute outside the net
+mutex. Success emits Data or a new HostFn automatically wrapped behind a Bind;
+retryable blocks keep their active pair in a blocked queue, while permanent
+errors retain the intact pair and diagnostic in the stuck collection. Core
+builtin expressions lowered into nets use this path, although saturated work
+remains a memoized semantic thunk and direct evaluator builtin values retain a
+compatibility path.
 
 Application spines use the dual construction. `NetBuilder::bind_spine` is
 shared by lambda lowering and evaluator-owned caller nets. `g_syntax` lowers a

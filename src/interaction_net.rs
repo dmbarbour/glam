@@ -76,6 +76,76 @@ impl FanIdentity {
     }
 }
 
+/// A host-provided unary data transition.
+///
+/// The principal port consumes [`Node::Data`]. Its sole auxiliary port is the
+/// result continuation. Returning another `HostFn` installs it behind a fresh
+/// [`Node::Bind`], preserving ordinary unary function topology.
+pub struct HostFn<D> {
+    name: Arc<str>,
+    implementation: Arc<dyn Fn(&D) -> HostFnResult<D> + Send + Sync>,
+}
+
+impl<D> HostFn<D> {
+    pub fn new(
+        name: impl Into<Arc<str>>,
+        implementation: impl Fn(&D) -> HostFnResult<D> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            implementation: Arc::new(implementation),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn apply(&self, data: &D) -> HostFnResult<D> {
+        (self.implementation)(data)
+    }
+}
+
+impl<D> Clone for HostFn<D> {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            implementation: self.implementation.clone(),
+        }
+    }
+}
+
+impl<D> fmt::Debug for HostFn<D> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostFn")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<D> PartialEq for HostFn<D> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.implementation, &other.implementation)
+    }
+}
+
+impl<D> Eq for HostFn<D> {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostFnYield<D> {
+    Data(D),
+    HostFn(HostFn<D>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostFnStop {
+    Block(Arc<str>),
+    Error(Arc<str>),
+}
+
+pub type HostFnResult<D> = Result<HostFnYield<D>, HostFnStop>;
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Port(NonZeroU64);
 
@@ -136,12 +206,15 @@ pub enum Node<D> {
     Erase,
     /// Client-defined embedded data. Port: `[data*]`.
     Data(D),
+    /// Host-provided unary data transition. Ports: `[input*, result]`.
+    HostFn(HostFn<D>),
 }
 
 impl<D> Node<D> {
     fn port_count(&self) -> u32 {
         match self {
             Self::Bind | Self::Fan { .. } => 3,
+            Self::HostFn(_) => 2,
             Self::Erase | Self::Data(_) => 1,
         }
     }
@@ -155,6 +228,7 @@ pub enum RuntimeNode<D> {
     },
     Erase,
     Data(D),
+    HostFn(HostFn<D>),
     /// Stable, evaluator-only anchor for a runtime net's exposed port.
     Interface,
     /// Evaluator-only one-way wire into a logical copy of another runtime net.
@@ -168,7 +242,7 @@ impl<D> RuntimeNode<D> {
     fn port_count(&self) -> u32 {
         match self {
             Self::Bind | Self::Fan { .. } => 3,
-            Self::Interface => 2,
+            Self::HostFn(_) | Self::Interface => 2,
             Self::Erase | Self::Data(_) | Self::RemoteCursor { .. } => 1,
         }
     }
@@ -375,6 +449,22 @@ impl<D> NetBuilder<D> {
     pub fn data(&mut self, data: D) -> Port {
         let node = self.push(Node::Data(data));
         Port::principal(node)
+    }
+
+    pub fn host_fn(&mut self, host_fn: HostFn<D>) -> [Port; 2] {
+        let node = self.push(Node::HostFn(host_fn));
+        [Port::principal(node), Port::auxiliary(node, 1)]
+    }
+
+    /// Constructs a unary function from an ordinary bind and a host function.
+    /// The returned ports are the exposed function port and its internal result
+    /// port, which is already wired to the host function continuation.
+    pub fn unary_host_fn(&mut self, host_fn: HostFn<D>) -> Port {
+        let [function, argument, result] = self.bind();
+        let [input, output] = self.host_fn(host_fn);
+        self.wire(argument, input);
+        self.wire(result, output);
+        function
     }
 
     pub fn push_fan(&mut self) -> NodeId {
@@ -657,9 +747,16 @@ pub enum ReductionKind {
     FanBind {
         identity: FanIdentity,
     },
+    FanHostFn {
+        identity: FanIdentity,
+    },
     Erase,
     Call {
         bind: NodeId,
+        data: NodeId,
+    },
+    HostCall {
+        host_fn: NodeId,
         data: NodeId,
     },
     RemoteCursor {
@@ -674,8 +771,25 @@ pub enum CursorProgress {
     Materialized { node: NodeId },
     MaterializedPair { left: NodeId, right: NodeId },
     Joined,
-    SourceSweep { reductions: usize },
     Blocked,
+}
+
+#[derive(Clone)]
+pub struct CursorDependency<D> {
+    pub source: SharedRuntimeNet<D>,
+    /// The exact intermediate cursor when one logical-copy boundary faces
+    /// another. `None` requests conservative progress in the source runtime.
+    pub cursor: Option<NodeId>,
+}
+
+impl<D> fmt::Debug for CursorDependency<D> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CursorDependency")
+            .field("source", &self.source)
+            .field("cursor", &self.cursor)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -683,6 +797,31 @@ pub struct BlockedCall {
     pub pair: ActivePair,
     pub bind: NodeId,
     pub data: NodeId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostCall {
+    pub pair: ActivePair,
+    pub host_fn: NodeId,
+    pub data: NodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedHostCall {
+    pub call: HostCall,
+    pub reason: Arc<str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StuckReason {
+    NoRule,
+    HostError(Arc<str>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StuckPair {
+    pub pair: ActivePair,
+    pub reason: StuckReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -779,10 +918,16 @@ pub struct RuntimeNet<D> {
     next_copy_id: u64,
     has_imported_copy: bool,
     copies: HashMap<CopyId, CopyState<D>>,
+    cursor_dependencies: HashMap<NodeId, CursorDependency<D>>,
+
+    // active pairs are stored in multiple queues to avoid repeated
+    // linear scans of the entire net
     ready: VecDeque<ActivePair>,
     calls: VecDeque<BlockedCall>,
+    host_calls: VecDeque<HostCall>,
+    blocked_host_calls: VecDeque<BlockedHostCall>,
     blocked_cursors: VecDeque<BlockedCursor>,
-    stuck: Vec<ActivePair>,
+    stuck: Vec<StuckPair>,
 }
 
 impl<D: Clone + 'static> RuntimeNet<D> {
@@ -800,6 +945,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                     },
                     Node::Erase => RuntimeNode::Erase,
                     Node::Data(data) => RuntimeNode::Data(map_data(data)),
+                    Node::HostFn(host_fn) => RuntimeNode::HostFn(host_fn.clone()),
                 };
                 (id, RuntimeEntry::new(node))
             })
@@ -825,8 +971,11 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             next_copy_id: 0,
             has_imported_copy: false,
             copies: HashMap::new(),
+            cursor_dependencies: HashMap::new(),
             ready: VecDeque::new(),
             calls: VecDeque::new(),
+            host_calls: VecDeque::new(),
+            blocked_host_calls: VecDeque::new(),
             blocked_cursors: VecDeque::new(),
             stuck: Vec::new(),
         };
@@ -848,8 +997,11 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             next_copy_id: 0,
             has_imported_copy: false,
             copies: HashMap::new(),
+            cursor_dependencies: HashMap::new(),
             ready: VecDeque::new(),
             calls: VecDeque::new(),
+            host_calls: VecDeque::new(),
+            blocked_host_calls: VecDeque::new(),
             blocked_cursors: VecDeque::new(),
             stuck: Vec::new(),
         }
@@ -860,8 +1012,14 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             .iter()
             .copied()
             .chain(self.calls.iter().map(|call| call.pair))
+            .chain(self.host_calls.iter().map(|call| call.pair))
+            .chain(
+                self.blocked_host_calls
+                    .iter()
+                    .map(|blocked| blocked.call.pair),
+            )
             .chain(self.blocked_cursors.iter().map(|cursor| cursor.pair))
-            .chain(self.stuck.iter().copied())
+            .chain(self.stuck.iter().map(|stuck| stuck.pair))
             .collect()
     }
 
@@ -879,23 +1037,28 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         &self.calls
     }
 
+    pub fn host_calls(&self) -> &VecDeque<HostCall> {
+        &self.host_calls
+    }
+
+    pub fn blocked_host_calls(&self) -> &VecDeque<BlockedHostCall> {
+        &self.blocked_host_calls
+    }
+
     pub fn blocked_cursors(&self) -> &VecDeque<BlockedCursor> {
         &self.blocked_cursors
     }
 
-    pub fn blocked_cursor_sources(&self) -> Vec<SharedRuntimeNet<D>> {
-        self.blocked_cursors
-            .iter()
-            .filter_map(|blocked| {
-                let RuntimeNode::RemoteCursor { copy, .. } = self.node(blocked.cursor)? else {
-                    return None;
-                };
-                self.copies.get(copy).map(|state| state.source.clone())
-            })
-            .collect()
+    pub fn cursor_dependency(&self, cursor: NodeId) -> Option<CursorDependency<D>> {
+        self.cursor_dependencies.get(&cursor).cloned()
     }
 
-    pub fn stuck_pairs(&self) -> &[ActivePair] {
+    pub fn interface_cursor(&self, interface: Port) -> Option<NodeId> {
+        self.assert_interface(interface);
+        self.cursor_across(interface)
+    }
+
+    pub fn stuck_pairs(&self) -> &[StuckPair] {
         &self.stuck
     }
 
@@ -935,9 +1098,65 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         self.demand_cursor_across(Port::auxiliary(call.bind, 1))
     }
 
-    pub fn call_argument_cursor_source(&self, call: BlockedCall) -> Option<SharedRuntimeNet<D>> {
+    pub fn call_argument_cursor(&self, call: BlockedCall) -> Option<NodeId> {
         assert!(self.calls.contains(&call), "call must still be blocked");
-        self.cursor_source_across(Port::auxiliary(call.bind, 1))
+        self.cursor_across(Port::auxiliary(call.bind, 1))
+    }
+
+    /// Clones a pending host transition so the host callback can run without
+    /// holding the shared runtime-net mutex.
+    pub fn host_call_parts(&self, call: HostCall) -> (HostFn<D>, D) {
+        assert!(self.host_calls.contains(&call), "host call must be pending");
+        let host_fn = match self.node(call.host_fn) {
+            Some(RuntimeNode::HostFn(host_fn)) => host_fn.clone(),
+            _ => panic!("pending host call function must exist"),
+        };
+        let data = match self.node(call.data) {
+            Some(RuntimeNode::Data(data)) => data.clone(),
+            _ => panic!("pending host call data must exist"),
+        };
+        (host_fn, data)
+    }
+
+    pub fn complete_host_call(&mut self, call: HostCall, result: HostFnYield<D>) -> NodeId {
+        let target = self.take_host_call(call);
+        match result {
+            HostFnYield::Data(data) => {
+                let node = self.add_node(RuntimeNode::Data(data));
+                self.connect(Port::principal(node), target);
+                node
+            }
+            HostFnYield::HostFn(host_fn) => {
+                let bind = self.add_node(RuntimeNode::Bind);
+                let host = self.add_node(RuntimeNode::HostFn(host_fn));
+                self.connect(Port::principal(bind), target);
+                self.connect(Port::auxiliary(bind, 1), Port::principal(host));
+                self.connect(Port::auxiliary(bind, 2), Port::auxiliary(host, 1));
+                bind
+            }
+        }
+    }
+
+    pub fn block_host_call(&mut self, call: HostCall, reason: Arc<str>) {
+        self.remove_pending_host_call(call);
+        self.blocked_host_calls
+            .push_back(BlockedHostCall { call, reason });
+    }
+
+    pub fn fail_host_call(&mut self, call: HostCall, error: Arc<str>) {
+        self.remove_pending_host_call(call);
+        self.stuck.push(StuckPair {
+            pair: call.pair,
+            reason: StuckReason::HostError(error),
+        });
+    }
+
+    pub fn wake_blocked_host_calls(&mut self) {
+        while let Some(blocked) = self.blocked_host_calls.pop_front() {
+            if self.principals_connect(blocked.call.pair) {
+                self.host_calls.push_back(blocked.call);
+            }
+        }
     }
 
     pub fn interface_data(&self, interface: Port) -> Option<&D> {
@@ -968,9 +1187,30 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         self.demand_cursor_across(interface)
     }
 
-    pub fn interface_cursor_source(&self, interface: Port) -> Option<SharedRuntimeNet<D>> {
-        self.assert_interface(interface);
-        self.cursor_source_across(interface)
+    /// Advances one cursor without requiring it to be part of a scheduled
+    /// principal pair. This is used to drive an exact layered-copy dependency.
+    pub fn drive_cursor(&mut self, cursor: NodeId) -> Option<CursorProgress> {
+        if !matches!(self.node(cursor), Some(RuntimeNode::RemoteCursor { .. })) {
+            return None;
+        }
+        self.unschedule_node(cursor);
+        let progress = self.advance_remote_cursor(cursor);
+        if matches!(self.node(cursor), Some(RuntimeNode::RemoteCursor { .. })) {
+            let local = self
+                .neighbor(Port::principal(cursor))
+                .expect("suspended cursor must remain wired");
+            if local.is_principal() {
+                let pair = ActivePair {
+                    left: cursor,
+                    right: local.node(),
+                };
+                if progress == CursorProgress::Blocked {
+                    self.blocked_cursors
+                        .push_back(BlockedCursor { pair, cursor });
+                }
+            }
+        }
+        Some(progress)
     }
 
     pub fn wake_blocked_cursors(&mut self) {
@@ -1020,8 +1260,6 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             if progress == CursorProgress::Blocked {
                 self.blocked_cursors
                     .push_back(BlockedCursor { pair, cursor });
-            } else if matches!(progress, CursorProgress::SourceSweep { .. }) {
-                self.ready.push_back(pair);
             }
             return Some(Reduction {
                 pair,
@@ -1071,6 +1309,18 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                     identity: identity.clone(),
                 }
             }
+            (RuntimeNode::Fan { identity }, RuntimeNode::HostFn(_)) => {
+                self.duplicate_host_fn(pair.left, identity, pair.right);
+                ReductionKind::FanHostFn {
+                    identity: identity.clone(),
+                }
+            }
+            (RuntimeNode::HostFn(_), RuntimeNode::Fan { identity }) => {
+                self.duplicate_host_fn(pair.right, identity, pair.left);
+                ReductionKind::FanHostFn {
+                    identity: identity.clone(),
+                }
+            }
             (RuntimeNode::Erase, _) => {
                 self.erase(pair.left, pair.right);
                 ReductionKind::Erase
@@ -1101,8 +1351,40 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                     data: pair.left,
                 }
             }
+            (RuntimeNode::HostFn(_), RuntimeNode::Data(_)) => {
+                self.host_calls.push_back(HostCall {
+                    pair,
+                    host_fn: pair.left,
+                    data: pair.right,
+                });
+                ReductionKind::HostCall {
+                    host_fn: pair.left,
+                    data: pair.right,
+                }
+            }
+            (RuntimeNode::Data(_), RuntimeNode::HostFn(_)) => {
+                self.host_calls.push_back(HostCall {
+                    pair,
+                    host_fn: pair.right,
+                    data: pair.left,
+                });
+                ReductionKind::HostCall {
+                    host_fn: pair.right,
+                    data: pair.left,
+                }
+            }
             (RuntimeNode::Data(_), RuntimeNode::Data(_)) => {
-                self.stuck.push(pair);
+                self.stuck.push(StuckPair {
+                    pair,
+                    reason: StuckReason::NoRule,
+                });
+                ReductionKind::Stuck
+            }
+            (RuntimeNode::HostFn(_), _) | (_, RuntimeNode::HostFn(_)) => {
+                self.stuck.push(StuckPair {
+                    pair,
+                    reason: StuckReason::NoRule,
+                });
                 ReductionKind::Stuck
             }
             (RuntimeNode::Interface, _)
@@ -1249,7 +1531,32 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         node
     }
 
+    fn take_host_call(&mut self, call: HostCall) -> Port {
+        self.remove_pending_host_call(call);
+        assert_eq!(
+            self.disconnect(Port::principal(call.host_fn)),
+            Some(Port::principal(call.data))
+        );
+        let target = self
+            .disconnect(Port::auxiliary(call.host_fn, 1))
+            .expect("host function result must remain wired");
+        assert!(matches!(
+            self.remove_node(call.host_fn),
+            RuntimeNode::HostFn(_)
+        ));
+        assert!(matches!(self.remove_node(call.data), RuntimeNode::Data(_)));
+        target
+    }
+
+    fn remove_pending_host_call(&mut self, call: HostCall) {
+        let Some(index) = self.host_calls.iter().position(|pending| *pending == call) else {
+            panic!("completed host call must still be pending");
+        };
+        self.host_calls.remove(index);
+    }
+
     fn advance_remote_cursor(&mut self, cursor: NodeId) -> CursorProgress {
+        self.cursor_dependencies.remove(&cursor);
         let RuntimeNode::RemoteCursor { copy, remote } = self
             .node(cursor)
             .expect("advanced remote cursor must exist")
@@ -1263,7 +1570,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             .expect("remote cursor must reference a live copy")
             .source
             .clone();
-        let mut source = source_handle
+        let source = source_handle
             .inner
             .lock()
             .expect("shared runtime net was poisoned");
@@ -1295,35 +1602,15 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             // is outward-only, so this never gives the inner source a
             // reference back into either caller.
             let nested_cursor = neighbor.node();
-            let progress = source.advance_remote_cursor(nested_cursor);
-            source.unschedule_node(nested_cursor);
-            if matches!(
-                source.node(nested_cursor),
-                Some(RuntimeNode::RemoteCursor { .. })
-            ) {
-                let local = source
-                    .neighbor(Port::principal(nested_cursor))
-                    .expect("suspended source cursor must remain wired");
-                if local.is_principal() {
-                    let pair = ActivePair {
-                        left: nested_cursor,
-                        right: local.node(),
-                    };
-                    if matches!(progress, CursorProgress::Blocked) {
-                        source.blocked_cursors.push_back(BlockedCursor {
-                            pair,
-                            cursor: nested_cursor,
-                        });
-                    } else if matches!(progress, CursorProgress::SourceSweep { .. }) {
-                        source.ready.push_back(pair);
-                    }
-                }
-            }
-            return if matches!(progress, CursorProgress::Blocked) {
-                CursorProgress::Blocked
-            } else {
-                CursorProgress::SourceSweep { reductions: 1 }
-            };
+            drop(source);
+            self.cursor_dependencies.insert(
+                cursor,
+                CursorDependency {
+                    source: source_handle,
+                    cursor: Some(nested_cursor),
+                },
+            );
+            return CursorProgress::Blocked;
         }
 
         if neighbor.is_principal() {
@@ -1343,16 +1630,24 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 
         let source_node = neighbor.node();
         let principal = Port::principal(source_node);
-        if let Some(partner) = source
-            .neighbor(principal)
-            .filter(|port| port.is_principal())
-        {
+        let principal_neighbor = source.neighbor(principal);
+        if let Some(partner) = principal_neighbor.filter(|port| port.is_principal()) {
             let pair_is_blocked = source.calls.iter().any(|call| {
                 (call.pair.left == source_node && call.pair.right == partner.node())
                     || (call.pair.right == source_node && call.pair.left == partner.node())
-            }) || source.stuck.iter().any(|pair| {
-                (pair.left == source_node && pair.right == partner.node())
-                    || (pair.right == source_node && pair.left == partner.node())
+            }) || source.host_calls.iter().any(|call| {
+                (call.pair.left == source_node && call.pair.right == partner.node())
+                    || (call.pair.right == source_node && call.pair.left == partner.node())
+            }) || source.blocked_host_calls.iter().any(|blocked| {
+                (blocked.call.pair.left == source_node && blocked.call.pair.right == partner.node())
+                    || (blocked.call.pair.right == source_node
+                        && blocked.call.pair.left == partner.node())
+            }) || source.blocked_cursors.iter().any(|blocked| {
+                (blocked.pair.left == source_node && blocked.pair.right == partner.node())
+                    || (blocked.pair.right == source_node && blocked.pair.left == partner.node())
+            }) || source.stuck.iter().any(|stuck| {
+                (stuck.pair.left == source_node && stuck.pair.right == partner.node())
+                    || (stuck.pair.right == source_node && stuck.pair.left == partner.node())
             });
             if pair_is_blocked {
                 let left = source
@@ -1363,26 +1658,54 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                     .node(partner.node())
                     .expect("blocked remote pair right node must exist")
                     .clone();
+                if matches!(right, RuntimeNode::RemoteCursor { .. }) {
+                    let dependency_cursor = partner.node();
+                    drop(source);
+                    self.cursor_dependencies.insert(
+                        cursor,
+                        CursorDependency {
+                            source: source_handle,
+                            cursor: Some(dependency_cursor),
+                        },
+                    );
+                    return CursorProgress::Blocked;
+                }
                 drop(source);
                 return self
                     .materialize_remote_pair(copy, cursor, remote, neighbor, left, partner, right);
             }
+        } else {
+            let source_node_data = source
+                .node(source_node)
+                .expect("stable remote node must exist")
+                .clone();
+            drop(source);
+            return self.materialize_remote_stable_node(
+                copy,
+                cursor,
+                remote,
+                neighbor,
+                source_node_data,
+            );
         }
 
-        let ready = source.ready.len();
-        if ready == 0 {
-            return CursorProgress::Blocked;
-        }
-        let mut reductions = 0;
-        for _ in 0..ready {
-            if source.reduce_next().is_some() {
-                reductions += 1;
-            }
-        }
-        CursorProgress::SourceSweep { reductions }
+        drop(source);
+        self.cursor_dependencies.insert(
+            cursor,
+            CursorDependency {
+                source: source_handle,
+                cursor: None,
+            },
+        );
+        CursorProgress::Blocked
     }
 
     fn demand_cursor_across(&mut self, local: Port) -> Option<CursorProgress> {
+        let cursor = self.cursor_across(local)?;
+        Some(self.advance_remote_cursor(cursor))
+    }
+
+    fn cursor_across(&self, local: Port) -> Option<NodeId> {
         let neighbor = self.neighbor(local)?;
         if !neighbor.is_principal()
             || !matches!(
@@ -1392,15 +1715,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         {
             return None;
         }
-        Some(self.advance_remote_cursor(neighbor.node()))
-    }
-
-    fn cursor_source_across(&self, local: Port) -> Option<SharedRuntimeNet<D>> {
-        let neighbor = self.neighbor(local)?;
-        let RuntimeNode::RemoteCursor { copy, .. } = self.node(neighbor.node())? else {
-            return None;
-        };
-        self.copies.get(copy).map(|state| state.source.clone())
+        Some(neighbor.node())
     }
 
     fn erase_remote_cursor(&mut self, eraser: NodeId, cursor: NodeId) {
@@ -1443,6 +1758,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             },
             RuntimeNode::Erase => RuntimeNode::Erase,
             RuntimeNode::Data(data) => RuntimeNode::Data((state.map_data)(&data)),
+            RuntimeNode::HostFn(host_fn) => RuntimeNode::HostFn(host_fn),
             RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => {
                 self.copies.insert(copy, state);
                 return CursorProgress::Blocked;
@@ -1450,6 +1766,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         };
         let auxiliaries = match &node {
             RuntimeNode::Bind | RuntimeNode::Fan { .. } => 2,
+            RuntimeNode::HostFn(_) => 1,
             RuntimeNode::Erase | RuntimeNode::Data(_) => 0,
             RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => unreachable!(),
         };
@@ -1556,6 +1873,47 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         }
     }
 
+    /// Copies a node entered through an auxiliary once its principal is known
+    /// not to face another principal in the source. The entered auxiliary is
+    /// attached locally and every other port remains a lazy source frontier.
+    fn materialize_remote_stable_node(
+        &mut self,
+        copy: CopyId,
+        cursor: NodeId,
+        remote: Port,
+        entered: Port,
+        node: RuntimeNode<D>,
+    ) -> CursorProgress {
+        let mut state = self
+            .copies
+            .remove(&copy)
+            .expect("materialized cursor must reference a live copy");
+        let Some((node, auxiliaries)) = self.copy_remote_node(&mut state, node) else {
+            self.copies.insert(copy, state);
+            return CursorProgress::Blocked;
+        };
+
+        let local = self
+            .disconnect(Port::principal(cursor))
+            .expect("active remote cursor must face the local net");
+        self.remove_node(cursor);
+        assert_eq!(state.frontiers.remove(&remote), Some(cursor));
+
+        let target = self.add_node(node);
+        assert!(state.mapped_nodes.insert(entered.node(), target).is_none());
+        for index in 0..=auxiliaries {
+            let source_anchor = Port::new(entered.node(), index);
+            let target_port = Port::new(target, index);
+            if index == entered.index() {
+                self.connect(target_port, local);
+            } else {
+                self.add_remote_frontier(copy, &mut state, source_anchor, target_port);
+            }
+        }
+        self.copies.insert(copy, state);
+        CursorProgress::Materialized { node: target }
+    }
+
     fn copy_remote_node(
         &mut self,
         state: &mut CopyState<D>,
@@ -1568,10 +1926,12 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             },
             RuntimeNode::Erase => RuntimeNode::Erase,
             RuntimeNode::Data(data) => RuntimeNode::Data((state.map_data)(&data)),
+            RuntimeNode::HostFn(host_fn) => RuntimeNode::HostFn(host_fn),
             RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => return None,
         };
         let auxiliaries = match &node {
             RuntimeNode::Bind | RuntimeNode::Fan { .. } => 2,
+            RuntimeNode::HostFn(_) => 1,
             RuntimeNode::Erase | RuntimeNode::Data(_) => 0,
             RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => unreachable!(),
         };
@@ -1712,6 +2072,35 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         }
     }
 
+    fn duplicate_host_fn(&mut self, fan: NodeId, identity: &FanIdentity, host_fn: NodeId) {
+        self.disconnect(Port::principal(fan));
+        let fan_targets = self.take_auxiliaries(fan, 2);
+        let [result] = <[Port; 1]>::try_from(self.take_auxiliaries(host_fn, 1)).unwrap();
+        let RuntimeNode::HostFn(host_fn) = self.remove_node(host_fn) else {
+            unreachable!();
+        };
+        self.remove_node(fan);
+
+        let hosts = fan_targets
+            .into_iter()
+            .map(|target| {
+                let node = self.add_node(RuntimeNode::HostFn(host_fn.clone()));
+                self.connect(Port::principal(node), target);
+                node
+            })
+            .collect::<Vec<_>>();
+        let residual = self.add_node(RuntimeNode::Fan {
+            identity: identity.clone(),
+        });
+        self.connect(Port::principal(residual), result);
+        for (branch, host) in hosts.into_iter().enumerate() {
+            self.connect(
+                Port::auxiliary(residual, branch as u32 + 1),
+                Port::auxiliary(host, 1),
+            );
+        }
+    }
+
     fn commute_fans(
         &mut self,
         left: NodeId,
@@ -1761,6 +2150,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         self.disconnect(Port::principal(eraser));
         let auxiliaries = match self.node(other).expect("erased node must exist") {
             RuntimeNode::Bind | RuntimeNode::Fan { .. } => 2,
+            RuntimeNode::HostFn(_) => 1,
             RuntimeNode::Erase | RuntimeNode::Data(_) => 0,
             RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => {
                 unreachable!("evaluator-only nodes are not erased as ordinary agents")
@@ -1810,6 +2200,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
     }
 
     fn remove_node(&mut self, node: NodeId) -> RuntimeNode<D> {
+        self.cursor_dependencies.remove(&node);
         let entry = self.nodes.remove(&node).expect("removed node must exist");
         assert!(entry.links.iter().all(Option::is_none));
         entry.node
@@ -1820,10 +2211,14 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             .retain(|pair| pair.left != node && pair.right != node);
         self.calls
             .retain(|call| call.pair.left != node && call.pair.right != node);
+        self.host_calls
+            .retain(|call| call.pair.left != node && call.pair.right != node);
+        self.blocked_host_calls
+            .retain(|blocked| blocked.call.pair.left != node && blocked.call.pair.right != node);
         self.blocked_cursors
             .retain(|cursor| cursor.pair.left != node && cursor.pair.right != node);
         self.stuck
-            .retain(|pair| pair.left != node && pair.right != node);
+            .retain(|stuck| stuck.pair.left != node && stuck.pair.right != node);
     }
 
     fn neighbor(&self, port: Port) -> Option<Port> {
@@ -2156,8 +2551,122 @@ mod tests {
             })
         );
         assert!(stuck.ready_pairs().is_empty());
-        assert_eq!(stuck.stuck_pairs(), &[stuck_pair]);
+        assert_eq!(
+            stuck.stuck_pairs(),
+            &[StuckPair {
+                pair: stuck_pair,
+                reason: StuckReason::NoRule,
+            }]
+        );
         assert_eq!(stuck.reduce_next(), None);
+    }
+
+    fn host_call_net(host_fn: HostFn<i32>, input: i32) -> (RuntimeNet<i32>, HostCall, Port) {
+        let mut net = RuntimeNet::empty();
+        let host = net.add_node(RuntimeNode::HostFn(host_fn));
+        let data = net.add_node(RuntimeNode::Data(input));
+        let interface = net.add_node(RuntimeNode::Interface);
+        let result = Port::auxiliary(interface, 1);
+        net.connect(Port::principal(host), Port::principal(data));
+        net.connect(Port::auxiliary(host, 1), result);
+        let pair = ActivePair {
+            left: host,
+            right: data,
+        };
+        assert!(matches!(
+            net.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::HostCall { .. },
+                ..
+            })
+        ));
+        (
+            net,
+            HostCall {
+                pair,
+                host_fn: host,
+                data,
+            },
+            result,
+        )
+    }
+
+    #[test]
+    fn host_fn_consumes_data_and_emits_data() {
+        let (mut net, call, result) = host_call_net(
+            HostFn::new("increment", |value| Ok(HostFnYield::Data(value + 1))),
+            41,
+        );
+        let (host_fn, data) = net.host_call_parts(call);
+        let outcome = host_fn.apply(&data).unwrap();
+
+        net.complete_host_call(call, outcome);
+
+        assert_eq!(net.interface_data(result), Some(&42));
+        assert!(net.host_calls().is_empty());
+    }
+
+    #[test]
+    fn returned_host_fn_is_wrapped_as_a_unary_function() {
+        let next = HostFn::new("increment", |value| Ok(HostFnYield::Data(value + 1)));
+        let (mut net, call, result) = host_call_net(
+            HostFn::new("curry", move |_| Ok(HostFnYield::HostFn(next.clone()))),
+            0,
+        );
+        let (host_fn, data) = net.host_call_parts(call);
+        let outcome = host_fn.apply(&data).unwrap();
+
+        let bind = net.complete_host_call(call, outcome);
+
+        assert_eq!(net.interface_neighbor(result), Some(Port::principal(bind)));
+        let host = net.port_neighbor(Port::auxiliary(bind, 1)).unwrap();
+        assert!(matches!(
+            net.node(host.node()),
+            Some(RuntimeNode::HostFn(_))
+        ));
+        assert_eq!(
+            net.port_neighbor(Port::auxiliary(bind, 2)),
+            Some(Port::auxiliary(host.node(), 1))
+        );
+    }
+
+    #[test]
+    fn host_fn_block_and_error_preserve_the_active_pair() {
+        let (mut blocked, call, _) = host_call_net(
+            HostFn::new("blocked", |_| {
+                Err(HostFnStop::Block(Arc::from("not ready")))
+            }),
+            0,
+        );
+        let (host_fn, data) = blocked.host_call_parts(call);
+        let Err(HostFnStop::Block(reason)) = host_fn.apply(&data) else {
+            panic!("host function should block");
+        };
+        blocked.block_host_call(call, reason);
+        assert!(blocked.host_calls().is_empty());
+        assert_eq!(blocked.blocked_host_calls().len(), 1);
+        assert!(blocked.principals_connect(call.pair));
+
+        let (mut failed, call, _) = host_call_net(
+            HostFn::new("failed", |_| {
+                Err(HostFnStop::Error(Arc::from("invalid input")))
+            }),
+            0,
+        );
+        let (host_fn, data) = failed.host_call_parts(call);
+        let Err(HostFnStop::Error(error)) = host_fn.apply(&data) else {
+            panic!("host function should fail");
+        };
+        failed.fail_host_call(call, error);
+        assert!(failed.host_calls().is_empty());
+        assert_eq!(
+            failed.stuck_pairs(),
+            &[StuckPair {
+                pair: call.pair,
+                reason: StuckReason::HostError(Arc::from("invalid input")),
+            }]
+        );
+        assert!(failed.principals_connect(call.pair));
     }
 
     #[test]
@@ -2238,7 +2747,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_cursor_sweeps_shared_source_once_then_materializes() {
+    fn remote_cursor_exposes_source_progress_without_holding_nested_locks() {
         let source = source_requiring_one_sweep().instantiate_shared();
         let mut first = target_waiting_on(source.clone());
 
@@ -2246,12 +2755,22 @@ mod tests {
             first.reduce_next(),
             Some(Reduction {
                 kind: ReductionKind::RemoteCursor {
-                    progress: CursorProgress::SourceSweep { reductions: 1 },
+                    progress: CursorProgress::Blocked,
                     ..
                 },
                 ..
             })
         ));
+        source.with_mut(|runtime| {
+            assert!(matches!(
+                runtime.reduce_next(),
+                Some(Reduction {
+                    kind: ReductionKind::BindJoin,
+                    ..
+                })
+            ));
+        });
+        first.wake_blocked_cursors();
         assert!(matches!(
             first.reduce_next(),
             Some(Reduction {
@@ -2262,8 +2781,8 @@ mod tests {
                 ..
             })
         ));
-        // The sweep advances only the pairs that were ready when it began.
-        // Newly exposed, unrelated pairs remain lazy in the shared source.
+        // Driving demand advances only one source reduction. Newly exposed,
+        // unrelated pairs remain lazy in the shared source.
         assert_eq!(source.with(|runtime| runtime.ready_pairs().len()), 1);
 
         let mut second = target_waiting_on(source);
@@ -2277,6 +2796,98 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn layered_cursor_reports_and_follows_an_exact_dependency() {
+        let mut leaf = NetBuilder::new();
+        let data = leaf.data("leaf");
+        let leaf = leaf.finish(data).instantiate_shared();
+
+        let mut middle = RuntimeNet::empty();
+        let middle_cursor = middle.begin_copy(leaf);
+        let exposed = middle.add_interface(Port::principal(middle_cursor));
+        middle.exposed = Some(exposed);
+        let middle = SharedRuntimeNet::new(middle);
+
+        let mut outer = target_waiting_on(middle.clone());
+        let Some(Reduction {
+            kind:
+                ReductionKind::RemoteCursor {
+                    cursor: outer_cursor,
+                    progress: CursorProgress::Blocked,
+                },
+            ..
+        }) = outer.reduce_next()
+        else {
+            panic!("outer cursor should block on the intermediate cursor");
+        };
+        let dependency = outer
+            .cursor_dependency(outer_cursor)
+            .expect("layered cursor should retain an exact dependency");
+        assert!(dependency.source.ptr_eq(&middle));
+        assert_eq!(dependency.cursor, Some(middle_cursor));
+
+        assert!(matches!(
+            middle.with_mut(|runtime| runtime.drive_cursor(middle_cursor)),
+            Some(CursorProgress::Materialized { .. })
+        ));
+        outer.wake_blocked_cursors();
+        assert!(matches!(
+            outer.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::RemoteCursor {
+                    progress: CursorProgress::Materialized { .. },
+                    ..
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn cursor_entering_an_auxiliary_materializes_a_boundary_stable_node() {
+        let mut source = RuntimeNet::empty();
+        let bind = source.add_node(RuntimeNode::Bind);
+        let exposed_interface = source.add_node(RuntimeNode::Interface);
+        let principal_interface = source.add_node(RuntimeNode::Interface);
+        let result = source.add_node(RuntimeNode::Data("result"));
+        let exposed = Port::auxiliary(exposed_interface, 1);
+        source.connect(exposed, Port::auxiliary(bind, 1));
+        source.connect(
+            Port::auxiliary(principal_interface, 1),
+            Port::principal(bind),
+        );
+        source.connect(Port::auxiliary(bind, 2), Port::principal(result));
+        source.exposed = Some(exposed);
+
+        let mut target = target_waiting_on(SharedRuntimeNet::new(source));
+        assert!(matches!(
+            target.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::RemoteCursor {
+                    progress: CursorProgress::Materialized { .. },
+                    ..
+                },
+                ..
+            })
+        ));
+        assert_eq!(
+            target
+                .nodes
+                .values()
+                .filter(|entry| matches!(entry.node, RuntimeNode::Bind))
+                .count(),
+            1
+        );
+        assert_eq!(
+            target
+                .nodes
+                .values()
+                .filter(|entry| matches!(entry.node, RuntimeNode::RemoteCursor { .. }))
+                .count(),
+            2
+        );
     }
 
     #[test]

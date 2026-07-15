@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::core::{BuiltinCall, DeferredValue, Expr, IVar, Key, KeyExpr, Lambda, Value};
-use crate::interaction_net::{InteractionNet, NetBuilder, Port, SharedRuntimeNet};
+use crate::interaction_net::{HostFn, InteractionNet, NetBuilder, Port, SharedRuntimeNet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreDataKey {
@@ -108,11 +108,12 @@ impl ClosedLowerer {
 
     fn compile_into(&mut self, expr: &Expr, target: Port) {
         match expr {
-            Expr::Value(Value::Builtin(builtin)) => {
-                self.data_into(CoreNetData::Builtin(BuiltinCall::new(*builtin)), target)
-            }
+            Expr::Value(Value::Builtin(builtin)) => self.host_fn_into(
+                crate::eval::builtin_host_fn(BuiltinCall::new(*builtin)),
+                target,
+            ),
             Expr::Value(Value::PartialBuiltin(call)) => {
-                self.data_into(CoreNetData::Builtin(call.clone()), target)
+                self.host_fn_into(crate::eval::builtin_host_fn(call.clone()), target)
             }
             Expr::Value(value) => self.data_into(CoreNetData::Value(value.clone()), target),
             Expr::List(items) => {
@@ -157,6 +158,11 @@ impl ClosedLowerer {
         self.net.wire(data, target);
     }
 
+    fn host_fn_into(&mut self, host_fn: HostFn<CoreNetData>, target: Port) {
+        let function = self.net.unary_host_fn(host_fn);
+        self.net.wire(function, target);
+    }
+
     fn data_application_into(&mut self, data: CoreNetData, args: &[&Expr], target: Port) {
         if args.is_empty() {
             self.data_into(data, target);
@@ -196,11 +202,12 @@ impl Lowerer {
 
     fn compile_into(&mut self, expr: &Expr, target: Port) {
         match expr {
-            Expr::Value(Value::Builtin(builtin)) => {
-                self.data_into(CoreNetData::Builtin(BuiltinCall::new(*builtin)), target)
-            }
+            Expr::Value(Value::Builtin(builtin)) => self.host_fn_into(
+                crate::eval::builtin_host_fn(BuiltinCall::new(*builtin)),
+                target,
+            ),
             Expr::Value(Value::PartialBuiltin(call)) => {
-                self.data_into(CoreNetData::Builtin(call.clone()), target)
+                self.host_fn_into(crate::eval::builtin_host_fn(call.clone()), target)
             }
             Expr::Value(value) => self.data_into(CoreNetData::Value(value.clone()), target),
             Expr::List(items) => {
@@ -261,6 +268,11 @@ impl Lowerer {
     fn data_into(&mut self, data: CoreNetData, target: Port) {
         let data = self.net.data(data);
         self.net.wire(data, target);
+    }
+
+    fn host_fn_into(&mut self, host_fn: HostFn<CoreNetData>, target: Port) {
+        let function = self.net.unary_host_fn(host_fn);
+        self.net.wire(function, target);
     }
 
     fn data_application_into(&mut self, data: CoreNetData, args: &[&Expr], target: Port) {
