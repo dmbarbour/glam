@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use chumsky::prelude::*;
@@ -258,6 +259,57 @@ struct LocalName {
     raw: String,
     canonical: Option<String>,
     suppress_unused_warning: bool,
+}
+
+/// Per-lowering lexical state. Binding identities are meaningful only within
+/// one resolver and are never allocated from process-global state.
+#[derive(Debug, Default)]
+struct ResolverContext {
+    locals: Vec<LocalName>,
+    next_binding_id: u64,
+}
+
+impl ResolverContext {
+    fn fresh_binding(&mut self) -> BindingId {
+        let binding = BindingId::from_local_index(self.next_binding_id);
+        self.next_binding_id = self
+            .next_binding_id
+            .checked_add(1)
+            .expect("g-syntax binding ID space exhausted");
+        binding
+    }
+}
+
+impl Deref for ResolverContext {
+    type Target = Vec<LocalName>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.locals
+    }
+}
+
+impl DerefMut for ResolverContext {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.locals
+    }
+}
+
+#[cfg(test)]
+mod resolver_context_tests {
+    use super::*;
+
+    #[test]
+    fn binding_ids_are_local_to_each_resolver() {
+        let mut left = ResolverContext::default();
+        let mut right = ResolverContext::default();
+
+        let left_first = left.fresh_binding();
+        let right_first = right.fresh_binding();
+        let left_second = left.fresh_binding();
+
+        assert_eq!(left_first, right_first);
+        assert_ne!(left_first, left_second);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -803,7 +855,7 @@ fn lower_definition(
         context,
         definitions,
         scope,
-        &mut Vec::new(),
+        &mut ResolverContext::default(),
     )
 }
 
@@ -814,7 +866,7 @@ fn lower_definition_with_locals(
     context: &CompileContext,
     definitions: &mut Value,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<(), Diagnostic> {
     let Some(expr) = &definition.expr else {
         return Ok(());
@@ -887,7 +939,7 @@ fn lower_object(
 ) -> Result<(), Diagnostic> {
     let object_value = object_decl_value(object, line, context, definitions.clone())?;
     let scope = NameScope::module(context, definitions.clone());
-    let mut locals = Vec::new();
+    let mut locals = ResolverContext::default();
     let object_value = annotate_definition_value(
         BuiltinAssertion::Undefined,
         &object.target,
@@ -912,7 +964,14 @@ fn object_decl_value(
     let parent_scope = NameScope::module(context, visible_definitions.clone());
     let name =
         context.abstract_global_path_value(context.abstract_global_path(&object.target).as_ref());
-    object_decl_value_in_scope(object, line, context, parent_scope, &mut Vec::new(), name)
+    object_decl_value_in_scope(
+        object,
+        line,
+        context,
+        parent_scope,
+        &mut ResolverContext::default(),
+        name,
+    )
 }
 
 fn object_decl_value_in_scope(
@@ -920,7 +979,7 @@ fn object_decl_value_in_scope(
     line: usize,
     context: &CompileContext,
     parent_scope: NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
     name: Value,
 ) -> Result<Value, Diagnostic> {
     let body_parent_scope = shift_name_scope_locals(&parent_scope, 2);
@@ -1250,7 +1309,14 @@ fn object_body_defs_value(
     context: &CompileContext,
     parent_scope: NameScope,
 ) -> Result<Value, Diagnostic> {
-    object_body_defs_value_in_scope(body, alias, line, context, parent_scope, &mut Vec::new())
+    object_body_defs_value_in_scope(
+        body,
+        alias,
+        line,
+        context,
+        parent_scope,
+        &mut ResolverContext::default(),
+    )
 }
 
 fn object_body_defs_value_in_scope(
@@ -1259,7 +1325,7 @@ fn object_body_defs_value_in_scope(
     _line: usize,
     context: &CompileContext,
     parent_scope: NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let mut definitions = remove_object_spec_value(context.value_local(1), context);
     let object_final_defs = context.value_local(0);
@@ -1283,7 +1349,7 @@ fn lower_object_body_item(
     context: &CompileContext,
     definitions: &mut Value,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<(), Diagnostic> {
     match &item.kind {
         ObjectBodyDefinitionKind::Definition(definition) => lower_definition_with_locals(
@@ -1307,7 +1373,7 @@ fn lower_nested_object(
     context: &CompileContext,
     definitions: &mut Value,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<(), Diagnostic> {
     let name = hierarchical_object_name_value(&object.target, line, context, scope)?;
     let object_value =
@@ -1392,7 +1458,7 @@ fn lower_extend(
 ) -> Result<(), Diagnostic> {
     let object_value = extend_object_value(extend, line, context, definitions.clone())?;
     let scope = NameScope::module(context, definitions.clone());
-    let mut locals = Vec::new();
+    let mut locals = ResolverContext::default();
     let object_value = annotate_definition_value(
         BuiltinAssertion::Defined,
         &extend.target,
@@ -1486,7 +1552,7 @@ fn lower_update_definition(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let prior =
         definition_target_access_value(target, visible_definitions, line, context, scope, locals)?;
@@ -1535,7 +1601,7 @@ fn annotate_definition_value(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let tag = match assertion {
         BuiltinAssertion::Defined => "assert_defined",
@@ -1593,7 +1659,7 @@ fn update_definition_target_value(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     Ok(context.builtin_apply3_value(
         Builtin::DictUpdate,
@@ -1665,7 +1731,7 @@ fn definition_target_access_value(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let path = definition_target_parts(target, line)?
         .iter()
@@ -1679,7 +1745,7 @@ fn definition_target_path_value(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let parts = definition_target_parts(target, line)?;
     syntax_path_value(&parts, line, context, scope, locals)
@@ -1690,7 +1756,7 @@ fn syntax_path_value(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let mut result: Option<Value> = None;
     let mut pending = Vec::new();
@@ -1776,7 +1842,7 @@ fn path_value_in_scope(
     _line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Value {
     let mut parts = target.split('.');
     let Some(first) = parts.next() else {
@@ -1824,7 +1890,7 @@ fn syntax_expr_to_value_in_scope(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     Ok(match expr {
         SyntaxExpr::Unit => context.unit_value(),
@@ -1906,7 +1972,7 @@ fn lower_object_expr(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let name = match &object.name {
         Some(name) => syntax_expr_to_value_in_scope(name, line, context, scope, locals)?,
@@ -1943,7 +2009,7 @@ fn lower_dict_with_expr(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let prior_defs = syntax_expr_to_value_in_scope(base, line, context, scope, locals)?;
     let final_defs = context.value_local(0);
@@ -2007,7 +2073,7 @@ fn lower_builtin_expr(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     Ok(context.builtin_apply2_value(
         builtin,
@@ -2035,7 +2101,7 @@ fn lower_operator_section(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     match (left, right) {
         (None, None) => return Ok(lower_syntax_operator_function(operator, context)),
@@ -2093,7 +2159,7 @@ fn lower_syntax_operator_expr(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     match operator {
         SyntaxOperator::Builtin(builtin) => {
@@ -2147,7 +2213,7 @@ fn lower_comparison_chain(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let left = syntax_expr_to_value_in_scope(first, line, context, scope, locals)?;
     let rest = rest
@@ -2297,7 +2363,7 @@ fn syntax_key_expr_to_value(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     Ok(match key {
         SyntaxKeyExpr::Atom(name) => context.value_atom(atom_from_str(name)),
@@ -2318,7 +2384,7 @@ fn lower_dict_union(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let mut items = items.iter();
     let Some(first) = items.next() else {
@@ -2342,7 +2408,7 @@ fn lower_lambda_expr(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let resolved = lower_lambda_expr_resolved(params, body, line, context, scope, locals)?;
     Ok(resolved_expr_to_value(resolved, context))
@@ -2354,18 +2420,18 @@ fn lower_lambda_expr_resolved(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let parameters = Arc::from(
+        (0..params.len())
+            .map(|_| locals.fresh_binding())
+            .collect::<Vec<_>>(),
+    );
     let base_len = locals.len();
     locals.extend(params.iter().map(|param| local_name_metadata(param)));
     let lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
-    let parameters = Arc::from(
-        (0..params.len())
-            .map(|_| BindingId::fresh())
-            .collect::<Vec<_>>(),
-    );
     Ok(ResolvedExpr::lambda(
         parameters,
         ResolvedExpr::Opaque(lowered),
@@ -2378,7 +2444,7 @@ fn lower_application_expr(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let mut head = function;
     let mut arguments = vec![argument];
@@ -2413,7 +2479,7 @@ fn lower_let_expr(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
     let values = bindings
         .iter()
@@ -2433,7 +2499,7 @@ fn lower_name_expr(
     name: &str,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Value {
     match name {
         "module" => return scope.module_final_defs.clone(),
@@ -2550,7 +2616,7 @@ fn syntax_key_expr_to_core(
     line: usize,
     context: &CompileContext,
     scope: &NameScope,
-    locals: &mut Vec<LocalName>,
+    locals: &mut ResolverContext,
 ) -> Result<CoreKeyExpr, Diagnostic> {
     Ok(match key {
         SyntaxKeyExpr::Atom(name) => context.key_expr_key(name_as_key(name)),

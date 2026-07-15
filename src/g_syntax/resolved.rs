@@ -1,9 +1,6 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static NEXT_BINDING_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Stable identity for one lexical binding in the g-syntax front end.
 ///
@@ -13,13 +10,11 @@ static NEXT_BINDING_ID: AtomicU64 = AtomicU64::new(1);
 pub(super) struct BindingId(NonZeroU64);
 
 impl BindingId {
-    pub(super) fn fresh() -> Self {
-        let raw = NEXT_BINDING_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
-                next.checked_add(1)
-            })
+    pub(super) fn from_local_index(index: u64) -> Self {
+        let encoded = index
+            .checked_add(1)
             .expect("g-syntax binding ID space exhausted");
-        Self(NonZeroU64::new(raw).expect("binding IDs start at one"))
+        Self(NonZeroU64::new(encoded).expect("encoded binding ID is always nonzero"))
     }
 }
 
@@ -155,6 +150,19 @@ impl<V: Clone> ResolvedExpr<V> {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct TestResolver {
+        next_binding_id: u64,
+    }
+
+    impl TestResolver {
+        fn fresh_binding(&mut self) -> BindingId {
+            let binding = BindingId::from_local_index(self.next_binding_id);
+            self.next_binding_id += 1;
+            binding
+        }
+    }
+
     #[test]
     fn application_spines_are_grouped() {
         let function = ResolvedExpr::Opaque("f");
@@ -172,7 +180,7 @@ mod tests {
 
     #[test]
     fn every_literal_lambda_application_is_marked_for_local_fusion() {
-        let parameter = BindingId::fresh();
+        let parameter = TestResolver::default().fresh_binding();
         let lambda = ResolvedExpr::lambda(Arc::from([parameter]), ResolvedExpr::Local(parameter));
         let applied = ResolvedExpr::apply(lambda, [ResolvedExpr::Opaque("argument")]);
 
@@ -181,8 +189,9 @@ mod tests {
 
     #[test]
     fn free_bindings_use_stable_identity_across_nested_lambdas() {
-        let outer = BindingId::fresh();
-        let inner = BindingId::fresh();
+        let mut resolver = TestResolver::default();
+        let outer = resolver.fresh_binding();
+        let inner = resolver.fresh_binding();
         let expression = ResolvedExpr::<()>::lambda(
             Arc::from([inner]),
             ResolvedExpr::apply(ResolvedExpr::Local(outer), [ResolvedExpr::Local(inner)]),
