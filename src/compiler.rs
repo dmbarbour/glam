@@ -6,7 +6,7 @@ use crate::core::Builtin;
 use crate::core::{
     Atom, DeferredValue, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, NetValue, Value,
 };
-use crate::core_net::{CoreSpecialization, lower_function_code};
+use crate::core_net::{CoreSpecialization, lower_closed_function_value, lower_function_code};
 use crate::interaction_net::{NetBuildError, NetBuilder, Port};
 use crate::number::Number;
 
@@ -262,6 +262,14 @@ impl CompileContext {
 
     pub fn value_lambda(&self, body: Value) -> Value {
         self.value_lambdas(1, body)
+    }
+
+    /// Lowers a function whose body contains no locals outside its declared
+    /// parameters. Front ends are responsible for closure conversion before
+    /// using this API.
+    pub fn value_closed_function(&self, arity: usize, body: Value) -> Value {
+        assert!(arity > 0, "a function must bind at least one parameter");
+        lower_closed_function_value(arity, value_to_core_expr(body))
     }
 
     /// Lowers one syntactic function body once. Evaluating the resulting

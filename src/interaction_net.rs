@@ -13,19 +13,28 @@ const PORT_BITS: u32 = 2;
 const PORT_MASK: u64 = (1 << PORT_BITS) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NodeId(u64);
+pub struct NodeId(NonZeroU64);
 
 impl NodeId {
     fn from_index(index: usize) -> Self {
-        Self(u64::try_from(index).expect("interaction-net node index does not fit in u64"))
+        Self::from_zero_based(
+            u64::try_from(index).expect("interaction-net node index does not fit in u64"),
+        )
+    }
+
+    fn from_zero_based(index: u64) -> Self {
+        let encoded = index
+            .checked_add(1)
+            .expect("interaction-net node ID space exhausted");
+        Self(NonZeroU64::new(encoded).expect("encoded node ID is always nonzero"))
     }
 
     fn index(self) -> usize {
-        usize::try_from(self.0).expect("interaction-net node ID does not fit in usize")
+        usize::try_from(self.get()).expect("interaction-net node ID does not fit in usize")
     }
 
     pub fn get(self) -> u64 {
-        self.0
+        self.0.get() - 1
     }
 }
 
@@ -133,15 +142,15 @@ impl Port {
         let index = u64::from(index);
         let max_node = (u64::MAX - index - 1) >> PORT_BITS;
         assert!(
-            node.0 <= max_node,
+            node.get() <= max_node,
             "interaction-net packed port space exhausted"
         );
-        let tagged = (node.0 << PORT_BITS) + index + 1;
+        let tagged = (node.get() << PORT_BITS) + index + 1;
         Self(NonZeroU64::new(tagged).expect("packed port is always nonzero"))
     }
 
     pub fn node(self) -> NodeId {
-        NodeId((self.0.get() - 1) >> PORT_BITS)
+        NodeId::from_zero_based((self.0.get() - 1) >> PORT_BITS)
     }
 
     pub fn index(self) -> u32 {
@@ -2033,7 +2042,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     fn add_node(&mut self, node: RuntimeNode<S>) -> NodeId {
-        let id = NodeId(self.next_node_id);
+        let id = NodeId::from_zero_based(self.next_node_id);
         self.next_node_id = self
             .next_node_id
             .checked_add(1)
@@ -2421,7 +2430,7 @@ mod tests {
     fn identical_fan_histories_join() {
         let fan = identity(3);
         let mut net = fan_pair(fan.clone(), fan.clone());
-        let pair = ActivePairKey::new(NodeId(0), NodeId(1));
+        let pair = ActivePairKey::new(NodeId::from_index(0), NodeId::from_index(1));
         assert_eq!(
             net.reduce_next(),
             Some(Reduction {
@@ -2431,8 +2440,8 @@ mod tests {
                 }
             })
         );
-        assert!(net.node(NodeId(0)).is_none());
-        assert!(net.node(NodeId(1)).is_none());
+        assert!(net.node(NodeId::from_index(0)).is_none());
+        assert!(net.node(NodeId::from_index(1)).is_none());
         assert_eq!(net.active_pairs().len(), 2);
     }
 
@@ -2441,7 +2450,7 @@ mod tests {
         let left = identity(3);
         let right = identity(4);
         let mut net = fan_pair(left.clone(), right.clone());
-        let pair = ActivePairKey::new(NodeId(0), NodeId(1));
+        let pair = ActivePairKey::new(NodeId::from_index(0), NodeId::from_index(1));
         assert_eq!(
             net.reduce_next(),
             Some(Reduction {
@@ -2480,7 +2489,12 @@ mod tests {
     }
 
     #[test]
-    fn ports_and_optional_ports_are_one_word() {
+    fn ids_ports_and_their_options_are_one_word() {
+        assert_eq!(std::mem::size_of::<NodeId>(), std::mem::size_of::<u64>());
+        assert_eq!(
+            std::mem::size_of::<Option<NodeId>>(),
+            std::mem::size_of::<u64>()
+        );
         assert_eq!(std::mem::size_of::<Port>(), std::mem::size_of::<u64>());
         assert_eq!(
             std::mem::size_of::<Option<Port>>(),

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chumsky::prelude::*;
@@ -641,8 +642,10 @@ fn inherited_import_env_object_value(
 }
 
 fn empty_object_defs(context: &CompileContext) -> Value {
-    context.value_lambda(
-        context.value_lambda(remove_object_spec_value(context.value_local(1), context)),
+    lower_lambda_value(
+        2,
+        remove_object_spec_value(context.value_local(1), context),
+        context,
     )
 }
 
@@ -662,7 +665,7 @@ fn module_object_value(target: &str, module: Value, context: &CompileContext) ->
 }
 
 fn constant_object_defs(value: Value, context: &CompileContext) -> Value {
-    context.value_lambda(context.value_lambda(value))
+    lower_lambda_value(2, value, context)
 }
 
 fn lower_unique(
@@ -755,18 +758,26 @@ fn builtin_not_value(context: &CompileContext) -> Value {
         )],
         context,
     );
-    let run_selected_operation = context.value_lambda(context.value_local(0));
-    context.value_lambda(effect_call_value(
-        "seq",
-        vec![select_operation, run_selected_operation],
+    let run_selected_operation = lower_lambda_value(1, context.value_local(0), context);
+    lower_lambda_value(
+        1,
+        effect_call_value(
+            "seq",
+            vec![select_operation, run_selected_operation],
+            context,
+        ),
         context,
-    ))
+    )
 }
 
 fn builtin_could_value(context: &CompileContext) -> Value {
     let not = builtin_not_value(context);
     let condition = context.value_local(0);
-    context.value_lambda(context.value_apply(not.clone(), context.value_apply(not, condition)))
+    lower_lambda_value(
+        1,
+        context.value_apply(not.clone(), context.value_apply(not, condition)),
+        context,
+    )
 }
 
 fn effect_return_value(value: Value, context: &CompileContext) -> Value {
@@ -1014,6 +1025,144 @@ fn shift_key_expr_locals(key: &CoreKeyExpr, amount: usize, cutoff: usize) -> Cor
     }
 }
 
+/// Closure-converts a front-end lambda into one closed interaction net.
+///
+/// Captures become leading arguments of the closed function and are supplied
+/// immediately, leaving only the source lambda's parameters unsaturated.
+fn lower_lambda_value(arity: usize, body: Value, context: &CompileContext) -> Value {
+    assert!(arity > 0, "a lambda must bind at least one parameter");
+    let body = semantic_value_to_expr(body);
+    let mut captures = BTreeSet::new();
+    collect_outer_locals(&body, arity, &mut captures);
+    let captures = captures.into_iter().collect::<Vec<_>>();
+    let closed_body = rewrite_outer_locals(&body, arity, &captures);
+    let function = context.value_closed_function(arity + captures.len(), Value::expr(closed_body));
+    context.value_apply_many(
+        function,
+        captures.into_iter().map(|index| context.value_local(index)),
+    )
+}
+
+fn semantic_value_to_expr(value: Value) -> CoreExpr {
+    match value {
+        Value::Expr(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
+            thunk.expr().unwrap().as_ref().clone()
+        }
+        value => CoreExpr::Value(value),
+    }
+}
+
+fn collect_outer_locals(expr: &CoreExpr, arity: usize, captures: &mut BTreeSet<usize>) {
+    match expr {
+        CoreExpr::Value(value) => collect_outer_locals_in_value(value, arity, captures),
+        CoreExpr::List(items) => {
+            for item in items.iter() {
+                collect_outer_locals(item, arity, captures);
+            }
+        }
+        CoreExpr::Apply(function, argument) => {
+            collect_outer_locals(function, arity, captures);
+            collect_outer_locals(argument, arity, captures);
+        }
+        CoreExpr::Function {
+            captures: nested, ..
+        } => {
+            for capture in nested.iter() {
+                collect_outer_locals(capture, arity, captures);
+            }
+        }
+        CoreExpr::Local(index) if *index >= arity => {
+            captures.insert(index - arity);
+        }
+        CoreExpr::Local(_) | CoreExpr::Deferred(_) | CoreExpr::Future(_) | CoreExpr::Error(_) => {}
+        CoreExpr::Access(base, path) => {
+            collect_outer_locals(base, arity, captures);
+            for key in path.iter() {
+                match key {
+                    CoreKeyExpr::Key(_) => {}
+                    CoreKeyExpr::Index(expr) | CoreKeyExpr::PathIndex(expr) => {
+                        collect_outer_locals(expr, arity, captures);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_outer_locals_in_value(value: &Value, arity: usize, captures: &mut BTreeSet<usize>) {
+    if let Value::Expr(thunk) = value
+        && thunk.env().is_some_and(|env| env.is_empty())
+    {
+        collect_outer_locals(thunk.expr().unwrap(), arity, captures);
+    }
+}
+
+fn rewrite_outer_locals(expr: &CoreExpr, arity: usize, captures: &[usize]) -> CoreExpr {
+    match expr {
+        CoreExpr::Value(value) => {
+            CoreExpr::Value(rewrite_outer_locals_in_value(value, arity, captures))
+        }
+        CoreExpr::List(items) => CoreExpr::List(Arc::from(
+            items
+                .iter()
+                .map(|item| Arc::new(rewrite_outer_locals(item, arity, captures)))
+                .collect::<Vec<_>>(),
+        )),
+        CoreExpr::Apply(function, argument) => CoreExpr::Apply(
+            Arc::new(rewrite_outer_locals(function, arity, captures)),
+            Arc::new(rewrite_outer_locals(argument, arity, captures)),
+        ),
+        CoreExpr::Function {
+            code,
+            captures: nested,
+        } => CoreExpr::Function {
+            code: code.clone(),
+            captures: Arc::from(
+                nested
+                    .iter()
+                    .map(|capture| Arc::new(rewrite_outer_locals(capture, arity, captures)))
+                    .collect::<Vec<_>>(),
+            ),
+        },
+        CoreExpr::Local(index) if *index >= arity => {
+            let outer = index - arity;
+            let capture_position = captures
+                .binary_search(&outer)
+                .expect("every rewritten local was collected");
+            CoreExpr::Local(arity + captures.len() - capture_position - 1)
+        }
+        CoreExpr::Local(index) => CoreExpr::Local(*index),
+        CoreExpr::Access(base, path) => CoreExpr::Access(
+            Arc::new(rewrite_outer_locals(base, arity, captures)),
+            Arc::from(
+                path.iter()
+                    .map(|key| match key {
+                        CoreKeyExpr::Key(key) => CoreKeyExpr::Key(key.clone()),
+                        CoreKeyExpr::Index(expr) => CoreKeyExpr::Index(Arc::new(
+                            rewrite_outer_locals(expr, arity, captures),
+                        )),
+                        CoreKeyExpr::PathIndex(expr) => CoreKeyExpr::PathIndex(Arc::new(
+                            rewrite_outer_locals(expr, arity, captures),
+                        )),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        ),
+        CoreExpr::Deferred(value) => CoreExpr::Deferred(value.clone()),
+        CoreExpr::Future(value) => CoreExpr::Future(value.clone()),
+        CoreExpr::Error(message) => CoreExpr::Error(message.clone()),
+    }
+}
+
+fn rewrite_outer_locals_in_value(value: &Value, arity: usize, captures: &[usize]) -> Value {
+    match value {
+        Value::Expr(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
+            Value::expr(rewrite_outer_locals(thunk.expr().unwrap(), arity, captures))
+        }
+        other => other.clone(),
+    }
+}
+
 fn object_spec_value(value: Value, context: &CompileContext) -> Value {
     context.value_apply(context.value_builtin(Builtin::ObjectSpec), value)
 }
@@ -1059,7 +1208,7 @@ fn object_body_defs_value_in_scope(
         definitions = remove_object_spec_value(definitions, context);
     }
 
-    Ok(context.value_lambda(context.value_lambda(definitions)))
+    Ok(lower_lambda_value(2, definitions, context))
 }
 
 fn lower_object_body_item(
@@ -1259,7 +1408,7 @@ fn compose_object_defs(
         context.value_apply(extension_defs, prior_self),
         context.value_local(0),
     );
-    context.value_lambda(context.value_lambda(body))
+    lower_lambda_value(2, body, context)
 }
 
 fn lower_update_definition(
@@ -1298,7 +1447,11 @@ fn lower_update_definition(
     locals.truncate(base_len);
     let lowered = lowered?;
     let prior = shift_value_locals(&prior, sugar_param_count, 0);
-    Ok(context.value_lambdas(sugar_param_count, context.value_apply(lowered, prior)))
+    Ok(lower_lambda_value(
+        sugar_param_count,
+        context.value_apply(lowered, prior),
+        context,
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -1747,7 +1900,7 @@ fn lower_dict_with_expr(
 
     Ok(context.value_apply(
         context.value_builtin(Builtin::Fixpoint),
-        context.value_lambda(definitions),
+        lower_lambda_value(1, definitions, context),
     ))
 }
 
@@ -1804,7 +1957,7 @@ fn lower_effect_expr(name: &str, context: &CompileContext) -> Value {
     context.builtin_apply2_value(
         Builtin::DictSingleton,
         context.value_atom(atom_from_str("eff")),
-        context.value_lambda(body),
+        lower_lambda_value(1, body, context),
     )
 }
 
@@ -1863,7 +2016,7 @@ fn lower_operator_section(
         (Some(left), None) => lower_syntax_operator_values(operator, left, section_arg, context),
         _ => unreachable!("operator section arity was handled before lowering operands"),
     };
-    Ok(context.value_lambda(body))
+    Ok(lower_lambda_value(1, body, context))
 }
 
 fn lower_syntax_operator_expr(
@@ -1979,7 +2132,7 @@ fn lower_comparison_chain_values(
         remaining_condition,
         context,
     );
-    context.value_apply(context.value_lambda(body), right.clone())
+    context.value_apply(lower_lambda_value(1, body, context), right.clone())
 }
 
 fn lower_syntax_operator_function(operator: SyntaxOperator, context: &CompileContext) -> Value {
@@ -1997,7 +2150,7 @@ fn lower_syntax_operator_function(operator: SyntaxOperator, context: &CompileCon
             let left = context.value_local(1);
             let right = context.value_local(0);
             let body = lower_syntax_operator_values(operator, left, right, context);
-            context.value_lambda(context.value_lambda(body))
+            lower_lambda_value(2, body, context)
         }
     }
 }
@@ -2026,7 +2179,11 @@ fn compose_values(first: Value, second: Value, context: &CompileContext) -> Valu
     let input = context.value_local(0);
     let first = shift_value_locals(&first, 1, 0);
     let second = shift_value_locals(&second, 1, 0);
-    context.value_lambda(context.value_apply(second, context.value_apply(first, input)))
+    lower_lambda_value(
+        1,
+        context.value_apply(second, context.value_apply(first, input)),
+        context,
+    )
 }
 
 fn kleisli_compose_values(first: Value, second: Value, context: &CompileContext) -> Value {
@@ -2035,14 +2192,14 @@ fn kleisli_compose_values(first: Value, second: Value, context: &CompileContext)
     let second = shift_value_locals(&second, 1, 0);
     let operation = context.value_apply(first, input);
     let body = effect_call_value("seq", vec![operation, second], context);
-    context.value_lambda(body)
+    lower_lambda_value(1, body, context)
 }
 
 fn effect_then_values(operation: Value, next: Value, context: &CompileContext) -> Value {
     let result = context.value_local(0);
     let next = shift_value_locals(&next, 1, 0);
     let body = annotate_assert_unit_value(result, next, context);
-    let continuation = context.value_lambda(body);
+    let continuation = lower_lambda_value(1, body, context);
     effect_call_value("seq", vec![operation, continuation], context)
 }
 
@@ -2125,7 +2282,7 @@ fn lower_lambda_expr(
     let lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
-    Ok(context.value_lambdas(params.len(), lowered))
+    Ok(lower_lambda_value(params.len(), lowered, context))
 }
 
 fn lower_application_expr(
@@ -2170,9 +2327,7 @@ fn lower_let_expr(
     let mut lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
-    for _ in bindings.iter().rev() {
-        lowered = context.value_lambda(lowered);
-    }
+    lowered = lower_lambda_value(bindings.len(), lowered, context);
     Ok(context.value_apply_many(lowered, values))
 }
 
@@ -6887,6 +7042,25 @@ mod tests {
     fn lowers_multi_argument_lambda_to_one_curried_net() {
         let parsed = parse(
             "language g0\nfirst = \\x _y _z -> x\nasm.result = first \"Hello, World!\" {} {}\n",
+        );
+        let context = CompileContext::default();
+        let lowered = lower_to_core_with_context(&parsed, &context);
+        assert_eq!(lowered.diagnostics, []);
+
+        let value = evaluated_module_value(&context, &lowered);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", "result"]
+            ))),
+            b"Hello, World!"
+        );
+    }
+
+    #[test]
+    fn front_end_closure_conversion_preserves_nested_captures() {
+        let parsed = parse(
+            "language g0\nmake = \\x -> \\_ignored -> x\nasm.result = make \"Hello, World!\" {}\n",
         );
         let context = CompileContext::default();
         let lowered = lower_to_core_with_context(&parsed, &context);
