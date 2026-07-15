@@ -116,10 +116,11 @@ finishes under only the target mutex.
 Each logical copy keeps an authoritative `frontiers` reverse map from stable
 source ports to live local cursors plus fan-site translation. Data is ordinary
 `Clone` data; copies do not transform it, and there is no historical source-node
-to target-node map. A remaining limitation is erasure: removing a frontier
-cursor can currently discard the witness needed if the opposite end of that
-source wire is reached later. General application lowering remains gated until
-that erased frontier outcome is represented explicitly.
+to target-node map. Erase has no cursor-specific shortcut: an active
+`Erase >< RemoteCursor` pair demands the cursor, materializes normally, and then
+uses the ordinary Erase interaction. If an auxiliary-side cursor has no local
+cursor facing the relevant principal yet, source inspection follows that
+principal chain to an exact active pair rather than scanning scheduler queues.
 
 `HostFn<Data>` is a unary runtime agent whose principal consumes Data and whose
 auxiliary is its result continuation. Host callbacks execute outside the net
@@ -161,9 +162,10 @@ permanently stuck.
 Only `Value::Net` uses cursor application. Compatibility closures retain
 `Closure::source_body` and use the expression evaluator; they no longer carry a
 compatibility runtime or data-mapping capture substitution. Automatic closed-
-net preparation currently excludes general application bodies because erased
-frontier outcomes are not yet retained for later convergence. Do not expose the
-`interaction_net` source keyword until that state and general effect blocking
-are represented explicitly.
+net preparation currently excludes general application bodies because the
+remaining composition/effect compatibility path can form a blocked-call/cursor
+dependency cycle. This is evaluator policy work rather than missing cursor
+provenance. Do not expose the `interaction_net` source keyword until that policy
+and general effect blocking are represented explicitly.
 The dictionary compatibility path is intentionally unchanged pending a
 separate persistent lazy dictionary design.

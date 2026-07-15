@@ -137,7 +137,11 @@ This document should summarize salient, relevant points rather than asking futur
   that peer is claimed. Per-copy `frontiers` are the authoritative reverse map
   from stable source ports to live local cursors; there is no historical
   source-node to target-node map. Embedded data is copied with `Clone`; only
-  fan-site translation and frontier state vary per logical copy.
+  fan-site translation and frontier state vary per logical copy. `Erase ><
+  RemoteCursor` has no shortcut: it demands and materializes through the cursor,
+  after which the ordinary Erase rule handles the copied agent. When an
+  auxiliary has no corresponding local principal cursor yet, dependency
+  inspection follows the source principal chain to an exact active pair.
 - A blocked bind-data pair can be consumed as a generic `CallFrame`; its
   argument and result survive behind independently stable interfaces. Core
   thunks may name one of those runtime/interface pairs, and memoize both values
@@ -169,10 +173,10 @@ This document should summarize salient, relevant points rather than asking futur
   The core HostFn boundary rejects any returned `Value::List` that already
   contains a structural lazy hole, leaving the call permanently stuck.
   General application bodies are temporarily excluded from automatic closed-
-  net preparation. Re-enabling them demonstrated that erasing a frontier cursor
-  can discard the convergence witness before the cursor at the opposite end of
-  the source wire arrives. Represent that erased frontier outcome explicitly;
-  do not restore historical mapped-node bookkeeping.
+  net preparation. After repairing cursor erasure and principal-chain demand,
+  re-enabling them still exposes a blocked-call/cursor dependency cycle in the
+  remaining composition/effect compatibility path. Treat that as evaluator
+  policy work, not missing cursor provenance or mapped-node bookkeeping.
 - Preserve the current dictionary/access compatibility evaluator while a
   persistent lazy dictionary representation is designed separately.
 - The topology reducer implements bind/fan join, fan commutation, duplication,

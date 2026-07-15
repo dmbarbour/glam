@@ -59,7 +59,9 @@ gets one fresh namespace. The current oracle records dynamic duplication paths
 directly; it provides reference semantics for replacing those histories with
 Lamping-style bracket/croissant control interactions. Builtin currying and
 closed list construction now cross the net runtime boundary. General
-application bodies remain on compatibility evaluation until logical copies
-retain an erased frontier outcome long enough for a later cursor at the other
-end of the source wire to converge. That state and general construction effects
-still belong before adding the `interaction_net` keyword.
+application bodies remain on compatibility evaluation while the remaining
+composition/effect path can form a blocked-call/cursor dependency cycle. Cursor
+erasure now uses ordinary materialization and Erase interactions; no erased
+frontier state or mapped-node history is required. The evaluator policy for
+that cycle and general construction effects still belong before adding the
+`interaction_net` keyword.

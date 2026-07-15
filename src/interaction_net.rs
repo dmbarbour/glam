@@ -922,7 +922,8 @@ enum SourceFrontier<D> {
     },
     StableAuxiliary {
         port: Port,
-        principal_neighbor: Option<Port>,
+        principal_anchors: Vec<Port>,
+        terminal_pair: Option<ActivePairKey>,
     },
     ActiveAuxiliary {
         entered: Port,
@@ -1295,18 +1296,6 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             _ => None,
         };
         if let Some(cursor) = cursor {
-            let eraser = match (&left, &right) {
-                (RuntimeNode::Erase, RuntimeNode::RemoteCursor { .. }) => Some(left_id),
-                (RuntimeNode::RemoteCursor { .. }, RuntimeNode::Erase) => Some(right_id),
-                _ => None,
-            };
-            if let Some(eraser) = eraser {
-                self.erase_remote_cursor(eraser, cursor);
-                return Some(Reduction {
-                    pair,
-                    kind: ReductionKind::Erase,
-                });
-            }
             let progress = self
                 .begin_cursor_claim(cursor, Some(pair))
                 .expect("ready cursor pair must be claimable");
@@ -1653,9 +1642,25 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                 partner,
             };
         }
+        let mut principal_anchors = Vec::new();
+        let mut terminal_pair = None;
+        let mut node = port.node();
+        let mut visited = HashSet::new();
+        while visited.insert(node) {
+            let Some(neighbor) = self.neighbor(Port::principal(node)) else {
+                break;
+            };
+            if neighbor.is_principal() {
+                terminal_pair = Some(ActivePairKey::new(node, neighbor.node()));
+                break;
+            }
+            principal_anchors.push(neighbor);
+            node = neighbor.node();
+        }
         SourceFrontier::StableAuxiliary {
             port,
-            principal_neighbor,
+            principal_anchors,
+            terminal_pair,
         }
     }
 
@@ -1718,17 +1723,27 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                     node,
                 ),
                 SourceFrontier::StableAuxiliary {
-                    principal_neighbor, ..
+                    principal_anchors,
+                    terminal_pair,
+                    ..
                 } => {
-                    if let Some(peer) = principal_neighbor.and_then(|source_anchor| {
-                        self.copies
-                            .get(&claim.copy)
-                            .and_then(|state| state.frontiers.get(&source_anchor))
-                            .copied()
-                    }) {
+                    let peer = self.copies.get(&claim.copy).and_then(|state| {
+                        principal_anchors
+                            .iter()
+                            .find_map(|anchor| state.frontiers.get(anchor).copied())
+                    });
+                    if let Some(peer) = peer {
                         assert_ne!(peer, claim.cursor);
                         self.cursor_dependencies
                             .insert(claim.cursor, CursorDependency::LocalCursor(peer));
+                    } else if let Some(pair) = terminal_pair {
+                        self.cursor_dependencies.insert(
+                            claim.cursor,
+                            CursorDependency::SourcePair {
+                                source: claim.source,
+                                pair,
+                            },
+                        );
                     }
                     CursorProgress::Blocked
                 }
@@ -1774,27 +1789,6 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             return None;
         }
         Some(neighbor.node())
-    }
-
-    fn erase_remote_cursor(&mut self, eraser: NodeId, cursor: NodeId) {
-        let RuntimeNode::RemoteCursor { copy, remote } = self
-            .node(cursor)
-            .expect("erased remote cursor must exist")
-            .clone()
-        else {
-            unreachable!();
-        };
-        self.disconnect(Port::principal(eraser));
-        self.remove_node(eraser);
-        self.remove_node(cursor);
-        let state = self
-            .copies
-            .get_mut(&copy)
-            .expect("erased remote cursor must reference a live copy");
-        assert_eq!(state.frontiers.remove(&remote), Some(cursor));
-        if state.frontiers.is_empty() {
-            self.copies.remove(&copy);
-        }
     }
 
     fn materialize_remote_node(
@@ -2875,6 +2869,58 @@ mod tests {
     }
 
     #[test]
+    fn auxiliary_cursor_traces_a_principal_chain_to_an_exact_source_pair() {
+        let mut source: RuntimeNet<&'static str> = RuntimeNet::empty();
+        let root = source.add_node(RuntimeNode::Bind);
+        let middle = source.add_node(RuntimeNode::Bind);
+        let upstream = source.add_node(RuntimeNode::Bind);
+        let callable = source.add_node(RuntimeNode::Data("callable"));
+        source.connect(Port::auxiliary(root, 2), Port::auxiliary(middle, 2));
+        source.connect(Port::principal(middle), Port::auxiliary(upstream, 2));
+        source.connect(Port::principal(upstream), Port::principal(callable));
+        let exposed = source.add_interface(Port::principal(root));
+        source.exposed = Some(exposed);
+        let pair = ActivePairKey::new(upstream, callable);
+        assert!(matches!(
+            source.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::Call { .. },
+                ..
+            })
+        ));
+        let source = SharedRuntimeNet::new(source);
+
+        let mut target = RuntimeNet::empty();
+        let root_cursor = target.begin_copy(source.clone());
+        let target_exposed = target.add_interface(Port::principal(root_cursor));
+        assert_eq!(
+            target.demand_interface(target_exposed),
+            Some(CursorProgress::Claimed)
+        );
+        assert!(matches!(
+            finish_claimed_cursor(&mut target, root_cursor),
+            CursorProgress::Materialized { .. }
+        ));
+
+        let cursor = target.copies.values().next().unwrap().frontiers[&Port::auxiliary(root, 2)];
+        assert_eq!(
+            target.claim_dependent_cursor(cursor),
+            Some(CursorProgress::Claimed)
+        );
+        assert_eq!(
+            finish_claimed_cursor(&mut target, cursor),
+            CursorProgress::Blocked
+        );
+        assert!(matches!(
+            target.cursor_dependency(cursor),
+            Some(CursorDependency::SourcePair {
+                source: dependency_source,
+                pair: dependency_pair,
+            }) if dependency_source.ptr_eq(&source) && dependency_pair == pair
+        ));
+    }
+
+    #[test]
     fn materializing_a_root_creates_lazy_auxiliary_cursors() {
         let source = duplicated_argument_template().instantiate_shared();
         let source_nodes = source.with(|runtime| runtime.nodes.len());
@@ -3080,7 +3126,7 @@ mod tests {
     }
 
     #[test]
-    fn erasing_a_remote_cursor_does_not_materialize_its_source() {
+    fn erasing_a_remote_cursor_materializes_then_uses_ordinary_erasure() {
         let source = duplicated_argument_template().instantiate_shared();
         let source_nodes = source.with(|runtime| runtime.nodes.len());
         let mut target = RuntimeNet::empty();
@@ -3089,6 +3135,10 @@ mod tests {
         target.connect(Port::principal(eraser), Port::principal(cursor));
 
         assert!(matches!(
+            reduce_next_cursor(&mut target).1,
+            CursorProgress::Materialized { .. }
+        ));
+        assert!(matches!(
             target.reduce_next(),
             Some(Reduction {
                 kind: ReductionKind::Erase,
@@ -3096,7 +3146,7 @@ mod tests {
             })
         ));
         assert_eq!(source.with(|runtime| runtime.nodes.len()), source_nodes);
-        assert!(target.copies.is_empty());
+        assert!(!target.copies.is_empty());
     }
 
     #[test]
