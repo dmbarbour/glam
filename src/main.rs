@@ -522,8 +522,8 @@ fn value_bytes(value: &glam::core::Value, path: &str) -> Result<Vec<u8>, String>
         glam::core::Value::Atom(_)
         | glam::core::Value::Dict(_)
         | glam::core::Value::Number(_)
+        | glam::core::Value::Function(_)
         | glam::core::Value::Net(_)
-        | glam::core::Value::Closure(_)
         | glam::core::Value::Builtin(_)
         | glam::core::Value::PartialBuiltin(_) => Err(format!("`{path}` is not binary text data")),
     }

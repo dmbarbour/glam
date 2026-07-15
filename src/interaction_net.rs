@@ -1243,6 +1243,22 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         self.neighbor(interface)
     }
 
+    /// Finds the exact local active pair that can advance an interface whose
+    /// current value is connected through auxiliary result ports.
+    pub fn interface_dependency(&self, interface: Port) -> Option<ActivePairKey> {
+        self.assert_interface(interface);
+        let mut port = self.neighbor(interface)?;
+        let mut visited = HashSet::new();
+        while !port.is_principal() && visited.insert(port.node()) {
+            let neighbor = self.neighbor(Port::principal(port.node()))?;
+            if neighbor.is_principal() {
+                return Some(ActivePairKey::new(port.node(), neighbor.node()));
+            }
+            port = neighbor;
+        }
+        None
+    }
+
     /// Returns the port wired to `port`, for evaluator diagnostics and demand
     /// propagation across evaluator-owned interfaces.
     pub fn port_neighbor(&self, port: Port) -> Option<Port> {

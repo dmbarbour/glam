@@ -6,10 +6,10 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::core::{
-    Builtin, BuiltinCall, Closure, DeferredValue, Expr, IVar, Key, KeyExpr, List, NetValue, Thunk,
-    Value,
+    Builtin, BuiltinCall, DeferredValue, Expr, FunctionCode, FunctionValue, IVar, Key, KeyExpr,
+    List, NetValue, Thunk, Value,
 };
-use crate::core_net::{CoreDataKey, CoreNetData, lower_function_value};
+use crate::core_net::{CoreDataKey, CoreNetData, lower_closed_function_value};
 use crate::interaction_net::{
     ActivePairKey, Call, Callable, CallableData, CursorDependency, HostFn, HostFnYield, NetBuilder,
     Port, Reduction, ReductionKind, StuckReason,
@@ -54,7 +54,13 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::List(list))
         }
         Expr::Apply(function, argument) => eval_apply(function, argument, local_env),
-        Expr::Lambda(lambda) => Ok(compiled_lambda_value(lambda, Arc::from(local_env.to_vec()))),
+        Expr::Function { code, captures } => {
+            let captures = captures
+                .iter()
+                .map(|capture| thunk_value(capture, local_env))
+                .collect();
+            instantiate_function(code, captures)
+        }
         Expr::Local(index) => eval_local(*index, local_env),
         Expr::Access(base, path) => {
             let base = eval_expr(base, local_env)?;
@@ -94,6 +100,12 @@ fn eval_thunk(thunk: &Thunk) -> Result<Value, EvalError> {
             .pop()
             .expect("saturated builtin thunk must contain an argument");
         apply_builtin(call.builtin, arguments, argument, &[])
+    } else if let Some((function, arguments)) = thunk.function_call() {
+        apply_net_many(Value::Net(function.stage().clone()), arguments.to_vec())
+    } else if let Some(net) = thunk.net() {
+        let runtime = net.runtime().clone();
+        let exposed = runtime.with(|runtime| runtime.exposed());
+        drive_core_net(runtime, exposed)
     } else {
         eval_expr(
             thunk
@@ -177,12 +189,9 @@ fn value_to_key(value: &Value, local_env: &[Value]) -> Result<Key, EvalError> {
                 .flatten()
                 .collect::<Vec<_>>(),
         ))),
-        Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Net(_) => Err(EvalError::new(
-            "dictionary keys must evaluate to keyable values",
-        )),
-        Value::Closure(_) => Err(EvalError::new(
-            "dictionary keys must evaluate to keyable values",
-        )),
+        Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Function(_) | Value::Net(_) => Err(
+            EvalError::new("dictionary keys must evaluate to keyable values"),
+        ),
         Value::Expr(_) => Err(EvalError::new(
             "dictionary keys must evaluate to keyable values",
         )),
@@ -288,7 +297,15 @@ fn eval_apply(function: &Expr, argument: &Expr, local_env: &[Value]) -> Result<V
         .into_iter()
         .map(|argument| thunk_value(argument, local_env))
         .collect::<Vec<_>>();
-    apply_values(function, arguments, local_env)
+    let result = apply_values(function, arguments, local_env)?;
+    match &result {
+        // A source-level function application evaluates its call stage, just
+        // as the former closure evaluator evaluated the body. Do not
+        // recursively force an arbitrary expression returned by that body:
+        // annotations and aggregate members deliberately return lazy values.
+        Value::Expr(thunk) if thunk.function_call().is_some() => eval_thunk(thunk),
+        _ => Ok(result),
+    }
 }
 
 fn thunk_value(expr: &Expr, local_env: &[Value]) -> Value {
@@ -310,8 +327,8 @@ fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<
             argument,
             local_env,
         ),
+        Value::Function(function) => apply_function_values(function, vec![argument]),
         Value::Net(net) => apply_net(net, argument),
-        Value::Closure(closure) => apply_closure(&closure, argument),
         Value::Dict(dict) => apply_dict_value(&dict, argument, local_env),
         Value::Expr(thunk) => apply_value(eval_thunk(&thunk)?, argument, local_env),
         _ => Err(EvalError::new("application requires a function value")),
@@ -326,6 +343,10 @@ fn apply_values(
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match function {
+            Value::Function(function_value) => {
+                let arguments = std::iter::once(argument).chain(arguments).collect();
+                return apply_function_values(function_value, arguments);
+            }
             Value::Net(net) => {
                 let arguments = std::iter::once(argument).chain(arguments).collect();
                 return apply_net_many(Value::Net(net), arguments);
@@ -334,6 +355,41 @@ fn apply_values(
         }
     }
     Ok(function)
+}
+
+fn apply_function_values(
+    function: FunctionValue,
+    arguments: Vec<Value>,
+) -> Result<Value, EvalError> {
+    assert!(
+        !arguments.is_empty(),
+        "function application requires an argument"
+    );
+    let remaining = function.remaining_arity();
+    if arguments.len() < remaining {
+        let supplied = arguments.len();
+        let stage = apply_net_many(Value::Net(function.stage().clone()), arguments)?;
+        let Value::Net(stage) = stage else {
+            return Err(EvalError::new(
+                "partial function application did not expose its next bind",
+            ));
+        };
+        return Ok(Value::Function(FunctionValue::new(
+            stage,
+            remaining - supplied,
+        )));
+    }
+
+    let (saturating, rest) = arguments.split_at(remaining);
+    let result = Value::Expr(Thunk::from_function_call(
+        function,
+        Arc::from(saturating.to_vec()),
+    ));
+    if rest.is_empty() {
+        Ok(result)
+    } else {
+        apply_values(result, rest.to_vec(), &[])
+    }
 }
 
 fn apply_dict_value(
@@ -395,21 +451,26 @@ fn effect_value(function: Value) -> Value {
     Value::Dict(crate::core::Dict::new_sync().insert(Key::atom_from_text("eff"), function))
 }
 
-fn apply_closure(closure: &Closure, argument: Value) -> Result<Value, EvalError> {
-    let mut extended = closure.env.iter().cloned().collect::<Vec<_>>();
-    extended.push(argument);
-    eval_expr(&closure.source_body, &extended)
-}
-
-fn compiled_lambda_value(lambda: &Arc<crate::core::Lambda>, environment: Arc<[Value]>) -> Value {
-    Value::Closure(Closure {
-        env: environment,
-        source_body: lambda.body().clone(),
-    })
-}
-
 fn closed_function_value(arity: usize, body: Expr) -> Value {
-    lower_function_value(arity, body)
+    lower_closed_function_value(arity, body)
+}
+
+fn instantiate_function(code: &FunctionCode, captures: Vec<Value>) -> Result<Value, EvalError> {
+    if captures.len() != code.capture_count() {
+        return Err(EvalError::new("function capture arity mismatch"));
+    }
+    let stage = if captures.is_empty() {
+        NetValue::new(code.runtime().clone())
+    } else {
+        let stage = apply_net_many(Value::Net(NetValue::new(code.runtime().clone())), captures)?;
+        let Value::Net(stage) = stage else {
+            return Err(EvalError::new(
+                "captured function did not expose its argument bind",
+            ));
+        };
+        stage
+    };
+    Ok(Value::Function(FunctionValue::new(stage, code.arity())))
 }
 
 fn apply_net(function: NetValue, argument: Value) -> Result<Value, EvalError> {
@@ -421,6 +482,14 @@ fn apply_net_many(function: Value, arguments: Vec<Value>) -> Result<Value, EvalE
         !arguments.is_empty(),
         "batched net application requires an argument"
     );
+    let net = attach_net_many(function, arguments);
+    let runtime = net.into_runtime();
+    let exposed = runtime.with(|net| net.exposed());
+    drive_core_net(runtime, exposed)
+}
+
+fn attach_net_many(function: Value, arguments: Vec<Value>) -> NetValue {
+    assert!(!arguments.is_empty(), "net attachment requires an argument");
     let mut net = NetBuilder::new();
     let spine = net.bind_spine(arguments.len());
     let function = net.data(CoreNetData::Value(function));
@@ -429,9 +498,7 @@ fn apply_net_many(function: Value, arguments: Vec<Value>) -> Result<Value, EvalE
         let argument = net.data(CoreNetData::Value(argument));
         net.wire(argument_port, argument);
     }
-    let runtime = net.finish(spine.result).instantiate_shared();
-    let exposed = runtime.with(|net| net.exposed());
-    drive_core_net(runtime, exposed)
+    NetValue::new(net.finish(spine.result).instantiate_shared())
 }
 
 fn observe_net(net: NetValue) -> Result<Value, EvalError> {
@@ -467,6 +534,19 @@ fn drive_core_net_inner(
             return observe_core_data(data);
         }
 
+        let exposes_bind = runtime.with(|net| {
+            net.interface_neighbor(interface).is_some_and(|port| {
+                port.is_principal()
+                    && matches!(
+                        net.node(port.node()),
+                        Some(crate::interaction_net::RuntimeNode::Bind)
+                    )
+            })
+        });
+        if exposes_bind {
+            return Ok(normal_form.unwrap_or_else(|| Value::Net(NetValue::new(runtime))));
+        }
+
         if let Some(progress) = runtime.with_mut(|net| net.demand_interface(interface)) {
             let cursor = runtime.with(|net| net.interface_cursor(interface));
             let progress = finish_core_cursor_claim(
@@ -484,6 +564,13 @@ fn drive_core_net_inner(
             }
         }
 
+        if let Some(pair) = runtime.with(|net| net.interface_dependency(interface)) {
+            if let Some(reduction) = runtime.with_mut(|net| net.reduce_pair(pair)) {
+                handle_core_reduction(&runtime, reduction)?;
+                continue;
+            }
+        }
+
         let reduction = runtime.with_mut(|net| net.reduce_next());
         if let Some(reduction) = reduction {
             handle_core_reduction(&runtime, reduction)?;
@@ -492,19 +579,6 @@ fn drive_core_net_inner(
 
         if progress_core_net(&runtime)? {
             continue;
-        }
-
-        let exposes_bind = runtime.with(|net| {
-            net.interface_neighbor(interface).is_some_and(|port| {
-                port.is_principal()
-                    && matches!(
-                        net.node(port.node()),
-                        Some(crate::interaction_net::RuntimeNode::Bind)
-                    )
-            })
-        });
-        if exposes_bind {
-            return Ok(normal_form.unwrap_or_else(|| Value::Net(NetValue::new(runtime))));
         }
 
         let scheduler_is_empty = runtime.with(|net| net.active_pairs().len() == 0);
@@ -659,12 +733,12 @@ fn lower_core_callable_value(value: Value) -> Result<Callable<CoreNetData>, Eval
         Value::Net(net) => Ok(Callable::Net(net.into_runtime())),
         Value::Builtin(builtin) => Ok(Callable::HostFn(builtin_host_fn(BuiltinCall::new(builtin)))),
         Value::PartialBuiltin(call) => Ok(Callable::HostFn(builtin_host_fn(call))),
-        value @ (Value::Closure(_) | Value::Dict(_)) => {
-            Ok(Callable::HostFn(core_applicable_host_fn(value)))
-        }
-        Value::Atom(_) | Value::Number(_) | Value::Binary(_) | Value::List(_) => {
-            Err(EvalError::new("application requires a function value"))
-        }
+        value @ Value::Dict(_) => Ok(Callable::HostFn(core_applicable_host_fn(value))),
+        Value::Atom(_)
+        | Value::Number(_)
+        | Value::Binary(_)
+        | Value::List(_)
+        | Value::Function(_) => Err(EvalError::new("application requires a function value")),
         Value::Expr(_) => unreachable!("callable value shell must be fully forced"),
     }
 }
@@ -754,11 +828,12 @@ fn progress_core_host_call(
     call: crate::interaction_net::HostCall,
 ) -> Result<bool, EvalError> {
     let (host_fn, data) = runtime.with(|net| net.host_call_parts(call));
-    match host_fn.apply(&data).and_then(validate_core_host_yield) {
+    match host_fn.apply(&data) {
         Ok(result) => runtime.with_mut(|net| {
             net.complete_host_call(call, result);
         }),
         Err(error) => {
+            let error: Arc<str> = format!("{}: {error}", host_fn.name()).into();
             runtime.with_mut(|net| {
                 net.fail_host_call(call, error.clone());
             });
@@ -766,17 +841,6 @@ fn progress_core_host_call(
         }
     }
     Ok(true)
-}
-
-fn validate_core_host_yield(
-    result: HostFnYield<CoreNetData>,
-) -> Result<HostFnYield<CoreNetData>, Arc<str>> {
-    if let HostFnYield::Data(CoreNetData::Value(Value::List(list))) = &result {
-        if list.known_len().is_none() {
-            return Err("host function cannot export a list with structural lazy holes".into());
-        }
-    }
-    Ok(result)
 }
 
 fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
@@ -841,6 +905,144 @@ fn core_data_to_lazy_value(data: CoreNetData) -> Result<Value, EvalError> {
         CoreNetData::Future(value) => Ok(Value::expr(Expr::Future(value))),
         CoreNetData::Error(message) => Ok(Value::expr(Expr::Error(message))),
     }
+}
+
+pub(crate) fn apply_host_fn(operand_count: usize, supplied: Arc<[Value]>) -> HostFn<CoreNetData> {
+    assert!(
+        operand_count >= 2,
+        "apply requires a function and an argument"
+    );
+    assert!(supplied.len() < operand_count);
+    HostFn::new("semantic apply", move |data: &CoreNetData| {
+        let operand = core_data_to_lazy_value(data.clone())
+            .map_err(|error| Arc::<str>::from(error.to_string()))?;
+        let mut operands = supplied.iter().cloned().collect::<Vec<_>>();
+        operands.push(operand);
+        if operands.len() < operand_count {
+            return Ok(HostFnYield::HostFn(apply_host_fn(
+                operand_count,
+                Arc::from(operands),
+            )));
+        }
+        let function = operands.remove(0);
+        let result = match function {
+            Value::Builtin(builtin) => apply_builtin_values_lazily(builtin, Vec::new(), operands),
+            Value::PartialBuiltin(call) => apply_builtin_values_lazily(
+                call.builtin,
+                call.arguments.iter().cloned().collect(),
+                operands,
+            ),
+            function => apply_values(function, operands, &[]),
+        }
+        .map_err(|error| Arc::<str>::from(error.to_string()))?;
+        Ok(HostFnYield::Data(CoreNetData::Value(result)))
+    })
+}
+
+/// Builds the semantic value for builtin application without executing a
+/// saturated call. Net construction may place that call in a lazy aggregate;
+/// evaluating it here would make enclosing construction accidentally strict.
+fn apply_builtin_values_lazily(
+    builtin: Builtin,
+    mut supplied: Vec<Value>,
+    arguments: Vec<Value>,
+) -> Result<Value, EvalError> {
+    let remaining = builtin
+        .arity()
+        .checked_sub(supplied.len())
+        .expect("partial builtin cannot contain too many arguments");
+    if arguments.len() < remaining {
+        supplied.extend(arguments);
+        return Ok(Value::PartialBuiltin(BuiltinCall {
+            builtin,
+            arguments: Arc::from(supplied),
+        }));
+    }
+
+    let (saturating, rest) = arguments.split_at(remaining);
+    supplied.extend_from_slice(saturating);
+    let result = Value::Expr(Thunk::from_builtin(BuiltinCall {
+        builtin,
+        arguments: Arc::from(supplied),
+    }));
+    if rest.is_empty() {
+        Ok(result)
+    } else {
+        apply_values(result, rest.to_vec(), &[])
+    }
+}
+
+pub(crate) fn function_capture_host_fn(
+    code: Arc<FunctionCode>,
+    supplied: Arc<[Value]>,
+) -> HostFn<CoreNetData> {
+    assert!(code.capture_count() > 0);
+    assert!(supplied.len() < code.capture_count());
+    HostFn::new("function captures", move |data: &CoreNetData| {
+        let capture = core_data_to_lazy_value(data.clone())
+            .map_err(|error| Arc::<str>::from(error.to_string()))?;
+        let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
+        captures.push(capture);
+        if captures.len() < code.capture_count() {
+            return Ok(HostFnYield::HostFn(function_capture_host_fn(
+                code.clone(),
+                Arc::from(captures),
+            )));
+        }
+        let function = instantiate_function(&code, captures)
+            .map_err(|error| Arc::<str>::from(error.to_string()))?;
+        Ok(HostFnYield::Data(CoreNetData::Value(function)))
+    })
+}
+
+pub(crate) fn computation_capture_host_fn(
+    code: Arc<FunctionCode>,
+    supplied: Arc<[Value]>,
+) -> HostFn<CoreNetData> {
+    assert_eq!(code.arity(), 0);
+    assert!(code.capture_count() > 0);
+    assert!(supplied.len() < code.capture_count());
+    HostFn::new("computation captures", move |data: &CoreNetData| {
+        let capture = core_data_to_lazy_value(data.clone())
+            .map_err(|error| Arc::<str>::from(error.to_string()))?;
+        let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
+        captures.push(capture);
+        if captures.len() < code.capture_count() {
+            return Ok(HostFnYield::HostFn(computation_capture_host_fn(
+                code.clone(),
+                Arc::from(captures),
+            )));
+        }
+        let stage = attach_net_many(Value::Net(NetValue::new(code.runtime().clone())), captures);
+        Ok(HostFnYield::Data(CoreNetData::Value(Value::Expr(
+            Thunk::from_net(stage),
+        ))))
+    })
+}
+
+pub(crate) fn dict_host_fn(keys: Arc<[Key]>, supplied: Arc<[Value]>) -> HostFn<CoreNetData> {
+    assert!(!keys.is_empty());
+    assert!(supplied.len() < keys.len());
+    HostFn::new("dictionary literal", move |data: &CoreNetData| {
+        let value = core_data_to_lazy_value(data.clone())
+            .map_err(|error| Arc::<str>::from(error.to_string()))?;
+        let mut values = supplied.iter().cloned().collect::<Vec<_>>();
+        values.push(value);
+        if values.len() < keys.len() {
+            return Ok(HostFnYield::HostFn(dict_host_fn(
+                keys.clone(),
+                Arc::from(values),
+            )));
+        }
+        let dict = keys
+            .iter()
+            .cloned()
+            .zip(values)
+            .fold(crate::core::Dict::new_sync(), |dict, (key, value)| {
+                dict.insert(key, value)
+            });
+        Ok(HostFnYield::Data(CoreNetData::Value(Value::Dict(dict))))
+    })
 }
 
 pub(crate) fn builtin_host_fn(call: BuiltinCall) -> HostFn<CoreNetData> {
@@ -1310,10 +1512,10 @@ fn compare_ordered_values(
         | (_, Value::Builtin(_))
         | (Value::PartialBuiltin(_), _)
         | (_, Value::PartialBuiltin(_))
+        | (Value::Function(_), _)
+        | (_, Value::Function(_))
         | (Value::Net(_), _)
-        | (_, Value::Net(_))
-        | (Value::Closure(_), _)
-        | (_, Value::Closure(_)) => Err(EvalError::new(format!(
+        | (_, Value::Net(_)) => Err(EvalError::new(format!(
             "{name} builtin cannot compare function values"
         ))),
         (left, right) => Err(EvalError::new(format!(
@@ -1373,10 +1575,10 @@ fn equal_values(
         | (_, Value::Builtin(_))
         | (Value::PartialBuiltin(_), _)
         | (_, Value::PartialBuiltin(_))
+        | (Value::Function(_), _)
+        | (_, Value::Function(_))
         | (Value::Net(_), _)
-        | (_, Value::Net(_))
-        | (Value::Closure(_), _)
-        | (_, Value::Closure(_)) => Err(EvalError::new(format!(
+        | (_, Value::Net(_)) => Err(EvalError::new(format!(
             "{name} builtin cannot compare function values"
         ))),
         (Value::Atom(_), _)
@@ -1900,8 +2102,8 @@ fn eval_dict_update_builtin(
 
 fn eval_fixpoint_builtin(function: &Value) -> Result<Value, EvalError> {
     let function = eval_value(function)?;
-    if !matches!(function, Value::Net(_) | Value::Closure(_)) {
-        return Err(EvalError::new("fixpoint builtin requires a lambda value"));
+    if !matches!(function, Value::Function(_) | Value::Net(_)) {
+        return Err(EvalError::new("fixpoint builtin requires a function value"));
     }
 
     let handle = IVar::new();
@@ -2875,10 +3077,13 @@ mod tests {
     fn compiled_function_values_reuse_one_shared_interaction_net() {
         let context = CompileContext::default();
         let function = context.value_lambdas(1, context.value_local(0));
-        let (Value::Net(first), Value::Net(second)) = (function.clone(), function) else {
-            panic!("closed functions should compile directly to net values");
+        let (Value::Function(first), Value::Function(second)) = (
+            eval_value(&function).unwrap(),
+            eval_value(&function).unwrap(),
+        ) else {
+            panic!("closed functions should evaluate to shared function stages");
         };
-        assert!(first.runtime().ptr_eq(second.runtime()));
+        assert!(first.stage().runtime().ptr_eq(second.stage().runtime()));
     }
 
     #[test]
@@ -2887,14 +3092,27 @@ mod tests {
         let function = context.value_lambdas(3, context.value_local(2));
         let partially_applied = eval_value(&context.value_apply(function, n(11)))
             .expect("first application should expose the remaining bind chain");
-        assert!(matches!(partially_applied, Value::Net(_)));
+        let Value::Function(first_stage) = &partially_applied else {
+            panic!("partial application should produce another function stage");
+        };
+        assert_eq!(first_stage.remaining_arity(), 2);
+        let cloned_stage = partially_applied.clone();
+        let Value::Function(cloned_stage) = cloned_stage else {
+            unreachable!()
+        };
+        assert!(
+            first_stage
+                .stage()
+                .runtime()
+                .ptr_eq(cloned_stage.stage().runtime())
+        );
 
         let result = context.value_apply(context.value_apply(partially_applied, n(22)), n(33));
         assert_eq!(eval_value(&result).unwrap(), n(11));
     }
 
     #[test]
-    fn net_application_accepts_a_cursor_backed_function_argument_without_forcing_it() {
+    fn function_application_accepts_a_cursor_backed_function_argument_without_forcing_it() {
         let context = CompileContext::default();
         let ignores_first = context.value_lambdas(2, context.value_local(0));
         let forwards_argument = context.value_lambdas(
@@ -2905,7 +3123,7 @@ mod tests {
 
         let partial = eval_value(&context.value_apply(forwards_argument, unresolved_function))
             .expect("net attachment must not demand a callable argument as embedded data");
-        assert!(matches!(partial, Value::Net(_)));
+        assert!(matches!(partial, Value::Function(_)));
 
         assert_eq!(
             eval_value(&context.value_apply(partial, n(42))).unwrap(),
@@ -2955,7 +3173,7 @@ mod tests {
     fn compiling_a_function_does_not_evaluate_its_body() {
         let function = closed_function_value(1, Expr::Error(Arc::from("unreached body")));
 
-        assert!(matches!(function, Value::Net(_)));
+        assert!(matches!(function, Value::Function(_)));
     }
 
     fn n(value: i64) -> Value {
@@ -3386,7 +3604,12 @@ mod tests {
         let Value::List(mapped) = mapped else {
             panic!("map should produce a list");
         };
-        let items = list_to_value_items(&mapped).expect("mapped list should be readable");
+        let items = list_to_value_items(&mapped)
+            .expect("mapped list should be readable")
+            .iter()
+            .map(eval_value)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("mapped values should evaluate");
         assert_eq!(items, vec![n(2), n(3), n(4)]);
         assert_eq!(binary_len, n(6));
         assert_eq!(list_len, n(4));
@@ -3498,7 +3721,7 @@ mod tests {
     }
 
     #[test]
-    fn net_partial_builtins_share_lazy_arguments() {
+    fn partial_builtins_share_lazy_arguments() {
         let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = force_count.clone();
         let argument = Expr::Deferred(Arc::new(DeferredValue::new(
@@ -3518,7 +3741,7 @@ mod tests {
         let partial = eval_closed_expr(&Expr::Apply(Arc::new(make_partial), Arc::new(argument)))
             .expect("a partial builtin should retain its argument lazily");
 
-        assert!(matches!(partial, Value::Net(_)));
+        assert!(matches!(partial, Value::PartialBuiltin(_)));
         assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(apply_value(partial.clone(), n(2), &[]).unwrap(), n(42));
         assert_eq!(apply_value(partial, n(3), &[]).unwrap(), n(43));
@@ -3564,16 +3787,16 @@ mod tests {
     }
 
     #[test]
-    fn host_functions_reject_lists_with_structural_lazy_holes() {
-        let hole = Thunk::new(Arc::new(Expr::Value(n(42))), Arc::from([]));
-        let result = HostFnYield::Data(CoreNetData::Value(Value::List(List::from_thunk(hole))));
-
-        let error = validate_core_host_yield(result).unwrap_err();
-
-        assert_eq!(
-            error.as_ref(),
-            "host function cannot export a list with structural lazy holes"
+    fn closed_semantic_list_holes_remain_host_observable() {
+        let hole = Thunk::new(
+            Arc::new(Expr::Value(Value::List(List::from_values(vec![n(42)])))),
+            Arc::from([]),
         );
+        let list = List::from_thunk(hole);
+
+        let (value, tail) = pop_list_front(&list).unwrap().unwrap();
+        assert_eq!(value, n(42));
+        assert!(pop_list_front(&tail).unwrap().is_none());
     }
 
     #[test]
@@ -3634,6 +3857,7 @@ mod tests {
         ));
 
         let value = apply_value(eval_value(&function).unwrap(), api, &[])
+            .and_then(|value| eval_value(&value))
             .expect("extended effect function should evaluate with an API");
         assert_eq!(value, n(42));
     }

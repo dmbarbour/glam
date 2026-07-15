@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use crate::core::{BuiltinCall, DeferredValue, Expr, IVar, Key, KeyExpr, Value};
+use crate::core::{
+    BuiltinCall, DeferredValue, Expr, FunctionCode, FunctionValue, IVar, Key, KeyExpr, NetValue,
+    Value,
+};
 use crate::interaction_net::{HostFn, InteractionNet, NetBuilder, Port, SharedRuntimeNet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,51 +37,25 @@ pub struct LiftedFunctionNet {
 /// leaving one closed shared net. Capture binds precede the function's ordinary
 /// argument binds and are supplied immediately by the enclosing lowerer.
 pub(crate) fn lower_function(arity: usize, body: Arc<Expr>) -> LiftedFunctionNet {
-    assert!(arity > 0, "a function must bind at least one argument");
     ClosedLowerer::lower_function(arity, body)
 }
 
-/// Lowers net-safe functions immediately and confines the remaining
-/// data-boundary compatibility representation to this construction boundary.
-pub(crate) fn lower_function_value(arity: usize, body: Expr) -> Value {
-    assert!(arity > 0, "a function must bind at least one argument");
-    if function_body_is_net_safe(&body, arity) {
-        let lifted = lower_function(arity, Arc::new(body));
-        debug_assert_eq!(lifted.capture_count, 0);
-        return Value::Net(crate::core::NetValue::new(lifted.runtime));
-    }
-
-    let mut expression = body;
-    for _ in 0..arity {
-        expression = Expr::Lambda(Arc::new(crate::core::Lambda::new(Arc::new(expression))));
-    }
-    Value::expr(expression)
+pub(crate) fn lower_function_code(arity: usize, body: Arc<Expr>) -> FunctionCode {
+    let lifted = lower_function(arity, body);
+    FunctionCode::new(lifted.runtime, arity, lifted.capture_count)
 }
 
-/// Transitional safety boundary for legacy host callbacks that can consume
-/// only embedded data. Structural functions passed to those callbacks cannot
-/// yet be reified as data, so expressions involving access, aggregates, or
-/// nested functions retain evaluator compatibility lowering for now.
-pub(crate) fn function_body_is_net_safe(expr: &Expr, arity: usize) -> bool {
-    match expr {
-        Expr::Value(value) => matches!(
-            value,
-            Value::Atom(_)
-                | Value::Number(_)
-                | Value::Binary(_)
-                | Value::Builtin(_)
-                | Value::Net(_)
-        ),
-        Expr::Deferred(_) | Expr::Future(_) | Expr::Error(_) => true,
-        Expr::List(items) => items
-            .iter()
-            .all(|item| function_body_is_net_safe(item, arity)),
-        Expr::Local(_) => true,
-        Expr::Apply(function, argument) => {
-            function_body_is_net_safe(function, arity) && function_body_is_net_safe(argument, arity)
-        }
-        Expr::Lambda(_) | Expr::Access(_, _) => false,
-    }
+pub(crate) fn lower_closed_function_value(arity: usize, body: Expr) -> Value {
+    let code = lower_function_code(arity, Arc::new(body));
+    assert_eq!(
+        code.capture_count(),
+        0,
+        "closed function helper cannot lift captures"
+    );
+    Value::Function(FunctionValue::new(
+        NetValue::new(code.runtime().clone()),
+        arity,
+    ))
 }
 
 struct ClosedLowerer {
@@ -105,6 +82,9 @@ impl ClosedLowerer {
 
         let capture_count = lowerer.local_uses.len().saturating_sub(arity);
         let bind_count = capture_count + arity;
+        if bind_count == 0 {
+            return (lowerer.net.finish(body_boundary.input), 0);
+        }
         let binds = lowerer.net.bind_spine(bind_count);
         lowerer.net.wire(binds.result, body_boundary.input);
 
@@ -124,12 +104,21 @@ impl ClosedLowerer {
 
     fn compile_into(&mut self, expr: &Expr, target: Port) {
         match expr {
-            Expr::Value(Value::Builtin(builtin)) => self.host_fn_into(
-                crate::eval::builtin_host_fn(BuiltinCall::new(*builtin)),
-                target,
-            ),
-            Expr::Value(Value::PartialBuiltin(call)) => {
-                self.host_fn_into(crate::eval::builtin_host_fn(call.clone()), target)
+            Expr::Value(Value::Dict(dict)) if !dict.is_empty() => {
+                let entries = dict.iter().collect::<Vec<_>>();
+                let keys = entries
+                    .iter()
+                    .map(|(key, _)| (*key).clone())
+                    .collect::<Vec<_>>();
+                let values = entries
+                    .into_iter()
+                    .map(|(_, value)| value)
+                    .collect::<Vec<_>>();
+                self.lazy_host_application_into(
+                    crate::eval::dict_host_fn(Arc::from(keys), Arc::from([])),
+                    &values,
+                    target,
+                );
             }
             Expr::Value(value) => self.data_into(CoreNetData::Value(value.clone()), target),
             Expr::List(items) => {
@@ -147,14 +136,28 @@ impl ClosedLowerer {
                     );
                 }
             }
-            Expr::Apply(function, argument) => {
-                let [application, argument_port, result] = self.net.bind();
-                self.net.wire(result, target);
-                self.compile_into(function, application);
-                self.compile_into(argument, argument_port);
+            Expr::Apply(_, _) => {
+                let (function, arguments) = application_spine(expr);
+                self.semantic_application_into(function, &arguments, target);
             }
-            Expr::Lambda(_) => {
-                unreachable!("nested compatibility lambdas are excluded from net lowering")
+            Expr::Function { code, captures } => {
+                debug_assert_eq!(code.capture_count(), captures.len());
+                if captures.is_empty() {
+                    self.data_into(
+                        CoreNetData::Value(Value::Function(FunctionValue::new(
+                            NetValue::new(code.runtime().clone()),
+                            code.arity(),
+                        ))),
+                        target,
+                    );
+                } else {
+                    let captures = captures.iter().map(Arc::as_ref).collect::<Vec<_>>();
+                    self.host_application_into(
+                        crate::eval::function_capture_host_fn(code.clone(), Arc::from([])),
+                        &captures,
+                        target,
+                    );
+                }
             }
             Expr::Local(index) => self.use_local(*index, target),
             Expr::Access(base, path) => {
@@ -197,11 +200,6 @@ impl ClosedLowerer {
         self.net.wire(data, target);
     }
 
-    fn host_fn_into(&mut self, host_fn: HostFn<CoreNetData>, target: Port) {
-        let function = self.net.unary_host_fn(host_fn);
-        self.net.wire(function, target);
-    }
-
     fn host_application_into(
         &mut self,
         host_fn: HostFn<CoreNetData>,
@@ -218,6 +216,79 @@ impl ClosedLowerer {
         self.net.wire(output, target);
     }
 
+    fn lazy_host_application_into(
+        &mut self,
+        host_fn: HostFn<CoreNetData>,
+        args: &[&Value],
+        target: Port,
+    ) {
+        let mut output = self.net.unary_host_fn(host_fn);
+        for argument in args {
+            let [application, argument_port, result] = self.net.bind();
+            self.net.wire(output, application);
+            self.compile_lazy_value_into(argument, argument_port);
+            output = result;
+        }
+        self.net.wire(output, target);
+    }
+
+    fn semantic_application_into(&mut self, function: &Expr, arguments: &[&Expr], target: Port) {
+        let mut output = self.net.unary_host_fn(crate::eval::apply_host_fn(
+            arguments.len() + 1,
+            Arc::from([]),
+        ));
+        let [application, function_port, result] = self.net.bind();
+        self.net.wire(output, application);
+        self.compile_into(function, function_port);
+        output = result;
+        for argument in arguments {
+            let [application, argument_port, result] = self.net.bind();
+            self.net.wire(output, application);
+            self.compile_lazy_expr_into(argument, argument_port);
+            output = result;
+        }
+        self.net.wire(output, target);
+    }
+
+    fn compile_lazy_value_into(&mut self, value: &Value, target: Port) {
+        if !matches!(value, Value::Expr(_)) {
+            self.data_into(CoreNetData::Value(value.clone()), target);
+            return;
+        }
+        let expr = value_to_expr(value.clone());
+        if matches!(expr, Expr::Value(_)) {
+            self.compile_into(&expr, target);
+            return;
+        }
+        self.compile_lazy_expr_into(&expr, target);
+    }
+
+    fn compile_lazy_expr_into(&mut self, expr: &Expr, target: Port) {
+        if let Expr::Value(value) = expr {
+            self.data_into(CoreNetData::Value(value.clone()), target);
+            return;
+        }
+        let code = Arc::new(lower_function_code(0, Arc::new(expr.clone())));
+        if code.capture_count() == 0 {
+            self.data_into(
+                CoreNetData::Value(Value::Expr(crate::core::Thunk::from_net(NetValue::new(
+                    code.runtime().clone(),
+                )))),
+                target,
+            );
+            return;
+        }
+        let captures = (0..code.capture_count())
+            .map(Expr::Local)
+            .collect::<Vec<_>>();
+        let captures = captures.iter().collect::<Vec<_>>();
+        self.host_application_into(
+            crate::eval::computation_capture_host_fn(code, Arc::from([])),
+            &captures,
+            target,
+        );
+    }
+
     fn distribute(&mut self, source: Port, targets: &[Port]) {
         let copy = self.net.copy(targets.len());
         self.net.wire(source, copy.input);
@@ -225,6 +296,49 @@ impl ClosedLowerer {
             self.net.wire(output, *target);
         }
     }
+}
+
+fn value_to_expr(value: Value) -> Expr {
+    match value {
+        Value::Expr(thunk)
+            if thunk.env().is_some_and(|env| env.is_empty())
+                && expr_contains_local(thunk.expr().unwrap()) =>
+        {
+            thunk.expr().unwrap().as_ref().clone()
+        }
+        value => Expr::Value(value),
+    }
+}
+
+fn expr_contains_local(expr: &Expr) -> bool {
+    match expr {
+        Expr::Value(_) | Expr::Deferred(_) | Expr::Future(_) | Expr::Error(_) => false,
+        Expr::List(items) => items.iter().any(|item| expr_contains_local(item)),
+        Expr::Apply(function, argument) => {
+            expr_contains_local(function) || expr_contains_local(argument)
+        }
+        Expr::Function { captures, .. } => {
+            captures.iter().any(|capture| expr_contains_local(capture))
+        }
+        Expr::Local(_) => true,
+        Expr::Access(base, path) => {
+            expr_contains_local(base)
+                || path.iter().any(|key| match key {
+                    KeyExpr::Key(_) => false,
+                    KeyExpr::Index(expr) | KeyExpr::PathIndex(expr) => expr_contains_local(expr),
+                })
+        }
+    }
+}
+
+fn application_spine(mut expr: &Expr) -> (&Expr, Vec<&Expr>) {
+    let mut arguments = Vec::new();
+    while let Expr::Apply(function, argument) = expr {
+        arguments.push(argument.as_ref());
+        expr = function;
+    }
+    arguments.reverse();
+    (expr, arguments)
 }
 
 #[cfg(test)]

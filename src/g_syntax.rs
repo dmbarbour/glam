@@ -977,9 +977,15 @@ fn shift_expr_locals(expr: &CoreExpr, amount: usize, cutoff: usize) -> CoreExpr 
             Arc::new(shift_expr_locals(function, amount, cutoff)),
             Arc::new(shift_expr_locals(argument, amount, cutoff)),
         ),
-        CoreExpr::Lambda(lambda) => CoreExpr::Lambda(Arc::new(crate::core::Lambda::new(Arc::new(
-            shift_expr_locals(lambda.body(), amount, cutoff + 1),
-        )))),
+        CoreExpr::Function { code, captures } => CoreExpr::Function {
+            code: code.clone(),
+            captures: Arc::from(
+                captures
+                    .iter()
+                    .map(|capture| Arc::new(shift_expr_locals(capture, amount, cutoff)))
+                    .collect::<Vec<_>>(),
+            ),
+        },
         CoreExpr::Local(index) if *index >= cutoff => CoreExpr::Local(index + amount),
         CoreExpr::Local(index) => CoreExpr::Local(*index),
         CoreExpr::Access(base, path) => CoreExpr::Access(
@@ -7510,11 +7516,11 @@ mod tests {
         assert!(matches!(anno, Value::Builtin(crate::core::Builtin::Anno)));
         assert!(matches!(
             crate::eval::eval_value(&std_not).unwrap(),
-            Value::Net(_) | Value::Closure(_)
+            Value::Function(_) | Value::Net(_)
         ));
         assert!(matches!(
             crate::eval::eval_value(&std_could).unwrap(),
-            Value::Net(_) | Value::Closure(_)
+            Value::Function(_) | Value::Net(_)
         ));
         assert!(matches!(floor, Value::Builtin(crate::core::Builtin::Floor)));
         assert!(matches!(mod_fn, Value::Builtin(crate::core::Builtin::Mod)));

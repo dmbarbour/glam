@@ -17,10 +17,10 @@
 - `main.rs` applies one temporary top-level fixpoint to the anonymous assembly module
 - `core_net.rs` lowers an explicit `(arity, body)` directly to one bind chain
   and shared runtime carrying `CoreNetData`; free locals become leading capture
-  binds that the enclosing semantic expression supplies once. Calls lazily copy
-  the runtime frontier through evaluator-only remote cursors. Functions that
-  can cross only data-only HostFn/dictionary boundaries retain the explicitly
-  transitional core lambda/closure path
+  binds that the enclosing semantic expression supplies once. Core stores the
+  result as `FunctionCode`, while each evaluated `FunctionValue` names a shared
+  curried runtime stage. Calls lazily copy the runtime frontier through
+  evaluator-only remote cursors
 - `interaction_net.rs` provides generic `InteractionNet<Data>` topology,
   checked construction through one `NetBuilder` (including fallible
   wiring/finalization and balanced copy helpers), active-pair discovery, and
@@ -39,27 +39,29 @@
   fan sites are translated per logical copy
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
-- `eval.rs` no longer constructs lambda expressions for its helper functions;
-  it requests function lowering from `core_net`. It still evaluates the
-  compatibility closures selected at the construction boundary, implements
-  generic callable-data policy for target-local blocked bind-data pairs, and
-  executes generic unary `HostFn` requests
+- `eval.rs` contains no lambda or closure representation. Source functions are
+  ordinary, observable `Value::Function` data; partial application derives and
+  shares another curried runtime stage. Saturated calls are memoized thunks.
+  Source-level application lowers through a data-consuming `HostFn`, while raw
+  `Value::Net` remains the explicit callable-data/cursor path. The evaluator
+  implements generic callable-data policy for target-local blocked bind-data
+  pairs and executes generic unary `HostFn` requests
   outside runtime locks; HostFn failures become permanently stuck pairs rather
   than an underspecified retry state; net-lowered builtins curry by returning
   another bind-wrapped HostFn and retain saturated work as memoized semantic thunks;
-  contiguous application spines targeting `Value::Net` share one evaluator-
-  owned caller runtime and one generic bind spine; List and Access lower through
-  HostFn chains, with embedded lazy list values stored as values rather than
-  exported runtime-backed holes; the core HostFn boundary rejects returned
-  lists containing structural holes; closed net values attach their exposed
+  contiguous application spines are represented by one semantic HostFn chain;
+  function stages attach all presently available arguments together. List,
+  dictionary, and Access construction lower through HostFn chains, with lazy
+  aggregate members represented as closed value/computation thunks rather than
+  exported runtime-backed holes; closed net values attach their exposed
   ports through logical-copy cursors and may normalize to either data or a non-
   data net frontier
 - `main` expects binary `asm.result`, writes to `stdout`
 
 At the moment, even this simple case is not fully implemented. Thus, it remains the focus for now.
 
-The current interaction-net slice establishes the lambda-to-shared-net boundary
-without exposing syntax. Templates use local fan sites and each runtime graph
+The current interaction-net slice removes lambdas and closures from core while
+keeping lambda syntax in `g_syntax`. Templates use local fan sites and each runtime graph
 gets one fresh namespace. The current oracle records dynamic duplication paths
 directly; it provides reference semantics for replacing those histories with
 Lamping-style bracket/croissant control interactions. Builtin currying, closed

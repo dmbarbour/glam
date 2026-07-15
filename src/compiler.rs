@@ -6,9 +6,7 @@ use crate::core::Builtin;
 use crate::core::{
     Atom, DeferredValue, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, NetValue, Value,
 };
-use crate::core_net::{
-    CoreNetData, function_body_is_net_safe, lower_function, lower_function_value,
-};
+use crate::core_net::{CoreNetData, lower_function_code};
 use crate::interaction_net::{NetBuildError, NetBuilder, Port};
 use crate::number::Number;
 
@@ -266,21 +264,21 @@ impl CompileContext {
         self.value_lambdas(1, body)
     }
 
-    /// Constructs one closed curried function net. Locals outside `arity` are
-    /// lifted into leading capture binds and immediately supplied from the
-    /// enclosing semantic expression.
+    /// Lowers one syntactic function body once. Evaluating the resulting
+    /// semantic constructor supplies lifted captures and produces an ordinary
+    /// shared, curried function value.
     pub fn value_lambdas(&self, arity: usize, body: Value) -> Value {
         assert!(arity > 0, "a lambda must bind at least one parameter");
         let body = value_to_core_expr(body);
-        if !function_body_is_net_safe(&body, arity) {
-            return lower_function_value(arity, body);
-        }
-        let lifted = lower_function(arity, Arc::new(body));
-        let mut function = Value::Net(NetValue::new(lifted.runtime));
-        for capture in 0..lifted.capture_count {
-            function = self.value_apply(function, self.value_local(capture));
-        }
-        function
+        let code = lower_function_code(arity, Arc::new(body));
+        let captures = (0..code.capture_count())
+            .map(CoreExpr::Local)
+            .map(Arc::new)
+            .collect::<Vec<_>>();
+        Value::expr(CoreExpr::Function {
+            code: Arc::new(code),
+            captures: Arc::from(captures),
+        })
     }
 
     pub fn value_local(&self, index: usize) -> Value {
@@ -451,12 +449,20 @@ mod tests {
         let closed = context.value_lambda(context.value_local(0));
         let captured = context.value_lambda(context.value_local(1));
 
-        assert!(matches!(closed, Value::Net(_)));
+        assert!(matches!(
+            closed,
+            Value::Expr(ref thunk)
+                if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Function { code, captures })
+                    if code.arity() == 1 && code.capture_count() == 0 && captures.is_empty())
+        ));
         assert!(matches!(
             captured,
             Value::Expr(ref thunk)
-                if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Apply(_, argument))
-                    if matches!(argument.as_ref(), CoreExpr::Local(0)))
+                if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Function { code, captures })
+                    if code.arity() == 1
+                        && code.capture_count() == 1
+                        && matches!(captures.as_ref(), [capture]
+                            if matches!(capture.as_ref(), CoreExpr::Local(0))))
         ));
     }
 
@@ -464,10 +470,20 @@ mod tests {
     fn compile_context_builds_one_net_for_a_function_arity() {
         let context = CompileContext::default();
         let grouped = context.value_lambdas(3, context.value_local(2));
-        assert!(matches!(grouped, Value::Net(_)));
+        assert!(matches!(
+            grouped,
+            Value::Expr(ref thunk)
+                if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Function { code, captures })
+                    if code.arity() == 3 && code.capture_count() == 0 && captures.is_empty())
+        ));
 
         let captured = context.value_lambdas(3, context.value_local(3));
-        assert!(matches!(captured, Value::Expr(_)));
+        assert!(matches!(
+            captured,
+            Value::Expr(ref thunk)
+                if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Function { code, captures })
+                    if code.arity() == 3 && code.capture_count() == 1 && captures.len() == 1)
+        ));
     }
 
     #[test]

@@ -92,13 +92,12 @@ may produce ordinary data rather than a bind, attachment is not intrinsically
 a call. `CompileContext::value_net` provides checked construction for Rust
 front ends and drops the immutable template after instantiation.
 
-During migration, CompileContext lowers a net-safe source function directly by
-arity. A source lambda such as `\x y z -> ...` becomes one runtime net containing
-three argument binds (plus any leading capture binds), rather than a semantic
-lambda spine. Partial application exposes the next bind in that same net. The
-residual compatibility closure path is reserved for bodies involving nested
-functions, dictionary access, or opaque aggregate data that can still carry a
-function across a data-only host boundary.
+CompileContext lowers a complete source function directly by arity. A source
+lambda such as `\x y z -> ...` becomes `FunctionCode` containing one runtime net
+with three argument binds (plus any leading capture binds), rather than a
+semantic lambda spine. Evaluating its explicit captures produces an observable
+`Value::Function`. Partial application derives another shared curried runtime
+stage; core has no lambda or closure representation.
 
 Remote cursors remain strictly outward, from a source net into a logical copy;
 an inner net cannot retain a cursor back to an outer capture. A logical copy of
@@ -131,39 +130,34 @@ remains a memoized semantic thunk. Dynamically obtained builtins and partial
 builtins are also converted to an explicit Bind backed by HostFn.
 
 Application spines use the dual construction. `NetBuilder::bind_spine` is
-shared by lambda lowering and evaluator-owned caller nets. `g_syntax` lowers a
-maximal application such as `f x y z` through
-`CompileContext::value_apply_many`; the evaluator peels the left-associated
-semantic `Apply` nodes and installs all remaining lazy arguments into one caller
-runtime for `Value::Net`. Closures and other compatibility-only callables remain
-sequential.
+shared by function lowering and evaluator-owned caller nets. `g_syntax` lowers
+a maximal application such as `f x y z` through
+`CompileContext::value_apply_many`. Ordinary semantic application becomes a
+data-consuming HostFn chain with closed lazy operands. A `Value::Function`
+attaches all currently supplied arguments to its shared stage together;
+undersaturation returns another shared function stage and saturation returns a
+memoized call thunk. Raw `Value::Net` remains the explicit cursor-callable path.
 
 The topology reducer handles bind-bind, fan-fan, fan-bind, fan-data, and eraser
 interactions. `bind-data` reports `ReductionKind::Call`; `eval` claims that exact
 pair and lowers only its callable data outside the runtime lock. A net
 loads through a cursor, while a builtin head becomes Bind/HostFn and proceeds
-through the ordinary bind join. Compatibility closures and dict applicables
-become the same Bind/HostFn shape using a host applicable callback. No path
+through the ordinary bind join. Dictionary applicables become the same
+Bind/HostFn shape using a host applicable callback. No path
 inspects or detaches the argument. Source `Data >< Bind` calls remain exact
 source dependencies and are never copied.
 
-Core thunks can be backed by an expression or a semantic builtin/access
-computation. All forms share one memoized result. Partial builtin application
-now produces a closed net and retains shared thunks; saturated calls emit a
-semantic thunk so unrelated source-pair progress does not force strict work
-before its result is demanded. List and
-Access lowering use HostFn chains. A list HostFn can store an embedded lazy
-`Value`, including `Value::Net`, but cannot export a list hole backed by a
-runtime/interface wire. More generally, the core HostFn boundary rejects any
-`Value::List` containing a structural lazy hole; such a call becomes
-permanently stuck.
+Core thunks can be backed by an expression, builtin/access computation, a
+closed arity-zero runtime computation, or a saturated function call. All forms
+share one memoized result. Saturated calls emit a semantic thunk so unrelated
+source-pair progress does not force strict work before its result is demanded.
+List, dictionary, and Access lowering use HostFn chains and store closed lazy
+members as ordinary values rather than exporting runtime/interface wires as
+aggregate holes.
 
-Only `Value::Net` uses cursor application. Transitional compatibility closures retain
-`Closure::source_body` and use the expression evaluator; they no longer carry a
-compatibility runtime or data-mapping capture substitution. Automatic closed-
-net preparation now includes general application bodies. Applicable lowering
-resolves the former composition dependency cycle without moving
-an active pair or caller-specific argument into the shared source. Do not expose
+Only raw `Value::Net` uses callable-data cursor application. Ordinary functions
+remain independently observable host values backed by shared curried stages;
+their semantic HostFn application never reifies a linear `Bind`. Do not expose
 the `interaction_net` source keyword until general construction effects are
 represented explicitly.
 The dictionary compatibility path is intentionally unchanged pending a

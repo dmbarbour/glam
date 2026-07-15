@@ -14,35 +14,17 @@ pub enum Expr {
     Value(Value),
     List(Arc<[Arc<Expr>]>),
     Apply(Arc<Expr>, Arc<Expr>),
-    /// Transitional fallback for functions that must cross a data-only host
-    /// boundary. New net-safe functions are lowered before reaching core.
-    Lambda(Arc<Lambda>),
+    /// Constructs an ordinary function value from once-lowered shared code and
+    /// the current values of its lifted captures.
+    Function {
+        code: Arc<FunctionCode>,
+        captures: Arc<[Arc<Expr>]>,
+    },
     Local(usize),
     Access(Arc<Expr>, Arc<[KeyExpr]>),
     Deferred(Arc<DeferredValue>),
     Future(IVar),
     Error(Arc<str>),
-}
-
-impl Expr {
-    pub fn lambda(body: Arc<Expr>) -> Self {
-        Self::Lambda(Arc::new(Lambda::new(body)))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Lambda {
-    body: Arc<Expr>,
-}
-
-impl Lambda {
-    pub fn new(body: Arc<Expr>) -> Self {
-        Self { body }
-    }
-
-    pub fn body(&self) -> &Arc<Expr> {
-        &self.body
-    }
 }
 
 #[derive(Clone)]
@@ -181,7 +163,7 @@ impl Key {
                     .flatten()
                     .collect::<Vec<_>>(),
             ))),
-            Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Net(_) | Value::Closure(_) => {
+            Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Function(_) | Value::Net(_) => {
                 None
             }
             Value::Expr(_) => None,
@@ -244,27 +226,13 @@ pub enum Value {
     Dict(Dict),
     Builtin(Builtin),
     PartialBuiltin(BuiltinCall),
+    /// An ordinary observable function value backed by a shared curried net
+    /// stage. Unlike `Net`, this never exposes structural binders as values.
+    Function(FunctionValue),
     /// A closed interaction net with one designated exposed port.
     Net(NetValue),
-    /// Transitional evaluator value for lambdas that cross legacy data-only
-    /// host boundaries.
-    Closure(Closure),
     Expr(Thunk),
 }
-
-#[derive(Debug, Clone)]
-pub struct Closure {
-    pub env: Arc<[Value]>,
-    pub(crate) source_body: Arc<Expr>,
-}
-
-impl PartialEq for Closure {
-    fn eq(&self, other: &Self) -> bool {
-        self.env == other.env && self.source_body == other.source_body
-    }
-}
-
-impl Eq for Closure {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetValue {
@@ -282,6 +250,62 @@ impl NetValue {
 
     pub fn into_runtime(self) -> CoreRuntimeNet {
         self.runtime
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionCode {
+    runtime: CoreRuntimeNet,
+    arity: usize,
+    capture_count: usize,
+}
+
+impl FunctionCode {
+    pub(crate) fn new(runtime: CoreRuntimeNet, arity: usize, capture_count: usize) -> Self {
+        Self {
+            runtime,
+            arity,
+            capture_count,
+        }
+    }
+
+    pub(crate) fn runtime(&self) -> &CoreRuntimeNet {
+        &self.runtime
+    }
+
+    pub fn arity(&self) -> usize {
+        self.arity
+    }
+
+    pub fn capture_count(&self) -> usize {
+        self.capture_count
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionValue {
+    stage: NetValue,
+    remaining_arity: usize,
+}
+
+impl FunctionValue {
+    pub(crate) fn new(stage: NetValue, remaining_arity: usize) -> Self {
+        assert!(
+            remaining_arity > 0,
+            "a function stage must accept an argument"
+        );
+        Self {
+            stage,
+            remaining_arity,
+        }
+    }
+
+    pub(crate) fn stage(&self) -> &NetValue {
+        &self.stage
+    }
+
+    pub fn remaining_arity(&self) -> usize {
+        self.remaining_arity
     }
 }
 
@@ -317,6 +341,11 @@ enum ThunkSource {
         arguments: Arc<[Value]>,
     },
     Builtin(BuiltinCall),
+    Net(NetValue),
+    FunctionCall {
+        function: FunctionValue,
+        arguments: Arc<[Value]>,
+    },
 }
 
 impl Thunk {
@@ -341,17 +370,40 @@ impl Thunk {
         }
     }
 
+    pub(crate) fn from_function_call(function: FunctionValue, arguments: Arc<[Value]>) -> Self {
+        Self {
+            source: ThunkSource::FunctionCall {
+                function,
+                arguments,
+            },
+            result: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn from_net(net: NetValue) -> Self {
+        Self {
+            source: ThunkSource::Net(net),
+            result: Arc::new(OnceLock::new()),
+        }
+    }
+
     pub fn expr(&self) -> Option<&Arc<Expr>> {
         match &self.source {
             ThunkSource::Expr { expr, .. } => Some(expr),
-            ThunkSource::Access { .. } | ThunkSource::Builtin(_) => None,
+            ThunkSource::Access { .. }
+            | ThunkSource::Builtin(_)
+            | ThunkSource::Net(_)
+            | ThunkSource::FunctionCall { .. } => None,
         }
     }
 
     pub fn env(&self) -> Option<&Arc<[Value]>> {
         match &self.source {
             ThunkSource::Expr { env, .. } => Some(env),
-            ThunkSource::Access { .. } | ThunkSource::Builtin(_) => None,
+            ThunkSource::Access { .. }
+            | ThunkSource::Builtin(_)
+            | ThunkSource::Net(_)
+            | ThunkSource::FunctionCall { .. } => None,
         }
     }
 
@@ -370,14 +422,37 @@ impl Thunk {
     pub(crate) fn access(&self) -> Option<(&[CoreDataKey], &[Value])> {
         match &self.source {
             ThunkSource::Access { path, arguments } => Some((path, arguments)),
-            ThunkSource::Expr { .. } | ThunkSource::Builtin(_) => None,
+            ThunkSource::Expr { .. }
+            | ThunkSource::Builtin(_)
+            | ThunkSource::Net(_)
+            | ThunkSource::FunctionCall { .. } => None,
         }
     }
 
     pub(crate) fn builtin(&self) -> Option<&BuiltinCall> {
         match &self.source {
             ThunkSource::Builtin(call) => Some(call),
-            ThunkSource::Expr { .. } | ThunkSource::Access { .. } => None,
+            ThunkSource::Expr { .. }
+            | ThunkSource::Access { .. }
+            | ThunkSource::Net(_)
+            | ThunkSource::FunctionCall { .. } => None,
+        }
+    }
+
+    pub(crate) fn function_call(&self) -> Option<(&FunctionValue, &[Value])> {
+        match &self.source {
+            ThunkSource::FunctionCall {
+                function,
+                arguments,
+            } => Some((function, arguments)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn net(&self) -> Option<&NetValue> {
+        match &self.source {
+            ThunkSource::Net(net) => Some(net),
+            _ => None,
         }
     }
 }
@@ -404,6 +479,15 @@ impl fmt::Debug for Thunk {
                 .field("arguments", arguments)
                 .finish_non_exhaustive(),
             ThunkSource::Builtin(call) => f.debug_tuple("BuiltinThunk").field(call).finish(),
+            ThunkSource::Net(net) => f.debug_tuple("NetThunk").field(net).finish(),
+            ThunkSource::FunctionCall {
+                function,
+                arguments,
+            } => f
+                .debug_struct("FunctionCallThunk")
+                .field("function", function)
+                .field("arguments", arguments)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -543,8 +627,8 @@ impl Value {
                 | Value::Number(_)
                 | Value::Binary(_)
                 | Value::List(_)
+                | Value::Function(_)
                 | Value::Net(_)
-                | Value::Closure(_)
                 | Value::Builtin(_)
                 | Value::PartialBuiltin(_)
                 | Value::Expr(_) => None,

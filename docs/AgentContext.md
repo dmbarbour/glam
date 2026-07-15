@@ -73,24 +73,22 @@ This document should summarize salient, relevant points rather than asking futur
 - Core lists alias `list::List<Value, Thunk>`. `list.rs` preserves `Bytes` as
   compact leaves and treats thunks as opaque lazy holes; evaluator code supplies
   forcing and converts individual observed bytes to core number values.
-- `core_net::lower_function` accepts `(arity, body)` and produces one shared
-  runtime with one bind chain. Locals outside the arity become leading capture
-  binds and `CompileContext` supplies those captures with ordinary semantic
-  applications. Logical copies materialize nodes lazily through remote cursors.
+- `core_net` accepts `(arity, body)` and produces `FunctionCode` containing one
+  shared runtime with one bind chain. Locals outside the arity become leading
+  capture binds. Evaluating the semantic `Expr::Function` supplies those
+  captures once and produces an observable `Value::Function` whose current
+  curried stage is another shared runtime. Logical copies materialize nodes
+  lazily through remote cursors.
 - `Value::Net` is a first-class closed net containing only a
   `SharedRuntimeNet<CoreNetData>`. Observing it may produce ordinary data or
   preserve a non-data normal-form net; applying it attaches the exposed port
   through a logical-copy cursor. `CompileContext::value_net` is the checked
   Rust construction entry point and discards the immutable template after
   instantiation.
-- Source lambdas exist in `g_syntax`; net-safe functions are lowered directly
-  through one batched compiler call, including capture lifting, without first
-  constructing core lambda wrappers. Update-definition parameter sugar is also
-  rewritten while still syntax. The residual `core::Lambda`/`Value::Closure`
-  path is restricted to bodies that may send structural functions through the
-  legacy data-only HostFn/dictionary compatibility boundary. `eval.rs` does not
-  construct lambdas for its helper functions; it uses the same centralized
-  function-lowering entry point.
+- Lambdas exist only as syntax in `g_syntax`. `CompileContext` lowers a complete
+  syntactic function, including its explicit lifted captures, without creating
+  a core lambda or closure. Update-definition parameter sugar is likewise
+  rewritten while still syntax. Core has no lambda/closure compatibility path.
 - Lambda templates contain `Bind`, binary `Fan`, `Erase`, and `Data` nodes.
   The generic topology lives in `interaction_net.rs`; core data and expression
   lowering live in `core_net.rs`.
@@ -144,11 +142,13 @@ This document should summarize salient, relevant points rather than asking futur
   asks the client data to produce either a shared net or `HostFn`, then briefly
   reacquires the lock to install that topology or mark the pair stuck. Core
   implements the policy in `eval`; call and host reductions are handled
-  immediately rather than rediscovered by scanning scheduler collections. A `Value::Net`
-  loads through a cursor without inspecting the argument. Builtins and partial
+  immediately rather than rediscovered by scanning scheduler collections. A raw
+  `Value::Net` loads through a cursor without inspecting the argument. Builtins and partial
   builtins lower to an explicit unary `Bind` backed by `HostFn`, after which the
-  ordinary bind-join rule applies. Compatibility closures and dict applicables
-  lower to the same shape using a host applicable callback. Source active pairs
+  ordinary bind-join rule applies. Dictionary applicables lower to the same
+  shape using a host applicable callback. Ordinary `Value::Function`
+  application instead uses the semantic data-consuming HostFn described below.
+  Source active pairs
   remain exact dependencies and are never copied across a cursor boundary; the
   evaluator no longer inspects an application argument through `Bind.aux1`.
 - `HostFn<Data>` is a generic unary agent with a principal data input and one
@@ -162,19 +162,18 @@ This document should summarize salient, relevant points rather than asking futur
   builtin values also lower to the same Bind/HostFn form; applicable lowering
   never detaches an argument from shared topology.
 - `g_syntax` and `CompileContext::value_apply_many` preserve maximal
-  left-associated application spines such as `f x y z`. The expression
-  evaluator peels such a spine before evaluation and supplies all remaining
-  arguments through one caller runtime only when the callable is `Value::Net`.
-  Closures remain on the semantic compatibility evaluator until they can be
-  represented as genuinely closed nets.
-- List and Access applications lower to HostFn chains rather than callable
-  `Data`. A list HostFn accepts only embedded values and stores lazy values as
-  ordinary list values; it never exports a runtime/interface-backed list hole.
-  The core HostFn boundary rejects any returned `Value::List` that already
-  contains a structural lazy hole, leaving the call permanently stuck. General
-  application bodies are enabled for automatic closed-net preparation; lowering
-  a lazy callable before touching its argument resolves the former composition
-  cursor dependency cycle.
+  left-associated application spines such as `f x y z`. Net lowering represents
+  an ordinary application as a data-consuming HostFn chain whose operands are
+  closed lazy values. When the head is a `Value::Function`, all currently
+  available arguments attach to its stage together. An undersaturated call
+  produces another shared `FunctionValue`; a saturated call produces a
+  memoized function-call thunk. This preserves sharing when arguments trickle
+  in without exposing linear binds as host functions.
+- List, dictionary, and Access applications lower to HostFn chains rather than
+  callable `Data`. Aggregate HostFns store lazy members as ordinary closed
+  values/computation thunks; they do not turn network interfaces into list
+  holes. Existing host-level structural list holes remain observable through
+  the list evaluator.
 - Preserve the current dictionary/access compatibility evaluator while a
   persistent lazy dictionary representation is designed separately.
 - The topology reducer implements bind/fan join, fan commutation, duplication,
