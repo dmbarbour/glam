@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
-use std::sync::Arc;
 
 /// Stable identity for one lexical binding in the g-syntax front end.
 ///
@@ -22,7 +21,7 @@ impl BindingId {
 ///
 /// Direct net lowering will ultimately consume these structural variants
 /// without constructing a Core expression.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum ResolvedExpr<V> {
     /// Closed ordinary data, including literal and builtin values.
     Embedded(V),
@@ -30,18 +29,18 @@ pub(super) enum ResolvedExpr<V> {
     /// environment or import result.
     Provided(V),
     Local(BindingId),
-    List(Arc<[Self]>),
+    List(Vec<Self>),
     Access {
-        base: Arc<Self>,
-        path: Arc<[ResolvedPathPart<V>]>,
+        base: Box<Self>,
+        path: Vec<ResolvedPathPart<V>>,
     },
     Lambda {
-        parameters: Arc<[BindingId]>,
-        body: Arc<Self>,
+        parameters: Vec<BindingId>,
+        body: Box<Self>,
     },
     Apply {
-        function: Arc<Self>,
-        arguments: Arc<[Self]>,
+        function: Box<Self>,
+        arguments: Vec<Self>,
     },
     /// A literal lambda and its immediately available arguments.
     ///
@@ -50,24 +49,24 @@ pub(super) enum ResolvedExpr<V> {
     /// then loading it through a cursor. This applies to every `(lambda) arg`
     /// expression, not only lambdas introduced by `let` or `where` sugar.
     ApplyLambda {
-        parameters: Arc<[BindingId]>,
-        body: Arc<Self>,
-        arguments: Arc<[Self]>,
+        parameters: Vec<BindingId>,
+        body: Box<Self>,
+        arguments: Vec<Self>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum ResolvedPathPart<V> {
     Key(crate::core::Key),
-    Index(Arc<ResolvedExpr<V>>),
-    PathIndex(Arc<ResolvedExpr<V>>),
+    Index(Box<ResolvedExpr<V>>),
+    PathIndex(Box<ResolvedExpr<V>>),
 }
 
-impl<V: Clone> ResolvedExpr<V> {
-    pub(super) fn lambda(parameters: Arc<[BindingId]>, body: Self) -> Self {
+impl<V> ResolvedExpr<V> {
+    pub(super) fn lambda(parameters: Vec<BindingId>, body: Self) -> Self {
         Self::Lambda {
             parameters,
-            body: Arc::new(body),
+            body: Box::new(body),
         }
     }
 
@@ -82,36 +81,34 @@ impl<V: Clone> ResolvedExpr<V> {
         match function {
             Self::Apply {
                 function,
-                arguments,
+                mut arguments,
             } => {
-                let mut combined = arguments.to_vec();
-                combined.append(&mut new_arguments);
+                arguments.append(&mut new_arguments);
                 Self::Apply {
                     function,
-                    arguments: Arc::from(combined),
+                    arguments,
                 }
             }
             Self::Lambda { parameters, body } => Self::ApplyLambda {
                 parameters,
                 body,
-                arguments: Arc::from(new_arguments),
+                arguments: new_arguments,
             },
             Self::ApplyLambda {
                 parameters,
                 body,
-                arguments,
+                mut arguments,
             } => {
-                let mut combined = arguments.to_vec();
-                combined.append(&mut new_arguments);
+                arguments.append(&mut new_arguments);
                 Self::ApplyLambda {
                     parameters,
                     body,
-                    arguments: Arc::from(combined),
+                    arguments,
                 }
             }
             function => Self::Apply {
-                function: Arc::new(function),
-                arguments: Arc::from(new_arguments),
+                function: Box::new(function),
+                arguments: new_arguments,
             },
         }
     }
@@ -119,45 +116,53 @@ impl<V: Clone> ResolvedExpr<V> {
     #[allow(dead_code)] // Becomes the closure-conversion input for direct net emission.
     pub(super) fn free_bindings(&self) -> BTreeSet<BindingId> {
         let mut free = BTreeSet::new();
-        self.collect_free_bindings(&mut free);
+        self.collect_free_bindings(&mut free, &mut BTreeSet::new());
         free
     }
 
     #[allow(dead_code)]
-    fn collect_free_bindings(&self, free: &mut BTreeSet<BindingId>) {
+    fn collect_free_bindings(
+        &self,
+        free: &mut BTreeSet<BindingId>,
+        bound: &mut BTreeSet<BindingId>,
+    ) {
         match self {
             Self::Embedded(_) | Self::Provided(_) => {}
             Self::Local(binding) => {
-                free.insert(*binding);
+                if !bound.contains(binding) {
+                    free.insert(*binding);
+                }
             }
             Self::List(items) => {
                 for item in items.iter() {
-                    item.collect_free_bindings(free);
+                    item.collect_free_bindings(free, bound);
                 }
             }
             Self::Access { base, path } => {
-                base.collect_free_bindings(free);
+                base.collect_free_bindings(free, bound);
                 for part in path.iter() {
                     match part {
                         ResolvedPathPart::Key(_) => {}
                         ResolvedPathPart::Index(expr) | ResolvedPathPart::PathIndex(expr) => {
-                            expr.collect_free_bindings(free);
+                            expr.collect_free_bindings(free, bound);
                         }
                     }
                 }
             }
             Self::Lambda { parameters, body } => {
-                let mut body_free = body.free_bindings();
-                body_free.retain(|binding| !parameters.contains(binding));
-                free.extend(body_free);
+                bound.extend(parameters.iter().copied());
+                body.collect_free_bindings(free, bound);
+                for parameter in parameters {
+                    bound.remove(parameter);
+                }
             }
             Self::Apply {
                 function,
                 arguments,
             } => {
-                function.collect_free_bindings(free);
+                function.collect_free_bindings(free, bound);
                 for argument in arguments.iter() {
-                    argument.collect_free_bindings(free);
+                    argument.collect_free_bindings(free, bound);
                 }
             }
             Self::ApplyLambda {
@@ -165,11 +170,13 @@ impl<V: Clone> ResolvedExpr<V> {
                 body,
                 arguments,
             } => {
-                let mut body_free = body.free_bindings();
-                body_free.retain(|binding| !parameters.contains(binding));
-                free.extend(body_free);
+                bound.extend(parameters.iter().copied());
+                body.collect_free_bindings(free, bound);
+                for parameter in parameters {
+                    bound.remove(parameter);
+                }
                 for argument in arguments.iter() {
-                    argument.collect_free_bindings(free);
+                    argument.collect_free_bindings(free, bound);
                 }
             }
         }
@@ -209,9 +216,26 @@ mod tests {
     }
 
     #[test]
+    fn application_spines_move_non_clone_expressions() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct NonClone(&'static str);
+
+        let first = ResolvedExpr::apply(
+            ResolvedExpr::Embedded(NonClone("f")),
+            [ResolvedExpr::Embedded(NonClone("x"))],
+        );
+        let grouped = ResolvedExpr::apply(first, [ResolvedExpr::Embedded(NonClone("y"))]);
+
+        assert!(matches!(
+            grouped,
+            ResolvedExpr::Apply { arguments, .. } if arguments.len() == 2
+        ));
+    }
+
+    #[test]
     fn every_literal_lambda_application_is_marked_for_local_fusion() {
         let parameter = TestResolver::default().fresh_binding();
-        let lambda = ResolvedExpr::lambda(Arc::from([parameter]), ResolvedExpr::Local(parameter));
+        let lambda = ResolvedExpr::lambda(vec![parameter], ResolvedExpr::Local(parameter));
         let applied = ResolvedExpr::apply(lambda, [ResolvedExpr::Embedded("argument")]);
 
         assert!(matches!(applied, ResolvedExpr::ApplyLambda { .. }));
@@ -223,7 +247,7 @@ mod tests {
         let outer = resolver.fresh_binding();
         let inner = resolver.fresh_binding();
         let expression = ResolvedExpr::<()>::lambda(
-            Arc::from([inner]),
+            vec![inner],
             ResolvedExpr::apply(ResolvedExpr::Local(outer), [ResolvedExpr::Local(inner)]),
         );
 
