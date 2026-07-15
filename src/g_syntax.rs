@@ -406,21 +406,93 @@ mod resolver_context_tests {
                             if *binding == parameters[0])))
         ));
     }
+
+    #[test]
+    fn with_expression_keeps_its_fixpoint_local_in_resolved_ir() {
+        let context = CompileContext::default();
+        let scope = NameScope::module(&context, context.empty_dict_value());
+        let mut resolver = ResolverContext::default();
+        let syntax = SyntaxExpr::With {
+            base: Box::new(SyntaxExpr::SingletonDict(
+                SyntaxKeyExpr::Atom("base".to_owned()),
+                Box::new(SyntaxExpr::Unit),
+            )),
+            alias: None,
+            body: vec![ObjectBodyDefinition {
+                line: 1,
+                text: "copy = self".to_owned(),
+                kind: ObjectBodyDefinitionKind::Definition(DefinitionDecl {
+                    target: "copy".to_owned(),
+                    kind: DefinitionKind::Introduce,
+                    body: "self".to_owned(),
+                    expr: Some(SyntaxExpr::Name("self".to_owned())),
+                }),
+            }],
+        };
+
+        let resolved =
+            syntax_expr_to_resolved_in_scope(&syntax, 1, &context, &scope, &mut resolver).unwrap();
+
+        assert!(matches!(
+            resolved,
+            ResolvedExpr::Apply { function, arguments }
+                if matches!(function.as_ref(),
+                    ResolvedExpr::Embedded(Value::Builtin(Builtin::Fixpoint)))
+                && matches!(arguments.as_ref(), [ResolvedExpr::Lambda { parameters, body }]
+                    if parameters.len() == 1
+                    && body.free_bindings().contains(&parameters[0]))
+        ));
+    }
+
+    #[test]
+    fn object_expression_keeps_self_pair_in_resolved_ir() {
+        let context = CompileContext::default();
+        let scope = NameScope::module(&context, context.empty_dict_value());
+        let mut resolver = ResolverContext::default();
+        let syntax = SyntaxExpr::Object(ObjectExpr {
+            name: None,
+            alias: None,
+            deps: Vec::new(),
+            body: vec![ObjectBodyDefinition {
+                line: 1,
+                text: "copy = self".to_owned(),
+                kind: ObjectBodyDefinitionKind::Definition(DefinitionDecl {
+                    target: "copy".to_owned(),
+                    kind: DefinitionKind::Introduce,
+                    body: "self".to_owned(),
+                    expr: Some(SyntaxExpr::Name("self".to_owned())),
+                }),
+            }],
+        });
+
+        let resolved =
+            syntax_expr_to_resolved_in_scope(&syntax, 1, &context, &scope, &mut resolver).unwrap();
+
+        assert!(matches!(
+            resolved,
+            ResolvedExpr::Apply { function, arguments }
+                if matches!(function.as_ref(),
+                    ResolvedExpr::Embedded(Value::Builtin(Builtin::ObjectInstanceFromParts)))
+                && matches!(arguments.as_ref(), [_, _, ResolvedExpr::Lambda { parameters, body }]
+                    if parameters.len() == 2
+                    && parameters.iter().all(|binding| body.free_bindings().contains(binding)))
+        ));
+    }
 }
 
 #[derive(Debug, Clone)]
-struct NameScope {
-    final_defs: Value,
-    prior_defs: Value,
-    module_final_defs: Value,
-    module_prior_defs: Value,
+struct NameScope<V = Value> {
+    final_defs: V,
+    prior_defs: V,
+    module_final_defs: V,
+    module_prior_defs: V,
     object_alias: Option<String>,
-    object_final_defs: Option<Value>,
-    object_prior_defs: Option<Value>,
-    parent: Option<Box<NameScope>>,
+    object_final_defs: Option<V>,
+    object_prior_defs: Option<V>,
+    parent: Option<Box<NameScope<V>>>,
 }
 
-impl NameScope {
+impl NameScope<Value> {
     fn module(context: &CompileContext, visible_definitions: Value) -> Self {
         Self {
             final_defs: context.final_defs.clone(),
@@ -431,6 +503,23 @@ impl NameScope {
             object_final_defs: None,
             object_prior_defs: None,
             parent: None,
+        }
+    }
+
+    fn resolved(&self) -> NameScope<ResolvedExpr<Value>> {
+        NameScope {
+            final_defs: ResolvedExpr::Provided(self.final_defs.clone()),
+            prior_defs: ResolvedExpr::Provided(self.prior_defs.clone()),
+            module_final_defs: ResolvedExpr::Provided(self.module_final_defs.clone()),
+            module_prior_defs: ResolvedExpr::Provided(self.module_prior_defs.clone()),
+            object_alias: self.object_alias.clone(),
+            object_final_defs: self.object_final_defs.clone().map(ResolvedExpr::Provided),
+            object_prior_defs: self.object_prior_defs.clone().map(ResolvedExpr::Provided),
+            parent: self
+                .parent
+                .as_deref()
+                .map(NameScope::resolved)
+                .map(Box::new),
         }
     }
 }
@@ -1078,51 +1167,18 @@ fn object_decl_value_in_scope(
     locals: &mut ResolverContext,
     name: Value,
 ) -> Result<Value, Diagnostic> {
-    let body_parent_scope = shift_name_scope_locals(&parent_scope, 2);
-    let defs = object_body_defs_value_in_scope(
-        &object.body,
-        object.alias.as_deref(),
+    let resolved_scope = parent_scope.resolved();
+    let resolved = object_decl_resolved_in_scope(
+        object,
         line,
         context,
-        body_parent_scope,
+        resolved_scope,
         locals,
+        ResolvedExpr::Provided(name),
     )?;
-    let deps = object
-        .deps
-        .iter()
-        .map(|dep| {
-            let dep_object = path_value_in_scope(dep, line, context, &parent_scope, locals);
-            Ok(object_spec_value(dep_object, context))
-        })
-        .collect::<Result<Vec<_>, Diagnostic>>()?;
-    Ok(object_instance_from_parts_value(
-        name,
-        context.value_list(deps),
-        defs,
-        context,
+    Ok(resolved_expr_to_value_in_resolver(
+        resolved, context, locals,
     ))
-}
-
-fn shift_name_scope_locals(scope: &NameScope, amount: usize) -> NameScope {
-    NameScope {
-        final_defs: shift_value_locals(&scope.final_defs, amount, 0),
-        prior_defs: shift_value_locals(&scope.prior_defs, amount, 0),
-        module_final_defs: shift_value_locals(&scope.module_final_defs, amount, 0),
-        module_prior_defs: shift_value_locals(&scope.module_prior_defs, amount, 0),
-        object_alias: scope.object_alias.clone(),
-        object_final_defs: scope
-            .object_final_defs
-            .as_ref()
-            .map(|value| shift_value_locals(value, amount, 0)),
-        object_prior_defs: scope
-            .object_prior_defs
-            .as_ref()
-            .map(|value| shift_value_locals(value, amount, 0)),
-        parent: scope
-            .parent
-            .as_ref()
-            .map(|parent| Box::new(shift_name_scope_locals(parent, amount))),
-    }
 }
 
 fn shift_value_locals(value: &Value, amount: usize, cutoff: usize) -> Value {
@@ -1231,7 +1287,7 @@ fn lower_resolved_expr_compat(
             );
             value
         }
-        ResolvedExpr::Provided(value) | ResolvedExpr::Legacy(value) => value,
+        ResolvedExpr::Provided(value) => value,
         ResolvedExpr::Local(binding) => {
             let position = bindings
                 .iter()
@@ -1439,6 +1495,234 @@ fn object_instance_from_parts_value(
     context.builtin_apply3_value(Builtin::ObjectInstanceFromParts, name, deps, defs)
 }
 
+fn apply_builtin_resolved(
+    builtin: Builtin,
+    arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
+    context: &CompileContext,
+) -> ResolvedExpr<Value> {
+    ResolvedExpr::apply(
+        ResolvedExpr::Embedded(context.value_builtin(builtin)),
+        arguments,
+    )
+}
+
+fn object_spec_resolved(
+    value: ResolvedExpr<Value>,
+    context: &CompileContext,
+) -> ResolvedExpr<Value> {
+    apply_builtin_resolved(Builtin::ObjectSpec, [value], context)
+}
+
+fn object_instance_from_parts_resolved(
+    name: ResolvedExpr<Value>,
+    deps: ResolvedExpr<Value>,
+    defs: ResolvedExpr<Value>,
+    context: &CompileContext,
+) -> ResolvedExpr<Value> {
+    apply_builtin_resolved(
+        Builtin::ObjectInstanceFromParts,
+        [name, deps, defs],
+        context,
+    )
+}
+
+fn object_decl_resolved_in_scope(
+    object: &ObjectDecl,
+    line: usize,
+    context: &CompileContext,
+    parent_scope: NameScope<ResolvedExpr<Value>>,
+    locals: &mut ResolverContext,
+    name: ResolvedExpr<Value>,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let defs = object_body_defs_resolved_in_scope(
+        &object.body,
+        object.alias.as_deref(),
+        line,
+        context,
+        parent_scope.clone(),
+        locals,
+    )?;
+    let deps = object
+        .deps
+        .iter()
+        .map(|dep| {
+            object_spec_resolved(
+                path_resolved_in_scope(dep, context, &parent_scope, locals),
+                context,
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(object_instance_from_parts_resolved(
+        name,
+        ResolvedExpr::List(Arc::from(deps)),
+        defs,
+        context,
+    ))
+}
+
+fn object_body_defs_resolved_in_scope(
+    body: &[ObjectBodyDefinition],
+    alias: Option<&str>,
+    _line: usize,
+    context: &CompileContext,
+    parent_scope: NameScope<ResolvedExpr<Value>>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let base_len = locals.len();
+    let prior_self = locals.push_binding("<object-prior-self>");
+    let final_self = locals.push_binding("<object-final-self>");
+    let object_final_defs = ResolvedExpr::Local(final_self);
+    let mut definitions = remove_object_spec_resolved(ResolvedExpr::Local(prior_self), context);
+
+    for body_definition in body {
+        let scope = object_body_scope_resolved(
+            alias,
+            object_final_defs.clone(),
+            definitions.clone(),
+            parent_scope.clone(),
+        );
+        lower_object_body_item_resolved(
+            body_definition,
+            context,
+            &mut definitions,
+            &scope,
+            locals,
+        )?;
+        definitions = remove_object_spec_resolved(definitions, context);
+    }
+
+    locals.truncate(base_len);
+    Ok(ResolvedExpr::lambda(
+        Arc::from([prior_self, final_self]),
+        definitions,
+    ))
+}
+
+fn lower_object_body_item_resolved(
+    item: &ObjectBodyDefinition,
+    context: &CompileContext,
+    definitions: &mut ResolvedExpr<Value>,
+    scope: &NameScope<ResolvedExpr<Value>>,
+    locals: &mut ResolverContext,
+) -> Result<(), Diagnostic> {
+    match &item.kind {
+        ObjectBodyDefinitionKind::Definition(definition) => lower_definition_resolved(
+            definition,
+            item.text.as_str(),
+            item.line,
+            context,
+            definitions,
+            scope,
+            locals,
+        ),
+        ObjectBodyDefinitionKind::Object(object) => {
+            lower_nested_object_resolved(object, item.line, context, definitions, scope, locals)
+        }
+    }
+}
+
+fn lower_nested_object_resolved(
+    object: &ObjectDecl,
+    line: usize,
+    context: &CompileContext,
+    definitions: &mut ResolvedExpr<Value>,
+    scope: &NameScope<ResolvedExpr<Value>>,
+    locals: &mut ResolverContext,
+) -> Result<(), Diagnostic> {
+    let name = hierarchical_object_name_resolved(&object.target, line, context, scope)?;
+    let object_value =
+        object_decl_resolved_in_scope(object, line, context, scope.clone(), locals, name)?;
+    let object_value = annotate_definition_resolved(
+        BuiltinAssertion::Undefined,
+        &object.target,
+        definitions.clone(),
+        object_value,
+        line,
+        context,
+        scope,
+        locals,
+    )?;
+    *definitions =
+        update_module_resolved(definitions.clone(), &object.target, object_value, context);
+    Ok(())
+}
+
+fn hierarchical_object_name_resolved(
+    target: &str,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedExpr<Value>>,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let Some(host) = &scope.object_final_defs else {
+        return Err(Diagnostic::error(
+            line,
+            "nested object declaration requires an object scope",
+        ));
+    };
+    let parts = ResolvedExpr::List(Arc::from(
+        target
+            .split('.')
+            .map(|part| ResolvedExpr::Embedded(context.value_atom(atom_from_str(part))))
+            .collect::<Vec<_>>(),
+    ));
+    Ok(apply_builtin_resolved(
+        Builtin::ObjectLocalName,
+        [host.clone(), parts],
+        context,
+    ))
+}
+
+fn remove_object_spec_resolved(
+    value: ResolvedExpr<Value>,
+    context: &CompileContext,
+) -> ResolvedExpr<Value> {
+    apply_builtin_resolved(
+        Builtin::DictUpdate,
+        [
+            static_path_resolved("spec", context),
+            ResolvedExpr::Embedded(context.empty_dict_value()),
+            value,
+        ],
+        context,
+    )
+}
+
+fn remove_object_spec_value(value: Value, context: &CompileContext) -> Value {
+    context.builtin_apply3_value(
+        Builtin::DictUpdate,
+        path_value("spec", context),
+        context.empty_dict_value(),
+        value,
+    )
+}
+
+fn object_body_scope_resolved(
+    alias: Option<&str>,
+    object_final_defs: ResolvedExpr<Value>,
+    object_prior_defs: ResolvedExpr<Value>,
+    parent: NameScope<ResolvedExpr<Value>>,
+) -> NameScope<ResolvedExpr<Value>> {
+    let object_alias = alias
+        .map(local_name_metadata)
+        .and_then(|alias| alias.canonical);
+    let (final_defs, prior_defs) = if object_alias.is_some() {
+        (parent.final_defs.clone(), parent.prior_defs.clone())
+    } else {
+        (object_final_defs.clone(), object_prior_defs.clone())
+    };
+
+    NameScope {
+        final_defs,
+        prior_defs,
+        module_final_defs: parent.module_final_defs.clone(),
+        module_prior_defs: parent.module_prior_defs.clone(),
+        object_alias,
+        object_final_defs: Some(object_final_defs),
+        object_prior_defs: Some(object_prior_defs),
+        parent: Some(Box::new(parent)),
+    }
+}
+
 fn object_body_defs_value(
     body: &[ObjectBodyDefinition],
     alias: Option<&str>,
@@ -1459,132 +1743,22 @@ fn object_body_defs_value(
 fn object_body_defs_value_in_scope(
     body: &[ObjectBodyDefinition],
     alias: Option<&str>,
-    _line: usize,
+    line: usize,
     context: &CompileContext,
     parent_scope: NameScope,
     locals: &mut ResolverContext,
 ) -> Result<Value, Diagnostic> {
-    let mut definitions = remove_object_spec_value(context.value_local(1), context);
-    let object_final_defs = context.value_local(0);
-
-    for body_definition in body {
-        let scope = object_body_scope(
-            alias,
-            object_final_defs.clone(),
-            definitions.clone(),
-            parent_scope.clone(),
-        );
-        lower_object_body_item(body_definition, context, &mut definitions, &scope, locals)?;
-        definitions = remove_object_spec_value(definitions, context);
-    }
-
-    Ok(lower_lambda_value(2, definitions, context))
-}
-
-fn lower_object_body_item(
-    item: &ObjectBodyDefinition,
-    context: &CompileContext,
-    definitions: &mut Value,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Result<(), Diagnostic> {
-    match &item.kind {
-        ObjectBodyDefinitionKind::Definition(definition) => lower_definition_with_locals(
-            definition,
-            item.text.as_str(),
-            item.line,
-            context,
-            definitions,
-            scope,
-            locals,
-        ),
-        ObjectBodyDefinitionKind::Object(object) => {
-            lower_nested_object(object, item.line, context, definitions, scope, locals)
-        }
-    }
-}
-
-fn lower_nested_object(
-    object: &ObjectDecl,
-    line: usize,
-    context: &CompileContext,
-    definitions: &mut Value,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Result<(), Diagnostic> {
-    let name = hierarchical_object_name_value(&object.target, line, context, scope)?;
-    let object_value =
-        object_decl_value_in_scope(object, line, context, scope.clone(), locals, name)?;
-    let object_value = annotate_definition_value(
-        BuiltinAssertion::Undefined,
-        &object.target,
-        definitions.clone(),
-        object_value,
+    let resolved = object_body_defs_resolved_in_scope(
+        body,
+        alias,
         line,
         context,
-        scope,
+        parent_scope.resolved(),
         locals,
     )?;
-
-    *definitions = update_module_value(definitions.clone(), &object.target, object_value, context);
-    Ok(())
-}
-
-fn hierarchical_object_name_value(
-    target: &str,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope,
-) -> Result<Value, Diagnostic> {
-    let Some(host) = &scope.object_final_defs else {
-        return Err(Diagnostic::error(
-            line,
-            "nested object declaration requires an object scope",
-        ));
-    };
-    let parts = context.value_list(
-        target
-            .split('.')
-            .map(|part| context.value_atom(atom_from_str(part)))
-            .collect(),
-    );
-    Ok(context.builtin_apply2_value(Builtin::ObjectLocalName, host.clone(), parts))
-}
-
-fn remove_object_spec_value(value: Value, context: &CompileContext) -> Value {
-    context.builtin_apply3_value(
-        Builtin::DictUpdate,
-        path_value("spec", context),
-        context.empty_dict_value(),
-        value,
-    )
-}
-
-fn object_body_scope(
-    alias: Option<&str>,
-    object_final_defs: Value,
-    object_prior_defs: Value,
-    parent: NameScope,
-) -> NameScope {
-    let object_alias = alias
-        .map(local_name_metadata)
-        .and_then(|alias| alias.canonical);
-    let (final_defs, prior_defs) = if object_alias.is_some() {
-        (parent.final_defs.clone(), parent.prior_defs.clone())
-    } else {
-        (object_final_defs.clone(), object_prior_defs.clone())
-    };
-
-    NameScope {
-        final_defs,
-        prior_defs,
-        module_final_defs: parent.module_final_defs.clone(),
-        module_prior_defs: parent.module_prior_defs.clone(),
-        object_alias,
-        object_final_defs: Some(object_final_defs),
-        object_prior_defs: Some(object_prior_defs),
-        parent: Some(Box::new(parent)),
-    }
+    Ok(resolved_expr_to_value_in_resolver(
+        resolved, context, locals,
+    ))
 }
 
 fn lower_extend(
@@ -1728,6 +1902,321 @@ fn lower_update_definition(
 enum BuiltinAssertion {
     Defined,
     Undefined,
+}
+
+fn lower_definition_resolved(
+    definition: &DefinitionDecl,
+    declaration_text: &str,
+    line: usize,
+    context: &CompileContext,
+    definitions: &mut ResolvedExpr<Value>,
+    scope: &NameScope<ResolvedExpr<Value>>,
+    locals: &mut ResolverContext,
+) -> Result<(), Diagnostic> {
+    let Some(expr) = &definition.expr else {
+        return Ok(());
+    };
+
+    let target_scope = definition_target_scope_resolved(scope, definitions.clone());
+    let value = match definition.kind {
+        DefinitionKind::Introduce => annotate_definition_resolved(
+            BuiltinAssertion::Undefined,
+            &definition.target,
+            definitions.clone(),
+            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?,
+            line,
+            context,
+            &target_scope,
+            locals,
+        )?,
+        DefinitionKind::Override => annotate_definition_resolved(
+            BuiltinAssertion::Defined,
+            &definition.target,
+            definitions.clone(),
+            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?,
+            line,
+            context,
+            &target_scope,
+            locals,
+        )?,
+        DefinitionKind::Update => lower_update_definition_resolved(
+            &definition.target,
+            definitions.clone(),
+            expr,
+            definition_param_count(definition, declaration_text, line)?,
+            line,
+            context,
+            &target_scope,
+            locals,
+        )?,
+    };
+    *definitions = update_definition_target_resolved(
+        definitions.clone(),
+        &definition.target,
+        value,
+        line,
+        context,
+        &target_scope,
+        locals,
+    )?;
+    Ok(())
+}
+
+fn definition_target_scope_resolved(
+    scope: &NameScope<ResolvedExpr<Value>>,
+    visible_definitions: ResolvedExpr<Value>,
+) -> NameScope<ResolvedExpr<Value>> {
+    if scope.object_final_defs.is_some() {
+        return scope.clone();
+    }
+
+    let mut scope = scope.clone();
+    scope.final_defs = visible_definitions.clone();
+    scope.prior_defs = visible_definitions.clone();
+    scope.module_final_defs = visible_definitions.clone();
+    scope.module_prior_defs = visible_definitions;
+    scope
+}
+
+fn lower_update_definition_resolved(
+    target: &str,
+    visible_definitions: ResolvedExpr<Value>,
+    update: &SyntaxExpr,
+    sugar_param_count: usize,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedExpr<Value>>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let prior = definition_target_access_resolved(
+        target,
+        visible_definitions,
+        line,
+        context,
+        scope,
+        locals,
+    )?;
+    if sugar_param_count == 0 {
+        let update =
+            syntax_expr_to_resolved_in_semantic_scope(update, line, context, scope, locals)?;
+        return Ok(ResolvedExpr::apply(update, [prior]));
+    }
+
+    let SyntaxExpr::Lambda(params, body) = update else {
+        return Err(Diagnostic::error(
+            line,
+            "internal error lowering update definition arguments",
+        ));
+    };
+    if params.len() != sugar_param_count {
+        return Err(Diagnostic::error(
+            line,
+            "internal error counting update definition arguments",
+        ));
+    }
+
+    let base_len = locals.len();
+    let parameters = Arc::from(locals.extend_bindings(params.iter().map(String::as_str)));
+    let lowered = syntax_expr_to_resolved_in_semantic_scope(body, line, context, scope, locals)?;
+    locals.truncate(base_len);
+    Ok(ResolvedExpr::lambda(
+        parameters,
+        ResolvedExpr::apply(lowered, [prior]),
+    ))
+}
+
+fn annotate_definition_resolved(
+    assertion: BuiltinAssertion,
+    target: &str,
+    visible_definitions: ResolvedExpr<Value>,
+    value: ResolvedExpr<Value>,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedExpr<Value>>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let tag = match assertion {
+        BuiltinAssertion::Defined => "assert_defined",
+        BuiltinAssertion::Undefined => "assert_undefined",
+    };
+    let singleton = |key: &str, value| {
+        apply_builtin_resolved(
+            Builtin::DictSingleton,
+            [
+                ResolvedExpr::Embedded(context.value_atom(atom_from_str(key))),
+                value,
+            ],
+            context,
+        )
+    };
+    let payload = apply_builtin_resolved(
+        Builtin::DictUnion,
+        [
+            singleton("name", ResolvedExpr::Embedded(context.value_binary(target))),
+            singleton(
+                "value",
+                definition_target_access_resolved(
+                    target,
+                    visible_definitions,
+                    line,
+                    context,
+                    scope,
+                    locals,
+                )?,
+            ),
+        ],
+        context,
+    );
+    let annotation = singleton(tag, payload);
+    Ok(apply_builtin_resolved(
+        Builtin::Anno,
+        [annotation, value],
+        context,
+    ))
+}
+
+fn update_module_resolved(
+    definitions: ResolvedExpr<Value>,
+    target: &str,
+    value: ResolvedExpr<Value>,
+    context: &CompileContext,
+) -> ResolvedExpr<Value> {
+    apply_builtin_resolved(
+        Builtin::DictUpdate,
+        [static_path_resolved(target, context), value, definitions],
+        context,
+    )
+}
+
+fn update_definition_target_resolved(
+    definitions: ResolvedExpr<Value>,
+    target: &str,
+    value: ResolvedExpr<Value>,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedExpr<Value>>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    Ok(apply_builtin_resolved(
+        Builtin::DictUpdate,
+        [
+            definition_target_path_resolved(target, line, context, scope, locals)?,
+            value,
+            definitions,
+        ],
+        context,
+    ))
+}
+
+fn definition_target_access_resolved(
+    target: &str,
+    definitions: ResolvedExpr<Value>,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedExpr<Value>>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let path = definition_target_parts(target, line)?
+        .iter()
+        .map(|part| syntax_key_expr_to_resolved_path(part, line, context, scope, locals))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ResolvedExpr::Access {
+        base: Arc::new(definitions),
+        path: Arc::from(path),
+    })
+}
+
+fn definition_target_path_resolved(
+    target: &str,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedExpr<Value>>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    syntax_path_resolved(
+        &definition_target_parts(target, line)?,
+        line,
+        context,
+        scope,
+        locals,
+    )
+}
+
+fn syntax_path_resolved(
+    parts: &[SyntaxKeyExpr],
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedExpr<Value>>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let mut result: Option<ResolvedExpr<Value>> = None;
+    let mut pending = Vec::new();
+
+    for part in parts {
+        match part {
+            SyntaxKeyExpr::PathIndex(expr) => {
+                let prefix = ResolvedExpr::List(Arc::from(std::mem::take(&mut pending)));
+                let combined = match result {
+                    Some(result) => {
+                        apply_builtin_resolved(Builtin::Append, [result, prefix], context)
+                    }
+                    None => prefix,
+                };
+                let splice =
+                    syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?;
+                result = Some(apply_builtin_resolved(
+                    Builtin::Append,
+                    [combined, splice],
+                    context,
+                ));
+            }
+            SyntaxKeyExpr::Atom(name) => pending.push(ResolvedExpr::Embedded(
+                context.value_atom(atom_from_str(name)),
+            )),
+            SyntaxKeyExpr::Index(expr) => pending.push(syntax_expr_to_resolved_in_semantic_scope(
+                expr, line, context, scope, locals,
+            )?),
+        }
+    }
+
+    let tail = ResolvedExpr::List(Arc::from(pending));
+    Ok(match result {
+        Some(result) => apply_builtin_resolved(Builtin::Append, [result, tail], context),
+        None => tail,
+    })
+}
+
+fn static_path_resolved(target: &str, context: &CompileContext) -> ResolvedExpr<Value> {
+    ResolvedExpr::List(Arc::from(
+        target
+            .split('.')
+            .map(|part| ResolvedExpr::Embedded(context.value_atom(atom_from_str(part))))
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn path_resolved_in_scope(
+    target: &str,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedExpr<Value>>,
+    locals: &ResolverContext,
+) -> ResolvedExpr<Value> {
+    let mut parts = target.split('.');
+    let Some(first) = parts.next() else {
+        return ResolvedExpr::Embedded(context.empty_dict_value());
+    };
+    let value = lower_name_expr_resolved(first, context, scope, locals);
+    let path = parts
+        .map(|part| ResolvedPathPart::Key(name_as_key(part)))
+        .collect::<Vec<_>>();
+    if path.is_empty() {
+        value
+    } else {
+        ResolvedExpr::Access {
+            base: Arc::new(value),
+            path: Arc::from(path),
+        }
+    }
 }
 
 fn annotate_definition_value(
@@ -1974,27 +2463,6 @@ fn path_value_in_definitions(
     Ok(context.value_access(definitions, path))
 }
 
-fn path_value_in_scope(
-    target: &str,
-    _line: usize,
-    context: &CompileContext,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Value {
-    let mut parts = target.split('.');
-    let Some(first) = parts.next() else {
-        return context.empty_dict_value();
-    };
-    let mut value = lower_name_expr(first, context, scope, locals);
-    let path = parts
-        .map(|part| context.key_expr_key(name_as_key(part)))
-        .collect::<Vec<_>>();
-    if !path.is_empty() {
-        value = context.value_access(value, path);
-    }
-    value
-}
-
 fn scoped_module_path(context: &CompileContext, target: &str) -> std::sync::Arc<[String]> {
     let mut parts = context.module_path.iter().cloned().collect::<Vec<_>>();
     parts.extend(target.split('.').map(ToOwned::to_owned));
@@ -2042,6 +2510,16 @@ fn syntax_expr_to_resolved_in_scope(
     scope: &NameScope,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    syntax_expr_to_resolved_in_semantic_scope(expr, line, context, &scope.resolved(), locals)
+}
+
+fn syntax_expr_to_resolved_in_semantic_scope(
+    expr: &SyntaxExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedExpr<Value>>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     Ok(match expr {
         SyntaxExpr::Unit => ResolvedExpr::Embedded(context.unit_value()),
         SyntaxExpr::Number(number) => ResolvedExpr::Embedded(context.value_number(number.clone())),
@@ -2052,7 +2530,7 @@ fn syntax_expr_to_resolved_in_scope(
             ResolvedExpr::Embedded(context.value_builtin(Builtin::DictSingleton)),
             [
                 syntax_key_expr_to_resolved_value(key, line, context, scope, locals)?,
-                syntax_expr_to_resolved_in_scope(value, line, context, scope, locals)?,
+                syntax_expr_to_resolved_in_semantic_scope(value, line, context, scope, locals)?,
             ],
         ),
         SyntaxExpr::DictUnion(items) => {
@@ -2062,10 +2540,10 @@ fn syntax_expr_to_resolved_in_scope(
         SyntaxExpr::PriorName(name) => lower_prior_name_expr_resolved(name, line, context, scope)?,
         SyntaxExpr::Escape(depth, expr) => {
             let escaped_scope = escaped_name_scope(scope, *depth, line)?;
-            syntax_expr_to_resolved_in_scope(expr, line, context, &escaped_scope, locals)?
+            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, &escaped_scope, locals)?
         }
         SyntaxExpr::Access(base, parts) => ResolvedExpr::Access {
-            base: Arc::new(syntax_expr_to_resolved_in_scope(
+            base: Arc::new(syntax_expr_to_resolved_in_semantic_scope(
                 base, line, context, scope, locals,
             )?),
             path: Arc::from(
@@ -2078,9 +2556,9 @@ fn syntax_expr_to_resolved_in_scope(
             ),
         },
         SyntaxExpr::Object(object) => {
-            ResolvedExpr::Legacy(lower_object_expr(object, line, context, scope, locals)?)
+            lower_object_expr_resolved(object, line, context, scope, locals)?
         }
-        SyntaxExpr::With { base, alias, body } => ResolvedExpr::Legacy(lower_dict_with_expr(
+        SyntaxExpr::With { base, alias, body } => lower_dict_with_expr_resolved(
             base,
             alias.as_deref(),
             body,
@@ -2088,11 +2566,13 @@ fn syntax_expr_to_resolved_in_scope(
             context,
             scope,
             locals,
-        )?),
+        )?,
         SyntaxExpr::List(items) => ResolvedExpr::List(Arc::from(
             items
                 .iter()
-                .map(|expr| syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals))
+                .map(|expr| {
+                    syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)
+                })
                 .collect::<Result<Vec<_>, _>>()?,
         )),
         SyntaxExpr::Lambda(params, body) => {
@@ -2149,26 +2629,29 @@ fn syntax_expr_to_resolved_in_scope(
     })
 }
 
-fn lower_object_expr(
+fn lower_object_expr_resolved(
     object: &ObjectExpr,
     line: usize,
     context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
     locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let name = match &object.name {
-        Some(name) => syntax_expr_to_value_in_scope(name, line, context, scope, locals)?,
-        None => context.empty_dict_value(),
+        Some(name) => {
+            syntax_expr_to_resolved_in_semantic_scope(name, line, context, scope, locals)?
+        }
+        None => ResolvedExpr::Embedded(context.empty_dict_value()),
     };
     let deps = object
         .deps
         .iter()
         .map(|dep| {
-            let dep_object = syntax_expr_to_value_in_scope(dep, line, context, scope, locals)?;
-            Ok(object_spec_value(dep_object, context))
+            let dep_object =
+                syntax_expr_to_resolved_in_semantic_scope(dep, line, context, scope, locals)?;
+            Ok(object_spec_resolved(dep_object, context))
         })
         .collect::<Result<Vec<_>, Diagnostic>>()?;
-    let defs = object_body_defs_value_in_scope(
+    let defs = object_body_defs_resolved_in_scope(
         &object.body,
         object.alias.as_deref(),
         line,
@@ -2176,25 +2659,27 @@ fn lower_object_expr(
         scope.clone(),
         locals,
     )?;
-    Ok(object_instance_from_parts_value(
+    Ok(object_instance_from_parts_resolved(
         name,
-        context.value_list(deps),
+        ResolvedExpr::List(Arc::from(deps)),
         defs,
         context,
     ))
 }
 
-fn lower_dict_with_expr(
+fn lower_dict_with_expr_resolved(
     base: &SyntaxExpr,
     alias: Option<&str>,
     body: &[ObjectBodyDefinition],
     line: usize,
     context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
     locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    let prior_defs = syntax_expr_to_value_in_scope(base, line, context, scope, locals)?;
-    let final_defs = context.value_local(0);
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let prior_defs = syntax_expr_to_resolved_in_semantic_scope(base, line, context, scope, locals)?;
+    let base_len = locals.len();
+    let final_binding = locals.push_binding("<with-final-defs>");
+    let final_defs = ResolvedExpr::Local(final_binding);
     let mut definitions = prior_defs.clone();
 
     for body_definition in body {
@@ -2204,7 +2689,7 @@ fn lower_dict_with_expr(
             definitions.clone(),
             scope.clone(),
         );
-        lower_object_body_item(
+        lower_object_body_item_resolved(
             body_definition,
             context,
             &mut definitions,
@@ -2213,18 +2698,22 @@ fn lower_dict_with_expr(
         )?;
     }
 
-    Ok(context.value_apply(
-        context.value_builtin(Builtin::Fixpoint),
-        lower_lambda_value(1, definitions, context),
+    locals.truncate(base_len);
+    Ok(ResolvedExpr::apply(
+        ResolvedExpr::Embedded(context.value_builtin(Builtin::Fixpoint)),
+        [ResolvedExpr::lambda(
+            Arc::from([final_binding]),
+            definitions,
+        )],
     ))
 }
 
 fn dict_with_body_scope(
     alias: Option<&str>,
-    dict_final_defs: Value,
-    dict_prior_defs: Value,
-    parent: NameScope,
-) -> NameScope {
+    dict_final_defs: ResolvedExpr<Value>,
+    dict_prior_defs: ResolvedExpr<Value>,
+    parent: NameScope<ResolvedExpr<Value>>,
+) -> NameScope<ResolvedExpr<Value>> {
     let object_alias = alias
         .map(local_name_metadata)
         .and_then(|alias| alias.canonical);
@@ -2254,14 +2743,14 @@ fn lower_builtin_expr_resolved(
     right: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     Ok(ResolvedExpr::apply(
         ResolvedExpr::Embedded(context.value_builtin(builtin)),
         [
-            syntax_expr_to_resolved_in_scope(left, line, context, scope, locals)?,
-            syntax_expr_to_resolved_in_scope(right, line, context, scope, locals)?,
+            syntax_expr_to_resolved_in_semantic_scope(left, line, context, scope, locals)?,
+            syntax_expr_to_resolved_in_semantic_scope(right, line, context, scope, locals)?,
         ],
     ))
 }
@@ -2306,7 +2795,7 @@ fn lower_operator_section_resolved(
     right: &Option<Box<SyntaxExpr>>,
     line: usize,
     context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     match (left, right) {
@@ -2327,11 +2816,11 @@ fn lower_operator_section_resolved(
     let parameter = locals.push_binding("<operator-section>");
     let left = left
         .as_deref()
-        .map(|expr| syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals))
+        .map(|expr| syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals))
         .transpose()?;
     let right = right
         .as_deref()
-        .map(|expr| syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals))
+        .map(|expr| syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals))
         .transpose()?;
     let argument = ResolvedExpr::Local(parameter);
     let body = match (left, right) {
@@ -2353,11 +2842,11 @@ fn lower_syntax_operator_expr_resolved(
     right: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let left = syntax_expr_to_resolved_in_scope(left, line, context, scope, locals)?;
-    let right = syntax_expr_to_resolved_in_scope(right, line, context, scope, locals)?;
+    let left = syntax_expr_to_resolved_in_semantic_scope(left, line, context, scope, locals)?;
+    let right = syntax_expr_to_resolved_in_semantic_scope(right, line, context, scope, locals)?;
     Ok(lower_syntax_operator_values_resolved(
         operator, left, right, context, locals,
     ))
@@ -2493,10 +2982,10 @@ fn lower_comparison_chain_resolved(
     rest: &[(SyntaxOperator, SyntaxExpr)],
     line: usize,
     context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let left = syntax_expr_to_resolved_in_scope(first, line, context, scope, locals)?;
+    let left = syntax_expr_to_resolved_in_semantic_scope(first, line, context, scope, locals)?;
     let rest = rest
         .iter()
         .map(|(operator, expr)| {
@@ -2508,7 +2997,7 @@ fn lower_comparison_chain_resolved(
             }
             Ok((
                 *operator,
-                syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals)?,
+                syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?,
             ))
         })
         .collect::<Result<Vec<_>, Diagnostic>>()?;
@@ -2596,7 +3085,7 @@ fn syntax_key_expr_to_resolved_value(
     key: &SyntaxKeyExpr,
     line: usize,
     context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     match key {
@@ -2604,7 +3093,7 @@ fn syntax_key_expr_to_resolved_value(
             context.value_atom(atom_from_str(name)),
         )),
         SyntaxKeyExpr::Index(expr) => {
-            syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals)
+            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)
         }
         SyntaxKeyExpr::PathIndex(_) => Err(Diagnostic::error(
             line,
@@ -2617,16 +3106,16 @@ fn syntax_key_expr_to_resolved_path(
     key: &SyntaxKeyExpr,
     line: usize,
     context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedPathPart<Value>, Diagnostic> {
     Ok(match key {
         SyntaxKeyExpr::Atom(name) => ResolvedPathPart::Key(name_as_key(name)),
         SyntaxKeyExpr::Index(expr) => ResolvedPathPart::Index(Arc::new(
-            syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals)?,
+            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?,
         )),
         SyntaxKeyExpr::PathIndex(expr) => ResolvedPathPart::PathIndex(Arc::new(
-            syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals)?,
+            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?,
         )),
     })
 }
@@ -2635,7 +3124,7 @@ fn lower_dict_union_resolved(
     items: &[SyntaxExpr],
     line: usize,
     context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let mut items = items.iter();
@@ -2643,13 +3132,13 @@ fn lower_dict_union_resolved(
         return Ok(ResolvedExpr::Embedded(context.empty_dict_value()));
     };
 
-    let mut value = syntax_expr_to_resolved_in_scope(first, line, context, scope, locals)?;
+    let mut value = syntax_expr_to_resolved_in_semantic_scope(first, line, context, scope, locals)?;
     for item in items {
         value = ResolvedExpr::apply(
             ResolvedExpr::Embedded(context.value_builtin(Builtin::DictUnion)),
             [
                 value,
-                syntax_expr_to_resolved_in_scope(item, line, context, scope, locals)?,
+                syntax_expr_to_resolved_in_semantic_scope(item, line, context, scope, locals)?,
             ],
         );
     }
@@ -2661,12 +3150,12 @@ fn lower_lambda_expr_resolved(
     body: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let base_len = locals.len();
     let parameters = Arc::from(locals.extend_bindings(params.iter().map(String::as_str)));
-    let lowered = syntax_expr_to_resolved_in_scope(body, line, context, scope, locals)?;
+    let lowered = syntax_expr_to_resolved_in_semantic_scope(body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
     Ok(ResolvedExpr::lambda(parameters, lowered))
@@ -2677,7 +3166,7 @@ fn lower_application_expr_resolved(
     argument: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let mut head = function;
@@ -2692,11 +3181,13 @@ fn lower_application_expr_resolved(
         SyntaxExpr::Lambda(params, body) => {
             lower_lambda_expr_resolved(params, body, line, context, scope, locals)?
         }
-        head => syntax_expr_to_resolved_in_scope(head, line, context, scope, locals)?,
+        head => syntax_expr_to_resolved_in_semantic_scope(head, line, context, scope, locals)?,
     };
     let arguments = arguments
         .into_iter()
-        .map(|argument| syntax_expr_to_resolved_in_scope(argument, line, context, scope, locals))
+        .map(|argument| {
+            syntax_expr_to_resolved_in_semantic_scope(argument, line, context, scope, locals)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ResolvedExpr::apply(function, arguments))
 }
@@ -2706,18 +3197,20 @@ fn lower_let_expr_resolved(
     body: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let values = bindings
         .iter()
-        .map(|(_, expr)| syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals))
+        .map(|(_, expr)| {
+            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     let base_len = locals.len();
     let parameters =
         Arc::from(locals.extend_bindings(bindings.iter().map(|(name, _)| name.as_str())));
-    let lowered = syntax_expr_to_resolved_in_scope(body, line, context, scope, locals)?;
+    let lowered = syntax_expr_to_resolved_in_semantic_scope(body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
     Ok(ResolvedExpr::apply(
@@ -2726,12 +3219,12 @@ fn lower_let_expr_resolved(
     ))
 }
 
-fn lower_name_expr(
+fn lower_name_expr_resolved(
     name: &str,
-    context: &CompileContext,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Value {
+    _context: &CompileContext,
+    scope: &NameScope<ResolvedExpr<Value>>,
+    locals: &ResolverContext,
+) -> ResolvedExpr<Value> {
     match name {
         "module" => return scope.module_final_defs.clone(),
         "self" => {
@@ -2739,40 +3232,6 @@ fn lower_name_expr(
                 .object_final_defs
                 .clone()
                 .unwrap_or_else(|| scope.module_final_defs.clone());
-        }
-        _ => {}
-    }
-
-    let Some(local_index) = local_binding_index(name, locals) else {
-        if scope.object_alias.as_deref() == Some(name) {
-            if let Some(object_final_defs) = &scope.object_final_defs {
-                return object_final_defs.clone();
-            }
-        }
-        return context.value_access(
-            scope.final_defs.clone(),
-            vec![context.key_expr_key(Key::atom_from_text(name))],
-        );
-    };
-
-    context.value_local(local_index)
-}
-
-fn lower_name_expr_resolved(
-    name: &str,
-    _context: &CompileContext,
-    scope: &NameScope,
-    locals: &ResolverContext,
-) -> ResolvedExpr<Value> {
-    match name {
-        "module" => return ResolvedExpr::Provided(scope.module_final_defs.clone()),
-        "self" => {
-            return ResolvedExpr::Provided(
-                scope
-                    .object_final_defs
-                    .clone()
-                    .unwrap_or_else(|| scope.module_final_defs.clone()),
-            );
         }
         _ => {}
     }
@@ -2792,11 +3251,11 @@ fn lower_name_expr_resolved(
     if scope.object_alias.as_deref() == Some(name)
         && let Some(object_final_defs) = &scope.object_final_defs
     {
-        return ResolvedExpr::Provided(object_final_defs.clone());
+        return object_final_defs.clone();
     }
 
     ResolvedExpr::Access {
-        base: Arc::new(ResolvedExpr::Provided(scope.final_defs.clone())),
+        base: Arc::new(scope.final_defs.clone()),
         path: Arc::from([ResolvedPathPart::Key(Key::atom_from_text(name))]),
     }
 }
@@ -2805,7 +3264,7 @@ fn lower_prior_name_expr_resolved(
     name: &str,
     line: usize,
     _context: &CompileContext,
-    scope: &NameScope,
+    scope: &NameScope<ResolvedExpr<Value>>,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     if name.is_empty() {
         return Err(Diagnostic::error(
@@ -2815,14 +3274,12 @@ fn lower_prior_name_expr_resolved(
     }
 
     match name {
-        "module" => return Ok(ResolvedExpr::Provided(scope.module_prior_defs.clone())),
+        "module" => return Ok(scope.module_prior_defs.clone()),
         "self" => {
-            return Ok(ResolvedExpr::Provided(
-                scope
-                    .object_prior_defs
-                    .clone()
-                    .unwrap_or_else(|| scope.module_prior_defs.clone()),
-            ));
+            return Ok(scope
+                .object_prior_defs
+                .clone()
+                .unwrap_or_else(|| scope.module_prior_defs.clone()));
         }
         _ => {}
     }
@@ -2830,20 +3287,20 @@ fn lower_prior_name_expr_resolved(
     if scope.object_alias.as_deref() == Some(name)
         && let Some(object_prior_defs) = &scope.object_prior_defs
     {
-        return Ok(ResolvedExpr::Provided(object_prior_defs.clone()));
+        return Ok(object_prior_defs.clone());
     }
 
     Ok(ResolvedExpr::Access {
-        base: Arc::new(ResolvedExpr::Provided(scope.prior_defs.clone())),
+        base: Arc::new(scope.prior_defs.clone()),
         path: Arc::from([ResolvedPathPart::Key(Key::atom_from_text(name))]),
     })
 }
 
-fn escaped_name_scope(
-    scope: &NameScope,
+fn escaped_name_scope<V: Clone>(
+    scope: &NameScope<V>,
     depth: usize,
     line: usize,
-) -> Result<NameScope, Diagnostic> {
+) -> Result<NameScope<V>, Diagnostic> {
     let mut escaped = scope.clone();
     for level in 0..depth {
         let Some(parent) = escaped.parent.as_deref() else {
@@ -2858,13 +3315,6 @@ fn escaped_name_scope(
         escaped = parent.clone();
     }
     Ok(escaped)
-}
-
-fn local_binding_index(name: &str, locals: &[LocalName]) -> Option<usize> {
-    locals
-        .iter()
-        .rposition(|candidate| candidate.canonical.as_deref() == Some(name))
-        .map(|position| locals.len() - 1 - position)
 }
 
 fn local_name_metadata(raw: &str) -> LocalName {

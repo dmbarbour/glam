@@ -20,9 +20,8 @@ impl BindingId {
 
 /// Syntax-independent expressions resolved by the g-syntax front end.
 ///
-/// `Legacy` is the explicit compatibility seam used while the remaining
-/// expression families migrate off Core. Direct net lowering will ultimately
-/// consume the structural variants without constructing a Core expression.
+/// Direct net lowering will ultimately consume these structural variants
+/// without constructing a Core expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ResolvedExpr<V> {
     /// Closed ordinary data, including literal and builtin values.
@@ -30,8 +29,6 @@ pub(super) enum ResolvedExpr<V> {
     /// An opaque value supplied by an assembler capability, such as a module
     /// environment or import result.
     Provided(V),
-    /// Temporary compatibility for a value still backed by CoreExpr.
-    Legacy(V),
     Local(BindingId),
     List(Arc<[Self]>),
     Access {
@@ -129,7 +126,7 @@ impl<V: Clone> ResolvedExpr<V> {
     #[allow(dead_code)]
     fn collect_free_bindings(&self, free: &mut BTreeSet<BindingId>) {
         match self {
-            Self::Embedded(_) | Self::Provided(_) | Self::Legacy(_) => {}
+            Self::Embedded(_) | Self::Provided(_) => {}
             Self::Local(binding) => {
                 free.insert(*binding);
             }
