@@ -9,6 +9,10 @@ use crate::core::{Atom, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Val
 use crate::diagnostic::Severity;
 use crate::number::Number;
 
+mod resolved;
+
+use resolved::{BindingId, ResolvedExpr};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFile {
     pub path: String,
@@ -1041,6 +1045,69 @@ fn lower_lambda_value(arity: usize, body: Value, context: &CompileContext) -> Va
         function,
         captures.into_iter().map(|index| context.value_local(index)),
     )
+}
+
+/// Temporary endpoint from the g-syntax resolved IR into the existing Core
+/// expression backend. Direct interaction-net emission will replace this one
+/// adapter; resolved-expression construction must not depend on CoreExpr.
+fn resolved_expr_to_value(expr: ResolvedExpr<Value>, context: &CompileContext) -> Value {
+    fn lower(
+        expr: ResolvedExpr<Value>,
+        context: &CompileContext,
+        bindings: &mut Vec<BindingId>,
+    ) -> Value {
+        match expr {
+            ResolvedExpr::Opaque(value) => value,
+            ResolvedExpr::Local(binding) => {
+                let position = bindings
+                    .iter()
+                    .rposition(|candidate| *candidate == binding)
+                    .expect("resolved local must have an enclosing binding");
+                context.value_local(bindings.len() - position - 1)
+            }
+            ResolvedExpr::Lambda { parameters, body } => {
+                let base_len = bindings.len();
+                bindings.extend(parameters.iter().copied());
+                let body = lower(Arc::unwrap_or_clone(body), context, bindings);
+                bindings.truncate(base_len);
+                lower_lambda_value(parameters.len(), body, context)
+            }
+            ResolvedExpr::Apply {
+                function,
+                arguments,
+            } => {
+                let function = lower(Arc::unwrap_or_clone(function), context, bindings);
+                let arguments = arguments
+                    .iter()
+                    .cloned()
+                    .map(|argument| lower(argument, context, bindings))
+                    .collect::<Vec<_>>();
+                context.value_apply_many(function, arguments)
+            }
+            ResolvedExpr::ApplyLambda {
+                parameters,
+                body,
+                arguments,
+            } => {
+                // Compatibility behavior still constructs and applies the
+                // function. The direct net emitter will instead wire these
+                // arguments into the lambda-local bind spine in one net.
+                let base_len = bindings.len();
+                bindings.extend(parameters.iter().copied());
+                let body = lower(Arc::unwrap_or_clone(body), context, bindings);
+                bindings.truncate(base_len);
+                let function = lower_lambda_value(parameters.len(), body, context);
+                let arguments = arguments
+                    .iter()
+                    .cloned()
+                    .map(|argument| lower(argument, context, bindings))
+                    .collect::<Vec<_>>();
+                context.value_apply_many(function, arguments)
+            }
+        }
+    }
+
+    lower(expr, context, &mut Vec::new())
 }
 
 fn semantic_value_to_expr(value: Value) -> CoreExpr {
@@ -2277,12 +2344,32 @@ fn lower_lambda_expr(
     scope: &NameScope,
     locals: &mut Vec<LocalName>,
 ) -> Result<Value, Diagnostic> {
+    let resolved = lower_lambda_expr_resolved(params, body, line, context, scope, locals)?;
+    Ok(resolved_expr_to_value(resolved, context))
+}
+
+fn lower_lambda_expr_resolved(
+    params: &[String],
+    body: &SyntaxExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope,
+    locals: &mut Vec<LocalName>,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let base_len = locals.len();
     locals.extend(params.iter().map(|param| local_name_metadata(param)));
     let lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
-    Ok(lower_lambda_value(params.len(), lowered, context))
+    let parameters = Arc::from(
+        (0..params.len())
+            .map(|_| BindingId::fresh())
+            .collect::<Vec<_>>(),
+    );
+    Ok(ResolvedExpr::lambda(
+        parameters,
+        ResolvedExpr::Opaque(lowered),
+    ))
 }
 
 fn lower_application_expr(
@@ -2301,12 +2388,23 @@ fn lower_application_expr(
     }
     arguments.reverse();
 
-    let function = syntax_expr_to_value_in_scope(head, line, context, scope, locals)?;
+    let function = match head {
+        SyntaxExpr::Lambda(params, body) => {
+            lower_lambda_expr_resolved(params, body, line, context, scope, locals)?
+        }
+        head => ResolvedExpr::Opaque(syntax_expr_to_value_in_scope(
+            head, line, context, scope, locals,
+        )?),
+    };
     let arguments = arguments
         .into_iter()
         .map(|argument| syntax_expr_to_value_in_scope(argument, line, context, scope, locals))
+        .map(|argument| argument.map(ResolvedExpr::Opaque))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(context.value_apply_many(function, arguments))
+    Ok(resolved_expr_to_value(
+        ResolvedExpr::apply(function, arguments),
+        context,
+    ))
 }
 
 fn lower_let_expr(
