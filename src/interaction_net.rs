@@ -138,13 +138,7 @@ pub enum HostFnYield<D> {
     HostFn(HostFn<D>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostFnStop {
-    Block(Arc<str>),
-    Error(Arc<str>),
-}
-
-pub type HostFnResult<D> = Result<HostFnYield<D>, HostFnStop>;
+pub type HostFnResult<D> = Result<HostFnYield<D>, Arc<str>>;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Port(NonZeroU64);
@@ -777,6 +771,7 @@ pub enum ReductionKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorProgress {
+    Claimed,
     Materialized { node: NodeId },
     Joined,
     Blocked,
@@ -816,12 +811,6 @@ pub struct HostCall {
     pub pair: ActivePairKey,
     pub host_fn: NodeId,
     pub data: NodeId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockedHostCall {
-    pub call: HostCall,
-    pub reason: Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -875,6 +864,22 @@ impl<D> SharedRuntimeNet<D> {
     }
 }
 
+impl<D: Clone + 'static> SharedRuntimeNet<D> {
+    /// Inspects and advances a previously claimed cursor without holding target
+    /// and source runtime locks at the same time.
+    pub fn advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
+        let claim = self.with(|target| target.cursor_claim(cursor))?;
+        let source = claim.source.clone();
+        let inspection = source.with_mut(|runtime| runtime.claim_source_frontier(claim.remote));
+        let progress =
+            self.with_mut(|target| target.finish_cursor_claim(claim, inspection.frontier));
+        if let Some(call) = inspection.claimed_call {
+            source.with_mut(|runtime| runtime.release_claimed_call(call));
+        }
+        Some(progress)
+    }
+}
+
 impl<D> Clone for SharedRuntimeNet<D> {
     fn clone(&self) -> Self {
         Self {
@@ -908,6 +913,41 @@ struct CopyState<D> {
     fan_sites: HashMap<FanSite, FanSite>,
 }
 
+#[derive(Clone)]
+struct CursorClaim<D> {
+    cursor: NodeId,
+    pair: Option<ActivePairKey>,
+    copy: CopyId,
+    remote: Port,
+    source: SharedRuntimeNet<D>,
+}
+
+enum SourceFrontier<D> {
+    Principal {
+        port: Port,
+        node: RuntimeNode<D>,
+    },
+    StableAuxiliary {
+        port: Port,
+        node: RuntimeNode<D>,
+    },
+    ActiveAuxiliary {
+        entered: Port,
+        partner: Port,
+    },
+    LegacyCall {
+        entered: Port,
+        entered_node: RuntimeNode<D>,
+        partner: Port,
+        partner_node: RuntimeNode<D>,
+    },
+}
+
+struct SourceInspection<D> {
+    frontier: SourceFrontier<D>,
+    claimed_call: Option<BlockedCall>,
+}
+
 struct RuntimeEntry<D> {
     node: RuntimeNode<D>,
     links: [Option<Port>; 3],
@@ -928,17 +968,17 @@ pub struct RuntimeNet<D> {
     exposed: Option<Port>,
     nodes: HashMap<NodeId, RuntimeEntry<D>>,
     next_copy_id: u64,
-    has_imported_copy: bool,
     copies: HashMap<CopyId, CopyState<D>>,
     cursor_dependencies: HashMap<NodeId, CursorDependency<D>>,
+    claimed_cursors: BTreeMap<NodeId, Option<ActivePairKey>>,
 
     // Each live principal-principal wire is keyed by its lower node ID and
     // occurs in exactly one scheduler collection. Keyed collections support
     // both deterministic next-work selection and exact dependency progress.
     ready: BTreeSet<ActivePairKey>,
     calls: BTreeMap<ActivePairKey, BlockedCall>,
-    host_calls: BTreeMap<ActivePairKey, HostCall>,
-    blocked_host_calls: BTreeMap<ActivePairKey, BlockedHostCall>,
+    claimed_calls: BTreeMap<ActivePairKey, BlockedCall>,
+    claimed_host_calls: BTreeMap<ActivePairKey, HostCall>,
     blocked_cursors: BTreeMap<ActivePairKey, BlockedCursor>,
     stuck: BTreeMap<ActivePairKey, StuckReason>,
 }
@@ -982,13 +1022,13 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             exposed: None,
             nodes,
             next_copy_id: 0,
-            has_imported_copy: false,
             copies: HashMap::new(),
             cursor_dependencies: HashMap::new(),
+            claimed_cursors: BTreeMap::new(),
             ready: BTreeSet::new(),
             calls: BTreeMap::new(),
-            host_calls: BTreeMap::new(),
-            blocked_host_calls: BTreeMap::new(),
+            claimed_calls: BTreeMap::new(),
+            claimed_host_calls: BTreeMap::new(),
             blocked_cursors: BTreeMap::new(),
             stuck: BTreeMap::new(),
         };
@@ -1008,13 +1048,13 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             exposed: None,
             nodes: HashMap::new(),
             next_copy_id: 0,
-            has_imported_copy: false,
             copies: HashMap::new(),
             cursor_dependencies: HashMap::new(),
+            claimed_cursors: BTreeMap::new(),
             ready: BTreeSet::new(),
             calls: BTreeMap::new(),
-            host_calls: BTreeMap::new(),
-            blocked_host_calls: BTreeMap::new(),
+            claimed_calls: BTreeMap::new(),
+            claimed_host_calls: BTreeMap::new(),
             blocked_cursors: BTreeMap::new(),
             stuck: BTreeMap::new(),
         }
@@ -1025,9 +1065,10 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             .iter()
             .copied()
             .chain(self.calls.keys().copied())
-            .chain(self.host_calls.keys().copied())
-            .chain(self.blocked_host_calls.keys().copied())
+            .chain(self.claimed_calls.keys().copied())
+            .chain(self.claimed_host_calls.keys().copied())
             .chain(self.blocked_cursors.keys().copied())
+            .chain(self.claimed_cursors.values().copied().flatten())
             .chain(self.stuck.keys().copied())
             .collect()
     }
@@ -1050,16 +1091,22 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         self.calls.get(&pair).copied()
     }
 
-    pub fn host_calls(&self) -> &BTreeMap<ActivePairKey, HostCall> {
-        &self.host_calls
+    pub fn claimed_host_calls(&self) -> &BTreeMap<ActivePairKey, HostCall> {
+        &self.claimed_host_calls
     }
 
-    pub fn host_call(&self, pair: ActivePairKey) -> Option<HostCall> {
-        self.host_calls.get(&pair).copied()
+    pub fn claimed_host_call(&self, pair: ActivePairKey) -> Option<HostCall> {
+        self.claimed_host_calls.get(&pair).copied()
     }
 
-    pub fn blocked_host_calls(&self) -> &BTreeMap<ActivePairKey, BlockedHostCall> {
-        &self.blocked_host_calls
+    /// Active pairs temporarily removed from scheduler ownership while work
+    /// proceeds without holding this runtime's mutex.
+    pub fn claimed_pairs(&self) -> impl Iterator<Item = ActivePairKey> + '_ {
+        self.claimed_calls
+            .keys()
+            .copied()
+            .chain(self.claimed_host_calls.keys().copied())
+            .chain(self.claimed_cursors.values().copied().flatten())
     }
 
     pub fn blocked_cursors(&self) -> &BTreeMap<ActivePairKey, BlockedCursor> {
@@ -1090,13 +1137,6 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         self.stuck.get(&pair)
     }
 
-    /// Whether this runtime has ever imported a logical copy. This remains
-    /// true after its copy frontiers converge, so evaluator-owned suspended
-    /// wires can be distinguished from an unsupplied canonical root.
-    pub fn has_imported_copy(&self) -> bool {
-        self.has_imported_copy
-    }
-
     pub fn node(&self, id: NodeId) -> Option<&RuntimeNode<D>> {
         self.nodes.get(&id).map(|entry| &entry.node)
     }
@@ -1113,7 +1153,10 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         }
     }
 
-    pub fn call_argument_data(&self, call: BlockedCall) -> Option<&D> {
+    /// Compatibility bridge for evaluator-owned Bind/Data calls. This is the
+    /// sole remaining content inspection through an ordinary agent auxiliary;
+    /// an explicit lazy-argument agent should eventually replace it.
+    pub fn compatibility_call_argument_data(&self, call: BlockedCall) -> Option<&D> {
         assert_eq!(
             self.calls.get(&call.pair),
             Some(&call),
@@ -1129,16 +1172,20 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         }
     }
 
-    pub fn demand_call_argument(&mut self, call: BlockedCall) -> Option<CursorProgress> {
+    pub fn compatibility_demand_call_argument(
+        &mut self,
+        call: BlockedCall,
+    ) -> Option<CursorProgress> {
         assert_eq!(
             self.calls.get(&call.pair),
             Some(&call),
             "call must still be blocked"
         );
-        self.demand_cursor_across(Port::auxiliary(call.bind, 1))
+        let cursor = self.cursor_across(Port::auxiliary(call.bind, 1))?;
+        self.begin_cursor_claim(cursor, None)
     }
 
-    pub fn call_argument_cursor(&self, call: BlockedCall) -> Option<NodeId> {
+    pub fn compatibility_call_argument_cursor(&self, call: BlockedCall) -> Option<NodeId> {
         assert_eq!(
             self.calls.get(&call.pair),
             Some(&call),
@@ -1151,7 +1198,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
     /// holding the shared runtime-net mutex.
     pub fn host_call_parts(&self, call: HostCall) -> (HostFn<D>, D) {
         assert_eq!(
-            self.host_calls.get(&call.pair),
+            self.claimed_host_calls.get(&call.pair),
             Some(&call),
             "host call must be pending"
         );
@@ -1185,15 +1232,6 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         }
     }
 
-    pub fn block_host_call(&mut self, call: HostCall, reason: Arc<str>) {
-        self.remove_pending_host_call(call);
-        assert!(
-            self.blocked_host_calls
-                .insert(call.pair, BlockedHostCall { call, reason })
-                .is_none()
-        );
-    }
-
     pub fn fail_host_call(&mut self, call: HostCall, error: Arc<str>) {
         self.remove_pending_host_call(call);
         assert!(
@@ -1201,17 +1239,6 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                 .insert(call.pair, StuckReason::HostError(error))
                 .is_none()
         );
-    }
-
-    /// Explicitly retries one blocked host call. A blocked host callback has no
-    /// implicit dependency on unrelated net reductions.
-    pub fn retry_host_call(&mut self, pair: ActivePairKey) -> bool {
-        let Some(blocked) = self.blocked_host_calls.remove(&pair) else {
-            return false;
-        };
-        assert!(self.principals_connect(pair));
-        assert!(self.host_calls.insert(pair, blocked.call).is_none());
-        true
     }
 
     pub fn interface_data(&self, interface: Port) -> Option<&D> {
@@ -1239,33 +1266,16 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 
     pub fn demand_interface(&mut self, interface: Port) -> Option<CursorProgress> {
         self.assert_interface(interface);
-        self.demand_cursor_across(interface)
+        let cursor = self.cursor_across(interface)?;
+        self.begin_cursor_claim(cursor, None)
     }
 
-    /// Advances one cursor without requiring it to be part of a scheduled
-    /// principal pair. This is used to drive an exact layered-copy dependency.
-    pub fn drive_cursor(&mut self, cursor: NodeId) -> Option<CursorProgress> {
+    /// Claims a cursor reached through an exact layered-copy dependency.
+    pub fn claim_dependent_cursor(&mut self, cursor: NodeId) -> Option<CursorProgress> {
         if !matches!(self.node(cursor), Some(RuntimeNode::RemoteCursor { .. })) {
             return None;
         }
-        self.unschedule_node(cursor);
-        let progress = self.advance_remote_cursor(cursor);
-        if matches!(self.node(cursor), Some(RuntimeNode::RemoteCursor { .. })) {
-            let local = self
-                .neighbor(Port::principal(cursor))
-                .expect("suspended cursor must remain wired");
-            if local.is_principal() {
-                let pair = ActivePairKey::new(cursor, local.node());
-                if progress == CursorProgress::Blocked {
-                    assert!(
-                        self.blocked_cursors
-                            .insert(pair, BlockedCursor { pair, cursor })
-                            .is_none()
-                    );
-                }
-            }
-        }
-        Some(progress)
+        self.begin_cursor_claim(cursor, None)
     }
 
     pub fn retry_blocked_cursor(&mut self, cursor: NodeId) -> bool {
@@ -1320,14 +1330,9 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                     kind: ReductionKind::Erase,
                 });
             }
-            let progress = self.advance_remote_cursor(cursor);
-            if progress == CursorProgress::Blocked {
-                assert!(
-                    self.blocked_cursors
-                        .insert(pair, BlockedCursor { pair, cursor })
-                        .is_none()
-                );
-            }
+            let progress = self
+                .begin_cursor_claim(cursor, Some(pair))
+                .expect("ready cursor pair must be claimable");
             return Some(Reduction {
                 pair,
                 kind: ReductionKind::RemoteCursor { cursor, progress },
@@ -1434,7 +1439,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             }
             (RuntimeNode::HostFn(_), RuntimeNode::Data(_)) => {
                 assert!(
-                    self.host_calls
+                    self.claimed_host_calls
                         .insert(
                             pair,
                             HostCall {
@@ -1452,7 +1457,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
             }
             (RuntimeNode::Data(_), RuntimeNode::HostFn(_)) => {
                 assert!(
-                    self.host_calls
+                    self.claimed_host_calls
                         .insert(
                             pair,
                             HostCall {
@@ -1496,7 +1501,6 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         source: SharedRuntimeNet<D>,
         map_data: Arc<dyn Fn(&D) -> D + Send + Sync>,
     ) -> NodeId {
-        self.has_imported_copy = true;
         let remote = source.with(RuntimeNet::exposed);
         let copy = CopyId(self.next_copy_id);
         self.next_copy_id = self
@@ -1642,135 +1646,224 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 
     fn remove_pending_host_call(&mut self, call: HostCall) {
         assert_eq!(
-            self.host_calls.remove(&call.pair),
+            self.claimed_host_calls.remove(&call.pair),
             Some(call),
             "completed host call must still be pending"
         );
     }
 
-    fn advance_remote_cursor(&mut self, cursor: NodeId) -> CursorProgress {
+    fn begin_cursor_claim(
+        &mut self,
+        cursor: NodeId,
+        expected_pair: Option<ActivePairKey>,
+    ) -> Option<CursorProgress> {
+        if self.claimed_cursors.contains_key(&cursor) {
+            return None;
+        }
+        let pair = expected_pair.or_else(|| self.active_pair_key(cursor));
+        if let Some(expected) = expected_pair {
+            assert_eq!(pair, Some(expected));
+        }
+        if let Some(pair) = pair {
+            self.ready.remove(&pair);
+            self.blocked_cursors.remove(&pair);
+        }
         self.cursor_dependencies.remove(&cursor);
-        let RuntimeNode::RemoteCursor { copy, remote } = self
-            .node(cursor)
-            .expect("advanced remote cursor must exist")
-            .clone()
-        else {
-            panic!("advanced runtime node must be a remote cursor");
+        assert!(self.claimed_cursors.insert(cursor, pair).is_none());
+        Some(CursorProgress::Claimed)
+    }
+
+    fn cursor_claim(&self, cursor: NodeId) -> Option<CursorClaim<D>> {
+        let pair = *self.claimed_cursors.get(&cursor)?;
+        let RuntimeNode::RemoteCursor { copy, remote } = self.node(cursor)?.clone() else {
+            return None;
         };
-        let source_handle = self
-            .copies
-            .get(&copy)
-            .expect("remote cursor must reference a live copy")
-            .source
-            .clone();
-        let source = source_handle
-            .inner
-            .lock()
-            .expect("shared runtime net was poisoned");
-        let neighbor = source
+        let source = self.copies.get(&copy)?.source.clone();
+        Some(CursorClaim {
+            cursor,
+            pair,
+            copy,
+            remote,
+            source,
+        })
+    }
+
+    fn claim_source_frontier(&mut self, remote: Port) -> SourceInspection<D> {
+        let port = self
             .neighbor(remote)
             .expect("remote cursor anchor must remain wired in its source");
-
-        if self
-            .copies
-            .get(&copy)
-            .unwrap()
-            .mapped_nodes
-            .contains_key(&neighbor.node())
-        {
-            drop(source);
-            return self.join_remote_frontiers(copy, cursor, remote, neighbor);
-        }
-
-        if neighbor.is_principal()
-            && matches!(
-                source.node(neighbor.node()),
-                Some(RuntimeNode::RemoteCursor { .. })
-            )
-        {
-            // A logical copy may itself be copied after partial application.
-            // Its outward cursor is an evaluator boundary, not a node that can
-            // migrate into this target. Drive that intermediate source cursor
-            // toward its own source, then retry this cursor. Copy provenance
-            // is outward-only, so this never gives the inner source a
-            // reference back into either caller.
-            let nested_cursor = neighbor.node();
-            drop(source);
-            self.cursor_dependencies.insert(
-                cursor,
-                CursorDependency {
-                    source: source_handle,
-                    target: CursorDependencyTarget::Cursor(nested_cursor),
-                },
-            );
-            return CursorProgress::Blocked;
-        }
-
-        if neighbor.is_principal() {
-            let source_node = source
-                .node(neighbor.node())
+        if port.is_principal() {
+            let node = self
+                .node(port.node())
                 .expect("remote cursor neighbor must exist")
                 .clone();
-            drop(source);
-            return self.materialize_remote_node(
-                copy,
-                cursor,
-                remote,
-                neighbor.node(),
-                source_node,
-            );
+            return SourceInspection {
+                frontier: SourceFrontier::Principal { port, node },
+                claimed_call: None,
+            };
         }
 
-        let source_node = neighbor.node();
-        let principal = Port::principal(source_node);
-        let principal_neighbor = source.neighbor(principal);
-        if let Some(partner) = principal_neighbor.filter(|port| port.is_principal()) {
-            let pair = ActivePairKey::new(source_node, partner.node());
-            if source.calls.contains_key(&pair) {
-                // Compatibility-only bridge for legacy Bind >< Data callables.
-                // General interaction-net active pairs never cross a cursor;
-                // List/Access/Closure lowering still needs this until those
-                // callables have explicit agents.
-                let entered_node = source
-                    .node(source_node)
-                    .expect("legacy remote call node must exist")
+        let principal_neighbor = self.neighbor(Port::principal(port.node()));
+        if let Some(partner) = principal_neighbor.filter(|neighbor| neighbor.is_principal()) {
+            let pair = ActivePairKey::new(port.node(), partner.node());
+            let claimed_call = self.calls.remove(&pair);
+            if let Some(call) = claimed_call {
+                assert!(self.claimed_calls.insert(pair, call).is_none());
+            }
+            let frontier = if claimed_call.is_some() {
+                let entered_node = self
+                    .node(port.node())
+                    .expect("claimed call node must exist")
                     .clone();
-                let partner_node = source
+                let partner_node = self
                     .node(partner.node())
-                    .expect("legacy remote call partner must exist")
+                    .expect("claimed call partner must exist")
                     .clone();
-                drop(source);
-                return self.materialize_legacy_call_pair(
-                    copy,
-                    cursor,
-                    remote,
-                    neighbor,
+                SourceFrontier::LegacyCall {
+                    entered: port,
                     entered_node,
                     partner,
                     partner_node,
-                );
-            }
-            drop(source);
-            self.cursor_dependencies.insert(
-                cursor,
-                CursorDependency {
-                    source: source_handle,
-                    target: CursorDependencyTarget::Pair(pair),
-                },
-            );
-            return CursorProgress::Blocked;
+                }
+            } else {
+                SourceFrontier::ActiveAuxiliary {
+                    entered: port,
+                    partner,
+                }
+            };
+            return SourceInspection {
+                frontier,
+                claimed_call,
+            };
         }
-        let source_node_data = source
-            .node(source_node)
-            .expect("stable remote node must exist")
+        let node = self
+            .node(port.node())
+            .expect("stable remote cursor neighbor must exist")
             .clone();
-        drop(source);
-        self.materialize_remote_stable_node(copy, cursor, remote, neighbor, source_node_data)
+        SourceInspection {
+            frontier: SourceFrontier::StableAuxiliary { port, node },
+            claimed_call: None,
+        }
     }
 
-    fn demand_cursor_across(&mut self, local: Port) -> Option<CursorProgress> {
-        let cursor = self.cursor_across(local)?;
-        Some(self.advance_remote_cursor(cursor))
+    fn release_claimed_call(&mut self, call: BlockedCall) {
+        assert_eq!(
+            self.claimed_calls.remove(&call.pair),
+            Some(call),
+            "released source call must still be claimed"
+        );
+        assert!(
+            self.calls.insert(call.pair, call).is_none(),
+            "released source call must return to its blocked state"
+        );
+    }
+
+    fn finish_cursor_claim(
+        &mut self,
+        claim: CursorClaim<D>,
+        frontier: SourceFrontier<D>,
+    ) -> CursorProgress {
+        assert_eq!(
+            self.claimed_cursors.remove(&claim.cursor),
+            Some(claim.pair),
+            "completed cursor must still be claimed"
+        );
+        assert!(matches!(
+            self.node(claim.cursor),
+            Some(RuntimeNode::RemoteCursor { copy, remote })
+                if *copy == claim.copy && *remote == claim.remote
+        ));
+        let frontier_port = match &frontier {
+            SourceFrontier::Principal { port, .. }
+            | SourceFrontier::StableAuxiliary { port, .. } => *port,
+            SourceFrontier::ActiveAuxiliary { entered, .. }
+            | SourceFrontier::LegacyCall { entered, .. } => *entered,
+        };
+
+        let progress = if self
+            .copies
+            .get(&claim.copy)
+            .expect("claimed cursor must reference a live copy")
+            .mapped_nodes
+            .contains_key(&frontier_port.node())
+        {
+            self.join_remote_frontiers(claim.copy, claim.cursor, claim.remote, frontier_port)
+        } else {
+            match frontier {
+                SourceFrontier::Principal {
+                    port,
+                    node: RuntimeNode::RemoteCursor { .. },
+                } => {
+                    self.cursor_dependencies.insert(
+                        claim.cursor,
+                        CursorDependency {
+                            source: claim.source,
+                            target: CursorDependencyTarget::Cursor(port.node()),
+                        },
+                    );
+                    CursorProgress::Blocked
+                }
+                SourceFrontier::Principal { port, node } => self.materialize_remote_node(
+                    claim.copy,
+                    claim.cursor,
+                    claim.remote,
+                    port.node(),
+                    node,
+                ),
+                SourceFrontier::StableAuxiliary { port, node } => self
+                    .materialize_remote_stable_node(
+                        claim.copy,
+                        claim.cursor,
+                        claim.remote,
+                        port,
+                        node,
+                    ),
+                SourceFrontier::LegacyCall {
+                    entered,
+                    entered_node,
+                    partner,
+                    partner_node,
+                } => self.materialize_legacy_call_pair(
+                    claim.copy,
+                    claim.cursor,
+                    claim.remote,
+                    entered,
+                    entered_node,
+                    partner,
+                    partner_node,
+                ),
+                SourceFrontier::ActiveAuxiliary { entered, partner } => {
+                    self.cursor_dependencies.insert(
+                        claim.cursor,
+                        CursorDependency {
+                            source: claim.source,
+                            target: CursorDependencyTarget::Pair(ActivePairKey::new(
+                                entered.node(),
+                                partner.node(),
+                            )),
+                        },
+                    );
+                    CursorProgress::Blocked
+                }
+            }
+        };
+
+        if progress == CursorProgress::Blocked {
+            if let Some(pair) = claim.pair {
+                assert!(
+                    self.blocked_cursors
+                        .insert(
+                            pair,
+                            BlockedCursor {
+                                pair,
+                                cursor: claim.cursor,
+                            },
+                        )
+                        .is_none()
+                );
+            }
+        }
+        progress
     }
 
     fn cursor_across(&self, local: Port) -> Option<NodeId> {
@@ -2032,9 +2125,17 @@ impl<D: Clone + 'static> RuntimeNet<D> {
                 .copies
                 .get_mut(&copy)
                 .expect("joined cursor must reference a live copy");
-            let Some(peer) = state.frontiers.remove(&neighbor) else {
+            let Some(peer) = state.frontiers.get(&neighbor).copied() else {
                 return CursorProgress::Blocked;
             };
+            // A converging frontier may be inspected concurrently from its
+            // other end. Leave both frontier records intact until that claim
+            // is released; otherwise the peer would finish against a cursor
+            // that this join removed underneath it.
+            if self.claimed_cursors.contains_key(&peer) {
+                return CursorProgress::Blocked;
+            }
+            assert_eq!(state.frontiers.remove(&neighbor), Some(peer));
             assert_eq!(state.frontiers.remove(&remote), Some(cursor));
             (peer, state.frontiers.is_empty())
         };
@@ -2279,8 +2380,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         };
         self.ready.remove(&pair);
         self.calls.remove(&pair);
-        self.host_calls.remove(&pair);
-        self.blocked_host_calls.remove(&pair);
+        self.claimed_host_calls.remove(&pair);
         self.blocked_cursors.remove(&pair);
         self.stuck.remove(&pair);
     }
@@ -2340,6 +2440,7 @@ impl<D: Clone + 'static> RuntimeNet<D> {
         Some((left, right.node()))
     }
 
+    #[cfg(test)]
     fn principals_connect(&self, pair: ActivePairKey) -> bool {
         self.pair_nodes(pair).is_some()
     }
@@ -2348,6 +2449,61 @@ impl<D: Clone + 'static> RuntimeNet<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn finish_claimed_cursor<D: Clone + 'static>(
+        target: &mut RuntimeNet<D>,
+        cursor: NodeId,
+    ) -> CursorProgress {
+        let claim = target
+            .cursor_claim(cursor)
+            .expect("cursor reduction should leave an inspectable claim");
+        let inspection = claim
+            .source
+            .with_mut(|source| source.claim_source_frontier(claim.remote));
+        let source = claim.source.clone();
+        let progress = target.finish_cursor_claim(claim, inspection.frontier);
+        if let Some(call) = inspection.claimed_call {
+            source.with_mut(|source| source.release_claimed_call(call));
+        }
+        progress
+    }
+
+    fn reduce_next_cursor<D: Clone + 'static>(
+        target: &mut RuntimeNet<D>,
+    ) -> (NodeId, CursorProgress) {
+        let Some(Reduction {
+            kind:
+                ReductionKind::RemoteCursor {
+                    cursor,
+                    progress: CursorProgress::Claimed,
+                },
+            ..
+        }) = target.reduce_next()
+        else {
+            panic!("next reduction should claim a remote cursor");
+        };
+        let progress = finish_claimed_cursor(target, cursor);
+        (cursor, progress)
+    }
+
+    fn reduce_pair_cursor<D: Clone + 'static>(
+        target: &mut RuntimeNet<D>,
+        pair: ActivePairKey,
+    ) -> (NodeId, CursorProgress) {
+        let Some(Reduction {
+            kind:
+                ReductionKind::RemoteCursor {
+                    cursor,
+                    progress: CursorProgress::Claimed,
+                },
+            ..
+        }) = target.reduce_pair(pair)
+        else {
+            panic!("exact reduction should claim a remote cursor");
+        };
+        let progress = finish_claimed_cursor(target, cursor);
+        (cursor, progress)
+    }
 
     #[test]
     fn builder_reports_wiring_errors_without_panicking() {
@@ -2681,7 +2837,7 @@ mod tests {
         net.complete_host_call(call, outcome);
 
         assert_eq!(net.interface_data(result), Some(&42));
-        assert!(net.host_calls().is_empty());
+        assert!(net.claimed_host_calls().is_empty());
     }
 
     #[test]
@@ -2709,34 +2865,17 @@ mod tests {
     }
 
     #[test]
-    fn host_fn_block_and_error_preserve_the_active_pair() {
-        let (mut blocked, call, _) = host_call_net(
-            HostFn::new("blocked", |_| {
-                Err(HostFnStop::Block(Arc::from("not ready")))
-            }),
-            0,
-        );
-        let (host_fn, data) = blocked.host_call_parts(call);
-        let Err(HostFnStop::Block(reason)) = host_fn.apply(&data) else {
-            panic!("host function should block");
-        };
-        blocked.block_host_call(call, reason);
-        assert!(blocked.host_calls().is_empty());
-        assert_eq!(blocked.blocked_host_calls().len(), 1);
-        assert!(blocked.principals_connect(call.pair));
-
+    fn host_fn_error_preserves_the_stuck_active_pair() {
         let (mut failed, call, _) = host_call_net(
-            HostFn::new("failed", |_| {
-                Err(HostFnStop::Error(Arc::from("invalid input")))
-            }),
+            HostFn::new("failed", |_| Err(Arc::from("invalid input"))),
             0,
         );
         let (host_fn, data) = failed.host_call_parts(call);
-        let Err(HostFnStop::Error(error)) = host_fn.apply(&data) else {
+        let Err(error) = host_fn.apply(&data) else {
             panic!("host function should fail");
         };
         failed.fail_host_call(call, error);
-        assert!(failed.host_calls().is_empty());
+        assert!(failed.claimed_host_calls().is_empty());
         assert_eq!(
             failed.stuck_pairs().collect::<Vec<_>>(),
             vec![StuckPair {
@@ -2828,16 +2967,8 @@ mod tests {
         let source = source_requiring_one_reduction().instantiate_shared();
         let mut first = target_waiting_on(source.clone());
 
-        assert!(matches!(
-            first.reduce_next(),
-            Some(Reduction {
-                kind: ReductionKind::RemoteCursor {
-                    progress: CursorProgress::Blocked,
-                    ..
-                },
-                ..
-            })
-        ));
+        let (_, progress) = reduce_next_cursor(&mut first);
+        assert_eq!(progress, CursorProgress::Blocked);
         source.with_mut(|runtime| {
             assert!(matches!(
                 runtime.reduce_next(),
@@ -2855,14 +2986,8 @@ mod tests {
             .cursor;
         assert!(first.retry_blocked_cursor(cursor));
         assert!(matches!(
-            first.reduce_next(),
-            Some(Reduction {
-                kind: ReductionKind::RemoteCursor {
-                    progress: CursorProgress::Materialized { .. },
-                    ..
-                },
-                ..
-            })
+            reduce_next_cursor(&mut first).1,
+            CursorProgress::Materialized { .. }
         ));
         // Driving demand advances only one source reduction. Newly exposed,
         // unrelated pairs remain lazy in the shared source.
@@ -2870,15 +2995,59 @@ mod tests {
 
         let mut second = target_waiting_on(source);
         assert!(matches!(
-            second.reduce_next(),
+            reduce_next_cursor(&mut second).1,
+            CursorProgress::Materialized { .. }
+        ));
+    }
+
+    #[test]
+    fn legacy_source_call_is_claimed_only_while_its_frontier_is_copied() {
+        let mut source = RuntimeNet::empty();
+        let bind = source.add_node(RuntimeNode::Bind);
+        let callable = source.add_node(RuntimeNode::Data("callable"));
+        let result = source.add_node(RuntimeNode::Data("result"));
+        source.connect(Port::principal(bind), Port::principal(callable));
+        source.connect(Port::auxiliary(bind, 2), Port::principal(result));
+        let exposed = source.add_interface(Port::auxiliary(bind, 1));
+        source.exposed = Some(exposed);
+        let pair = ActivePairKey::new(bind, callable);
+        assert!(matches!(
+            source.reduce_next(),
             Some(Reduction {
-                kind: ReductionKind::RemoteCursor {
-                    progress: CursorProgress::Materialized { .. },
-                    ..
-                },
+                kind: ReductionKind::Call { .. },
                 ..
             })
         ));
+        let source = SharedRuntimeNet::new(source);
+
+        let mut target = target_waiting_on(source.clone());
+        let Some(Reduction {
+            kind:
+                ReductionKind::RemoteCursor {
+                    cursor,
+                    progress: CursorProgress::Claimed,
+                },
+            ..
+        }) = target.reduce_next()
+        else {
+            panic!("target cursor should claim its active pair");
+        };
+        let claim = target.cursor_claim(cursor).unwrap();
+        let inspection = source.with_mut(|source| source.claim_source_frontier(claim.remote));
+        source.with(|source| {
+            assert!(source.blocked_call(pair).is_none());
+            assert_eq!(source.claimed_pairs().collect::<Vec<_>>(), vec![pair]);
+        });
+
+        assert!(matches!(
+            target.finish_cursor_claim(claim, inspection.frontier),
+            CursorProgress::Materialized { .. }
+        ));
+        source.with_mut(|source| {
+            source.release_claimed_call(inspection.claimed_call.unwrap());
+            assert!(source.blocked_call(pair).is_some());
+            assert!(source.claimed_pairs().next().is_none());
+        });
     }
 
     #[test]
@@ -2894,17 +3063,8 @@ mod tests {
         let middle = SharedRuntimeNet::new(middle);
 
         let mut outer = target_waiting_on(middle.clone());
-        let Some(Reduction {
-            kind:
-                ReductionKind::RemoteCursor {
-                    cursor: outer_cursor,
-                    progress: CursorProgress::Blocked,
-                },
-            ..
-        }) = outer.reduce_next()
-        else {
-            panic!("outer cursor should block on the intermediate cursor");
-        };
+        let (outer_cursor, progress) = reduce_next_cursor(&mut outer);
+        assert_eq!(progress, CursorProgress::Blocked);
         let dependency = outer
             .cursor_dependency(outer_cursor)
             .expect("layered cursor should retain an exact dependency");
@@ -2915,19 +3075,17 @@ mod tests {
         );
 
         assert!(matches!(
-            middle.with_mut(|runtime| runtime.drive_cursor(middle_cursor)),
+            middle.with_mut(|runtime| runtime.claim_dependent_cursor(middle_cursor)),
+            Some(CursorProgress::Claimed)
+        ));
+        assert!(matches!(
+            middle.advance_claimed_cursor(middle_cursor),
             Some(CursorProgress::Materialized { .. })
         ));
         assert!(outer.retry_blocked_cursor(outer_cursor));
         assert!(matches!(
-            outer.reduce_next(),
-            Some(Reduction {
-                kind: ReductionKind::RemoteCursor {
-                    progress: CursorProgress::Materialized { .. },
-                    ..
-                },
-                ..
-            })
+            reduce_next_cursor(&mut outer).1,
+            CursorProgress::Materialized { .. }
         ));
     }
 
@@ -2949,14 +3107,8 @@ mod tests {
 
         let mut target = target_waiting_on(SharedRuntimeNet::new(source));
         assert!(matches!(
-            target.reduce_next(),
-            Some(Reduction {
-                kind: ReductionKind::RemoteCursor {
-                    progress: CursorProgress::Materialized { .. },
-                    ..
-                },
-                ..
-            })
+            reduce_next_cursor(&mut target).1,
+            CursorProgress::Materialized { .. }
         ));
         assert_eq!(
             target
@@ -2986,14 +3138,8 @@ mod tests {
         target.connect(Port::principal(local), Port::principal(cursor));
 
         assert!(matches!(
-            target.reduce_next(),
-            Some(Reduction {
-                kind: ReductionKind::RemoteCursor {
-                    progress: CursorProgress::Materialized { .. },
-                    ..
-                },
-                ..
-            })
+            reduce_next_cursor(&mut target).1,
+            CursorProgress::Materialized { .. }
         ));
         let cursors = target
             .nodes
@@ -3026,14 +3172,8 @@ mod tests {
         let call = *caller.blocked_calls().values().next().unwrap();
         caller.resume_call_with_copy(call, source);
         assert!(matches!(
-            caller.reduce_next(),
-            Some(Reduction {
-                kind: ReductionKind::RemoteCursor {
-                    progress: CursorProgress::Materialized { .. },
-                    ..
-                },
-                ..
-            })
+            reduce_next_cursor(&mut caller).1,
+            CursorProgress::Materialized { .. }
         ));
         assert!(matches!(
             caller.reduce_next(),
@@ -3071,17 +3211,14 @@ mod tests {
         caller.reduce_next();
         let call = *caller.blocked_calls().values().next().unwrap();
         caller.resume_call_with_copy(call, source);
-        caller.reduce_next();
+        assert!(matches!(
+            reduce_next_cursor(&mut caller).1,
+            CursorProgress::Materialized { .. }
+        ));
         caller.reduce_next();
         assert!(matches!(
-            caller.reduce_next(),
-            Some(Reduction {
-                kind: ReductionKind::RemoteCursor {
-                    progress: CursorProgress::Joined,
-                    ..
-                },
-                ..
-            })
+            reduce_next_cursor(&mut caller).1,
+            CursorProgress::Joined
         ));
         assert!(caller.copies.is_empty());
         assert!(matches!(
@@ -3092,6 +3229,72 @@ mod tests {
             })
         ));
         assert!(caller.reduce_next().is_none());
+    }
+
+    #[test]
+    fn converging_frontier_waits_for_a_claimed_peer() {
+        let mut template = NetBuilder::new();
+        let root = template.push(Node::Bind);
+        template.wire(Port::auxiliary(root, 1), Port::auxiliary(root, 2));
+        let source = template.finish(Port::principal(root)).instantiate_shared();
+
+        let mut caller = RuntimeNet::empty();
+        let bind = caller.add_node(RuntimeNode::Bind);
+        let function = caller.add_node(RuntimeNode::Data(()));
+        let left = caller.add_node(RuntimeNode::Data(()));
+        let right = caller.add_node(RuntimeNode::Data(()));
+        caller.connect(Port::principal(bind), Port::principal(function));
+        caller.connect(Port::auxiliary(bind, 1), Port::principal(left));
+        caller.connect(Port::auxiliary(bind, 2), Port::principal(right));
+
+        caller.reduce_next();
+        let call = *caller.blocked_calls().values().next().unwrap();
+        caller.resume_call_with_copy(call, source);
+        assert!(matches!(
+            reduce_next_cursor(&mut caller).1,
+            CursorProgress::Materialized { .. }
+        ));
+        assert!(matches!(
+            caller.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::BindJoin,
+                ..
+            })
+        ));
+
+        let mut claims = Vec::new();
+        for _ in 0..2 {
+            let Some(Reduction {
+                kind:
+                    ReductionKind::RemoteCursor {
+                        cursor,
+                        progress: CursorProgress::Claimed,
+                    },
+                ..
+            }) = caller.reduce_next()
+            else {
+                panic!("each converging cursor should be independently claimable");
+            };
+            let claim = caller.cursor_claim(cursor).unwrap();
+            let inspection = claim
+                .source
+                .with_mut(|source| source.claim_source_frontier(claim.remote));
+            claims.push((claim, inspection));
+        }
+
+        let (first_claim, first_inspection) = claims.remove(0);
+        assert_eq!(
+            caller.finish_cursor_claim(first_claim, first_inspection.frontier),
+            CursorProgress::Blocked
+        );
+        let (second_claim, second_inspection) = claims.remove(0);
+        assert_eq!(
+            caller.finish_cursor_claim(second_claim, second_inspection.frontier),
+            CursorProgress::Joined
+        );
+        assert!(caller.copies.is_empty());
+        assert!(caller.blocked_cursors().is_empty());
+        assert!(caller.claimed_pairs().next().is_none());
     }
 
     #[test]
@@ -3114,14 +3317,8 @@ mod tests {
         }
         for pair in cursor_pairs {
             assert!(matches!(
-                target.reduce_pair(pair),
-                Some(Reduction {
-                    kind: ReductionKind::RemoteCursor {
-                        progress: CursorProgress::Materialized { .. },
-                        ..
-                    },
-                    ..
-                })
+                reduce_pair_cursor(&mut target, pair).1,
+                CursorProgress::Materialized { .. }
             ));
         }
         let mut sites = target

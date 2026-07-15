@@ -75,11 +75,12 @@ all three possible links inline.
 
 Every principal-principal connection is named by an `ActivePairKey` containing
 its lower `NodeId`; the partner is recovered from the principal neighbor. Ready
-keys live in an ordered set, while unresolved bind calls, pending/blocked host
-calls, blocked cursors, and stuck diagnostics use maps keyed the same way.
-Completion and targeted source progress are exact lookups rather than queue
-scans. Interaction rules, especially erasure, explicitly remove nodes; there is
-no separate reachability collector.
+keys live in an ordered set, while unresolved bind calls, claimed host calls,
+blocked cursors, and stuck diagnostics use maps keyed the same way. Claimed
+pairs are temporarily absent from scheduler ownership but remain explicitly
+enumerable for diagnostics. Completion and targeted source progress are exact
+lookups rather than queue scans. Interaction rules, especially erasure,
+explicitly remove nodes; there is no separate reachability collector.
 
 ## Remaining evaluator bridge
 
@@ -105,17 +106,17 @@ runtime and intermediate cursor as its dependency. An auxiliary blocked by a
 source active pair records that exact pair key instead. The evaluator drives the
 specific cursor or pair transitively and retries the outer copy, without a broad
 source sweep. This is cursor composition along copy provenance, not reversed
-dataflow. Initial frontier inspection still nests target/source locks and is a
-remaining concurrency cleanup. Runtime calls also defer capturing lazy
+dataflow. Cursor progress claims its target pair before releasing the target
+mutex, inspects the source frontier under only the source mutex, and then
+finishes under only the target mutex. Runtime calls also defer capturing lazy
 arguments while the runtime still exposes an unsupplied bind from its curried
 spine.
 
 `HostFn<Data>` is a unary runtime agent whose principal consumes Data and whose
 auxiliary is its result continuation. Host callbacks execute outside the net
-mutex. Success emits Data or a new HostFn automatically wrapped behind a Bind;
-retryable blocks keep their active pair in keyed blocked state until an explicit
-retry, while permanent errors retain the intact pair and diagnostic in keyed
-stuck state. Core
+mutex while the active pair is claimed. Success emits Data or a new HostFn
+automatically wrapped behind a Bind; failure retains the intact pair and
+diagnostic in keyed stuck state. There is no retryable HostFn outcome. Core
 builtin expressions lowered into nets use this path, although saturated work
 remains a memoized semantic thunk and direct evaluator builtin values retain a
 compatibility path.
@@ -132,11 +133,13 @@ uses cursor composition when it is called later.
 The topology reducer handles bind-bind, fan-fan, fan-bind, fan-data, and eraser
 interactions. `bind-data` reports `ReductionKind::Call`; `eval` consumes that
 blocked pair through a generic `CallFrame`, preserving the argument and result
-wires behind stable interfaces. A runtime remembers whether it imported a
-logical copy, because only an instance may detach a lazy argument wire. Doing
-that in the canonical lambda runtime would capture its unsupplied root. This
-legacy Bind/Data call is the only active pair that cursor materialization still
-copies; removing it depends on giving List/Access/Closure explicit agents.
+wires behind stable interfaces. Whether lazy arguments may detach is determined
+from the current exposed bind topology, not historical imported-copy state.
+The legacy Bind/Data call is the only active pair that cursor materialization
+still copies; the source call is claimed while its two-node frontier is copied.
+`compatibility_call_argument_data` is the only remaining content inspection
+through an ordinary auxiliary port. Removing both exceptions depends on giving
+List/Access/Closure explicit lazy-argument agents.
 
 Core thunks can be backed by an expression, a runtime/interface pair, or a
 semantic builtin/access/list-item computation. All forms share one memoized

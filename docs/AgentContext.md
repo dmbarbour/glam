@@ -126,25 +126,33 @@ This document should summarize salient, relevant points rather than asking futur
   the source. Copying a partially applied net may instead encounter a cursor in
   the intermediate source; that exact cursor is driven transitively before the
   outer cursor retries. This does not reverse cursor flow or copy directly
-  across an intermediate net. Initial source-frontier inspection still takes a
-  nested target/source lock and remains cleanup work.
+  across an intermediate net. Cursor progress first claims the cursor pair,
+  releases the target mutex, inspects the source frontier, then reacquires only
+  the target mutex to finish. A converging cursor will not remove a peer while
+  that peer is claimed.
 - A blocked bind-data pair can be consumed as a generic `CallFrame`; its
   argument and result survive behind independently stable interfaces. Core
   thunks may name one of those runtime/interface pairs, and memoize both values
   and errors without introducing a new language-level `Value` variant. A
   blocked legacy Bind/Data call is also the sole remaining active-pair copying
   exception at a cursor boundary, pending explicit List/Access/Closure agents.
+  Its source pair is claimed for the short interval in which the cursor copies
+  its two-node frontier, so the snapshot cannot race source evaluation.
+  `compatibility_call_argument_data` is correspondingly the sole remaining
+  content inspection through an ordinary auxiliary port; keep it isolated
+  until a lazy-argument agent replaces this bridge.
 - `HostFn<Data>` is a generic unary agent with a principal data input and one
-  result auxiliary. Its callback runs outside the runtime mutex and may emit
-  `Data`, emit another automatically bind-wrapped `HostFn`, block for an
-  explicit retry, or become permanently stuck with a diagnostic. Core builtin
+  result auxiliary. Its active pair is claimed while its callback runs outside
+  the runtime mutex. The callback either emits `Data`, emits another
+  automatically bind-wrapped `HostFn`, or leaves the pair permanently stuck
+  with a diagnostic; there is no retryable blocking state. Core builtin
   expressions lowered into nets use HostFn currying; partial builtins therefore
   escape as ordinary `Value::Net` functions. Saturated builtins still emit
   memoized semantic thunks, so unrelated exact source-pair progress does not
   force strict builtin work until its result is observed. Direct evaluator
-  builtin values retain the compatibility path. An
-  imported runtime that still exposes an unsupplied bind may not detach lazy
-  call arguments yet; later parameters in the same bind spine are not captures.
+  builtin values retain the compatibility path. A runtime that still exposes
+  an unsupplied bind may not detach lazy call arguments yet; later parameters
+  in the same bind spine are not captures.
 - `g_syntax` and `CompileContext::value_apply_many` preserve maximal
   left-associated application spines such as `f x y z`. The expression
   evaluator peels such a spine before evaluation and supplies all remaining

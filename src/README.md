@@ -27,14 +27,17 @@
   runtime nodes use monotonic IDs and hash-table storage, preserve a stable
   exposed interface, and allocate fan sites locally; an active pair is keyed by
   its lower node ID, with ready work in an ordered set and suspended/stuck work
-  in exact keyed maps; layered cursors expose a precise source cursor or pair
-  dependency instead of scanning or sweeping scheduler collections
+  in exact keyed maps; claimed cursor and host work can release the runtime
+  mutex without surrendering pair ownership; layered cursors expose a precise
+  source cursor or pair dependency instead of scanning or sweeping scheduler
+  collections, and source-frontier inspection never nests target/source locks
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
 - `eval.rs` drives closure calls through runtime nets, turns blocked bind-data
   pairs into stable call frames, and executes generic unary `HostFn` requests
-  outside runtime locks; net-lowered builtins curry by returning another
-  bind-wrapped HostFn and retain saturated work as memoized semantic thunks;
+  outside runtime locks; HostFn failures become permanently stuck pairs rather
+  than an underspecified retry state; net-lowered builtins curry by returning
+  another bind-wrapped HostFn and retain saturated work as memoized semantic thunks;
   contiguous application spines targeting nets share
   one evaluator-owned caller runtime and one generic bind spine; dictionary-
   access closure bodies temporarily retain the call-by-need compatibility path
