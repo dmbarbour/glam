@@ -339,7 +339,16 @@ fn declaration_label(kind: &DeclarationKind) -> &'static str {
 }
 
 fn print_help() {
-    println!(
-        "Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...\n       glam --parse <PATH>\n       glam --help\n       glam --version\n\nAssembly inputs are applied as mixins; earlier inputs override later inputs.\nConfiguration is loaded from GLAM_CONF as an OS path-list, or from the user config/default fixture.\nBare arguments are reserved for configured `conf.cli` rewriting."
-    );
+    const HELP: &str = "\
+Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...
+       glam --parse <PATH>
+       glam --help
+       glam --version
+
+Assembly inputs are applied as mixins; earlier inputs override later inputs.
+Configuration is loaded from GLAM_CONF as an OS path-list, or from the user config/default fixture.
+Bare arguments are reserved for configured `conf.cli` rewriting.
+";
+
+    print!("{HELP}");
 }
