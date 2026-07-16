@@ -242,9 +242,9 @@ pub struct Wire {
 
 /// Stable key for a principal-principal wire.
 ///
-/// Runtime node IDs are never reused, and a principal port has at most one
-/// neighbor, so the lower-numbered endpoint uniquely identifies the pair. The
-/// other endpoint is always recovered from the graph.
+/// A principal port has at most one neighbor, so the lower-numbered 
+/// endpoint uniquely identifies the pair. The other endpoint is always 
+/// recovered from the graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ActivePairKey(NodeId);
 

@@ -1,110 +1,147 @@
+# Bootstrap Implementation Map
 
-# Architecture Sketches
+This document is a navigation aid for the current Rust bootstrap. It describes
+where data and control move today; it does not define the eventual language.
+See [`docs/DistilledDesign.md`](../docs/DistilledDesign.md) for target semantics
+and [`docs/AgentContext.md`](../docs/AgentContext.md) for regression-sensitive
+implementation constraints.
 
-## Simplest Case
+## Entry Points and Module Ownership
 
-        glam --file source.g
+| Path | Current responsibility |
+| --- | --- |
+| `main.rs` | CLI parsing, configuration/assembly policy, diagnostic rendering, and writing `asm.result` |
+| `lib.rs`, `api.rs` | Embedding facade: opaque values, host capabilities, module assembly, diagnostics, evaluation, binary extraction, and checked net construction |
+| `compiler.rs` | Per-source compiler capabilities and context: module identity, prior/final definitions, source bytes, and import loaders |
+| `g_syntax.rs` | `.g` front-end facade and source diagnostics |
+| `g_syntax/parser/` | Layout, declarations, expressions, and compound syntax parsing |
+| `g_syntax/resolve/`, `resolved.rs`, `analysis.rs` | Lexical resolution, affine semantic IR, capture discovery, and front-end warnings |
+| `g_syntax/module_lowering/` | Declaration, import, definition, and object orchestration into a module value |
+| `g_syntax/net_lowering.rs` | One-pass lowering of resolved expressions, functions, and applications into closed interaction nets |
+| `core.rs` | Syntax-independent assembly values, lazy cells, function stages, keys, dictionaries, and builtin identifiers |
+| `core_net.rs` | Core `Value`/`CoreOperator` specialization of generic interaction nets |
+| `interaction_net.rs` | Facade for generic topology, checked templates, and mutable runtime reduction |
+| `interaction_net/model.rs`, `builder.rs` | Packed ports/node identity, net agents, specialization protocol, and checked construction |
+| `interaction_net/runtime/` | Runtime graph storage, active-pair rewrites, cursor materialization, and focused tests |
+| `eval.rs` | Evaluation facade and shared evaluator context |
+| `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing, application, semantic operator staging, and interaction-net driving |
+| `eval/builtins/` | Small builtin dispatcher with implementations split by semantic family |
+| `eval/sequence.rs` | List-to-binary observation and range extraction |
+| `list.rs` | Generic compact/lazy persistent list ropes |
+| `number.rs` | Exact-rational wrapper and public conversion boundary |
+| `diagnostic.rs` | Shared diagnostic severity |
 
-- `main.rs` parses CLI arguments, delegates assembly to the public library
-  facade, renders retained diagnostics, and writes output
-- `api.rs` owns the public `Assembler`, opaque `Value`, module builder, host
-  capabilities, and bounded diagnostic history. The facade exposes exact
-  numbers through canonical text or small integer ratios, lossy finite `f64`
-  conversion, lazy function application/evaluation, and ranged extraction from
-  compact binaries or byte-valued lists without exposing core number or list
-  representations. `Assembler::net` wraps the core-specialized builder with
-  lifetime-scoped opaque ports and only `bind`, `copy`, `data`, checked `wire`,
-  and final exposed-port selection. Core values, net topology, scheduling,
-  evaluation, lists, and number implementations are crate-private; `compiler`
-  and `g_syntax` remain temporarily public for the `--parse` inspection path
-- `api.rs` prepares an internal compile-time context for each source
-  - optional source path for local-import loading
-  - prior module value for future mixin-style compilation
-  - abstract module path for namespace-relative identities such as `abstract_global_path`
-- `g_syntax.rs` is the front-end facade; `g_syntax/parser/` owns source and
-  expression parsing, including source-byte access and parse diagnostics
-- `g_syntax/resolve/` resolves syntax into the affine `ResolvedExpr<Value>` IR,
-  while `g_syntax/module_lowering/` assembles declarations into a module and
-  `g_syntax/net_lowering.rs` consumes resolved expressions into closed shared
-  interaction nets. Source lambdas remain front-end syntax, and update sugar
-  is rewritten before net emission
-- `api.rs` applies one temporary top-level fixpoint to a caller-named root module;
-  `main.rs` chooses `configuration` and `assembly` for its two CLI modules
-- `core_net.rs` defines the syntax-independent `CoreOperator` and
-  `CoreSpecialization` carried by generic interaction nets. The core
-  specialization embeds `Value` directly as its data type.
-  The `g_syntax` emitter builds one bind chain per resolved function; free
-  `BindingId`s become leading capture binds supplied once by the enclosing net.
-  Core stores the result as `FunctionCode`, while each evaluated
-  `FunctionValue` names a shared curried runtime stage. Calls lazily copy the
-  runtime frontier through evaluator-only remote cursors
-- `interaction_net.rs` is the generic interaction-net facade. Its `model` and
-  `builder` modules own topology and checked construction, while
-  `interaction_net/runtime/` owns mutable graph storage, rewrites, and cursor
-  materialization. `InteractionNet<Specialization>` supplies generic
-  topology. A specialization supplies cloneable `Data` and unary `Operator`
-  values plus the rules for callable data and `Operator >< Data`;
-  checked construction through one `NetBuilder` (including fallible
-  wiring/finalization and balanced copy helpers), active-pair discovery, and
-  mutable runtime reduction; builder-only one-output copy tunnels are spliced
-  out before a template is produced;
-  runtime nodes use monotonic IDs and hash-table storage, preserve a stable
-  exposed interface, and allocate fan sites locally; an active pair is keyed by
-  its lower node ID, with one ordered tree recording ready, claimed, cursor-
-  blocked, and stuck states; claimed cursor and operator work can release the
-  runtime mutex without surrendering pair ownership; layered cursors expose a precise
-  local cursor, source cursor, or source pair dependency instead of scanning or
-  sweeping scheduler collections; nodes materialize only through principal
-  frontiers, active pairs never cross cursor boundaries, and source-frontier
-  inspection never nests target/source locks; per-copy frontier cursors are the
-  only port provenance, embedded data is cloned without transformation, and
-  fan sites are translated per logical copy
-- `list.rs` provides compact byte leaves, generic value leaves, finger-tree
-  ropes, and opaque lazy holes; `core::List` supplies `Value` and `LazyValue`
-- `eval.rs` is the evaluator facade. Value forcing, application, interaction-net
-  driving, operator staging, sequence adaptation, and builtin semantic families
-  live in corresponding `eval/` modules. The evaluator contains no production
-  expression, lambda, or closure
-  representation. Source functions are
-  ordinary, observable `Value::Function` data; partial application derives and
-  shares another curried runtime stage. Saturated calls are memoized thunks.
-  Source-level application lowers through a data-consuming `CoreOperator`, while raw
-  `Value::Net` remains the explicit callable-data/cursor path. The evaluator
-  implements generic callable-data policy for target-local blocked bind-data
-  pairs and executes generic unary operator requests
-  outside runtime locks; operator failures become permanently stuck pairs rather
-  than an underspecified retry state; net-lowered builtins curry by returning
-  another bind-wrapped operator and retain saturated work as memoized semantic thunks;
-  contiguous application spines (and direct lambda applications) are
-  represented by one semantic operator chain;
-  function stages attach all presently available arguments together. List,
-  dictionary, and Access construction lower through operator chains, with lazy
-  aggregate members represented as closed value/computation thunks rather than
-  exported runtime-backed holes; closed net values attach their exposed
-  ports through logical-copy cursors and may normalize to either data or a non-
-  data net frontier
-- the public facade extracts binary `asm.result`; `main` otherwise uses only
-  this facade and writes the result to `stdout`. The temporary `--parse`
-  inspection command remains the sole direct front-end API client pending a
-  reflection replacement
+The detailed interaction-net invariants live in
+[`docs/agent_context/interaction_nets.md`](../docs/agent_context/interaction_nets.md),
+not here.
 
-At the moment, even this simple case is not fully implemented. Thus, it remains the focus for now.
+## Module Assembly Flow
 
-The current interaction-net slice removes lambdas and closures from core while
-keeping lambda syntax in `g_syntax`. Templates use local fan sites and each runtime graph
-gets one fresh namespace. The current oracle records dynamic duplication paths
-directly; it provides reference semantics for replacing those histories with
-Lamping-style bracket/croissant control interactions. Builtin currying, closed
-list construction, and general application bodies now cross the net runtime
-boundary. Callable data is claimed and lowered immediately without touching its
-argument: nets load through cursors, while builtins lower to Bind/Operator
-topology. Cursor erasure uses ordinary materialization and Erase interactions;
-no erased frontier state or mapped-node history is required. Net-backed lazy
-computations and saturated ordinary function calls require an
-exposed `Data` result; partial function stages explicitly require `Bind`, while
-explicit `Value::Net` application may retain a residual bind-exposing net.
-The embedding facade now provides the checked replay target for future
-`interaction_net` construction effects; the freer-monad operation list and
-keyword remain front-end work.
-`CompileContext` deliberately has no expression-building compatibility DSL;
-front ends own their semantic IR and return values or checked closed nets.
+The ordinary CLI path uses only the embedding facade:
+
+```text
+main
+  -> Assembler::module(module_path)
+  -> ModuleBuilder + ModuleInput values
+  -> api::Assembler::build_module_inner
+       -> Host reads each source
+       -> CompileContext records source/module/import context
+       -> g_syntax parses SourceFile into ParsedSource
+       -> g_syntax resolves and lowers declarations into a core Value
+       -> the final-definition lazy cell closes the module fixpoint
+       -> eval exposes the assembled module value
+  -> Assembler::binary_at(module, "asm.result")
+  -> main writes bytes and drains retained diagnostics
+```
+
+Inputs are processed from last to first so earlier command-line inputs override
+later ones. Local source and binary imports re-enter the same `Assembler`
+session through loaders installed in `CompileContext`; their diagnostics join
+the originating build session.
+
+`main` chooses the `configuration` and `assembly` module paths and constructs
+their initial definitions. Those names and roles are CLI policy, not library
+policy. `--parse` is the one temporary exception to the facade boundary: it
+calls the front end directly for inspection until reflection provides that
+view.
+
+## Front-End Dataflow
+
+```text
+source bytes
+  -> parser-owned SyntaxExpr and declaration nodes
+  -> resolver-owned BindingId locals and ResolvedExpr<Value>
+  -> module lowering or net lowering
+  -> closed core Value / FunctionCode / NetValue
+```
+
+`SyntaxExpr` describes spelling and sugar. `ResolvedExpr<Value>` is a private,
+affine semantic IR: consumers move its children rather than clone and re-lower
+them. Resolution discovers lexical bindings and explicit function captures;
+net lowering emits one bind spine for a whole source function and one operator
+chain for a maximal application spine. No syntax or core expression tree
+survives into evaluation.
+
+Module lowering owns declaration order and the open module fixpoint. It routes
+ordinary expressions through resolution/net lowering, imports through compiler
+loaders, and object declarations through the object lowering helpers. The
+front-end facade returns only lowered definitions plus source diagnostics.
+
+## Evaluation and Application Flow
+
+The evaluator exposes outer semantic values on demand:
+
+```text
+Value
+  -> eval_value / force_value_shell
+       -> return already-observable data
+       -> force and memoize LazyValue work
+       -> drive a net-backed computation until its interface exposes Data
+
+apply(function, arguments)
+  -> builtin/partial builtin staging, or
+  -> shared FunctionValue curried stage, or
+  -> explicit Value::Net cursor attachment, or
+  -> dictionary applicability compatibility
+```
+
+An undersaturated source function produces another `FunctionValue` sharing a
+curried runtime stage. Saturation produces a memoized computation. Explicit
+`Value::Net` is different: application attaches a logical copy of its exposed
+port and may leave a residual non-data net. A net-backed lazy computation, by
+contrast, must expose `Data` when forced.
+
+Builtins are identified in `core`, dispatched once in `eval/builtins.rs`, and
+implemented by semantic family below `eval/builtins/`. Net-lowered application
+uses inspectable `CoreOperator` values rather than Rust closure agents.
+
+## Interaction-Net Control Flow
+
+`NetBuilder` validates an immutable `InteractionNet` template. Instantiation
+creates a `SharedRuntimeNet` with a stable interface around the exposed port.
+The runtime records every principal-principal wire in one active-pair map.
+
+```text
+evaluator asks for one reduction
+  -> runtime claims one exact active pair under its mutex
+  -> topology-only rule rewrites it immediately, or
+  -> evaluator performs callable/operator/cursor work without the mutex
+  -> runtime finishes, blocks, or marks that same pair stuck
+```
+
+A logical copy is represented by one-way remote cursors owned by the target
+runtime. Demand on a cursor may materialize a stable source node or drive one
+exact dependency in the source. Source active pairs are reduced in the source;
+they are never copied into the target. Source and target runtime locks are not
+held together.
+
+## Test Navigation
+
+- Parser-only tests sit beside parser submodules under `g_syntax/parser/`.
+- Cross-front-end tests live in `g_syntax/tests.rs`.
+- Runtime topology and cursor tests live in
+  `interaction_net/runtime/tests.rs`.
+- Evaluator integration tests live in `eval/tests.rs`; shared fixtures are in
+  `eval/test_support.rs`.
+- `tests/` covers the public facade, CLI behavior, samples, and invalid source
+  fixtures.
