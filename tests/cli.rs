@@ -162,7 +162,7 @@ fn import_as_inherits_assembly_env() {
         .unwrap_or_else(|err| panic!("failed to write {}: {err}", lib.display()));
 
     let output = glam_command()
-        .env("GLAS_CONF", &config)
+        .env("GLAM_CONF", &config)
         .arg("--file")
         .arg(&main)
         .output()
@@ -203,7 +203,7 @@ fn configuration_files_compose_using_path_separator() {
         .expect("test configuration paths should join");
 
     let output = glam_command()
-        .env("GLAS_CONF", conf)
+        .env("GLAM_CONF", conf)
         .arg("--script.g")
         .arg("language g0\nasm.result = env.message\n")
         .output()
@@ -229,7 +229,7 @@ fn undefined_configuration_env_defaults_assembly_env_to_empty_object() {
         .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 
     let output = glam_command()
-        .env("GLAS_CONF", &config)
+        .env("GLAM_CONF", &config)
         .arg("--script.g")
         .arg("language g0\nasm.result = { [{}]:\"missing\" }.[env.missing]\n")
         .output()
@@ -364,7 +364,7 @@ fn hello_sample_files() -> Vec<PathBuf> {
 
 fn glam_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_glam"));
-    command.env("GLAS_CONF", "samples/config/unit_tests.g");
+    command.env("GLAM_CONF", "samples/config/unit_tests.g");
     command
 }
 

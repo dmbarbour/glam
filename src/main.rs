@@ -193,19 +193,12 @@ fn empty_environment_object() -> Value {
 }
 
 fn configuration_paths() -> Vec<PathBuf> {
-    if let Some(paths) = configuration_paths_from_env("GLAM_CONF")
-        .or_else(|| configuration_paths_from_env("GLAM_CONF"))
-    {
+    if let Some(paths) = configuration_paths_from_env("GLAM_CONF") {
         return paths;
     }
 
     if let Some(path) = default_user_configuration_path().filter(|path| path.exists()) {
         return vec![path];
-    }
-
-    let workspace_default = PathBuf::from("samples/config/dev.g");
-    if workspace_default.exists() {
-        return vec![workspace_default];
     }
 
     Vec::new()

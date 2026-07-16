@@ -5,6 +5,13 @@ use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{Signed, ToPrimitive, Zero};
 
+/// Largest base-10 exponent magnitude accepted in a numeric literal.
+///
+/// Exact arithmetic remains unbounded. This limit only prevents a short
+/// scientific literal from requesting an arbitrarily large `BigInt` while it
+/// is being parsed.
+const MAX_DECIMAL_EXPONENT: u32 = 100_000;
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Number(BigRational);
 
@@ -173,12 +180,13 @@ impl fmt::Display for Number {
 }
 
 fn parse_decimal_or_scientific(text: &str) -> Result<Number, String> {
-    let (mantissa, exponent) = if let Some((mantissa, exponent)) = split_once_either(text, 'e', 'E')
-    {
-        (mantissa, parse_exponent(exponent)?)
-    } else {
-        (text, 0_i64)
-    };
+    let (mantissa, negative_exponent, exponent) =
+        if let Some((mantissa, exponent)) = split_once_either(text, 'e', 'E') {
+            let (negative, magnitude) = parse_exponent(exponent)?;
+            (mantissa, negative, magnitude)
+        } else {
+            (text, false, 0)
+        };
 
     let (numerator, scale) = if let Some((whole, fractional)) = split_once(mantissa, '.') {
         let whole = clean_grouped_digits(whole, is_decimal_digit)?;
@@ -186,7 +194,9 @@ fn parse_decimal_or_scientific(text: &str) -> Result<Number, String> {
         let digits = format!("{whole}{fractional}");
         let numerator = BigInt::parse_bytes(digits.as_bytes(), 10)
             .ok_or_else(|| format!("invalid decimal literal `{text}`"))?;
-        (numerator, fractional.len())
+        let scale = u32::try_from(fractional.len())
+            .map_err(|_| format!("invalid decimal literal `{text}`: too many fractional digits"))?;
+        (numerator, scale)
     } else {
         let digits = clean_grouped_digits(mantissa, is_decimal_digit)?;
         let numerator = BigInt::parse_bytes(digits.as_bytes(), 10)
@@ -195,16 +205,19 @@ fn parse_decimal_or_scientific(text: &str) -> Result<Number, String> {
     };
 
     let mut rational = BigRational::new(numerator, pow10(scale));
-    if exponent > 0 {
-        rational *= BigRational::from_integer(pow10(exponent as usize));
-    } else if exponent < 0 {
-        rational /= BigRational::from_integer(pow10((-exponent) as usize));
+    if exponent != 0 {
+        let factor = BigRational::from_integer(pow10(exponent));
+        if negative_exponent {
+            rational /= factor;
+        } else {
+            rational *= factor;
+        }
     }
 
     Ok(Number(rational))
 }
 
-fn parse_exponent(text: &str) -> Result<i64, String> {
+fn parse_exponent(text: &str) -> Result<(bool, u32), String> {
     let (negative, rest) =
         if let Some(rest) = text.strip_prefix('_').or_else(|| text.strip_prefix('-')) {
             (true, rest)
@@ -212,10 +225,15 @@ fn parse_exponent(text: &str) -> Result<i64, String> {
             (false, text)
         };
     let digits = clean_grouped_digits(rest, is_decimal_digit)?;
-    let exponent = digits
-        .parse::<i64>()
+    let magnitude = digits
+        .parse::<u32>()
         .map_err(|err| format!("invalid exponent `{text}`: {err}"))?;
-    Ok(if negative { -exponent } else { exponent })
+    if magnitude > MAX_DECIMAL_EXPONENT {
+        return Err(format!(
+            "invalid exponent `{text}`: magnitude exceeds supported limit {MAX_DECIMAL_EXPONENT}"
+        ));
+    }
+    Ok((negative, magnitude))
 }
 
 fn parse_grouped_bigint(
@@ -259,8 +277,8 @@ fn clean_grouped_digits(text: &str, is_digit: impl Fn(char) -> bool) -> Result<S
     Ok(cleaned)
 }
 
-fn pow10(exponent: usize) -> BigInt {
-    BigInt::from(10_u8).pow(exponent as u32)
+fn pow10(exponent: u32) -> BigInt {
+    BigInt::from(10_u8).pow(exponent)
 }
 
 fn split_once(text: &str, needle: char) -> Option<(&str, &str)> {
@@ -300,7 +318,7 @@ fn is_hex_digit(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::Number;
+    use super::{MAX_DECIMAL_EXPONENT, Number, parse_exponent};
 
     #[test]
     fn parses_integer_forms() {
@@ -365,5 +383,33 @@ mod tests {
         let err = Number::parse("3/4/5").unwrap_err();
 
         assert!(err.contains("ambiguous `/` chain"));
+    }
+
+    #[test]
+    fn bounds_scientific_exponent_magnitudes() {
+        assert_eq!(
+            parse_exponent(&MAX_DECIMAL_EXPONENT.to_string()),
+            Ok((false, MAX_DECIMAL_EXPONENT))
+        );
+        assert_eq!(
+            parse_exponent(&format!("_{MAX_DECIMAL_EXPONENT}")),
+            Ok((true, MAX_DECIMAL_EXPONENT))
+        );
+
+        for exponent in [
+            (u64::from(MAX_DECIMAL_EXPONENT) + 1).to_string(),
+            format!("_{}", u64::from(MAX_DECIMAL_EXPONENT) + 1),
+        ] {
+            let err = Number::parse(&format!("1e{exponent}")).unwrap_err();
+            assert!(err.contains("invalid exponent"));
+            assert!(err.contains("magnitude exceeds supported limit"));
+        }
+    }
+
+    #[test]
+    fn rejects_exponents_too_large_for_the_bounded_representation() {
+        let err = Number::parse("1e999999999999999999999999999999").unwrap_err();
+
+        assert!(err.contains("invalid exponent"));
     }
 }
