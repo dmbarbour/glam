@@ -125,10 +125,10 @@ fn script_extension(option: &str) -> Option<&str> {
 }
 
 fn assemble_inputs(inputs: Vec<ModuleInput>, cli_args: Vec<String>) -> ExitCode {
-    let assembler = Assembler::default();
+    let assembler = Assembler::default().with_diagnostic_callback(|diagnostic| {
+        print_diagnostic(&diagnostic);
+    });
     let result = assemble(&assembler, inputs, cli_args);
-
-    print_assembler_diagnostics(&assembler);
 
     let bytes = match result {
         Ok(bytes) => bytes,
@@ -248,21 +248,6 @@ fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-}
-
-fn print_assembler_diagnostics(assembler: &Assembler) {
-    let Some(snapshot) = assembler.read_diagnostics() else {
-        return;
-    };
-    for diagnostic in snapshot.entries() {
-        print_diagnostic(diagnostic);
-    }
-    if snapshot.dropped() != 0 {
-        eprintln!(
-            "warning: {} earlier diagnostics were dropped from the bounded history",
-            snapshot.dropped()
-        );
-    }
 }
 
 fn print_diagnostic(diagnostic: &Diagnostic) {
