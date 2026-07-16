@@ -1697,10 +1697,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                     cursor: claim.cursor,
                 };
             }
-        } else if let Some(pair) = claim.pair {
-            if self.active.get(&pair) == Some(&ActivePairState::Claimed) {
-                self.active.remove(&pair);
-            }
+        } else if let Some(pair) = claim.pair
+            && self.active.get(&pair) == Some(&ActivePairState::Claimed)
+        {
+            self.active.remove(&pair);
         }
         progress
     }
@@ -2131,9 +2131,11 @@ mod tests {
     impl TestData for i32 {}
     impl TestData for &'static str {}
 
+    type TestOperatorFn<D> = dyn Fn(&D) -> Result<OperatorYield<D>, Arc<str>> + Send + Sync;
+
     pub struct TestOperator<D: TestData> {
         name: &'static str,
-        implementation: Arc<dyn Fn(&D) -> Result<OperatorYield<D>, Arc<str>> + Send + Sync>,
+        implementation: Arc<TestOperatorFn<D>>,
     }
 
     impl<D: TestData> TestOperator<D> {
@@ -2730,7 +2732,6 @@ mod tests {
 
         let mut scheduled_pairs = net
             .active_pairs()
-            .into_iter()
             .map(|pair| {
                 let (left, right) = net.pair_nodes(pair).unwrap();
                 (left.get(), right.get())

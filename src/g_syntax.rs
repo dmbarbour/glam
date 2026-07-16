@@ -1211,14 +1211,11 @@ fn lower_object(
     );
     let object_value =
         object_decl_resolved_in_scope(object, line, context, scope.clone(), &mut locals, name)?;
-    let object_value = annotate_definition_resolved(
+    let target_context = DefinitionTargetContext::new(&definitions_root, line, context, &scope);
+    let object_value = target_context.annotate(
         BuiltinAssertion::Undefined,
         &object.target,
-        &definitions_root,
         object_value,
-        line,
-        context,
-        &scope,
         &mut locals,
     )?;
     *definitions = lower_resolved_expr(update_module_resolved(
@@ -1663,14 +1660,11 @@ fn lower_nested_object_resolved(
     let name = hierarchical_object_name_resolved(&object.target, line, context, scope)?;
     let object_value =
         object_decl_resolved_in_scope(object, line, context, scope.clone(), locals, name)?;
-    let object_value = annotate_definition_resolved(
+    let target_context = DefinitionTargetContext::new(definitions, line, context, scope);
+    let object_value = target_context.annotate(
         BuiltinAssertion::Undefined,
         &object.target,
-        definitions,
         object_value,
-        line,
-        context,
-        scope,
         locals,
     )?;
     Ok(update_module_resolved(
@@ -1793,14 +1787,11 @@ fn lower_extend(
         composed_defs,
         context,
     ));
-    let object_value = annotate_definition_resolved(
+    let target_context = DefinitionTargetContext::new(&definitions_root, line, context, &scope);
+    let object_value = target_context.annotate(
         BuiltinAssertion::Defined,
         &extend.target,
-        &definitions_root,
         object_value,
-        line,
-        context,
-        &scope,
         &mut locals,
     )?;
     *definitions = lower_resolved_expr(update_module_resolved(
@@ -1857,6 +1848,135 @@ enum BuiltinAssertion {
     Undefined,
 }
 
+/// Shared source and scope state for checking and updating one definition.
+struct DefinitionTargetContext<'a> {
+    definitions: &'a ResolvedRoot,
+    line: usize,
+    compiler: &'a CompileContext,
+    scope: &'a NameScope<ResolvedRoot>,
+}
+
+impl<'a> DefinitionTargetContext<'a> {
+    fn new(
+        definitions: &'a ResolvedRoot,
+        line: usize,
+        compiler: &'a CompileContext,
+        scope: &'a NameScope<ResolvedRoot>,
+    ) -> Self {
+        Self {
+            definitions,
+            line,
+            compiler,
+            scope,
+        }
+    }
+
+    fn lower_update(
+        &self,
+        target: &str,
+        update: &SyntaxExpr,
+        sugar_param_count: usize,
+        locals: &mut ResolverContext,
+    ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+        let prior = definition_target_access_resolved(
+            target,
+            self.definitions,
+            self.line,
+            self.compiler,
+            self.scope,
+            locals,
+        )?;
+        if sugar_param_count == 0 {
+            let update = syntax_expr_to_resolved_in_semantic_scope(
+                update,
+                self.line,
+                self.compiler,
+                self.scope,
+                locals,
+            )?;
+            return Ok(ResolvedExpr::apply(update, [prior]));
+        }
+
+        let SyntaxExpr::Lambda(params, body) = update else {
+            return Err(Diagnostic::error(
+                self.line,
+                "internal error lowering update definition arguments",
+            ));
+        };
+        if params.len() != sugar_param_count {
+            return Err(Diagnostic::error(
+                self.line,
+                "internal error counting update definition arguments",
+            ));
+        }
+
+        let base_len = locals.len();
+        let parameters = locals.extend_bindings(params.iter().map(String::as_str));
+        let lowered = syntax_expr_to_resolved_in_semantic_scope(
+            body,
+            self.line,
+            self.compiler,
+            self.scope,
+            locals,
+        )?;
+        locals.truncate(base_len);
+        Ok(ResolvedExpr::lambda(
+            parameters,
+            ResolvedExpr::apply(lowered, [prior]),
+        ))
+    }
+
+    fn annotate(
+        &self,
+        assertion: BuiltinAssertion,
+        target: &str,
+        value: ResolvedExpr<Value>,
+        locals: &mut ResolverContext,
+    ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+        let tag = match assertion {
+            BuiltinAssertion::Defined => "assert_defined",
+            BuiltinAssertion::Undefined => "assert_undefined",
+        };
+        let singleton = |key: &str, value| {
+            apply_builtin_resolved(
+                Builtin::DictSingleton,
+                [
+                    ResolvedExpr::Embedded(self.compiler.value_atom(atom_from_str(key))),
+                    value,
+                ],
+                self.compiler,
+            )
+        };
+        let payload = apply_builtin_resolved(
+            Builtin::DictUnion,
+            [
+                singleton(
+                    "name",
+                    ResolvedExpr::Embedded(self.compiler.value_binary(target)),
+                ),
+                singleton(
+                    "value",
+                    definition_target_access_resolved(
+                        target,
+                        self.definitions,
+                        self.line,
+                        self.compiler,
+                        self.scope,
+                        locals,
+                    )?,
+                ),
+            ],
+            self.compiler,
+        );
+        let annotation = singleton(tag, payload);
+        Ok(apply_builtin_resolved(
+            Builtin::Anno,
+            [annotation, value],
+            self.compiler,
+        ))
+    }
+}
+
 fn lower_definition_resolved(
     definition: &DefinitionDecl,
     declaration_text: &str,
@@ -1871,35 +1991,22 @@ fn lower_definition_resolved(
     };
 
     let target_scope = definition_target_scope_resolved(scope, definitions.clone());
+    let target_context = DefinitionTargetContext::new(definitions, line, context, &target_scope);
     let value = match definition.kind {
-        DefinitionKind::Introduce => annotate_definition_resolved(
-            BuiltinAssertion::Undefined,
+        DefinitionKind::Introduce | DefinitionKind::Override => {
+            let assertion = match definition.kind {
+                DefinitionKind::Introduce => BuiltinAssertion::Undefined,
+                DefinitionKind::Override => BuiltinAssertion::Defined,
+                DefinitionKind::Update => unreachable!(),
+            };
+            let value =
+                syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?;
+            target_context.annotate(assertion, &definition.target, value, locals)?
+        }
+        DefinitionKind::Update => target_context.lower_update(
             &definition.target,
-            definitions,
-            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?,
-            line,
-            context,
-            &target_scope,
-            locals,
-        )?,
-        DefinitionKind::Override => annotate_definition_resolved(
-            BuiltinAssertion::Defined,
-            &definition.target,
-            definitions,
-            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?,
-            line,
-            context,
-            &target_scope,
-            locals,
-        )?,
-        DefinitionKind::Update => lower_update_definition_resolved(
-            &definition.target,
-            definitions,
             expr,
             definition_param_count(definition, declaration_text, line)?,
-            line,
-            context,
-            &target_scope,
             locals,
         )?,
     };
@@ -1928,103 +2035,6 @@ fn definition_target_scope_resolved(
     scope.module_final_defs = visible_definitions.clone();
     scope.module_prior_defs = visible_definitions;
     scope
-}
-
-fn lower_update_definition_resolved(
-    target: &str,
-    visible_definitions: &ResolvedRoot,
-    update: &SyntaxExpr,
-    sugar_param_count: usize,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope<ResolvedRoot>,
-    locals: &mut ResolverContext,
-) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let prior = definition_target_access_resolved(
-        target,
-        visible_definitions,
-        line,
-        context,
-        scope,
-        locals,
-    )?;
-    if sugar_param_count == 0 {
-        let update =
-            syntax_expr_to_resolved_in_semantic_scope(update, line, context, scope, locals)?;
-        return Ok(ResolvedExpr::apply(update, [prior]));
-    }
-
-    let SyntaxExpr::Lambda(params, body) = update else {
-        return Err(Diagnostic::error(
-            line,
-            "internal error lowering update definition arguments",
-        ));
-    };
-    if params.len() != sugar_param_count {
-        return Err(Diagnostic::error(
-            line,
-            "internal error counting update definition arguments",
-        ));
-    }
-
-    let base_len = locals.len();
-    let parameters = locals.extend_bindings(params.iter().map(String::as_str));
-    let lowered = syntax_expr_to_resolved_in_semantic_scope(body, line, context, scope, locals)?;
-    locals.truncate(base_len);
-    Ok(ResolvedExpr::lambda(
-        parameters,
-        ResolvedExpr::apply(lowered, [prior]),
-    ))
-}
-
-fn annotate_definition_resolved(
-    assertion: BuiltinAssertion,
-    target: &str,
-    visible_definitions: &ResolvedRoot,
-    value: ResolvedExpr<Value>,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope<ResolvedRoot>,
-    locals: &mut ResolverContext,
-) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let tag = match assertion {
-        BuiltinAssertion::Defined => "assert_defined",
-        BuiltinAssertion::Undefined => "assert_undefined",
-    };
-    let singleton = |key: &str, value| {
-        apply_builtin_resolved(
-            Builtin::DictSingleton,
-            [
-                ResolvedExpr::Embedded(context.value_atom(atom_from_str(key))),
-                value,
-            ],
-            context,
-        )
-    };
-    let payload = apply_builtin_resolved(
-        Builtin::DictUnion,
-        [
-            singleton("name", ResolvedExpr::Embedded(context.value_binary(target))),
-            singleton(
-                "value",
-                definition_target_access_resolved(
-                    target,
-                    visible_definitions,
-                    line,
-                    context,
-                    scope,
-                    locals,
-                )?,
-            ),
-        ],
-        context,
-    );
-    let annotation = singleton(tag, payload);
-    Ok(apply_builtin_resolved(
-        Builtin::Anno,
-        [annotation, value],
-        context,
-    ))
 }
 
 fn update_module_resolved(
@@ -3425,9 +3435,7 @@ fn parse_object_body_definition(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ObjectBodyDefinition> {
     if text.trim_start().starts_with("object ") {
-        let Some(object) = parse_object_declaration(text, line, diagnostics) else {
-            return None;
-        };
+        let object = parse_object_declaration(text, line, diagnostics)?;
         return Some(ObjectBodyDefinition {
             line,
             text: text.to_owned(),
@@ -3440,9 +3448,7 @@ fn parse_object_body_definition(
         diagnostics.push(Diagnostic::error(line, error.to_string()));
     }
 
-    let Some(definition) = declaration else {
-        return None;
-    };
+    let definition = declaration?;
     Some(ObjectBodyDefinition {
         line,
         text: text.to_owned(),
@@ -4134,7 +4140,11 @@ fn parse_object_expr_result(
         ));
     }
 
-    let (name_text, alias, dep_texts) = match parse_object_expr_header(header) {
+    let ParsedObjectExprHeader {
+        name: name_text,
+        alias,
+        deps: dep_texts,
+    } = match parse_object_expr_header(header) {
         Ok(parsed) => parsed,
         Err(message) => return Some(Err(message)),
     };
@@ -4164,9 +4174,13 @@ fn parse_object_expr_result(
     })))
 }
 
-fn parse_object_expr_header(
-    header: &str,
-) -> Result<(Option<&str>, Option<String>, Vec<&str>), String> {
+struct ParsedObjectExprHeader<'a> {
+    name: Option<&'a str>,
+    alias: Option<String>,
+    deps: Vec<&'a str>,
+}
+
+fn parse_object_expr_header(header: &str) -> Result<ParsedObjectExprHeader<'_>, String> {
     let (name_text, rest) = split_before_object_expr_keyword(header);
     let name_text = name_text.trim();
     if name_text.is_empty() {
@@ -4197,7 +4211,7 @@ fn parse_object_expr_header(
             .collect::<Vec<_>>()
     };
 
-    Ok((name, alias, deps))
+    Ok(ParsedObjectExprHeader { name, alias, deps })
 }
 
 fn split_before_object_expr_keyword(header: &str) -> (&str, &str) {
@@ -4426,10 +4440,10 @@ fn warn_unused_with_alias(
 
 fn analyze_object_body_locals(body: &[ObjectBodyDefinition], diagnostics: &mut Vec<Diagnostic>) {
     for item in body {
-        if let Some(definition) = item.definition() {
-            if let Some(expr) = &definition.expr {
-                analyze_expr_locals(expr, item.line, diagnostics);
-            }
+        if let Some(definition) = item.definition()
+            && let Some(expr) = &definition.expr
+        {
+            analyze_expr_locals(expr, item.line, diagnostics);
         }
         if let Some(object) = item.object() {
             analyze_object_body_locals(&object.body, diagnostics);
@@ -4528,10 +4542,10 @@ fn mark_used_body_item_prior_alias(
     alias: Option<&str>,
     used: &mut bool,
 ) {
-    if let Some(definition) = item.definition() {
-        if let Some(expr) = &definition.expr {
-            mark_used_prior_alias(expr, alias, used);
-        }
+    if let Some(definition) = item.definition()
+        && let Some(expr) = &definition.expr
+    {
+        mark_used_prior_alias(expr, alias, used);
     }
     if let Some(object) = item.object() {
         for item in &object.body {
@@ -4659,10 +4673,10 @@ fn mark_used_body_item_locals(
     locals: &[LocalName],
     used: &mut [bool],
 ) {
-    if let Some(definition) = item.definition() {
-        if let Some(expr) = &definition.expr {
-            mark_used_locals(expr, locals, used);
-        }
+    if let Some(definition) = item.definition()
+        && let Some(expr) = &definition.expr
+    {
+        mark_used_locals(expr, locals, used);
     }
     if let Some(object) = item.object() {
         for item in &object.body {
@@ -4950,7 +4964,7 @@ fn syntax_expr_parser<'src>()
         }
     }
 
-    let parser = recursive(|expr| {
+    recursive(|expr| {
         let name = glam_name().boxed();
         let expr_name = glam_name()
             .try_map(|name, span| match name.as_str() {
@@ -5202,9 +5216,7 @@ fn syntax_expr_parser<'src>()
                     resolve_infix_chain(first, rest).map_err(|message| Rich::custom(span, message))
                 }),
         ))
-    });
-
-    parser
+    })
 }
 
 fn syntax_binary_expr(operator: SyntaxOperator, left: SyntaxExpr, right: SyntaxExpr) -> SyntaxExpr {

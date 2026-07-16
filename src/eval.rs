@@ -648,10 +648,10 @@ fn apply_dict_value(
         )));
     }
 
-    if let Some(function) = dict.get(&Key::atom_from_text("apply")) {
-        if !is_undefined_dict_value(function) {
-            return apply_value(eval_value(function)?, argument, local_env);
-        }
+    if let Some(function) = dict.get(&Key::atom_from_text("apply"))
+        && !is_undefined_dict_value(function)
+    {
+        return apply_value(eval_value(function)?, argument, local_env);
     }
 
     Err(EvalError::new("application requires a function value"))
@@ -846,34 +846,34 @@ fn drive_net_interface(
         if let Some(progress) = runtime.with_mut(|net| net.demand_interface(interface)) {
             let cursor = runtime.with(|net| net.interface_cursor(interface));
             let progress = finish_core_cursor_claim(
-                &runtime,
+                runtime,
                 cursor.expect("demanded interface cursor must exist"),
                 progress,
             );
             if !matches!(progress, crate::interaction_net::CursorProgress::Blocked) {
                 continue;
             }
-            if let Some(cursor) = cursor {
-                if progress_cursor_dependency(&runtime, cursor, 0)? {
-                    continue;
-                }
-            }
-        }
-
-        if let Some(pair) = runtime.with(|net| net.interface_dependency(interface)) {
-            if let Some(reduction) = runtime.with_mut(|net| net.reduce_pair(pair)) {
-                handle_core_reduction(&runtime, reduction)?;
+            if let Some(cursor) = cursor
+                && progress_cursor_dependency(runtime, cursor, 0)?
+            {
                 continue;
             }
         }
 
-        let reduction = runtime.with_mut(|net| net.reduce_next());
-        if let Some(reduction) = reduction {
-            handle_core_reduction(&runtime, reduction)?;
+        if let Some(pair) = runtime.with(|net| net.interface_dependency(interface))
+            && let Some(reduction) = runtime.with_mut(|net| net.reduce_pair(pair))
+        {
+            handle_core_reduction(runtime, reduction)?;
             continue;
         }
 
-        if progress_core_net(&runtime)? {
+        let reduction = runtime.with_mut(|net| net.reduce_next());
+        if let Some(reduction) = reduction {
+            handle_core_reduction(runtime, reduction)?;
+            continue;
+        }
+
+        if progress_core_net(runtime)? {
             continue;
         }
 
@@ -2585,7 +2585,7 @@ fn object_c3_linearization(
     let mut direct_deps = Vec::new();
     let mut saw_named_dep = false;
     for dep_spec in &deps {
-        let dep_spec = object_spec_dict(&dep_spec)?;
+        let dep_spec = object_spec_dict(dep_spec)?;
         let dep_linearization =
             object_c3_linearization(&dep_spec, local_env, seen, next_anonymous_id)?;
         let dep_entry = dep_linearization
@@ -3774,7 +3774,7 @@ mod tests {
                 Ok::<_, ()>(())
             },
             &mut |segment| {
-                saw_values.push(segment.iter().cloned().collect::<Vec<_>>());
+                saw_values.push(segment.to_vec());
                 Ok(())
             },
         )

@@ -32,8 +32,9 @@
     },
     "mounts":[
         "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.Xauthority,target=/root/.Xauthority,type=bind,consistency=cached",
     ],
     "runArgs":[
-        "--net=host",
+        // "--net=host",
     ],
 }

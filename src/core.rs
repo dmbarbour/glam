@@ -576,7 +576,7 @@ mod tests {
     fn atoms_and_binary_keys_are_distinct() {
         let asm = Atom::from_key(&Key::binary_from_text("asm"));
         let dict = Dict::new_sync()
-            .insert(Key::Atom(asm.clone()), Value::binary_from_text("atom"))
+            .insert(Key::Atom(asm), Value::binary_from_text("atom"))
             .insert(
                 Key::binary_from_text("asm"),
                 Value::binary_from_text("binary"),
