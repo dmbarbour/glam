@@ -11,7 +11,8 @@ pub mod list;
 pub mod number;
 
 pub use api::{
-    Assembler, BuiltModule, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticSnapshot, Error,
-    Host, HostError, ModuleBuilder, ModuleInput, SystemHost, Value, ValueKind,
+    Assembler, BuiltModule, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticBuffer,
+    DiagnosticSink, DiagnosticSnapshot, Error, Host, HostError, ModuleBuilder, ModuleInput,
+    SystemHost, Value, ValueKind,
 };
 pub use diagnostic::Severity;

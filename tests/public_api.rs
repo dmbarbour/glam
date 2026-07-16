@@ -22,7 +22,13 @@ fn public_api_builds_a_script_module_and_extracts_binary_data() {
             .expect("asm.result should be binary"),
         b"Hello, library!".as_slice()
     );
-    assert_eq!(assembler.diagnostics().dropped(), 0);
+    assert_eq!(
+        assembler
+            .read_diagnostics()
+            .expect("default assembler should retain diagnostics")
+            .dropped(),
+        0
+    );
 }
 
 #[test]
@@ -35,7 +41,7 @@ fn public_api_can_load_sources_and_binaries_from_a_custom_host() {
         ),
         ("payload.bin", b"virtual bytes".as_slice()),
     ]);
-    let assembler = Assembler::with_host(host);
+    let assembler = Assembler::default().with_host(host);
     let module = assembler
         .module()
         .env(Value::binary(Vec::new()))

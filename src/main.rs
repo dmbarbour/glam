@@ -152,7 +152,9 @@ fn assemble_inputs(inputs: Vec<ModuleInput>, cli_args: Vec<String>) -> ExitCode 
 }
 
 fn print_assembler_diagnostics(assembler: &Assembler) {
-    let snapshot = assembler.diagnostics();
+    let Some(snapshot) = assembler.read_diagnostics() else {
+        return;
+    };
     for diagnostic in snapshot.entries() {
         print_diagnostic(diagnostic);
     }

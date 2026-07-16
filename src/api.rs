@@ -164,6 +164,74 @@ struct DiagnosticHistory {
     dropped: u64,
 }
 
+/// Destination for diagnostics emitted by assembly and future reflection work.
+/// Implementations may be called concurrently.
+pub trait DiagnosticSink: Send + Sync {
+    fn emit(&self, diagnostic: Diagnostic);
+
+    /// Atomically reads and consumes any retained diagnostics.
+    fn read(&self) -> Option<DiagnosticSnapshot> {
+        None
+    }
+}
+
+impl<T: DiagnosticSink + ?Sized> DiagnosticSink for Arc<T> {
+    fn emit(&self, diagnostic: Diagnostic) {
+        (**self).emit(diagnostic);
+    }
+
+    fn read(&self) -> Option<DiagnosticSnapshot> {
+        (**self).read()
+    }
+}
+
+/// Bounded, oldest-first diagnostic history used by [`Assembler::default`].
+#[derive(Debug)]
+pub struct DiagnosticBuffer {
+    history: Mutex<DiagnosticHistory>,
+}
+
+impl DiagnosticBuffer {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            history: Mutex::new(DiagnosticHistory::new(capacity)),
+        }
+    }
+
+    /// Atomically reads and removes all retained diagnostics and resets the
+    /// dropped-entry count.
+    pub fn read(&self) -> DiagnosticSnapshot {
+        self.history
+            .lock()
+            .expect("diagnostic history mutex should not be poisoned")
+            .read()
+    }
+}
+
+impl DiagnosticSink for DiagnosticBuffer {
+    fn emit(&self, diagnostic: Diagnostic) {
+        self.history
+            .lock()
+            .expect("diagnostic history mutex should not be poisoned")
+            .push(diagnostic);
+    }
+
+    fn read(&self) -> Option<DiagnosticSnapshot> {
+        Some(DiagnosticBuffer::read(self))
+    }
+}
+
+struct DiagnosticCallback<F>(F);
+
+impl<F> DiagnosticSink for DiagnosticCallback<F>
+where
+    F: Fn(Diagnostic) + Send + Sync,
+{
+    fn emit(&self, diagnostic: Diagnostic) {
+        (self.0)(diagnostic);
+    }
+}
+
 impl DiagnosticHistory {
     fn new(capacity: usize) -> Self {
         Self {
@@ -185,16 +253,11 @@ impl DiagnosticHistory {
         self.entries.push_back(diagnostic);
     }
 
-    fn snapshot(&self) -> DiagnosticSnapshot {
+    fn read(&mut self) -> DiagnosticSnapshot {
         DiagnosticSnapshot {
-            entries: self.entries.iter().cloned().collect(),
-            dropped: self.dropped,
+            entries: self.entries.drain(..).collect(),
+            dropped: std::mem::take(&mut self.dropped),
         }
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.dropped = 0;
     }
 }
 
@@ -226,6 +289,20 @@ pub trait Host: Send + Sync {
     fn path_exists(&self, path: &Path) -> bool;
 
     fn environment_variable(&self, name: &str) -> Option<OsString>;
+}
+
+impl<T: Host + ?Sized> Host for Arc<T> {
+    fn read(&self, path: &Path) -> Result<Bytes, HostError> {
+        (**self).read(path)
+    }
+
+    fn path_exists(&self, path: &Path) -> bool {
+        (**self).path_exists(path)
+    }
+
+    fn environment_variable(&self, name: &str) -> Option<OsString> {
+        (**self).environment_variable(name)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -321,39 +398,42 @@ impl std::error::Error for Error {}
 #[derive(Clone)]
 pub struct Assembler {
     host: Arc<dyn Host>,
-    history: Arc<Mutex<DiagnosticHistory>>,
+    diagnostic_sink: Arc<dyn DiagnosticSink>,
 }
 
 impl Default for Assembler {
     fn default() -> Self {
-        Self::with_host(SystemHost)
+        Self {
+            host: Arc::new(SystemHost),
+            diagnostic_sink: Arc::new(DiagnosticBuffer::new(DEFAULT_DIAGNOSTIC_CAPACITY)),
+        }
     }
 }
 
 impl Assembler {
-    pub fn with_host(host: impl Host + 'static) -> Self {
-        Self::with_host_and_diagnostic_capacity(host, DEFAULT_DIAGNOSTIC_CAPACITY)
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn with_host_and_diagnostic_capacity(
-        host: impl Host + 'static,
-        diagnostic_capacity: usize,
-    ) -> Self {
-        Self::with_shared_host_and_diagnostic_capacity(Arc::new(host), diagnostic_capacity)
+    pub fn with_host(mut self, host: impl Host + 'static) -> Self {
+        self.host = Arc::new(host);
+        self
     }
 
-    pub fn with_shared_host(host: Arc<dyn Host>) -> Self {
-        Self::with_shared_host_and_diagnostic_capacity(host, DEFAULT_DIAGNOSTIC_CAPACITY)
+    pub fn with_diagnostic_sink(mut self, sink: impl DiagnosticSink + 'static) -> Self {
+        self.diagnostic_sink = Arc::new(sink);
+        self
     }
 
-    pub fn with_shared_host_and_diagnostic_capacity(
-        host: Arc<dyn Host>,
-        diagnostic_capacity: usize,
-    ) -> Self {
-        Self {
-            host,
-            history: Arc::new(Mutex::new(DiagnosticHistory::new(diagnostic_capacity))),
-        }
+    pub fn with_diagnostic_buffer(self, capacity: usize) -> Self {
+        self.with_diagnostic_sink(DiagnosticBuffer::new(capacity))
+    }
+
+    pub fn with_diagnostic_callback<F>(self, callback: F) -> Self
+    where
+        F: Fn(Diagnostic) + Send + Sync + 'static,
+    {
+        self.with_diagnostic_sink(DiagnosticCallback(callback))
     }
 
     pub fn module(&self) -> ModuleBuilder<'_> {
@@ -365,26 +445,14 @@ impl Assembler {
         }
     }
 
-    pub fn diagnostics(&self) -> DiagnosticSnapshot {
-        self.history
-            .lock()
-            .expect("diagnostic history mutex should not be poisoned")
-            .snapshot()
-    }
-
-    /// Clears retained diagnostics and resets the dropped-entry count.
-    pub fn clear_diagnostics(&self) {
-        self.history
-            .lock()
-            .expect("diagnostic history mutex should not be poisoned")
-            .clear();
+    /// Atomically reads and consumes retained diagnostics when supported by
+    /// the configured sink.
+    pub fn read_diagnostics(&self) -> Option<DiagnosticSnapshot> {
+        self.diagnostic_sink.read()
     }
 
     pub(crate) fn record_diagnostic(&self, diagnostic: Diagnostic) {
-        self.history
-            .lock()
-            .expect("diagnostic history mutex should not be poisoned")
-            .push(diagnostic);
+        self.diagnostic_sink.emit(diagnostic);
     }
 
     pub fn force(&self, value: &Value) -> Result<Value, Error> {
@@ -898,8 +966,7 @@ mod tests {
 
     #[test]
     fn diagnostic_history_is_bounded_and_counts_dropped_entries() {
-        let assembler =
-            Assembler::with_shared_host_and_diagnostic_capacity(Arc::new(SystemHost), 2);
+        let assembler = Assembler::default().with_diagnostic_buffer(2);
         let session = Arc::new(Mutex::new(Vec::new()));
         for line in 1..=3 {
             assembler.record_syntax_diagnostics(
@@ -913,7 +980,9 @@ mod tests {
             );
         }
 
-        let snapshot = assembler.diagnostics();
+        let snapshot = assembler
+            .read_diagnostics()
+            .expect("diagnostic buffer should support reads");
         assert_eq!(snapshot.dropped(), 1);
         assert_eq!(
             snapshot
@@ -922,6 +991,38 @@ mod tests {
                 .filter_map(Diagnostic::line)
                 .collect::<Vec<_>>(),
             [2, 3]
+        );
+        assert_eq!(
+            assembler
+                .read_diagnostics()
+                .expect("diagnostic buffer should support reads"),
+            DiagnosticSnapshot {
+                entries: Vec::new(),
+                dropped: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn diagnostic_callback_replaces_the_default_buffer() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let callback_values = received.clone();
+        let assembler = Assembler::default().with_diagnostic_callback(move |diagnostic| {
+            callback_values
+                .lock()
+                .expect("callback collection mutex should not be poisoned")
+                .push(diagnostic);
+        });
+
+        assembler.record_diagnostic(Diagnostic::new(Severity::Info, "hello"));
+
+        assert!(assembler.read_diagnostics().is_none());
+        assert_eq!(
+            received
+                .lock()
+                .expect("callback collection mutex should not be poisoned")[0]
+                .message(),
+            "hello"
         );
     }
 }
