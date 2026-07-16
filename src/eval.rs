@@ -6,18 +6,38 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::core::{
-    Builtin, BuiltinCall, Expr, FunctionCode, FunctionValue, Key, KeyExpr, LazyValue, List,
-    NetValue, Value,
+    Builtin, BuiltinCall, FunctionCode, FunctionValue, Key, LazyValue, List, NetValue, Value,
 };
-use crate::core_net::{
-    CoreDataKey, CoreNetData, CoreOperator, CoreSpecialization, lower_closed_function_value,
-};
+use crate::core_net::{CoreDataKey, CoreNetData, CoreOperator, CoreSpecialization};
 use crate::interaction_net::{
     ActivePairKey, Call, Callable, CursorDependency, NetBuilder, NetSpecialization, OperatorCall,
     OperatorYield, Port, Reduction, ReductionKind, StuckReason,
 };
 use crate::list::ListItem;
 use crate::number::Number;
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TestExpr {
+    Value(Value),
+    List(Arc<[Arc<TestExpr>]>),
+    Apply(Arc<TestExpr>, Arc<TestExpr>),
+    Function {
+        code: Arc<FunctionCode>,
+        captures: Arc<[Arc<TestExpr>]>,
+    },
+    Local(usize),
+    Access(Arc<TestExpr>, Arc<[TestKey]>),
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+enum TestKey {
+    Key(Key),
+    Index(Arc<TestExpr>),
+    PathIndex(Arc<TestExpr>),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalError {
@@ -40,14 +60,16 @@ impl fmt::Display for EvalError {
 
 impl std::error::Error for EvalError {}
 
-pub fn eval_closed_expr(expr: &Expr) -> Result<Value, EvalError> {
+#[cfg(test)]
+fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvalError> {
     eval_expr(expr, &[])
 }
 
-fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
+#[cfg(test)]
+fn eval_expr(expr: &TestExpr, local_env: &[Value]) -> Result<Value, EvalError> {
     match expr {
-        Expr::Value(value) => eval_value(value),
-        Expr::List(items) => {
+        TestExpr::Value(value) => eval_value(value),
+        TestExpr::List(items) => {
             let mut list = List::empty();
             for item in items.iter() {
                 let value = eval_expr(item, local_env)?;
@@ -55,16 +77,16 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
             }
             Ok(Value::List(list))
         }
-        Expr::Apply(function, argument) => eval_apply(function, argument, local_env),
-        Expr::Function { code, captures } => {
+        TestExpr::Apply(function, argument) => eval_apply(function, argument, local_env),
+        TestExpr::Function { code, captures } => {
             let captures = captures
                 .iter()
                 .map(|capture| thunk_value(capture, local_env))
                 .collect();
             instantiate_function(code, captures)
         }
-        Expr::Local(index) => eval_local(*index, local_env),
-        Expr::Access(base, path) => {
+        TestExpr::Local(index) => eval_local(*index, local_env),
+        TestExpr::Access(base, path) => {
             let base = eval_expr(base, local_env)?;
             resolve_key_path(base, path, path, local_env)
         }
@@ -80,8 +102,16 @@ pub fn eval_value(value: &Value) -> Result<Value, EvalError> {
 }
 
 fn eval_lazy(lazy: &LazyValue) -> Result<Value, EvalError> {
+    let net_computation = lazy.net_computation();
+    let function_call = lazy.function_call();
+    let continue_through_result = net_computation.is_some() || function_call.is_some();
     if let Some(result) = lazy.cached() {
-        return result.map_err(|message| EvalError::new(message.as_ref()));
+        let result = result.map_err(|message| EvalError::new(message.as_ref()))?;
+        return if continue_through_result {
+            eval_value(&result)
+        } else {
+            Ok(result)
+        };
     }
     let result = if let Some(result) = lazy.force_deferred() {
         result.map_err(|message| EvalError::new(message.as_ref()))
@@ -93,9 +123,9 @@ fn eval_lazy(lazy: &LazyValue) -> Result<Value, EvalError> {
             .pop()
             .expect("saturated builtin thunk must contain an argument");
         apply_builtin(call.builtin, arguments, argument, &[])
-    } else if let Some((function, arguments)) = lazy.function_call() {
+    } else if let Some((function, arguments)) = function_call.as_ref() {
         evaluate_function_call(function, arguments)
-    } else if let Some(net) = lazy.net_computation() {
+    } else if let Some(net) = net_computation.as_ref() {
         let runtime = net.runtime().clone();
         let exposed = runtime.with(|runtime| runtime.exposed());
         extract_net_data(runtime, exposed, "lazy net computation")
@@ -108,26 +138,31 @@ fn eval_lazy(lazy: &LazyValue) -> Result<Value, EvalError> {
             "lazy value was observed before initialization",
         ));
     } else {
-        let expr = lazy
-            .expr()
-            .expect("non-pending lazy value must have a producer");
-        eval_expr(
-            expr,
-            lazy.env()
-                .expect("expression lazy value must have an environment"),
-        )
+        return Err(EvalError::new("lazy value has no producer"));
     }
     .map_err(|error| Arc::<str>::from(error.to_string()));
-    lazy.cache(result)
-        .map_err(|message| EvalError::new(message.as_ref()))
+    let result = lazy
+        .cache(result)
+        .map_err(|message| EvalError::new(message.as_ref()))?;
+    if continue_through_result {
+        // A net computation itself has exactly one meaning: extract the
+        // exposed Data payload and cache it. Once that has happened, the
+        // surrounding computation (including an ordinary function-call
+        // stage) may perform the next lazy step without re-entering the
+        // source runtime.
+        eval_value(&result)
+    } else {
+        Ok(result)
+    }
 }
 
 pub fn eval_key(value: &Value) -> Result<Key, EvalError> {
-    let value = eval_value(value)?;
+    let value = force_value_shell(value)?;
     value_to_key(&value, &[])
 }
 
-fn format_name(path: &[KeyExpr]) -> String {
+#[cfg(test)]
+fn format_name(path: &[TestKey]) -> String {
     path.iter()
         .map(format_name_key_expr)
         .collect::<Vec<_>>()
@@ -147,14 +182,16 @@ fn format_name_part(key: &Key) -> String {
     }
 }
 
-fn format_name_key_expr(key: &KeyExpr) -> String {
+#[cfg(test)]
+fn format_name_key_expr(key: &TestKey) -> String {
     match key {
-        KeyExpr::Key(key) => format_name_part(key),
-        KeyExpr::Index(_) => "[index]".to_owned(),
-        KeyExpr::PathIndex(_) => "(path-index)".to_owned(),
+        TestKey::Key(key) => format_name_part(key),
+        TestKey::Index(_) => "[index]".to_owned(),
+        TestKey::PathIndex(_) => "(path-index)".to_owned(),
     }
 }
 
+#[cfg(test)]
 fn eval_local(index: usize, local_env: &[Value]) -> Result<Value, EvalError> {
     let Some(value) = local_env.get(
         local_env
@@ -198,10 +235,11 @@ fn value_to_key(value: &Value, local_env: &[Value]) -> Result<Key, EvalError> {
     }
 }
 
+#[cfg(test)]
 fn resolve_key_path(
     current: Value,
-    remaining: &[KeyExpr],
-    full_path: &[KeyExpr],
+    remaining: &[TestKey],
+    full_path: &[TestKey],
     local_env: &[Value],
 ) -> Result<Value, EvalError> {
     let Some((head, rest)) = remaining.split_first() else {
@@ -213,11 +251,12 @@ fn resolve_key_path(
     resolve_key_path(next, rest, full_path, local_env)
 }
 
+#[cfg(test)]
 fn resolve_expanded_keys(
     mut current: Value,
     expanded: &[Key],
-    full_path: &[KeyExpr],
-    remaining: &[KeyExpr],
+    full_path: &[TestKey],
+    remaining: &[TestKey],
     local_env: &[Value],
 ) -> Result<Value, EvalError> {
     for key in expanded {
@@ -230,11 +269,12 @@ fn resolve_expanded_keys(
     Ok(current)
 }
 
+#[cfg(test)]
 fn force_dict_shell(
     value: &Value,
     _local_env: &[Value],
-    full_path: &[KeyExpr],
-    remaining: &[KeyExpr],
+    full_path: &[TestKey],
+    remaining: &[TestKey],
 ) -> Result<crate::core::Dict, EvalError> {
     match force_value_shell(value)? {
         Value::Dict(dict) => Ok(dict),
@@ -283,10 +323,15 @@ fn pop_list_front(list: &List) -> Result<Option<(Value, List)>, EvalError> {
         }))
 }
 
-fn eval_apply(function: &Expr, argument: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
+#[cfg(test)]
+fn eval_apply(
+    function: &TestExpr,
+    argument: &TestExpr,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
     let mut head = function;
     let mut arguments = vec![argument];
-    while let Expr::Apply(next, argument) = head {
+    while let TestExpr::Apply(next, argument) = head {
         arguments.push(argument);
         head = next;
     }
@@ -308,13 +353,218 @@ fn eval_apply(function: &Expr, argument: &Expr, local_env: &[Value]) -> Result<V
     }
 }
 
-fn thunk_value(expr: &Expr, local_env: &[Value]) -> Value {
+#[cfg(test)]
+fn thunk_value(expr: &TestExpr, local_env: &[Value]) -> Value {
     match expr {
-        Expr::Value(value) => value.clone(),
-        _ => Value::Lazy(LazyValue::new(
-            Arc::new(expr.clone()),
-            Arc::from(local_env.to_vec()),
-        )),
+        TestExpr::Value(value) => value.clone(),
+        _ => {
+            let expr = expr.clone();
+            let local_env = local_env.to_vec();
+            Value::deferred("test expression", move || {
+                eval_expr(&expr, &local_env).map_err(|error| error.to_string())
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+fn closed_function_value(arity: usize, body: TestExpr) -> Value {
+    let code = lower_test_function_code(arity, body);
+    assert_eq!(code.capture_count(), 0, "test function must be closed");
+    Value::Function(FunctionValue::new(
+        NetValue::new(code.runtime().clone()),
+        arity,
+    ))
+}
+
+#[cfg(test)]
+fn lower_test_function_code(arity: usize, body: TestExpr) -> FunctionCode {
+    let mut lowerer = TestExprLowerer {
+        net: NetBuilder::new(),
+        local_uses: Vec::new(),
+    };
+    let boundary = lowerer.net.copy(1);
+    lowerer.compile_into(&body, boundary.outputs[0]);
+    let capture_count = lowerer.local_uses.len().saturating_sub(arity);
+    let bind_count = arity + capture_count;
+    let exposed = if bind_count == 0 {
+        boundary.input
+    } else {
+        let binds = lowerer.net.bind_spine(bind_count);
+        lowerer.net.wire(binds.result, boundary.input);
+        let uses = std::mem::take(&mut lowerer.local_uses);
+        for index in 0..bind_count {
+            let targets = uses.get(index).map(Vec::as_slice).unwrap_or_default();
+            let bind_index = if index < arity {
+                capture_count + arity - index - 1
+            } else {
+                index - arity
+            };
+            lowerer.distribute(binds.arguments[bind_index], targets);
+        }
+        binds.input
+    };
+    let runtime = lowerer.net.finish(exposed).instantiate_shared();
+    FunctionCode::new(runtime, arity, capture_count)
+}
+
+#[cfg(test)]
+struct TestExprLowerer {
+    net: NetBuilder<CoreSpecialization>,
+    local_uses: Vec<Vec<Port>>,
+}
+
+#[cfg(test)]
+impl TestExprLowerer {
+    fn compile_into(&mut self, expr: &TestExpr, target: Port) {
+        match expr {
+            TestExpr::Value(value) => self.data_into(value.clone(), target),
+            TestExpr::List(items) => {
+                if items.is_empty() {
+                    self.data_into(Value::List(List::empty()), target);
+                } else {
+                    let arguments = items.iter().map(Arc::as_ref).collect::<Vec<_>>();
+                    self.operator_application_into(
+                        list_operator(arguments.len(), Arc::from([])),
+                        &arguments,
+                        target,
+                    );
+                }
+            }
+            TestExpr::Apply(_, _) => {
+                let mut head = expr;
+                let mut arguments = Vec::new();
+                while let TestExpr::Apply(function, argument) = head {
+                    arguments.push(argument.as_ref());
+                    head = function;
+                }
+                arguments.reverse();
+                self.semantic_application_into(head, &arguments, target);
+            }
+            TestExpr::Function { code, captures } => {
+                if captures.is_empty() {
+                    self.data_into(
+                        Value::Function(FunctionValue::new(
+                            NetValue::new(code.runtime().clone()),
+                            code.arity(),
+                        )),
+                        target,
+                    );
+                } else {
+                    let captures = captures.iter().map(Arc::as_ref).collect::<Vec<_>>();
+                    self.operator_application_into(
+                        function_capture_operator(code.clone(), Arc::from([])),
+                        &captures,
+                        target,
+                    );
+                }
+            }
+            TestExpr::Local(index) => {
+                if self.local_uses.len() <= *index {
+                    self.local_uses.resize_with(index + 1, Vec::new);
+                }
+                self.local_uses[*index].push(target);
+            }
+            TestExpr::Access(base, path) => {
+                let mut arguments = vec![base.as_ref()];
+                let path = path
+                    .iter()
+                    .map(|part| match part {
+                        TestKey::Key(key) => CoreDataKey::Key(key.clone()),
+                        TestKey::Index(expr) => {
+                            arguments.push(expr);
+                            CoreDataKey::Index
+                        }
+                        TestKey::PathIndex(expr) => {
+                            arguments.push(expr);
+                            CoreDataKey::PathIndex
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                self.operator_application_into(
+                    access_operator(Arc::from(path), Arc::from([])),
+                    &arguments,
+                    target,
+                );
+            }
+        }
+    }
+
+    fn semantic_application_into(
+        &mut self,
+        function: &TestExpr,
+        arguments: &[&TestExpr],
+        target: Port,
+    ) {
+        let mut output = self
+            .net
+            .unary_operator(apply_arity_operator(arguments.len(), Arc::from([])));
+        let [application, function_port, result] = self.net.bind();
+        self.net.wire(output, application);
+        self.compile_into(function, function_port);
+        output = result;
+        for argument in arguments {
+            let [application, argument_port, result] = self.net.bind();
+            self.net.wire(output, application);
+            self.compile_lazy_into(argument, argument_port);
+            output = result;
+        }
+        self.net.wire(output, target);
+    }
+
+    fn operator_application_into(
+        &mut self,
+        operator: CoreOperator,
+        arguments: &[&TestExpr],
+        target: Port,
+    ) {
+        let mut output = self.net.unary_operator(operator);
+        for argument in arguments {
+            let [application, argument_port, result] = self.net.bind();
+            self.net.wire(output, application);
+            self.compile_into(argument, argument_port);
+            output = result;
+        }
+        self.net.wire(output, target);
+    }
+
+    fn compile_lazy_into(&mut self, expr: &TestExpr, target: Port) {
+        if let TestExpr::Value(value) = expr {
+            self.data_into(value.clone(), target);
+            return;
+        }
+        let code = Arc::new(lower_test_function_code(0, expr.clone()));
+        if code.capture_count() == 0 {
+            self.data_into(
+                Value::Lazy(LazyValue::from_net_computation(NetValue::new(
+                    code.runtime().clone(),
+                ))),
+                target,
+            );
+        } else {
+            let captures = (0..code.capture_count())
+                .map(TestExpr::Local)
+                .collect::<Vec<_>>();
+            let captures = captures.iter().collect::<Vec<_>>();
+            self.operator_application_into(
+                computation_capture_operator(code, Arc::from([])),
+                &captures,
+                target,
+            );
+        }
+    }
+
+    fn data_into(&mut self, value: Value, target: Port) {
+        let data = self.net.data(CoreNetData::Value(value));
+        self.net.wire(data, target);
+    }
+
+    fn distribute(&mut self, source: Port, targets: &[Port]) {
+        let copy = self.net.copy(targets.len());
+        self.net.wire(source, copy.input);
+        for (output, target) in copy.outputs.into_iter().zip(targets) {
+            self.net.wire(output, *target);
+        }
     }
 }
 
@@ -430,24 +680,14 @@ fn dict_effect_function(dict: &crate::core::Dict) -> Option<Value> {
 }
 
 fn apply_effect_function_value(function: Value, argument: Value) -> Value {
-    closed_function_value(
-        1,
-        Expr::Apply(
-            Arc::new(Expr::Apply(
-                Arc::new(Expr::Value(function)),
-                Arc::new(Expr::Local(0)),
-            )),
-            Arc::new(Expr::Value(argument)),
-        ),
-    )
+    Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::EffectApply,
+        arguments: Arc::from([function, argument]),
+    })
 }
 
 fn effect_value(function: Value) -> Value {
     Value::Dict(crate::core::Dict::new_sync().insert(Key::atom_from_text("eff"), function))
-}
-
-fn closed_function_value(arity: usize, body: Expr) -> Value {
-    lower_closed_function_value(arity, body)
 }
 
 fn instantiate_function(code: &FunctionCode, captures: Vec<Value>) -> Result<Value, EvalError> {
@@ -512,7 +752,7 @@ fn extract_net_data(
     match drive_net_interface(&runtime, interface)? {
         NetInterfaceOutcome::Data => {
             let data = runtime
-                .with_mut(|runtime| runtime.take_interface_data(interface))
+                .with(|runtime| runtime.interface_data(interface).cloned())
                 .expect("evaluated interaction-net interface must contain data");
             observe_core_data(data)
         }
@@ -532,7 +772,7 @@ fn finish_explicit_net_application(
     match drive_net_interface(&runtime, interface)? {
         NetInterfaceOutcome::Data => {
             let data = runtime
-                .with_mut(|runtime| runtime.take_interface_data(interface))
+                .with(|runtime| runtime.interface_data(interface).cloned())
                 .expect("applied interaction-net interface must contain data");
             observe_core_data(data)
         }
@@ -897,8 +1137,10 @@ fn progress_core_operator_call(
             net.complete_operator_call(call, result);
         }),
         Err(error) => {
-            let error: Arc<str> =
-                format!("{}: {error}", CoreSpecialization::operator_name(&operator)).into();
+            // Core operator errors already identify the failed semantic
+            // operation. Preserve that diagnostic verbatim while retaining
+            // the operator itself in the stuck pair for runtime inspection.
+            let error: Arc<str> = error.to_string().into();
             runtime.with_mut(|net| {
                 net.fail_operator_call(call, error.clone());
             });
@@ -910,7 +1152,11 @@ fn progress_core_operator_call(
 
 fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
     match data {
-        CoreNetData::Value(value) => eval_value(&value),
+        // Crossing a net interface extracts exactly one Data payload. If that
+        // payload is itself lazy, callers may force it after the enclosing net
+        // result has been memoized; recursively forcing here can re-enter the
+        // same mutable runtime during productive fixpoint construction.
+        CoreNetData::Value(value) => Ok(value),
         CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
         CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
     }
@@ -1434,6 +1680,44 @@ fn apply_builtin(
             })?;
             eval_object_instance_builtin(&spec, local_env)
         }
+        Builtin::EffectApply => {
+            let [function, argument, api] = <[Value; 3]>::try_from(args).map_err(|_| {
+                EvalError::new("effect apply builtin received the wrong number of arguments")
+            })?;
+            apply_values(eval_value(&function)?, vec![api, argument], local_env)
+        }
+        Builtin::EffectCall => {
+            let [name, arguments, api] = <[Value; 3]>::try_from(args).map_err(|_| {
+                EvalError::new("effect call builtin received the wrong number of arguments")
+            })?;
+            let name = value_to_key(&eval_value(&name)?, local_env)?;
+            let function = resolve_core_access(&[api], &[CoreDataKey::Key(name)])?;
+            let arguments = match force_value_shell(&arguments)? {
+                Value::List(arguments) => list_to_value_items(&arguments)?,
+                _ => {
+                    return Err(EvalError::new(
+                        "effect call builtin requires a list of arguments",
+                    ));
+                }
+            };
+            apply_values(function, arguments, local_env)
+        }
+        Builtin::ObjectDefaultDefs => {
+            let [base, _self_value] = <[Value; 2]>::try_from(args).map_err(|_| {
+                EvalError::new(
+                    "default object definitions builtin received the wrong number of arguments",
+                )
+            })?;
+            eval_value(&base)
+        }
+        Builtin::ObjectDictDefs => {
+            let [dict, base, _self_value] = <[Value; 3]>::try_from(args).map_err(|_| {
+                EvalError::new(
+                    "dictionary object definitions builtin received the wrong number of arguments",
+                )
+            })?;
+            eval_dict_union_builtin(&base, &dict, local_env)
+        }
     }
 }
 
@@ -1512,16 +1796,13 @@ fn condition_effect_value(success: bool) -> Value {
 }
 
 fn effect_call_expr_value(name: &str, arguments: Vec<Value>) -> Value {
-    let api_member = Expr::Access(
-        Arc::new(Expr::Local(0)),
-        Arc::from([KeyExpr::Key(Key::atom_from_text(name))]),
-    );
-    let body = arguments
-        .into_iter()
-        .fold(api_member, |function, argument| {
-            Expr::Apply(Arc::new(function), Arc::new(Expr::Value(argument)))
-        });
-    effect_value(closed_function_value(1, body))
+    effect_value(Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::EffectCall,
+        arguments: Arc::from([
+            Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(name))),
+            Value::List(List::from_values(arguments)),
+        ]),
+    }))
 }
 
 fn builtin_unit_value() -> Value {
@@ -2083,16 +2364,6 @@ fn eval_index_number(
     })
 }
 
-fn builtin2_expr(builtin: Builtin, left: Expr, right: Expr) -> Expr {
-    Expr::Apply(
-        Arc::new(Expr::Apply(
-            Arc::new(Expr::Value(Value::Builtin(builtin))),
-            Arc::new(left),
-        )),
-        Arc::new(right),
-    )
-}
-
 fn eval_singleton_builtin(
     key: &Value,
     value: &Value,
@@ -2262,10 +2533,10 @@ fn object_spec_dict(spec: &Value) -> Result<crate::core::Dict, EvalError> {
 }
 
 fn dict_object_spec(dict: crate::core::Dict) -> Value {
-    let defs = closed_function_value(
-        2,
-        dict_union_expr(Expr::Local(1), Expr::Value(Value::Dict(dict))),
-    );
+    let defs = Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::ObjectDictDefs,
+        arguments: Arc::from([Value::Dict(dict)]),
+    });
     let spec = crate::core::Dict::new_sync()
         .insert(
             Key::atom_from_text("name"),
@@ -2274,10 +2545,6 @@ fn dict_object_spec(dict: crate::core::Dict) -> Value {
         .insert(Key::atom_from_text("deps"), Value::List(List::empty()))
         .insert(Key::atom_from_text("defs"), defs);
     Value::Dict(spec)
-}
-
-fn dict_union_expr(left: Expr, right: Expr) -> Expr {
-    builtin2_expr(Builtin::DictUnion, left, right)
 }
 
 fn object_application_order(
@@ -2427,7 +2694,7 @@ fn object_spec_name(spec: &crate::core::Dict, local_env: &[Value]) -> Result<Key
     let Some(name) = spec.get(&Key::atom_from_text("name")) else {
         return Err(EvalError::new("object specification requires a name"));
     };
-    let name = eval_value(name)?;
+    let name = force_value_shell(name)?;
     value_to_key(&name, local_env)
 }
 
@@ -2455,7 +2722,7 @@ fn object_dep_specs(deps: &Value) -> Result<Vec<Value>, EvalError> {
 }
 
 fn default_object_defs_value() -> Value {
-    closed_function_value(2, Expr::Local(1))
+    Value::Builtin(Builtin::ObjectDefaultDefs)
 }
 
 fn eval_anno_builtin(
@@ -2483,7 +2750,7 @@ fn eval_anno_builtin(
             }
         }
         RecognizedAnnotation::AssertUnit { value } => {
-            let value = eval_value(&value)?;
+            let value = force_value_shell(&value)?;
             if is_unit_value(&value) {
                 Ok(target.clone())
             } else {
@@ -2518,7 +2785,7 @@ fn recognize_annotation(
     annotation: &Value,
     local_env: &[Value],
 ) -> Result<RecognizedAnnotation, EvalError> {
-    let annotation = eval_value(annotation)?;
+    let annotation = force_value_shell(annotation)?;
     if let Value::Atom(atom) = &annotation {
         return Ok(recognize_simple_annotation(atom)
             .unwrap_or_else(|| RecognizedAnnotation::Unknown(format!("{annotation:?}"))));
@@ -2594,7 +2861,7 @@ fn parse_assertion_annotation(
     local_env: &[Value],
     tag_name: &str,
 ) -> Result<ParsedAssertion, EvalError> {
-    let payload = eval_value(payload)?;
+    let payload = force_value_shell(payload)?;
     let Value::Dict(payload) = payload else {
         return Ok(ParsedAssertion::Invalid(format!(
             "invalid `{tag_name}` annotation payload"
@@ -2613,7 +2880,7 @@ fn parse_assertion_annotation(
     };
 
     let name = annotation_name(name_value, local_env)?;
-    let defined = !is_undefined_value(&eval_value(value)?);
+    let defined = !is_undefined_value(&force_value_shell(value)?);
     Ok(ParsedAssertion::Valid { name, defined })
 }
 
@@ -2621,7 +2888,7 @@ fn parse_value_annotation(
     payload: &Value,
     tag_name: &str,
 ) -> Result<ParsedValueAnnotation, EvalError> {
-    let payload = eval_value(payload)?;
+    let payload = force_value_shell(payload)?;
     let Value::Dict(payload) = payload else {
         return Ok(ParsedValueAnnotation::Invalid(format!(
             "invalid `{tag_name}` annotation payload"
@@ -2640,7 +2907,7 @@ fn parse_value_annotation(
 }
 
 fn annotation_name(value: &Value, _local_env: &[Value]) -> Result<String, EvalError> {
-    let value = eval_value(value)?;
+    let value = force_value_shell(value)?;
     Ok(match value {
         Value::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Value::Atom(atom) => atom_name(&atom)
@@ -2716,7 +2983,7 @@ fn eval_merge_duplicate_builtin(
     right: &Value,
     _local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let name = eval_value(name)?;
+    let name = force_value_shell(name)?;
     let name = match name {
         Value::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Value::Atom(atom) => atom_name(&atom)
@@ -2857,24 +3124,11 @@ fn key_value(key: &Key) -> Value {
     }
 }
 
-fn value_as_expr(value: &Value) -> Arc<Expr> {
-    Arc::new(Expr::Value(value.clone()))
-}
-
 fn builtin_apply3_value(builtin: Builtin, first: &Value, second: &Value, third: &Value) -> Value {
-    Value::Lazy(LazyValue::new(
-        Arc::new(Expr::Apply(
-            Arc::new(Expr::Apply(
-                Arc::new(Expr::Apply(
-                    Arc::new(Expr::Value(Value::Builtin(builtin))),
-                    value_as_expr(first),
-                )),
-                value_as_expr(second),
-            )),
-            value_as_expr(third),
-        )),
-        Arc::from([]),
-    ))
+    Value::Lazy(LazyValue::from_builtin(BuiltinCall {
+        builtin,
+        arguments: Arc::from([first.clone(), second.clone(), third.clone()]),
+    }))
 }
 
 fn is_lazy_value(value: &Value) -> bool {
@@ -2889,18 +3143,16 @@ fn is_undefined_dict_value(value: &Value) -> bool {
     is_undefined_value(value)
 }
 
-fn expand_key_expr(key: &KeyExpr, local_env: &[Value]) -> Result<Vec<Key>, EvalError> {
+#[cfg(test)]
+fn expand_key_expr(key: &TestKey, local_env: &[Value]) -> Result<Vec<Key>, EvalError> {
     match key {
-        KeyExpr::Key(key) => Ok(vec![key.clone()]),
-        KeyExpr::Index(expr) => {
-            let value = Value::Lazy(LazyValue::new(expr.clone(), Arc::from(local_env.to_vec())));
+        TestKey::Key(key) => Ok(vec![key.clone()]),
+        TestKey::Index(expr) => {
+            let value = thunk_value(expr, local_env);
             let value = force_value_shell(&value)?;
             Ok(vec![value_to_key(&value, local_env)?])
         }
-        KeyExpr::PathIndex(expr) => eval_key_path_list(
-            &Value::Lazy(LazyValue::new(expr.clone(), Arc::from(local_env.to_vec()))),
-            local_env,
-        ),
+        TestKey::PathIndex(expr) => eval_key_path_list(&thunk_value(expr, local_env), local_env),
     }
 }
 
@@ -3018,7 +3270,7 @@ pub fn list_output_bytes(list: &List) -> Result<Vec<u8>, String> {
         },
         &mut |segment| {
             for item in segment.iter() {
-                let item = eval_value(item).map_err(|err| err.to_string())?;
+                let item = force_value_shell(item).map_err(|err| err.to_string())?;
                 let Value::Number(number) = item else {
                     return Err("must contain only integers and binary segments".to_owned());
                 };
@@ -3066,8 +3318,7 @@ mod tests {
 
     use bytes::Bytes;
 
-    use crate::compiler::CompileContext;
-    use crate::core::{Dict, Expr, LazyValue, Value};
+    use crate::core::{Dict, LazyValue, Value};
     use crate::number::Number;
 
     use super::*;
@@ -3076,6 +3327,21 @@ mod tests {
         let mut builder = NetBuilder::new();
         let exposed = build(&mut builder);
         NetValue::new(builder.finish(exposed).instantiate_shared())
+    }
+
+    fn expr_value(expr: TestExpr) -> Value {
+        Value::deferred("test expression", move || {
+            eval_closed_expr(&expr).map_err(|error| error.to_string())
+        })
+    }
+
+    fn apply_expr_values(function: Value, arguments: impl IntoIterator<Item = Value>) -> Value {
+        let expr = arguments
+            .into_iter()
+            .fold(TestExpr::Value(function), |function, argument| {
+                TestExpr::Apply(Arc::new(function), Arc::new(TestExpr::Value(argument)))
+            });
+        expr_value(expr)
     }
 
     #[test]
@@ -3094,9 +3360,9 @@ mod tests {
             builder.wire(argument, result);
             application
         });
-        let expression = Expr::Apply(
-            Arc::new(Expr::Value(Value::Net(identity))),
-            Arc::new(Expr::Value(n(42))),
+        let expression = TestExpr::Apply(
+            Arc::new(TestExpr::Value(Value::Net(identity))),
+            Arc::new(TestExpr::Value(n(42))),
         );
 
         assert_eq!(eval_closed_expr(&expression).unwrap(), n(42));
@@ -3185,8 +3451,7 @@ mod tests {
 
     #[test]
     fn compiled_function_values_reuse_one_shared_interaction_net() {
-        let context = CompileContext::default();
-        let function = context.value_lambdas(1, context.value_local(0));
+        let function = closed_function_value(1, TestExpr::Local(0));
         let (Value::Function(first), Value::Function(second)) = (
             eval_value(&function).unwrap(),
             eval_value(&function).unwrap(),
@@ -3198,9 +3463,8 @@ mod tests {
 
     #[test]
     fn curried_lambda_partial_application_exposes_the_next_bind() {
-        let context = CompileContext::default();
-        let function = context.value_lambdas(3, context.value_local(2));
-        let partially_applied = eval_value(&context.value_apply(function, n(11)))
+        let function = closed_function_value(3, TestExpr::Local(2));
+        let partially_applied = eval_value(&apply_expr_values(function, [n(11)]))
             .expect("first application should expose the remaining bind chain");
         let Value::Function(first_stage) = &partially_applied else {
             panic!("partial application should produce another function stage");
@@ -3217,33 +3481,34 @@ mod tests {
                 .ptr_eq(cloned_stage.stage().runtime())
         );
 
-        let result = context.value_apply(context.value_apply(partially_applied, n(22)), n(33));
+        let result = apply_expr_values(partially_applied, [n(22), n(33)]);
         assert_eq!(eval_value(&result).unwrap(), n(11));
     }
 
     #[test]
     fn function_application_accepts_a_cursor_backed_function_argument_without_forcing_it() {
-        let context = CompileContext::default();
-        let ignores_first = context.value_lambdas(2, context.value_local(0));
-        let forwards_argument = context.value_lambdas(
+        let ignores_first = closed_function_value(2, TestExpr::Local(0));
+        let forwards_argument = closed_function_value(
             1,
-            context.value_apply(ignores_first, context.value_local(0)),
+            TestExpr::Apply(
+                Arc::new(TestExpr::Value(ignores_first)),
+                Arc::new(TestExpr::Local(0)),
+            ),
         );
-        let unresolved_function = context.value_lambdas(1, context.value_local(0));
+        let unresolved_function = closed_function_value(1, TestExpr::Local(0));
 
-        let partial = eval_value(&context.value_apply(forwards_argument, unresolved_function))
+        let partial = eval_value(&apply_expr_values(forwards_argument, [unresolved_function]))
             .expect("net attachment must not demand a callable argument as embedded data");
         assert!(matches!(partial, Value::Function(_)));
 
         assert_eq!(
-            eval_value(&context.value_apply(partial, n(42))).unwrap(),
+            eval_value(&apply_expr_values(partial, [n(42)])).unwrap(),
             n(42)
         );
     }
 
     #[test]
     fn batched_application_spine_keeps_unused_arguments_lazy() {
-        let context = CompileContext::default();
         let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let lazy_argument = |label: &'static str| {
             let forced = forced.clone();
@@ -3252,8 +3517,8 @@ mod tests {
                 Ok(n(99))
             })
         };
-        let function = context.value_lambdas(3, context.value_local(2));
-        let application = context.value_apply_many(
+        let function = closed_function_value(3, TestExpr::Local(2));
+        let application = apply_expr_values(
             function,
             [n(11), lazy_argument("second"), lazy_argument("third")],
         );
@@ -3264,21 +3529,23 @@ mod tests {
 
     #[test]
     fn batched_application_preserves_access_closure_compatibility() {
-        let context = CompileContext::default();
         let key = Key::atom_from_text("answer");
-        let function = context.value_lambdas(
+        let function = closed_function_value(
             2,
-            context.value_access(context.value_local(1), vec![KeyExpr::Key(key.clone())]),
+            TestExpr::Access(
+                Arc::new(TestExpr::Local(1)),
+                Arc::from([TestKey::Key(key.clone())]),
+            ),
         );
         let dict = Value::Dict(Dict::new_sync().insert(key, n(42)));
-        let application = context.value_apply_many(function, [dict, n(0)]);
+        let application = apply_expr_values(function, [dict, n(0)]);
 
         assert_eq!(eval_value(&application).unwrap(), n(42));
     }
 
     #[test]
     fn compiling_a_function_does_not_evaluate_its_body() {
-        let function = closed_function_value(1, Expr::Value(Value::error("unreached body")));
+        let function = closed_function_value(1, TestExpr::Value(Value::error("unreached body")));
 
         assert!(matches!(function, Value::Function(_)));
     }
@@ -3310,36 +3577,49 @@ mod tests {
         );
     }
 
-    fn function_expr(arity: usize, body: Expr) -> Expr {
-        Expr::Value(closed_function_value(arity, body))
+    fn function_expr(arity: usize, body: TestExpr) -> TestExpr {
+        let code = Arc::new(lower_test_function_code(arity, body));
+        let captures = (0..code.capture_count())
+            .map(TestExpr::Local)
+            .map(Arc::new)
+            .collect::<Vec<_>>();
+        TestExpr::Function {
+            code,
+            captures: Arc::from(captures),
+        }
     }
 
     fn k(value: i64) -> Key {
         Key::Number(value.into())
     }
 
-    fn builtin2_expr(builtin: Builtin, left: Expr, right: Expr) -> Expr {
-        Expr::Apply(
-            Arc::new(Expr::Apply(
-                Arc::new(Expr::Value(Value::Builtin(builtin))),
+    fn builtin2_expr(builtin: Builtin, left: TestExpr, right: TestExpr) -> TestExpr {
+        TestExpr::Apply(
+            Arc::new(TestExpr::Apply(
+                Arc::new(TestExpr::Value(Value::Builtin(builtin))),
                 Arc::new(left),
             )),
             Arc::new(right),
         )
     }
 
-    fn builtin1_expr(builtin: Builtin, value: Expr) -> Expr {
-        Expr::Apply(
-            Arc::new(Expr::Value(Value::Builtin(builtin))),
+    fn builtin1_expr(builtin: Builtin, value: TestExpr) -> TestExpr {
+        TestExpr::Apply(
+            Arc::new(TestExpr::Value(Value::Builtin(builtin))),
             Arc::new(value),
         )
     }
 
-    fn builtin3_expr(builtin: Builtin, first: Expr, second: Expr, third: Expr) -> Expr {
-        Expr::Apply(
-            Arc::new(Expr::Apply(
-                Arc::new(Expr::Apply(
-                    Arc::new(Expr::Value(Value::Builtin(builtin))),
+    fn builtin3_expr(
+        builtin: Builtin,
+        first: TestExpr,
+        second: TestExpr,
+        third: TestExpr,
+    ) -> TestExpr {
+        TestExpr::Apply(
+            Arc::new(TestExpr::Apply(
+                Arc::new(TestExpr::Apply(
+                    Arc::new(TestExpr::Value(Value::Builtin(builtin))),
                     Arc::new(first),
                 )),
                 Arc::new(second),
@@ -3348,20 +3628,20 @@ mod tests {
         )
     }
 
-    fn singleton_expr(key: Value, value: Expr) -> Expr {
-        builtin2_expr(Builtin::DictSingleton, Expr::Value(key), value)
+    fn singleton_expr(key: Value, value: TestExpr) -> TestExpr {
+        builtin2_expr(Builtin::DictSingleton, TestExpr::Value(key), value)
     }
 
-    fn dict_union_expr(left: Expr, right: Expr) -> Expr {
+    fn dict_union_expr(left: TestExpr, right: TestExpr) -> TestExpr {
         builtin2_expr(Builtin::DictUnion, left, right)
     }
 
-    fn dict_update_expr(path: Expr, new_value: Expr, dict: Expr) -> Expr {
+    fn dict_update_expr(path: TestExpr, new_value: TestExpr, dict: TestExpr) -> TestExpr {
         builtin3_expr(Builtin::DictUpdate, path, new_value, dict)
     }
 
-    fn global_access(path: Vec<KeyExpr>) -> Expr {
-        Expr::Access(Arc::new(Expr::Local(0)), Arc::from(path))
+    fn global_access(path: Vec<TestKey>) -> TestExpr {
+        TestExpr::Access(Arc::new(TestExpr::Local(0)), Arc::from(path))
     }
 
     fn key_value(key: &Key) -> Value {
@@ -3385,18 +3665,18 @@ mod tests {
         }
     }
 
-    fn key_path_expr(path: Vec<Key>) -> Expr {
-        Expr::Value(Value::List(List::from_values(
+    fn key_path_expr(path: Vec<Key>) -> TestExpr {
+        TestExpr::Value(Value::List(List::from_values(
             path.iter().map(key_value).collect(),
         )))
     }
 
-    fn module_value_expr(value: &Value) -> Expr {
+    fn module_value_expr(value: &Value) -> TestExpr {
         match value {
             Value::Dict(dict) => {
                 let mut items = dict.iter();
                 let Some((first_key, first_value)) = items.next() else {
-                    return Expr::Value(Value::Dict(crate::core::Dict::new_sync()));
+                    return TestExpr::Value(Value::Dict(crate::core::Dict::new_sync()));
                 };
 
                 let mut expr = singleton_expr(key_value(first_key), module_value_expr(first_value));
@@ -3408,29 +3688,26 @@ mod tests {
                 }
                 expr
             }
-            Value::Lazy(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
-                thunk.expr().unwrap().as_ref().clone()
-            }
-            _ => Expr::Value(value.clone()),
+            _ => TestExpr::Value(value.clone()),
         }
     }
 
-    fn fixpoint_dict(dict: Dict) -> Expr {
-        Expr::Apply(
-            Arc::new(Expr::Value(Value::Builtin(Builtin::Fixpoint))),
+    fn fixpoint_dict(dict: Dict) -> TestExpr {
+        TestExpr::Apply(
+            Arc::new(TestExpr::Value(Value::Builtin(Builtin::Fixpoint))),
             Arc::new(function_expr(1, module_value_expr(&Value::Dict(dict)))),
         )
     }
 
-    fn rooted_expr_value(root: &Value, expr: Expr) -> Value {
+    fn rooted_expr_value(root: &Value, expr: TestExpr) -> Value {
         let handle = LazyValue::pending("test root");
         handle
             .set(root.clone())
             .expect("rooted test expression should initialize handle once");
-        Value::Lazy(LazyValue::new(
-            Arc::new(expr),
-            Arc::from([Value::Lazy(handle)]),
-        ))
+        let env = vec![Value::Lazy(handle)];
+        Value::deferred("rooted test expression", move || {
+            eval_expr(&expr, &env).map_err(|error| error.to_string())
+        })
     }
 
     #[test]
@@ -3462,7 +3739,7 @@ mod tests {
 
     #[test]
     fn evaluates_binary_literals() {
-        let value = eval_closed_expr(&Expr::Value(Value::binary_from_text("oops")))
+        let value = eval_closed_expr(&TestExpr::Value(Value::binary_from_text("oops")))
             .expect("binary literal should evaluate");
 
         assert_eq!(value, Value::binary_from_text("oops"));
@@ -3470,15 +3747,15 @@ mod tests {
 
     #[test]
     fn appends_lists() {
-        let expr = Expr::Apply(
-            Arc::new(Expr::Apply(
-                Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
-                Arc::new(Expr::Value(Value::List(List::from_values(vec![
+        let expr = TestExpr::Apply(
+            Arc::new(TestExpr::Apply(
+                Arc::new(TestExpr::Value(Value::Builtin(Builtin::Append))),
+                Arc::new(TestExpr::Value(Value::List(List::from_values(vec![
                     n(1),
                     n(2),
                 ])))),
             )),
-            Arc::new(Expr::Value(Value::List(List::from_values(vec![n(3)])))),
+            Arc::new(TestExpr::Value(Value::List(List::from_values(vec![n(3)])))),
         );
 
         let value = eval_closed_expr(&expr).expect("append should evaluate");
@@ -3497,15 +3774,15 @@ mod tests {
 
     #[test]
     fn evaluates_mixed_list_segments() {
-        let expr = Expr::List(Arc::from([
-            Arc::new(Expr::Value(n(1))),
-            Arc::new(Expr::Value(Value::binary_from_text("Hi"))),
-            Arc::new(Expr::Apply(
-                Arc::new(Expr::Apply(
-                    Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
-                    Arc::new(Expr::Value(Value::List(List::from_values(vec![n(2)])))),
+        let expr = TestExpr::List(Arc::from([
+            Arc::new(TestExpr::Value(n(1))),
+            Arc::new(TestExpr::Value(Value::binary_from_text("Hi"))),
+            Arc::new(TestExpr::Apply(
+                Arc::new(TestExpr::Apply(
+                    Arc::new(TestExpr::Value(Value::Builtin(Builtin::Append))),
+                    Arc::new(TestExpr::Value(Value::List(List::from_values(vec![n(2)])))),
                 )),
-                Arc::new(Expr::Value(Value::binary_from_text("!"))),
+                Arc::new(TestExpr::Value(Value::binary_from_text("!"))),
             )),
         ]));
 
@@ -3534,15 +3811,15 @@ mod tests {
 
     #[test]
     fn appends_list_and_binary() {
-        let expr = Expr::Apply(
-            Arc::new(Expr::Apply(
-                Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
-                Arc::new(Expr::Value(Value::List(List::from_values(vec![
+        let expr = TestExpr::Apply(
+            Arc::new(TestExpr::Apply(
+                Arc::new(TestExpr::Value(Value::Builtin(Builtin::Append))),
+                Arc::new(TestExpr::Value(Value::List(List::from_values(vec![
                     n(72),
                     n(105),
                 ])))),
             )),
-            Arc::new(Expr::Value(Value::binary_from_text("!"))),
+            Arc::new(TestExpr::Value(Value::binary_from_text("!"))),
         );
 
         let value = eval_closed_expr(&expr).expect("append should evaluate");
@@ -3554,11 +3831,11 @@ mod tests {
     fn append_preserves_lazy_list_chunks_until_observed() {
         let expr = builtin2_expr(
             Builtin::Append,
-            Expr::Value(Value::List(List::from_values(vec![n(72)]))),
+            TestExpr::Value(Value::List(List::from_values(vec![n(72)]))),
             builtin2_expr(
                 Builtin::Append,
-                Expr::Value(Value::binary_from_text("i")),
-                Expr::Value(Value::binary_from_text("!")),
+                TestExpr::Value(Value::binary_from_text("i")),
+                TestExpr::Value(Value::binary_from_text("!")),
             ),
         );
 
@@ -3578,8 +3855,8 @@ mod tests {
     fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
         let expr = builtin2_expr(
             Builtin::Append,
-            Expr::Value(Value::binary_from_text("Hi")),
-            builtin2_expr(Builtin::Add, Expr::Value(n(1)), Expr::Value(n(1))),
+            TestExpr::Value(Value::binary_from_text("Hi")),
+            builtin2_expr(Builtin::Add, TestExpr::Value(n(1)), TestExpr::Value(n(1))),
         );
 
         let value = eval_closed_expr(&expr).expect("append should preserve lazy chunk");
@@ -3597,8 +3874,8 @@ mod tests {
         let list = List::concat(lazy_left, List::from_bytes(Bytes::from_static(b"abc")));
         let split = eval_closed_expr(&builtin2_expr(
             Builtin::ListSplitEnd,
-            Expr::Value(n(1)),
-            Expr::Value(Value::List(list)),
+            TestExpr::Value(n(1)),
+            TestExpr::Value(Value::List(list)),
         ))
         .expect("split_end should not force left branch");
 
@@ -3623,10 +3900,18 @@ mod tests {
             Builtin::Subtract,
             builtin2_expr(
                 Builtin::Add,
-                Expr::Value(n(1)),
-                builtin2_expr(Builtin::Multiply, Expr::Value(n(2)), Expr::Value(n(3))),
+                TestExpr::Value(n(1)),
+                builtin2_expr(
+                    Builtin::Multiply,
+                    TestExpr::Value(n(2)),
+                    TestExpr::Value(n(3)),
+                ),
             ),
-            builtin2_expr(Builtin::Divide, Expr::Value(n(4)), Expr::Value(n(5))),
+            builtin2_expr(
+                Builtin::Divide,
+                TestExpr::Value(n(4)),
+                TestExpr::Value(n(5)),
+            ),
         );
 
         let value = eval_closed_expr(&expr).expect("arithmetic should evaluate");
@@ -3638,14 +3923,14 @@ mod tests {
     fn expression_arguments_share_forced_values() {
         let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = force_count.clone();
-        let counted = Expr::Value(Value::deferred("counted", move || {
+        let counted = TestExpr::Value(Value::deferred("counted", move || {
             count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(n(2))
         }));
-        let expr = Expr::Apply(
+        let expr = TestExpr::Apply(
             Arc::new(function_expr(
                 1,
-                builtin2_expr(Builtin::Add, Expr::Local(0), Expr::Local(0)),
+                builtin2_expr(Builtin::Add, TestExpr::Local(0), TestExpr::Local(0)),
             )),
             Arc::new(counted),
         );
@@ -3658,13 +3943,13 @@ mod tests {
 
     #[test]
     fn equality_errors_when_dictionary_comparison_reaches_functions() {
-        let function = closed_function_value(1, Expr::Local(0));
+        let function = closed_function_value(1, TestExpr::Local(0));
         let left = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("f"), function.clone()));
         let right = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("f"), function));
         let err = eval_closed_expr(&builtin2_expr(
             Builtin::Equal,
-            Expr::Value(left),
-            Expr::Value(right),
+            TestExpr::Value(left),
+            TestExpr::Value(right),
         ))
         .expect_err("function-valued fields should not be equatable");
 
@@ -3675,13 +3960,13 @@ mod tests {
     fn evaluates_extended_math_builtins() {
         let floor = eval_closed_expr(&builtin1_expr(
             Builtin::Floor,
-            Expr::Value(Value::Number(Number::parse("_7/2").unwrap())),
+            TestExpr::Value(Value::Number(Number::parse("_7/2").unwrap())),
         ))
         .expect("floor should evaluate");
         let modulus = eval_closed_expr(&builtin2_expr(
             Builtin::Mod,
-            Expr::Value(Value::Number(Number::parse("17/5").unwrap())),
-            Expr::Value(Value::Number(Number::parse("3/2").unwrap())),
+            TestExpr::Value(Value::Number(Number::parse("17/5").unwrap())),
+            TestExpr::Value(Value::Number(Number::parse("3/2").unwrap())),
         ))
         .expect("mod should evaluate");
 
@@ -3693,34 +3978,34 @@ mod tests {
     fn evaluates_slice_and_map_builtins() {
         let slice = eval_closed_expr(&builtin3_expr(
             Builtin::Slice,
-            Expr::Value(n(1)),
-            Expr::Value(n(4)),
-            Expr::Value(Value::binary_from_text("World!")),
+            TestExpr::Value(n(1)),
+            TestExpr::Value(n(4)),
+            TestExpr::Value(Value::binary_from_text("World!")),
         ))
         .expect("slice should evaluate");
         let mapped = eval_closed_expr(&builtin2_expr(
             Builtin::Map,
             function_expr(
                 1,
-                Expr::Apply(
-                    Arc::new(Expr::Apply(
-                        Arc::new(Expr::Value(Value::Builtin(Builtin::Add))),
-                        Arc::new(Expr::Local(0)),
+                TestExpr::Apply(
+                    Arc::new(TestExpr::Apply(
+                        Arc::new(TestExpr::Value(Value::Builtin(Builtin::Add))),
+                        Arc::new(TestExpr::Local(0)),
                     )),
-                    Arc::new(Expr::Value(n(1))),
+                    Arc::new(TestExpr::Value(n(1))),
                 ),
             ),
-            Expr::Value(Value::List(List::from_values(vec![n(1), n(2), n(3)]))),
+            TestExpr::Value(Value::List(List::from_values(vec![n(1), n(2), n(3)]))),
         ))
         .expect("map should evaluate");
         let binary_len = eval_closed_expr(&builtin1_expr(
             Builtin::ListLen,
-            Expr::Value(Value::binary_from_text("World!")),
+            TestExpr::Value(Value::binary_from_text("World!")),
         ))
         .expect("binary len should evaluate");
         let list_len = eval_closed_expr(&builtin1_expr(
             Builtin::ListLen,
-            Expr::Value(Value::List(List::concat(
+            TestExpr::Value(Value::List(List::concat(
                 List::from_values(vec![n(1), n(2)]),
                 List::from_bytes(Bytes::from_static(b"Hi")),
             ))),
@@ -3746,14 +4031,14 @@ mod tests {
     fn evaluates_split_and_split_end_builtins() {
         let split = eval_closed_expr(&builtin2_expr(
             Builtin::ListSplit,
-            Expr::Value(n(2)),
-            Expr::Value(Value::binary_from_text("Hello")),
+            TestExpr::Value(n(2)),
+            TestExpr::Value(Value::binary_from_text("Hello")),
         ))
         .expect("split should evaluate");
         let split_end = eval_closed_expr(&builtin2_expr(
             Builtin::ListSplitEnd,
-            Expr::Value(n(2)),
-            Expr::Value(Value::List(List::concat(
+            TestExpr::Value(n(2)),
+            TestExpr::Value(Value::List(List::concat(
                 List::from_values(vec![n(1), n(2)]),
                 List::from_bytes(Bytes::from_static(b"abc")),
             ))),
@@ -3806,9 +4091,9 @@ mod tests {
         let bytes = Bytes::from_static(b"Hello");
         let slice = eval_closed_expr(&builtin3_expr(
             Builtin::Slice,
-            Expr::Value(n(1)),
-            Expr::Value(n(4)),
-            Expr::Value(Value::Binary(bytes.clone())),
+            TestExpr::Value(n(1)),
+            TestExpr::Value(n(4)),
+            TestExpr::Value(Value::Binary(bytes.clone())),
         ))
         .expect("slice should evaluate");
 
@@ -3821,12 +4106,12 @@ mod tests {
 
     #[test]
     fn evaluates_lambda_application_lazily() {
-        let expr = Expr::Apply(
-            Arc::new(function_expr(1, Expr::Local(0))),
+        let expr = TestExpr::Apply(
+            Arc::new(function_expr(1, TestExpr::Local(0))),
             Arc::new(builtin2_expr(
                 Builtin::Add,
-                Expr::Value(n(1)),
-                Expr::Value(n(2)),
+                TestExpr::Value(n(1)),
+                TestExpr::Value(n(2)),
             )),
         );
 
@@ -3837,12 +4122,23 @@ mod tests {
 
     #[test]
     fn closures_capture_outer_locals() {
-        let context = CompileContext::default();
-        let invoke = context.value_lambda(context.value_apply(context.value_local(0), n(0)));
-        let returns_outer = context.value_lambda(context.value_local(1));
-        let outer = context.value_lambda(context.value_apply(invoke, returns_outer));
-        let value = eval_value(&context.value_apply(outer, n(42)))
-            .expect("nested functions should evaluate");
+        let invoke = function_expr(
+            1,
+            TestExpr::Apply(
+                Arc::new(TestExpr::Local(0)),
+                Arc::new(TestExpr::Value(n(0))),
+            ),
+        );
+        let returns_outer = function_expr(1, TestExpr::Local(1));
+        let outer = function_expr(
+            1,
+            TestExpr::Apply(Arc::new(invoke), Arc::new(returns_outer)),
+        );
+        let value = eval_closed_expr(&TestExpr::Apply(
+            Arc::new(outer),
+            Arc::new(TestExpr::Value(n(42))),
+        ))
+        .expect("nested functions should evaluate");
 
         assert_eq!(value, n(42));
     }
@@ -3851,19 +4147,20 @@ mod tests {
     fn partial_builtins_share_lazy_arguments() {
         let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = force_count.clone();
-        let argument = Expr::Value(Value::deferred("partial argument", move || {
+        let argument = TestExpr::Value(Value::deferred("partial argument", move || {
             count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(n(40))
         }));
         let make_partial = function_expr(
             1,
-            Expr::Apply(
-                Arc::new(Expr::Value(Value::Builtin(Builtin::Add))),
-                Arc::new(Expr::Local(0)),
+            TestExpr::Apply(
+                Arc::new(TestExpr::Value(Value::Builtin(Builtin::Add))),
+                Arc::new(TestExpr::Local(0)),
             ),
         );
-        let partial = eval_closed_expr(&Expr::Apply(Arc::new(make_partial), Arc::new(argument)))
-            .expect("a partial builtin should retain its argument lazily");
+        let partial =
+            eval_closed_expr(&TestExpr::Apply(Arc::new(make_partial), Arc::new(argument)))
+                .expect("a partial builtin should retain its argument lazily");
 
         assert!(matches!(partial, Value::PartialBuiltin(_)));
         assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -3876,12 +4173,12 @@ mod tests {
     fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
         let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = force_count.clone();
-        let expression = Expr::Apply(
+        let expression = TestExpr::Apply(
             Arc::new(function_expr(
                 1,
-                Expr::List(Arc::from([Arc::new(Expr::Local(0))])),
+                TestExpr::List(Arc::from([Arc::new(TestExpr::Local(0))])),
             )),
-            Arc::new(Expr::Value(Value::deferred("list value", move || {
+            Arc::new(TestExpr::Value(Value::deferred("list value", move || {
                 count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(n(42))
             }))),
@@ -3909,10 +4206,11 @@ mod tests {
 
     #[test]
     fn closed_semantic_list_holes_remain_host_observable() {
-        let hole = LazyValue::new(
-            Arc::new(Expr::Value(Value::List(List::from_values(vec![n(42)])))),
-            Arc::from([]),
-        );
+        let Value::Lazy(hole) = Value::deferred("list hole", || {
+            Ok(Value::List(List::from_values(vec![n(42)])))
+        }) else {
+            unreachable!()
+        };
         let list = List::from_thunk(hole);
 
         let (value, tail) = pop_list_front(&list).unwrap().unwrap();
@@ -3922,9 +4220,8 @@ mod tests {
 
     #[test]
     fn dropped_arguments_do_not_prevent_later_locals_from_resolving() {
-        let context = CompileContext::default();
-        let function = context.value_lambdas(2, context.value_local(0));
-        let value = eval_value(&context.value_apply_many(function, [n(1), n(42)]))
+        let function = closed_function_value(2, TestExpr::Local(0));
+        let value = eval_value(&apply_expr_values(function, [n(1), n(42)]))
             .expect("function with dropped argument should evaluate");
 
         assert_eq!(value, n(42));
@@ -3936,12 +4233,12 @@ mod tests {
             Key::atom_from_text("apply"),
             closed_function_value(
                 1,
-                builtin2_expr(Builtin::Add, Expr::Local(0), Expr::Value(n(1))),
+                builtin2_expr(Builtin::Add, TestExpr::Local(0), TestExpr::Value(n(1))),
             ),
         ));
-        let value = eval_closed_expr(&Expr::Apply(
-            Arc::new(Expr::Value(method)),
-            Arc::new(Expr::Value(n(41))),
+        let value = eval_closed_expr(&TestExpr::Apply(
+            Arc::new(TestExpr::Value(method)),
+            Arc::new(TestExpr::Value(n(41))),
         ))
         .expect("method object application should evaluate");
 
@@ -3952,14 +4249,14 @@ mod tests {
     fn effect_values_apply_by_extending_the_effect_function() {
         let effect = effect_value(closed_function_value(
             1,
-            Expr::Access(
-                Arc::new(Expr::Local(0)),
-                Arc::from([KeyExpr::Key(Key::atom_from_text("op"))]),
+            TestExpr::Access(
+                Arc::new(TestExpr::Local(0)),
+                Arc::from([TestKey::Key(Key::atom_from_text("op"))]),
             ),
         ));
-        let applied = eval_closed_expr(&Expr::Apply(
-            Arc::new(Expr::Value(effect)),
-            Arc::new(Expr::Value(n(41))),
+        let applied = eval_closed_expr(&TestExpr::Apply(
+            Arc::new(TestExpr::Value(effect)),
+            Arc::new(TestExpr::Value(n(41))),
         ))
         .expect("effect application should evaluate");
         let Value::Dict(effect) = applied else {
@@ -3973,7 +4270,7 @@ mod tests {
             Key::atom_from_text("op"),
             closed_function_value(
                 1,
-                builtin2_expr(Builtin::Add, Expr::Local(0), Expr::Value(n(1))),
+                builtin2_expr(Builtin::Add, TestExpr::Local(0), TestExpr::Value(n(1))),
             ),
         ));
 
@@ -3989,13 +4286,13 @@ mod tests {
             Dict::new_sync()
                 .insert(
                     Key::atom_from_text("eff"),
-                    closed_function_value(1, Expr::Local(0)),
+                    closed_function_value(1, TestExpr::Local(0)),
                 )
                 .insert(Key::atom_from_text("extra"), n(1)),
         );
-        let err = eval_closed_expr(&Expr::Apply(
-            Arc::new(Expr::Value(not_singleton)),
-            Arc::new(Expr::Value(n(42))),
+        let err = eval_closed_expr(&TestExpr::Apply(
+            Arc::new(TestExpr::Value(not_singleton)),
+            Arc::new(TestExpr::Value(n(42))),
         ))
         .unwrap_err();
 
@@ -4008,15 +4305,15 @@ mod tests {
             Key::atom_from_text("tail"),
             Value::binary_from_text("World"),
         ));
-        let expr = Expr::Apply(
+        let expr = TestExpr::Apply(
             Arc::new(function_expr(
                 1,
-                Expr::Access(
-                    Arc::new(Expr::Local(0)),
-                    Arc::from([KeyExpr::Key(Key::atom_from_text("tail"))]),
+                TestExpr::Access(
+                    Arc::new(TestExpr::Local(0)),
+                    Arc::from([TestKey::Key(Key::atom_from_text("tail"))]),
                 ),
             )),
-            Arc::new(Expr::Value(dict)),
+            Arc::new(TestExpr::Value(dict)),
         );
 
         let value = eval_closed_expr(&expr).expect("local dictionary path should evaluate");
@@ -4026,72 +4323,13 @@ mod tests {
 
     #[test]
     fn divide_builtin_rejects_zero() {
-        let expr = builtin2_expr(Builtin::Divide, Expr::Value(n(1)), Expr::Value(n(0)));
+        let expr = builtin2_expr(
+            Builtin::Divide,
+            TestExpr::Value(n(1)),
+            TestExpr::Value(n(0)),
+        );
         let err = eval_closed_expr(&expr).expect_err("division by zero should fail");
         assert_eq!(err.to_string(), "divide builtin cannot divide by zero");
-    }
-
-    #[test]
-    fn resolves_names_against_final_root() {
-        let hello = crate::core::Key::atom_from_text("hello");
-        let world = crate::core::Key::atom_from_text("world");
-        let asm = crate::core::Atom::from_key(&crate::core::Key::binary_from_text("asm"));
-        let result = crate::core::Atom::from_key(&crate::core::Key::binary_from_text("result"));
-
-        let root = Dict::new_sync()
-            .insert(
-                crate::core::Key::Atom(asm),
-                Value::Dict(Dict::new_sync().insert(
-                    crate::core::Key::Atom(result),
-                    Value::expr(Expr::Apply(
-                        Arc::new(Expr::Apply(
-                            Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
-                            Arc::new(Expr::Apply(
-                                Arc::new(Expr::Apply(
-                                    Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
-                                    Arc::new(Expr::Apply(
-                                        Arc::new(Expr::Apply(
-                                            Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
-                                            Arc::new(global_access(vec![KeyExpr::Key(
-                                                hello.clone(),
-                                            )])),
-                                        )),
-                                        Arc::new(Expr::Value(Value::binary_from_text(", "))),
-                                    )),
-                                )),
-                                Arc::new(global_access(vec![KeyExpr::Key(world.clone())])),
-                            )),
-                        )),
-                        Arc::new(Expr::Value(Value::binary_from_text("!"))),
-                    )),
-                )),
-            )
-            .insert(hello, Value::binary_from_text("Hello"))
-            .insert(world, Value::binary_from_text("World"));
-
-        let value = eval_closed_expr(&fixpoint_dict(root)).expect("term should evaluate");
-        let asm_value = value.get_atom_path(&[asm]).expect("asm should exist");
-        let asm_value = eval_value(asm_value).expect("asm binding should evaluate");
-        let Value::Dict(asm_value) = asm_value else {
-            panic!("asm should evaluate to a dictionary");
-        };
-        let result_value = asm_value
-            .get(&crate::core::Key::Atom(result))
-            .expect("result should exist");
-        let Value::Lazy(thunk) = result_value else {
-            panic!("resolved result should stay lazy until demanded");
-        };
-        let resolved = eval_value(&Value::Lazy(thunk.clone()))
-            .expect("result expression should evaluate when demanded");
-
-        let Value::List(list) = resolved else {
-            panic!("resolved result should be a list");
-        };
-
-        assert_eq!(
-            list_output_bytes(&list).expect("should render resolved list"),
-            b"Hello, World!"
-        );
     }
 
     #[test]
@@ -4114,7 +4352,7 @@ mod tests {
 
     #[test]
     fn evaluates_expressions_before_key_validation() {
-        let key = eval_key(&Value::expr(Expr::Value(n(1))))
+        let key = eval_key(&expr_value(TestExpr::Value(n(1))))
             .expect("expressions should be allowed when they evaluate to keyable values");
 
         assert_eq!(key, k(1));
@@ -4124,7 +4362,7 @@ mod tests {
     fn dictionaries_remain_lazy_under_eval_value() {
         let value = Value::Dict(crate::core::Dict::new_sync().insert(
             Key::atom_from_text("answer"),
-            Value::expr(Expr::Value(n(42))),
+            expr_value(TestExpr::Value(n(42))),
         ));
 
         let evaluated = eval_value(&value).expect("dict should stay lazy");
@@ -4137,7 +4375,7 @@ mod tests {
         let root = Value::Dict(crate::core::Dict::new_sync());
         let key = eval_key(&rooted_expr_value(
             &root,
-            global_access(vec![KeyExpr::Key(Key::atom_from_text("missing"))]),
+            global_access(vec![TestKey::Key(Key::atom_from_text("missing"))]),
         ))
         .expect("missing names should now resolve to empty dictionaries");
 
@@ -4146,14 +4384,14 @@ mod tests {
 
     #[test]
     fn raw_value_to_key_rejects_expressions() {
-        assert_eq!(Key::from_value(&Value::expr(Expr::Value(n(1)))), None);
+        assert_eq!(Key::from_value(&expr_value(TestExpr::Value(n(1)))), None);
     }
 
     #[test]
     fn eval_key_forces_nested_dictionary_values() {
         let key = eval_key(&Value::Dict(crate::core::Dict::new_sync().insert(
             Key::atom_from_text("answer"),
-            Value::expr(Expr::Value(n(42))),
+            expr_value(TestExpr::Value(n(42))),
         )))
         .expect("dict key should force nested values");
 
@@ -4183,7 +4421,7 @@ mod tests {
             Value::Atom(crate::core::Atom::from_key(
                 &crate::core::Key::binary_from_text("gone"),
             )),
-            Expr::Value(Value::Dict(crate::core::Dict::new_sync())),
+            TestExpr::Value(Value::Dict(crate::core::Dict::new_sync())),
         ))
         .expect("singleton dict should evaluate");
 
@@ -4197,7 +4435,7 @@ mod tests {
         let world = Key::atom_from_text("world");
 
         let expr = dict_union_expr(
-            Expr::Value(Value::Dict(
+            TestExpr::Value(Value::Dict(
                 crate::core::Dict::new_sync().insert(
                     key.clone(),
                     Value::Dict(
@@ -4206,7 +4444,7 @@ mod tests {
                     ),
                 ),
             )),
-            Expr::Value(Value::Dict(
+            TestExpr::Value(Value::Dict(
                 crate::core::Dict::new_sync().insert(
                     key.clone(),
                     Value::Dict(
@@ -4246,13 +4484,13 @@ mod tests {
                 Value::Atom(crate::core::Atom::from_key(
                     &crate::core::Key::binary_from_text("greeting"),
                 )),
-                Expr::Value(Value::binary_from_text("Hello")),
+                TestExpr::Value(Value::binary_from_text("Hello")),
             ),
             singleton_expr(
                 Value::Atom(crate::core::Atom::from_key(
                     &crate::core::Key::binary_from_text("greeting"),
                 )),
-                Expr::Value(Value::Dict(crate::core::Dict::new_sync())),
+                TestExpr::Value(Value::Dict(crate::core::Dict::new_sync())),
             ),
         );
 
@@ -4267,10 +4505,10 @@ mod tests {
     fn dictionary_unions_defer_ambiguous_keys_until_observed() {
         let key = Key::atom_from_text("greeting");
         let expr = dict_union_expr(
-            Expr::Value(Value::Dict(
+            TestExpr::Value(Value::Dict(
                 crate::core::Dict::new_sync().insert(key.clone(), Value::binary_from_text("Hello")),
             )),
-            Expr::Value(Value::Dict(
+            TestExpr::Value(Value::Dict(
                 crate::core::Dict::new_sync().insert(key.clone(), Value::binary_from_text("World")),
             )),
         );
@@ -4297,8 +4535,8 @@ mod tests {
         let key = Key::atom_from_text("greeting");
         let expr = dict_update_expr(
             key_path_expr(vec![key.clone()]),
-            Expr::Value(Value::binary_from_text("World")),
-            Expr::Value(Value::Dict(
+            TestExpr::Value(Value::binary_from_text("World")),
+            TestExpr::Value(Value::Dict(
                 crate::core::Dict::new_sync().insert(key.clone(), Value::binary_from_text("Hello")),
             )),
         );
@@ -4319,8 +4557,8 @@ mod tests {
 
         let expr = dict_update_expr(
             key_path_expr(vec![key.clone(), world.clone()]),
-            Expr::Value(Value::binary_from_text("World")),
-            Expr::Value(Value::Dict(
+            TestExpr::Value(Value::binary_from_text("World")),
+            TestExpr::Value(Value::Dict(
                 crate::core::Dict::new_sync().insert(
                     key.clone(),
                     Value::Dict(
@@ -4352,8 +4590,8 @@ mod tests {
         let key = Key::atom_from_text("greeting");
         let expr = dict_update_expr(
             key_path_expr(vec![key.clone()]),
-            Expr::Value(Value::Dict(crate::core::Dict::new_sync())),
-            Expr::Value(Value::Dict(
+            TestExpr::Value(Value::Dict(crate::core::Dict::new_sync())),
+            TestExpr::Value(Value::Dict(
                 crate::core::Dict::new_sync().insert(key.clone(), Value::binary_from_text("Hello")),
             )),
         );
@@ -4369,19 +4607,19 @@ mod tests {
 
         let root = crate::core::Dict::new_sync().insert(
             d.clone(),
-            Value::expr(dict_union_expr(
-                Expr::Value(Value::Dict(
+            expr_value(dict_union_expr(
+                TestExpr::Value(Value::Dict(
                     crate::core::Dict::new_sync()
                         .insert(hello.clone(), Value::binary_from_text("Hello")),
                 )),
-                Expr::Value(Value::Dict(crate::core::Dict::new_sync())),
+                TestExpr::Value(Value::Dict(crate::core::Dict::new_sync())),
             )),
         );
 
         let value = eval_closed_expr(&fixpoint_dict(root)).expect("root should evaluate");
         let resolved = eval_value(&rooted_expr_value(
             &value,
-            global_access(vec![KeyExpr::Key(d), KeyExpr::Key(hello)]),
+            global_access(vec![TestKey::Key(d), TestKey::Key(hello)]),
         ))
         .expect("dotted name should force intermediate dict unions");
 
@@ -4415,16 +4653,16 @@ mod tests {
         let resolved = eval_value(&rooted_expr_value(
             &value,
             global_access(vec![
-                KeyExpr::Key(foo),
-                KeyExpr::PathIndex(Arc::new(Expr::Apply(
-                    Arc::new(Expr::Apply(
-                        Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
-                        Arc::new(Expr::List(Arc::from([
-                            Arc::new(Expr::Value(n(1))),
-                            Arc::new(Expr::Value(n(2))),
+                TestKey::Key(foo),
+                TestKey::PathIndex(Arc::new(TestExpr::Apply(
+                    Arc::new(TestExpr::Apply(
+                        Arc::new(TestExpr::Value(Value::Builtin(Builtin::Append))),
+                        Arc::new(TestExpr::List(Arc::from([
+                            Arc::new(TestExpr::Value(n(1))),
+                            Arc::new(TestExpr::Value(n(2))),
                         ]))),
                     )),
-                    Arc::new(Expr::List(Arc::from([Arc::new(Expr::Value(n(3)))]))),
+                    Arc::new(TestExpr::List(Arc::from([Arc::new(TestExpr::Value(n(3)))]))),
                 ))),
             ]),
         ))
@@ -4442,8 +4680,8 @@ mod tests {
         let resolved = eval_value(&rooted_expr_value(
             &root,
             global_access(vec![
-                KeyExpr::Key(Key::atom_from_text("present")),
-                KeyExpr::Key(Key::atom_from_text("missing")),
+                TestKey::Key(Key::atom_from_text("present")),
+                TestKey::Key(Key::atom_from_text("missing")),
             ]),
         ))
         .expect("missing member access should stay evaluable");
@@ -4464,25 +4702,25 @@ mod tests {
                     Value::Atom(crate::core::Atom::from_key(
                         &crate::core::Key::binary_from_text("name"),
                     )),
-                    Expr::Value(Value::binary_from_text("missing")),
+                    TestExpr::Value(Value::binary_from_text("missing")),
                 ),
                 singleton_expr(
                     Value::Atom(crate::core::Atom::from_key(
                         &crate::core::Key::binary_from_text("value"),
                     )),
-                    global_access(vec![KeyExpr::Key(Key::atom_from_text("missing"))]),
+                    global_access(vec![TestKey::Key(Key::atom_from_text("missing"))]),
                 ),
             ),
         );
 
         let value = eval_value(&rooted_expr_value(
             &root,
-            Expr::Apply(
-                Arc::new(Expr::Apply(
-                    Arc::new(Expr::Value(Value::Builtin(Builtin::Anno))),
+            TestExpr::Apply(
+                Arc::new(TestExpr::Apply(
+                    Arc::new(TestExpr::Value(Value::Builtin(Builtin::Anno))),
                     Arc::new(annotation),
                 )),
-                Arc::new(global_access(vec![KeyExpr::Key(Key::atom_from_text(
+                Arc::new(global_access(vec![TestKey::Key(Key::atom_from_text(
                     "later",
                 ))])),
             ),
@@ -4508,25 +4746,25 @@ mod tests {
                     Value::Atom(crate::core::Atom::from_key(
                         &crate::core::Key::binary_from_text("name"),
                     )),
-                    Expr::Value(Value::binary_from_text("foo")),
+                    TestExpr::Value(Value::binary_from_text("foo")),
                 ),
                 singleton_expr(
                     Value::Atom(crate::core::Atom::from_key(
                         &crate::core::Key::binary_from_text("value"),
                     )),
-                    global_access(vec![KeyExpr::Key(Key::atom_from_text("foo"))]),
+                    global_access(vec![TestKey::Key(Key::atom_from_text("foo"))]),
                 ),
             ),
         );
 
         let value = eval_value(&rooted_expr_value(
             &Value::Dict(crate::core::Dict::new_sync()),
-            Expr::Apply(
-                Arc::new(Expr::Apply(
-                    Arc::new(Expr::Value(Value::Builtin(Builtin::Anno))),
+            TestExpr::Apply(
+                Arc::new(TestExpr::Apply(
+                    Arc::new(TestExpr::Value(Value::Builtin(Builtin::Anno))),
                     Arc::new(annotation),
                 )),
-                Arc::new(Expr::Value(n(1))),
+                Arc::new(TestExpr::Value(n(1))),
             ),
         ))
         .expect("failed anno should still produce a stuck value");
@@ -4545,10 +4783,10 @@ mod tests {
     fn list_annotations_rebalance_and_flatten_lists() {
         let deque = eval_closed_expr(&builtin2_expr(
             Builtin::Anno,
-            Expr::Value(Value::Atom(crate::core::Atom::from_key(
+            TestExpr::Value(Value::Atom(crate::core::Atom::from_key(
                 &Key::binary_from_text("deque"),
             ))),
-            Expr::Value(Value::List(List::concat(
+            TestExpr::Value(Value::List(List::concat(
                 List::from_bytes(Bytes::from_static(b"Hello")),
                 List::from_values(vec![n(33)]),
             ))),
@@ -4561,10 +4799,10 @@ mod tests {
 
         let binary = eval_closed_expr(&builtin2_expr(
             Builtin::Anno,
-            Expr::Value(Value::Atom(crate::core::Atom::from_key(
+            TestExpr::Value(Value::Atom(crate::core::Atom::from_key(
                 &Key::binary_from_text("binary"),
             ))),
-            Expr::Value(Value::List(List::concat(
+            TestExpr::Value(Value::List(List::concat(
                 List::from_values(vec![n(72), n(105)]),
                 List::from_bytes(Bytes::from_static(b"!")),
             ))),
@@ -4574,10 +4812,10 @@ mod tests {
 
         let array = eval_closed_expr(&builtin2_expr(
             Builtin::Anno,
-            Expr::Value(Value::Atom(crate::core::Atom::from_key(
+            TestExpr::Value(Value::Atom(crate::core::Atom::from_key(
                 &Key::binary_from_text("array"),
             ))),
-            Expr::Value(Value::binary_from_text("Hi")),
+            TestExpr::Value(Value::binary_from_text("Hi")),
         ))
         .expect("array annotation should evaluate");
         let Value::List(array) = array else {
@@ -4590,10 +4828,10 @@ mod tests {
     fn list_annotations_return_stuck_errors_for_wrong_targets() {
         let value = eval_closed_expr(&builtin2_expr(
             Builtin::Anno,
-            Expr::Value(Value::Atom(crate::core::Atom::from_key(
+            TestExpr::Value(Value::Atom(crate::core::Atom::from_key(
                 &Key::binary_from_text("binary"),
             ))),
-            Expr::Value(Value::List(List::from_values(vec![n(300)]))),
+            TestExpr::Value(Value::List(List::from_values(vec![n(300)]))),
         ))
         .expect("annotation should evaluate to a stuck expression");
 
@@ -4604,10 +4842,10 @@ mod tests {
 
         let value = eval_closed_expr(&builtin2_expr(
             Builtin::Anno,
-            Expr::Value(Value::Atom(crate::core::Atom::from_key(
+            TestExpr::Value(Value::Atom(crate::core::Atom::from_key(
                 &Key::binary_from_text("deque"),
             ))),
-            Expr::Value(n(1)),
+            TestExpr::Value(n(1)),
         ))
         .expect("annotation should evaluate to a stuck expression");
 
@@ -4621,17 +4859,17 @@ mod tests {
 
     #[test]
     fn unknown_annotations_pass_through_targets() {
-        let value = eval_closed_expr(&Expr::Apply(
-            Arc::new(Expr::Apply(
-                Arc::new(Expr::Value(Value::Builtin(Builtin::Anno))),
+        let value = eval_closed_expr(&TestExpr::Apply(
+            Arc::new(TestExpr::Apply(
+                Arc::new(TestExpr::Value(Value::Builtin(Builtin::Anno))),
                 Arc::new(singleton_expr(
                     Value::Atom(crate::core::Atom::from_key(
                         &crate::core::Key::binary_from_text("mystery"),
                     )),
-                    Expr::Value(n(0)),
+                    TestExpr::Value(n(0)),
                 )),
             )),
-            Arc::new(Expr::Value(n(42))),
+            Arc::new(TestExpr::Value(n(42))),
         ))
         .expect("unknown annotations should pass through");
 
@@ -4640,9 +4878,9 @@ mod tests {
 
     #[test]
     fn builtins_are_curried_and_do_not_force_arguments_early() {
-        let partial = eval_closed_expr(&Expr::Apply(
-            Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
-            Arc::new(global_access(vec![KeyExpr::Key(Key::atom_from_text(
+        let partial = eval_closed_expr(&TestExpr::Apply(
+            Arc::new(TestExpr::Value(Value::Builtin(Builtin::Append))),
+            Arc::new(global_access(vec![TestKey::Key(Key::atom_from_text(
                 "missing",
             ))])),
         ))

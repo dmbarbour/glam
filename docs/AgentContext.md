@@ -8,7 +8,7 @@ This document should summarize salient, relevant points rather than asking futur
 
 - `src/g_syntax.rs` - initial front-end compiler for ".g" syntax
 - `src/core.rs` - assembly-time representations, independent of syntax
-- `src/core_net.rs` - lowering from core expressions to core-data interaction nets
+- `src/core_net.rs` - syntax-independent core data/operator specialization for interaction nets
 - `src/eval.rs` - efficient reduction of core terms
 - `src/interaction_net.rs` - generic interaction-net topology and reduction
 - `src/list.rs` - generic compact, lazy, persistent list ropes
@@ -78,12 +78,12 @@ This document should summarize salient, relevant points rather than asking futur
   and memoized failures. Pending cells currently fail if observed before being
   set; parallel evaluation will require thunk-level sparks and suspended
   continuations rather than a blindly blocking cell join.
-- `core_net` accepts `(arity, body)` and produces `FunctionCode` containing one
-  shared runtime with one bind chain. Locals outside the arity become leading
-  capture binds. Evaluating the semantic `Expr::Function` supplies those
-  captures once and produces an observable `Value::Function` whose current
-  curried stage is another shared runtime. Logical copies materialize nodes
-  lazily through remote cursors.
+- `g_syntax` consumes its affine `ResolvedExpr<Value>` IR directly into a
+  shared runtime with one bind chain. `BindingId`-keyed locals outside a
+  function's arity become explicit leading capture binds. Supplying those
+  captures produces an observable `Value::Function` whose current curried
+  stage is another shared runtime. Logical copies materialize nodes lazily
+  through remote cursors. Core contains no semantic expression tree.
 - `Value::Net` is a first-class closed net containing only a
   `SharedRuntimeNet<CoreSpecialization>`. Observing it may produce ordinary data or
   preserve a non-data normal-form net; applying it attaches the exposed port
@@ -96,13 +96,16 @@ This document should summarize salient, relevant points rather than asking futur
   data-result contract. Partial function stages explicitly require the next
   `Bind`, while application of an explicit `Value::Net` may return either data
   or a residual bind-exposing net.
-- Lambdas exist only as syntax in `g_syntax`. `CompileContext` lowers a complete
-  syntactic function, including its explicit lifted captures, without creating
-  a core lambda or closure. Update-definition parameter sugar is likewise
-  rewritten while still syntax. Core has no lambda/closure compatibility path.
-- Lambda templates contain `Bind`, binary `Fan`, `Erase`, and `Data` nodes.
-  The generic topology lives in `interaction_net.rs`; core data and expression
-  lowering live in `core_net.rs`.
+- Lambdas exist only in the syntax and resolved front-end IR in `g_syntax`.
+  The front-end net emitter lowers a complete function, including explicit
+  lifted captures, without creating a core lambda or closure.
+  Update-definition parameter sugar is likewise rewritten while still syntax.
+  `CompileContext` exposes values, builtins, loaders, paths, and checked closed
+  net construction; it has no local/lambda/application expression helpers.
+- Lowered function templates contain `Bind`, binary `Fan`, `Erase`, and `Data`
+  nodes. The generic topology lives in `interaction_net.rs`; core data/operator
+  specialization lives in `core_net.rs`, while front-end lowering lives in
+  `g_syntax.rs`.
   `NetBuilder` is the single checked construction layer: it provides semantic
   bind/data/copy helpers plus a curried `bind_spine`, and fallible
   wiring/finalization diagnostics. A one-output copy is a builder-only tunnel
@@ -174,8 +177,9 @@ This document should summarize salient, relevant points rather than asking futur
   force strict builtin work until its result is observed. Dynamically obtained
   builtin values also lower to the same Bind/Operator form; applicable lowering
   never detaches an argument from shared topology.
-- `g_syntax` and `CompileContext::value_apply_many` preserve maximal
-  left-associated application spines such as `f x y z`. Net lowering represents
+- `g_syntax::ResolvedExpr` preserves maximal left-associated application
+  spines such as `f x y z`, including fused direct lambda application. Its net
+  emitter represents
   an ordinary application as a data-consuming operator chain whose operands are
   closed lazy values. When the head is a `Value::Function`, all currently
   available arguments attach to its stage together. An undersaturated call

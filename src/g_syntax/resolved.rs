@@ -17,10 +17,10 @@ impl BindingId {
     }
 }
 
-/// Syntax-independent expressions resolved by the g-syntax front end.
+/// Affine semantic expressions resolved and owned by the g-syntax front end.
 ///
-/// Direct net lowering will ultimately consume these structural variants
-/// without constructing a Core expression.
+/// Direct net lowering consumes these structural variants by value without
+/// constructing a core expression or cloning expression subtrees.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ResolvedExpr<V> {
     /// Closed ordinary data, including literal and builtin values.
@@ -113,14 +113,12 @@ impl<V> ResolvedExpr<V> {
         }
     }
 
-    #[allow(dead_code)] // Becomes the closure-conversion input for direct net emission.
     pub(super) fn free_bindings(&self) -> BTreeSet<BindingId> {
         let mut free = BTreeSet::new();
         self.collect_free_bindings(&mut free, &mut BTreeSet::new());
         free
     }
 
-    #[allow(dead_code)]
     fn collect_free_bindings(
         &self,
         free: &mut BTreeSet<BindingId>,

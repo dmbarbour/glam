@@ -9,21 +9,6 @@ use rpds::RedBlackTreeMapSync;
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
 use crate::number::Number;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Expr {
-    Value(Value),
-    List(Arc<[Arc<Expr>]>),
-    Apply(Arc<Expr>, Arc<Expr>),
-    /// Constructs an ordinary function value from once-lowered shared code and
-    /// the current values of its lifted captures.
-    Function {
-        code: Arc<FunctionCode>,
-        captures: Arc<[Arc<Expr>]>,
-    },
-    Local(usize),
-    Access(Arc<Expr>, Arc<[KeyExpr]>),
-}
-
 #[derive(Clone)]
 pub struct LazyValue {
     id: u64,
@@ -121,13 +106,6 @@ impl fmt::Debug for LazyValue {
             .field("label", &self.label)
             .finish_non_exhaustive()
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KeyExpr {
-    Key(Key),
-    Index(Arc<Expr>),
-    PathIndex(Arc<Expr>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -343,10 +321,6 @@ impl BuiltinCall {
 enum LazySource {
     Pending,
     Deferred(Arc<dyn Fn() -> Result<Value, String> + Send + Sync>),
-    Expr {
-        expr: Arc<Expr>,
-        env: Arc<[Value]>,
-    },
     Access {
         path: Arc<[CoreDataKey]>,
         arguments: Arc<[Value]>,
@@ -360,10 +334,6 @@ enum LazySource {
 }
 
 impl LazyValue {
-    pub fn new(expr: Arc<Expr>, env: Arc<[Value]>) -> Self {
-        Self::with_source("expression", LazySource::Expr { expr, env })
-    }
-
     pub(crate) fn from_access(path: Arc<[CoreDataKey]>, arguments: Arc<[Value]>) -> Self {
         Self::with_source("access", LazySource::Access { path, arguments })
     }
@@ -384,20 +354,6 @@ impl LazyValue {
 
     pub(crate) fn from_net_computation(net: NetValue) -> Self {
         Self::with_source("net computation", LazySource::NetComputation(net))
-    }
-
-    pub fn expr(&self) -> Option<&Arc<Expr>> {
-        match &self.source {
-            LazySource::Expr { expr, .. } => Some(expr),
-            _ => None,
-        }
-    }
-
-    pub fn env(&self) -> Option<&Arc<[Value]>> {
-        match &self.source {
-            LazySource::Expr { env, .. } => Some(env),
-            _ => None,
-        }
     }
 
     pub(crate) fn access(&self) -> Option<(&[CoreDataKey], &[Value])> {
@@ -470,6 +426,12 @@ pub enum Builtin {
     ObjectLocalName,
     ObjectInstanceFromParts,
     ObjectInstance,
+    /// Internal protocol adapters used while object/effect construction is
+    /// still implemented by the bootstrap evaluator.
+    EffectApply,
+    EffectCall,
+    ObjectDefaultDefs,
+    ObjectDictDefs,
 }
 
 impl Builtin {
@@ -511,6 +473,10 @@ impl Builtin {
             Self::ObjectLocalName => 2,
             Self::ObjectInstanceFromParts => 3,
             Self::ObjectInstance => 1,
+            Self::EffectApply => 3,
+            Self::EffectCall => 3,
+            Self::ObjectDefaultDefs => 2,
+            Self::ObjectDictDefs => 3,
         }
     }
 }
@@ -544,14 +510,6 @@ impl Value {
         Self::Binary(Bytes::copy_from_slice(text.as_bytes()))
     }
 
-    pub fn expr(expr: Expr) -> Self {
-        Self::Lazy(LazyValue::new(Arc::new(expr), Arc::from([])))
-    }
-
-    pub fn expr_arc(expr: Arc<Expr>) -> Self {
-        Self::Lazy(LazyValue::new(expr, Arc::from([])))
-    }
-
     pub fn deferred(
         label: impl Into<Arc<str>>,
         thunk: impl Fn() -> Result<Value, String> + Send + Sync + 'static,
@@ -561,6 +519,26 @@ impl Value {
 
     pub fn error(message: impl Into<Arc<str>>) -> Self {
         Self::Lazy(LazyValue::error(message))
+    }
+
+    /// Constructs a builtin value at a specific curried stage without
+    /// evaluating a saturated call.
+    pub fn builtin_call(builtin: Builtin, arguments: Vec<Value>) -> Self {
+        assert!(
+            arguments.len() <= builtin.arity(),
+            "builtin call contains too many arguments"
+        );
+        match arguments.len() {
+            0 => Self::Builtin(builtin),
+            supplied if supplied < builtin.arity() => Self::PartialBuiltin(BuiltinCall {
+                builtin,
+                arguments: Arc::from(arguments),
+            }),
+            _ => Self::Lazy(LazyValue::from_builtin(BuiltinCall {
+                builtin,
+                arguments: Arc::from(arguments),
+            })),
+        }
     }
 
     pub fn singleton_list(value: Value) -> List {
@@ -650,43 +628,6 @@ mod tests {
     }
 
     #[test]
-    fn semantic_expr_can_hold_literal_values_builtins_and_application() {
-        let expr = Expr::Apply(
-            Arc::new(Expr::Apply(
-                Arc::new(Expr::Value(Value::Builtin(Builtin::Append))),
-                Arc::new(Expr::Value(Value::List(List::from_values(vec![
-                    Value::Number(1.into()),
-                ])))),
-            )),
-            Arc::new(Expr::Value(Value::List(List::from_values(vec![
-                Value::Number(2.into()),
-            ])))),
-        );
-
-        assert!(matches!(expr, Expr::Apply(_, _)));
-    }
-
-    #[test]
-    fn semantic_expr_can_hold_lists() {
-        let expr = Expr::List(Arc::from([
-            Arc::new(Expr::Value(Value::Number(1.into()))),
-            Arc::new(Expr::Value(Value::Number(2.into()))),
-        ]));
-
-        assert!(matches!(expr, Expr::List(items) if items.len() == 2));
-    }
-
-    #[test]
-    fn semantic_expr_can_hold_accesses() {
-        let expr = Expr::Access(
-            Arc::new(Expr::Local(0)),
-            Arc::from([KeyExpr::Key(Key::atom_from_text("hello"))]),
-        );
-
-        assert!(matches!(expr, Expr::Access(_, path) if path.len() == 1));
-    }
-
-    #[test]
     fn semantic_values_can_hold_atoms() {
         let value = Value::Atom(Atom::from_key(&Key::binary_from_text("greeting")));
 
@@ -740,9 +681,9 @@ mod tests {
     }
 
     #[test]
-    fn keys_reject_expressions() {
+    fn keys_reject_lazy_values() {
         assert_eq!(
-            Key::from_value(&Value::expr(Expr::Value(Value::Number(1.into())))),
+            Key::from_value(&Value::deferred("number", || Ok(Value::Number(1.into())))),
             None
         );
     }

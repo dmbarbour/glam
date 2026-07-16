@@ -3,10 +3,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::core::Builtin;
-use crate::core::{
-    Atom, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, LazyValue, NetValue, Value,
-};
-use crate::core_net::{CoreSpecialization, lower_closed_function_value, lower_function_code};
+use crate::core::{Atom, Dict, Key, LazyValue, NetValue, Value};
+use crate::core_net::CoreSpecialization;
 use crate::interaction_net::{NetBuildError, NetBuilder, Port};
 use crate::number::Number;
 
@@ -51,9 +49,8 @@ pub struct ModuleLoadArgs {
 
 #[derive(Clone)]
 pub struct CompileContext {
-    // Ideally, we should actually abstract the effects API, i.e. such that
-    // our front-end compilers don't even know what an `Expr` or `Value`
-    // looks like under-the-hood. But for now, we use core data structures.
+    // The bootstrap still exposes core Values, but never a semantic expression
+    // language. Front ends own their IR and lower it before returning Values.
     source_path: Option<Arc<str>>,
     pub source_binary: Arc<[u8]>,
     pub module_path: Arc<[String]>,
@@ -167,18 +164,6 @@ impl CompileContext {
     // TODO: eliminate direct use of Builtin in this API. The front-end
     // knows about builtins, but will access them as atoms, not as the Builtin enum.
 
-    pub fn key_expr_key(&self, key: Key) -> CoreKeyExpr {
-        CoreKeyExpr::Key(key)
-    }
-
-    pub fn key_expr_index(&self, value: Value) -> CoreKeyExpr {
-        CoreKeyExpr::Index(Arc::new(value_to_core_expr(value)))
-    }
-
-    pub fn key_expr_path_index(&self, value: Value) -> CoreKeyExpr {
-        CoreKeyExpr::PathIndex(Arc::new(value_to_core_expr(value)))
-    }
-
     pub fn value_number(&self, number: Number) -> Value {
         Value::Number(number)
     }
@@ -215,36 +200,6 @@ impl CompileContext {
         ])))
     }
 
-    pub fn value_list(&self, items: Vec<Value>) -> Value {
-        Value::expr(CoreExpr::List(Arc::from(
-            items
-                .into_iter()
-                .map(value_to_core_expr)
-                .map(Arc::new)
-                .collect::<Vec<_>>(),
-        )))
-    }
-
-    pub fn value_apply(&self, function: Value, argument: Value) -> Value {
-        self.value_apply_many(function, [argument])
-    }
-
-    pub fn value_apply_many(
-        &self,
-        function: Value,
-        arguments: impl IntoIterator<Item = Value>,
-    ) -> Value {
-        let arguments = arguments.into_iter().collect::<Vec<_>>();
-        if arguments.is_empty() {
-            return function;
-        }
-        let mut expr = value_to_core_expr(function);
-        for argument in arguments {
-            expr = CoreExpr::Apply(Arc::new(expr), Arc::new(value_to_core_expr(argument)));
-        }
-        Value::expr(expr)
-    }
-
     /// Constructs one closed interaction-net value. The callback returns the
     /// net's sole exposed port; all other ports must be wired before it
     /// returns. The immutable template exists only long enough to instantiate
@@ -258,60 +213,6 @@ impl CompileContext {
         let template = builder.try_finish(exposed)?;
         let runtime = template.instantiate_shared();
         Ok(Value::Net(NetValue::new(runtime)))
-    }
-
-    pub fn value_lambda(&self, body: Value) -> Value {
-        self.value_lambdas(1, body)
-    }
-
-    /// Lowers a function whose body contains no locals outside its declared
-    /// parameters. Front ends are responsible for closure conversion before
-    /// using this API.
-    pub fn value_closed_function(&self, arity: usize, body: Value) -> Value {
-        assert!(arity > 0, "a function must bind at least one parameter");
-        lower_closed_function_value(arity, value_to_core_expr(body))
-    }
-
-    /// Lowers one syntactic function body once. Evaluating the resulting
-    /// semantic constructor supplies lifted captures and produces an ordinary
-    /// shared, curried function value.
-    pub fn value_lambdas(&self, arity: usize, body: Value) -> Value {
-        assert!(arity > 0, "a lambda must bind at least one parameter");
-        let body = value_to_core_expr(body);
-        let code = lower_function_code(arity, Arc::new(body));
-        let captures = (0..code.capture_count())
-            .map(CoreExpr::Local)
-            .map(Arc::new)
-            .collect::<Vec<_>>();
-        Value::expr(CoreExpr::Function {
-            code: Arc::new(code),
-            captures: Arc::from(captures),
-        })
-    }
-
-    pub fn value_local(&self, index: usize) -> Value {
-        Value::expr(CoreExpr::Local(index))
-    }
-
-    pub fn value_access(&self, base: Value, path: Vec<CoreKeyExpr>) -> Value {
-        Value::expr(CoreExpr::Access(
-            Arc::new(value_to_core_expr(base)),
-            Arc::from(path),
-        ))
-    }
-
-    pub fn builtin_apply2_value(&self, builtin: Builtin, left: Value, right: Value) -> Value {
-        self.value_apply_many(self.value_builtin(builtin), [left, right])
-    }
-
-    pub fn builtin_apply3_value(
-        &self,
-        builtin: Builtin,
-        first: Value,
-        second: Value,
-        third: Value,
-    ) -> Value {
-        self.value_apply_many(self.value_builtin(builtin), [first, second, third])
     }
 
     pub fn local_module_load_args(
@@ -365,15 +266,6 @@ impl CompileContext {
             };
             loader(args.clone())
         })
-    }
-}
-
-fn value_to_core_expr(value: Value) -> CoreExpr {
-    match value {
-        Value::Lazy(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
-            thunk.expr().unwrap().as_ref().clone()
-        }
-        value => CoreExpr::Value(value),
     }
 }
 
@@ -442,76 +334,6 @@ mod tests {
         assert!(matches!(
             error,
             CompileNetError::Build(NetBuildError::PortUnwired(_))
-        ));
-    }
-
-    #[test]
-    fn compile_context_builds_closed_functions_and_explicit_capture_applications() {
-        let context = CompileContext::default();
-        let closed = context.value_lambda(context.value_local(0));
-        let captured = context.value_lambda(context.value_local(1));
-
-        assert!(matches!(
-            closed,
-            Value::Lazy(ref thunk)
-                if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Function { code, captures })
-                    if code.arity() == 1 && code.capture_count() == 0 && captures.is_empty())
-        ));
-        assert!(matches!(
-            captured,
-            Value::Lazy(ref thunk)
-                if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Function { code, captures })
-                    if code.arity() == 1
-                        && code.capture_count() == 1
-                        && matches!(captures.as_ref(), [capture]
-                            if matches!(capture.as_ref(), CoreExpr::Local(0))))
-        ));
-    }
-
-    #[test]
-    fn compile_context_builds_one_net_for_a_function_arity() {
-        let context = CompileContext::default();
-        let grouped = context.value_lambdas(3, context.value_local(2));
-        assert!(matches!(
-            grouped,
-            Value::Lazy(ref thunk)
-                if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Function { code, captures })
-                    if code.arity() == 3 && code.capture_count() == 0 && captures.is_empty())
-        ));
-
-        let captured = context.value_lambdas(3, context.value_local(3));
-        assert!(matches!(
-            captured,
-            Value::Lazy(ref thunk)
-                if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Function { code, captures })
-                    if code.arity() == 3 && code.capture_count() == 1 && captures.len() == 1)
-        ));
-    }
-
-    #[test]
-    fn compile_context_builds_one_semantic_application_spine() {
-        let context = CompileContext::default();
-        let value = context.value_apply_many(
-            context.value_builtin(Builtin::Add),
-            [
-                context.value_number(1.into()),
-                context.value_number(2.into()),
-            ],
-        );
-
-        let Value::Lazy(value) = value else {
-            panic!("application spine should remain a semantic expression");
-        };
-        let mut expr = value.expr().unwrap().as_ref();
-        let mut arity = 0;
-        while let CoreExpr::Apply(function, _) = expr {
-            arity += 1;
-            expr = function;
-        }
-        assert_eq!(arity, 2);
-        assert!(matches!(
-            expr,
-            CoreExpr::Value(Value::Builtin(Builtin::Add))
         ));
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
@@ -6,8 +6,10 @@ use chumsky::prelude::*;
 
 use crate::compiler::CompileContext;
 use crate::core::Builtin;
-use crate::core::{Atom, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value};
+use crate::core::{Atom, Dict, FunctionCode, FunctionValue, Key, NetValue, Value};
+use crate::core_net::{CoreDataKey, CoreNetData, CoreOperator, CoreSpecialization};
 use crate::diagnostic::Severity;
+use crate::interaction_net::{NetBuilder, Port};
 use crate::number::Number;
 
 mod resolved;
@@ -313,6 +315,11 @@ impl DerefMut for ResolverContext {
 #[cfg(test)]
 mod resolver_context_tests {
     use super::*;
+    use crate::interaction_net::Node;
+
+    fn unit() -> Value {
+        Value::Dict(Dict::new_sync())
+    }
 
     #[test]
     fn binding_ids_are_local_to_each_resolver() {
@@ -481,6 +488,87 @@ mod resolver_context_tests {
                     if parameters.len() == 2
                     && parameters.iter().all(|binding| body.free_bindings().contains(binding)))
         ));
+    }
+
+    #[test]
+    fn direct_net_emitter_wires_identity_without_a_fan_or_erase() {
+        let mut resolver = ResolverContext::default();
+        let parameter = resolver.fresh_binding();
+        let net =
+            ResolvedNetLowerer::lower_template(vec![parameter], ResolvedExpr::Local(parameter));
+
+        assert_eq!(
+            net.nodes()
+                .iter()
+                .filter(|node| matches!(node, Node::Bind))
+                .count(),
+            1
+        );
+        assert!(
+            !net.nodes()
+                .iter()
+                .any(|node| matches!(node, Node::Fan { .. }))
+        );
+        assert!(!net.nodes().iter().any(|node| matches!(node, Node::Erase)));
+    }
+
+    #[test]
+    fn direct_net_emitter_erases_unused_parameters() {
+        let mut resolver = ResolverContext::default();
+        let parameter = resolver.fresh_binding();
+        let net =
+            ResolvedNetLowerer::lower_template(vec![parameter], ResolvedExpr::Embedded(unit()));
+
+        assert!(net.nodes().iter().any(|node| matches!(node, Node::Erase)));
+    }
+
+    #[test]
+    fn direct_net_emitter_fans_repeated_parameters_once() {
+        let mut resolver = ResolverContext::default();
+        let parameter = resolver.fresh_binding();
+        let body = ResolvedExpr::apply(
+            ResolvedExpr::Local(parameter),
+            [ResolvedExpr::Local(parameter)],
+        );
+        let net = ResolvedNetLowerer::lower_template(vec![parameter], body);
+
+        assert_eq!(
+            net.nodes()
+                .iter()
+                .filter(|node| matches!(node, Node::Fan { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn direct_net_emitter_builds_one_bind_chain_for_curried_parameters() {
+        let mut resolver = ResolverContext::default();
+        let first = resolver.fresh_binding();
+        let second = resolver.fresh_binding();
+        let net =
+            ResolvedNetLowerer::lower_template(vec![first, second], ResolvedExpr::Local(first));
+
+        assert_eq!(
+            net.nodes()
+                .iter()
+                .filter(|node| matches!(node, Node::Bind))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn direct_net_emitter_lifts_only_free_bindings_as_captures() {
+        let mut resolver = ResolverContext::default();
+        let parameter = resolver.fresh_binding();
+        let capture = resolver.fresh_binding();
+        let (code, captures) =
+            ResolvedNetLowerer::lower_code(vec![parameter], ResolvedExpr::Local(capture));
+
+        assert_eq!(code.arity(), 1);
+        assert_eq!(code.capture_count(), 1);
+        assert_eq!(captures, vec![capture]);
     }
 }
 
@@ -807,7 +895,7 @@ fn lower_builtin_import(
         ImportPlacement::At(target) => {
             let object = extend_object_with_defs(
                 target,
-                constant_object_defs(module, context),
+                constant_object_defs(module),
                 context,
                 definitions.clone(),
             )?;
@@ -845,11 +933,11 @@ fn lower_local_import(
             );
         }
         ImportPlacement::At(target) => {
-            let scoped_prior = path_value_in_definitions(target, definitions.clone(), context)?;
+            let scoped_prior = path_value_in_definitions(target, definitions.clone())?;
             let loaded = scoped_local_import_value(reference, target, scoped_prior, context)?;
             let object = extend_object_with_defs(
                 target,
-                constant_object_defs(loaded, context),
+                constant_object_defs(loaded),
                 context,
                 definitions.clone(),
             )?;
@@ -885,7 +973,7 @@ fn scoped_local_import_value(
     prior_defs: Value,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
-    let final_defs = path_value_in_definitions(target, context.final_defs.clone(), context)?;
+    let final_defs = path_value_in_definitions(target, context.final_defs.clone())?;
     let args = context.local_module_load_args(
         reference,
         scoped_module_path(context, target),
@@ -914,13 +1002,16 @@ fn inherited_import_env_object_value(
     definitions: Value,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
-    let parent_env = path_value_in_definitions("env", definitions, context)?;
+    let parent_env = path_value_in_definitions("env", definitions)?;
     let name = context.abstract_global_path_value(
         context
             .abstract_global_path(&format!("{target}.env"))
             .as_ref(),
     );
-    let deps = context.value_list(vec![object_spec_value(parent_env, context)]);
+    let deps = lower_resolved_expr(ResolvedExpr::List(vec![object_spec_resolved(
+        ResolvedExpr::Provided(parent_env),
+        context,
+    )]));
     Ok(object_instance_from_parts_value(
         name,
         deps,
@@ -930,30 +1021,34 @@ fn inherited_import_env_object_value(
 }
 
 fn empty_object_defs(context: &CompileContext) -> Value {
-    lower_lambda_value(
-        2,
-        remove_object_spec_value(context.value_local(1), context),
-        context,
-    )
+    let mut locals = ResolverContext::default();
+    let prior_self = locals.push_binding("<object-prior-self>");
+    let final_self = locals.push_binding("<object-final-self>");
+    lower_resolved_expr(ResolvedExpr::lambda(
+        vec![prior_self, final_self],
+        remove_object_spec_resolved(ResolvedExpr::Local(prior_self), context),
+    ))
 }
 
 fn module_object_value(target: &str, module: Value, context: &CompileContext) -> Value {
-    let spec = Dict::new_sync()
-        .insert(
-            name_as_key("name"),
+    lower_resolved_expr(object_instance_from_parts_resolved(
+        ResolvedExpr::Embedded(
             context.abstract_global_path_value(context.abstract_global_path(target).as_ref()),
-        )
-        .insert(name_as_key("deps"), context.value_list(Vec::new()))
-        .insert(name_as_key("defs"), constant_object_defs(module, context));
-
-    context.value_apply(
-        context.value_builtin(Builtin::ObjectInstance),
-        context.value_dict(spec),
-    )
+        ),
+        ResolvedExpr::List(Vec::new()),
+        ResolvedExpr::Provided(constant_object_defs(module)),
+        context,
+    ))
 }
 
-fn constant_object_defs(value: Value, context: &CompileContext) -> Value {
-    lower_lambda_value(2, value, context)
+fn constant_object_defs(value: Value) -> Value {
+    let mut locals = ResolverContext::default();
+    let prior_self = locals.push_binding("<object-prior-self>");
+    let final_self = locals.push_binding("<object-final-self>");
+    lower_resolved_expr(ResolvedExpr::lambda(
+        vec![prior_self, final_self],
+        ResolvedExpr::Provided(value),
+    ))
 }
 
 fn lower_unique(
@@ -1028,48 +1123,55 @@ fn builtin_std_module(context: &CompileContext) -> Dict {
 }
 
 fn builtin_not_value(context: &CompileContext) -> Value {
-    let condition = context.value_local(0);
-    let fail_operation = lower_effect_expr("fail", context);
-    let true_operation = effect_return_value(context.unit_value(), context);
-    let fail_if_condition_succeeds = effect_then_values(
-        condition,
-        effect_return_value(fail_operation, context),
+    let mut locals = ResolverContext::default();
+    let condition = locals.push_binding("<not-condition>");
+    let fail_operation = lower_effect_expr_resolved("fail", context, &mut locals);
+    let true_operation = effect_call_resolved(
+        "r",
+        [ResolvedExpr::Embedded(context.unit_value())],
         context,
+        &mut locals,
     );
-    let succeed_if_condition_fails = effect_return_value(true_operation, context);
-    let select_operation = effect_call_value(
-        "cut",
-        vec![effect_call_value(
-            "alt",
-            vec![fail_if_condition_succeeds, succeed_if_condition_fails],
-            context,
-        )],
+    let returned_failure = effect_call_resolved("r", [fail_operation], context, &mut locals);
+    let fail_if_condition_succeeds = effect_then_resolved(
+        ResolvedExpr::Local(condition),
+        returned_failure,
         context,
+        &mut locals,
     );
-    let run_selected_operation = lower_lambda_value(1, context.value_local(0), context);
-    lower_lambda_value(
-        1,
-        effect_call_value(
-            "seq",
-            vec![select_operation, run_selected_operation],
-            context,
-        ),
+    let succeed_if_condition_fails =
+        effect_call_resolved("r", [true_operation], context, &mut locals);
+    let alternate = effect_call_resolved(
+        "alt",
+        [fail_if_condition_succeeds, succeed_if_condition_fails],
         context,
-    )
+        &mut locals,
+    );
+    let select_operation = effect_call_resolved("cut", [alternate], context, &mut locals);
+    let selected = locals.push_binding("<selected-operation>");
+    let run_selected_operation =
+        ResolvedExpr::lambda(vec![selected], ResolvedExpr::Local(selected));
+    let body = effect_call_resolved(
+        "seq",
+        [select_operation, run_selected_operation],
+        context,
+        &mut locals,
+    );
+    lower_resolved_expr(ResolvedExpr::lambda(vec![condition], body))
 }
 
 fn builtin_could_value(context: &CompileContext) -> Value {
     let not = builtin_not_value(context);
-    let condition = context.value_local(0);
-    lower_lambda_value(
-        1,
-        context.value_apply(not.clone(), context.value_apply(not, condition)),
-        context,
-    )
-}
-
-fn effect_return_value(value: Value, context: &CompileContext) -> Value {
-    context.value_apply(lower_effect_expr("r", context), value)
+    let mut locals = ResolverContext::default();
+    let condition = locals.push_binding("<could-condition>");
+    let inner = ResolvedExpr::apply(
+        ResolvedExpr::Provided(not.clone()),
+        [ResolvedExpr::Local(condition)],
+    );
+    lower_resolved_expr(ResolvedExpr::lambda(
+        vec![condition],
+        ResolvedExpr::apply(ResolvedExpr::Provided(not), [inner]),
+    ))
 }
 
 fn lower_definition(
@@ -1080,87 +1182,19 @@ fn lower_definition(
     definitions: &mut Value,
     scope: &NameScope,
 ) -> Result<(), Diagnostic> {
-    lower_definition_with_locals(
+    let mut locals = ResolverContext::default();
+    let definitions_root = ResolvedRoot::Provided(definitions.clone());
+    let resolved = lower_definition_resolved(
         definition,
         declaration_text,
         line,
         context,
-        definitions,
-        scope,
-        &mut ResolverContext::default(),
-    )
-}
-
-fn lower_definition_with_locals(
-    definition: &DefinitionDecl,
-    declaration_text: &str,
-    line: usize,
-    context: &CompileContext,
-    definitions: &mut Value,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Result<(), Diagnostic> {
-    let Some(expr) = &definition.expr else {
-        return Ok(());
-    };
-
-    let target_scope = definition_target_scope(scope, definitions.clone());
-    let value = match definition.kind {
-        DefinitionKind::Introduce => annotate_definition_value(
-            BuiltinAssertion::Undefined,
-            &definition.target,
-            definitions.clone(),
-            syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?,
-            line,
-            context,
-            &target_scope,
-            locals,
-        )?,
-        DefinitionKind::Override => annotate_definition_value(
-            BuiltinAssertion::Defined,
-            &definition.target,
-            definitions.clone(),
-            syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?,
-            line,
-            context,
-            &target_scope,
-            locals,
-        )?,
-        DefinitionKind::Update => lower_update_definition(
-            &definition.target,
-            definitions.clone(),
-            expr,
-            definition_param_count(definition, declaration_text, line)?,
-            line,
-            context,
-            &target_scope,
-            locals,
-        )?,
-    };
-    *definitions = update_definition_target_value(
-        definitions.clone(),
-        &definition.target,
-        value,
-        line,
-        context,
-        &target_scope,
-        locals,
+        &definitions_root,
+        &scope.resolved(),
+        &mut locals,
     )?;
-
+    *definitions = lower_resolved_expr(resolved);
     Ok(())
-}
-
-fn definition_target_scope(scope: &NameScope, visible_definitions: Value) -> NameScope {
-    if scope.object_final_defs.is_some() {
-        return scope.clone();
-    }
-
-    let mut scope = scope.clone();
-    scope.final_defs = visible_definitions.clone();
-    scope.prior_defs = visible_definitions.clone();
-    scope.module_final_defs = visible_definitions.clone();
-    scope.module_prior_defs = visible_definitions;
-    scope
 }
 
 fn lower_object(
@@ -1169,356 +1203,311 @@ fn lower_object(
     context: &CompileContext,
     definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
-    let object_value = object_decl_value(object, line, context, definitions.clone())?;
-    let scope = NameScope::module(context, definitions.clone());
     let mut locals = ResolverContext::default();
-    let object_value = annotate_definition_value(
+    let scope = NameScope::module(context, definitions.clone()).resolved();
+    let definitions_root = ResolvedRoot::Provided(definitions.clone());
+    let name = ResolvedExpr::Embedded(
+        context.abstract_global_path_value(context.abstract_global_path(&object.target).as_ref()),
+    );
+    let object_value =
+        object_decl_resolved_in_scope(object, line, context, scope.clone(), &mut locals, name)?;
+    let object_value = annotate_definition_resolved(
         BuiltinAssertion::Undefined,
         &object.target,
-        definitions.clone(),
+        &definitions_root,
         object_value,
         line,
         context,
         &scope,
         &mut locals,
     )?;
-
-    *definitions = update_module_value(definitions.clone(), &object.target, object_value, context);
+    *definitions = lower_resolved_expr(update_module_resolved(
+        definitions_root.expr(),
+        &object.target,
+        object_value,
+        context,
+    ));
     Ok(())
 }
 
-fn object_decl_value(
-    object: &ObjectDecl,
-    line: usize,
-    context: &CompileContext,
-    visible_definitions: Value,
-) -> Result<Value, Diagnostic> {
-    let parent_scope = NameScope::module(context, visible_definitions.clone());
-    let name =
-        context.abstract_global_path_value(context.abstract_global_path(&object.target).as_ref());
-    object_decl_value_in_scope(
-        object,
-        line,
-        context,
-        parent_scope,
-        &mut ResolverContext::default(),
-        name,
-    )
-}
-
-fn object_decl_value_in_scope(
-    object: &ObjectDecl,
-    line: usize,
-    context: &CompileContext,
-    parent_scope: NameScope,
-    locals: &mut ResolverContext,
-    name: Value,
-) -> Result<Value, Diagnostic> {
-    let resolved_scope = parent_scope.resolved();
-    let resolved = object_decl_resolved_in_scope(
-        object,
-        line,
-        context,
-        resolved_scope,
-        locals,
-        ResolvedExpr::Provided(name),
-    )?;
-    Ok(resolved_expr_to_value_in_resolver(
-        resolved, context, locals,
-    ))
-}
-
-fn shift_value_locals(value: &Value, amount: usize, cutoff: usize) -> Value {
-    match value {
-        Value::Lazy(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => Value::expr(
-            shift_expr_locals(thunk.expr().unwrap().as_ref(), amount, cutoff),
-        ),
-        other => other.clone(),
-    }
-}
-
-fn shift_expr_locals(expr: &CoreExpr, amount: usize, cutoff: usize) -> CoreExpr {
+/// Consumes one closed front-end semantic expression and lowers it directly to
+/// a shared interaction-net computation. No syntax-shaped value survives this
+/// boundary.
+fn lower_resolved_expr(expr: ResolvedExpr<Value>) -> Value {
     match expr {
-        CoreExpr::Value(value) => CoreExpr::Value(shift_value_locals(value, amount, cutoff)),
-        CoreExpr::List(items) => CoreExpr::List(Arc::from(
-            items
-                .iter()
-                .map(|item| Arc::new(shift_expr_locals(item, amount, cutoff)))
-                .collect::<Vec<_>>(),
-        )),
-        CoreExpr::Apply(function, argument) => CoreExpr::Apply(
-            Arc::new(shift_expr_locals(function, amount, cutoff)),
-            Arc::new(shift_expr_locals(argument, amount, cutoff)),
-        ),
-        CoreExpr::Function { code, captures } => CoreExpr::Function {
-            code: code.clone(),
-            captures: Arc::from(
-                captures
-                    .iter()
-                    .map(|capture| Arc::new(shift_expr_locals(capture, amount, cutoff)))
-                    .collect::<Vec<_>>(),
-            ),
-        },
-        CoreExpr::Local(index) if *index >= cutoff => CoreExpr::Local(index + amount),
-        CoreExpr::Local(index) => CoreExpr::Local(*index),
-        CoreExpr::Access(base, path) => CoreExpr::Access(
-            Arc::new(shift_expr_locals(base, amount, cutoff)),
-            Arc::from(
-                path.iter()
-                    .map(|key| shift_key_expr_locals(key, amount, cutoff))
-                    .collect::<Vec<_>>(),
-            ),
-        ),
-    }
-}
-
-fn shift_key_expr_locals(key: &CoreKeyExpr, amount: usize, cutoff: usize) -> CoreKeyExpr {
-    match key {
-        CoreKeyExpr::Key(key) => CoreKeyExpr::Key(key.clone()),
-        CoreKeyExpr::Index(expr) => {
-            CoreKeyExpr::Index(Arc::new(shift_expr_locals(expr, amount, cutoff)))
-        }
-        CoreKeyExpr::PathIndex(expr) => {
-            CoreKeyExpr::PathIndex(Arc::new(shift_expr_locals(expr, amount, cutoff)))
-        }
-    }
-}
-
-/// Closure-converts a front-end lambda into one closed interaction net.
-///
-/// Captures become leading arguments of the closed function and are supplied
-/// immediately, leaving only the source lambda's parameters unsaturated.
-fn lower_lambda_value(arity: usize, body: Value, context: &CompileContext) -> Value {
-    assert!(arity > 0, "a lambda must bind at least one parameter");
-    let body = semantic_value_to_expr(body);
-    let mut captures = BTreeSet::new();
-    collect_outer_locals(&body, arity, &mut captures);
-    let captures = captures.into_iter().collect::<Vec<_>>();
-    let closed_body = rewrite_outer_locals(&body, arity, &captures);
-    let function = context.value_closed_function(arity + captures.len(), Value::expr(closed_body));
-    context.value_apply_many(
-        function,
-        captures.into_iter().map(|index| context.value_local(index)),
-    )
-}
-
-fn resolved_expr_to_value_in_resolver(
-    expr: ResolvedExpr<Value>,
-    context: &CompileContext,
-    resolver: &ResolverContext,
-) -> Value {
-    let mut bindings = resolver
-        .iter()
-        .filter_map(|local| local.binding)
-        .collect::<Vec<_>>();
-
-    lower_resolved_expr_compat(expr, context, &mut bindings)
-}
-
-/// Temporary endpoint from the g-syntax resolved IR into the existing Core
-/// expression backend. Direct interaction-net emission will replace this one
-/// adapter; resolved-expression construction must not depend on CoreExpr.
-fn lower_resolved_expr_compat(
-    expr: ResolvedExpr<Value>,
-    context: &CompileContext,
-    bindings: &mut Vec<BindingId>,
-) -> Value {
-    match expr {
-        ResolvedExpr::Embedded(value) => {
-            debug_assert!(
-                !matches!(value, Value::Lazy(_)),
-                "resolved embedded data cannot contain a Core expression"
+        ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => value,
+        expr => {
+            let (code, captures) = ResolvedNetLowerer::lower_code(Vec::new(), expr);
+            assert!(
+                captures.is_empty(),
+                "a value leaving g-syntax must be a closed interaction net"
             );
-            value
-        }
-        ResolvedExpr::Provided(value) => value,
-        ResolvedExpr::Local(binding) => {
-            let position = bindings
-                .iter()
-                .rposition(|candidate| *candidate == binding)
-                .expect("resolved local must have an enclosing binding");
-            context.value_local(bindings.len() - position - 1)
-        }
-        ResolvedExpr::List(items) => context.value_list(
-            items
-                .into_iter()
-                .map(|item| lower_resolved_expr_compat(item, context, bindings))
-                .collect(),
-        ),
-        ResolvedExpr::Access { base, path } => {
-            let base = lower_resolved_expr_compat(*base, context, bindings);
-            let path = path
-                .into_iter()
-                .map(|part| match part {
-                    ResolvedPathPart::Key(key) => context.key_expr_key(key),
-                    ResolvedPathPart::Index(expr) => {
-                        context.key_expr_index(lower_resolved_expr_compat(*expr, context, bindings))
-                    }
-                    ResolvedPathPart::PathIndex(expr) => context
-                        .key_expr_path_index(lower_resolved_expr_compat(*expr, context, bindings)),
-                })
-                .collect();
-            context.value_access(base, path)
-        }
-        ResolvedExpr::Lambda { parameters, body } => {
-            let base_len = bindings.len();
-            bindings.extend(parameters.iter().copied());
-            let body = lower_resolved_expr_compat(*body, context, bindings);
-            bindings.truncate(base_len);
-            lower_lambda_value(parameters.len(), body, context)
-        }
-        ResolvedExpr::Apply {
-            function,
-            arguments,
-        } => {
-            let function = lower_resolved_expr_compat(*function, context, bindings);
-            let arguments = arguments
-                .into_iter()
-                .map(|argument| lower_resolved_expr_compat(argument, context, bindings))
-                .collect::<Vec<_>>();
-            context.value_apply_many(function, arguments)
-        }
-        ResolvedExpr::ApplyLambda {
-            parameters,
-            body,
-            arguments,
-        } => {
-            // Compatibility behavior still constructs and applies the
-            // function. The direct net emitter will instead wire these
-            // arguments into the lambda-local bind spine in one net.
-            let base_len = bindings.len();
-            bindings.extend(parameters.iter().copied());
-            let body = lower_resolved_expr_compat(*body, context, bindings);
-            bindings.truncate(base_len);
-            let function = lower_lambda_value(parameters.len(), body, context);
-            let arguments = arguments
-                .into_iter()
-                .map(|argument| lower_resolved_expr_compat(argument, context, bindings))
-                .collect::<Vec<_>>();
-            context.value_apply_many(function, arguments)
+            Value::Lazy(crate::core::LazyValue::from_net_computation(NetValue::new(
+                code.runtime().clone(),
+            )))
         }
     }
 }
 
-fn semantic_value_to_expr(value: Value) -> CoreExpr {
-    match value {
-        Value::Lazy(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
-            thunk.expr().unwrap().as_ref().clone()
-        }
-        value => CoreExpr::Value(value),
-    }
+struct ResolvedNetLowerer {
+    net: NetBuilder<CoreSpecialization>,
+    local_uses: BTreeMap<BindingId, Vec<Port>>,
 }
 
-fn collect_outer_locals(expr: &CoreExpr, arity: usize, captures: &mut BTreeSet<usize>) {
-    match expr {
-        CoreExpr::Value(value) => collect_outer_locals_in_value(value, arity, captures),
-        CoreExpr::List(items) => {
-            for item in items.iter() {
-                collect_outer_locals(item, arity, captures);
+impl ResolvedNetLowerer {
+    fn lower_code(
+        parameters: Vec<BindingId>,
+        body: ResolvedExpr<Value>,
+    ) -> (FunctionCode, Vec<BindingId>) {
+        let mut captures = body.free_bindings();
+        for parameter in &parameters {
+            captures.remove(parameter);
+        }
+        let captures = captures.into_iter().collect::<Vec<_>>();
+        let mut inputs = captures.clone();
+        inputs.extend(parameters.iter().copied());
+        let runtime = Self::lower_template(inputs, body).instantiate_shared();
+        (
+            FunctionCode::new(runtime, parameters.len(), captures.len()),
+            captures,
+        )
+    }
+
+    fn lower_template(
+        inputs: Vec<BindingId>,
+        body: ResolvedExpr<Value>,
+    ) -> crate::core_net::CoreInteractionNet {
+        let mut lowerer = Self {
+            net: NetBuilder::new(),
+            local_uses: BTreeMap::new(),
+        };
+        let body_boundary = lowerer.net.copy(1);
+        lowerer.compile_into(body, body_boundary.outputs[0]);
+
+        if inputs.is_empty() {
+            assert!(
+                lowerer.local_uses.is_empty(),
+                "closed net body contains an unbound local"
+            );
+            return lowerer.net.finish(body_boundary.input);
+        }
+
+        let binds = lowerer.net.bind_spine(inputs.len());
+        lowerer.net.wire(binds.result, body_boundary.input);
+        for (binding, source) in inputs.into_iter().zip(binds.arguments) {
+            let targets = lowerer.local_uses.remove(&binding).unwrap_or_default();
+            lowerer.distribute(source, &targets);
+        }
+        assert!(
+            lowerer.local_uses.is_empty(),
+            "lowered function body contains an unbound local"
+        );
+        lowerer.net.finish(binds.input)
+    }
+
+    fn compile_into(&mut self, expr: ResolvedExpr<Value>, target: Port) {
+        match expr {
+            ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => {
+                self.data_into(CoreNetData::Value(value), target);
+            }
+            ResolvedExpr::Local(binding) => {
+                self.local_uses.entry(binding).or_default().push(target)
+            }
+            ResolvedExpr::List(items) => {
+                if items.is_empty() {
+                    self.data_into(
+                        CoreNetData::Value(Value::List(crate::core::List::empty())),
+                        target,
+                    );
+                } else {
+                    let arity = items.len();
+                    self.lazy_operator_application_into(
+                        crate::eval::list_operator(arity, Arc::from([])),
+                        items,
+                        target,
+                    );
+                }
+            }
+            ResolvedExpr::Access { base, path } => {
+                let mut arguments = vec![*base];
+                let path = path
+                    .into_iter()
+                    .map(|part| match part {
+                        ResolvedPathPart::Key(key) => CoreDataKey::Key(key),
+                        ResolvedPathPart::Index(expr) => {
+                            arguments.push(*expr);
+                            CoreDataKey::Index
+                        }
+                        ResolvedPathPart::PathIndex(expr) => {
+                            arguments.push(*expr);
+                            CoreDataKey::PathIndex
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                self.operator_application_into(
+                    crate::eval::access_operator(Arc::from(path), Arc::from([])),
+                    arguments,
+                    target,
+                );
+            }
+            ResolvedExpr::Lambda { parameters, body } => {
+                self.function_into(parameters, *body, target);
+            }
+            ResolvedExpr::Apply {
+                function,
+                arguments,
+            } => self.semantic_application_into(*function, arguments, target),
+            ResolvedExpr::ApplyLambda {
+                parameters,
+                body,
+                arguments,
+            } => {
+                // Preserve the grouped redex as one lowering operation. The
+                // function template is emitted once and the complete argument
+                // spine is attached without intermediate host expressions.
+                self.semantic_application_into(
+                    ResolvedExpr::Lambda { parameters, body },
+                    arguments,
+                    target,
+                );
             }
         }
-        CoreExpr::Apply(function, argument) => {
-            collect_outer_locals(function, arity, captures);
-            collect_outer_locals(argument, arity, captures);
+    }
+
+    fn function_into(
+        &mut self,
+        parameters: Vec<BindingId>,
+        body: ResolvedExpr<Value>,
+        target: Port,
+    ) {
+        assert!(!parameters.is_empty(), "a function must bind an argument");
+        let (code, captures) = Self::lower_code(parameters, body);
+        let code = Arc::new(code);
+        if captures.is_empty() {
+            self.data_into(
+                CoreNetData::Value(Value::Function(FunctionValue::new(
+                    NetValue::new(code.runtime().clone()),
+                    code.arity(),
+                ))),
+                target,
+            );
+        } else {
+            let operator = crate::eval::function_capture_operator(code, Arc::from([]));
+            self.binding_operator_application_into(operator, captures, target);
         }
-        CoreExpr::Function {
-            captures: nested, ..
-        } => {
-            for capture in nested.iter() {
-                collect_outer_locals(capture, arity, captures);
+    }
+
+    fn semantic_application_into(
+        &mut self,
+        function: ResolvedExpr<Value>,
+        arguments: Vec<ResolvedExpr<Value>>,
+        target: Port,
+    ) {
+        let mut output = self.net.unary_operator(crate::eval::apply_arity_operator(
+            arguments.len(),
+            Arc::from([]),
+        ));
+        let [application, function_port, result] = self.net.bind();
+        self.net.wire(output, application);
+        self.compile_into(function, function_port);
+        output = result;
+        for argument in arguments {
+            let [application, argument_port, result] = self.net.bind();
+            self.net.wire(output, application);
+            self.compile_lazy_into(argument, argument_port);
+            output = result;
+        }
+        self.net.wire(output, target);
+    }
+
+    fn operator_application_into(
+        &mut self,
+        operator: CoreOperator,
+        arguments: Vec<ResolvedExpr<Value>>,
+        target: Port,
+    ) {
+        let mut output = self.net.unary_operator(operator);
+        for argument in arguments {
+            let [application, argument_port, result] = self.net.bind();
+            self.net.wire(output, application);
+            self.compile_into(argument, argument_port);
+            output = result;
+        }
+        self.net.wire(output, target);
+    }
+
+    fn lazy_operator_application_into(
+        &mut self,
+        operator: CoreOperator,
+        arguments: Vec<ResolvedExpr<Value>>,
+        target: Port,
+    ) {
+        let mut output = self.net.unary_operator(operator);
+        for argument in arguments {
+            let [application, argument_port, result] = self.net.bind();
+            self.net.wire(output, application);
+            self.compile_lazy_into(argument, argument_port);
+            output = result;
+        }
+        self.net.wire(output, target);
+    }
+
+    fn binding_operator_application_into(
+        &mut self,
+        operator: CoreOperator,
+        bindings: Vec<BindingId>,
+        target: Port,
+    ) {
+        let mut output = self.net.unary_operator(operator);
+        for binding in bindings {
+            let [application, argument_port, result] = self.net.bind();
+            self.net.wire(output, application);
+            self.local_uses
+                .entry(binding)
+                .or_default()
+                .push(argument_port);
+            output = result;
+        }
+        self.net.wire(output, target);
+    }
+
+    fn compile_lazy_into(&mut self, expr: ResolvedExpr<Value>, target: Port) {
+        match expr {
+            ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => {
+                self.data_into(CoreNetData::Value(value), target);
             }
-        }
-        CoreExpr::Local(index) if *index >= arity => {
-            captures.insert(index - arity);
-        }
-        CoreExpr::Local(_) => {}
-        CoreExpr::Access(base, path) => {
-            collect_outer_locals(base, arity, captures);
-            for key in path.iter() {
-                match key {
-                    CoreKeyExpr::Key(_) => {}
-                    CoreKeyExpr::Index(expr) | CoreKeyExpr::PathIndex(expr) => {
-                        collect_outer_locals(expr, arity, captures);
-                    }
+            expr => {
+                let (code, captures) = Self::lower_code(Vec::new(), expr);
+                let code = Arc::new(code);
+                if captures.is_empty() {
+                    self.data_into(
+                        CoreNetData::Value(Value::Lazy(
+                            crate::core::LazyValue::from_net_computation(NetValue::new(
+                                code.runtime().clone(),
+                            )),
+                        )),
+                        target,
+                    );
+                } else {
+                    let operator = crate::eval::computation_capture_operator(code, Arc::from([]));
+                    self.binding_operator_application_into(operator, captures, target);
                 }
             }
         }
     }
-}
 
-fn collect_outer_locals_in_value(value: &Value, arity: usize, captures: &mut BTreeSet<usize>) {
-    if let Value::Lazy(thunk) = value
-        && thunk.env().is_some_and(|env| env.is_empty())
-    {
-        collect_outer_locals(thunk.expr().unwrap(), arity, captures);
+    fn data_into(&mut self, data: CoreNetData, target: Port) {
+        let data = self.net.data(data);
+        self.net.wire(data, target);
     }
-}
 
-fn rewrite_outer_locals(expr: &CoreExpr, arity: usize, captures: &[usize]) -> CoreExpr {
-    match expr {
-        CoreExpr::Value(value) => {
-            CoreExpr::Value(rewrite_outer_locals_in_value(value, arity, captures))
+    fn distribute(&mut self, source: Port, targets: &[Port]) {
+        let copy = self.net.copy(targets.len());
+        self.net.wire(source, copy.input);
+        for (output, target) in copy.outputs.into_iter().zip(targets) {
+            self.net.wire(output, *target);
         }
-        CoreExpr::List(items) => CoreExpr::List(Arc::from(
-            items
-                .iter()
-                .map(|item| Arc::new(rewrite_outer_locals(item, arity, captures)))
-                .collect::<Vec<_>>(),
-        )),
-        CoreExpr::Apply(function, argument) => CoreExpr::Apply(
-            Arc::new(rewrite_outer_locals(function, arity, captures)),
-            Arc::new(rewrite_outer_locals(argument, arity, captures)),
-        ),
-        CoreExpr::Function {
-            code,
-            captures: nested,
-        } => CoreExpr::Function {
-            code: code.clone(),
-            captures: Arc::from(
-                nested
-                    .iter()
-                    .map(|capture| Arc::new(rewrite_outer_locals(capture, arity, captures)))
-                    .collect::<Vec<_>>(),
-            ),
-        },
-        CoreExpr::Local(index) if *index >= arity => {
-            let outer = index - arity;
-            let capture_position = captures
-                .binary_search(&outer)
-                .expect("every rewritten local was collected");
-            CoreExpr::Local(arity + captures.len() - capture_position - 1)
-        }
-        CoreExpr::Local(index) => CoreExpr::Local(*index),
-        CoreExpr::Access(base, path) => CoreExpr::Access(
-            Arc::new(rewrite_outer_locals(base, arity, captures)),
-            Arc::from(
-                path.iter()
-                    .map(|key| match key {
-                        CoreKeyExpr::Key(key) => CoreKeyExpr::Key(key.clone()),
-                        CoreKeyExpr::Index(expr) => CoreKeyExpr::Index(Arc::new(
-                            rewrite_outer_locals(expr, arity, captures),
-                        )),
-                        CoreKeyExpr::PathIndex(expr) => CoreKeyExpr::PathIndex(Arc::new(
-                            rewrite_outer_locals(expr, arity, captures),
-                        )),
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-        ),
     }
-}
-
-fn rewrite_outer_locals_in_value(value: &Value, arity: usize, captures: &[usize]) -> Value {
-    match value {
-        Value::Lazy(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
-            Value::expr(rewrite_outer_locals(thunk.expr().unwrap(), arity, captures))
-        }
-        other => other.clone(),
-    }
-}
-
-fn object_spec_value(value: Value, context: &CompileContext) -> Value {
-    context.value_apply(context.value_builtin(Builtin::ObjectSpec), value)
 }
 
 fn object_instance_from_parts_value(
@@ -1527,7 +1516,12 @@ fn object_instance_from_parts_value(
     defs: Value,
     context: &CompileContext,
 ) -> Value {
-    context.builtin_apply3_value(Builtin::ObjectInstanceFromParts, name, deps, defs)
+    lower_resolved_expr(object_instance_from_parts_resolved(
+        ResolvedExpr::Provided(name),
+        ResolvedExpr::Provided(deps),
+        ResolvedExpr::Provided(defs),
+        context,
+    ))
 }
 
 fn apply_builtin_resolved(
@@ -1732,15 +1726,6 @@ fn remove_object_spec_resolved(
     )
 }
 
-fn remove_object_spec_value(value: Value, context: &CompileContext) -> Value {
-    context.builtin_apply3_value(
-        Builtin::DictUpdate,
-        path_value("spec", context),
-        context.empty_dict_value(),
-        value,
-    )
-}
-
 fn object_body_scope_resolved(
     alias: Option<&str>,
     object_final_defs: ResolvedRoot,
@@ -1768,82 +1753,68 @@ fn object_body_scope_resolved(
     }
 }
 
-fn object_body_defs_value(
-    body: &[ObjectBodyDefinition],
-    alias: Option<&str>,
-    line: usize,
-    context: &CompileContext,
-    parent_scope: NameScope,
-) -> Result<Value, Diagnostic> {
-    object_body_defs_value_in_scope(
-        body,
-        alias,
-        line,
-        context,
-        parent_scope,
-        &mut ResolverContext::default(),
-    )
-}
-
-fn object_body_defs_value_in_scope(
-    body: &[ObjectBodyDefinition],
-    alias: Option<&str>,
-    line: usize,
-    context: &CompileContext,
-    parent_scope: NameScope,
-    locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    let resolved = object_body_defs_resolved_in_scope(
-        body,
-        alias,
-        line,
-        context,
-        parent_scope.resolved(),
-        locals,
-    )?;
-    Ok(resolved_expr_to_value_in_resolver(
-        resolved, context, locals,
-    ))
-}
-
 fn lower_extend(
     extend: &ObjectExtendDecl,
     line: usize,
     context: &CompileContext,
     definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
-    let object_value = extend_object_value(extend, line, context, definitions.clone())?;
-    let scope = NameScope::module(context, definitions.clone());
     let mut locals = ResolverContext::default();
-    let object_value = annotate_definition_value(
+    let scope = NameScope::module(context, definitions.clone()).resolved();
+    let definitions_root = ResolvedRoot::Provided(definitions.clone());
+    let extension_defs = object_body_defs_resolved_in_scope(
+        &extend.body,
+        extend.alias.as_deref(),
+        line,
+        context,
+        scope.clone(),
+        &mut locals,
+    )?;
+    let prior_object = path_resolved_in_definitions(&extend.target, definitions_root.expr());
+    let prior_spec = object_spec_resolved(prior_object, context);
+    let mut bindings = ResolvedBindings::default();
+    let prior_spec = bindings.bind(&mut locals, "<extended-object-spec>", prior_spec);
+    let spec_member = |name| ResolvedExpr::Access {
+        base: Box::new(prior_spec.expr()),
+        path: vec![ResolvedPathPart::Key(name_as_key(name))],
+    };
+    let prior_defs = spec_member("defs");
+    let base = locals.push_binding("<extension-base>");
+    let self_value = locals.push_binding("<extension-self>");
+    let prior_result = ResolvedExpr::apply(
+        prior_defs,
+        [ResolvedExpr::Local(base), ResolvedExpr::Local(self_value)],
+    );
+    let composed_defs = ResolvedExpr::lambda(
+        vec![base, self_value],
+        ResolvedExpr::apply(
+            extension_defs,
+            [prior_result, ResolvedExpr::Local(self_value)],
+        ),
+    );
+    let object_value = bindings.wrap(object_instance_from_parts_resolved(
+        spec_member("name"),
+        spec_member("deps"),
+        composed_defs,
+        context,
+    ));
+    let object_value = annotate_definition_resolved(
         BuiltinAssertion::Defined,
         &extend.target,
-        definitions.clone(),
+        &definitions_root,
         object_value,
         line,
         context,
         &scope,
         &mut locals,
     )?;
-
-    *definitions = update_module_value(definitions.clone(), &extend.target, object_value, context);
-    Ok(())
-}
-
-fn extend_object_value(
-    extend: &ObjectExtendDecl,
-    line: usize,
-    context: &CompileContext,
-    visible_definitions: Value,
-) -> Result<Value, Diagnostic> {
-    let extension_defs = object_body_defs_value(
-        &extend.body,
-        extend.alias.as_deref(),
-        line,
+    *definitions = lower_resolved_expr(update_module_resolved(
+        definitions_root.expr(),
+        &extend.target,
+        object_value,
         context,
-        NameScope::module(context, visible_definitions.clone()),
-    )?;
-    extend_object_with_defs(&extend.target, extension_defs, context, visible_definitions)
+    ));
+    Ok(())
 }
 
 fn extend_object_with_defs(
@@ -1852,95 +1823,37 @@ fn extend_object_with_defs(
     context: &CompileContext,
     visible_definitions: Value,
 ) -> Result<Value, Diagnostic> {
-    let prior_object = path_value_in_definitions(target, visible_definitions, context)?;
-    let prior_spec = context.value_access(
-        prior_object,
-        vec![context.key_expr_key(name_as_key("spec"))],
-    );
-    let prior_defs = context.value_access(
-        prior_spec.clone(),
-        vec![context.key_expr_key(name_as_key("defs"))],
-    );
-    let spec = Dict::new_sync()
-        .insert(
-            name_as_key("name"),
-            context.value_access(
-                prior_spec.clone(),
-                vec![context.key_expr_key(name_as_key("name"))],
-            ),
-        )
-        .insert(
-            name_as_key("deps"),
-            context.value_access(prior_spec, vec![context.key_expr_key(name_as_key("deps"))]),
-        )
-        .insert(
-            name_as_key("defs"),
-            compose_object_defs(prior_defs, extension_defs, context),
-        );
-
-    Ok(context.value_apply(
-        context.value_builtin(Builtin::ObjectInstance),
-        context.value_dict(spec),
-    ))
-}
-
-fn compose_object_defs(
-    prior_defs: Value,
-    extension_defs: Value,
-    context: &CompileContext,
-) -> Value {
-    let prior_self = context.value_apply(
-        context.value_apply(prior_defs, context.value_local(1)),
-        context.value_local(0),
-    );
-    let body = context.value_apply(
-        context.value_apply(extension_defs, prior_self),
-        context.value_local(0),
-    );
-    lower_lambda_value(2, body, context)
-}
-
-fn lower_update_definition(
-    target: &str,
-    visible_definitions: Value,
-    update: &SyntaxExpr,
-    sugar_param_count: usize,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    let prior =
-        definition_target_access_value(target, visible_definitions, line, context, scope, locals)?;
-    if sugar_param_count == 0 {
-        let update = syntax_expr_to_value_in_scope(update, line, context, scope, locals)?;
-        return Ok(context.value_apply(update, prior));
-    }
-
-    let SyntaxExpr::Lambda(params, body) = update else {
-        return Err(Diagnostic::error(
-            line,
-            "internal error lowering update definition arguments",
-        ));
+    let mut locals = ResolverContext::default();
+    let prior_object =
+        path_resolved_in_definitions(target, ResolvedExpr::Provided(visible_definitions));
+    let prior_spec = object_spec_resolved(prior_object, context);
+    let mut bindings = ResolvedBindings::default();
+    let prior_spec = bindings.bind(&mut locals, "<extended-object-spec>", prior_spec);
+    let spec_member = |name| ResolvedExpr::Access {
+        base: Box::new(prior_spec.expr()),
+        path: vec![ResolvedPathPart::Key(name_as_key(name))],
     };
-    if params.len() != sugar_param_count {
-        return Err(Diagnostic::error(
-            line,
-            "internal error counting update definition arguments",
-        ));
-    }
-
-    let base_len = locals.len();
-    locals.extend_bindings(params.iter().map(String::as_str));
-    let lowered = syntax_expr_to_value_in_scope(body, line, context, scope, locals);
-    locals.truncate(base_len);
-    let lowered = lowered?;
-    let prior = shift_value_locals(&prior, sugar_param_count, 0);
-    Ok(lower_lambda_value(
-        sugar_param_count,
-        context.value_apply(lowered, prior),
-        context,
-    ))
+    let base = locals.push_binding("<extension-base>");
+    let self_value = locals.push_binding("<extension-self>");
+    let prior_result = ResolvedExpr::apply(
+        spec_member("defs"),
+        [ResolvedExpr::Local(base), ResolvedExpr::Local(self_value)],
+    );
+    let composed_defs = ResolvedExpr::lambda(
+        vec![base, self_value],
+        ResolvedExpr::apply(
+            ResolvedExpr::Provided(extension_defs),
+            [prior_result, ResolvedExpr::Local(self_value)],
+        ),
+    );
+    Ok(lower_resolved_expr(bindings.wrap(
+        object_instance_from_parts_resolved(
+            spec_member("name"),
+            spec_member("deps"),
+            composed_defs,
+            context,
+        ),
+    )))
 }
 
 #[derive(Clone, Copy)]
@@ -2263,47 +2176,17 @@ fn path_resolved_in_scope(
     }
 }
 
-fn annotate_definition_value(
-    assertion: BuiltinAssertion,
+fn path_resolved_in_definitions(
     target: &str,
-    visible_definitions: Value,
-    value: Value,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    let tag = match assertion {
-        BuiltinAssertion::Defined => "assert_defined",
-        BuiltinAssertion::Undefined => "assert_undefined",
-    };
-    let payload = context.builtin_apply2_value(
-        Builtin::DictUnion,
-        context.builtin_apply2_value(
-            Builtin::DictSingleton,
-            context.value_atom(atom_from_str("name")),
-            context.value_binary(target),
-        ),
-        context.builtin_apply2_value(
-            Builtin::DictSingleton,
-            context.value_atom(atom_from_str("value")),
-            definition_target_access_value(
-                target,
-                visible_definitions,
-                line,
-                context,
-                scope,
-                locals,
-            )?,
-        ),
-    );
-    let annotation = context.builtin_apply2_value(
-        Builtin::DictSingleton,
-        context.value_atom(atom_from_str(tag)),
-        payload,
-    );
-
-    Ok(context.builtin_apply2_value(Builtin::Anno, annotation, value))
+    definitions: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
+    ResolvedExpr::Access {
+        base: Box::new(definitions),
+        path: target
+            .split('.')
+            .map(|part| ResolvedPathPart::Key(name_as_key(part)))
+            .collect(),
+    }
 }
 
 fn update_module_value(
@@ -2314,28 +2197,14 @@ fn update_module_value(
 ) -> Value {
     // Module definitions are ordered updates over the incoming namespace.
     // Ordinary dictionary literals still lower through DictUnion.
-    context.builtin_apply3_value(
+    lower_resolved_expr(apply_builtin_resolved(
         Builtin::DictUpdate,
-        path_value(target, context),
-        value,
-        definitions,
-    )
-}
-
-fn update_definition_target_value(
-    definitions: Value,
-    target: &str,
-    value: Value,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    Ok(context.builtin_apply3_value(
-        Builtin::DictUpdate,
-        definition_target_path_value(target, line, context, scope, locals)?,
-        value,
-        definitions,
+        [
+            ResolvedExpr::Embedded(path_value(target, context)),
+            ResolvedExpr::Provided(value),
+            ResolvedExpr::Provided(definitions),
+        ],
+        context,
     ))
 }
 
@@ -2359,23 +2228,26 @@ fn update_module_dict_entries(
             Value::Dict(nested) if !nested.is_empty() => {
                 update_module_dict_entries(definitions, path, nested, context)
             }
-            _ => context.builtin_apply3_value(
+            _ => lower_resolved_expr(apply_builtin_resolved(
                 Builtin::DictUpdate,
-                context.value_list(path),
-                value.clone(),
-                definitions,
-            ),
+                [
+                    ResolvedExpr::Embedded(Value::List(crate::core::List::from_values(path))),
+                    ResolvedExpr::Provided(value.clone()),
+                    ResolvedExpr::Provided(definitions),
+                ],
+                context,
+            )),
         }
     })
 }
 
 fn path_value(target: &str, context: &CompileContext) -> Value {
-    context.value_list(
+    Value::List(crate::core::List::from_values(
         target
             .split('.')
             .map(|part| context.value_atom(atom_from_str(part)))
             .collect(),
-    )
+    ))
 }
 
 fn definition_target_parts(target: &str, line: usize) -> Result<Vec<SyntaxKeyExpr>, Diagnostic> {
@@ -2395,84 +2267,6 @@ fn definition_target_parts(target: &str, line: usize) -> Result<Vec<SyntaxKeyExp
         })
 }
 
-fn definition_target_access_value(
-    target: &str,
-    definitions: Value,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    let path = definition_target_parts(target, line)?
-        .iter()
-        .map(|part| syntax_key_expr_to_core(part, line, context, scope, locals))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(context.value_access(definitions, path))
-}
-
-fn definition_target_path_value(
-    target: &str,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    let parts = definition_target_parts(target, line)?;
-    syntax_path_value(&parts, line, context, scope, locals)
-}
-
-fn syntax_path_value(
-    parts: &[SyntaxKeyExpr],
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    let mut result: Option<Value> = None;
-    let mut pending = Vec::new();
-
-    for part in parts {
-        match part {
-            SyntaxKeyExpr::PathIndex(expr) => {
-                result = append_path_segments(
-                    result,
-                    std::mem::take(&mut pending),
-                    syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?,
-                    context,
-                );
-            }
-            SyntaxKeyExpr::Atom(name) => pending.push(context.value_atom(atom_from_str(name))),
-            SyntaxKeyExpr::Index(expr) => {
-                pending.push(syntax_expr_to_value_in_scope(
-                    expr, line, context, scope, locals,
-                )?);
-            }
-        }
-    }
-
-    Ok(match result {
-        Some(result) => {
-            let tail = context.value_list(pending);
-            context.builtin_apply2_value(Builtin::Append, result, tail)
-        }
-        None => context.value_list(pending),
-    })
-}
-
-fn append_path_segments(
-    result: Option<Value>,
-    pending: Vec<Value>,
-    splice: Value,
-    context: &CompileContext,
-) -> Option<Value> {
-    let prefix = context.value_list(pending);
-    let combined = match result {
-        Some(result) => context.builtin_apply2_value(Builtin::Append, result, prefix),
-        None => prefix,
-    };
-    Some(context.builtin_apply2_value(Builtin::Append, combined, splice))
-}
-
 fn key_to_value(key: &Key, context: &CompileContext) -> Value {
     match key {
         Key::Atom(atom) => context.value_atom(*atom),
@@ -2481,12 +2275,12 @@ fn key_to_value(key: &Key, context: &CompileContext) -> Value {
         Key::AbstractGlobalPath(parts) => {
             context.value_atom(Atom::from_key(&Key::AbstractGlobalPath(parts.clone())))
         }
-        Key::List(items) => context.value_list(
+        Key::List(items) => Value::List(crate::core::List::from_values(
             items
                 .iter()
                 .map(|item| key_to_value(item, context))
                 .collect(),
-        ),
+        )),
         Key::Dict(entries) => {
             context.value_dict(entries.iter().fold(Dict::new_sync(), |dict, (key, value)| {
                 dict.insert(key.clone(), key_to_value(value, context))
@@ -2495,16 +2289,15 @@ fn key_to_value(key: &Key, context: &CompileContext) -> Value {
     }
 }
 
-fn path_value_in_definitions(
-    target: &str,
-    definitions: Value,
-    context: &CompileContext,
-) -> Result<Value, Diagnostic> {
+fn path_value_in_definitions(target: &str, definitions: Value) -> Result<Value, Diagnostic> {
     let path = target
         .split('.')
-        .map(|part| context.key_expr_key(name_as_key(part)))
+        .map(|part| ResolvedPathPart::Key(name_as_key(part)))
         .collect::<Vec<_>>();
-    Ok(context.value_access(definitions, path))
+    Ok(lower_resolved_expr(ResolvedExpr::Access {
+        base: Box::new(ResolvedExpr::Provided(definitions)),
+        path,
+    }))
 }
 
 fn scoped_module_path(context: &CompileContext, target: &str) -> std::sync::Arc<[String]> {
@@ -2534,19 +2327,7 @@ fn definition_param_count(
     Ok(params.split_whitespace().count())
 }
 
-fn syntax_expr_to_value_in_scope(
-    expr: &SyntaxExpr,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Result<Value, Diagnostic> {
-    let resolved = syntax_expr_to_resolved_in_scope(expr, line, context, scope, locals)?;
-    Ok(resolved_expr_to_value_in_resolver(
-        resolved, context, locals,
-    ))
-}
-
+#[cfg(test)]
 fn syntax_expr_to_resolved_in_scope(
     expr: &SyntaxExpr,
     line: usize,
@@ -2798,18 +2579,6 @@ fn lower_builtin_expr_resolved(
             syntax_expr_to_resolved_in_semantic_scope(right, line, context, scope, locals)?,
         ],
     ))
-}
-
-fn lower_effect_expr(name: &str, context: &CompileContext) -> Value {
-    let body = context.value_access(
-        context.value_local(0),
-        vec![context.key_expr_key(Key::atom_from_text(name))],
-    );
-    context.builtin_apply2_value(
-        Builtin::DictSingleton,
-        context.value_atom(atom_from_str("eff")),
-        lower_lambda_value(1, body, context),
-    )
 }
 
 fn lower_effect_expr_resolved(
@@ -3093,36 +2862,6 @@ fn lower_comparison_chain_values_resolved(
     ResolvedExpr::apply(ResolvedExpr::lambda(vec![right_binding], body), [right])
 }
 
-fn effect_then_values(operation: Value, next: Value, context: &CompileContext) -> Value {
-    let result = context.value_local(0);
-    let next = shift_value_locals(&next, 1, 0);
-    let body = annotate_assert_unit_value(result, next, context);
-    let continuation = lower_lambda_value(1, body, context);
-    effect_call_value("seq", vec![operation, continuation], context)
-}
-
-fn effect_call_value(name: &str, arguments: Vec<Value>, context: &CompileContext) -> Value {
-    arguments
-        .into_iter()
-        .fold(lower_effect_expr(name, context), |function, argument| {
-            context.value_apply(function, argument)
-        })
-}
-
-fn annotate_assert_unit_value(value: Value, target: Value, context: &CompileContext) -> Value {
-    let payload = context.builtin_apply2_value(
-        Builtin::DictSingleton,
-        context.value_atom(atom_from_str("value")),
-        value,
-    );
-    let annotation = context.builtin_apply2_value(
-        Builtin::DictSingleton,
-        context.value_atom(atom_from_str("assert_unit")),
-        payload,
-    );
-    context.builtin_apply2_value(Builtin::Anno, annotation, target)
-}
-
 fn syntax_key_expr_to_resolved_value(
     key: &SyntaxKeyExpr,
     line: usize,
@@ -3381,24 +3120,6 @@ fn local_name_metadata(raw: &str) -> LocalName {
             binding: None,
         },
     }
-}
-
-fn syntax_key_expr_to_core(
-    key: &SyntaxKeyExpr,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope,
-    locals: &mut ResolverContext,
-) -> Result<CoreKeyExpr, Diagnostic> {
-    Ok(match key {
-        SyntaxKeyExpr::Atom(name) => context.key_expr_key(name_as_key(name)),
-        SyntaxKeyExpr::Index(expr) => context.key_expr_index(syntax_expr_to_value_in_scope(
-            expr, line, context, scope, locals,
-        )?),
-        SyntaxKeyExpr::PathIndex(expr) => context.key_expr_path_index(
-            syntax_expr_to_value_in_scope(expr, line, context, scope, locals)?,
-        ),
-    })
 }
 
 fn name_as_key(name: &str) -> Key {
@@ -5218,6 +4939,12 @@ fn syntax_expr_parser<'src>()
                 "object_instance_from_parts"
             }
             SyntaxOperator::Builtin(crate::core::Builtin::ObjectInstance) => "object_instance",
+            SyntaxOperator::Builtin(crate::core::Builtin::EffectApply) => "effect_apply",
+            SyntaxOperator::Builtin(crate::core::Builtin::EffectCall) => "effect_call",
+            SyntaxOperator::Builtin(crate::core::Builtin::ObjectDefaultDefs) => {
+                "object_default_defs"
+            }
+            SyntaxOperator::Builtin(crate::core::Builtin::ObjectDictDefs) => "object_dict_defs",
         }
     }
 
@@ -5667,17 +5394,15 @@ fn split_lines(text: &str) -> Vec<PhysicalLine<'_>> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use crate::compiler::CompileContext;
-    use crate::core::{Builtin, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, Value};
+    use crate::core::{Builtin, Dict, Key, Value};
     use crate::number::Number;
 
-    fn core_global_access(context: &CompileContext, path: Vec<CoreKeyExpr>) -> CoreExpr {
-        CoreExpr::Access(
-            Arc::new(CoreExpr::Value(context.final_defs.clone())),
-            Arc::from(path),
-        )
+    fn core_global_access(context: &CompileContext, path: Vec<Key>) -> Value {
+        lower_resolved_expr(ResolvedExpr::Access {
+            base: Box::new(ResolvedExpr::Provided(context.final_defs.clone())),
+            path: path.into_iter().map(ResolvedPathPart::Key).collect(),
+        })
     }
 
     fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> Value {
@@ -8496,45 +8221,30 @@ mod tests {
         let mod_fn = value
             .get_atom_path(&[Atom::from_key(&Key::binary_from_text("mod"))])
             .expect("inline math import should expose mod");
-        let list_len_import = crate::eval::eval_value(&Value::expr(core_global_access(
+        let list_len_import = crate::eval::eval_value(&core_global_access(
             &context,
-            vec![
-                CoreKeyExpr::Key(Key::atom_from_text("list")),
-                CoreKeyExpr::Key(Key::atom_from_text("len")),
-            ],
-        )))
+            vec![Key::atom_from_text("list"), Key::atom_from_text("len")],
+        ))
         .expect("list.len import should resolve");
-        let list_spec = crate::eval::eval_value(&Value::expr(core_global_access(
+        let list_spec = crate::eval::eval_value(&core_global_access(
             &context,
-            vec![
-                CoreKeyExpr::Key(Key::atom_from_text("list")),
-                CoreKeyExpr::Key(Key::atom_from_text("spec")),
-            ],
-        )))
+            vec![Key::atom_from_text("list"), Key::atom_from_text("spec")],
+        ))
         .expect("list.spec import should resolve");
-        let list_head_import = crate::eval::eval_value(&Value::expr(core_global_access(
+        let list_head_import = crate::eval::eval_value(&core_global_access(
             &context,
-            vec![
-                CoreKeyExpr::Key(Key::atom_from_text("list")),
-                CoreKeyExpr::Key(Key::atom_from_text("head")),
-            ],
-        )))
+            vec![Key::atom_from_text("list"), Key::atom_from_text("head")],
+        ))
         .expect("list.head import should resolve");
-        let list_tail_import = crate::eval::eval_value(&Value::expr(core_global_access(
+        let list_tail_import = crate::eval::eval_value(&core_global_access(
             &context,
-            vec![
-                CoreKeyExpr::Key(Key::atom_from_text("list")),
-                CoreKeyExpr::Key(Key::atom_from_text("tail")),
-            ],
-        )))
+            vec![Key::atom_from_text("list"), Key::atom_from_text("tail")],
+        ))
         .expect("list.tail import should resolve");
-        let list_pure_import = crate::eval::eval_value(&Value::expr(core_global_access(
+        let list_pure_import = crate::eval::eval_value(&core_global_access(
             &context,
-            vec![
-                CoreKeyExpr::Key(Key::atom_from_text("list")),
-                CoreKeyExpr::Key(Key::atom_from_text("pure")),
-            ],
-        )))
+            vec![Key::atom_from_text("list"), Key::atom_from_text("pure")],
+        ))
         .expect("list.pure import should resolve");
         let (
             anno,

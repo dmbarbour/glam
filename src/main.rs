@@ -8,7 +8,7 @@ use std::sync::Arc;
 use glam::compiler::{
     BinaryFileLoader, BinaryLoadArgs, CompileContext, ModuleLoadArgs, ModuleLoader,
 };
-use glam::core::{Builtin, Dict, Key, Value};
+use glam::core::{Builtin, Dict, Key, List, Value};
 use glam::diagnostic::Severity;
 use glam::eval;
 use glam::g_syntax::{DeclarationKind, ParsedSource, SourceFile, lower_to_core_with_context};
@@ -217,12 +217,12 @@ fn initial_assembly_definitions(
     cli_args: &[String],
     configuration_env: Value,
 ) -> Value {
-    let args = context.value_list(
+    let args = Value::List(List::from_values(
         cli_args
             .iter()
             .map(|arg| context.value_binary(arg))
             .collect(),
-    );
+    ));
     let asm = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("args"), args));
     Value::Dict(
         Dict::new_sync()
@@ -307,16 +307,13 @@ fn empty_environment_object(context: &CompileContext) -> Value {
             Key::atom_from_text("name"),
             context.abstract_global_path_value(context.abstract_global_path("env").as_ref()),
         )
-        .insert(Key::atom_from_text("deps"), context.value_list(Vec::new()))
+        .insert(Key::atom_from_text("deps"), Value::List(List::empty()))
         .insert(
             Key::atom_from_text("defs"),
-            context.value_lambda(context.value_lambda(context.value_local(1))),
+            Value::Builtin(Builtin::ObjectDefaultDefs),
         );
 
-    context.value_apply(
-        context.value_builtin(Builtin::ObjectInstance),
-        context.value_dict(spec),
-    )
+    Value::builtin_call(Builtin::ObjectInstance, vec![Value::Dict(spec)])
 }
 
 fn configuration_paths() -> Vec<PathBuf> {

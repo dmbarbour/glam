@@ -11,16 +11,18 @@
   - prior module value for future mixin-style compilation
   - abstract module path for namespace-relative identities such as `abstract_global_path`
 - `g_syntax.rs` parses file.g through compile-time context, sourcing bytes and reporting diagnostics there
-- `g_syntax.rs` lowers AST through compile-time context and a core-facing
-  interface; source lambdas remain syntax, and update sugar is rewritten before
-  semantic lowering
+- `g_syntax.rs` resolves syntax into its own affine `ResolvedExpr<Value>` IR,
+  then consumes that IR directly into closed shared interaction nets; source
+  lambdas remain front-end syntax, and update sugar is rewritten before net
+  emission
 - `main.rs` applies one temporary top-level fixpoint to the anonymous assembly module
-- `core_net.rs` lowers an explicit `(arity, body)` directly to one bind chain
-  and shared runtime carrying `CoreNetData`; free locals become leading capture
-  binds that the enclosing semantic expression supplies once. Core stores the
-  result as `FunctionCode`, while each evaluated `FunctionValue` names a shared
-  curried runtime stage. Calls lazily copy the runtime frontier through
-  evaluator-only remote cursors
+- `core_net.rs` defines only the syntax-independent `CoreNetData`,
+  `CoreOperator`, and `CoreSpecialization` carried by generic interaction nets.
+  The `g_syntax` emitter builds one bind chain per resolved function; free
+  `BindingId`s become leading capture binds supplied once by the enclosing net.
+  Core stores the result as `FunctionCode`, while each evaluated
+  `FunctionValue` names a shared curried runtime stage. Calls lazily copy the
+  runtime frontier through evaluator-only remote cursors
 - `interaction_net.rs` provides generic `InteractionNet<Specialization>`
   topology. A specialization supplies cloneable `Data` and unary `Operator`
   values plus the rules for callable data and `Operator >< Data`;
@@ -41,7 +43,8 @@
   fan sites are translated per logical copy
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `LazyValue`
-- `eval.rs` contains no lambda or closure representation. Source functions are
+- `eval.rs` contains no production expression, lambda, or closure
+  representation. Source functions are
   ordinary, observable `Value::Function` data; partial application derives and
   shares another curried runtime stage. Saturated calls are memoized thunks.
   Source-level application lowers through a data-consuming `CoreOperator`, while raw
@@ -51,7 +54,8 @@
   outside runtime locks; operator failures become permanently stuck pairs rather
   than an underspecified retry state; net-lowered builtins curry by returning
   another bind-wrapped operator and retain saturated work as memoized semantic thunks;
-  contiguous application spines are represented by one semantic operator chain;
+  contiguous application spines (and direct lambda applications) are
+  represented by one semantic operator chain;
   function stages attach all presently available arguments together. List,
   dictionary, and Access construction lower through operator chains, with lazy
   aggregate members represented as closed value/computation thunks rather than
@@ -76,3 +80,5 @@ computations and saturated ordinary function calls require an
 exposed `Data` result; partial function stages explicitly require `Bind`, while
 explicit `Value::Net` application may retain a residual bind-exposing net.
 Construction effects still belong before adding the `interaction_net` keyword.
+`CompileContext` deliberately has no expression-building compatibility DSL;
+front ends own their semantic IR and return values or checked closed nets.

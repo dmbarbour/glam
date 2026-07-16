@@ -2,11 +2,11 @@
 
 ## Shared runtime and lazy copies
 
-`core_net` lowers an explicit function arity and body through an immutable
-checked template, then instantiates one `SharedRuntimeNet<CoreSpecialization>`.
-Capture locals become leading binds and are supplied by the enclosing semantic
-expression. Runtime instantiation preserves the exposed port behind a stable
-evaluator-only interface anchor.
+The `g_syntax` net emitter consumes a resolved function arity and body through
+an immutable checked template, then instantiates one
+`SharedRuntimeNet<CoreSpecialization>`. Capture bindings become leading binds
+and are supplied by the enclosing net. Runtime instantiation preserves the
+exposed port behind a stable evaluator-only interface anchor.
 
 A logical copy is target-owned state selected by `CopyId`. Its
 `RemoteCursor { copy, remote }` nodes are one-way suspended wires: `remote`
@@ -30,7 +30,8 @@ Variable use is normalized during lowering:
 - multiple uses become a balanced tree of binary `Fan` nodes
 
 `interaction_net` is generic over embedded data and has no dependency on core.
-`core_net` owns `CoreNetData` and the `Expr` lowering adapter.
+`core_net` owns only `CoreNetData`, `CoreOperator`, and `CoreSpecialization`;
+front-end lowering belongs to `g_syntax`.
 
 ## Checked construction
 
@@ -130,10 +131,10 @@ pair and diagnostic in the pair's stuck state. Core uses inspectable
 uses a dedicated operator whose only activated outcome is a stuck pair.
 
 Application spines use the dual construction. `NetBuilder::bind_spine` is
-shared by function lowering and evaluator-owned caller nets. `g_syntax` lowers
-a maximal application such as `f x y z` through
-`CompileContext::value_apply_many`. Ordinary semantic application becomes a
-data-consuming operator chain with closed lazy operands. A `Value::Function`
+shared by function lowering and evaluator-owned caller nets. `g_syntax`
+preserves a maximal application such as `f x y z` in `ResolvedExpr` and emits
+it directly as a data-consuming operator chain with closed lazy operands. A
+`Value::Function`
 attaches all currently supplied arguments to its shared stage together;
 undersaturation returns another shared function stage and saturation returns a
 memoized call thunk. Raw `Value::Net` remains the explicit cursor-callable path.
@@ -147,13 +148,13 @@ Bind/Operator shape using an applicable operator. No path
 inspects or detaches the argument. Source `Data >< Bind` calls remain exact
 source dependencies and are never copied.
 
-Core thunks can be backed by an expression, builtin/access computation, a
-closed arity-zero runtime computation, or a saturated function call. All forms
-share one memoized result. Saturated calls emit a semantic thunk so unrelated
-source-pair progress does not force strict work before its result is demanded.
-List, dictionary, and Access lowering use operator chains and store closed lazy
-members as ordinary values rather than exporting runtime/interface wires as
-aggregate holes.
+Core thunks can be backed by deferred host work, builtin/access computation, a
+closed arity-zero runtime computation, or a saturated function call. Core has
+no expression-backed lazy source. All forms share one memoized result.
+Saturated calls emit a semantic thunk so unrelated source-pair progress does
+not force strict work before its result is demanded. List, dictionary, and
+Access lowering use operator chains and store closed lazy members as ordinary
+values rather than exporting runtime/interface wires as aggregate holes.
 
 Only raw `Value::Net` uses callable-data cursor application. Ordinary functions
 remain independently observable host values backed by shared curried stages;
