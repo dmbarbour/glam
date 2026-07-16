@@ -71,5 +71,8 @@ list construction, and general application bodies now cross the net runtime
 boundary. Callable data is claimed and lowered immediately without touching its
 argument: nets load through cursors, while builtins lower to Bind/Operator
 topology. Cursor erasure uses ordinary materialization and Erase interactions;
-no erased frontier state or mapped-node history is required. General
-construction effects still belong before adding the `interaction_net` keyword.
+no erased frontier state or mapped-node history is required. Net-backed lazy
+computations and saturated ordinary function calls require an
+exposed `Data` result; partial function stages explicitly require `Bind`, while
+explicit `Value::Net` application may retain a residual bind-exposing net.
+Construction effects still belong before adding the `interaction_net` keyword.

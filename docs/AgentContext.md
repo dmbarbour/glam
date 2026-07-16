@@ -90,6 +90,12 @@ This document should summarize salient, relevant points rather than asking futur
   through a logical-copy cursor. `CompileContext::value_net` is the checked
   Rust construction entry point and discards the immutable template after
   instantiation.
+- A net-backed `Value::Lazy` is specifically a suspended computation and must
+  expose `Data` when forced; an exposed `Bind` is an error rather than an
+  implicit function conversion. Saturated `Value::Function` calls have the same
+  data-result contract. Partial function stages explicitly require the next
+  `Bind`, while application of an explicit `Value::Net` may return either data
+  or a residual bind-exposing net.
 - Lambdas exist only as syntax in `g_syntax`. `CompileContext` lowers a complete
   syntactic function, including its explicit lifted captures, without creating
   a core lambda or closure. Update-definition parameter sugar is likewise

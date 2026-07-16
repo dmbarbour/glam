@@ -94,11 +94,11 @@ fn eval_lazy(lazy: &LazyValue) -> Result<Value, EvalError> {
             .expect("saturated builtin thunk must contain an argument");
         apply_builtin(call.builtin, arguments, argument, &[])
     } else if let Some((function, arguments)) = lazy.function_call() {
-        apply_net_many(Value::Net(function.stage().clone()), arguments.to_vec())
-    } else if let Some(net) = lazy.net() {
+        evaluate_function_call(function, arguments)
+    } else if let Some(net) = lazy.net_computation() {
         let runtime = net.runtime().clone();
         let exposed = runtime.with(|runtime| runtime.exposed());
-        drive_core_net(runtime, exposed)
+        extract_net_data(runtime, exposed, "lazy net computation")
     } else if lazy.is_pending() {
         // TODO(parallel evaluation): an unfulfilled lazy value currently
         // fails fast. Parallel evaluation needs a thunk-level scheduler,
@@ -349,7 +349,7 @@ fn apply_values(
             }
             Value::Net(net) => {
                 let arguments = std::iter::once(argument).chain(arguments).collect();
-                return apply_net_many(Value::Net(net), arguments);
+                return apply_explicit_net_many(net, arguments);
             }
             other => function = apply_value(other, argument, local_env)?,
         }
@@ -368,12 +368,7 @@ fn apply_function_values(
     let remaining = function.remaining_arity();
     if arguments.len() < remaining {
         let supplied = arguments.len();
-        let stage = apply_net_many(Value::Net(function.stage().clone()), arguments)?;
-        let Value::Net(stage) = stage else {
-            return Err(EvalError::new(
-                "partial function application did not expose its next bind",
-            ));
-        };
+        let stage = advance_function_stage(function.stage().clone(), arguments)?;
         return Ok(Value::Function(FunctionValue::new(
             stage,
             remaining - supplied,
@@ -462,30 +457,24 @@ fn instantiate_function(code: &FunctionCode, captures: Vec<Value>) -> Result<Val
     let stage = if captures.is_empty() {
         NetValue::new(code.runtime().clone())
     } else {
-        let stage = apply_net_many(Value::Net(NetValue::new(code.runtime().clone())), captures)?;
-        let Value::Net(stage) = stage else {
-            return Err(EvalError::new(
-                "captured function did not expose its argument bind",
-            ));
-        };
-        stage
+        advance_function_stage(NetValue::new(code.runtime().clone()), captures)?
     };
     Ok(Value::Function(FunctionValue::new(stage, code.arity())))
 }
 
 fn apply_net(function: NetValue, argument: Value) -> Result<Value, EvalError> {
-    apply_net_many(Value::Net(function), vec![argument])
+    apply_explicit_net_many(function, vec![argument])
 }
 
-fn apply_net_many(function: Value, arguments: Vec<Value>) -> Result<Value, EvalError> {
+fn apply_explicit_net_many(function: NetValue, arguments: Vec<Value>) -> Result<Value, EvalError> {
     assert!(
         !arguments.is_empty(),
         "batched net application requires an argument"
     );
-    let net = attach_net_many(function, arguments);
+    let net = attach_net_many(Value::Net(function), arguments);
     let runtime = net.into_runtime();
     let exposed = runtime.with(|net| net.exposed());
-    drive_core_net(runtime, exposed)
+    finish_explicit_net_application(runtime, exposed)
 }
 
 fn attach_net_many(function: Value, arguments: Vec<Value>) -> NetValue {
@@ -504,34 +493,98 @@ fn attach_net_many(function: Value, arguments: Vec<Value>) -> NetValue {
 fn observe_net(net: NetValue) -> Result<Value, EvalError> {
     let runtime = net.runtime().clone();
     let exposed = runtime.with(|runtime| runtime.exposed());
-    drive_core_net_inner(runtime, exposed, false, Some(Value::Net(net)))
+    match drive_net_interface(&runtime, exposed)? {
+        NetInterfaceOutcome::Data => {
+            let data = runtime
+                .with(|runtime| runtime.interface_data(exposed).cloned())
+                .expect("observed interaction-net interface must contain data");
+            observe_core_data(data)
+        }
+        NetInterfaceOutcome::Bind | NetInterfaceOutcome::NormalForm => Ok(Value::Net(net)),
+    }
 }
 
-fn drive_core_net(
+fn extract_net_data(
+    runtime: crate::core_net::CoreRuntimeNet,
+    interface: Port,
+    operation: &str,
+) -> Result<Value, EvalError> {
+    match drive_net_interface(&runtime, interface)? {
+        NetInterfaceOutcome::Data => {
+            let data = runtime
+                .with_mut(|runtime| runtime.take_interface_data(interface))
+                .expect("evaluated interaction-net interface must contain data");
+            observe_core_data(data)
+        }
+        NetInterfaceOutcome::Bind => Err(EvalError::new(format!(
+            "{operation} exposed a bind instead of data"
+        ))),
+        NetInterfaceOutcome::NormalForm => Err(EvalError::new(format!(
+            "{operation} reached a non-data normal form"
+        ))),
+    }
+}
+
+fn finish_explicit_net_application(
     runtime: crate::core_net::CoreRuntimeNet,
     interface: Port,
 ) -> Result<Value, EvalError> {
-    drive_core_net_inner(runtime, interface, true, None)
+    match drive_net_interface(&runtime, interface)? {
+        NetInterfaceOutcome::Data => {
+            let data = runtime
+                .with_mut(|runtime| runtime.take_interface_data(interface))
+                .expect("applied interaction-net interface must contain data");
+            observe_core_data(data)
+        }
+        NetInterfaceOutcome::Bind => Ok(Value::Net(NetValue::new(runtime))),
+        NetInterfaceOutcome::NormalForm => Err(EvalError::new(
+            "interaction-net application reached a non-data normal form without exposing a bind",
+        )),
+    }
 }
 
-fn drive_core_net_inner(
-    runtime: crate::core_net::CoreRuntimeNet,
-    interface: Port,
-    consume_data: bool,
-    normal_form: Option<Value>,
+fn evaluate_function_call(
+    function: &FunctionValue,
+    arguments: &[Value],
 ) -> Result<Value, EvalError> {
+    let net = attach_net_many(Value::Net(function.stage().clone()), arguments.to_vec());
+    let runtime = net.into_runtime();
+    let exposed = runtime.with(|runtime| runtime.exposed());
+    extract_net_data(runtime, exposed, "function call")
+}
+
+fn advance_function_stage(
+    function: NetValue,
+    arguments: Vec<Value>,
+) -> Result<NetValue, EvalError> {
+    let net = attach_net_many(Value::Net(function), arguments);
+    let runtime = net.into_runtime();
+    let exposed = runtime.with(|runtime| runtime.exposed());
+    match drive_net_interface(&runtime, exposed)? {
+        NetInterfaceOutcome::Bind => Ok(NetValue::new(runtime)),
+        NetInterfaceOutcome::Data => Err(EvalError::new(
+            "partial function stage produced data before exposing its next bind",
+        )),
+        NetInterfaceOutcome::NormalForm => Err(EvalError::new(
+            "partial function stage reached a non-data normal form without exposing its next bind",
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetInterfaceOutcome {
+    Data,
+    Bind,
+    NormalForm,
+}
+
+fn drive_net_interface(
+    runtime: &crate::core_net::CoreRuntimeNet,
+    interface: Port,
+) -> Result<NetInterfaceOutcome, EvalError> {
     loop {
         if runtime.with(|net| net.interface_data(interface).is_some()) {
-            let data = if consume_data {
-                runtime
-                    .with_mut(|net| net.take_interface_data(interface))
-                    .expect("observed interaction-net interface must contain data")
-            } else {
-                runtime
-                    .with(|net| net.interface_data(interface).cloned())
-                    .expect("observed interaction-net interface must contain data")
-            };
-            return observe_core_data(data);
+            return Ok(NetInterfaceOutcome::Data);
         }
 
         let exposes_bind = runtime.with(|net| {
@@ -544,7 +597,7 @@ fn drive_core_net_inner(
             })
         });
         if exposes_bind {
-            return Ok(normal_form.unwrap_or_else(|| Value::Net(NetValue::new(runtime))));
+            return Ok(NetInterfaceOutcome::Bind);
         }
 
         if let Some(progress) = runtime.with_mut(|net| net.demand_interface(interface)) {
@@ -583,9 +636,7 @@ fn drive_core_net_inner(
 
         let scheduler_is_empty = runtime.with(|net| net.active_pairs().len() == 0);
         if scheduler_is_empty {
-            if let Some(normal_form) = normal_form {
-                return Ok(normal_form);
-            }
+            return Ok(NetInterfaceOutcome::NormalForm);
         }
 
         let detail = runtime.with(|net| {
@@ -1052,7 +1103,7 @@ fn apply_core_operator(
             let stage =
                 attach_net_many(Value::Net(NetValue::new(code.runtime().clone())), captures);
             Ok(OperatorYield::Data(CoreNetData::Value(Value::Lazy(
-                LazyValue::from_net(stage),
+                LazyValue::from_net_computation(stage),
             ))))
         }
         CoreOperator::Dict { keys, supplied } => {
@@ -3064,6 +3115,61 @@ mod tests {
             eval_value(&Value::Net(identity)).unwrap(),
             Value::Net(expected)
         );
+    }
+
+    #[test]
+    fn net_backed_lazy_values_require_an_exposed_data_node() {
+        let identity = closed_net(|builder| {
+            let [application, argument, result] = builder.bind();
+            builder.wire(argument, result);
+            application
+        });
+        let value = Value::Lazy(LazyValue::from_net_computation(identity));
+
+        assert_eq!(
+            eval_value(&value).unwrap_err().to_string(),
+            "lazy net computation exposed a bind instead of data"
+        );
+    }
+
+    #[test]
+    fn saturated_function_calls_reject_a_remaining_bind() {
+        let two_argument_stage = closed_net(|builder| {
+            let spine = builder.bind_spine(2);
+            for argument in &spine.arguments {
+                let eraser = builder.copy(0);
+                builder.wire(*argument, eraser.input);
+            }
+            let result = builder.data(CoreNetData::Value(n(42)));
+            builder.wire(spine.result, result);
+            spine.input
+        });
+        let malformed = FunctionValue::new(two_argument_stage, 1);
+        let result = apply_function_values(malformed, vec![n(0)]).unwrap();
+
+        assert_eq!(
+            eval_value(&result).unwrap_err().to_string(),
+            "function call exposed a bind instead of data"
+        );
+    }
+
+    #[test]
+    fn explicit_net_application_may_return_a_residual_bind() {
+        let two_argument_net = closed_net(|builder| {
+            let spine = builder.bind_spine(2);
+            for argument in &spine.arguments {
+                let eraser = builder.copy(0);
+                builder.wire(*argument, eraser.input);
+            }
+            let result = builder.data(CoreNetData::Value(n(42)));
+            builder.wire(spine.result, result);
+            spine.input
+        });
+
+        assert!(matches!(
+            apply_net(two_argument_net, n(0)).unwrap(),
+            Value::Net(_)
+        ));
     }
 
     #[test]

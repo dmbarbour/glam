@@ -291,7 +291,7 @@ impl ClosedLowerer {
         let code = Arc::new(lower_function_code(0, Arc::new(expr.clone())));
         if code.capture_count() == 0 {
             self.data_into(
-                CoreNetData::Value(Value::Lazy(crate::core::LazyValue::from_net(
+                CoreNetData::Value(Value::Lazy(crate::core::LazyValue::from_net_computation(
                     NetValue::new(code.runtime().clone()),
                 ))),
                 target,

@@ -352,7 +352,7 @@ enum LazySource {
         arguments: Arc<[Value]>,
     },
     Builtin(BuiltinCall),
-    Net(NetValue),
+    NetComputation(NetValue),
     FunctionCall {
         function: FunctionValue,
         arguments: Arc<[Value]>,
@@ -382,8 +382,8 @@ impl LazyValue {
         )
     }
 
-    pub(crate) fn from_net(net: NetValue) -> Self {
-        Self::with_source("net", LazySource::Net(net))
+    pub(crate) fn from_net_computation(net: NetValue) -> Self {
+        Self::with_source("net computation", LazySource::NetComputation(net))
     }
 
     pub fn expr(&self) -> Option<&Arc<Expr>> {
@@ -424,9 +424,9 @@ impl LazyValue {
         }
     }
 
-    pub(crate) fn net(&self) -> Option<&NetValue> {
+    pub(crate) fn net_computation(&self) -> Option<&NetValue> {
         match &self.source {
-            LazySource::Net(net) => Some(net),
+            LazySource::NetComputation(net) => Some(net),
             _ => None,
         }
     }
