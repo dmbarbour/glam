@@ -84,7 +84,7 @@ pub(super) fn apply_dict_value(
         )));
     }
 
-    if let Some(function) = dict.get(&Key::atom_from_text("apply"))
+    if let Some(function) = dict.get(&*keys::APPLY)
         && !is_undefined_dict_value(function)
     {
         return apply_value(eval_value(function)?, argument, local_env);
@@ -94,11 +94,10 @@ pub(super) fn apply_dict_value(
 }
 
 pub(super) fn singleton_effect_function(dict: &crate::core::Dict) -> Option<Value> {
-    let eff_key = Key::atom_from_text("eff");
     let function = dict_effect_function(dict)?;
     if dict
         .iter()
-        .all(|(key, value)| *key == eff_key || is_undefined_dict_value(value))
+        .all(|(key, value)| key == &*keys::EFF || is_undefined_dict_value(value))
     {
         Some(function.clone())
     } else {
@@ -107,7 +106,7 @@ pub(super) fn singleton_effect_function(dict: &crate::core::Dict) -> Option<Valu
 }
 
 pub(super) fn dict_effect_function(dict: &crate::core::Dict) -> Option<Value> {
-    let function = dict.get(&Key::atom_from_text("eff"))?;
+    let function = dict.get(&*keys::EFF)?;
     if is_undefined_dict_value(function) {
         None
     } else {
@@ -123,7 +122,7 @@ pub(super) fn apply_effect_function_value(function: Value, argument: Value) -> V
 }
 
 pub(super) fn effect_value(function: Value) -> Value {
-    Value::Dict(crate::core::Dict::new_sync().insert(Key::atom_from_text("eff"), function))
+    Value::Dict(crate::core::Dict::new_sync().insert((*keys::EFF).clone(), function))
 }
 
 pub(super) fn instantiate_function(

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::core::{
-    Builtin, BuiltinCall, FunctionCode, FunctionValue, Key, LazyValue, List, NetValue, Value,
+    Builtin, BuiltinCall, FunctionCode, FunctionValue, Key, LazyValue, List, NetValue, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::interaction_net::{

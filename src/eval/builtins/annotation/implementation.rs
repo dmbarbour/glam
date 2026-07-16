@@ -143,12 +143,12 @@ fn parse_assertion_annotation(
         )));
     };
 
-    let Some(name_value) = payload.get(&Key::atom_from_text("name")) else {
+    let Some(name_value) = payload.get(&*keys::NAME) else {
         return Ok(ParsedAssertion::Invalid(format!(
             "invalid `{tag_name}` annotation payload"
         )));
     };
-    let Some(value) = payload.get(&Key::atom_from_text("value")) else {
+    let Some(value) = payload.get(&*keys::VALUE) else {
         return Ok(ParsedAssertion::Invalid(format!(
             "invalid `{tag_name}` annotation payload"
         )));
@@ -170,7 +170,7 @@ fn parse_value_annotation(
         )));
     };
 
-    let Some(value) = payload.get(&Key::atom_from_text("value")) else {
+    let Some(value) = payload.get(&*keys::VALUE) else {
         return Ok(ParsedValueAnnotation::Invalid(format!(
             "invalid `{tag_name}` annotation payload"
         )));

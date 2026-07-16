@@ -12,7 +12,7 @@ pub(super) fn eval_object_instance_builtin(
     let mut base = Value::Dict(crate::core::Dict::new_sync());
     for spec in specs {
         let defs = spec
-            .get(&Key::atom_from_text("defs"))
+            .get(&*keys::DEFS)
             .cloned()
             .unwrap_or_else(default_object_defs_value);
         let mixed = apply_value(eval_value(&defs)?, base, local_env)?;
@@ -28,7 +28,7 @@ pub(super) fn eval_object_instance_builtin(
     let Value::Dict(base_dict) = base else {
         return Err(EvalError::new("object base is not a dictionary"));
     };
-    let object = Value::Dict(base_dict.insert(Key::atom_from_text("spec"), Value::Dict(spec_dict)));
+    let object = Value::Dict(base_dict.insert((*keys::SPEC).clone(), Value::Dict(spec_dict)));
     handle
         .set(object.clone())
         .map_err(|_| EvalError::new("object instance initialized twice"))?;
@@ -42,9 +42,9 @@ pub(super) fn eval_object_instance_from_parts_builtin(
     local_env: &[Value],
 ) -> Result<Value, EvalError> {
     let spec = crate::core::Dict::new_sync()
-        .insert(Key::atom_from_text("name"), name)
-        .insert(Key::atom_from_text("deps"), deps)
-        .insert(Key::atom_from_text("defs"), defs);
+        .insert((*keys::NAME).clone(), name)
+        .insert((*keys::DEPS).clone(), deps)
+        .insert((*keys::DEFS).clone(), defs);
     eval_object_instance_builtin(&Value::Dict(spec), local_env)
 }
 
@@ -56,7 +56,7 @@ pub(super) fn eval_object_spec_builtin(value: &Value) -> Result<Value, EvalError
         ));
     };
 
-    if let Some(spec) = dict.get(&Key::atom_from_text("spec")) {
+    if let Some(spec) = dict.get(&*keys::SPEC) {
         let spec = force_value_shell(spec)?;
         if !is_undefined_dict_value(&spec) {
             return Ok(spec);
@@ -72,7 +72,7 @@ pub(super) fn eval_object_local_name_builtin(
 ) -> Result<Value, EvalError> {
     let host_spec = eval_object_spec_builtin(host)?;
     let host_spec = object_spec_dict(&host_spec)?;
-    let Some(host_name) = host_spec.get(&Key::atom_from_text("name")).cloned() else {
+    let Some(host_name) = host_spec.get(&*keys::NAME).cloned() else {
         return Err(EvalError::new("object specification requires a name"));
     };
 
@@ -106,11 +106,11 @@ fn dict_object_spec(dict: crate::core::Dict) -> Value {
     });
     let spec = crate::core::Dict::new_sync()
         .insert(
-            Key::atom_from_text("name"),
+            (*keys::NAME).clone(),
             Value::Dict(crate::core::Dict::new_sync()),
         )
-        .insert(Key::atom_from_text("deps"), Value::List(List::empty()))
-        .insert(Key::atom_from_text("defs"), defs);
+        .insert((*keys::DEPS).clone(), Value::List(List::empty()))
+        .insert((*keys::DEFS).clone(), defs);
     Value::Dict(spec)
 }
 
@@ -169,7 +169,7 @@ fn object_c3_linearization(
         remember_object_spec(&entry.name, spec, seen)?;
     }
     let deps = spec
-        .get(&Key::atom_from_text("deps"))
+        .get(&*keys::DEPS)
         .cloned()
         .unwrap_or_else(|| Value::List(List::empty()));
     let deps = object_dep_specs(&deps)?;
@@ -258,7 +258,7 @@ fn same_linearized_object_spec(left: &LinearizedObjectSpec, right: &LinearizedOb
 }
 
 fn object_spec_name(spec: &crate::core::Dict, local_env: &[Value]) -> Result<Key, EvalError> {
-    let Some(name) = spec.get(&Key::atom_from_text("name")) else {
+    let Some(name) = spec.get(&*keys::NAME) else {
         return Err(EvalError::new("object specification requires a name"));
     };
     let name = force_value_shell(name)?;

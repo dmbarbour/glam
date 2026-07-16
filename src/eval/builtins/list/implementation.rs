@@ -1,13 +1,12 @@
 use super::super::super::*;
 
 pub(in crate::eval::builtins) fn tuple_payload(dict: &crate::core::Dict) -> Option<Value> {
-    let tuple_key = Key::atom_from_text("tuple");
-    let payload = dict.get(&tuple_key)?;
+    let payload = dict.get(&*keys::TUPLE)?;
     if is_undefined_dict_value(payload) {
         return None;
     }
     dict.iter()
-        .all(|(key, value)| *key == tuple_key || is_undefined_dict_value(value))
+        .all(|(key, value)| key == &*keys::TUPLE || is_undefined_dict_value(value))
         .then(|| payload.clone())
 }
 

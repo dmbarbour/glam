@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::core::{Key, LazyValue, List, Value};
+use crate::core::{Key, LazyValue, List, Value, keys};
 use crate::list::ListItem;
 use crate::number::Number;
 
@@ -329,8 +329,8 @@ pub(super) fn pop_list_front(list: &List) -> Result<Option<(Value, List)>, EvalE
 pub(super) fn split_result_value(left: Value, right: Value) -> Value {
     Value::Dict(
         crate::core::Dict::new_sync()
-            .insert(Key::atom_from_text("left"), left)
-            .insert(Key::atom_from_text("right"), right),
+            .insert((*keys::LEFT).clone(), left)
+            .insert((*keys::RIGHT).clone(), right),
     )
 }
 

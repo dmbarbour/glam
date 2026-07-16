@@ -144,25 +144,13 @@ fn list_effect_api() -> Value {
     Value::Dict(
         crate::core::Dict::new_sync()
             .insert(
-                Key::atom_from_text("r"),
+                (*keys::R).clone(),
                 Value::Builtin(Builtin::ListEffectReturn),
             )
-            .insert(
-                Key::atom_from_text("seq"),
-                Value::Builtin(Builtin::ListEffectSeq),
-            )
-            .insert(
-                Key::atom_from_text("alt"),
-                Value::Builtin(Builtin::ListEffectAlt),
-            )
-            .insert(Key::atom_from_text("fail"), Value::List(List::empty()))
-            .insert(
-                Key::atom_from_text("cut"),
-                Value::Builtin(Builtin::ListEffectCut),
-            )
-            .insert(
-                Key::atom_from_text("fix"),
-                Value::Builtin(Builtin::ListEffectFix),
-            ),
+            .insert((*keys::SEQ).clone(), Value::Builtin(Builtin::ListEffectSeq))
+            .insert((*keys::ALT).clone(), Value::Builtin(Builtin::ListEffectAlt))
+            .insert((*keys::FAIL).clone(), Value::List(List::empty()))
+            .insert((*keys::CUT).clone(), Value::Builtin(Builtin::ListEffectCut))
+            .insert((*keys::FIX).clone(), Value::Builtin(Builtin::ListEffectFix)),
     )
 }
