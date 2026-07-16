@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::core::Builtin;
-use crate::core::{Atom, Dict, Key, LazyValue, Value};
+use crate::core::{Atom, Dict, Key, LazyValue, Value, keys};
 use crate::diagnostic::Severity;
 use crate::number::Number;
 
@@ -169,9 +169,7 @@ impl CompileContext {
     }
 
     pub fn unit_value(&self) -> Value {
-        self.value_atom(Atom::from_key(&Key::abstract_global_path([
-            "builtin", "unit",
-        ])))
+        (*keys::UNIT_VALUE).clone()
     }
 
     /// Requests a module import in the current or a relative child namespace.

@@ -5,7 +5,7 @@
 
 use std::sync::LazyLock;
 
-use super::Key;
+use super::{Atom, Key, Value};
 
 macro_rules! protocol_key {
     ($name:ident, $text:literal) => {
@@ -32,3 +32,8 @@ protocol_key!(ALT, "alt");
 protocol_key!(FAIL, "fail");
 protocol_key!(CUT, "cut");
 protocol_key!(FIX, "fix");
+
+pub(crate) static UNIT: LazyLock<Key> =
+    LazyLock::new(|| Key::abstract_global_path(["builtin", "unit"]));
+pub(crate) static UNIT_VALUE: LazyLock<Value> =
+    LazyLock::new(|| Value::Atom(Atom::from_key(&UNIT)));
