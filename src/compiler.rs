@@ -1,36 +1,12 @@
 use std::borrow::Cow;
-use std::fmt;
 use std::sync::Arc;
 
 use crate::core::Builtin;
-use crate::core::{Atom, Dict, Key, LazyValue, NetValue, Value};
-use crate::core_net::CoreSpecialization;
-use crate::interaction_net::{NetBuildError, NetBuilder, Port};
+use crate::core::{Atom, Dict, Key, LazyValue, Value};
 use crate::number::Number;
 
 pub type ModuleLoader = Arc<dyn Fn(ModuleLoadArgs) -> Result<Value, String> + Send + Sync>;
 pub type BinaryFileLoader = Arc<dyn Fn(BinaryLoadArgs) -> Result<Value, String> + Send + Sync>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompileNetError {
-    Build(NetBuildError),
-}
-
-impl fmt::Display for CompileNetError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Build(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl std::error::Error for CompileNetError {}
-
-impl From<NetBuildError> for CompileNetError {
-    fn from(error: NetBuildError) -> Self {
-        Self::Build(error)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryLoadArgs {
@@ -200,21 +176,6 @@ impl CompileContext {
         ])))
     }
 
-    /// Constructs one closed interaction-net value. The callback returns the
-    /// net's sole exposed port; all other ports must be wired before it
-    /// returns. The immutable template exists only long enough to instantiate
-    /// the shared runtime.
-    pub fn value_net(
-        &self,
-        build: impl FnOnce(&mut NetBuilder<CoreSpecialization>) -> Result<Port, NetBuildError>,
-    ) -> Result<Value, CompileNetError> {
-        let mut builder = NetBuilder::new();
-        let exposed = build(&mut builder)?;
-        let template = builder.try_finish(exposed)?;
-        let runtime = template.instantiate_shared();
-        Ok(Value::Net(NetValue::new(runtime)))
-    }
-
     pub fn local_module_load_args(
         &self,
         reference: &str,
@@ -302,38 +263,5 @@ mod tests {
             context.abstract_global_path_value(&["builtin".to_owned(), "unit".to_owned()])
         );
         assert_ne!(unit, forged);
-    }
-
-    #[test]
-    fn compile_context_constructs_a_closed_net_value() {
-        let context = CompileContext::default();
-        let value = context
-            .value_net(|builder| {
-                let [application, argument, result] = builder.bind();
-                builder.try_wire(argument, result)?;
-                Ok(application)
-            })
-            .unwrap();
-
-        let Value::Net(net) = value else {
-            panic!("closed net construction should produce a net value");
-        };
-        assert_eq!(net.runtime().with(|runtime| runtime.exposed().index()), 1);
-    }
-
-    #[test]
-    fn compile_context_reports_incomplete_net_construction() {
-        let context = CompileContext::default();
-        let error = context
-            .value_net(|builder| {
-                let [application, _, _] = builder.bind();
-                Ok(application)
-            })
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            CompileNetError::Build(NetBuildError::PortUnwired(_))
-        ));
     }
 }

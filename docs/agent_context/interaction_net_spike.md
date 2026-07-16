@@ -90,8 +90,9 @@ explicitly remove nodes; there is no separate reachability collector.
 no immutable template, capture environment, or lambda body. Nets compose by
 attaching exposed ports through remote cursors. Because an exposed computation
 may produce ordinary data rather than a bind, attachment is not intrinsically
-a call. `CompileContext::value_net` provides checked construction for Rust
-front ends and drops the immutable template after instantiation.
+a call. `Assembler::net` provides checked construction for library clients and
+drops the immutable template after instantiation; built-in front-end lowering
+uses the crate-owned generic builder directly.
 
 CompileContext lowers a complete source function directly by arity. A source
 lambda such as `\x y z -> ...` becomes `FunctionCode` containing one runtime net

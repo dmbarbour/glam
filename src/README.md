@@ -12,7 +12,11 @@
   numbers through canonical text or small integer ratios, lossy finite `f64`
   conversion, lazy function application/evaluation, and ranged extraction from
   compact binaries or byte-valued lists without exposing core number or list
-  representations
+  representations. `Assembler::net` wraps the core-specialized builder with
+  lifetime-scoped opaque ports and only `bind`, `copy`, `data`, checked `wire`,
+  and final exposed-port selection. Core values, net topology, scheduling,
+  evaluation, lists, and number implementations are crate-private; `compiler`
+  and `g_syntax` remain temporarily public for the `--parse` inspection path
 - `api.rs` prepares an internal compile-time context for each source
   - optional source path for local-import loading
   - prior module value for future mixin-style compilation
@@ -91,6 +95,8 @@ no erased frontier state or mapped-node history is required. Net-backed lazy
 computations and saturated ordinary function calls require an
 exposed `Data` result; partial function stages explicitly require `Bind`, while
 explicit `Value::Net` application may retain a residual bind-exposing net.
-Construction effects still belong before adding the `interaction_net` keyword.
+The embedding facade now provides the checked replay target for future
+`interaction_net` construction effects; the freer-monad operation list and
+keyword remain front-end work.
 `CompileContext` deliberately has no expression-building compatibility DSL;
 front ends own their semantic IR and return values or checked closed nets.

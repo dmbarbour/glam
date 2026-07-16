@@ -156,7 +156,8 @@ fn eval_lazy(lazy: &LazyValue) -> Result<Value, EvalError> {
     }
 }
 
-pub fn eval_key(value: &Value) -> Result<Key, EvalError> {
+#[cfg(test)]
+fn eval_key(value: &Value) -> Result<Key, EvalError> {
     let value = force_value_shell(value)?;
     value_to_key(&value, &[])
 }

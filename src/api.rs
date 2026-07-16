@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::env;
 use std::ffi::OsString;
 use std::fmt;
+use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -18,10 +19,12 @@ use crate::compiler::{
     BinaryFileLoader, BinaryLoadArgs, CompileContext, ModuleLoadArgs, ModuleLoader,
 };
 use crate::core::Value as CoreValue;
-use crate::core::{Builtin, Dict, Key, List};
+use crate::core::{Builtin, Dict, Key, List, NetValue};
+use crate::core_net::CoreSpecialization;
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::g_syntax::{Diagnostic as SyntaxDiagnostic, SourceFile, lower_to_core_with_context};
+use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
 use crate::number::Number;
 
 pub const DEFAULT_DIAGNOSTIC_CAPACITY: usize = 1_000;
@@ -196,6 +199,94 @@ pub enum ValueKind {
     Function,
     Net,
     Lazy,
+}
+
+/// An opaque port created during one [`Assembler::net`] construction.
+///
+/// The lifetime prevents ports from escaping their construction callback or
+/// being mixed between builders. Copying a handle does not copy the net value;
+/// wiring either copy twice is rejected by the checked builder.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct NetPort<'net> {
+    port: CorePort,
+    brand: PhantomData<fn(&'net mut ()) -> &'net mut ()>,
+}
+
+impl fmt::Debug for NetPort<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NetPort(..)")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetBind<'net> {
+    pub application: NetPort<'net>,
+    pub argument: NetPort<'net>,
+    pub result: NetPort<'net>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetCopy<'net> {
+    pub input: NetPort<'net>,
+    pub outputs: Vec<NetPort<'net>>,
+}
+
+/// Checked, core-specialized construction of one closed interaction net.
+///
+/// This deliberately exposes only the operations needed by the future
+/// `interaction_net` effect replay. Returning a port from the callback selects
+/// the net's sole exposed port; every other port must be wired exactly once.
+pub struct NetBuilder<'net> {
+    builder: CoreNetBuilder<CoreSpecialization>,
+    brand: PhantomData<fn(&'net mut ()) -> &'net mut ()>,
+}
+
+impl<'net> NetBuilder<'net> {
+    pub fn bind(&mut self) -> NetBind<'net> {
+        let [application, argument, result] = self.builder.bind();
+        NetBind {
+            application: self.port(application),
+            argument: self.port(argument),
+            result: self.port(result),
+        }
+    }
+
+    pub fn copy(&mut self, outputs: usize) -> NetCopy<'net> {
+        let copy = self.builder.copy(outputs);
+        NetCopy {
+            input: self.port(copy.input),
+            outputs: copy
+                .outputs
+                .into_iter()
+                .map(|port| self.port(port))
+                .collect(),
+        }
+    }
+
+    pub fn data(&mut self, value: Value) -> NetPort<'net> {
+        let port = self.builder.data(value.into_core());
+        self.port(port)
+    }
+
+    pub fn wire(&mut self, left: NetPort<'net>, right: NetPort<'net>) -> Result<(), Error> {
+        self.builder
+            .try_wire(left.port, right.port)
+            .map_err(net_build_error)
+    }
+
+    fn new() -> Self {
+        Self {
+            builder: CoreNetBuilder::new(),
+            brand: PhantomData,
+        }
+    }
+
+    fn port(&self, port: CorePort) -> NetPort<'net> {
+        NetPort {
+            port,
+            brand: PhantomData,
+        }
+    }
 }
 
 /// One source or runtime diagnostic retained by an [`Assembler`].
@@ -499,6 +590,10 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+fn net_build_error(error: NetBuildError) -> Error {
+    Error::new(format!("invalid interaction net: {error}"))
+}
+
 #[derive(Clone)]
 pub struct Assembler {
     host: Arc<dyn Host>,
@@ -592,11 +687,25 @@ impl Assembler {
         .map_err(|error| Error::new(error.to_string()))
     }
 
+    /// Builds one closed interaction-net value through a checked, effect-style
+    /// API. The callback's returned port becomes the sole exposed port.
+    pub fn net(
+        &self,
+        build: impl for<'net> FnOnce(&mut NetBuilder<'net>) -> Result<NetPort<'net>, Error>,
+    ) -> Result<Value, Error> {
+        let mut builder = NetBuilder::new();
+        let exposed = build(&mut builder)?.port;
+        let template = builder
+            .builder
+            .try_finish(exposed)
+            .map_err(net_build_error)?;
+        Ok(Value::from_core(CoreValue::Net(NetValue::new(
+            template.instantiate_shared(),
+        ))))
+    }
+
     // TODO: add reflection snapshots and event subscriptions here. Reflection
     // producers should feed the same bounded history rather than print.
-
-    // TODO: add the checked effect-style bind/copy/data/wire builder here
-    // without exposing the generic core specialization or runtime scheduler.
 
     pub fn get(&self, root: &Value, path: &str) -> Result<Value, Error> {
         self.core_value_at_path(root.as_core(), path)

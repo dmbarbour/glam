@@ -265,6 +265,7 @@ pub struct InteractionNet<S: NetSpecialization> {
     active_pairs: Arc<[ActivePairKey]>, // subset of wires connecting principal ports
 }
 
+#[cfg(test)]
 impl<S: NetSpecialization> InteractionNet<S> {
     pub fn nodes(&self) -> &[Node<S>] {
         &self.nodes

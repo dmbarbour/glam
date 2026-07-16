@@ -144,6 +144,69 @@ fn assembler_extracts_ranges_from_compact_and_list_binary_data() {
     assert!(assembler.binary_slice(&listed, 3..5).is_err());
 }
 
+#[test]
+fn checked_net_builder_constructs_an_identity_function() {
+    let assembler = Assembler::default();
+    let identity = assembler
+        .net(|net| {
+            let bind = net.bind();
+            net.wire(bind.argument, bind.result)?;
+            Ok(bind.application)
+        })
+        .expect("identity net should be closed");
+    let result = assembler
+        .apply(&identity, [Value::integer(42)])
+        .and_then(|value| assembler.evaluate(&value))
+        .expect("identity net should return its argument");
+
+    assert_eq!(result.as_i64(), Some(42));
+}
+
+#[test]
+fn checked_net_builder_exposes_data_through_copy_helpers() {
+    let assembler = Assembler::default();
+    let net = assembler
+        .net(|net| {
+            let data = net.data(Value::text("copied"));
+            let copy = net.copy(1);
+            net.wire(data, copy.input)?;
+            Ok(copy.outputs[0])
+        })
+        .expect("one-output copy should normalize to a tunnel");
+
+    assert_eq!(
+        assembler
+            .evaluate(&net)
+            .expect("net should expose its data")
+            .as_binary(),
+        Some(b"copied".as_slice())
+    );
+}
+
+#[test]
+fn checked_net_builder_reports_wiring_and_finalization_errors() {
+    let assembler = Assembler::default();
+    let unwired = assembler
+        .net(|net| {
+            let bind = net.bind();
+            Ok(bind.application)
+        })
+        .expect_err("unwired ports must reject the net");
+    assert!(unwired.to_string().contains("is unwired"));
+
+    let duplicate = assembler
+        .net(|net| {
+            let left = net.data(Value::integer(1));
+            let right = net.data(Value::integer(2));
+            let other = net.data(Value::integer(3));
+            net.wire(left, right)?;
+            net.wire(left, other)?;
+            Ok(other)
+        })
+        .expect_err("a port cannot be wired twice");
+    assert!(duplicate.to_string().contains("wired more than once"));
+}
+
 struct MemoryHost {
     files: HashMap<PathBuf, Bytes>,
 }

@@ -47,6 +47,12 @@ This document should summarize salient, relevant points rather than asking futur
 - Public binary range extraction accepts compact binaries and byte-valued lazy
   lists. Keep compact byte leaves intact and force only through evaluator-owned
   list operations.
+- `Assembler::net` is the public, nongeneric construction facade. Its opaque
+  ports are scoped to one callback and it exposes only bind, balanced copy,
+  embedded data, checked wiring, and selection of one exposed port. Do not leak
+  nodes, core specialization types, runtime nets, cursors, fan histories, or
+  reduction controls through this API; future `interaction_net` effects should
+  replay into it.
 - Use Chumsky for growing `.g` grammar work. Keep hand-written parsing limited
   to small source-normalization steps where that is clearer than grammar code.
 - Object implementation notes live in `docs/agent_context/object_spike.md`.
@@ -95,9 +101,9 @@ This document should summarize salient, relevant points rather than asking futur
 - `Value::Net` is a first-class closed net containing only a
   `SharedRuntimeNet<CoreSpecialization>`. Observing it may produce ordinary data or
   preserve a non-data normal-form net; applying it attaches the exposed port
-  through a logical-copy cursor. `CompileContext::value_net` is the checked
-  Rust construction entry point and discards the immutable template after
-  instantiation.
+  through a logical-copy cursor. `Assembler::net` is the checked public Rust
+  construction entry point and discards the immutable template after
+  instantiation; front-end lowering uses the crate-owned generic builder.
 - A net-backed `Value::Lazy` is specifically a suspended computation and must
   expose `Data` when forced; an exposed `Bind` is an error rather than an
   implicit function conversion. Saturated `Value::Function` calls have the same
@@ -108,8 +114,8 @@ This document should summarize salient, relevant points rather than asking futur
   The front-end net emitter lowers a complete function, including explicit
   lifted captures, without creating a core lambda or closure.
   Update-definition parameter sugar is likewise rewritten while still syntax.
-  `CompileContext` exposes values, builtins, loaders, paths, and checked closed
-  net construction; it has no local/lambda/application expression helpers.
+  `CompileContext` exposes values, builtins, loaders, and paths; it has no
+  local/lambda/application expression helpers or public raw-net builder.
 - Lowered function templates contain `Bind`, binary `Fan`, `Erase`, and `Data`
   nodes. The generic topology lives in `interaction_net.rs`; core data/operator
   specialization lives in `core_net.rs`, while front-end lowering lives in

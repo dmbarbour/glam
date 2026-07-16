@@ -1,19 +1,22 @@
 mod api;
 
+/// compiler and g_syntax are exposed for `--parse` and will be
+/// removed from the public API in the future (when reflection is 
+/// implemented).
 pub mod compiler;
-pub mod core;
-pub mod core_net;
+mod core;
+mod core_net;
 pub mod diagnostic;
-pub mod eval;
+mod eval;
 pub mod g_syntax;
-pub mod interaction_net;
-pub mod list;
-pub mod number;
+mod interaction_net;
+mod list;
+mod number;
 
 pub use api::{
     Assembler, BuiltModule, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticBuffer,
     DiagnosticSink, DiagnosticSnapshot, Error, Host, HostError, ModuleBuilder, ModuleInput,
-    SystemHost, Value, ValueKind,
+    NetBind, NetBuilder, NetCopy, NetPort, SystemHost, Value, ValueKind,
 };
 pub use core::Builtin;
 pub use diagnostic::Severity;
