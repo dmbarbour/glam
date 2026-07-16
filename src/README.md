@@ -45,7 +45,7 @@ main
   -> ModuleBuilder + ModuleInput values
   -> api::Assembler::build_module_inner
        -> Host reads each source
-       -> CompileContext records hidden provenance and module/import capabilities
+       -> CompileContext qualifies relative names/imports using hidden provenance
        -> g_syntax explicitly interprets raw source bytes into ParsedSource
        -> g_syntax resolves and lowers declarations into a core Value
        -> the final-definition lazy cell closes the module fixpoint

@@ -10,9 +10,7 @@ pub(in crate::g_syntax) fn lower_object(
     let mut locals = ResolverContext::default();
     let scope = NameScope::module(context, definitions.clone()).resolved();
     let definitions_root = ResolvedRoot::Provided(definitions.clone());
-    let name = ResolvedExpr::Embedded(
-        context.abstract_global_path_value(context.abstract_global_path(&object.target).as_ref()),
-    );
+    let name = ResolvedExpr::Embedded(context.abstract_global_path(&object.target));
     let object_value =
         object_decl_resolved_in_scope(object, line, context, scope.clone(), &mut locals, name)?;
     let target_context = DefinitionTargetContext::new(&definitions_root, line, context, &scope);

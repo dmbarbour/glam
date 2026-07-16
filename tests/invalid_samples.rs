@@ -22,7 +22,7 @@ fn invalid_syntax_samples_report_expected_diagnostics() {
         let expect_text = fs::read_to_string(&expect_path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", expect_path.display()));
 
-        let context = CompileContext::from_module_path(["assembly"]);
+        let context = CompileContext::default();
         let parsed = parse_source(&source_bytes);
         let lowered = lower_to_core_with_context(parsed, &context);
         assert_expectations(

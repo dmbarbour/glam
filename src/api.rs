@@ -832,8 +832,8 @@ impl Assembler {
                 let bytes = self.read_source(path)?;
                 let label: Arc<str> = Arc::from(path.display().to_string());
                 let had_errors = Arc::new(AtomicBool::new(false));
-                let context = CompileContext::from_source_path(label.clone())
-                    .with_module_path(module_path.iter().cloned())
+                let context = CompileContext::from_module_path(module_path.iter().cloned())
+                    .with_importer_source_path(label.clone())
                     .with_prior_defs(prior_defs)
                     .with_final_defs(final_defs)
                     .with_local_module_loader(module_loader)
@@ -896,8 +896,8 @@ impl Assembler {
         let module_loader = self.module_loader(session.clone());
         let binary_loader = self.binary_loader();
         let had_errors = Arc::new(AtomicBool::new(false));
-        let context = CompileContext::from_source_path(label.as_str())
-            .with_module_path(args.module_path.iter().cloned())
+        let context = CompileContext::from_module_path(args.module_path.iter().cloned())
+            .with_importer_source_path(label.as_str())
             .with_prior_defs(args.prior_defs)
             .with_final_defs(args.final_defs)
             .with_local_module_loader(module_loader)

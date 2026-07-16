@@ -456,12 +456,3 @@ pub(in crate::g_syntax) fn path_value_in_definitions(
         path,
     }))
 }
-
-pub(in crate::g_syntax) fn scoped_module_path(
-    context: &CompileContext,
-    target: &str,
-) -> std::sync::Arc<[String]> {
-    let mut parts = context.module_path().to_vec();
-    parts.extend(target.split('.').map(ToOwned::to_owned));
-    std::sync::Arc::from(parts.into_boxed_slice())
-}

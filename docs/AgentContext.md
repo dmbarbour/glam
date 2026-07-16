@@ -46,6 +46,10 @@ design in the design documents.
 - `CompileContext` supplies module capabilities, values, builtins, loaders,
   and diagnostic emission. It is not an expression-building DSL and must not
   acquire lambda/application helpers.
+- Front ends pass relative names to `CompileContext::abstract_global_path` and
+  relative import requests to `import_module`/`import_binary`. Absolute module
+  paths and importer provenance remain handler-owned and must not be exposed
+  back to the front end.
 
 ### Values and evaluation
 

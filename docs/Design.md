@@ -280,6 +280,8 @@ We can express extarbitrary data flow via indexed state, and arbitrary control f
 
 Unfortunately, fixpoint is not fully compatible with continuations. The essential issue is the continuation may be invoked any number of times, but we're only permitted exactly one fixpoint value. We can shift where reset is scoped within the fixpoint. We can support Alt and Fix together, i.e. exactly one fixpoint future per alt choice.
 
+*Note:* I might review [Delimited Control in OCaml, Abstractly and Concretely](https://okmij.org/ftp/continuations/caml-shift.pdf) or [A Monadic Framework for Delimited Continuations](https://www.microsoft.com/en-us/research/wp-content/uploads/2005/01/jfp-revised.pdf) for a better alternative to shift-reset. A `pushSubCont` variation requires abstracting continuations as something more structured than functions.
+
 *Note:* A transformer variation of 'run' is feasible. We'd likely want to lift Alt, Cut, Fail, and Fix, while rewriting the higher-order effects. But *Extensible Effects* offers a better direction.
 
 ### Abstract Effects API

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use super::super::*;
 use super::objects::*;
 
@@ -68,13 +66,12 @@ pub(in crate::g_syntax) fn lower_local_import(
 ) -> Result<(), Diagnostic> {
     match placement {
         ImportPlacement::Inline => {
-            let args = context.local_module_load_args(
+            *definitions = context.import_module(
                 reference,
-                Arc::from(context.module_path()),
+                None,
                 definitions.clone(),
                 context.final_defs().clone(),
             );
-            *definitions = context.value_load_local_module(args);
         }
         ImportPlacement::As(target) => {
             let prior_defs = import_as_prior_defs(target, definitions.clone(), context)?;
@@ -116,7 +113,7 @@ pub(in crate::g_syntax) fn lower_local_binary_import(
         ));
     };
 
-    let loaded = context.value_load_local_binary(context.local_binary_load_args(reference));
+    let loaded = context.import_binary(reference);
     *definitions = update_module_value(definitions.clone(), target, loaded, context);
     Ok(())
 }
@@ -128,13 +125,7 @@ pub(in crate::g_syntax) fn scoped_local_import_value(
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
     let final_defs = path_value_in_definitions(target, context.final_defs().clone())?;
-    let args = context.local_module_load_args(
-        reference,
-        scoped_module_path(context, target),
-        prior_defs,
-        final_defs,
-    );
-    Ok(context.value_load_local_module(args))
+    Ok(context.import_module(reference, Some(target), prior_defs, final_defs))
 }
 
 pub(in crate::g_syntax) fn import_as_prior_defs(
@@ -157,11 +148,7 @@ pub(in crate::g_syntax) fn inherited_import_env_object_value(
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
     let parent_env = path_value_in_definitions("env", definitions)?;
-    let name = context.abstract_global_path_value(
-        context
-            .abstract_global_path(&format!("{target}.env"))
-            .as_ref(),
-    );
+    let name = context.abstract_global_path(&format!("{target}.env"));
     let deps = lower_resolved_expr(ResolvedExpr::List(vec![object_spec_resolved(
         ResolvedExpr::Provided(parent_env),
         context,
@@ -190,9 +177,7 @@ pub(in crate::g_syntax) fn module_object_value(
     context: &CompileContext,
 ) -> Value {
     lower_resolved_expr(object_instance_from_parts_resolved(
-        ResolvedExpr::Embedded(
-            context.abstract_global_path_value(context.abstract_global_path(target).as_ref()),
-        ),
+        ResolvedExpr::Embedded(context.abstract_global_path(target)),
         ResolvedExpr::List(Vec::new()),
         ResolvedExpr::Provided(constant_object_defs(module)),
         context,
@@ -216,8 +201,7 @@ pub(in crate::g_syntax) fn lower_unique(
     definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
     for name in names {
-        let path = context.abstract_global_path(name);
-        let value = context.abstract_global_path_value(path.as_ref());
+        let value = context.abstract_global_path(name);
         *definitions = update_module_value(definitions.clone(), name, value, context);
     }
     Ok(())
