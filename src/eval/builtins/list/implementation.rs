@@ -1,15 +1,5 @@
 use super::super::super::*;
 
-pub(in crate::eval::builtins) fn tuple_payload(dict: &crate::core::Dict) -> Option<Value> {
-    let payload = dict.get(&*keys::TUPLE)?;
-    if is_undefined_dict_value(payload) {
-        return None;
-    }
-    dict.iter()
-        .all(|(key, value)| key == &*keys::TUPLE || is_undefined_dict_value(value))
-        .then(|| payload.clone())
-}
-
 pub(in crate::eval::builtins) fn list_like_value(
     value: Value,
     name: &str,

@@ -78,7 +78,7 @@ pub(super) fn apply_dict_value(
     argument: Value,
     local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    if let Some(function) = singleton_effect_function(dict) {
+    if let Some(function) = dict.tagged_payload(&keys::EFF)? {
         return Ok(effect_value(apply_effect_function_value(
             function, argument,
         )));
@@ -91,27 +91,6 @@ pub(super) fn apply_dict_value(
     }
 
     Err(EvalError::new("application requires a function value"))
-}
-
-pub(super) fn singleton_effect_function(dict: &crate::core::Dict) -> Option<Value> {
-    let function = dict_effect_function(dict)?;
-    if dict
-        .iter()
-        .all(|(key, value)| key == &*keys::EFF || is_undefined_dict_value(value))
-    {
-        Some(function.clone())
-    } else {
-        None
-    }
-}
-
-pub(super) fn dict_effect_function(dict: &crate::core::Dict) -> Option<Value> {
-    let function = dict.get(&*keys::EFF)?;
-    if is_undefined_dict_value(function) {
-        None
-    } else {
-        Some(function.clone())
-    }
 }
 
 pub(super) fn apply_effect_function_value(function: Value, argument: Value) -> Value {

@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use super::super::super::*;
-use super::super::list::{list_like_value, tuple_payload};
+use super::super::list::list_like_value;
 
 pub(super) fn eval_compare_ordering_builtin(
     name: &str,
@@ -70,12 +70,12 @@ fn compare_ordered_values(
             compare_lists_ordered(left, right, local_env, name)
         }
         (Value::Dict(left), Value::Dict(right)) => {
-            let Some(left) = tuple_payload(&left) else {
+            let Some(left) = left.tagged_payload(&keys::TUPLE)? else {
                 return Err(EvalError::new(format!(
                     "{name} builtin can only order dictionaries tagged as `tuple`"
                 )));
             };
-            let Some(right) = tuple_payload(&right) else {
+            let Some(right) = right.tagged_payload(&keys::TUPLE)? else {
                 return Err(EvalError::new(format!(
                     "{name} builtin can only order dictionaries tagged as `tuple`"
                 )));

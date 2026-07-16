@@ -975,6 +975,63 @@ fn effect_application_requires_singleton_eff_tag() {
 }
 
 #[test]
+fn tagged_payload_ignores_only_semantically_undefined_extra_entries() {
+    let payload = n(42);
+    let lazy_empty = Value::Lazy(LazyValue::deferred("empty tag field", || {
+        Ok(Value::Dict(Dict::new_sync()))
+    }));
+    let recursively_empty =
+        Value::Dict(Dict::new_sync().insert(Key::atom_from_text("nested"), lazy_empty));
+    let tagged = Dict::new_sync()
+        .insert((*keys::TUPLE).clone(), payload.clone())
+        .insert(Key::atom_from_text("ignored"), recursively_empty.clone());
+
+    assert_eq!(tagged.tagged_payload(&keys::TUPLE).unwrap(), Some(payload));
+    assert_eq!(
+        tagged
+            .insert(Key::atom_from_text("defined"), n(1))
+            .tagged_payload(&keys::TUPLE)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        Dict::new_sync()
+            .insert((*keys::TUPLE).clone(), recursively_empty)
+            .tagged_payload(&keys::TUPLE)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn tuple_ordering_requires_a_singleton_tuple_tag() {
+    let left = Value::Dict(
+        Dict::new_sync()
+            .insert(
+                (*keys::TUPLE).clone(),
+                Value::List(List::from_values(vec![n(1)])),
+            )
+            .insert(Key::atom_from_text("extra"), n(1)),
+    );
+    let right = Value::Dict(Dict::new_sync().insert(
+        (*keys::TUPLE).clone(),
+        Value::List(List::from_values(vec![n(2)])),
+    ));
+
+    let err = eval_closed_expr(&builtin2_expr(
+        Builtin::Less,
+        TestExpr::Value(left),
+        TestExpr::Value(right),
+    ))
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "less-than builtin can only order dictionaries tagged as `tuple`"
+    );
+}
+
+#[test]
 fn local_dictionary_paths_resolve_without_a_global_root() {
     let dict = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("tail"),

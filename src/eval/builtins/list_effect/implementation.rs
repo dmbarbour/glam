@@ -71,7 +71,11 @@ fn run_list_effect_to_list(effect: Value, local_env: Arc<[Value]>) -> Result<Lis
             "list effect handler requires an effect dictionary, got {effect:?}"
         )));
     };
-    let Some(function) = dict_effect_function(&dict) else {
+    let Some(function) = dict
+        .get(&*keys::EFF)
+        .filter(|function| !is_undefined_dict_value(function))
+        .cloned()
+    else {
         return Err(EvalError::new(
             "list effect handler requires an `eff` member",
         ));

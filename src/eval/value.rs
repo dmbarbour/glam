@@ -373,6 +373,46 @@ pub(super) fn is_undefined_dict_value(value: &Value) -> bool {
     is_undefined_value(value)
 }
 
+/// Evaluator semantics for extracting the payload of a singleton tagged value.
+///
+/// Other dictionary entries are ignored only when their values recursively
+/// evaluate to undefined dictionaries. The tagged payload must itself be
+/// semantically defined.
+pub(super) trait TaggedDictExt {
+    fn tagged_payload(&self, tag: &Key) -> Result<Option<Value>, EvalError>;
+}
+
+impl TaggedDictExt for crate::core::Dict {
+    fn tagged_payload(&self, tag: &Key) -> Result<Option<Value>, EvalError> {
+        let Some(payload) = self.get(tag) else {
+            return Ok(None);
+        };
+        if is_semantically_undefined(payload)? {
+            return Ok(None);
+        }
+
+        for (key, value) in self.iter() {
+            if key != tag && !is_semantically_undefined(value)? {
+                return Ok(None);
+            }
+        }
+        Ok(Some(payload.clone()))
+    }
+}
+
+fn is_semantically_undefined(value: &Value) -> Result<bool, EvalError> {
+    let value = force_value_shell(value)?;
+    let Value::Dict(dict) = value else {
+        return Ok(false);
+    };
+    for (_, value) in dict.iter() {
+        if !is_semantically_undefined(value)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 pub(super) fn expand_key_expr(key: &TestKey, local_env: &[Value]) -> Result<Vec<Key>, EvalError> {
     match key {

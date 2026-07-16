@@ -2,8 +2,8 @@ use super::super::*;
 
 mod implementation;
 
+pub(super) use implementation::list_like_value;
 use implementation::*;
-pub(super) use implementation::{list_like_value, tuple_payload};
 
 pub(super) fn apply(
     builtin: Builtin,
