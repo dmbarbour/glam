@@ -21,12 +21,30 @@ impl Number {
         Self(BigRational::from_integer(BigInt::from(value)))
     }
 
+    pub fn from_ratio_i64(numerator: i64, denominator: i64) -> Option<Self> {
+        (denominator != 0).then(|| {
+            Self(BigRational::new(
+                BigInt::from(numerator),
+                BigInt::from(denominator),
+            ))
+        })
+    }
+
+    pub fn from_f64(value: f64) -> Option<Self> {
+        value
+            .is_finite()
+            .then(|| BigRational::from_float(value))
+            .flatten()
+            .map(Self)
+    }
+
     pub fn parse(text: &str) -> Result<Self, String> {
-        let (negative, rest) = if let Some(rest) = text.strip_prefix('_') {
-            (true, rest)
-        } else {
-            (false, text)
-        };
+        let (negative, rest) =
+            if let Some(rest) = text.strip_prefix('_').or_else(|| text.strip_prefix('-')) {
+                (true, rest)
+            } else {
+                (false, text)
+            };
 
         if rest.is_empty() {
             return Err("missing digits".to_owned());
@@ -70,6 +88,22 @@ impl Number {
         }
 
         self.0.to_integer().to_u8()
+    }
+
+    pub fn to_i64_if_integer(&self) -> Option<i64> {
+        if !self.0.is_integer() {
+            return None;
+        }
+
+        self.0.to_integer().to_i64()
+    }
+
+    pub fn to_ratio_i64(&self) -> Option<(i64, i64)> {
+        Some((self.0.numer().to_i64()?, self.0.denom().to_i64()?))
+    }
+
+    pub fn to_f64(&self) -> Option<f64> {
+        self.0.to_f64().filter(|value| value.is_finite())
     }
 
     pub fn add(&self, other: &Self) -> Self {
@@ -171,11 +205,12 @@ fn parse_decimal_or_scientific(text: &str) -> Result<Number, String> {
 }
 
 fn parse_exponent(text: &str) -> Result<i64, String> {
-    let (negative, rest) = if let Some(rest) = text.strip_prefix('_') {
-        (true, rest)
-    } else {
-        (false, text)
-    };
+    let (negative, rest) =
+        if let Some(rest) = text.strip_prefix('_').or_else(|| text.strip_prefix('-')) {
+            (true, rest)
+        } else {
+            (false, text)
+        };
     let digits = clean_grouped_digits(rest, is_decimal_digit)?;
     let exponent = digits
         .parse::<i64>()
@@ -279,12 +314,28 @@ mod tests {
     #[test]
     fn parses_rational_and_scientific_forms() {
         assert_eq!(Number::parse("1/6").unwrap().to_string(), "1/6");
+        assert_eq!(Number::parse("-3/2").unwrap().to_string(), "-3/2");
         assert_eq!(Number::parse("1.234").unwrap().to_string(), "617/500");
         assert_eq!(
             Number::parse("1.234e_7").unwrap().to_string(),
             "617/5000000000"
         );
         assert_eq!(Number::parse("12e3").unwrap().to_string(), "12000");
+    }
+
+    #[test]
+    fn converts_through_small_and_lossy_public_shapes() {
+        let ratio = Number::from_ratio_i64(-6, -4).unwrap();
+        assert_eq!(ratio.to_string(), "3/2");
+        assert_eq!(ratio.to_ratio_i64(), Some((3, 2)));
+        assert_eq!(ratio.to_i64_if_integer(), None);
+        assert_eq!(ratio.to_f64(), Some(1.5));
+
+        assert_eq!(Number::from_ratio_i64(1, 0), None);
+        assert_eq!(Number::from_f64(f64::NAN), None);
+        assert_eq!(Number::from_f64(f64::INFINITY), None);
+        assert_eq!(Number::from_f64(f64::NEG_INFINITY), None);
+        assert_eq!(Number::from_f64(1.5).unwrap(), ratio);
     }
 
     #[test]

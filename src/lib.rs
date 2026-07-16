@@ -15,4 +15,5 @@ pub use api::{
     DiagnosticSink, DiagnosticSnapshot, Error, Host, HostError, ModuleBuilder, ModuleInput,
     SystemHost, Value, ValueKind,
 };
+pub use core::Builtin;
 pub use diagnostic::Severity;

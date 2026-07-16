@@ -8,7 +8,11 @@
 - `main.rs` parses CLI arguments, delegates assembly to the public library
   facade, renders retained diagnostics, and writes output
 - `api.rs` owns the public `Assembler`, opaque `Value`, module builder, host
-  capabilities, and bounded diagnostic history
+  capabilities, and bounded diagnostic history. The facade exposes exact
+  numbers through canonical text or small integer ratios, lossy finite `f64`
+  conversion, lazy function application/evaluation, and ranged extraction from
+  compact binaries or byte-valued lists without exposing core number or list
+  representations
 - `api.rs` prepares an internal compile-time context for each source
   - optional source path for local-import loading
   - prior module value for future mixin-style compilation
@@ -18,7 +22,8 @@
   then consumes that IR directly into closed shared interaction nets; source
   lambdas remain front-end syntax, and update sugar is rewritten before net
   emission
-- `api.rs` applies one temporary top-level fixpoint to the anonymous assembly module
+- `api.rs` applies one temporary top-level fixpoint to a caller-named root module;
+  `main.rs` chooses `configuration` and `assembly` for its two CLI modules
 - `core_net.rs` defines the syntax-independent `CoreOperator` and
   `CoreSpecialization` carried by generic interaction nets. The core
   specialization embeds `Value` directly as its data type.
@@ -66,7 +71,10 @@
   exported runtime-backed holes; closed net values attach their exposed
   ports through logical-copy cursors and may normalize to either data or a non-
   data net frontier
-- the public facade extracts binary `asm.result`; `main` writes it to `stdout`
+- the public facade extracts binary `asm.result`; `main` otherwise uses only
+  this facade and writes the result to `stdout`. The temporary `--parse`
+  inspection command remains the sole direct front-end API client pending a
+  reflection replacement
 
 At the moment, even this simple case is not fully implemented. Thus, it remains the focus for now.
 

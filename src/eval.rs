@@ -585,7 +585,7 @@ fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<
     }
 }
 
-fn apply_values(
+pub(crate) fn apply_values(
     mut function: Value,
     arguments: Vec<Value>,
     local_env: &[Value],
@@ -3260,6 +3260,19 @@ pub fn list_output_bytes(list: &List) -> Result<Vec<u8>, String> {
         &mut |thunk| force_list_thunk(thunk).map_err(|err| err.to_string()),
     )?;
     Ok(bytes.into_inner())
+}
+
+pub(crate) fn list_output_bytes_range(
+    list: &List,
+    range: std::ops::Range<usize>,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(slice) = list
+        .try_slice(range.start, range.end, &mut force_list_thunk)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    list_output_bytes(&slice).map(Some)
 }
 
 fn append_values(left: Value, right: Value) -> Result<Value, EvalError> {

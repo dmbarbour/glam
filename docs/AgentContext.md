@@ -40,6 +40,13 @@ This document should summarize salient, relevant points rather than asking futur
 - Implement in spikes where feasible, i.e. where a feature has observable output.
 - Prefer spans and diagnostics over panics for source-facing behavior.
 - Tests should pin design constraints as soon as they become executable.
+- The embedding API keeps `Value` opaque. Public number conversions use exact
+  canonical text, finite `f64`, `i64`, or `(i64, i64)` rather than exposing the
+  current big-number crates. `Value` accessors do not evaluate; clients drive
+  lazy work explicitly through `Assembler::evaluate` and `Assembler::apply`.
+- Public binary range extraction accepts compact binaries and byte-valued lazy
+  lists. Keep compact byte leaves intact and force only through evaluator-owned
+  list operations.
 - Use Chumsky for growing `.g` grammar work. Keep hand-written parsing limited
   to small source-normalization steps where that is clearer than grammar code.
 - Object implementation notes live in `docs/agent_context/object_spike.md`.

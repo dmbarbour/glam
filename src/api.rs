@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::env;
 use std::ffi::OsString;
 use std::fmt;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +22,7 @@ use crate::core::{Builtin, Dict, Key, List};
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::g_syntax::{Diagnostic as SyntaxDiagnostic, SourceFile, lower_to_core_with_context};
+use crate::number::Number;
 
 pub const DEFAULT_DIAGNOSTIC_CAPACITY: usize = 1_000;
 
@@ -35,6 +37,78 @@ impl Value {
 
     pub fn text(text: impl AsRef<str>) -> Self {
         Self(CoreValue::binary_from_text(text.as_ref()))
+    }
+
+    pub fn integer(value: i64) -> Self {
+        Self(CoreValue::Number(Number::integer(value)))
+    }
+
+    /// Constructs a small exact rational, normalized to lowest terms.
+    /// Returns `None` when `denominator` is zero.
+    pub fn rational(numerator: i64, denominator: i64) -> Option<Self> {
+        Number::from_ratio_i64(numerator, denominator).map(|number| Self(CoreValue::Number(number)))
+    }
+
+    /// Constructs the exact rational represented by a finite `f64`.
+    /// NaN and either infinity return `None`.
+    pub fn number_from_f64(value: f64) -> Option<Self> {
+        Number::from_f64(value).map(|number| Self(CoreValue::Number(number)))
+    }
+
+    /// Parses an exact number without exposing the backing big-number types.
+    /// Both `-3/2` and glam's `_3/2` spelling are accepted.
+    pub fn number_from_text(text: impl AsRef<str>) -> Result<Self, Error> {
+        Number::parse(text.as_ref())
+            .map(|number| Self(CoreValue::Number(number)))
+            .map_err(Error::new)
+    }
+
+    pub fn list(values: impl IntoIterator<Item = Value>) -> Self {
+        Self(CoreValue::List(List::from_values(
+            values.into_iter().map(Value::into_core).collect(),
+        )))
+    }
+
+    pub fn record<I, S>(entries: I) -> Self
+    where
+        I: IntoIterator<Item = (S, Value)>,
+        S: AsRef<str>,
+    {
+        let dict = entries
+            .into_iter()
+            .fold(Dict::new_sync(), |dict, (name, value)| {
+                dict.insert(Key::atom_from_text(name), value.into_core())
+            });
+        Self(CoreValue::Dict(dict))
+    }
+
+    pub fn empty_record() -> Self {
+        Self(CoreValue::Dict(Dict::new_sync()))
+    }
+
+    pub fn builtin(builtin: Builtin) -> Self {
+        Self(CoreValue::Builtin(builtin))
+    }
+
+    pub fn builtin_call(builtin: Builtin, arguments: impl IntoIterator<Item = Value>) -> Self {
+        Self(CoreValue::builtin_call(
+            builtin,
+            arguments.into_iter().map(Value::into_core).collect(),
+        ))
+    }
+
+    pub fn abstract_global_path<I, S>(parts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self(CoreValue::Atom(crate::core::Atom::from_key(
+            &Key::abstract_global_path(parts),
+        )))
+    }
+
+    pub fn is_undefined(&self) -> bool {
+        matches!(&self.0, CoreValue::Dict(dict) if dict.is_empty())
     }
 
     pub fn kind(&self) -> ValueKind {
@@ -55,6 +129,36 @@ impl Value {
     pub fn as_binary(&self) -> Option<&[u8]> {
         match &self.0 {
             CoreValue::Binary(bytes) => Some(bytes.as_ref()),
+            _ => None,
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        match &self.0 {
+            CoreValue::Number(number) => number.to_i64_if_integer(),
+            _ => None,
+        }
+    }
+
+    pub fn as_rational_i64(&self) -> Option<(i64, i64)> {
+        match &self.0 {
+            CoreValue::Number(number) => number.to_ratio_i64(),
+            _ => None,
+        }
+    }
+
+    /// Converts a number lossily to a finite `f64`.
+    pub fn as_f64(&self) -> Option<f64> {
+        match &self.0 {
+            CoreValue::Number(number) => number.to_f64(),
+            _ => None,
+        }
+    }
+
+    /// Returns the canonical exact integer or `numerator/denominator` text.
+    pub fn as_number_text(&self) -> Option<String> {
+        match &self.0 {
+            CoreValue::Number(number) => Some(number.to_string()),
             _ => None,
         }
     }
@@ -436,12 +540,22 @@ impl Assembler {
         self.with_diagnostic_sink(DiagnosticCallback(callback))
     }
 
-    pub fn module(&self) -> ModuleBuilder<'_> {
+    pub fn module<I, S>(&self, module_path: I) -> ModuleBuilder<'_>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         ModuleBuilder {
             assembler: self,
+            module_path: Arc::from(
+                module_path
+                    .into_iter()
+                    .map(Into::into)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
             inputs: Vec::new(),
-            arguments: Vec::new(),
-            environment: None,
+            initial_definitions: Value::empty_record(),
         }
     }
 
@@ -455,14 +569,28 @@ impl Assembler {
         self.diagnostic_sink.emit(diagnostic);
     }
 
-    pub fn force(&self, value: &Value) -> Result<Value, Error> {
+    /// Evaluates a value far enough to expose its outer semantic value.
+    pub fn evaluate(&self, value: &Value) -> Result<Value, Error> {
         eval::eval_value(value.as_core())
             .map(Value::from_core)
             .map_err(|error| Error::new(error.to_string()))
     }
 
-    // TODO: add multi-argument application here once evaluator application is
-    // exposed through one syntax-independent crate-internal operation.
+    /// Applies all supplied arguments while preserving evaluator laziness.
+    /// Call [`Self::evaluate`] when the result itself must be observed.
+    pub fn apply(
+        &self,
+        function: &Value,
+        arguments: impl IntoIterator<Item = Value>,
+    ) -> Result<Value, Error> {
+        eval::apply_values(
+            function.as_core().clone(),
+            arguments.into_iter().map(Value::into_core).collect(),
+            &[],
+        )
+        .map(Value::from_core)
+        .map_err(|error| Error::new(error.to_string()))
+    }
 
     // TODO: add reflection snapshots and event subscriptions here. Reflection
     // producers should feed the same bounded history rather than print.
@@ -479,6 +607,12 @@ impl Assembler {
         self.core_value_bytes(value.as_core(), "value")
     }
 
+    /// Extracts a byte range from compact binary data or a byte-valued list.
+    /// Lazy list chunks are evaluated as required to locate the range.
+    pub fn binary_slice(&self, value: &Value, range: Range<usize>) -> Result<Bytes, Error> {
+        self.core_value_binary_slice(value.as_core(), range, "value")
+    }
+
     pub fn binary_at(&self, root: &Value, path: &str) -> Result<Bytes, Error> {
         let value = self.core_value_at_path(root.as_core(), path)?;
         self.core_value_bytes(&value, path)
@@ -486,12 +620,17 @@ impl Assembler {
 
     fn build_module(
         &self,
+        module_path: Arc<[String]>,
         inputs: Vec<ModuleInput>,
-        arguments: Vec<String>,
-        environment: Option<Value>,
+        initial_definitions: Value,
     ) -> Result<BuiltModule, Error> {
         let session = Arc::new(Mutex::new(Vec::new()));
-        let result = self.build_module_inner(inputs, arguments, environment, session.clone());
+        let result = self.build_module_inner(
+            module_path,
+            inputs,
+            initial_definitions.into_core(),
+            session.clone(),
+        );
         let diagnostics = session
             .lock()
             .expect("build diagnostic mutex should not be poisoned")
@@ -508,32 +647,23 @@ impl Assembler {
 
     fn build_module_inner(
         &self,
+        module_path: Arc<[String]>,
         inputs: Vec<ModuleInput>,
-        arguments: Vec<String>,
-        environment: Option<Value>,
+        mut definitions: CoreValue,
         session: Arc<Mutex<Vec<Diagnostic>>>,
     ) -> Result<CoreValue, Error> {
         let module_loader = self.module_loader(session.clone());
         let binary_loader = self.binary_loader();
-        let environment = match environment {
-            Some(environment) => environment.into_core(),
-            None => self.load_configuration(
-                module_loader.clone(),
-                binary_loader.clone(),
-                session.clone(),
-            )?,
-        };
-        let assembly_context = CompileContext::from_module_path(["assembly"])
+        let module_context = CompileContext::from_module_path(module_path.iter().cloned())
             .with_local_module_loader(module_loader.clone())
             .with_local_binary_loader(binary_loader.clone());
-        let final_defs = assembly_context.final_defs.clone();
-        let mut definitions =
-            self.initial_assembly_definitions(&assembly_context, &arguments, environment);
+        let final_defs = module_context.final_defs.clone();
         let mut had_errors = false;
 
         for input in inputs.iter().rev() {
             let (source, context, label) = self.prepare_input(
                 input,
+                &module_path,
                 definitions.clone(),
                 final_defs.clone(),
                 module_loader.clone(),
@@ -546,16 +676,17 @@ impl Assembler {
         }
 
         if had_errors {
-            return Err(Error::new("assembly failed to compile"));
+            return Err(Error::new("module failed to compile"));
         }
 
-        let module_value = self.seal_module(&assembly_context, &definitions);
+        let module_value = self.seal_module(&module_context, &definitions);
         eval::eval_value(&module_value).map_err(|error| Error::new(error.to_string()))
     }
 
     fn prepare_input(
         &self,
         input: &ModuleInput,
+        module_path: &Arc<[String]>,
         prior_defs: CoreValue,
         final_defs: CoreValue,
         module_loader: ModuleLoader,
@@ -566,7 +697,7 @@ impl Assembler {
                 let source = self.read_source(path)?;
                 let label = source.path.clone();
                 let context = CompileContext::from_source_path(&label)
-                    .with_module_path(["assembly"])
+                    .with_module_path(module_path.iter().cloned())
                     .with_prior_defs(prior_defs)
                     .with_final_defs(final_defs)
                     .with_local_module_loader(module_loader)
@@ -577,7 +708,7 @@ impl Assembler {
             ModuleInput::Script { extension, body } => {
                 let label = format!("<script.{extension}>");
                 let source = SourceFile::new(&label, body);
-                let context = CompileContext::from_module_path(["assembly"])
+                let context = CompileContext::from_module_path(module_path.iter().cloned())
                     .with_prior_defs(prior_defs)
                     .with_final_defs(final_defs)
                     .with_local_module_loader(module_loader)
@@ -586,169 +717,6 @@ impl Assembler {
                 Ok((source, context, label))
             }
         }
-    }
-
-    fn initial_assembly_definitions(
-        &self,
-        context: &CompileContext,
-        arguments: &[String],
-        environment: CoreValue,
-    ) -> CoreValue {
-        let arguments = CoreValue::List(List::from_values(
-            arguments
-                .iter()
-                .map(|argument| context.value_binary(argument))
-                .collect(),
-        ));
-        let assembly =
-            CoreValue::Dict(Dict::new_sync().insert(Key::atom_from_text("args"), arguments));
-        CoreValue::Dict(
-            Dict::new_sync()
-                .insert(Key::atom_from_text("asm"), assembly)
-                .insert(Key::atom_from_text("env"), environment),
-        )
-    }
-
-    fn load_configuration(
-        &self,
-        module_loader: ModuleLoader,
-        binary_loader: BinaryFileLoader,
-        session: Arc<Mutex<Vec<Diagnostic>>>,
-    ) -> Result<CoreValue, Error> {
-        let context = CompileContext::from_module_path(["configuration"])
-            .with_local_module_loader(module_loader.clone())
-            .with_local_binary_loader(binary_loader.clone());
-        let final_defs = context.final_defs.clone();
-        let mut definitions = self.initial_configuration_definitions(&context);
-        let mut had_errors = false;
-
-        for path in self.configuration_paths().into_iter().rev() {
-            let source = self.read_source(&path)?;
-            let label = source.path.clone();
-            let source_context = CompileContext::from_source_path(&label)
-                .with_module_path(["configuration"])
-                .with_prior_defs(definitions.clone())
-                .with_final_defs(final_defs.clone())
-                .with_local_module_loader(module_loader.clone())
-                .with_local_binary_loader(binary_loader.clone())
-                .with_source_binary(source.text.as_bytes());
-            let parsed = source.parse_with_context(&source_context);
-            let lowered = lower_to_core_with_context(parsed, &source_context);
-            had_errors |= self.record_syntax_diagnostics(&label, &lowered.diagnostics, &session);
-            definitions = lowered.definitions;
-        }
-
-        if had_errors {
-            return Err(Error::new("configuration failed to compile"));
-        }
-
-        let module_value = self.seal_module(&context, &definitions);
-        let root = eval::eval_value(&module_value)
-            .map_err(|error| Error::new(format!("configuration evaluation failed: {error}")))?;
-
-        match self.core_value_at_path(&root, "conf.env") {
-            Ok(environment) if !is_undefined_value(&environment) => eval::eval_value(&environment)
-                .map_err(|error| {
-                    Error::new(format!(
-                        "configuration `conf.env` failed to evaluate: {error}"
-                    ))
-                }),
-            Ok(_) | Err(_) => Ok(self.empty_environment_object(&context)),
-        }
-    }
-
-    fn initial_configuration_definitions(&self, context: &CompileContext) -> CoreValue {
-        CoreValue::Dict(Dict::new_sync().insert(
-            Key::atom_from_text("env"),
-            self.empty_environment_object(context),
-        ))
-    }
-
-    fn empty_environment_object(&self, context: &CompileContext) -> CoreValue {
-        let spec = Dict::new_sync()
-            .insert(
-                Key::atom_from_text("name"),
-                context.abstract_global_path_value(context.abstract_global_path("env").as_ref()),
-            )
-            .insert(Key::atom_from_text("deps"), CoreValue::List(List::empty()))
-            .insert(
-                Key::atom_from_text("defs"),
-                CoreValue::Builtin(Builtin::ObjectDefaultDefs),
-            );
-
-        CoreValue::builtin_call(Builtin::ObjectInstance, vec![CoreValue::Dict(spec)])
-    }
-
-    fn configuration_paths(&self) -> Vec<PathBuf> {
-        if let Some(paths) = self
-            .configuration_paths_from_environment("GLAS_CONF")
-            .or_else(|| self.configuration_paths_from_environment("GLAM_CONF"))
-        {
-            return paths;
-        }
-
-        if let Some(path) = self
-            .default_user_configuration_path()
-            .filter(|path| self.host.path_exists(path))
-        {
-            return vec![path];
-        }
-
-        let workspace_default = PathBuf::from("samples/config/dev.g");
-        if self.host.path_exists(&workspace_default) {
-            return vec![workspace_default];
-        }
-
-        Vec::new()
-    }
-
-    fn configuration_paths_from_environment(&self, name: &str) -> Option<Vec<PathBuf>> {
-        self.host.environment_variable(name).map(|value| {
-            env::split_paths(&value)
-                .filter(|path| !path.as_os_str().is_empty())
-                .collect()
-        })
-    }
-
-    fn default_user_configuration_path(&self) -> Option<PathBuf> {
-        #[cfg(target_os = "windows")]
-        {
-            self.host
-                .environment_variable("APPDATA")
-                .map(PathBuf::from)
-                .map(|path| path.join("glas").join("conf.g"))
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            self.home_dir().map(|path| {
-                path.join("Library")
-                    .join("Application Support")
-                    .join("glas")
-                    .join("conf.g")
-            })
-        }
-
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            self.host
-                .environment_variable("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .or_else(|| self.home_dir().map(|home| home.join(".config")))
-                .map(|path| path.join("glas").join("conf.g"))
-        }
-
-        #[cfg(not(any(unix, target_os = "windows")))]
-        {
-            None
-        }
-    }
-
-    fn home_dir(&self) -> Option<PathBuf> {
-        self.host
-            .environment_variable("HOME")
-            .filter(|home| !home.is_empty())
-            .map(PathBuf::from)
     }
 
     fn module_loader(&self, session: Arc<Mutex<Vec<Diagnostic>>>) -> ModuleLoader {
@@ -870,6 +838,48 @@ impl Assembler {
         }
     }
 
+    fn core_value_binary_slice(
+        &self,
+        value: &CoreValue,
+        range: Range<usize>,
+        label: &str,
+    ) -> Result<Bytes, Error> {
+        if range.start > range.end {
+            return Err(Error::new(format!(
+                "invalid binary range {}..{}",
+                range.start, range.end
+            )));
+        }
+
+        match value {
+            CoreValue::Binary(bytes) => {
+                (range.end <= bytes.len()).then(|| bytes.slice(range.clone()))
+            }
+            CoreValue::List(list) => eval::list_output_bytes_range(list, range.clone())
+                .map(|bytes| bytes.map(Bytes::from))
+                .map_err(|error| Error::new(format!("`{label}` {error}")))?,
+            CoreValue::Lazy(_) | CoreValue::Net(_) => {
+                let value =
+                    eval::eval_value(value).map_err(|error| Error::new(error.to_string()))?;
+                return self.core_value_binary_slice(&value, range, label);
+            }
+            CoreValue::Atom(_)
+            | CoreValue::Dict(_)
+            | CoreValue::Number(_)
+            | CoreValue::Function(_)
+            | CoreValue::Builtin(_)
+            | CoreValue::PartialBuiltin(_) => {
+                return Err(Error::new(format!("`{label}` is not binary list data")));
+            }
+        }
+        .ok_or_else(|| {
+            Error::new(format!(
+                "binary range {}..{} is out of bounds for `{label}`",
+                range.start, range.end
+            ))
+        })
+    }
+
     fn record_syntax_diagnostics(
         &self,
         source: &str,
@@ -892,9 +902,9 @@ impl Assembler {
 
 pub struct ModuleBuilder<'a> {
     assembler: &'a Assembler,
+    module_path: Arc<[String]>,
     inputs: Vec<ModuleInput>,
-    arguments: Vec<String>,
-    environment: Option<Value>,
+    initial_definitions: Value,
 }
 
 impl ModuleBuilder<'_> {
@@ -916,34 +926,15 @@ impl ModuleBuilder<'_> {
         self.input(ModuleInput::script(extension, body))
     }
 
-    pub fn argument(mut self, argument: impl Into<String>) -> Self {
-        self.arguments.push(argument.into());
-        self
-    }
-
-    pub fn arguments<I, S>(mut self, arguments: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.arguments.extend(arguments.into_iter().map(Into::into));
-        self
-    }
-
-    /// Supplies the assembly-level `env` value and skips configuration loading.
-    pub fn env(mut self, environment: Value) -> Self {
-        self.environment = Some(environment);
+    pub fn initial_definitions(mut self, definitions: Value) -> Self {
+        self.initial_definitions = definitions;
         self
     }
 
     pub fn build(self) -> Result<BuiltModule, Error> {
         self.assembler
-            .build_module(self.inputs, self.arguments, self.environment)
+            .build_module(self.module_path, self.inputs, self.initial_definitions)
     }
-}
-
-fn is_undefined_value(value: &CoreValue) -> bool {
-    matches!(value, CoreValue::Dict(dict) if dict.is_empty())
 }
 
 fn resolve_local_import_path(

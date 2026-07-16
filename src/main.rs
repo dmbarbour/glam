@@ -1,9 +1,11 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-use glam::{Assembler, Diagnostic, ModuleInput, Severity};
+use bytes::Bytes;
+use glam::{Assembler, Builtin, Diagnostic, Error, ModuleInput, Severity, Value};
 
 // Parse inspection intentionally remains on the front-end API while ordinary
 // assembly uses only the embedding facade.
@@ -124,14 +126,7 @@ fn script_extension(option: &str) -> Option<&str> {
 
 fn assemble_inputs(inputs: Vec<ModuleInput>, cli_args: Vec<String>) -> ExitCode {
     let assembler = Assembler::default();
-    let mut module = assembler.module().arguments(cli_args);
-    for input in inputs {
-        module = module.input(input);
-    }
-
-    let result = module
-        .build()
-        .and_then(|module| assembler.binary_at(module.value(), "asm.result"));
+    let result = assemble(&assembler, inputs, cli_args);
 
     print_assembler_diagnostics(&assembler);
 
@@ -149,6 +144,117 @@ fn assemble_inputs(inputs: Vec<ModuleInput>, cli_args: Vec<String>) -> ExitCode 
     }
 
     ExitCode::SUCCESS
+}
+
+fn assemble(
+    assembler: &Assembler,
+    inputs: Vec<ModuleInput>,
+    cli_args: Vec<String>,
+) -> Result<Bytes, Error> {
+    let environment = load_configuration(assembler)?;
+    let arguments = Value::list(cli_args.into_iter().map(Value::text));
+    let initial_definitions = Value::record([
+        ("asm", Value::record([("args", arguments)])),
+        ("env", environment),
+    ]);
+    let module = assembler
+        .module(["assembly"])
+        .initial_definitions(initial_definitions)
+        .inputs(inputs)
+        .build()?;
+    assembler.binary_at(module.value(), "asm.result")
+}
+
+fn load_configuration(assembler: &Assembler) -> Result<Value, Error> {
+    let default_environment = empty_environment_object();
+    let initial_definitions = Value::record([("env", default_environment.clone())]);
+    let module = assembler
+        .module(["configuration"])
+        .initial_definitions(initial_definitions)
+        .inputs(configuration_paths().into_iter().map(ModuleInput::file))
+        .build()?;
+
+    match assembler.get(module.value(), "conf.env") {
+        Ok(environment) if !environment.is_undefined() => assembler.evaluate(&environment),
+        Ok(_) | Err(_) => Ok(default_environment),
+    }
+}
+
+fn empty_environment_object() -> Value {
+    let spec = Value::record([
+        (
+            "name",
+            Value::abstract_global_path(["configuration", "env"]),
+        ),
+        ("deps", Value::list(std::iter::empty())),
+        ("defs", Value::builtin(Builtin::ObjectDefaultDefs)),
+    ]);
+    Value::builtin_call(Builtin::ObjectInstance, [spec])
+}
+
+fn configuration_paths() -> Vec<PathBuf> {
+    if let Some(paths) = configuration_paths_from_env("GLAS_CONF")
+        .or_else(|| configuration_paths_from_env("GLAM_CONF"))
+    {
+        return paths;
+    }
+
+    if let Some(path) = default_user_configuration_path().filter(|path| path.exists()) {
+        return vec![path];
+    }
+
+    let workspace_default = PathBuf::from("samples/config/dev.g");
+    if workspace_default.exists() {
+        return vec![workspace_default];
+    }
+
+    Vec::new()
+}
+
+fn configuration_paths_from_env(name: &str) -> Option<Vec<PathBuf>> {
+    env::var_os(name).map(|value| {
+        env::split_paths(&value)
+            .filter(|path| !path.as_os_str().is_empty())
+            .collect()
+    })
+}
+
+fn default_user_configuration_path() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|path| path.join("glas").join("conf.g"))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        home_dir().map(|path| {
+            path.join("Library")
+                .join("Application Support")
+                .join("glas")
+                .join("conf.g")
+        })
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home_dir().map(|home| home.join(".config")))
+            .map(|path| path.join("glas").join("conf.g"))
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        None
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 fn print_assembler_diagnostics(assembler: &Assembler) {
