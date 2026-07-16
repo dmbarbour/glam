@@ -4,7 +4,7 @@ use std::process::Command;
 
 use glam::compiler::CompileContext;
 use glam::diagnostic::Severity;
-use glam::g_syntax::{Diagnostic, SourceFile, lower_to_core_with_context};
+use glam::g_syntax::{Diagnostic, lower_to_core_with_context, parse_source};
 
 #[test]
 fn invalid_syntax_samples_report_expected_diagnostics() {
@@ -17,15 +17,13 @@ fn invalid_syntax_samples_report_expected_diagnostics() {
             expect_path.display()
         );
 
-        let source_text = fs::read_to_string(&source_path)
+        let source_bytes = fs::read(&source_path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", source_path.display()));
         let expect_text = fs::read_to_string(&expect_path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", expect_path.display()));
 
-        let source = SourceFile::new(source_path.display().to_string(), source_text);
-        let context = CompileContext::for_assembly_file(&source.path)
-            .with_source_binary(source.text.as_bytes());
-        let parsed = source.parse_with_context(&context);
+        let context = CompileContext::from_module_path(["assembly"]);
+        let parsed = parse_source(&source_bytes);
         let lowered = lower_to_core_with_context(parsed, &context);
         assert_expectations(
             &source_path,

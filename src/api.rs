@@ -11,19 +11,21 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
 use crate::compiler::{
-    BinaryFileLoader, BinaryLoadArgs, CompileContext, ModuleLoadArgs, ModuleLoader,
+    BinaryFileLoader, BinaryLoadArgs, CompileContext, CompileDiagnostic, CompileDiagnosticEmitter,
+    ModuleLoadArgs, ModuleLoader,
 };
 use crate::core::Value as CoreValue;
 use crate::core::{Builtin, Dict, Key, List, NetValue};
 use crate::core_net::CoreSpecialization;
 use crate::diagnostic::Severity;
 use crate::eval;
-use crate::g_syntax::{Diagnostic as SyntaxDiagnostic, SourceFile, lower_to_core_with_context};
+use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
 use crate::number::Number;
 
@@ -330,9 +332,13 @@ impl Diagnostic {
         &self.message
     }
 
-    fn from_syntax(source: &str, diagnostic: &SyntaxDiagnostic) -> Self {
-        Self::new(diagnostic.severity, Arc::from(diagnostic.message.as_str()))
-            .with_source_location(source, diagnostic.line)
+    fn from_compile(source: Arc<str>, diagnostic: CompileDiagnostic) -> Self {
+        let CompileDiagnostic {
+            severity,
+            line,
+            message,
+        } = diagnostic;
+        Self::new(severity, Arc::<str>::from(message)).with_source_location(source, line)
     }
 }
 
@@ -522,7 +528,7 @@ impl Host for SystemHost {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleInput {
     File(PathBuf),
-    Script { extension: String, body: String },
+    Script { extension: String, body: Bytes },
 }
 
 impl ModuleInput {
@@ -533,9 +539,24 @@ impl ModuleInput {
     pub fn script(extension: impl Into<String>, body: impl Into<String>) -> Self {
         Self::Script {
             extension: extension.into(),
-            body: body.into(),
+            body: Bytes::from(body.into()),
         }
     }
+}
+
+struct PreparedSource {
+    bytes: Bytes,
+    context: CompileContext,
+    had_errors: Arc<AtomicBool>,
+}
+
+struct CompileSetup {
+    module_path: Arc<[String]>,
+    prior_defs: CoreValue,
+    final_defs: CoreValue,
+    module_loader: ModuleLoader,
+    binary_loader: BinaryFileLoader,
+    session: Arc<Mutex<Vec<Diagnostic>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -770,18 +791,19 @@ impl Assembler {
         let mut had_errors = false;
 
         for input in inputs.iter().rev() {
-            let (source, context, label) = self.prepare_input(
+            let prepared = self.prepare_input(
                 input,
-                &module_path,
-                definitions.clone(),
-                final_defs.clone(),
-                module_loader.clone(),
-                binary_loader.clone(),
+                CompileSetup {
+                    module_path: module_path.clone(),
+                    prior_defs: definitions.clone(),
+                    final_defs: final_defs.clone(),
+                    module_loader: module_loader.clone(),
+                    binary_loader: binary_loader.clone(),
+                    session: session.clone(),
+                },
             )?;
-            let parsed = source.parse_with_context(&context);
-            let lowered = lower_to_core_with_context(parsed, &context);
-            had_errors |= self.record_syntax_diagnostics(&label, &lowered.diagnostics, &session);
-            definitions = lowered.definitions;
+            definitions = compile_source(&prepared.bytes, &prepared.context);
+            had_errors |= prepared.had_errors.load(Ordering::Relaxed);
         }
 
         if had_errors {
@@ -795,35 +817,56 @@ impl Assembler {
     fn prepare_input(
         &self,
         input: &ModuleInput,
-        module_path: &Arc<[String]>,
-        prior_defs: CoreValue,
-        final_defs: CoreValue,
-        module_loader: ModuleLoader,
-        binary_loader: BinaryFileLoader,
-    ) -> Result<(SourceFile, CompileContext, String), Error> {
+        setup: CompileSetup,
+    ) -> Result<PreparedSource, Error> {
+        let CompileSetup {
+            module_path,
+            prior_defs,
+            final_defs,
+            module_loader,
+            binary_loader,
+            session,
+        } = setup;
         match input {
             ModuleInput::File(path) => {
-                let source = self.read_source(path)?;
-                let label = source.path.clone();
-                let context = CompileContext::from_source_path(&label)
+                let bytes = self.read_source(path)?;
+                let label: Arc<str> = Arc::from(path.display().to_string());
+                let had_errors = Arc::new(AtomicBool::new(false));
+                let context = CompileContext::from_source_path(label.clone())
                     .with_module_path(module_path.iter().cloned())
                     .with_prior_defs(prior_defs)
                     .with_final_defs(final_defs)
                     .with_local_module_loader(module_loader)
                     .with_local_binary_loader(binary_loader)
-                    .with_source_binary(source.text.as_bytes());
-                Ok((source, context, label))
+                    .with_diagnostic_emitter(self.compile_diagnostic_emitter(
+                        label,
+                        session,
+                        had_errors.clone(),
+                    ));
+                Ok(PreparedSource {
+                    bytes,
+                    context,
+                    had_errors,
+                })
             }
             ModuleInput::Script { extension, body } => {
-                let label = format!("<script.{extension}>");
-                let source = SourceFile::new(&label, body);
+                let label: Arc<str> = Arc::from(format!("<script.{extension}>"));
+                let had_errors = Arc::new(AtomicBool::new(false));
                 let context = CompileContext::from_module_path(module_path.iter().cloned())
                     .with_prior_defs(prior_defs)
                     .with_final_defs(final_defs)
                     .with_local_module_loader(module_loader)
                     .with_local_binary_loader(binary_loader)
-                    .with_source_binary(source.text.as_bytes());
-                Ok((source, context, label))
+                    .with_diagnostic_emitter(self.compile_diagnostic_emitter(
+                        label,
+                        session,
+                        had_errors.clone(),
+                    ));
+                Ok(PreparedSource {
+                    bytes: body.clone(),
+                    context,
+                    had_errors,
+                })
             }
         }
     }
@@ -852,21 +895,24 @@ impl Assembler {
         let source = self.read_source(&path).map_err(|error| error.to_string())?;
         let module_loader = self.module_loader(session.clone());
         let binary_loader = self.binary_loader();
-        let context = CompileContext::from_source_path(&label)
+        let had_errors = Arc::new(AtomicBool::new(false));
+        let context = CompileContext::from_source_path(label.as_str())
             .with_module_path(args.module_path.iter().cloned())
             .with_prior_defs(args.prior_defs)
             .with_final_defs(args.final_defs)
             .with_local_module_loader(module_loader)
             .with_local_binary_loader(binary_loader)
-            .with_source_binary(source.text.as_bytes());
-        let parsed = source.parse_with_context(&context);
-        let lowered = lower_to_core_with_context(parsed, &context);
-        let had_errors = self.record_syntax_diagnostics(&label, &lowered.diagnostics, &session);
+            .with_diagnostic_emitter(self.compile_diagnostic_emitter(
+                Arc::from(label.as_str()),
+                session,
+                had_errors.clone(),
+            ));
+        let definitions = compile_source(&source, &context);
 
-        if had_errors {
+        if had_errors.load(Ordering::Relaxed) {
             Err(format!("local import `{label}` failed to compile"))
         } else {
-            Ok(lowered.definitions)
+            Ok(definitions)
         }
     }
 
@@ -882,18 +928,10 @@ impl Assembler {
             .map_err(|error| error.to_string())
     }
 
-    fn read_source(&self, path: &Path) -> Result<SourceFile, Error> {
-        let bytes = self
-            .host
+    fn read_source(&self, path: &Path) -> Result<Bytes, Error> {
+        self.host
             .read(path)
-            .map_err(|error| Error::new(error.to_string()))?;
-        let text = String::from_utf8(bytes.to_vec()).map_err(|error| {
-            Error::new(format!(
-                "could not read `{}` as UTF-8 source: {error}",
-                path.display()
-            ))
-        })?;
-        Ok(SourceFile::new(path.display().to_string(), text))
+            .map_err(|error| Error::new(error.to_string()))
     }
 
     fn seal_module(&self, context: &CompileContext, definitions: &CoreValue) -> CoreValue {
@@ -989,23 +1027,24 @@ impl Assembler {
         })
     }
 
-    fn record_syntax_diagnostics(
+    fn compile_diagnostic_emitter(
         &self,
-        source: &str,
-        diagnostics: &[SyntaxDiagnostic],
-        session: &Arc<Mutex<Vec<Diagnostic>>>,
-    ) -> bool {
-        let mut had_errors = false;
-        for diagnostic in diagnostics {
-            had_errors |= diagnostic.severity == Severity::Error;
-            let diagnostic = Diagnostic::from_syntax(source, diagnostic);
+        source: Arc<str>,
+        session: Arc<Mutex<Vec<Diagnostic>>>,
+        had_errors: Arc<AtomicBool>,
+    ) -> CompileDiagnosticEmitter {
+        let assembler = self.clone();
+        Arc::new(move |diagnostic| {
+            if diagnostic.severity == Severity::Error {
+                had_errors.store(true, Ordering::Relaxed);
+            }
+            let diagnostic = Diagnostic::from_compile(source.clone(), diagnostic);
             session
                 .lock()
                 .expect("build diagnostic mutex should not be poisoned")
                 .push(diagnostic.clone());
-            self.record_diagnostic(diagnostic);
-        }
-        had_errors
+            assembler.record_diagnostic(diagnostic);
+        })
     }
 }
 
@@ -1067,16 +1106,10 @@ mod tests {
     #[test]
     fn diagnostic_history_is_bounded_and_counts_dropped_entries() {
         let assembler = Assembler::default().with_diagnostic_buffer(2);
-        let session = Arc::new(Mutex::new(Vec::new()));
         for line in 1..=3 {
-            assembler.record_syntax_diagnostics(
-                "test.g",
-                &[SyntaxDiagnostic {
-                    severity: Severity::Warning,
-                    line,
-                    message: format!("warning {line}"),
-                }],
-                &session,
+            assembler.record_diagnostic(
+                Diagnostic::new(Severity::Warning, format!("warning {line}"))
+                    .with_source_location("test.g", line),
             );
         }
 

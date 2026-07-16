@@ -90,13 +90,10 @@ fn output_binary_result_list(value: &Value) -> Vec<u8> {
 
 use super::*;
 use crate::diagnostic::Severity;
+use std::sync::{Arc, Mutex};
 
 fn parse(text: &str) -> ParsedSource {
-    SourceFile::new("test.g", text).parse()
-}
-
-fn parse_with_context(text: &str, context: &CompileContext) -> ParsedSource {
-    SourceFile::new("test.g", text).parse_with_context(context)
+    parse_source(text.as_bytes())
 }
 
 fn lower_with_module_path(text: &str, module_path: &[&str]) -> LoweredSource {
@@ -2562,30 +2559,35 @@ fn lowers_unique_declarations_via_abstract_global_paths() {
 }
 
 #[test]
-fn source_paths_remain_separate_from_module_paths() {
-    let context = CompileContext::from_source_path("samples/assembly/hello_text.g");
+fn g_parser_rejects_non_utf8_source_bytes() {
+    let parsed = parse_source(b"language g0\nanswer = \xff\n");
 
-    assert_eq!(context.source_path(), Some("samples/assembly/hello_text.g"));
-    assert!(context.module_path().is_empty());
+    assert_eq!(parsed.declarations, []);
+    assert_eq!(parsed.diagnostics.len(), 1);
+    assert_eq!(parsed.diagnostics[0].severity, Severity::Error);
+    assert!(parsed.diagnostics[0].message.contains("not valid UTF-8"));
 }
 
 #[test]
-fn parse_can_read_source_binary_from_compile_context() {
-    let context = CompileContext::from_module_path(["pkg"])
-        .with_source_binary(&b"language g0\nanswer = 42\n"[..]);
-    let parsed = parse_with_context("language g0\nbroken =", &context);
+fn compile_source_emits_relative_diagnostics_through_context() {
+    let emitted = Arc::new(Mutex::new(Vec::new()));
+    let captured = emitted.clone();
+    let context = CompileContext::default().with_diagnostic_emitter(Arc::new(move |diagnostic| {
+        captured
+            .lock()
+            .expect("diagnostic mutex should not be poisoned")
+            .push(diagnostic);
+    }));
 
-    assert_eq!(parsed.diagnostics, []);
-    assert_eq!(parsed.declarations.len(), 2);
-    assert!(matches!(
-        &parsed.declarations[1].kind,
-        DeclarationKind::Definition(DefinitionDecl {
-            target,
-            kind: DefinitionKind::Introduce,
-            body,
-            ..
-        }) if target == "answer" && body == "42"
-    ));
+    let _definitions = compile_source(b"language g0\nbroken =\n", &context);
+
+    let emitted = emitted
+        .lock()
+        .expect("diagnostic mutex should not be poisoned");
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(emitted[0].severity, Severity::Error);
+    assert_eq!(emitted[0].line, 2);
+    assert!(!emitted[0].message.is_empty());
 }
 
 #[test]

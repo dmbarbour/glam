@@ -1,31 +1,7 @@
-use crate::compiler::CompileContext;
 use crate::core::Builtin;
 use crate::number::Number;
 
-use super::{Diagnostic, parse_source, parse_source_with_context};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceFile {
-    pub path: String,
-    pub text: String,
-}
-
-impl SourceFile {
-    pub fn new(path: impl Into<String>, text: impl Into<String>) -> Self {
-        Self {
-            path: path.into(),
-            text: text.into(),
-        }
-    }
-
-    pub fn parse(&self) -> ParsedSource {
-        parse_source(self)
-    }
-
-    pub fn parse_with_context(&self, context: &CompileContext) -> ParsedSource {
-        parse_source_with_context(self, context)
-    }
-}
+use super::Diagnostic;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ParsedSource {

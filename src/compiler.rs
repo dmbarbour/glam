@@ -1,12 +1,20 @@
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::core::Builtin;
 use crate::core::{Atom, Dict, Key, LazyValue, Value};
+use crate::diagnostic::Severity;
 use crate::number::Number;
 
 pub type ModuleLoader = Arc<dyn Fn(ModuleLoadArgs) -> Result<Value, String> + Send + Sync>;
 pub type BinaryFileLoader = Arc<dyn Fn(BinaryLoadArgs) -> Result<Value, String> + Send + Sync>;
+pub(crate) type CompileDiagnosticEmitter = Arc<dyn Fn(CompileDiagnostic) + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompileDiagnostic {
+    pub severity: Severity,
+    pub line: usize,
+    pub message: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryLoadArgs {
@@ -28,35 +36,31 @@ pub struct CompileContext {
     // The bootstrap still exposes core Values, but never a semantic expression
     // language. Front ends own their IR and lower it before returning Values.
     source_path: Option<Arc<str>>,
-    source_binary: Arc<[u8]>,
     module_path: Arc<[String]>,
     prior_defs: Value, // prior dictionary, can be observed at compile-time
     final_defs: Value, // future dictionary, cannot observe at compile-time
     local_module_loader: Option<ModuleLoader>,
     local_binary_loader: Option<BinaryFileLoader>,
+    diagnostic_emitter: Option<CompileDiagnosticEmitter>,
 }
 
 impl Default for CompileContext {
     fn default() -> Self {
         Self {
             source_path: None,
-            source_binary: Arc::from([]),
             module_path: Arc::from([]),
             prior_defs: Value::Dict(Dict::new_sync()), // empty prior dictionary
             final_defs: Value::Lazy(LazyValue::pending("final definitions")),
             local_module_loader: None,
             local_binary_loader: None,
+            diagnostic_emitter: None,
         }
     }
 }
 
 impl CompileContext {
-    pub fn from_source_path(path: &str) -> Self {
+    pub(crate) fn from_source_path(path: impl Into<Arc<str>>) -> Self {
         Self::default().with_source_path(path)
-    }
-
-    pub fn for_assembly_file(path: &str) -> Self {
-        Self::from_source_path(path).with_module_path(["assembly"])
     }
 
     pub fn from_module_path<I, S>(parts: I) -> Self
@@ -67,13 +71,8 @@ impl CompileContext {
         Self::default().with_module_path(parts)
     }
 
-    pub fn with_source_path(mut self, path: impl Into<Arc<str>>) -> Self {
+    pub(crate) fn with_source_path(mut self, path: impl Into<Arc<str>>) -> Self {
         self.source_path = Some(path.into());
-        self
-    }
-
-    pub fn with_source_binary(mut self, bytes: impl Into<Arc<[u8]>>) -> Self {
-        self.source_binary = bytes.into();
         self
     }
 
@@ -112,12 +111,9 @@ impl CompileContext {
         self
     }
 
-    pub fn source_path(&self) -> Option<&str> {
-        self.source_path.as_deref()
-    }
-
-    pub fn source_binary(&self) -> &[u8] {
-        &self.source_binary
+    pub(crate) fn with_diagnostic_emitter(mut self, emitter: CompileDiagnosticEmitter) -> Self {
+        self.diagnostic_emitter = Some(emitter);
+        self
     }
 
     pub fn module_path(&self) -> &[String] {
@@ -139,19 +135,14 @@ impl CompileContext {
         Arc::from(parts.into_boxed_slice())
     }
 
-    pub fn source_text<'a>(
-        &'a self,
-        fallback: &'a str,
-    ) -> Result<Cow<'a, str>, std::str::Utf8Error> {
-        if self.source_binary.is_empty() {
-            return Ok(Cow::Borrowed(fallback));
+    pub(crate) fn emit_diagnostic(&self, diagnostic: CompileDiagnostic) {
+        if let Some(emitter) = &self.diagnostic_emitter {
+            emitter(diagnostic);
         }
-
-        std::str::from_utf8(self.source_binary.as_ref()).map(Cow::Borrowed)
     }
 
-    // TODO: methods to emit diagnostics with source context
-    // diagnostic messages should be emitted as values at this layer
+    // TODO: replace the typed bootstrap diagnostic with an open Value payload.
+    // The assembler-owned emitter will continue to attach source provenance.
 
     // TODO: eliminate direct use of Builtin in this API. The front-end
     // knows about builtins, but will access them as atoms, not as the Builtin enum.
@@ -251,11 +242,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn assembly_file_context_uses_assembly_module_root() {
-        let context = CompileContext::for_assembly_file("samples/assembly/hello_text.g");
+    fn source_path_is_only_forwarded_to_load_requests() {
+        let context = CompileContext::from_source_path("samples/assembly/hello_text.g");
+        let args = context.local_binary_load_args("message.txt");
 
-        assert_eq!(context.source_path(), Some("samples/assembly/hello_text.g"));
-        assert_eq!(context.module_path(), &["assembly".to_owned()]);
+        assert_eq!(
+            args.importer_source_path.as_deref(),
+            Some("samples/assembly/hello_text.g")
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@ implementation constraints.
 | --- | --- |
 | `main.rs` | CLI parsing, configuration/assembly policy, diagnostic rendering, and writing `asm.result` |
 | `lib.rs`, `api.rs` | Embedding facade: opaque values, host capabilities, module assembly, diagnostics, evaluation, binary extraction, and checked net construction |
-| `compiler.rs` | Per-source compiler capabilities and context: module identity, prior/final definitions, source bytes, and import loaders |
+| `compiler.rs` | Per-source compiler capabilities: hidden source provenance, module identity, prior/final definitions, import loaders, and diagnostic emission |
 | `g_syntax.rs` | `.g` front-end facade and source diagnostics |
 | `g_syntax/parser/` | Layout, declarations, expressions, and compound syntax parsing |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs` | Lexical resolution, affine semantic IR, capture discovery, and front-end warnings |
@@ -45,8 +45,8 @@ main
   -> ModuleBuilder + ModuleInput values
   -> api::Assembler::build_module_inner
        -> Host reads each source
-       -> CompileContext records source/module/import context
-       -> g_syntax parses SourceFile into ParsedSource
+       -> CompileContext records hidden provenance and module/import capabilities
+       -> g_syntax explicitly interprets raw source bytes into ParsedSource
        -> g_syntax resolves and lowers declarations into a core Value
        -> the final-definition lazy cell closes the module fixpoint
        -> eval exposes the assembled module value

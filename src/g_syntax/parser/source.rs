@@ -1,19 +1,12 @@
-use crate::compiler::CompileContext;
-
-use super::super::{Declaration, Diagnostic, ParsedSource, SourceFile};
+use super::super::{Declaration, Diagnostic, ParsedSource};
 use super::declaration::{classify_declaration, validate_language_position};
 use super::layout::{
     indentation_width, is_dedent_closer, is_indented, line_ending_diagnostics, split_lines,
     strip_comment, strip_indent_width,
 };
 
-pub fn parse_source(source: &SourceFile) -> ParsedSource {
-    let context = CompileContext::default().with_source_binary(source.text.as_bytes());
-    parse_source_with_context(source, &context)
-}
-
-pub fn parse_source_with_context(source: &SourceFile, context: &CompileContext) -> ParsedSource {
-    let text = match context.source_text(source.text.as_str()) {
+pub fn parse_source(source: &[u8]) -> ParsedSource {
+    let text = match std::str::from_utf8(source) {
         Ok(text) => text,
         Err(err) => {
             return ParsedSource {
@@ -26,8 +19,8 @@ pub fn parse_source_with_context(source: &SourceFile, context: &CompileContext) 
         }
     };
 
-    let mut diagnostics = line_ending_diagnostics(text.as_ref());
-    let physical_lines = split_lines(text.as_ref());
+    let mut diagnostics = line_ending_diagnostics(text);
+    let physical_lines = split_lines(text);
     let mut declarations = Vec::new();
     let mut index = 0;
 

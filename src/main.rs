@@ -9,8 +9,7 @@ use glam::{Assembler, Builtin, Diagnostic, Error, ModuleInput, Severity, Value};
 
 // Parse inspection intentionally remains on the front-end API while ordinary
 // assembly uses only the embedding facade.
-use glam::compiler::CompileContext;
-use glam::g_syntax::{DeclarationKind, ParsedSource, SourceFile};
+use glam::g_syntax::{DeclarationKind, ParsedSource, parse_source};
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -262,7 +261,7 @@ fn print_diagnostic(diagnostic: &Diagnostic) {
 }
 
 fn parse_path(path: &str) -> ExitCode {
-    let (parsed, _context) = match parse_source_path(path) {
+    let parsed = match parse_source_path(path) {
         Ok(parsed) => parsed,
         Err(exit_code) => return exit_code,
     };
@@ -270,24 +269,16 @@ fn parse_path(path: &str) -> ExitCode {
     print_parse_summary(path, &parsed)
 }
 
-fn parse_source_path(path: &str) -> Result<(ParsedSource, CompileContext), ExitCode> {
-    let source = read_source_path(path)?;
-    let context =
-        CompileContext::for_assembly_file(path).with_source_binary(source.text.as_bytes());
-    Ok((source.parse_with_context(&context), context))
-}
-
-fn read_source_path(path: &str) -> Result<SourceFile, ExitCode> {
-    // TODO: let the front-end parse source bytes without this UTF-8 copy.
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
+fn parse_source_path(path: &str) -> Result<ParsedSource, ExitCode> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
         Err(error) => {
             eprintln!("error: could not read `{path}`: {error}");
             return Err(ExitCode::from(1));
         }
     };
 
-    Ok(SourceFile::new(path, text))
+    Ok(parse_source(&bytes))
 }
 
 fn print_parse_summary(path: &str, parsed: &ParsedSource) -> ExitCode {

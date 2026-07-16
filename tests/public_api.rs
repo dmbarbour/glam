@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
-use glam::{Assembler, Host, HostError, ModuleInput, Value};
+use glam::{Assembler, Host, HostError, ModuleInput, Severity, Value};
 
 #[test]
 fn public_api_builds_a_script_module_and_extracts_binary_data() {
@@ -53,6 +53,27 @@ fn public_api_can_load_sources_and_binaries_from_a_custom_host() {
             .expect("virtual binary import should evaluate"),
         b"virtual bytes".as_slice()
     );
+}
+
+#[test]
+fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
+    let assembler = Assembler::default().with_host(MemoryHost::new([(
+        "invalid.g",
+        b"language g0\nvalue = \xff\n".as_slice(),
+    )]));
+
+    let error = assembler
+        .module(["invalid"])
+        .file("invalid.g")
+        .build()
+        .expect_err("the built-in g compiler should reject invalid UTF-8");
+
+    assert_eq!(error.diagnostics().len(), 1);
+    let diagnostic = &error.diagnostics()[0];
+    assert_eq!(diagnostic.source(), Some("invalid.g"));
+    assert_eq!(diagnostic.line(), Some(1));
+    assert_eq!(diagnostic.severity(), Severity::Error);
+    assert!(diagnostic.message().contains("not valid UTF-8"));
 }
 
 #[test]

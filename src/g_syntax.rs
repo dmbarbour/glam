@@ -1,7 +1,7 @@
 #[cfg(test)]
 use chumsky::Parser;
 
-use crate::compiler::CompileContext;
+use crate::compiler::{CompileContext, CompileDiagnostic};
 use crate::core::Builtin;
 use crate::core::{Atom, Dict, Key, Value};
 use crate::diagnostic::Severity;
@@ -28,7 +28,7 @@ use parser::definition_decl;
 use parser::definition_target_parts;
 #[cfg(test)]
 use parser::parse_expr;
-pub use parser::{parse_source, parse_source_with_context};
+pub use parser::parse_source;
 use resolved::{BindingId, ResolvedExpr, ResolvedPathPart};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +42,21 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub line: usize,
     pub message: String,
+}
+
+pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
+    let LoweredSource {
+        definitions,
+        diagnostics,
+    } = lower_to_core_with_context(parse_source(source), context);
+    for diagnostic in diagnostics {
+        context.emit_diagnostic(CompileDiagnostic {
+            severity: diagnostic.severity,
+            line: diagnostic.line,
+            message: diagnostic.message,
+        });
+    }
+    definitions
 }
 
 impl Diagnostic {

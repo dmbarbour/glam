@@ -13,4 +13,4 @@ pub(super) use declaration::definition_target_parts;
 #[cfg(test)]
 pub(super) use expression::parse_expr;
 pub(super) use expression::syntax_expr_parser;
-pub use source::{parse_source, parse_source_with_context};
+pub use source::parse_source;

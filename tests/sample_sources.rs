@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use glam::diagnostic::Severity;
-use glam::g_syntax::SourceFile;
+use glam::g_syntax::parse_source;
 
 #[test]
 fn syntax_samples_parse_without_errors() {
@@ -25,10 +25,9 @@ fn assert_samples_parse_without_errors(relative_dir: &str) {
             continue;
         }
 
-        let text = fs::read_to_string(&path)
+        let bytes = fs::read(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let source = SourceFile::new(path.display().to_string(), text);
-        let parsed = source.parse();
+        let parsed = parse_source(&bytes);
         let errors = parsed
             .diagnostics
             .iter()

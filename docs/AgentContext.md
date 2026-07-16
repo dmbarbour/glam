@@ -40,9 +40,12 @@ design in the design documents.
 - Lambdas and applications are front-end constructs. A complete source
   function lowers to one bind spine, with free locals supplied as leading
   capture binds. Core has no expression, lambda, or closure representation.
-- `CompileContext` supplies source/module context, values, builtins, and
-  loaders. It is not an expression-building DSL and must not acquire
-  lambda/application helpers.
+- Front ends receive raw source bytes separately from `CompileContext`; the
+  built-in `.g` compiler explicitly validates UTF-8. Source paths remain
+  assembler-owned provenance used by import and diagnostic handlers.
+- `CompileContext` supplies module capabilities, values, builtins, loaders,
+  and diagnostic emission. It is not an expression-building DSL and must not
+  acquire lambda/application helpers.
 
 ### Values and evaluation
 
