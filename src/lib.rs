@@ -1,7 +1,7 @@
 mod api;
 
 /// compiler and g_syntax are exposed for `--parse` and will be
-/// removed from the public API in the future (when reflection is 
+/// removed from the public API in the future (when reflection is
 /// implemented).
 pub mod compiler;
 mod core;

@@ -1,0 +1,48 @@
+use super::super::*;
+
+mod implementation;
+
+use implementation::*;
+pub(super) use implementation::{list_like_value, tuple_payload};
+
+pub(super) fn apply(
+    builtin: Builtin,
+    arguments: Vec<Value>,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    match builtin {
+        Builtin::Append => {
+            let [left, right] = super::exact(arguments, "append")?;
+            append_values(left, right)
+        }
+        Builtin::Slice => {
+            let [start, end, value] = super::exact(arguments, "slice")?;
+            eval_slice_builtin(&start, &end, &value, local_env)
+        }
+        Builtin::Map => {
+            let [function, value] = super::exact(arguments, "map")?;
+            eval_map_builtin(&function, &value, local_env)
+        }
+        Builtin::ListLen => {
+            let [value] = super::exact(arguments, "list len")?;
+            eval_list_len_builtin(&value)
+        }
+        Builtin::ListSplit => {
+            let [index, value] = super::exact(arguments, "list split")?;
+            eval_list_split_builtin(&index, &value, local_env)
+        }
+        Builtin::ListSplitEnd => {
+            let [count, value] = super::exact(arguments, "list split_end")?;
+            eval_list_split_end_builtin(&count, &value, local_env)
+        }
+        Builtin::ListHead => {
+            let [value] = super::exact(arguments, "list head")?;
+            eval_list_head_builtin(&value)
+        }
+        Builtin::ListTail => {
+            let [value] = super::exact(arguments, "list tail")?;
+            eval_list_tail_builtin(&value)
+        }
+        _ => unreachable!("list dispatcher received a non-list builtin"),
+    }
+}

@@ -21,11 +21,13 @@
   - optional source path for local-import loading
   - prior module value for future mixin-style compilation
   - abstract module path for namespace-relative identities such as `abstract_global_path`
-- `g_syntax.rs` parses file.g through compile-time context, sourcing bytes and reporting diagnostics there
-- `g_syntax.rs` resolves syntax into its own affine `ResolvedExpr<Value>` IR,
-  then consumes that IR directly into closed shared interaction nets; source
-  lambdas remain front-end syntax, and update sugar is rewritten before net
-  emission
+- `g_syntax.rs` is the front-end facade; `g_syntax/parser/` owns source and
+  expression parsing, including source-byte access and parse diagnostics
+- `g_syntax/resolve/` resolves syntax into the affine `ResolvedExpr<Value>` IR,
+  while `g_syntax/module_lowering/` assembles declarations into a module and
+  `g_syntax/net_lowering.rs` consumes resolved expressions into closed shared
+  interaction nets. Source lambdas remain front-end syntax, and update sugar
+  is rewritten before net emission
 - `api.rs` applies one temporary top-level fixpoint to a caller-named root module;
   `main.rs` chooses `configuration` and `assembly` for its two CLI modules
 - `core_net.rs` defines the syntax-independent `CoreOperator` and
@@ -36,7 +38,10 @@
   Core stores the result as `FunctionCode`, while each evaluated
   `FunctionValue` names a shared curried runtime stage. Calls lazily copy the
   runtime frontier through evaluator-only remote cursors
-- `interaction_net.rs` provides generic `InteractionNet<Specialization>`
+- `interaction_net.rs` is the generic interaction-net facade. Its `model` and
+  `builder` modules own topology and checked construction, while
+  `interaction_net/runtime/` owns mutable graph storage, rewrites, and cursor
+  materialization. `InteractionNet<Specialization>` supplies generic
   topology. A specialization supplies cloneable `Data` and unary `Operator`
   values plus the rules for callable data and `Operator >< Data`;
   checked construction through one `NetBuilder` (including fallible
@@ -56,7 +61,10 @@
   fan sites are translated per logical copy
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
   ropes, and opaque lazy holes; `core::List` supplies `Value` and `LazyValue`
-- `eval.rs` contains no production expression, lambda, or closure
+- `eval.rs` is the evaluator facade. Value forcing, application, interaction-net
+  driving, operator staging, sequence adaptation, and builtin semantic families
+  live in corresponding `eval/` modules. The evaluator contains no production
+  expression, lambda, or closure
   representation. Source functions are
   ordinary, observable `Value::Function` data; partial application derives and
   shares another curried runtime stage. Saturated calls are memoized thunks.
