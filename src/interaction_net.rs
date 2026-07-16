@@ -1478,23 +1478,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         function
     }
 
-    /// Consumes an interface whose neighbor is embedded data.
-    pub fn take_interface_data(&mut self, interface: Port) -> Option<S::Data> {
-        self.assert_interface(interface);
-        let neighbor = self.neighbor(interface)?;
-        if !neighbor.is_principal()
-            || !matches!(self.node(neighbor.node()), Some(RuntimeNode::Data(_)))
-        {
-            return None;
-        }
-        self.disconnect(interface);
-        self.remove_node(interface.node());
-        let RuntimeNode::Data(data) = self.remove_node(neighbor.node()) else {
-            unreachable!();
-        };
-        Some(data)
-    }
-
     /// Replaces an evaluator interface with one embedded data node.
     pub fn complete_interface_with_data(&mut self, interface: Port, data: S::Data) -> NodeId {
         self.assert_interface(interface);

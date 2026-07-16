@@ -1,4 +1,4 @@
-//! Core specialization data carried by generic interaction nets.
+//! Core operators and specialization for generic interaction nets.
 //!
 //! Front-end semantic lowering lives in `g_syntax`; this module deliberately
 //! contains no expression language.
@@ -13,12 +13,6 @@ pub enum CoreDataKey {
     Key(Key),
     Index,
     PathIndex,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CoreNetData {
-    Value(Value),
-    Builtin(BuiltinCall),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +43,6 @@ pub enum CoreOperator {
         path: Arc<[CoreDataKey]>,
         supplied: Arc<[Value]>,
     },
-    Error(Arc<str>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

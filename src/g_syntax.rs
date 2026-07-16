@@ -7,7 +7,7 @@ use chumsky::prelude::*;
 use crate::compiler::CompileContext;
 use crate::core::Builtin;
 use crate::core::{Atom, Dict, FunctionCode, FunctionValue, Key, NetValue, Value};
-use crate::core_net::{CoreDataKey, CoreNetData, CoreOperator, CoreSpecialization};
+use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::diagnostic::Severity;
 use crate::interaction_net::{NetBuilder, Port};
 use crate::number::Number;
@@ -1308,17 +1308,14 @@ impl ResolvedNetLowerer {
     fn compile_into(&mut self, expr: ResolvedExpr<Value>, target: Port) {
         match expr {
             ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => {
-                self.data_into(CoreNetData::Value(value), target);
+                self.data_into(value, target);
             }
             ResolvedExpr::Local(binding) => {
                 self.local_uses.entry(binding).or_default().push(target)
             }
             ResolvedExpr::List(items) => {
                 if items.is_empty() {
-                    self.data_into(
-                        CoreNetData::Value(Value::List(crate::core::List::empty())),
-                        target,
-                    );
+                    self.data_into(Value::List(crate::core::List::empty()), target);
                 } else {
                     let arity = items.len();
                     self.lazy_operator_application_into(
@@ -1385,10 +1382,10 @@ impl ResolvedNetLowerer {
         let code = Arc::new(code);
         if captures.is_empty() {
             self.data_into(
-                CoreNetData::Value(Value::Function(FunctionValue::new(
+                Value::Function(FunctionValue::new(
                     NetValue::new(code.runtime().clone()),
                     code.arity(),
-                ))),
+                )),
                 target,
             );
         } else {
@@ -1474,18 +1471,16 @@ impl ResolvedNetLowerer {
     fn compile_lazy_into(&mut self, expr: ResolvedExpr<Value>, target: Port) {
         match expr {
             ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => {
-                self.data_into(CoreNetData::Value(value), target);
+                self.data_into(value, target);
             }
             expr => {
                 let (code, captures) = Self::lower_code(Vec::new(), expr);
                 let code = Arc::new(code);
                 if captures.is_empty() {
                     self.data_into(
-                        CoreNetData::Value(Value::Lazy(
-                            crate::core::LazyValue::from_net_computation(NetValue::new(
-                                code.runtime().clone(),
-                            )),
-                        )),
+                        Value::Lazy(crate::core::LazyValue::from_net_computation(NetValue::new(
+                            code.runtime().clone(),
+                        ))),
                         target,
                     );
                 } else {
@@ -1496,7 +1491,7 @@ impl ResolvedNetLowerer {
         }
     }
 
-    fn data_into(&mut self, data: CoreNetData, target: Port) {
+    fn data_into(&mut self, data: Value, target: Port) {
         let data = self.net.data(data);
         self.net.wire(data, target);
     }

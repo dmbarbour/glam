@@ -16,8 +16,9 @@
   lambdas remain front-end syntax, and update sugar is rewritten before net
   emission
 - `main.rs` applies one temporary top-level fixpoint to the anonymous assembly module
-- `core_net.rs` defines only the syntax-independent `CoreNetData`,
-  `CoreOperator`, and `CoreSpecialization` carried by generic interaction nets.
+- `core_net.rs` defines the syntax-independent `CoreOperator` and
+  `CoreSpecialization` carried by generic interaction nets. The core
+  specialization embeds `Value` directly as its data type.
   The `g_syntax` emitter builds one bind chain per resolved function; free
   `BindingId`s become leading capture binds supplied once by the enclosing net.
   Core stores the result as `FunctionCode`, while each evaluated

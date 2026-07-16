@@ -53,10 +53,6 @@ impl LazyValue {
         &self.label
     }
 
-    pub fn get(&self) -> Option<Result<Value, Arc<str>>> {
-        self.result.get().cloned()
-    }
-
     pub fn set(&self, value: Value) -> Result<(), Value> {
         self.result.set(Ok(value)).map_err(|result| {
             result.expect("setting a lazy value always supplies a successful value")
@@ -64,7 +60,7 @@ impl LazyValue {
     }
 
     pub fn cached(&self) -> Option<Result<Value, Arc<str>>> {
-        self.get()
+        self.result.get().cloned()
     }
 
     pub fn cache(&self, value: Result<Value, Arc<str>>) -> Result<Value, Arc<str>> {

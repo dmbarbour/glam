@@ -13,7 +13,7 @@ This document should summarize salient, relevant points rather than asking futur
 - `src/interaction_net.rs` - generic interaction-net topology and reduction
 - `src/list.rs` - generic compact, lazy, persistent list ropes
 - `src/main.rs` - CLI parsing, integration
-- `src/numbers.rs` - wrapper for big-rationals
+- `src/number.rs` - wrapper for big-rationals
 - `src/README.md` - rough sketch of architecture
 
 ## Todo

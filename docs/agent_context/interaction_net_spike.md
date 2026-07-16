@@ -30,8 +30,8 @@ Variable use is normalized during lowering:
 - multiple uses become a balanced tree of binary `Fan` nodes
 
 `interaction_net` is generic over embedded data and has no dependency on core.
-`core_net` owns only `CoreNetData`, `CoreOperator`, and `CoreSpecialization`;
-front-end lowering belongs to `g_syntax`.
+`core_net` owns `CoreOperator` and `CoreSpecialization`; its embedded data is
+`Value` directly, and front-end lowering belongs to `g_syntax`.
 
 ## Checked construction
 

@@ -8,7 +8,7 @@ use bytes::Bytes;
 use crate::core::{
     Builtin, BuiltinCall, FunctionCode, FunctionValue, Key, LazyValue, List, NetValue, Value,
 };
-use crate::core_net::{CoreDataKey, CoreNetData, CoreOperator, CoreSpecialization};
+use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::interaction_net::{
     ActivePairKey, Call, Callable, CursorDependency, NetBuilder, NetSpecialization, OperatorCall,
     OperatorYield, Port, Reduction, ReductionKind, StuckReason,
@@ -555,7 +555,7 @@ impl TestExprLowerer {
     }
 
     fn data_into(&mut self, value: Value, target: Port) {
-        let data = self.net.data(CoreNetData::Value(value));
+        let data = self.net.data(value);
         self.net.wire(data, target);
     }
 
@@ -721,10 +721,10 @@ fn attach_net_many(function: Value, arguments: Vec<Value>) -> NetValue {
     assert!(!arguments.is_empty(), "net attachment requires an argument");
     let mut net = NetBuilder::new();
     let spine = net.bind_spine(arguments.len());
-    let function = net.data(CoreNetData::Value(function));
+    let function = net.data(function);
     net.wire(spine.input, function);
     for (argument_port, argument) in spine.arguments.into_iter().zip(arguments) {
-        let argument = net.data(CoreNetData::Value(argument));
+        let argument = net.data(argument);
         net.wire(argument_port, argument);
     }
     NetValue::new(net.finish(spine.result).instantiate_shared())
@@ -738,7 +738,7 @@ fn observe_net(net: NetValue) -> Result<Value, EvalError> {
             let data = runtime
                 .with(|runtime| runtime.interface_data(exposed).cloned())
                 .expect("observed interaction-net interface must contain data");
-            observe_core_data(data)
+            Ok(data)
         }
         NetInterfaceOutcome::Bind | NetInterfaceOutcome::NormalForm => Ok(Value::Net(net)),
     }
@@ -754,7 +754,10 @@ fn extract_net_data(
             let data = runtime
                 .with(|runtime| runtime.interface_data(interface).cloned())
                 .expect("evaluated interaction-net interface must contain data");
-            observe_core_data(data)
+            // Extract exactly one Data payload. If it is lazy, the caller may
+            // force it after the enclosing net result has been memoized;
+            // forcing here can re-enter a productive fixpoint runtime.
+            Ok(data)
         }
         NetInterfaceOutcome::Bind => Err(EvalError::new(format!(
             "{operation} exposed a bind instead of data"
@@ -774,7 +777,7 @@ fn finish_explicit_net_application(
             let data = runtime
                 .with(|runtime| runtime.interface_data(interface).cloned())
                 .expect("applied interaction-net interface must contain data");
-            observe_core_data(data)
+            Ok(data)
         }
         NetInterfaceOutcome::Bind => Ok(Value::Net(NetValue::new(runtime))),
         NetInterfaceOutcome::NormalForm => Err(EvalError::new(
@@ -986,7 +989,7 @@ fn progress_exact_core_pair(
 }
 
 impl NetSpecialization for CoreSpecialization {
-    type Data = CoreNetData;
+    type Data = Value;
     type Operator = CoreOperator;
     type Error = EvalError;
 
@@ -1011,19 +1014,11 @@ impl NetSpecialization for CoreSpecialization {
             CoreOperator::Applicable(_) => "core applicable",
             CoreOperator::List { .. } => "list literal",
             CoreOperator::Access { .. } => "dictionary access",
-            CoreOperator::Error(_) => "error",
         }
     }
 }
 
-fn lower_core_callable(data: CoreNetData) -> Result<Callable<CoreSpecialization>, EvalError> {
-    match data {
-        CoreNetData::Value(value) => lower_core_callable_value(value),
-        CoreNetData::Builtin(call) => Ok(Callable::Operator(builtin_operator(call))),
-    }
-}
-
-fn lower_core_callable_value(value: Value) -> Result<Callable<CoreSpecialization>, EvalError> {
+fn lower_core_callable(value: Value) -> Result<Callable<CoreSpecialization>, EvalError> {
     let value = if matches!(value, Value::Lazy(_)) {
         force_value_shell(&value)?
     } else {
@@ -1150,18 +1145,6 @@ fn progress_core_operator_call(
     Ok(true)
 }
 
-fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
-    match data {
-        // Crossing a net interface extracts exactly one Data payload. If that
-        // payload is itself lazy, callers may force it after the enclosing net
-        // result has been memoized; recursively forcing here can re-enter the
-        // same mutable runtime during productive fixpoint construction.
-        CoreNetData::Value(value) => Ok(value),
-        CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
-        CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
-    }
-}
-
 fn resolve_core_access(arguments: &[Value], path: &[CoreDataKey]) -> Result<Value, EvalError> {
     let mut current = arguments
         .first()
@@ -1197,14 +1180,6 @@ fn resolve_core_access(arguments: &[Value], path: &[CoreDataKey]) -> Result<Valu
         }
     }
     eval_value(&current)
-}
-
-fn core_data_to_lazy_value(data: CoreNetData) -> Result<Value, EvalError> {
-    match data {
-        CoreNetData::Value(value) => Ok(value),
-        CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
-        CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
-    }
 }
 
 pub(crate) fn apply_arity_operator(arity: usize, supplied: Arc<[Value]>) -> CoreOperator {
@@ -1294,9 +1269,9 @@ pub(crate) fn access_operator(path: Arc<[CoreDataKey]>, supplied: Arc<[Value]>) 
 
 fn apply_core_operator(
     operator: &CoreOperator,
-    data: &CoreNetData,
+    data: &Value,
 ) -> Result<OperatorYield<CoreSpecialization>, EvalError> {
-    let operand = core_data_to_lazy_value(data.clone())?;
+    let operand = data.clone();
     match operator {
         CoreOperator::ApplyArity { arity, supplied } => {
             let mut operands = supplied.iter().cloned().collect::<Vec<_>>();
@@ -1309,7 +1284,7 @@ fn apply_core_operator(
             }
             let function = operands.remove(0);
             if *arity == 0 {
-                return Ok(OperatorYield::Data(CoreNetData::Value(function)));
+                return Ok(OperatorYield::Data(function));
             }
             let result = match function {
                 Value::Builtin(builtin) => {
@@ -1322,7 +1297,7 @@ fn apply_core_operator(
                 ),
                 function => apply_values(function, operands, &[]),
             }?;
-            Ok(OperatorYield::Data(CoreNetData::Value(result)))
+            Ok(OperatorYield::Data(result))
         }
         CoreOperator::FunctionCaptures { code, supplied } => {
             let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
@@ -1333,9 +1308,7 @@ fn apply_core_operator(
                     Arc::from(captures),
                 )));
             }
-            Ok(OperatorYield::Data(CoreNetData::Value(
-                instantiate_function(code, captures)?,
-            )))
+            Ok(OperatorYield::Data(instantiate_function(code, captures)?))
         }
         CoreOperator::ComputationCaptures { code, supplied } => {
             let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
@@ -1348,9 +1321,9 @@ fn apply_core_operator(
             }
             let stage =
                 attach_net_many(Value::Net(NetValue::new(code.runtime().clone())), captures);
-            Ok(OperatorYield::Data(CoreNetData::Value(Value::Lazy(
+            Ok(OperatorYield::Data(Value::Lazy(
                 LazyValue::from_net_computation(stage),
-            ))))
+            )))
         }
         CoreOperator::Dict { keys, supplied } => {
             let mut values = supplied.iter().cloned().collect::<Vec<_>>();
@@ -1368,7 +1341,7 @@ fn apply_core_operator(
                 .fold(crate::core::Dict::new_sync(), |dict, (key, value)| {
                     dict.insert(key, value)
                 });
-            Ok(OperatorYield::Data(CoreNetData::Value(Value::Dict(dict))))
+            Ok(OperatorYield::Data(Value::Dict(dict)))
         }
         CoreOperator::Builtin(call) => {
             let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
@@ -1384,16 +1357,18 @@ fn apply_core_operator(
                     "builtin operator received too many arguments",
                 ));
             }
-            Ok(OperatorYield::Data(CoreNetData::Value(Value::Lazy(
-                LazyValue::from_builtin(BuiltinCall {
+            Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_builtin(
+                BuiltinCall {
                     builtin: call.builtin,
                     arguments: Arc::from(arguments),
-                }),
+                },
             ))))
         }
-        CoreOperator::Applicable(function) => Ok(OperatorYield::Data(CoreNetData::Value(
-            apply_value(function.clone(), operand, &[])?,
-        ))),
+        CoreOperator::Applicable(function) => Ok(OperatorYield::Data(apply_value(
+            function.clone(),
+            operand,
+            &[],
+        )?)),
         CoreOperator::List { arity, supplied } => {
             let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
             arguments.push(operand);
@@ -1406,7 +1381,7 @@ fn apply_core_operator(
             let list = arguments.into_iter().fold(List::empty(), |list, value| {
                 List::concat(list, list_literal_segment(value))
             });
-            Ok(OperatorYield::Data(CoreNetData::Value(Value::List(list))))
+            Ok(OperatorYield::Data(Value::List(list)))
         }
         CoreOperator::Access { path, supplied } => {
             let arity = 1 + path
@@ -1421,11 +1396,11 @@ fn apply_core_operator(
                     Arc::from(arguments),
                 )));
             }
-            Ok(OperatorYield::Data(CoreNetData::Value(Value::Lazy(
-                LazyValue::from_access(path.clone(), Arc::from(arguments)),
+            Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_access(
+                path.clone(),
+                Arc::from(arguments),
             ))))
         }
-        CoreOperator::Error(message) => Err(EvalError::new(message.as_ref())),
     }
 }
 
@@ -3346,7 +3321,7 @@ mod tests {
 
     #[test]
     fn closed_net_values_can_expose_ordinary_data_repeatedly() {
-        let net = closed_net(|builder| builder.data(CoreNetData::Value(n(42))));
+        let net = closed_net(|builder| builder.data(n(42)));
         let value = Value::Net(net);
 
         assert_eq!(eval_value(&value).unwrap(), n(42));
@@ -3406,7 +3381,7 @@ mod tests {
                 let eraser = builder.copy(0);
                 builder.wire(*argument, eraser.input);
             }
-            let result = builder.data(CoreNetData::Value(n(42)));
+            let result = builder.data(n(42));
             builder.wire(spine.result, result);
             spine.input
         });
@@ -3427,7 +3402,7 @@ mod tests {
                 let eraser = builder.copy(0);
                 builder.wire(*argument, eraser.input);
             }
-            let result = builder.data(CoreNetData::Value(n(42)));
+            let result = builder.data(n(42));
             builder.wire(spine.result, result);
             spine.input
         });
@@ -3441,7 +3416,7 @@ mod tests {
     #[test]
     fn zero_arity_apply_operator_is_data_identity() {
         let operator = apply_arity_operator(0, Arc::from([]));
-        let data = CoreNetData::Value(n(42));
+        let data = n(42);
 
         assert_eq!(
             CoreSpecialization::apply_operator(&operator, &data).unwrap(),
