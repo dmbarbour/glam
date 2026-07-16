@@ -193,7 +193,7 @@ fn empty_environment_object() -> Value {
 }
 
 fn configuration_paths() -> Vec<PathBuf> {
-    if let Some(paths) = configuration_paths_from_env("GLAS_CONF")
+    if let Some(paths) = configuration_paths_from_env("GLAM_CONF")
         .or_else(|| configuration_paths_from_env("GLAM_CONF"))
     {
         return paths;
@@ -224,7 +224,7 @@ fn default_user_configuration_path() -> Option<PathBuf> {
     {
         env::var_os("APPDATA")
             .map(PathBuf::from)
-            .map(|path| path.join("glas").join("conf.g"))
+            .map(|path| path.join("glam").join("conf.g"))
     }
 
     #[cfg(target_os = "macos")]
@@ -232,7 +232,7 @@ fn default_user_configuration_path() -> Option<PathBuf> {
         home_dir().map(|path| {
             path.join("Library")
                 .join("Application Support")
-                .join("glas")
+                .join("glam")
                 .join("conf.g")
         })
     }
@@ -242,7 +242,7 @@ fn default_user_configuration_path() -> Option<PathBuf> {
         env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| home_dir().map(|home| home.join(".config")))
-            .map(|path| path.join("glas").join("conf.g"))
+            .map(|path| path.join("glam").join("conf.g"))
     }
 
     #[cfg(not(any(unix, target_os = "windows")))]
@@ -362,6 +362,6 @@ fn declaration_label(kind: &DeclarationKind) -> &'static str {
 
 fn print_help() {
     println!(
-        "Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...\n       glam --parse <PATH>\n       glam --help\n       glam --version\n\nAssembly inputs are applied as mixins; earlier inputs override later inputs.\nConfiguration is loaded from GLAS_CONF as an OS path-list, or from the user config/default fixture.\nBare arguments are reserved for configured `conf.cli` rewriting."
+        "Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...\n       glam --parse <PATH>\n       glam --help\n       glam --version\n\nAssembly inputs are applied as mixins; earlier inputs override later inputs.\nConfiguration is loaded from GLAM_CONF as an OS path-list, or from the user config/default fixture.\nBare arguments are reserved for configured `conf.cli` rewriting."
     );
 }
