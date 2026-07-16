@@ -7,12 +7,13 @@ This document should summarize salient, relevant points rather than asking futur
 ## Source Layout
 
 - `src/g_syntax.rs` - initial front-end compiler for ".g" syntax
+- `src/api.rs` - public assembly, host-capability, value, and diagnostic facade
 - `src/core.rs` - assembly-time representations, independent of syntax
 - `src/core_net.rs` - syntax-independent core data/operator specialization for interaction nets
 - `src/eval.rs` - efficient reduction of core terms
 - `src/interaction_net.rs` - generic interaction-net topology and reduction
 - `src/list.rs` - generic compact, lazy, persistent list ropes
-- `src/main.rs` - CLI parsing, integration
+- `src/main.rs` - CLI argument parsing, parse inspection, diagnostic rendering, and output
 - `src/number.rs` - wrapper for big-rationals
 - `src/README.md` - rough sketch of architecture
 

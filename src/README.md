@@ -5,8 +5,11 @@
 
         glam --file source.g
 
-- `main.rs` parses CLI, initiates ops
-- `main.rs` prepares a compile-time context for the source
+- `main.rs` parses CLI arguments, delegates assembly to the public library
+  facade, renders retained diagnostics, and writes output
+- `api.rs` owns the public `Assembler`, opaque `Value`, module builder, host
+  capabilities, and bounded diagnostic history
+- `api.rs` prepares an internal compile-time context for each source
   - optional source path for local-import loading
   - prior module value for future mixin-style compilation
   - abstract module path for namespace-relative identities such as `abstract_global_path`
@@ -15,7 +18,7 @@
   then consumes that IR directly into closed shared interaction nets; source
   lambdas remain front-end syntax, and update sugar is rewritten before net
   emission
-- `main.rs` applies one temporary top-level fixpoint to the anonymous assembly module
+- `api.rs` applies one temporary top-level fixpoint to the anonymous assembly module
 - `core_net.rs` defines the syntax-independent `CoreOperator` and
   `CoreSpecialization` carried by generic interaction nets. The core
   specialization embeds `Value` directly as its data type.
@@ -63,7 +66,7 @@
   exported runtime-backed holes; closed net values attach their exposed
   ports through logical-copy cursors and may normalize to either data or a non-
   data net frontier
-- `main` expects binary `asm.result`, writes to `stdout`
+- the public facade extracts binary `asm.result`; `main` writes it to `stdout`
 
 At the moment, even this simple case is not fully implemented. Thus, it remains the focus for now.
 
