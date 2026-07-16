@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::core::Builtin;
 use crate::core::{
-    Atom, DeferredValue, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, NetValue, Value,
+    Atom, Dict, Expr as CoreExpr, Key, KeyExpr as CoreKeyExpr, LazyValue, NetValue, Value,
 };
 use crate::core_net::{CoreSpecialization, lower_closed_function_value, lower_function_code};
 use crate::interaction_net::{NetBuildError, NetBuilder, Port};
@@ -70,7 +70,7 @@ impl Default for CompileContext {
             source_binary: Arc::from([]),
             module_path: Arc::from([]),
             prior_defs: Value::Dict(Dict::new_sync()), // empty prior dictionary
-            final_defs: Value::expr(CoreExpr::Future(crate::core::IVar::new())), // future dictionary, assigned later
+            final_defs: Value::Lazy(LazyValue::pending("final definitions")),
             local_module_loader: None,
             local_binary_loader: None,
         }
@@ -334,18 +334,15 @@ impl CompileContext {
         let label: Arc<str> = Arc::from(format!("import {}", args.reference));
         let loader = self.local_module_loader.clone();
 
-        Value::expr(CoreExpr::Deferred(Arc::new(DeferredValue::new(
-            label,
-            move || {
-                let Some(loader) = &loader else {
-                    return Err(format!(
-                        "local import `{}` cannot be loaded without a module loader",
-                        args.reference
-                    ));
-                };
-                loader(args.clone())
-            },
-        ))))
+        Value::deferred(label, move || {
+            let Some(loader) = &loader else {
+                return Err(format!(
+                    "local import `{}` cannot be loaded without a module loader",
+                    args.reference
+                ));
+            };
+            loader(args.clone())
+        })
     }
 
     pub fn local_binary_load_args(&self, reference: &str) -> BinaryLoadArgs {
@@ -359,24 +356,21 @@ impl CompileContext {
         let label: Arc<str> = Arc::from(format!("import binary {}", args.reference));
         let loader = self.local_binary_loader.clone();
 
-        Value::expr(CoreExpr::Deferred(Arc::new(DeferredValue::new(
-            label,
-            move || {
-                let Some(loader) = &loader else {
-                    return Err(format!(
-                        "binary import `{}` cannot be loaded without a binary loader",
-                        args.reference
-                    ));
-                };
-                loader(args.clone())
-            },
-        ))))
+        Value::deferred(label, move || {
+            let Some(loader) = &loader else {
+                return Err(format!(
+                    "binary import `{}` cannot be loaded without a binary loader",
+                    args.reference
+                ));
+            };
+            loader(args.clone())
+        })
     }
 }
 
 fn value_to_core_expr(value: Value) -> CoreExpr {
     match value {
-        Value::Expr(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
+        Value::Lazy(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
             thunk.expr().unwrap().as_ref().clone()
         }
         value => CoreExpr::Value(value),
@@ -459,13 +453,13 @@ mod tests {
 
         assert!(matches!(
             closed,
-            Value::Expr(ref thunk)
+            Value::Lazy(ref thunk)
                 if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Function { code, captures })
                     if code.arity() == 1 && code.capture_count() == 0 && captures.is_empty())
         ));
         assert!(matches!(
             captured,
-            Value::Expr(ref thunk)
+            Value::Lazy(ref thunk)
                 if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Function { code, captures })
                     if code.arity() == 1
                         && code.capture_count() == 1
@@ -480,7 +474,7 @@ mod tests {
         let grouped = context.value_lambdas(3, context.value_local(2));
         assert!(matches!(
             grouped,
-            Value::Expr(ref thunk)
+            Value::Lazy(ref thunk)
                 if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Function { code, captures })
                     if code.arity() == 3 && code.capture_count() == 0 && captures.is_empty())
         ));
@@ -488,7 +482,7 @@ mod tests {
         let captured = context.value_lambdas(3, context.value_local(3));
         assert!(matches!(
             captured,
-            Value::Expr(ref thunk)
+            Value::Lazy(ref thunk)
                 if matches!(thunk.expr().map(Arc::as_ref), Some(CoreExpr::Function { code, captures })
                     if code.arity() == 3 && code.capture_count() == 1 && captures.len() == 1)
         ));
@@ -505,7 +499,7 @@ mod tests {
             ],
         );
 
-        let Value::Expr(value) = value else {
+        let Value::Lazy(value) = value else {
             panic!("application spine should remain a semantic expression");
         };
         let mut expr = value.expr().unwrap().as_ref();

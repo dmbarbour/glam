@@ -70,9 +70,14 @@ This document should summarize salient, relevant points rather than asking futur
 - Evaluation should consume core terms/values, not `.g` syntax nodes directly.
 - Core dictionaries use explicit `Key` values. `.g` paths lower through
   interned atom keys, not text keys. 
-- Core lists alias `list::List<Value, Thunk>`. `list.rs` preserves `Bytes` as
+- Core lists alias `list::List<Value, LazyValue>`. `list.rs` preserves `Bytes` as
   compact leaves and treats thunks as opaque lazy holes; evaluator code supplies
   forcing and converts individual observed bytes to core number values.
+- `Value::Lazy` is the single suspension representation for deferred producers,
+  externally fulfilled fixpoint cells, net/builtin/access/function-call work,
+  and memoized failures. Pending cells currently fail if observed before being
+  set; parallel evaluation will require thunk-level sparks and suspended
+  continuations rather than a blindly blocking cell join.
 - `core_net` accepts `(arity, body)` and produces `FunctionCode` containing one
   shared runtime with one bind chain. Locals outside the arity become leading
   capture binds. Evaluating the semantic `Expr::Function` supplies those

@@ -2,10 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::core::{
-    BuiltinCall, DeferredValue, Expr, FunctionCode, FunctionValue, IVar, Key, KeyExpr, NetValue,
-    Value,
-};
+use crate::core::{BuiltinCall, Expr, FunctionCode, FunctionValue, Key, KeyExpr, NetValue, Value};
 use crate::interaction_net::{InteractionNet, NetBuilder, Port, SharedRuntimeNet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,8 +16,6 @@ pub enum CoreDataKey {
 pub enum CoreNetData {
     Value(Value),
     Builtin(BuiltinCall),
-    Deferred(Arc<DeferredValue>),
-    Future(IVar),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,16 +210,6 @@ impl ClosedLowerer {
                     target,
                 );
             }
-            Expr::Deferred(value) => self.data_into(CoreNetData::Deferred(value.clone()), target),
-            Expr::Future(value) => self.data_into(CoreNetData::Future(value.clone()), target),
-            Expr::Error(message) => {
-                let [input, output] = self.net.operator(CoreOperator::Error(message.clone()));
-                let trigger = self.net.data(CoreNetData::Value(Value::Dict(
-                    crate::core::Dict::new_sync(),
-                )));
-                self.net.wire(input, trigger);
-                self.net.wire(output, target);
-            }
         }
     }
 
@@ -286,7 +271,7 @@ impl ClosedLowerer {
     }
 
     fn compile_lazy_value_into(&mut self, value: &Value, target: Port) {
-        if !matches!(value, Value::Expr(_)) {
+        if !matches!(value, Value::Lazy(_)) {
             self.data_into(CoreNetData::Value(value.clone()), target);
             return;
         }
@@ -306,9 +291,9 @@ impl ClosedLowerer {
         let code = Arc::new(lower_function_code(0, Arc::new(expr.clone())));
         if code.capture_count() == 0 {
             self.data_into(
-                CoreNetData::Value(Value::Expr(crate::core::Thunk::from_net(NetValue::new(
-                    code.runtime().clone(),
-                )))),
+                CoreNetData::Value(Value::Lazy(crate::core::LazyValue::from_net(
+                    NetValue::new(code.runtime().clone()),
+                ))),
                 target,
             );
             return;
@@ -335,7 +320,7 @@ impl ClosedLowerer {
 
 fn value_to_expr(value: Value) -> Expr {
     match value {
-        Value::Expr(thunk)
+        Value::Lazy(thunk)
             if thunk.env().is_some_and(|env| env.is_empty())
                 && expr_contains_local(thunk.expr().unwrap()) =>
         {
@@ -347,7 +332,7 @@ fn value_to_expr(value: Value) -> Expr {
 
 fn expr_contains_local(expr: &Expr) -> bool {
     match expr {
-        Expr::Value(_) | Expr::Deferred(_) | Expr::Future(_) | Expr::Error(_) => false,
+        Expr::Value(_) => false,
         Expr::List(items) => items.iter().any(|item| expr_contains_local(item)),
         Expr::Apply(function, argument) => {
             expr_contains_local(function) || expr_contains_local(argument)
@@ -467,17 +452,18 @@ mod tests {
     }
 
     #[test]
-    fn error_lowering_builds_an_operator_that_can_only_get_stuck() {
+    fn lazy_error_lowering_builds_closed_data() {
         let (net, _) = ClosedLowerer::lower_template(
             0,
-            Arc::new(Expr::Error(Arc::from("deliberate failure"))),
+            Arc::new(Expr::Value(Value::error("deliberate failure"))),
         );
 
         assert!(net.nodes().iter().any(|node| matches!(
             node,
-            Node::Operator(CoreOperator::Error(message)) if message.as_ref() == "deliberate failure"
+            Node::Data(CoreNetData::Value(Value::Lazy(value)))
+                if value.cached().is_some_and(|result| result.is_err())
         )));
-        assert_eq!(net.active_pairs().len(), 1);
+        assert!(net.active_pairs().is_empty());
     }
 
     #[test]

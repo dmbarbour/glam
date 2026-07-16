@@ -6,8 +6,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::core::{
-    Builtin, BuiltinCall, DeferredValue, Expr, FunctionCode, FunctionValue, IVar, Key, KeyExpr,
-    List, NetValue, Thunk, Value,
+    Builtin, BuiltinCall, Expr, FunctionCode, FunctionValue, Key, KeyExpr, LazyValue, List,
+    NetValue, Value,
 };
 use crate::core_net::{
     CoreDataKey, CoreNetData, CoreOperator, CoreSpecialization, lower_closed_function_value,
@@ -68,59 +68,57 @@ fn eval_expr(expr: &Expr, local_env: &[Value]) -> Result<Value, EvalError> {
             let base = eval_expr(base, local_env)?;
             resolve_key_path(base, path, path, local_env)
         }
-        // TODO: Future should lock down and wait for the value to be initialized, rather than
-        // returning an error. At least once we start using parallel evaluation, this will be
-        // necessary
-        Expr::Future(ivar) => ivar
-            .get()
-            .cloned()
-            .ok_or_else(|| EvalError::new("future was observed before initialization")),
-        Expr::Deferred(deferred) => deferred
-            .force()
-            .map_err(|message| EvalError::new(message.as_ref())),
-        Expr::Error(message) => Err(EvalError::new(message.as_ref())),
     }
 }
 
 pub fn eval_value(value: &Value) -> Result<Value, EvalError> {
     match value {
-        Value::Expr(thunk) => eval_thunk(thunk),
+        Value::Lazy(lazy) => eval_lazy(lazy),
         Value::Net(net) => observe_net(net.clone()),
         other => Ok(other.clone()),
     }
 }
 
-fn eval_thunk(thunk: &Thunk) -> Result<Value, EvalError> {
-    if let Some(result) = thunk.cached() {
+fn eval_lazy(lazy: &LazyValue) -> Result<Value, EvalError> {
+    if let Some(result) = lazy.cached() {
         return result.map_err(|message| EvalError::new(message.as_ref()));
     }
-    let result = if let Some((path, arguments)) = thunk.access() {
+    let result = if let Some(result) = lazy.force_deferred() {
+        result.map_err(|message| EvalError::new(message.as_ref()))
+    } else if let Some((path, arguments)) = lazy.access() {
         resolve_core_access(arguments, path)
-    } else if let Some(call) = thunk.builtin() {
+    } else if let Some(call) = lazy.builtin() {
         let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
         let argument = arguments
             .pop()
             .expect("saturated builtin thunk must contain an argument");
         apply_builtin(call.builtin, arguments, argument, &[])
-    } else if let Some((function, arguments)) = thunk.function_call() {
+    } else if let Some((function, arguments)) = lazy.function_call() {
         apply_net_many(Value::Net(function.stage().clone()), arguments.to_vec())
-    } else if let Some(net) = thunk.net() {
+    } else if let Some(net) = lazy.net() {
         let runtime = net.runtime().clone();
         let exposed = runtime.with(|runtime| runtime.exposed());
         drive_core_net(runtime, exposed)
+    } else if lazy.is_pending() {
+        // TODO(parallel evaluation): an unfulfilled lazy value currently
+        // fails fast. Parallel evaluation needs a thunk-level scheduler,
+        // including explicit sparks and suspended continuations, rather
+        // than a blocking IVar join that can deadlock on cyclic demand.
+        return Err(EvalError::new(
+            "lazy value was observed before initialization",
+        ));
     } else {
+        let expr = lazy
+            .expr()
+            .expect("non-pending lazy value must have a producer");
         eval_expr(
-            thunk
-                .expr()
-                .expect("expression thunk must have an expression"),
-            thunk
-                .env()
-                .expect("expression thunk must have an environment"),
+            expr,
+            lazy.env()
+                .expect("expression lazy value must have an environment"),
         )
     }
     .map_err(|error| Arc::<str>::from(error.to_string()));
-    thunk
-        .cache(result)
+    lazy.cache(result)
         .map_err(|message| EvalError::new(message.as_ref()))
 }
 
@@ -194,7 +192,7 @@ fn value_to_key(value: &Value, local_env: &[Value]) -> Result<Key, EvalError> {
         Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Function(_) | Value::Net(_) => Err(
             EvalError::new("dictionary keys must evaluate to keyable values"),
         ),
-        Value::Expr(_) => Err(EvalError::new(
+        Value::Lazy(_) => Err(EvalError::new(
             "dictionary keys must evaluate to keyable values",
         )),
     }
@@ -257,14 +255,14 @@ fn force_dict_shell(
 
 fn force_value_shell(value: &Value) -> Result<Value, EvalError> {
     let mut current = eval_value(value)?;
-    while matches!(current, Value::Expr(_)) {
+    while matches!(current, Value::Lazy(_)) {
         current = eval_value(&current)?;
     }
     Ok(current)
 }
 
-fn force_list_thunk(thunk: &Thunk) -> Result<List, EvalError> {
-    match force_value_shell(&Value::Expr(thunk.clone()))? {
+fn force_list_thunk(thunk: &LazyValue) -> Result<List, EvalError> {
+    match force_value_shell(&Value::Lazy(thunk.clone()))? {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
         other => Err(EvalError::new(format!(
@@ -305,7 +303,7 @@ fn eval_apply(function: &Expr, argument: &Expr, local_env: &[Value]) -> Result<V
         // as the former closure evaluator evaluated the body. Do not
         // recursively force an arbitrary expression returned by that body:
         // annotations and aggregate members deliberately return lazy values.
-        Value::Expr(thunk) if thunk.function_call().is_some() => eval_thunk(thunk),
+        Value::Lazy(thunk) if thunk.function_call().is_some() => eval_lazy(thunk),
         _ => Ok(result),
     }
 }
@@ -313,7 +311,7 @@ fn eval_apply(function: &Expr, argument: &Expr, local_env: &[Value]) -> Result<V
 fn thunk_value(expr: &Expr, local_env: &[Value]) -> Value {
     match expr {
         Expr::Value(value) => value.clone(),
-        _ => Value::Expr(Thunk::new(
+        _ => Value::Lazy(LazyValue::new(
             Arc::new(expr.clone()),
             Arc::from(local_env.to_vec()),
         )),
@@ -332,7 +330,7 @@ fn apply_value(function: Value, argument: Value, local_env: &[Value]) -> Result<
         Value::Function(function) => apply_function_values(function, vec![argument]),
         Value::Net(net) => apply_net(net, argument),
         Value::Dict(dict) => apply_dict_value(&dict, argument, local_env),
-        Value::Expr(thunk) => apply_value(eval_thunk(&thunk)?, argument, local_env),
+        Value::Lazy(thunk) => apply_value(eval_lazy(&thunk)?, argument, local_env),
         _ => Err(EvalError::new("application requires a function value")),
     }
 }
@@ -383,7 +381,7 @@ fn apply_function_values(
     }
 
     let (saturating, rest) = arguments.split_at(remaining);
-    let result = Value::Expr(Thunk::from_function_call(
+    let result = Value::Lazy(LazyValue::from_function_call(
         function,
         Arc::from(saturating.to_vec()),
     ));
@@ -731,24 +729,11 @@ fn lower_core_callable(data: CoreNetData) -> Result<Callable<CoreSpecialization>
     match data {
         CoreNetData::Value(value) => lower_core_callable_value(value),
         CoreNetData::Builtin(call) => Ok(Callable::Operator(builtin_operator(call))),
-        CoreNetData::Deferred(value) => {
-            let value = value
-                .force()
-                .map_err(|message| EvalError::new(message.as_ref()))?;
-            lower_core_callable_value(value)
-        }
-        CoreNetData::Future(value) => {
-            let value = value
-                .get()
-                .cloned()
-                .ok_or_else(|| EvalError::new("future was observed before initialization"))?;
-            lower_core_callable_value(value)
-        }
     }
 }
 
 fn lower_core_callable_value(value: Value) -> Result<Callable<CoreSpecialization>, EvalError> {
-    let value = if matches!(value, Value::Expr(_)) {
+    let value = if matches!(value, Value::Lazy(_)) {
         force_value_shell(&value)?
     } else {
         value
@@ -765,7 +750,7 @@ fn lower_core_callable_value(value: Value) -> Result<Callable<CoreSpecialization
         | Value::Binary(_)
         | Value::List(_)
         | Value::Function(_) => Err(EvalError::new("application requires a function value")),
-        Value::Expr(_) => unreachable!("callable value shell must be fully forced"),
+        Value::Lazy(_) => unreachable!("callable value shell must be fully forced"),
     }
 }
 
@@ -877,13 +862,6 @@ fn observe_core_data(data: CoreNetData) -> Result<Value, EvalError> {
         CoreNetData::Value(value) => eval_value(&value),
         CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
         CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
-        CoreNetData::Deferred(value) => value
-            .force()
-            .map_err(|message| EvalError::new(message.as_ref())),
-        CoreNetData::Future(value) => value
-            .get()
-            .cloned()
-            .ok_or_else(|| EvalError::new("future was observed before initialization")),
     }
 }
 
@@ -929,8 +907,6 @@ fn core_data_to_lazy_value(data: CoreNetData) -> Result<Value, EvalError> {
         CoreNetData::Value(value) => Ok(value),
         CoreNetData::Builtin(call) if call.arguments.is_empty() => Ok(Value::Builtin(call.builtin)),
         CoreNetData::Builtin(call) => Ok(Value::PartialBuiltin(call)),
-        CoreNetData::Deferred(value) => Ok(Value::expr(Expr::Deferred(value))),
-        CoreNetData::Future(value) => Ok(Value::expr(Expr::Future(value))),
     }
 }
 
@@ -961,7 +937,7 @@ fn apply_builtin_values_lazily(
 
     let (saturating, rest) = arguments.split_at(remaining);
     supplied.extend_from_slice(saturating);
-    let result = Value::Expr(Thunk::from_builtin(BuiltinCall {
+    let result = Value::Lazy(LazyValue::from_builtin(BuiltinCall {
         builtin,
         arguments: Arc::from(supplied),
     }));
@@ -1075,8 +1051,8 @@ fn apply_core_operator(
             }
             let stage =
                 attach_net_many(Value::Net(NetValue::new(code.runtime().clone())), captures);
-            Ok(OperatorYield::Data(CoreNetData::Value(Value::Expr(
-                Thunk::from_net(stage),
+            Ok(OperatorYield::Data(CoreNetData::Value(Value::Lazy(
+                LazyValue::from_net(stage),
             ))))
         }
         CoreOperator::Dict { keys, supplied } => {
@@ -1111,8 +1087,8 @@ fn apply_core_operator(
                     "builtin operator received too many arguments",
                 ));
             }
-            Ok(OperatorYield::Data(CoreNetData::Value(Value::Expr(
-                Thunk::from_builtin(BuiltinCall {
+            Ok(OperatorYield::Data(CoreNetData::Value(Value::Lazy(
+                LazyValue::from_builtin(BuiltinCall {
                     builtin: call.builtin,
                     arguments: Arc::from(arguments),
                 }),
@@ -1148,8 +1124,8 @@ fn apply_core_operator(
                     Arc::from(arguments),
                 )));
             }
-            Ok(OperatorYield::Data(CoreNetData::Value(Value::Expr(
-                Thunk::from_access(path.clone(), Arc::from(arguments)),
+            Ok(OperatorYield::Data(CoreNetData::Value(Value::Lazy(
+                LazyValue::from_access(path.clone(), Arc::from(arguments)),
             ))))
         }
         CoreOperator::Error(message) => Err(EvalError::new(message.as_ref())),
@@ -1598,7 +1574,7 @@ fn equal_values(
         }
         (Value::List(left), Value::List(right)) => equal_lists(left, right, local_env, name),
         (Value::Dict(left), Value::Dict(right)) => equal_dicts(&left, &right, local_env, name),
-        (Value::Expr(_), _) | (_, Value::Expr(_)) => {
+        (Value::Lazy(_), _) | (_, Value::Lazy(_)) => {
             unreachable!("force_value_shell removes suspended values")
         }
         (Value::Builtin(_), _)
@@ -1902,8 +1878,8 @@ fn eval_list_effect_cut_builtin(
 
 fn eval_list_effect_fix_builtin(function: &Value, local_env: &[Value]) -> Result<Value, EvalError> {
     let function = eval_value(function)?;
-    let handle = IVar::new();
-    let marker = Value::expr(Expr::Future(handle.clone()));
+    let handle = LazyValue::pending("list effect fixpoint");
+    let marker = Value::Lazy(handle.clone());
     let operation = apply_value(function, marker.clone(), local_env)?;
     Ok(Value::List(fix_list_effect_results(
         operation,
@@ -1969,7 +1945,7 @@ fn cut_list_effect_results(operation: Value, local_env: Arc<[Value]>) -> List {
     })
 }
 
-fn fix_list_effect_results(operation: Value, handle: IVar, local_env: Arc<[Value]>) -> List {
+fn fix_list_effect_results(operation: Value, handle: LazyValue, local_env: Arc<[Value]>) -> List {
     deferred_list("list effect fix", move || {
         let results = lazy_run_list_effect(operation.clone(), local_env.clone());
         let Some((head, tail)) = pop_list_front(&results)? else {
@@ -1989,13 +1965,9 @@ fn deferred_list(
     label: &'static str,
     thunk: impl Fn() -> Result<List, EvalError> + Send + Sync + 'static,
 ) -> List {
-    List::from_thunk(Thunk::new(
-        Arc::new(Expr::Deferred(Arc::new(DeferredValue::new(
-            label,
-            move || thunk().map(Value::List).map_err(|err| err.to_string()),
-        )))),
-        Arc::from([]),
-    ))
+    List::from_thunk(LazyValue::deferred(label, move || {
+        thunk().map(Value::List).map_err(|err| err.to_string())
+    }))
 }
 
 fn list_effect_api() -> Value {
@@ -2136,8 +2108,8 @@ fn eval_fixpoint_builtin(function: &Value) -> Result<Value, EvalError> {
         return Err(EvalError::new("fixpoint builtin requires a function value"));
     }
 
-    let handle = IVar::new();
-    let marker = Value::expr(Expr::Future(handle.clone()));
+    let handle = LazyValue::pending("fixpoint");
+    let marker = Value::Lazy(handle.clone());
     let value = apply_value(function, marker.clone(), &[])?;
     handle
         .set(value.clone())
@@ -2149,8 +2121,8 @@ fn eval_object_instance_builtin(spec: &Value, local_env: &[Value]) -> Result<Val
     let spec_dict = object_spec_dict(spec)?;
     let specs = object_application_order(&spec_dict, local_env)?;
 
-    let handle = IVar::new();
-    let self_marker = Value::expr(Expr::Future(handle.clone()));
+    let handle = LazyValue::pending("object self");
+    let self_marker = Value::Lazy(handle.clone());
     let mut base = Value::Dict(crate::core::Dict::new_sync());
     for spec in specs {
         let defs = spec
@@ -2647,10 +2619,7 @@ fn is_unit_value(value: &Value) -> bool {
 }
 
 fn annotation_error_value(message: impl Into<String>) -> Value {
-    Value::Expr(Thunk::new(
-        Arc::new(Expr::Error(Arc::from(message.into()))),
-        Arc::from([]),
-    ))
+    Value::error(message.into())
 }
 
 fn eval_deque_annotation(target: &Value) -> Result<Value, EvalError> {
@@ -2713,10 +2682,10 @@ fn eval_merge_duplicate_builtin(
     if is_undefined_value(&right) {
         return Ok(left);
     }
-    if is_error_expr_value(&left) {
+    if is_error_lazy_value(&left) {
         return Ok(left);
     }
-    if is_error_expr_value(&right) {
+    if is_error_lazy_value(&right) {
         return Ok(right);
     }
 
@@ -2759,8 +2728,8 @@ fn merge_duplicate_dict_value(key: &Key, left: &Value, right: &Value) -> Value {
     } else if is_undefined_dict_value(right) {
         left.clone()
     } else if matches!((left, right), (Value::Dict(_), Value::Dict(_)))
-        || is_expr_value(left)
-        || is_expr_value(right)
+        || is_lazy_value(left)
+        || is_lazy_value(right)
     {
         builtin_apply3_value(
             Builtin::MergeDuplicate,
@@ -2769,12 +2738,9 @@ fn merge_duplicate_dict_value(key: &Key, left: &Value, right: &Value) -> Value {
             right,
         )
     } else {
-        Value::Expr(Thunk::new(
-            Arc::new(Expr::Error(Arc::from(format!(
-                "dictionary union is ambiguous at key `{}`",
-                format_name_part(key)
-            )))),
-            Arc::from([]),
+        Value::error(format!(
+            "dictionary union is ambiguous at key `{}`",
+            format_name_part(key)
         ))
     }
 }
@@ -2804,18 +2770,15 @@ fn update_dict_path(dict: &crate::core::Dict, path: &[Key], new_value: Value) ->
 fn update_nested_dict_path(head: &Key, rest: &[Key], new_value: Value, prior: Value) -> Value {
     match prior {
         Value::Dict(dict) => Value::Dict(update_dict_path(&dict, rest, new_value)),
-        Value::Expr(_) => builtin_apply3_value(
+        Value::Lazy(_) => builtin_apply3_value(
             Builtin::DictUpdate,
             &key_path_value(rest),
             &new_value,
             &prior,
         ),
-        _ => Value::Expr(Thunk::new(
-            Arc::new(Expr::Error(Arc::from(format!(
-                "dictionary update path `{}` traverses a non-dictionary value",
-                format_name_part(head)
-            )))),
-            Arc::from([]),
+        _ => Value::error(format!(
+            "dictionary update path `{}` traverses a non-dictionary value",
+            format_name_part(head)
         )),
     }
 }
@@ -2848,7 +2811,7 @@ fn value_as_expr(value: &Value) -> Arc<Expr> {
 }
 
 fn builtin_apply3_value(builtin: Builtin, first: &Value, second: &Value, third: &Value) -> Value {
-    Value::Expr(Thunk::new(
+    Value::Lazy(LazyValue::new(
         Arc::new(Expr::Apply(
             Arc::new(Expr::Apply(
                 Arc::new(Expr::Apply(
@@ -2863,12 +2826,12 @@ fn builtin_apply3_value(builtin: Builtin, first: &Value, second: &Value, third: 
     ))
 }
 
-fn is_expr_value(value: &Value) -> bool {
-    matches!(value, Value::Expr(_))
+fn is_lazy_value(value: &Value) -> bool {
+    matches!(value, Value::Lazy(_))
 }
 
-fn is_error_expr_value(value: &Value) -> bool {
-    matches!(value, Value::Expr(thunk) if matches!(thunk.expr().map(Arc::as_ref), Some(Expr::Error(_))))
+fn is_error_lazy_value(value: &Value) -> bool {
+    matches!(value, Value::Lazy(lazy) if lazy.cached().is_some_and(|result| result.is_err()))
 }
 
 fn is_undefined_dict_value(value: &Value) -> bool {
@@ -2879,12 +2842,12 @@ fn expand_key_expr(key: &KeyExpr, local_env: &[Value]) -> Result<Vec<Key>, EvalE
     match key {
         KeyExpr::Key(key) => Ok(vec![key.clone()]),
         KeyExpr::Index(expr) => {
-            let value = Value::Expr(Thunk::new(expr.clone(), Arc::from(local_env.to_vec())));
+            let value = Value::Lazy(LazyValue::new(expr.clone(), Arc::from(local_env.to_vec())));
             let value = force_value_shell(&value)?;
             Ok(vec![value_to_key(&value, local_env)?])
         }
         KeyExpr::PathIndex(expr) => eval_key_path_list(
-            &Value::Expr(Thunk::new(expr.clone(), Arc::from(local_env.to_vec()))),
+            &Value::Lazy(LazyValue::new(expr.clone(), Arc::from(local_env.to_vec()))),
             local_env,
         ),
     }
@@ -3031,7 +2994,7 @@ fn append_sequence(value: Value) -> Result<List, EvalError> {
     match value {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
-        Value::Expr(thunk) => Ok(List::from_thunk(thunk)),
+        Value::Lazy(thunk) => Ok(List::from_thunk(thunk)),
         _ => Err(EvalError::new(
             "append requires list or binary values on both sides",
         )),
@@ -3053,7 +3016,7 @@ mod tests {
     use bytes::Bytes;
 
     use crate::compiler::CompileContext;
-    use crate::core::{Dict, Expr, IVar, Thunk, Value};
+    use crate::core::{Dict, Expr, LazyValue, Value};
     use crate::number::Number;
 
     use super::*;
@@ -3178,13 +3141,10 @@ mod tests {
         let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let lazy_argument = |label: &'static str| {
             let forced = forced.clone();
-            Value::expr(Expr::Deferred(Arc::new(DeferredValue::new(
-                label,
-                move || {
-                    forced.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok(n(99))
-                },
-            ))))
+            Value::deferred(label, move || {
+                forced.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(n(99))
+            })
         };
         let function = context.value_lambdas(3, context.value_local(2));
         let application = context.value_apply_many(
@@ -3212,13 +3172,36 @@ mod tests {
 
     #[test]
     fn compiling_a_function_does_not_evaluate_its_body() {
-        let function = closed_function_value(1, Expr::Error(Arc::from("unreached body")));
+        let function = closed_function_value(1, Expr::Value(Value::error("unreached body")));
 
         assert!(matches!(function, Value::Function(_)));
     }
 
     fn n(value: i64) -> Value {
         Value::Number(value.into())
+    }
+
+    #[test]
+    fn pending_lazy_values_fail_fast_until_initialized() {
+        let pending = LazyValue::pending("test pending value");
+        let value = Value::Lazy(pending.clone());
+
+        assert_eq!(
+            eval_value(&value).unwrap_err().to_string(),
+            "lazy value was observed before initialization"
+        );
+        pending.set(n(42)).unwrap();
+        assert_eq!(eval_value(&value).unwrap(), n(42));
+    }
+
+    #[test]
+    fn ready_lazy_errors_fail_when_observed() {
+        let value = Value::error("deliberate failure");
+
+        assert_eq!(
+            eval_value(&value).unwrap_err().to_string(),
+            "deliberate failure"
+        );
     }
 
     fn function_expr(arity: usize, body: Expr) -> Expr {
@@ -3319,7 +3302,7 @@ mod tests {
                 }
                 expr
             }
-            Value::Expr(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
+            Value::Lazy(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
                 thunk.expr().unwrap().as_ref().clone()
             }
             _ => Expr::Value(value.clone()),
@@ -3334,13 +3317,13 @@ mod tests {
     }
 
     fn rooted_expr_value(root: &Value, expr: Expr) -> Value {
-        let handle = IVar::new();
+        let handle = LazyValue::pending("test root");
         handle
             .set(root.clone())
             .expect("rooted test expression should initialize handle once");
-        Value::Expr(Thunk::new(
+        Value::Lazy(LazyValue::new(
             Arc::new(expr),
-            Arc::from([Value::expr(Expr::Future(handle))]),
+            Arc::from([Value::Lazy(handle)]),
         ))
     }
 
@@ -3504,10 +3487,7 @@ mod tests {
 
     #[test]
     fn split_end_does_not_force_lazy_left_branch_when_suffix_is_in_right_branch() {
-        let lazy_left = List::from_thunk(Thunk::new(
-            Arc::new(Expr::Error(Arc::from("left branch was forced"))),
-            Arc::from([]),
-        ));
+        let lazy_left = List::from_thunk(LazyValue::error("left branch was forced"));
         let list = List::concat(lazy_left, List::from_bytes(Bytes::from_static(b"abc")));
         let split = eval_closed_expr(&builtin2_expr(
             Builtin::ListSplitEnd,
@@ -3552,10 +3532,10 @@ mod tests {
     fn expression_arguments_share_forced_values() {
         let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = force_count.clone();
-        let counted = Expr::Deferred(Arc::new(DeferredValue::new("counted", move || {
+        let counted = Expr::Value(Value::deferred("counted", move || {
             count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(n(2))
-        })));
+        }));
         let expr = Expr::Apply(
             Arc::new(function_expr(
                 1,
@@ -3765,13 +3745,10 @@ mod tests {
     fn partial_builtins_share_lazy_arguments() {
         let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = force_count.clone();
-        let argument = Expr::Deferred(Arc::new(DeferredValue::new(
-            "partial argument",
-            move || {
-                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(n(40))
-            },
-        )));
+        let argument = Expr::Value(Value::deferred("partial argument", move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(n(40))
+        }));
         let make_partial = function_expr(
             1,
             Expr::Apply(
@@ -3798,13 +3775,10 @@ mod tests {
                 1,
                 Expr::List(Arc::from([Arc::new(Expr::Local(0))])),
             )),
-            Arc::new(Expr::Deferred(Arc::new(DeferredValue::new(
-                "list value",
-                move || {
-                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok(n(42))
-                },
-            )))),
+            Arc::new(Expr::Value(Value::deferred("list value", move || {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(n(42))
+            }))),
         );
         let Value::List(list) = eval_closed_expr(&expression).unwrap() else {
             panic!("net-backed list literal should produce a list");
@@ -3820,7 +3794,7 @@ mod tests {
         let ListItem::Value(item) = item else {
             panic!("lazy argument should remain an ordinary list value")
         };
-        assert!(matches!(item, Value::Expr(_)));
+        assert!(matches!(item, Value::Lazy(_)));
         assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(eval_value(&item).unwrap(), n(42));
         assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -3829,7 +3803,7 @@ mod tests {
 
     #[test]
     fn closed_semantic_list_holes_remain_host_observable() {
-        let hole = Thunk::new(
+        let hole = LazyValue::new(
             Arc::new(Expr::Value(Value::List(List::from_values(vec![n(42)])))),
             Arc::from([]),
         );
@@ -3998,10 +3972,10 @@ mod tests {
         let result_value = asm_value
             .get(&crate::core::Key::Atom(result))
             .expect("result should exist");
-        let Value::Expr(thunk) = result_value else {
+        let Value::Lazy(thunk) = result_value else {
             panic!("resolved result should stay lazy until demanded");
         };
-        let resolved = eval_value(&Value::Expr(thunk.clone()))
+        let resolved = eval_value(&Value::Lazy(thunk.clone()))
             .expect("result expression should evaluate when demanded");
 
         let Value::List(list) = resolved else {
@@ -4139,10 +4113,10 @@ mod tests {
 
         let value = eval_closed_expr(&expr).expect("dict union should evaluate");
         let greeting = value.get_key_path(&[key]).expect("greeting should exist");
-        let Value::Expr(greeting) = greeting else {
+        let Value::Lazy(greeting) = greeting else {
             panic!("greeting should stay lazy until demanded");
         };
-        let greeting = eval_value(&Value::Expr(greeting.clone()))
+        let greeting = eval_value(&Value::Lazy(greeting.clone()))
             .expect("nested dict union should evaluate when demanded");
         let Value::Dict(greeting) = greeting else {
             panic!("greeting should evaluate to a merged dictionary");
@@ -4199,11 +4173,11 @@ mod tests {
         let ambiguous = value
             .get_key_path(&[key])
             .expect("ambiguous key should exist");
-        let Value::Expr(ambiguous) = ambiguous else {
+        let Value::Lazy(ambiguous) = ambiguous else {
             panic!("ambiguous duplicate should stay as a stuck expression");
         };
 
-        let err = eval_value(&Value::Expr(ambiguous.clone()))
+        let err = eval_value(&Value::Lazy(ambiguous.clone()))
             .expect_err("ambiguous key should fail only when demanded");
 
         assert_eq!(
@@ -4409,11 +4383,11 @@ mod tests {
         ))
         .expect("anno should pass through successful assertions");
 
-        let Value::Expr(thunk) = value else {
+        let Value::Lazy(thunk) = value else {
             panic!("anno should preserve lazy target evaluation");
         };
         let resolved =
-            eval_value(&Value::Expr(thunk)).expect("returned target should still evaluate");
+            eval_value(&Value::Lazy(thunk)).expect("returned target should still evaluate");
         assert_eq!(resolved, n(42));
     }
 
@@ -4451,10 +4425,10 @@ mod tests {
         ))
         .expect("failed anno should still produce a stuck value");
 
-        let Value::Expr(thunk) = value else {
+        let Value::Lazy(thunk) = value else {
             panic!("failed anno should produce a stuck expression");
         };
-        let err = eval_value(&Value::Expr(thunk)).expect_err("failed anno should raise on demand");
+        let err = eval_value(&Value::Lazy(thunk)).expect_err("failed anno should raise on demand");
         assert_eq!(
             err.to_string(),
             "cannot override `foo` because it is not defined"
@@ -4572,7 +4546,7 @@ mod tests {
             Value::PartialBuiltin(call) => {
                 assert_eq!(call.builtin, Builtin::Append);
                 assert_eq!(call.arguments.len(), 1);
-                assert!(matches!(&call.arguments[0], Value::Expr(_)));
+                assert!(matches!(&call.arguments[0], Value::Lazy(_)));
             }
             other => panic!("expected partial builtin, got {other:?}"),
         }

@@ -1230,7 +1230,7 @@ fn object_decl_value_in_scope(
 
 fn shift_value_locals(value: &Value, amount: usize, cutoff: usize) -> Value {
     match value {
-        Value::Expr(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => Value::expr(
+        Value::Lazy(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => Value::expr(
             shift_expr_locals(thunk.expr().unwrap().as_ref(), amount, cutoff),
         ),
         other => other.clone(),
@@ -1269,9 +1269,6 @@ fn shift_expr_locals(expr: &CoreExpr, amount: usize, cutoff: usize) -> CoreExpr 
                     .collect::<Vec<_>>(),
             ),
         ),
-        CoreExpr::Future(ivar) => CoreExpr::Future(ivar.clone()),
-        CoreExpr::Deferred(deferred) => CoreExpr::Deferred(deferred.clone()),
-        CoreExpr::Error(message) => CoreExpr::Error(message.clone()),
     }
 }
 
@@ -1329,7 +1326,7 @@ fn lower_resolved_expr_compat(
     match expr {
         ResolvedExpr::Embedded(value) => {
             debug_assert!(
-                !matches!(value, Value::Expr(_)),
+                !matches!(value, Value::Lazy(_)),
                 "resolved embedded data cannot contain a Core expression"
             );
             value
@@ -1405,7 +1402,7 @@ fn lower_resolved_expr_compat(
 
 fn semantic_value_to_expr(value: Value) -> CoreExpr {
     match value {
-        Value::Expr(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
+        Value::Lazy(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
             thunk.expr().unwrap().as_ref().clone()
         }
         value => CoreExpr::Value(value),
@@ -1434,7 +1431,7 @@ fn collect_outer_locals(expr: &CoreExpr, arity: usize, captures: &mut BTreeSet<u
         CoreExpr::Local(index) if *index >= arity => {
             captures.insert(index - arity);
         }
-        CoreExpr::Local(_) | CoreExpr::Deferred(_) | CoreExpr::Future(_) | CoreExpr::Error(_) => {}
+        CoreExpr::Local(_) => {}
         CoreExpr::Access(base, path) => {
             collect_outer_locals(base, arity, captures);
             for key in path.iter() {
@@ -1450,7 +1447,7 @@ fn collect_outer_locals(expr: &CoreExpr, arity: usize, captures: &mut BTreeSet<u
 }
 
 fn collect_outer_locals_in_value(value: &Value, arity: usize, captures: &mut BTreeSet<usize>) {
-    if let Value::Expr(thunk) = value
+    if let Value::Lazy(thunk) = value
         && thunk.env().is_some_and(|env| env.is_empty())
     {
         collect_outer_locals(thunk.expr().unwrap(), arity, captures);
@@ -1508,15 +1505,12 @@ fn rewrite_outer_locals(expr: &CoreExpr, arity: usize, captures: &[usize]) -> Co
                     .collect::<Vec<_>>(),
             ),
         ),
-        CoreExpr::Deferred(value) => CoreExpr::Deferred(value.clone()),
-        CoreExpr::Future(value) => CoreExpr::Future(value.clone()),
-        CoreExpr::Error(message) => CoreExpr::Error(message.clone()),
     }
 }
 
 fn rewrite_outer_locals_in_value(value: &Value, arity: usize, captures: &[usize]) -> Value {
     match value {
-        Value::Expr(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
+        Value::Lazy(thunk) if thunk.env().is_some_and(|env| env.is_empty()) => {
             Value::expr(rewrite_outer_locals(thunk.expr().unwrap(), arity, captures))
         }
         other => other.clone(),
@@ -5680,20 +5674,18 @@ mod tests {
     use crate::number::Number;
 
     fn core_global_access(context: &CompileContext, path: Vec<CoreKeyExpr>) -> CoreExpr {
-        let Value::Expr(thunk) = &context.final_defs else {
-            panic!("final module binding should be a lazy expression");
-        };
-        CoreExpr::Access(thunk.expr().unwrap().clone(), Arc::from(path))
+        CoreExpr::Access(
+            Arc::new(CoreExpr::Value(context.final_defs.clone())),
+            Arc::from(path),
+        )
     }
 
     fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> Value {
-        let Value::Expr(thunk) = &context.final_defs else {
-            panic!("final module binding should be a lazy expression");
+        let Value::Lazy(final_defs) = &context.final_defs else {
+            panic!("final module binding should be a pending lazy value");
         };
-        let crate::core::Expr::Future(ivar) = thunk.expr().unwrap().as_ref() else {
-            panic!("final module binding should be a future expression");
-        };
-        ivar.set(lowered.definitions.clone())
+        final_defs
+            .set(lowered.definitions.clone())
             .expect("future should not be set yet");
         crate::eval::eval_value(&lowered.definitions).expect("lowered module should evaluate")
     }
@@ -5718,7 +5710,7 @@ mod tests {
     }
 
     fn fully_evaluated_value(mut value: Value) -> Value {
-        while matches!(value, Value::Expr(_)) {
+        while matches!(value, Value::Lazy(_)) {
             value = crate::eval::eval_value(&value).expect("value should fully evaluate");
         }
         value
@@ -5753,7 +5745,7 @@ mod tests {
                 }
                 Ok(())
             },
-            &mut |thunk| match crate::eval::eval_value(&Value::Expr(thunk.clone()))
+            &mut |thunk| match crate::eval::eval_value(&Value::Lazy(thunk.clone()))
                 .map_err(|err| err.to_string())?
             {
                 Value::Binary(bytes) => Ok(crate::core::List::from_bytes(bytes)),
@@ -8219,7 +8211,7 @@ mod tests {
             value_at_atom_path(&value, &["asm", "result"]).expect("result should exist");
         let err = loop {
             match crate::eval::eval_value(&result) {
-                Ok(Value::Expr(next)) => result = Value::Expr(next),
+                Ok(Value::Lazy(next)) => result = Value::Lazy(next),
                 Ok(other) => panic!("non-unit result should not evaluate to {other:?}"),
                 Err(err) => break err,
             }
@@ -8809,10 +8801,10 @@ mod tests {
             .expect("foo binding should exist lazily");
         let foo =
             crate::eval::eval_value(foo).expect("foo binding should resolve to a stuck expression");
-        let Value::Expr(foo) = foo else {
+        let Value::Lazy(foo) = foo else {
             panic!("foo binding should resolve to a stuck expression");
         };
-        let err = crate::eval::eval_value(&Value::Expr(foo))
+        let err = crate::eval::eval_value(&Value::Lazy(foo))
             .expect_err("override check should fail on demand");
         assert_eq!(
             err.to_string(),
@@ -8838,10 +8830,10 @@ mod tests {
             .expect("duplicate foo binding should exist lazily");
         let foo = crate::eval::eval_value(foo)
             .expect("duplicate foo binding should resolve to a stuck expression");
-        let Value::Expr(foo) = foo else {
+        let Value::Lazy(foo) = foo else {
             panic!("duplicate foo binding should resolve to a stuck expression");
         };
-        let err = crate::eval::eval_value(&Value::Expr(foo))
+        let err = crate::eval::eval_value(&Value::Lazy(foo))
             .expect_err("duplicate introductions should fail on demand");
         assert_eq!(
             err.to_string(),

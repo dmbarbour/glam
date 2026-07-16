@@ -40,7 +40,7 @@
   only port provenance, embedded data is cloned without transformation, and
   fan sites are translated per logical copy
 - `list.rs` provides compact byte leaves, generic value leaves, finger-tree
-  ropes, and opaque lazy holes; `core::List` supplies `Value` and `Thunk`
+  ropes, and opaque lazy holes; `core::List` supplies `Value` and `LazyValue`
 - `eval.rs` contains no lambda or closure representation. Source functions are
   ordinary, observable `Value::Function` data; partial application derives and
   shares another curried runtime stage. Saturated calls are memoized thunks.

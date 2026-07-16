@@ -22,56 +22,101 @@ pub enum Expr {
     },
     Local(usize),
     Access(Arc<Expr>, Arc<[KeyExpr]>),
-    Deferred(Arc<DeferredValue>),
-    Future(IVar),
-    Error(Arc<str>),
 }
 
 #[derive(Clone)]
-pub struct DeferredValue {
+pub struct LazyValue {
     id: u64,
     label: Arc<str>,
-    thunk: Arc<dyn Fn() -> Result<Value, String> + Send + Sync>,
+    source: LazySource,
     result: Arc<OnceLock<Result<Value, Arc<str>>>>,
 }
 
-impl DeferredValue {
-    pub fn new(
-        label: impl Into<Arc<str>>,
-        thunk: impl Fn() -> Result<Value, String> + Send + Sync + 'static,
-    ) -> Self {
+impl LazyValue {
+    fn with_source(label: impl Into<Arc<str>>, source: LazySource) -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
         Self {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             label: label.into(),
-            thunk: Arc::new(thunk),
+            source,
             result: Arc::new(OnceLock::new()),
         }
+    }
+
+    pub fn pending(label: impl Into<Arc<str>>) -> Self {
+        Self::with_source(label, LazySource::Pending)
+    }
+
+    pub fn deferred(
+        label: impl Into<Arc<str>>,
+        thunk: impl Fn() -> Result<Value, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_source(label, LazySource::Deferred(Arc::new(thunk)))
+    }
+
+    pub fn error(message: impl Into<Arc<str>>) -> Self {
+        let value = Self::with_source("error", LazySource::Pending);
+        value
+            .result
+            .set(Err(message.into()))
+            .expect("new lazy error must be uninitialized");
+        value
     }
 
     pub fn label(&self) -> &str {
         &self.label
     }
 
-    pub fn force(&self) -> Result<Value, Arc<str>> {
+    pub fn get(&self) -> Option<Result<Value, Arc<str>>> {
+        self.result.get().cloned()
+    }
+
+    pub fn set(&self, value: Value) -> Result<(), Value> {
+        self.result.set(Ok(value)).map_err(|result| {
+            result.expect("setting a lazy value always supplies a successful value")
+        })
+    }
+
+    pub fn cached(&self) -> Option<Result<Value, Arc<str>>> {
+        self.get()
+    }
+
+    pub fn cache(&self, value: Result<Value, Arc<str>>) -> Result<Value, Arc<str>> {
+        let _ = self.result.set(value);
         self.result
-            .get_or_init(|| (self.thunk)().map_err(Arc::from))
+            .get()
+            .expect("lazy cache should contain a value after set")
             .clone()
+    }
+
+    pub(crate) fn is_pending(&self) -> bool {
+        matches!(self.source, LazySource::Pending) && self.result.get().is_none()
+    }
+
+    pub(crate) fn force_deferred(&self) -> Option<Result<Value, Arc<str>>> {
+        match &self.source {
+            LazySource::Deferred(thunk) => Some(
+                self.result
+                    .get_or_init(|| thunk().map_err(Arc::from))
+                    .clone(),
+            ),
+            _ => None,
+        }
     }
 }
 
-impl PartialEq for DeferredValue {
+impl PartialEq for LazyValue {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
 }
 
-impl Eq for DeferredValue {}
+impl Eq for LazyValue {}
 
-impl fmt::Debug for DeferredValue {
+impl fmt::Debug for LazyValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DeferredValue")
+        f.debug_struct("LazyValue")
             .field("id", &self.id)
             .field("label", &self.label)
             .finish_non_exhaustive()
@@ -166,7 +211,7 @@ impl Key {
             Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Function(_) | Value::Net(_) => {
                 None
             }
-            Value::Expr(_) => None,
+            Value::Lazy(_) => None,
         }
     }
 }
@@ -186,37 +231,6 @@ impl fmt::Debug for Key {
     }
 }
 
-#[derive(Clone)]
-pub struct IVar(Arc<OnceLock<Value>>);
-
-impl IVar {
-    pub fn new() -> Self {
-        Self(Arc::new(OnceLock::new()))
-    }
-
-    pub fn get(&self) -> Option<&Value> {
-        self.0.get()
-    }
-
-    pub fn set(&self, value: Value) -> Result<(), Value> {
-        self.0.set(value)
-    }
-}
-
-impl PartialEq for IVar {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for IVar {}
-
-impl fmt::Debug for IVar {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("FixpointHandle(..)")
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Atom(Atom),
@@ -231,7 +245,8 @@ pub enum Value {
     Function(FunctionValue),
     /// A closed interaction net with one designated exposed port.
     Net(NetValue),
-    Expr(Thunk),
+    /// A closed suspended computation, pending value, or memoized failure.
+    Lazy(LazyValue),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,13 +340,9 @@ impl BuiltinCall {
 }
 
 #[derive(Clone)]
-pub struct Thunk {
-    source: ThunkSource,
-    result: Arc<OnceLock<Result<Value, Arc<str>>>>,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-enum ThunkSource {
+enum LazySource {
+    Pending,
+    Deferred(Arc<dyn Fn() -> Result<Value, String> + Send + Sync>),
     Expr {
         expr: Arc<Expr>,
         env: Arc<[Value]>,
@@ -348,100 +359,64 @@ enum ThunkSource {
     },
 }
 
-impl Thunk {
+impl LazyValue {
     pub fn new(expr: Arc<Expr>, env: Arc<[Value]>) -> Self {
-        Self {
-            source: ThunkSource::Expr { expr, env },
-            result: Arc::new(OnceLock::new()),
-        }
+        Self::with_source("expression", LazySource::Expr { expr, env })
     }
 
     pub(crate) fn from_access(path: Arc<[CoreDataKey]>, arguments: Arc<[Value]>) -> Self {
-        Self {
-            source: ThunkSource::Access { path, arguments },
-            result: Arc::new(OnceLock::new()),
-        }
+        Self::with_source("access", LazySource::Access { path, arguments })
     }
 
     pub(crate) fn from_builtin(call: BuiltinCall) -> Self {
-        Self {
-            source: ThunkSource::Builtin(call),
-            result: Arc::new(OnceLock::new()),
-        }
+        Self::with_source("builtin call", LazySource::Builtin(call))
     }
 
     pub(crate) fn from_function_call(function: FunctionValue, arguments: Arc<[Value]>) -> Self {
-        Self {
-            source: ThunkSource::FunctionCall {
+        Self::with_source(
+            "function call",
+            LazySource::FunctionCall {
                 function,
                 arguments,
             },
-            result: Arc::new(OnceLock::new()),
-        }
+        )
     }
 
     pub(crate) fn from_net(net: NetValue) -> Self {
-        Self {
-            source: ThunkSource::Net(net),
-            result: Arc::new(OnceLock::new()),
-        }
+        Self::with_source("net", LazySource::Net(net))
     }
 
     pub fn expr(&self) -> Option<&Arc<Expr>> {
         match &self.source {
-            ThunkSource::Expr { expr, .. } => Some(expr),
-            ThunkSource::Access { .. }
-            | ThunkSource::Builtin(_)
-            | ThunkSource::Net(_)
-            | ThunkSource::FunctionCall { .. } => None,
+            LazySource::Expr { expr, .. } => Some(expr),
+            _ => None,
         }
     }
 
     pub fn env(&self) -> Option<&Arc<[Value]>> {
         match &self.source {
-            ThunkSource::Expr { env, .. } => Some(env),
-            ThunkSource::Access { .. }
-            | ThunkSource::Builtin(_)
-            | ThunkSource::Net(_)
-            | ThunkSource::FunctionCall { .. } => None,
+            LazySource::Expr { env, .. } => Some(env),
+            _ => None,
         }
-    }
-
-    pub fn cached(&self) -> Option<Result<Value, Arc<str>>> {
-        self.result.get().cloned()
-    }
-
-    pub fn cache(&self, value: Result<Value, Arc<str>>) -> Result<Value, Arc<str>> {
-        let _ = self.result.set(value);
-        self.result
-            .get()
-            .expect("thunk cache should contain a value after set")
-            .clone()
     }
 
     pub(crate) fn access(&self) -> Option<(&[CoreDataKey], &[Value])> {
         match &self.source {
-            ThunkSource::Access { path, arguments } => Some((path, arguments)),
-            ThunkSource::Expr { .. }
-            | ThunkSource::Builtin(_)
-            | ThunkSource::Net(_)
-            | ThunkSource::FunctionCall { .. } => None,
+            LazySource::Access { path, arguments } => Some((path, arguments)),
+            _ => None,
         }
     }
 
     pub(crate) fn builtin(&self) -> Option<&BuiltinCall> {
         match &self.source {
-            ThunkSource::Builtin(call) => Some(call),
-            ThunkSource::Expr { .. }
-            | ThunkSource::Access { .. }
-            | ThunkSource::Net(_)
-            | ThunkSource::FunctionCall { .. } => None,
+            LazySource::Builtin(call) => Some(call),
+            _ => None,
         }
     }
 
     pub(crate) fn function_call(&self) -> Option<(&FunctionValue, &[Value])> {
         match &self.source {
-            ThunkSource::FunctionCall {
+            LazySource::FunctionCall {
                 function,
                 arguments,
             } => Some((function, arguments)),
@@ -451,43 +426,8 @@ impl Thunk {
 
     pub(crate) fn net(&self) -> Option<&NetValue> {
         match &self.source {
-            ThunkSource::Net(net) => Some(net),
+            LazySource::Net(net) => Some(net),
             _ => None,
-        }
-    }
-}
-
-impl PartialEq for Thunk {
-    fn eq(&self, other: &Self) -> bool {
-        self.source == other.source
-    }
-}
-
-impl Eq for Thunk {}
-
-impl fmt::Debug for Thunk {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.source {
-            ThunkSource::Expr { expr, env } => f
-                .debug_struct("Thunk")
-                .field("expr", expr)
-                .field("env", env)
-                .finish_non_exhaustive(),
-            ThunkSource::Access { path, arguments } => f
-                .debug_struct("AccessThunk")
-                .field("path", path)
-                .field("arguments", arguments)
-                .finish_non_exhaustive(),
-            ThunkSource::Builtin(call) => f.debug_tuple("BuiltinThunk").field(call).finish(),
-            ThunkSource::Net(net) => f.debug_tuple("NetThunk").field(net).finish(),
-            ThunkSource::FunctionCall {
-                function,
-                arguments,
-            } => f
-                .debug_struct("FunctionCallThunk")
-                .field("function", function)
-                .field("arguments", arguments)
-                .finish_non_exhaustive(),
         }
     }
 }
@@ -577,7 +517,7 @@ impl Builtin {
 
 pub type Dict = RedBlackTreeMapSync<Key, Value>;
 
-pub type List = crate::list::List<Value, Thunk>;
+pub type List = crate::list::List<Value, LazyValue>;
 
 fn list_to_key_items(list: &List) -> Option<Arc<[Key]>> {
     let items = std::cell::RefCell::new(Vec::new());
@@ -605,11 +545,22 @@ impl Value {
     }
 
     pub fn expr(expr: Expr) -> Self {
-        Self::Expr(Thunk::new(Arc::new(expr), Arc::from([])))
+        Self::Lazy(LazyValue::new(Arc::new(expr), Arc::from([])))
     }
 
     pub fn expr_arc(expr: Arc<Expr>) -> Self {
-        Self::Expr(Thunk::new(expr, Arc::from([])))
+        Self::Lazy(LazyValue::new(expr, Arc::from([])))
+    }
+
+    pub fn deferred(
+        label: impl Into<Arc<str>>,
+        thunk: impl Fn() -> Result<Value, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self::Lazy(LazyValue::deferred(label, thunk))
+    }
+
+    pub fn error(message: impl Into<Arc<str>>) -> Self {
+        Self::Lazy(LazyValue::error(message))
     }
 
     pub fn singleton_list(value: Value) -> List {
@@ -631,7 +582,7 @@ impl Value {
                 | Value::Net(_)
                 | Value::Builtin(_)
                 | Value::PartialBuiltin(_)
-                | Value::Expr(_) => None,
+                | Value::Lazy(_) => None,
             },
         }
     }
@@ -743,10 +694,12 @@ mod tests {
     }
 
     #[test]
-    fn semantic_expr_can_hold_errors() {
-        let expr = Expr::Error(Arc::from("ambiguous key"));
+    fn semantic_values_can_hold_lazy_errors() {
+        let value = Value::error("ambiguous key");
 
-        assert!(matches!(expr, Expr::Error(_)));
+        assert!(
+            matches!(value, Value::Lazy(lazy) if lazy.cached().is_some_and(|value| value.is_err()))
+        );
     }
 
     #[test]

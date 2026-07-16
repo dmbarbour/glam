@@ -8,7 +8,7 @@ use std::sync::Arc;
 use glam::compiler::{
     BinaryFileLoader, BinaryLoadArgs, CompileContext, ModuleLoadArgs, ModuleLoader,
 };
-use glam::core::{Builtin, Dict, Expr as CoreExpr, Key, Value};
+use glam::core::{Builtin, Dict, Key, Value};
 use glam::diagnostic::Severity;
 use glam::eval;
 use glam::g_syntax::{DeclarationKind, ParsedSource, SourceFile, lower_to_core_with_context};
@@ -493,13 +493,11 @@ fn resolve_local_import_path(
 
 fn instantiate_module(context: &CompileContext, definitions: &Value) -> Value {
     // Currently relying on default CompileContext to provide default fixpoint.
-    let Value::Expr(thunk) = &context.final_defs else {
-        panic!("CompileContext.final_defs must be a future expression");
+    let Value::Lazy(final_defs) = &context.final_defs else {
+        panic!("CompileContext.final_defs must be a pending lazy value");
     };
-    let CoreExpr::Future(ivar) = thunk.expr().unwrap().as_ref() else {
-        panic!("CompileContext.final_defs must be a future expression");
-    };
-    ivar.set(definitions.clone())
+    final_defs
+        .set(definitions.clone())
         .expect("CompileContext.final_defs future must be unassigned");
     definitions.clone()
 }
@@ -515,7 +513,7 @@ fn value_bytes(value: &glam::core::Value, path: &str) -> Result<Vec<u8>, String>
         glam::core::Value::List(list) => {
             eval::list_output_bytes(list).map_err(|err| format!("`{path}` {err}"))
         }
-        glam::core::Value::Expr(_) => {
+        glam::core::Value::Lazy(_) => {
             let value = eval::eval_value(value).map_err(|err| err.to_string())?;
             value_bytes(&value, path)
         }
