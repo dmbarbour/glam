@@ -17,7 +17,7 @@
 	},
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
-	"forwardPorts": [9090],
+	"forwardPorts": [9090, 6080, 5901],
 
 	// Configure tool-specific properties.
 	// "customizations": {},
@@ -32,9 +32,10 @@
     },
     "mounts":[
         "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
-        "source=${localEnv:HOME}/.Xauthority,target=/root/.Xauthority,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.Xauthority,target=/root/.Xauthority,type=bind,readonly",
     ],
     "runArgs":[
         // "--net=host",
+        // "--ipc=host",
     ],
 }
