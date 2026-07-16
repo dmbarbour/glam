@@ -10,7 +10,7 @@ pub(in crate::g_syntax) use objects::*;
 
 pub fn lower_to_core_with_context(parsed: ParsedSource, context: &CompileContext) -> LoweredSource {
     // note: we'll extend 'prior' within the 'body' of an implicit lambda
-    let mut definitions = context.prior_defs.clone();
+    let mut definitions = context.prior_defs().clone();
     let ParsedSource {
         declarations,
         mut diagnostics,

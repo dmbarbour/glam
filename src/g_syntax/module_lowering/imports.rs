@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::super::*;
 use super::objects::*;
 
@@ -68,9 +70,9 @@ pub(in crate::g_syntax) fn lower_local_import(
         ImportPlacement::Inline => {
             let args = context.local_module_load_args(
                 reference,
-                context.module_path.clone(),
+                Arc::from(context.module_path()),
                 definitions.clone(),
-                context.final_defs.clone(),
+                context.final_defs().clone(),
             );
             *definitions = context.value_load_local_module(args);
         }
@@ -125,7 +127,7 @@ pub(in crate::g_syntax) fn scoped_local_import_value(
     prior_defs: Value,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
-    let final_defs = path_value_in_definitions(target, context.final_defs.clone())?;
+    let final_defs = path_value_in_definitions(target, context.final_defs().clone())?;
     let args = context.local_module_load_args(
         reference,
         scoped_module_path(context, target),

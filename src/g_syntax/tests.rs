@@ -4,13 +4,13 @@ use crate::number::Number;
 
 fn core_global_access(context: &CompileContext, path: Vec<Key>) -> Value {
     lower_resolved_expr(ResolvedExpr::Access {
-        base: Box::new(ResolvedExpr::Provided(context.final_defs.clone())),
+        base: Box::new(ResolvedExpr::Provided(context.final_defs().clone())),
         path: path.into_iter().map(ResolvedPathPart::Key).collect(),
     })
 }
 
 fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> Value {
-    let Value::Lazy(final_defs) = &context.final_defs else {
+    let Value::Lazy(final_defs) = context.final_defs() else {
         panic!("final module binding should be a pending lazy value");
     };
     final_defs
@@ -2566,7 +2566,7 @@ fn source_paths_remain_separate_from_module_paths() {
     let context = CompileContext::from_source_path("samples/assembly/hello_text.g");
 
     assert_eq!(context.source_path(), Some("samples/assembly/hello_text.g"));
-    assert!(context.module_path.is_empty());
+    assert!(context.module_path().is_empty());
 }
 
 #[test]

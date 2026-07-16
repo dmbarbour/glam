@@ -766,7 +766,7 @@ impl Assembler {
         let module_context = CompileContext::from_module_path(module_path.iter().cloned())
             .with_local_module_loader(module_loader.clone())
             .with_local_binary_loader(binary_loader.clone());
-        let final_defs = module_context.final_defs.clone();
+        let final_defs = module_context.final_defs().clone();
         let mut had_errors = false;
 
         for input in inputs.iter().rev() {
@@ -897,7 +897,7 @@ impl Assembler {
     }
 
     fn seal_module(&self, context: &CompileContext, definitions: &CoreValue) -> CoreValue {
-        let CoreValue::Lazy(final_defs) = &context.final_defs else {
+        let CoreValue::Lazy(final_defs) = context.final_defs() else {
             panic!("CompileContext.final_defs must be a pending lazy value");
         };
         final_defs

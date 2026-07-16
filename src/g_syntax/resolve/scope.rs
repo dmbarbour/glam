@@ -382,9 +382,9 @@ impl NameScope<Value> {
         visible_definitions: Value,
     ) -> Self {
         Self {
-            final_defs: context.final_defs.clone(),
+            final_defs: context.final_defs().clone(),
             prior_defs: visible_definitions.clone(),
-            module_final_defs: context.final_defs.clone(),
+            module_final_defs: context.final_defs().clone(),
             module_prior_defs: visible_definitions,
             object_alias: None,
             object_final_defs: None,

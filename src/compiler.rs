@@ -28,10 +28,10 @@ pub struct CompileContext {
     // The bootstrap still exposes core Values, but never a semantic expression
     // language. Front ends own their IR and lower it before returning Values.
     source_path: Option<Arc<str>>,
-    pub source_binary: Arc<[u8]>,
-    pub module_path: Arc<[String]>,
-    pub prior_defs: Value, // prior dictionary, can be observed at compile-time
-    pub final_defs: Value, // future dictionary, cannot observe at compile-time
+    source_binary: Arc<[u8]>,
+    module_path: Arc<[String]>,
+    prior_defs: Value, // prior dictionary, can be observed at compile-time
+    final_defs: Value, // future dictionary, cannot observe at compile-time
     local_module_loader: Option<ModuleLoader>,
     local_binary_loader: Option<BinaryFileLoader>,
 }
@@ -114,6 +114,22 @@ impl CompileContext {
 
     pub fn source_path(&self) -> Option<&str> {
         self.source_path.as_deref()
+    }
+
+    pub fn source_binary(&self) -> &[u8] {
+        &self.source_binary
+    }
+
+    pub fn module_path(&self) -> &[String] {
+        &self.module_path
+    }
+
+    pub fn prior_defs(&self) -> &Value {
+        &self.prior_defs
+    }
+
+    pub fn final_defs(&self) -> &Value {
+        &self.final_defs
     }
 
     pub fn abstract_global_path(&self, target: &str) -> Arc<[String]> {
@@ -239,14 +255,14 @@ mod tests {
         let context = CompileContext::for_assembly_file("samples/assembly/hello_text.g");
 
         assert_eq!(context.source_path(), Some("samples/assembly/hello_text.g"));
-        assert_eq!(context.module_path.as_ref(), &["assembly".to_owned()]);
+        assert_eq!(context.module_path(), &["assembly".to_owned()]);
     }
 
     #[test]
     fn compile_context_defaults_prior_to_empty_dict() {
         let context = CompileContext::default();
 
-        assert_eq!(context.prior_defs, Value::Dict(Dict::new_sync()));
+        assert_eq!(context.prior_defs(), &Value::Dict(Dict::new_sync()));
     }
 
     #[test]
