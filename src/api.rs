@@ -311,12 +311,18 @@ pub struct Diagnostic {
 impl Diagnostic {
     pub fn new(severity: Severity, message: impl Into<Arc<str>>) -> Self {
         let message = message.into();
-        Self::from_emission(
+        Self::from_parts(
             None,
             severity,
             crate::diagnostic::text_message(None, &message),
             None,
         )
+    }
+
+    /// Wraps an arbitrary diagnostic value with separately supplied severity.
+    /// Assembler and viewer metadata remain unapplied until enrichment.
+    pub fn from_emission(severity: Severity, emission: Value) -> Self {
+        Self::from_parts(None, severity, emission.into_core(), None)
     }
 
     pub fn with_source_location(self, source: impl Into<Arc<str>>, line: usize) -> Self {
@@ -325,7 +331,7 @@ impl Diagnostic {
             (*crate::core::keys::SOURCE).clone(),
             SourceIdentity::file(source.clone()).value(),
         ));
-        Self::from_emission(
+        Self::from_parts(
             Some(source.clone()),
             self.severity,
             crate::diagnostic::text_message(Some(line), &self.message),
@@ -380,7 +386,7 @@ impl Diagnostic {
     }
 
     fn from_compile(trace: &CompilationTrace, severity: Severity, message: CoreValue) -> Self {
-        Self::from_emission(
+        Self::from_parts(
             Some(trace.source_label().clone()),
             severity,
             message,
@@ -388,7 +394,7 @@ impl Diagnostic {
         )
     }
 
-    fn from_emission(
+    fn from_parts(
         source: Option<Arc<str>>,
         severity: Severity,
         message: CoreValue,

@@ -9,8 +9,9 @@ use std::thread;
 
 use bytes::Bytes;
 use glam::reflection::{
-    CommitResult, EffectRequestSpec, HostSnapshot, RequestContext, RequestResult, TaskCommit,
-    TaskHost, TaskOutcome, TaskSpecialization,
+    CommitResult, EffectRequestSpec, HostSnapshot, ReflectionHost, ReflectionJournal,
+    ReflectionRequest, ReflectionTransaction, RequestContext, RequestResult, TaskCommit, TaskHost,
+    TaskOutcome, TaskSpecialization, handle_reflection_request, reflection_request_specs,
 };
 use glam::{
     Assembler, Builtin, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticSink, Error,
@@ -222,7 +223,7 @@ fn start_logger(
         .filter(|logger| !logger.is_undefined());
     thread::spawn(move || {
         if let Some(custom) = custom {
-            match glam::reflection::run(&custom, LogEffects::new(effect_assembler), host.clone()) {
+            match glam::reflection::run(&custom, MainEffects::new(effect_assembler), host.clone()) {
                 Ok(TaskOutcome::Complete(_)) | Ok(TaskOutcome::Cancelled) => {}
                 Err(error) => {
                     let message = format!("error: configured logger failed: {error}\n");
@@ -235,55 +236,68 @@ fn start_logger(
 }
 
 #[derive(Clone)]
-struct LogEffects {
+struct MainEffects {
     assembler: Assembler,
 }
 
-impl LogEffects {
+impl MainEffects {
     fn new(assembler: Assembler) -> Self {
         Self { assembler }
     }
 }
 
 #[derive(Clone)]
-enum LogRequest {
-    Read,
-    Write,
+enum MainRequest {
+    Reflection(ReflectionRequest),
+    ReadLog,
+    WriteStderr,
 }
 
 #[derive(Clone)]
-struct LogSnapshot {
+struct MainSnapshot {
     diagnostics: Arc<[Diagnostic]>,
     closed: bool,
 }
 
 #[derive(Clone, Default)]
-struct LogJournal {
+struct MainJournal {
+    reflection: ReflectionJournal,
     consumed_diagnostics: usize,
+    consumed_emitted_diagnostics: usize,
     stderr: Vec<Bytes>,
 }
 
-impl TaskSpecialization for LogEffects {
+impl ReflectionTransaction for MainJournal {
+    fn reflection_journal(&mut self) -> &mut ReflectionJournal {
+        &mut self.reflection
+    }
+}
+
+impl TaskSpecialization for MainEffects {
     type Host = LogHost;
-    type Request = LogRequest;
-    type Snapshot = LogSnapshot;
-    type Journal = LogJournal;
+    type Request = MainRequest;
+    type Snapshot = MainSnapshot;
+    type Journal = MainJournal;
 
     fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>> {
-        vec![
-            EffectRequestSpec::new(
-                "read_log",
-                ["glam_cli", "v0", "request", "read_log"],
-                0,
-                LogRequest::Read,
-            ),
-            EffectRequestSpec::new(
-                "write_stderr",
-                ["glam_cli", "v0", "request", "write_stderr"],
-                1,
-                LogRequest::Write,
-            ),
-        ]
+        reflection_request_specs()
+            .into_iter()
+            .map(|request| request.map_request(MainRequest::Reflection))
+            .chain([
+                EffectRequestSpec::new(
+                    "read_log",
+                    ["glam_cli", "v0", "request", "read_log"],
+                    0,
+                    MainRequest::ReadLog,
+                ),
+                EffectRequestSpec::new(
+                    "write_stderr",
+                    ["glam_cli", "v0", "request", "write_stderr"],
+                    1,
+                    MainRequest::WriteStderr,
+                ),
+            ])
+            .collect()
     }
 
     fn handle_request(
@@ -293,8 +307,11 @@ impl TaskSpecialization for LogEffects {
         context: &mut RequestContext<'_, Self>,
     ) -> Result<RequestResult, glam::reflection::TaskError> {
         match request {
-            LogRequest::Read => read_log(context),
-            LogRequest::Write => {
+            MainRequest::Reflection(request) => {
+                handle_reflection_request(request, arguments, context)
+            }
+            MainRequest::ReadLog => read_log(context),
+            MainRequest::WriteStderr => {
                 let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
                     glam::reflection::TaskError::new(
                         "`.write_stderr` received the wrong number of arguments",
@@ -316,12 +333,23 @@ impl TaskSpecialization for LogEffects {
 }
 
 fn read_log(
-    context: &mut RequestContext<'_, LogEffects>,
+    context: &mut RequestContext<'_, MainEffects>,
 ) -> Result<RequestResult, glam::reflection::TaskError> {
     if let Some(mut transaction) = context.transaction() {
         let (snapshot, journal) = transaction.parts();
         if let Some(diagnostic) = snapshot.diagnostics.get(journal.consumed_diagnostics) {
             journal.consumed_diagnostics += 1;
+            return diagnostic
+                .enrich()
+                .map(RequestResult::Return)
+                .map_err(|error| glam::reflection::TaskError::new(error.to_string()));
+        }
+        if let Some(diagnostic) = journal
+            .reflection
+            .diagnostics()
+            .get(journal.consumed_emitted_diagnostics)
+        {
+            journal.consumed_emitted_diagnostics += 1;
             return diagnostic
                 .enrich()
                 .map(RequestResult::Return)
@@ -349,8 +377,10 @@ fn read_log(
         let commit = TaskCommit::new(
             snapshot.generation(),
             snapshot.heap().clone(),
-            LogJournal {
+            MainJournal {
+                reflection: ReflectionJournal::default(),
                 consumed_diagnostics: 1,
+                consumed_emitted_diagnostics: 0,
                 stderr: Vec::new(),
             },
         );
@@ -451,6 +481,16 @@ impl LogHost {
             .push_back(bytes);
         self.flush_stderr();
     }
+
+    fn push_diagnostic(&self, state: &mut LogHostState, diagnostic: Diagnostic) {
+        if self.capacity == 0 {
+            return;
+        }
+        if state.diagnostics.len() == self.capacity {
+            state.diagnostics.pop_front();
+        }
+        state.diagnostics.push_back(diagnostic);
+    }
 }
 
 impl DiagnosticSink for LogHost {
@@ -459,20 +499,20 @@ impl DiagnosticSink for LogHost {
             .state
             .lock()
             .expect("log host mutex should not be poisoned");
-        if self.capacity == 0 {
-            return;
-        }
-        if state.diagnostics.len() == self.capacity {
-            state.diagnostics.pop_front();
-        }
-        state.diagnostics.push_back(diagnostic);
+        self.push_diagnostic(&mut state, diagnostic);
         state.generation = state.generation.wrapping_add(1);
         self.changed.notify_all();
     }
 }
 
-impl TaskHost<LogEffects> for LogHost {
-    fn snapshot(&self) -> HostSnapshot<LogEffects> {
+impl ReflectionHost<MainEffects> for LogHost {
+    fn emit_diagnostic(&self, diagnostic: Diagnostic) {
+        self.emit(diagnostic);
+    }
+}
+
+impl TaskHost<MainEffects> for LogHost {
+    fn snapshot(&self) -> HostSnapshot<MainEffects> {
         let state = self
             .state
             .lock()
@@ -480,14 +520,14 @@ impl TaskHost<LogEffects> for LogHost {
         HostSnapshot::new(
             state.generation,
             state.heap.clone(),
-            LogSnapshot {
+            MainSnapshot {
                 diagnostics: Arc::from(state.diagnostics.iter().cloned().collect::<Vec<_>>()),
                 closed: state.closed,
             },
         )
     }
 
-    fn commit(&self, commit: TaskCommit<LogEffects>) -> CommitResult {
+    fn commit(&self, commit: TaskCommit<MainEffects>) -> CommitResult {
         {
             let mut state = self
                 .state
@@ -502,6 +542,16 @@ impl TaskHost<LogEffects> for LogHost {
             state
                 .diagnostics
                 .drain(..commit.extra().consumed_diagnostics);
+            for diagnostic in commit
+                .extra()
+                .reflection
+                .diagnostics()
+                .iter()
+                .skip(commit.extra().consumed_emitted_diagnostics)
+                .cloned()
+            {
+                self.push_diagnostic(&mut state, diagnostic);
+            }
             state.stderr.extend(commit.extra().stderr.iter().cloned());
             state.generation = state.generation.wrapping_add(1);
             self.changed.notify_all();

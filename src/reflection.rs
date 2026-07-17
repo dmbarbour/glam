@@ -4,6 +4,13 @@
 //! tags. Interaction-net operators only construct those values; this module
 //! performs the state, control, transaction, and host operations.
 
+mod requests;
+
+pub use requests::{
+    ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionTransaction,
+    handle_reflection_request, reflection_request_specs,
+};
+
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
@@ -36,6 +43,15 @@ impl<R> EffectRequestSpec<R> {
             tag_path: tag_path.into_iter().map(Into::into).collect(),
             arity,
             request,
+        }
+    }
+
+    pub fn map_request<T>(self, map: impl FnOnce(R) -> T) -> EffectRequestSpec<T> {
+        EffectRequestSpec {
+            api_name: self.api_name,
+            tag_path: self.tag_path,
+            arity: self.arity,
+            request: map(self.request),
         }
     }
 }
@@ -1509,7 +1525,31 @@ mod tests {
     struct TestEffects;
 
     #[derive(Clone)]
+    struct ReflectionOnlyEffects;
+
+    impl TaskSpecialization for ReflectionOnlyEffects {
+        type Host = TestHost;
+        type Request = ReflectionRequest;
+        type Snapshot = ();
+        type Journal = ReflectionJournal;
+
+        fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>> {
+            reflection_request_specs()
+        }
+
+        fn handle_request(
+            &self,
+            request: Self::Request,
+            arguments: Vec<PublicValue>,
+            context: &mut RequestContext<'_, Self>,
+        ) -> Result<RequestResult, TaskError> {
+            handle_reflection_request(request, arguments, context)
+        }
+    }
+
+    #[derive(Clone)]
     enum TestRequest {
+        Reflection(ReflectionRequest),
         ReadLog,
         WriteStderr,
     }
@@ -1522,8 +1562,16 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct TestJournal {
+        reflection: ReflectionJournal,
         consumed_diagnostics: usize,
+        consumed_emitted_diagnostics: usize,
         stderr: Vec<Bytes>,
+    }
+
+    impl ReflectionTransaction for TestJournal {
+        fn reflection_journal(&mut self) -> &mut ReflectionJournal {
+            &mut self.reflection
+        }
     }
 
     impl TaskSpecialization for TestEffects {
@@ -1533,20 +1581,24 @@ mod tests {
         type Journal = TestJournal;
 
         fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>> {
-            vec![
-                EffectRequestSpec::new(
-                    "read_log",
-                    ["reflection_test", "request", "read_log"],
-                    0,
-                    TestRequest::ReadLog,
-                ),
-                EffectRequestSpec::new(
-                    "write_stderr",
-                    ["reflection_test", "request", "write_stderr"],
-                    1,
-                    TestRequest::WriteStderr,
-                ),
-            ]
+            reflection_request_specs()
+                .into_iter()
+                .map(|request| request.map_request(TestRequest::Reflection))
+                .chain([
+                    EffectRequestSpec::new(
+                        "read_log",
+                        ["reflection_test", "request", "read_log"],
+                        0,
+                        TestRequest::ReadLog,
+                    ),
+                    EffectRequestSpec::new(
+                        "write_stderr",
+                        ["reflection_test", "request", "write_stderr"],
+                        1,
+                        TestRequest::WriteStderr,
+                    ),
+                ])
+                .collect()
         }
 
         fn handle_request(
@@ -1556,6 +1608,9 @@ mod tests {
             context: &mut RequestContext<'_, Self>,
         ) -> Result<RequestResult, TaskError> {
             match request {
+                TestRequest::Reflection(request) => {
+                    handle_reflection_request(request, arguments, context)
+                }
                 TestRequest::ReadLog => {
                     let Some(mut transaction) = context.transaction() else {
                         return Ok(RequestResult::Cancelled);
@@ -1564,6 +1619,17 @@ mod tests {
                     if let Some(diagnostic) = snapshot.diagnostics.get(journal.consumed_diagnostics)
                     {
                         journal.consumed_diagnostics += 1;
+                        return diagnostic
+                            .enrich()
+                            .map(RequestResult::Return)
+                            .map_err(|error| TaskError::new(error.to_string()));
+                    }
+                    if let Some(diagnostic) = journal
+                        .reflection
+                        .diagnostics()
+                        .get(journal.consumed_emitted_diagnostics)
+                    {
+                        journal.consumed_emitted_diagnostics += 1;
                         return diagnostic
                             .enrich()
                             .map(RequestResult::Return)
@@ -1634,8 +1700,30 @@ mod tests {
             self.state.lock().unwrap().heap.clone()
         }
 
+        fn diagnostics(&self) -> Vec<Diagnostic> {
+            self.state.lock().unwrap().diagnostics.clone()
+        }
+
+        fn emit_diagnostic(&self, diagnostic: Diagnostic) {
+            let mut state = self.state.lock().unwrap();
+            state.diagnostics.push(diagnostic);
+            state.generation += 1;
+        }
+
         fn write_stderr(&self, bytes: Bytes) {
             self.state.lock().unwrap().stderr.push(bytes);
+        }
+    }
+
+    impl ReflectionHost<TestEffects> for TestHost {
+        fn emit_diagnostic(&self, diagnostic: Diagnostic) {
+            TestHost::emit_diagnostic(self, diagnostic);
+        }
+    }
+
+    impl ReflectionHost<ReflectionOnlyEffects> for TestHost {
+        fn emit_diagnostic(&self, diagnostic: Diagnostic) {
+            TestHost::emit_diagnostic(self, diagnostic);
         }
     }
 
@@ -1666,6 +1754,15 @@ mod tests {
                 .consumed_diagnostics
                 .min(state.diagnostics.len());
             state.diagnostics.drain(..consumed);
+            state.diagnostics.extend(
+                commit
+                    .extra()
+                    .reflection
+                    .diagnostics()
+                    .iter()
+                    .skip(commit.extra().consumed_emitted_diagnostics)
+                    .cloned(),
+            );
             state.stderr.extend_from_slice(&commit.extra().stderr);
             state.generation += 1;
             CommitResult::Committed
@@ -1700,6 +1797,33 @@ mod tests {
         }
     }
 
+    impl TaskHost<ReflectionOnlyEffects> for TestHost {
+        fn snapshot(&self) -> HostSnapshot<ReflectionOnlyEffects> {
+            let state = self.state.lock().unwrap();
+            HostSnapshot::new(state.generation, state.heap.clone(), ())
+        }
+
+        fn commit(&self, commit: TaskCommit<ReflectionOnlyEffects>) -> CommitResult {
+            let mut state = self.state.lock().unwrap();
+            if state.closed {
+                return CommitResult::Closed;
+            }
+            if state.generation != commit.generation() {
+                return CommitResult::Conflict;
+            }
+            state.heap = commit.heap().clone();
+            state
+                .diagnostics
+                .extend(commit.extra().diagnostics().iter().cloned());
+            state.generation += 1;
+            CommitResult::Committed
+        }
+
+        fn wait_for_change(&self, _observed_generation: u64) -> bool {
+            false
+        }
+    }
+
     fn value_bytes(value: &Value) -> Result<Bytes, TaskError> {
         match evaluate(value.clone())? {
             Value::Binary(bytes) => Ok(bytes),
@@ -1712,6 +1836,13 @@ mod tests {
 
     fn run_log_test(effect: &PublicValue, host: Arc<TestHost>) -> Result<TaskOutcome, TaskError> {
         run(effect, TestEffects, host)
+    }
+
+    fn run_reflection_test(
+        effect: &PublicValue,
+        host: Arc<TestHost>,
+    ) -> Result<TaskOutcome, TaskError> {
+        run(effect, ReflectionOnlyEffects, host)
     }
 
     fn run_standard_test(effect: &PublicValue) -> Result<TaskOutcome, TaskError> {
@@ -1757,6 +1888,40 @@ mod tests {
     fn standard_task_does_not_expose_specialized_requests() {
         let (_, effect) = compile_effect(".read_log");
         assert!(run_standard_test(&effect).is_err());
+
+        let (_, effect) = compile_effect(".log 'info { msg:{ text:\"hidden\" } }");
+        assert!(run_standard_test(&effect).is_err());
+    }
+
+    #[test]
+    fn reusable_reflection_log_emits_raw_diagnostics_transactionally() {
+        let (assembler, effect) =
+            compile_effect(".cut ((.log 'warn { msg:{ text:\"reflection warning\" } }) =>> .r ())");
+        let host = Arc::new(TestHost::default());
+        assert!(matches!(
+            run_reflection_test(&effect, host.clone()).unwrap(),
+            TaskOutcome::Complete(_)
+        ));
+        let diagnostics = host.diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].severity(),
+            crate::diagnostic::Severity::Warning
+        );
+        let enriched = diagnostics[0].enrich().unwrap();
+        let text = assembler.get(&enriched, "msg.text").unwrap();
+        assert_eq!(
+            assembler.to_binary(&text).unwrap(),
+            b"reflection warning".as_slice()
+        );
+
+        let (_, invalid) = compile_effect(".log 'verbose { msg:{ text:\"wrong\" } }");
+        assert!(
+            run_reflection_test(&invalid, host)
+                .unwrap_err()
+                .to_string()
+                .contains("severity must be")
+        );
     }
 
     #[test]
@@ -1885,6 +2050,20 @@ mod tests {
                 .diagnostics
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn composed_logging_rolls_back_and_can_read_its_own_reflection_writes() {
+        let (_, effect) = compile_effect(
+            ".cut (.alt ((.log 'error { msg:{ text:\"bad\" } }) =>> .fail) ((.log 'warn { msg:{ text:\"good\" } }) =>> (.read_log >>= (\\message -> (.write_stderr message.msg.text) =>> .r ()))))",
+        );
+        let host = Arc::new(TestHost::default());
+        assert!(matches!(
+            run_log_test(&effect, host.clone()).unwrap(),
+            TaskOutcome::Complete(_)
+        ));
+        assert_eq!(host.stderr(), [Bytes::from_static(b"good")]);
+        assert!(host.diagnostics().is_empty());
     }
 
     #[test]

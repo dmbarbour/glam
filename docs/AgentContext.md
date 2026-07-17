@@ -78,10 +78,14 @@ design in the design documents.
   tagged by host-only abstract-global atoms.
 - The standard task machine provides `r`, `seq`, `alt`, `fail`, `cut`, `fix`,
   `get`, `set`, `reset`, and `shift`. `TaskSpecialization` contributes an API
-  fragment, private request tags, and specialization-owned transaction data;
-  the executable's logger specialization adds provisional `read_log` and
-  `write_stderr` effects. A top-level `alt` is rejected; alternatives belong to
-  `cut`. This and task-local `.shift` continuations are the conservative
+  fragment, private request tags, and specialization-owned transaction data.
+  Reusable request families compose by mapping their requests into the host
+  specialization's request enum. The first reflection family contributes
+  `log Severity Message`; `main` adds provisional `read_log` and `write_stderr`
+  effects. Logged diagnostics join the current transaction, including
+  read-your-writes behavior, or go directly to the host outside `cut`. A
+  top-level `alt` is rejected; alternatives belong to `cut`. This and
+  task-local `.shift` continuations are the conservative
   standard-effect contract: general-purpose utilities must not assume broader
   behavior, although a specialized handler may explicitly provide it.
 - Every `get`/`set` path is implicitly under user-owned `user_state`. The

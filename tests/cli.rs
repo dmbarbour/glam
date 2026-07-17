@@ -371,6 +371,37 @@ fn configured_logger_reads_diagnostics_and_writes_stderr_effectfully() {
     );
 }
 
+#[test]
+fn configured_logger_composes_reusable_reflection_requests() {
+    let dir = unique_temp_dir("glam-conf-log-request");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    let invalid = dir.join("invalid.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = .cut (.read_log >>= (\\_message -> (.log 'warn { msg:{ text:\"REFLECTION LOG\" } }) =>> (.read_log >>= (\\message -> (.write_stderr (message.msg.text ++ [10])) =>> .r ()))))\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+    fs::write(&invalid, b"language g0\nvalue = \xff\n")
+        .unwrap_or_else(|err| panic!("failed to write {}: {err}", invalid.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--file")
+        .arg(&invalid)
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("REFLECTION LOG\n"),
+        "configured logger did not compose the reflection request:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn hello_sample_files() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/assembly");
     let mut files = fs::read_dir(&root)

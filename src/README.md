@@ -75,8 +75,10 @@ default terminal logger is not part of `Assembler`.
 so bootstrap diagnostics are available to the configured logger. If `conf.log`
 is defined, it runs through the generic external freer-effect task machine.
 That machine owns the standard effects and delegates additional private request
-tags to a `TaskSpecialization`; `main` supplies the logging specialization,
-including `read_log`, `write_stderr`, and their atomic snapshot/journal data.
+tags to a `TaskSpecialization`. Reusable request families map into a host
+specialization's request enum; the reflection family currently contributes
+`log`, while `main` adds `read_log`, `write_stderr`, and their shared atomic
+snapshot/journal data.
 Otherwise the Rust terminal logger drains the queue. Normal early termination
 or task failure also returns remaining messages to the fallback logger. Core
 operators only construct requests; reflection state and external I/O are never
