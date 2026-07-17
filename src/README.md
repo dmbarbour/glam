@@ -59,6 +59,12 @@ later ones. Local source and binary imports re-enter the same `Assembler`
 session through loaders installed in `CompileContext`; their diagnostics join
 the originating build session.
 
+Each source compilation receives an assembler-local invocation ID. A hidden
+immutable trace links imported compilations to their parent invocation and
+relative import reference. Diagnostic enrichment projects that compact trace
+into `msg.origin` before callbacks or retained histories observe the message;
+front ends never receive it.
+
 `main` chooses the `configuration` and `assembly` module paths and constructs
 their initial definitions. Those names and roles are CLI policy, not library
 policy. `--parse` is the one temporary exception to the facade boundary: it

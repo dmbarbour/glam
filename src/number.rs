@@ -24,6 +24,10 @@ impl Number {
         Self::integer(i64::from(value))
     }
 
+    pub(crate) fn from_u64(value: u64) -> Self {
+        Self(BigRational::from_integer(BigInt::from(value)))
+    }
+
     pub fn from_usize(value: usize) -> Self {
         Self(BigRational::from_integer(BigInt::from(value)))
     }

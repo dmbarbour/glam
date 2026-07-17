@@ -98,6 +98,74 @@ fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
 }
 
 #[test]
+fn repeated_source_compilations_have_distinct_invocations() {
+    let assembler = Assembler::default().with_host(MemoryHost::new([(
+        "invalid.g",
+        b"language g0\nvalue = \xff\n".as_slice(),
+    )]));
+    let error = assembler
+        .module(["repeated"])
+        .inputs([
+            ModuleInput::file("invalid.g"),
+            ModuleInput::file("invalid.g"),
+        ])
+        .build()
+        .expect_err("both source invocations should report their error");
+
+    assert_eq!(error.diagnostics().len(), 2);
+    let invocation = |diagnostic: &glam::Diagnostic| {
+        assembler
+            .get(diagnostic.value(), "msg.origin.invocation")
+            .expect("diagnostic should identify its compilation invocation")
+            .as_i64()
+            .expect("small invocation ID should fit i64")
+    };
+    assert_ne!(
+        invocation(&error.diagnostics()[0]),
+        invocation(&error.diagnostics()[1])
+    );
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.source() == Some("invalid.g"))
+    );
+}
+
+#[test]
+fn imported_source_diagnostics_include_the_import_chain() {
+    let assembler = Assembler::default().with_host(MemoryHost::new([
+        (
+            "main.g",
+            b"language g0\nimport \"child.g\" as child\nasm.result = child.value\n".as_slice(),
+        ),
+        ("child.g", b"language g0\nvalue = \xff\n".as_slice()),
+    ]));
+    let module = assembler
+        .module(["imports"])
+        .file("main.g")
+        .build()
+        .expect("the lazy imported source is not observed during module construction");
+
+    assembler
+        .binary_at(module.value(), "asm.result")
+        .expect_err("observing the imported definition should compile and reject child.g");
+    let diagnostics = assembler
+        .read_diagnostics()
+        .expect("default assembler should retain diagnostics");
+    assert_eq!(diagnostics.entries().len(), 1);
+    let diagnostic = &diagnostics.entries()[0];
+    assert_eq!(diagnostic.source(), Some("child.g"));
+    assert_eq!(
+        assembler
+            .get(diagnostic.value(), "msg.origin.imports")
+            .expect("imported diagnostic should carry its parent chain")
+            .kind(),
+        glam::ValueKind::List
+    );
+}
+
+#[test]
 fn caller_selected_module_path_scopes_abstract_global_paths() {
     let assembler = Assembler::default();
     let module = assembler

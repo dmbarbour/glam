@@ -11,7 +11,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -23,7 +23,7 @@ use crate::compiler::{
 use crate::core::Value as CoreValue;
 use crate::core::{Builtin, Dict, Key, List, NetValue};
 use crate::core_net::CoreSpecialization;
-use crate::diagnostic::Severity;
+use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity, SourceIdentity};
 use crate::eval;
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -310,15 +310,21 @@ impl Diagnostic {
             None,
             severity,
             crate::diagnostic::text_message(None, &message),
+            None,
         )
     }
 
     pub fn with_source_location(self, source: impl Into<Arc<str>>, line: usize) -> Self {
         let source = source.into();
+        let origin = CoreValue::Dict(Dict::new_sync().insert(
+            (*crate::core::keys::SOURCE).clone(),
+            CoreValue::binary_from_text(&source),
+        ));
         Self::from_emission(
-            Some(source),
+            Some(source.clone()),
             self.severity,
             crate::diagnostic::text_message(Some(line), &self.message),
+            Some(origin),
         )
     }
 
@@ -344,19 +350,29 @@ impl Diagnostic {
         &self.message
     }
 
-    fn from_compile(source: Arc<str>, severity: Severity, message: CoreValue) -> Self {
-        Self::from_emission(Some(source), severity, message)
+    fn from_compile(trace: &CompilationTrace, severity: Severity, message: CoreValue) -> Self {
+        Self::from_emission(
+            Some(trace.source_label().clone()),
+            severity,
+            message,
+            Some(trace.origin_value()),
+        )
     }
 
-    fn from_emission(source: Option<Arc<str>>, severity: Severity, message: CoreValue) -> Self {
+    fn from_emission(
+        source: Option<Arc<str>>,
+        severity: Severity,
+        message: CoreValue,
+        origin: Option<CoreValue>,
+    ) -> Self {
         let (line, text) = crate::diagnostic::conventional_summary(&message);
-        let enriched = crate::diagnostic::enrich(message, severity, source.as_deref())
-            .unwrap_or_else(|error| {
+        let enriched =
+            crate::diagnostic::enrich(message, severity, origin.clone()).unwrap_or_else(|error| {
                 let text = format!("invalid diagnostic message: {error}");
                 crate::diagnostic::enrich(
                     crate::diagnostic::text_message(line, &text),
                     severity,
-                    source.as_deref(),
+                    origin,
                 )
                 .expect("canonical fallback diagnostic must be valid")
             });
@@ -647,6 +663,7 @@ fn net_build_error(error: NetBuildError) -> Error {
 pub struct Assembler {
     host: Arc<dyn Host>,
     diagnostic_sink: Arc<dyn DiagnosticSink>,
+    next_compilation_invocation: Arc<AtomicU64>,
 }
 
 impl Default for Assembler {
@@ -654,6 +671,7 @@ impl Default for Assembler {
         Self {
             host: Arc::new(SystemHost),
             diagnostic_sink: Arc::new(DiagnosticBuffer::new(DEFAULT_DIAGNOSTIC_CAPACITY)),
+            next_compilation_invocation: Arc::new(AtomicU64::new(1)),
         }
     }
 }
@@ -711,6 +729,14 @@ impl Assembler {
 
     pub(crate) fn record_diagnostic(&self, diagnostic: Diagnostic) {
         self.diagnostic_sink.emit(diagnostic);
+    }
+
+    fn next_compilation_invocation(&self) -> CompilationInvocationId {
+        let id = self
+            .next_compilation_invocation
+            .fetch_add(1, Ordering::Relaxed);
+        assert!(id != u64::MAX, "compilation invocation IDs exhausted");
+        CompilationInvocationId::new(id)
     }
 
     /// Evaluates a value far enough to expose its outer semantic value.
@@ -859,15 +885,21 @@ impl Assembler {
             ModuleInput::File(path) => {
                 let bytes = self.read_source(path)?;
                 let label: Arc<str> = Arc::from(path.display().to_string());
+                let trace = Arc::new(CompilationTrace::root(
+                    self.next_compilation_invocation(),
+                    SourceIdentity::file(label.clone()),
+                    module_path.clone(),
+                ));
                 let had_errors = Arc::new(AtomicBool::new(false));
                 let context = CompileContext::from_module_path(module_path.iter().cloned())
                     .with_importer_source_path(label.clone())
+                    .with_compilation_trace(trace.clone())
                     .with_prior_defs(prior_defs)
                     .with_final_defs(final_defs)
                     .with_local_module_loader(module_loader)
                     .with_local_binary_loader(binary_loader)
                     .with_diagnostic_emitter(self.compile_diagnostic_emitter(
-                        label,
+                        trace,
                         session,
                         had_errors.clone(),
                     ));
@@ -879,14 +911,20 @@ impl Assembler {
             }
             ModuleInput::Script { extension, body } => {
                 let label: Arc<str> = Arc::from(format!("<script.{extension}>"));
+                let trace = Arc::new(CompilationTrace::root(
+                    self.next_compilation_invocation(),
+                    SourceIdentity::script(label),
+                    module_path.clone(),
+                ));
                 let had_errors = Arc::new(AtomicBool::new(false));
                 let context = CompileContext::from_module_path(module_path.iter().cloned())
+                    .with_compilation_trace(trace.clone())
                     .with_prior_defs(prior_defs)
                     .with_final_defs(final_defs)
                     .with_local_module_loader(module_loader)
                     .with_local_binary_loader(binary_loader)
                     .with_diagnostic_emitter(self.compile_diagnostic_emitter(
-                        label,
+                        trace,
                         session,
                         had_errors.clone(),
                     ));
@@ -919,19 +957,34 @@ impl Assembler {
             &args.reference,
             "local import",
         )?;
-        let label = path.display().to_string();
+        let label: Arc<str> = Arc::from(path.display().to_string());
         let source = self.read_source(&path).map_err(|error| error.to_string())?;
         let module_loader = self.module_loader(session.clone());
         let binary_loader = self.binary_loader();
         let had_errors = Arc::new(AtomicBool::new(false));
+        let trace = match args.importer_trace {
+            Some(parent) => Arc::new(CompilationTrace::imported(
+                self.next_compilation_invocation(),
+                SourceIdentity::file(label.clone()),
+                args.module_path.clone(),
+                parent,
+                args.reference.clone(),
+            )),
+            None => Arc::new(CompilationTrace::root(
+                self.next_compilation_invocation(),
+                SourceIdentity::file(label.clone()),
+                args.module_path.clone(),
+            )),
+        };
         let context = CompileContext::from_module_path(args.module_path.iter().cloned())
-            .with_importer_source_path(label.as_str())
+            .with_importer_source_path(label.clone())
+            .with_compilation_trace(trace.clone())
             .with_prior_defs(args.prior_defs)
             .with_final_defs(args.final_defs)
             .with_local_module_loader(module_loader)
             .with_local_binary_loader(binary_loader)
             .with_diagnostic_emitter(self.compile_diagnostic_emitter(
-                Arc::from(label.as_str()),
+                trace,
                 session,
                 had_errors.clone(),
             ));
@@ -1057,7 +1110,7 @@ impl Assembler {
 
     fn compile_diagnostic_emitter(
         &self,
-        source: Arc<str>,
+        trace: Arc<CompilationTrace>,
         session: Arc<Mutex<Vec<Diagnostic>>>,
         had_errors: Arc<AtomicBool>,
     ) -> CompileDiagnosticEmitter {
@@ -1066,7 +1119,7 @@ impl Assembler {
             if severity == Severity::Error {
                 had_errors.store(true, Ordering::Relaxed);
             }
-            let diagnostic = Diagnostic::from_compile(source.clone(), severity, message);
+            let diagnostic = Diagnostic::from_compile(&trace, severity, message);
             session
                 .lock()
                 .expect("build diagnostic mutex should not be poisoned")
@@ -1130,6 +1183,14 @@ fn resolve_local_import_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_compilation_trace(source: &str) -> CompilationTrace {
+        CompilationTrace::root(
+            CompilationInvocationId::new(1),
+            SourceIdentity::file(Arc::<str>::from(source)),
+            Arc::from(["test".to_owned()]),
+        )
+    }
 
     #[test]
     fn diagnostic_history_is_bounded_and_counts_dropped_entries() {
@@ -1208,7 +1269,8 @@ mod tests {
             CoreValue::Dict(interface),
         ));
 
-        let diagnostic = Diagnostic::from_compile(Arc::from("test.g"), Severity::Warning, message);
+        let trace = test_compilation_trace("test.g");
+        let diagnostic = Diagnostic::from_compile(&trace, Severity::Warning, message);
         assert_eq!(diagnostic.severity(), Severity::Warning);
 
         let CoreValue::Dict(enriched) = diagnostic.value().as_core() else {
@@ -1243,8 +1305,9 @@ mod tests {
 
     #[test]
     fn viewers_can_inherit_one_diagnostic_independently() {
+        let trace = test_compilation_trace("test.g");
         let diagnostic = Diagnostic::from_compile(
-            Arc::from("test.g"),
+            &trace,
             Severity::Info,
             crate::diagnostic::text_message(Some(3), "hello"),
         );

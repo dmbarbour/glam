@@ -35,6 +35,11 @@ protocol_key!(LOCATION, "location");
 protocol_key!(LINE, "line");
 protocol_key!(ORIGIN, "origin");
 protocol_key!(SOURCE, "source");
+protocol_key!(SOURCE_KIND, "source_kind");
+protocol_key!(INVOCATION, "invocation");
+protocol_key!(MODULE, "module");
+protocol_key!(IMPORTS, "imports");
+protocol_key!(REFERENCE, "reference");
 
 protocol_key!(VALUE, "value");
 protocol_key!(LEFT, "left");
@@ -58,3 +63,8 @@ protocol_key!(ERROR, "error");
 protocol_value!(INFO_VALUE, INFO);
 protocol_value!(WARN_VALUE, WARN);
 protocol_value!(ERROR_VALUE, ERROR);
+
+protocol_key!(FILE, "file");
+protocol_key!(SCRIPT, "script");
+protocol_value!(FILE_VALUE, FILE);
+protocol_value!(SCRIPT_VALUE, SCRIPT);

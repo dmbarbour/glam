@@ -54,6 +54,9 @@ design in the design documents.
   assembler discovers by evaluating the message. Before dispatch, the
   assembler mixes authoritative `msg.severity` and `msg.origin` fields into
   the message and composes that mixin into the resulting object `spec`.
+  `msg.origin` separates source kind/label from a fresh assembler-local
+  compilation invocation ID and carries a compact root-to-parent import chain;
+  it must not retain source bytes, module values, or compilation environments.
 
 ### Values and evaluation
 

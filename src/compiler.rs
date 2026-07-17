@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::core::Builtin;
 use crate::core::{Atom, Dict, Key, LazyValue, Value, keys};
-use crate::diagnostic::Severity;
+use crate::diagnostic::{CompilationTrace, Severity};
 use crate::number::Number;
 
 pub(crate) type ModuleLoader = Arc<dyn Fn(ModuleLoadArgs) -> Result<Value, String> + Send + Sync>;
@@ -20,6 +20,7 @@ pub(crate) struct BinaryLoadArgs {
 pub(crate) struct ModuleLoadArgs {
     pub(crate) reference: Arc<str>,
     pub(crate) importer_source_path: Option<Arc<str>>,
+    pub(crate) importer_trace: Option<Arc<CompilationTrace>>,
     pub(crate) module_path: Arc<[String]>,
     pub(crate) prior_defs: Value,
     pub(crate) final_defs: Value,
@@ -30,6 +31,7 @@ pub struct CompileContext {
     // The bootstrap still exposes core Values, but never a semantic expression
     // language. Front ends own their IR and lower it before returning Values.
     importer_source_path: Option<Arc<str>>,
+    compilation_trace: Option<Arc<CompilationTrace>>,
     module_path: Arc<[String]>,
     prior_defs: Value, // prior dictionary, can be observed at compile-time
     final_defs: Value, // future dictionary, cannot observe at compile-time
@@ -42,6 +44,7 @@ impl Default for CompileContext {
     fn default() -> Self {
         Self {
             importer_source_path: None,
+            compilation_trace: None,
             module_path: Arc::from([]),
             prior_defs: Value::Dict(Dict::new_sync()), // empty prior dictionary
             final_defs: Value::Lazy(LazyValue::pending("final definitions")),
@@ -63,6 +66,11 @@ impl CompileContext {
 
     pub(crate) fn with_importer_source_path(mut self, path: impl Into<Arc<str>>) -> Self {
         self.importer_source_path = Some(path.into());
+        self
+    }
+
+    pub(crate) fn with_compilation_trace(mut self, trace: Arc<CompilationTrace>) -> Self {
+        self.compilation_trace = Some(trace);
         self
     }
 
@@ -174,6 +182,7 @@ impl CompileContext {
         let args = ModuleLoadArgs {
             reference: Arc::from(reference),
             importer_source_path: self.importer_source_path.clone(),
+            importer_trace: self.compilation_trace.clone(),
             module_path: self.qualify_module_path(relative_namespace),
             prior_defs,
             final_defs,
@@ -258,7 +267,13 @@ mod tests {
     fn module_import_qualifies_only_the_relative_child_namespace() {
         let received = Arc::new(std::sync::Mutex::new(None));
         let captured = received.clone();
+        let trace = Arc::new(CompilationTrace::root(
+            crate::diagnostic::CompilationInvocationId::new(1),
+            crate::diagnostic::SourceIdentity::file("root.g"),
+            Arc::from(["root".to_owned(), "module".to_owned()]),
+        ));
         let context = CompileContext::from_module_path(["root", "module"])
+            .with_compilation_trace(trace.clone())
             .with_local_module_loader(Arc::new(move |args| {
                 *captured
                     .lock()
@@ -284,6 +299,7 @@ mod tests {
             args.module_path.as_ref(),
             &["root", "module", "nested", "child"]
         );
+        assert_eq!(args.importer_trace.as_deref(), Some(trace.as_ref()));
     }
 
     #[test]
