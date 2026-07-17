@@ -62,7 +62,10 @@ pub(super) fn apply_builtin(
         | Builtin::ObjectInstanceFromParts
         | Builtin::ObjectInstance
         | Builtin::ObjectDefaultDefs
-        | Builtin::ObjectDictDefs => object::apply(builtin, arguments, local_env),
+        | Builtin::ObjectDictDefs
+        | Builtin::ObjectWithDefs
+        | Builtin::ObjectComposedDefs
+        | Builtin::ObjectOverrideDefs => object::apply(builtin, arguments, local_env),
         Builtin::Fixpoint | Builtin::EffectApply | Builtin::EffectCall => {
             effect::apply(builtin, arguments, local_env)
         }

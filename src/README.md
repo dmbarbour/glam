@@ -29,7 +29,7 @@ implementation constraints.
 | `eval/sequence.rs` | List-to-binary observation and range extraction |
 | `list.rs` | Generic compact/lazy persistent list ropes |
 | `number.rs` | Exact-rational wrapper and public conversion boundary |
-| `diagnostic.rs` | Shared diagnostic severity |
+| `diagnostic.rs` | Diagnostic severity plus conventional `msg` values and assembler metadata records |
 
 The detailed interaction-net invariants live in
 [`docs/agent_context/interaction_nets.md`](../docs/agent_context/interaction_nets.md),

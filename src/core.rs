@@ -430,6 +430,9 @@ pub enum Builtin {
     EffectCall,
     ObjectDefaultDefs,
     ObjectDictDefs,
+    ObjectWithDefs,
+    ObjectComposedDefs,
+    ObjectOverrideDefs,
 }
 
 impl Builtin {
@@ -475,6 +478,9 @@ impl Builtin {
             Self::EffectCall => 3,
             Self::ObjectDefaultDefs => 2,
             Self::ObjectDictDefs => 3,
+            Self::ObjectWithDefs => 2,
+            Self::ObjectComposedDefs => 4,
+            Self::ObjectOverrideDefs => 3,
         }
     }
 }

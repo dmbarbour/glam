@@ -36,6 +36,26 @@ pub(super) fn apply(
                 super::exact(arguments, "dictionary object definitions")?;
             eval_dict_union_builtin(&base, &dict, local_env)
         }
+        Builtin::ObjectWithDefs => {
+            let [object, extension_defs] = super::exact(arguments, "object with definitions")?;
+            eval_object_with_defs_builtin(&object, extension_defs, local_env)
+        }
+        Builtin::ObjectComposedDefs => {
+            let [prior_defs, extension_defs, base, self_value] =
+                super::exact(arguments, "composed object definitions")?;
+            eval_object_composed_defs_builtin(
+                prior_defs,
+                extension_defs,
+                base,
+                self_value,
+                local_env,
+            )
+        }
+        Builtin::ObjectOverrideDefs => {
+            let [updates, base, _self_value] =
+                super::exact(arguments, "overriding object definitions")?;
+            eval_object_override_defs_builtin(&updates, &base)
+        }
         _ => unreachable!("object dispatcher received another builtin"),
     }
 }

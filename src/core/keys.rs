@@ -13,6 +13,13 @@ macro_rules! protocol_key {
     };
 }
 
+macro_rules! protocol_value {
+    ($name:ident, $val:ident) => {
+        pub(crate) static $name: LazyLock<Value> =
+            LazyLock::new(|| Value::Atom(Atom::from_key(&$val)));
+    };
+}
+
 protocol_key!(APPLY, "apply");
 protocol_key!(EFF, "eff");
 
@@ -20,6 +27,14 @@ protocol_key!(SPEC, "spec");
 protocol_key!(NAME, "name");
 protocol_key!(DEPS, "deps");
 protocol_key!(DEFS, "defs");
+
+protocol_key!(MSG, "msg");
+protocol_key!(TEXT, "text");
+protocol_key!(SEVERITY, "severity");
+protocol_key!(LOCATION, "location");
+protocol_key!(LINE, "line");
+protocol_key!(ORIGIN, "origin");
+protocol_key!(SOURCE, "source");
 
 protocol_key!(VALUE, "value");
 protocol_key!(LEFT, "left");
@@ -35,5 +50,11 @@ protocol_key!(FIX, "fix");
 
 pub(crate) static UNIT: LazyLock<Key> =
     LazyLock::new(|| Key::abstract_global_path(["builtin", "unit"]));
-pub(crate) static UNIT_VALUE: LazyLock<Value> =
-    LazyLock::new(|| Value::Atom(Atom::from_key(&UNIT)));
+protocol_value!(UNIT_VALUE, UNIT);
+
+protocol_key!(INFO, "info");
+protocol_key!(WARN, "warn");
+protocol_key!(ERROR, "error");
+protocol_value!(INFO_VALUE, INFO);
+protocol_value!(WARN_VALUE, WARN);
+protocol_value!(ERROR_VALUE, ERROR);

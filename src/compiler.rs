@@ -8,14 +8,7 @@ use crate::number::Number;
 pub(crate) type ModuleLoader = Arc<dyn Fn(ModuleLoadArgs) -> Result<Value, String> + Send + Sync>;
 pub(crate) type BinaryFileLoader =
     Arc<dyn Fn(BinaryLoadArgs) -> Result<Value, String> + Send + Sync>;
-pub(crate) type CompileDiagnosticEmitter = Arc<dyn Fn(CompileDiagnostic) + Send + Sync>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CompileDiagnostic {
-    pub severity: Severity,
-    pub line: usize,
-    pub message: String,
-}
+pub(crate) type CompileDiagnosticEmitter = Arc<dyn Fn(Severity, Value) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BinaryLoadArgs {
@@ -132,14 +125,11 @@ impl CompileContext {
         ))))
     }
 
-    pub(crate) fn emit_diagnostic(&self, diagnostic: CompileDiagnostic) {
+    pub(crate) fn emit_diagnostic(&self, severity: Severity, message: Value) {
         if let Some(emitter) = &self.diagnostic_emitter {
-            emitter(diagnostic);
+            emitter(severity, message);
         }
     }
-
-    // TODO: replace the typed bootstrap diagnostic with an open Value payload.
-    // The assembler-owned emitter will continue to attach source provenance.
 
     // TODO: eliminate direct use of Builtin in this API. The front-end
     // knows about builtins, but will access them as atoms, not as the Builtin enum.

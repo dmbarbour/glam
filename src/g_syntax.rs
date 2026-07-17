@@ -1,7 +1,7 @@
 #[cfg(test)]
 use chumsky::Parser;
 
-use crate::compiler::{CompileContext, CompileDiagnostic};
+use crate::compiler::CompileContext;
 use crate::core::Builtin;
 use crate::core::{Atom, Dict, Key, Value};
 use crate::diagnostic::Severity;
@@ -50,11 +50,8 @@ pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
         diagnostics,
     } = lower_to_core_with_context(parse_source(source), context);
     for diagnostic in diagnostics {
-        context.emit_diagnostic(CompileDiagnostic {
-            severity: diagnostic.severity,
-            line: diagnostic.line,
-            message: diagnostic.message,
-        });
+        let message = crate::diagnostic::text_message(Some(diagnostic.line), &diagnostic.message);
+        context.emit_diagnostic(diagnostic.severity, message);
     }
     definitions
 }

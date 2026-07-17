@@ -74,6 +74,27 @@ fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
     assert_eq!(diagnostic.line(), Some(1));
     assert_eq!(diagnostic.severity(), Severity::Error);
     assert!(diagnostic.message().contains("not valid UTF-8"));
+    assert_eq!(
+        assembler
+            .get(diagnostic.value(), "msg.text")
+            .expect("diagnostic text should be available")
+            .as_binary(),
+        Some(diagnostic.message().as_bytes())
+    );
+    assert_eq!(
+        assembler
+            .get(diagnostic.value(), "msg.origin.source")
+            .expect("assembler source provenance should be mixed in")
+            .as_binary(),
+        Some(b"invalid.g".as_slice())
+    );
+    assert_eq!(
+        assembler
+            .get(diagnostic.value(), "spec")
+            .expect("diagnostic enrichment should update its object spec")
+            .kind(),
+        glam::ValueKind::Dict
+    );
 }
 
 #[test]

@@ -50,6 +50,10 @@ design in the design documents.
   relative import requests to `import_module`/`import_binary`. Absolute module
   paths and importer provenance remain handler-owned and must not be exposed
   back to the front end.
+- Diagnostic severity is a front-end emission-effect argument, not a field the
+  assembler discovers by evaluating the message. Before dispatch, the
+  assembler mixes authoritative `msg.severity` and `msg.origin` fields into
+  the message and composes that mixin into the resulting object `spec`.
 
 ### Values and evaluation
 

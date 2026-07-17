@@ -278,6 +278,13 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
                 "object_default_defs"
             }
             SyntaxOperator::Builtin(crate::core::Builtin::ObjectDictDefs) => "object_dict_defs",
+            SyntaxOperator::Builtin(crate::core::Builtin::ObjectWithDefs) => "object_with_defs",
+            SyntaxOperator::Builtin(crate::core::Builtin::ObjectComposedDefs) => {
+                "object_composed_defs"
+            }
+            SyntaxOperator::Builtin(crate::core::Builtin::ObjectOverrideDefs) => {
+                "object_override_defs"
+            }
         }
     }
 

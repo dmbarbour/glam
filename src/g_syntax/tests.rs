@@ -2572,12 +2572,13 @@ fn g_parser_rejects_non_utf8_source_bytes() {
 fn compile_source_emits_relative_diagnostics_through_context() {
     let emitted = Arc::new(Mutex::new(Vec::new()));
     let captured = emitted.clone();
-    let context = CompileContext::default().with_diagnostic_emitter(Arc::new(move |diagnostic| {
-        captured
-            .lock()
-            .expect("diagnostic mutex should not be poisoned")
-            .push(diagnostic);
-    }));
+    let context =
+        CompileContext::default().with_diagnostic_emitter(Arc::new(move |severity, message| {
+            captured
+                .lock()
+                .expect("diagnostic mutex should not be poisoned")
+                .push((severity, message));
+        }));
 
     let _definitions = compile_source(b"language g0\nbroken =\n", &context);
 
@@ -2585,9 +2586,25 @@ fn compile_source_emits_relative_diagnostics_through_context() {
         .lock()
         .expect("diagnostic mutex should not be poisoned");
     assert_eq!(emitted.len(), 1);
-    assert_eq!(emitted[0].severity, Severity::Error);
-    assert_eq!(emitted[0].line, 2);
-    assert!(!emitted[0].message.is_empty());
+    assert_eq!(emitted[0].0, Severity::Error);
+    let Value::Dict(message) = &emitted[0].1 else {
+        panic!("diagnostic message must be a dictionary");
+    };
+    let Some(Value::Dict(interface)) = message.get(&*crate::core::keys::MSG) else {
+        panic!("diagnostic message must provide msg");
+    };
+    let Some(Value::Dict(location)) = interface.get(&*crate::core::keys::LOCATION) else {
+        panic!("diagnostic message must provide msg.location");
+    };
+    assert_eq!(
+        location.get(&*crate::core::keys::LINE),
+        Some(&Value::Number(crate::number::Number::from_usize(2)))
+    );
+    assert!(matches!(
+        interface.get(&*crate::core::keys::TEXT),
+        Some(Value::Binary(message)) if !message.is_empty()
+    ));
+    assert!(interface.get(&*crate::core::keys::SEVERITY).is_none());
 }
 
 #[test]

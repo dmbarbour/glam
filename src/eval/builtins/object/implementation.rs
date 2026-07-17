@@ -48,6 +48,78 @@ pub(super) fn eval_object_instance_from_parts_builtin(
     eval_object_instance_builtin(&Value::Dict(spec), local_env)
 }
 
+/// Re-instantiates an object with an additional stateless definitions mixin.
+///
+/// The composed definitions are retained in the resulting `spec`; directly
+/// updating the instance dictionary would lose the extension when a later
+/// observer inherits the object again.
+pub(super) fn eval_object_with_defs_builtin(
+    object: &Value,
+    extension_defs: Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let spec = object_spec_dict(&eval_object_spec_builtin(object)?)?;
+    let name = spec
+        .get(&*keys::NAME)
+        .cloned()
+        .ok_or_else(|| EvalError::new("object specification requires a name"))?;
+    let deps = spec
+        .get(&*keys::DEPS)
+        .cloned()
+        .unwrap_or_else(|| Value::List(List::empty()));
+    let prior_defs = spec
+        .get(&*keys::DEFS)
+        .cloned()
+        .unwrap_or_else(default_object_defs_value);
+    let composed_defs = Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::ObjectComposedDefs,
+        arguments: Arc::from([prior_defs, extension_defs]),
+    });
+    eval_object_instance_from_parts_builtin(name, deps, composed_defs, local_env)
+}
+
+pub(super) fn eval_object_composed_defs_builtin(
+    prior_defs: Value,
+    extension_defs: Value,
+    base: Value,
+    self_value: Value,
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let prior = apply_value(prior_defs, base, local_env)?;
+    let prior = apply_value(prior, self_value.clone(), local_env)?;
+    let extended = apply_value(extension_defs, prior, local_env)?;
+    apply_value(extended, self_value, local_env)
+}
+
+/// Implements the small right-biased record mixin used for assembler-owned
+/// diagnostic fields. It is an internal definitions adapter, not the language
+/// `with` surface or its assertion policy.
+pub(super) fn eval_object_override_defs_builtin(
+    updates: &Value,
+    base: &Value,
+) -> Result<Value, EvalError> {
+    let updates = force_value_shell(updates)?;
+    let base = force_value_shell(base)?;
+    let (Value::Dict(updates), Value::Dict(base)) = (updates, base) else {
+        return Err(EvalError::new(
+            "object override definitions require dictionary values",
+        ));
+    };
+    Ok(Value::Dict(override_dict(&base, &updates)))
+}
+
+fn override_dict(base: &crate::core::Dict, updates: &crate::core::Dict) -> crate::core::Dict {
+    updates.iter().fold(base.clone(), |base, (key, update)| {
+        let update = match (base.get(key), update) {
+            (Some(Value::Dict(prior)), Value::Dict(update)) => {
+                Value::Dict(override_dict(prior, update))
+            }
+            _ => update.clone(),
+        };
+        base.insert(key.clone(), update)
+    })
+}
+
 pub(super) fn eval_object_spec_builtin(value: &Value) -> Result<Value, EvalError> {
     let value = force_value_shell(value)?;
     let Value::Dict(dict) = value else {

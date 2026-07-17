@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 
 use crate::compiler::{
-    BinaryFileLoader, BinaryLoadArgs, CompileContext, CompileDiagnostic, CompileDiagnosticEmitter,
-    ModuleLoadArgs, ModuleLoader,
+    BinaryFileLoader, BinaryLoadArgs, CompileContext, CompileDiagnosticEmitter, ModuleLoadArgs,
+    ModuleLoader,
 };
 use crate::core::Value as CoreValue;
 use crate::core::{Builtin, Dict, Key, List, NetValue};
@@ -294,6 +294,9 @@ impl<'net> NetBuilder<'net> {
 /// One source or runtime diagnostic retained by an [`Assembler`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
+    value: Value,
+    // Transitional projections for the text-only embedding API. The enriched
+    // Value is the semantic message delivered to future loggers and viewers.
     source: Option<Arc<str>>,
     severity: Severity,
     line: Option<usize>,
@@ -302,18 +305,27 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     pub fn new(severity: Severity, message: impl Into<Arc<str>>) -> Self {
-        Self {
-            source: None,
+        let message = message.into();
+        Self::from_emission(
+            None,
             severity,
-            line: None,
-            message: message.into(),
-        }
+            crate::diagnostic::text_message(None, &message),
+        )
     }
 
-    pub fn with_source_location(mut self, source: impl Into<Arc<str>>, line: usize) -> Self {
-        self.source = Some(source.into());
-        self.line = Some(line);
-        self
+    pub fn with_source_location(self, source: impl Into<Arc<str>>, line: usize) -> Self {
+        let source = source.into();
+        Self::from_emission(
+            Some(source),
+            self.severity,
+            crate::diagnostic::text_message(Some(line), &self.message),
+        )
+    }
+
+    /// Returns the complete enriched diagnostic object. Conventional text,
+    /// severity, and provenance accessors below are compatibility projections.
+    pub fn value(&self) -> &Value {
+        &self.value
     }
 
     pub fn source(&self) -> Option<&str> {
@@ -332,13 +344,29 @@ impl Diagnostic {
         &self.message
     }
 
-    fn from_compile(source: Arc<str>, diagnostic: CompileDiagnostic) -> Self {
-        let CompileDiagnostic {
+    fn from_compile(source: Arc<str>, severity: Severity, message: CoreValue) -> Self {
+        Self::from_emission(Some(source), severity, message)
+    }
+
+    fn from_emission(source: Option<Arc<str>>, severity: Severity, message: CoreValue) -> Self {
+        let (line, text) = crate::diagnostic::conventional_summary(&message);
+        let enriched = crate::diagnostic::enrich(message, severity, source.as_deref())
+            .unwrap_or_else(|error| {
+                let text = format!("invalid diagnostic message: {error}");
+                crate::diagnostic::enrich(
+                    crate::diagnostic::text_message(line, &text),
+                    severity,
+                    source.as_deref(),
+                )
+                .expect("canonical fallback diagnostic must be valid")
+            });
+        Self {
+            value: Value::from_core(enriched),
+            source,
             severity,
             line,
-            message,
-        } = diagnostic;
-        Self::new(severity, Arc::<str>::from(message)).with_source_location(source, line)
+            message: text.unwrap_or_else(|| Arc::from("<diagnostic has no immediate text view>")),
+        }
     }
 }
 
@@ -1034,11 +1062,11 @@ impl Assembler {
         had_errors: Arc<AtomicBool>,
     ) -> CompileDiagnosticEmitter {
         let assembler = self.clone();
-        Arc::new(move |diagnostic| {
-            if diagnostic.severity == Severity::Error {
+        Arc::new(move |severity, message| {
+            if severity == Severity::Error {
                 had_errors.store(true, Ordering::Relaxed);
             }
-            let diagnostic = Diagnostic::from_compile(source.clone(), diagnostic);
+            let diagnostic = Diagnostic::from_compile(source.clone(), severity, message);
             session
                 .lock()
                 .expect("build diagnostic mutex should not be poisoned")
@@ -1157,5 +1185,112 @@ mod tests {
                 .message(),
             "hello"
         );
+    }
+
+    #[test]
+    fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
+        let CoreValue::Dict(message) = crate::diagnostic::text_message(Some(7), "careful") else {
+            unreachable!()
+        };
+        let CoreValue::Dict(interface) = message
+            .get(&*crate::core::keys::MSG)
+            .cloned()
+            .expect("text diagnostic should provide msg")
+        else {
+            unreachable!()
+        };
+        let interface = interface.insert(
+            (*crate::core::keys::SEVERITY).clone(),
+            (*crate::core::keys::ERROR_VALUE).clone(),
+        );
+        let message = CoreValue::Dict(message.insert(
+            (*crate::core::keys::MSG).clone(),
+            CoreValue::Dict(interface),
+        ));
+
+        let diagnostic = Diagnostic::from_compile(Arc::from("test.g"), Severity::Warning, message);
+        assert_eq!(diagnostic.severity(), Severity::Warning);
+
+        let CoreValue::Dict(enriched) = diagnostic.value().as_core() else {
+            panic!("enriched diagnostic should be an object dictionary");
+        };
+        let Some(CoreValue::Dict(interface)) = enriched.get(&*crate::core::keys::MSG) else {
+            panic!("enriched diagnostic should provide msg");
+        };
+        assert_eq!(
+            interface.get(&*crate::core::keys::SEVERITY),
+            Some(&*crate::core::keys::WARN_VALUE)
+        );
+        assert_eq!(
+            interface
+                .get(&*crate::core::keys::ORIGIN)
+                .and_then(|origin| match origin {
+                    CoreValue::Dict(origin) => origin.get(&*crate::core::keys::SOURCE),
+                    _ => None,
+                }),
+            Some(&CoreValue::binary_from_text("test.g"))
+        );
+
+        let Some(CoreValue::Dict(spec)) = enriched.get(&*crate::core::keys::SPEC) else {
+            panic!("each diagnostic mixin should update the object specification");
+        };
+        assert!(matches!(
+            spec.get(&*crate::core::keys::DEFS),
+            Some(CoreValue::PartialBuiltin(call))
+                if call.builtin == Builtin::ObjectComposedDefs
+        ));
+    }
+
+    #[test]
+    fn viewers_can_inherit_one_diagnostic_independently() {
+        let diagnostic = Diagnostic::from_compile(
+            Arc::from("test.g"),
+            Severity::Info,
+            crate::diagnostic::text_message(Some(3), "hello"),
+        );
+        let viewer_key = Key::atom_from_text("viewer");
+        let inherit = |name: &str| {
+            let updates = CoreValue::Dict(
+                Dict::new_sync().insert(viewer_key.clone(), CoreValue::binary_from_text(name)),
+            );
+            let defs = CoreValue::builtin_call(Builtin::ObjectOverrideDefs, vec![updates]);
+            eval::apply_values(
+                CoreValue::Builtin(Builtin::ObjectWithDefs),
+                vec![diagnostic.value().as_core().clone(), defs],
+                &[],
+            )
+            .expect("viewer mixin should apply")
+        };
+
+        let first = inherit("terminal");
+        let second = inherit("ide");
+        let CoreValue::Dict(original) = diagnostic.value().as_core() else {
+            unreachable!()
+        };
+        let CoreValue::Dict(first) = first else {
+            unreachable!()
+        };
+        let CoreValue::Dict(second) = second else {
+            unreachable!()
+        };
+        assert!(original.get(&viewer_key).is_none());
+        assert_eq!(
+            first.get(&viewer_key),
+            Some(&CoreValue::binary_from_text("terminal"))
+        );
+        assert_eq!(
+            second.get(&viewer_key),
+            Some(&CoreValue::binary_from_text("ide"))
+        );
+        assert!(matches!(
+            first
+                .get(&*crate::core::keys::SPEC)
+                .and_then(|spec| match spec {
+                    CoreValue::Dict(spec) => spec.get(&*crate::core::keys::DEFS),
+                    _ => None,
+                }),
+            Some(CoreValue::PartialBuiltin(call))
+                if call.builtin == Builtin::ObjectComposedDefs
+        ));
     }
 }
