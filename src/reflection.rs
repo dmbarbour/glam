@@ -1557,14 +1557,12 @@ mod tests {
     #[derive(Clone)]
     struct TestSnapshot {
         diagnostics: Arc<[Diagnostic]>,
-        closed: bool,
     }
 
     #[derive(Clone, Default)]
     struct TestJournal {
         reflection: ReflectionJournal,
         consumed_diagnostics: usize,
-        consumed_emitted_diagnostics: usize,
         stderr: Vec<Bytes>,
     }
 
@@ -1611,36 +1609,7 @@ mod tests {
                 TestRequest::Reflection(request) => {
                     handle_reflection_request(request, arguments, context)
                 }
-                TestRequest::ReadLog => {
-                    let Some(mut transaction) = context.transaction() else {
-                        return Ok(RequestResult::Cancelled);
-                    };
-                    let (snapshot, journal) = transaction.parts();
-                    if let Some(diagnostic) = snapshot.diagnostics.get(journal.consumed_diagnostics)
-                    {
-                        journal.consumed_diagnostics += 1;
-                        return diagnostic
-                            .enrich()
-                            .map(RequestResult::Return)
-                            .map_err(|error| TaskError::new(error.to_string()));
-                    }
-                    if let Some(diagnostic) = journal
-                        .reflection
-                        .diagnostics()
-                        .get(journal.consumed_emitted_diagnostics)
-                    {
-                        journal.consumed_emitted_diagnostics += 1;
-                        return diagnostic
-                            .enrich()
-                            .map(RequestResult::Return)
-                            .map_err(|error| TaskError::new(error.to_string()));
-                    }
-                    Ok(if snapshot.closed {
-                        RequestResult::Cancelled
-                    } else {
-                        RequestResult::Fail
-                    })
-                }
+                TestRequest::ReadLog => read_test_log(context),
                 TestRequest::WriteStderr => {
                     let [value]: [PublicValue; 1] = arguments.try_into().map_err(|_| {
                         TaskError::new("test stderr request received the wrong arity")
@@ -1653,6 +1622,47 @@ mod tests {
                     }
                     Ok(RequestResult::ReturnUnit)
                 }
+            }
+        }
+    }
+
+    fn read_test_log(
+        context: &mut RequestContext<'_, TestEffects>,
+    ) -> Result<RequestResult, TaskError> {
+        if let Some(mut transaction) = context.transaction() {
+            let (snapshot, journal) = transaction.parts();
+            let Some(diagnostic) = snapshot.diagnostics.get(journal.consumed_diagnostics) else {
+                return Ok(RequestResult::Fail);
+            };
+            journal.consumed_diagnostics += 1;
+            return diagnostic
+                .enrich()
+                .map(RequestResult::Return)
+                .map_err(|error| TaskError::new(error.to_string()));
+        }
+
+        loop {
+            let host = context.host();
+            let snapshot = <TestHost as TaskHost<TestEffects>>::snapshot(host);
+            let Some(diagnostic) = snapshot.extra().diagnostics.first() else {
+                return Ok(RequestResult::Fail);
+            };
+            let value = diagnostic
+                .enrich()
+                .map_err(|error| TaskError::new(error.to_string()))?;
+            let commit = TaskCommit::new(
+                snapshot.generation(),
+                snapshot.heap().clone(),
+                TestJournal {
+                    reflection: ReflectionJournal::default(),
+                    consumed_diagnostics: 1,
+                    stderr: Vec::new(),
+                },
+            );
+            match <TestHost as TaskHost<TestEffects>>::commit(host, commit) {
+                CommitResult::Committed => return Ok(RequestResult::Return(value)),
+                CommitResult::Conflict => {}
+                CommitResult::Closed => return Ok(RequestResult::Cancelled),
             }
         }
     }
@@ -1735,7 +1745,6 @@ mod tests {
                 state.heap.clone(),
                 TestSnapshot {
                     diagnostics: Arc::from(state.diagnostics.clone()),
-                    closed: state.closed,
                 },
             )
         }
@@ -1754,15 +1763,9 @@ mod tests {
                 .consumed_diagnostics
                 .min(state.diagnostics.len());
             state.diagnostics.drain(..consumed);
-            state.diagnostics.extend(
-                commit
-                    .extra()
-                    .reflection
-                    .diagnostics()
-                    .iter()
-                    .skip(commit.extra().consumed_emitted_diagnostics)
-                    .cloned(),
-            );
+            state
+                .diagnostics
+                .extend(commit.extra().reflection.diagnostics().iter().cloned());
             state.stderr.extend_from_slice(&commit.extra().stderr);
             state.generation += 1;
             CommitResult::Committed
@@ -2053,17 +2056,26 @@ mod tests {
     }
 
     #[test]
-    fn composed_logging_rolls_back_and_can_read_its_own_reflection_writes() {
-        let (_, effect) = compile_effect(
-            ".cut (.alt ((.log 'error { msg:{ text:\"bad\" } }) =>> .fail) ((.log 'warn { msg:{ text:\"good\" } }) =>> (.read_log >>= (\\message -> (.write_stderr message.msg.text) =>> .r ()))))",
+    fn composed_logging_does_not_read_its_own_reflection_writes() {
+        let (assembler, effect) = compile_effect(
+            ".cut (.alt ((.log 'error { msg:{ text:\"bad\" } }) =>> (.read_log >>= (\\message -> (.write_stderr message.msg.text) =>> .r ()))) ((.log 'warn { msg:{ text:\"good\" } }) =>> .r ()))",
         );
         let host = Arc::new(TestHost::default());
         assert!(matches!(
             run_log_test(&effect, host.clone()).unwrap(),
             TaskOutcome::Complete(_)
         ));
-        assert_eq!(host.stderr(), [Bytes::from_static(b"good")]);
-        assert!(host.diagnostics().is_empty());
+        assert!(host.stderr().is_empty());
+        let diagnostics = host.diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].severity(),
+            crate::diagnostic::Severity::Warning
+        );
+        let text = assembler
+            .get(&diagnostics[0].enrich().unwrap(), "msg.text")
+            .unwrap();
+        assert_eq!(assembler.to_binary(&text).unwrap(), b"good".as_slice());
     }
 
     #[test]

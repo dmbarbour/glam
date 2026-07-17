@@ -82,8 +82,9 @@ design in the design documents.
   Reusable request families compose by mapping their requests into the host
   specialization's request enum. The first reflection family contributes
   `log Severity Message`; `main` adds provisional `read_log` and `write_stderr`
-  effects. Logged diagnostics join the current transaction, including
-  read-your-writes behavior, or go directly to the host outside `cut`. A
+  effects. Logged diagnostics join the current transaction or go directly to
+  the host outside `cut`. Queue reads inspect only their host snapshot, never
+  journaled writes, and fail immediately when no input is available. A
   top-level `alt` is rejected; alternatives belong to `cut`. This and
   task-local `.shift` continuations are the conservative
   standard-effect contract: general-purpose utilities must not assume broader

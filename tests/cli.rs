@@ -380,7 +380,7 @@ fn configured_logger_composes_reusable_reflection_requests() {
     let invalid = dir.join("invalid.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .cut (.read_log >>= (\\_message -> (.log 'warn { msg:{ text:\"REFLECTION LOG\" } }) =>> (.read_log >>= (\\message -> (.write_stderr (message.msg.text ++ [10])) =>> .r ()))))\n",
+        "language g0\nobject conf.env\nconf.log = .cut (.read_log >>= (\\_message -> (.log 'warn { msg:{ text:\"REFLECTION LOG\" } }) =>> (.write_stderr (\"COMPOSED\" ++ [10]) =>> .r ())))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(&invalid, b"language g0\nvalue = \xff\n")
@@ -395,10 +395,15 @@ fn configured_logger_composes_reusable_reflection_requests() {
 
     assert!(!output.status.success());
     assert_eq!(output.stdout, b"");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("REFLECTION LOG\n"),
+        stderr.contains("COMPOSED\n"),
+        "configured logger did not run its main-owned request:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("warning: REFLECTION LOG\n"),
         "configured logger did not compose the reflection request:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr
     );
 }
 

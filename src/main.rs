@@ -256,14 +256,12 @@ enum MainRequest {
 #[derive(Clone)]
 struct MainSnapshot {
     diagnostics: Arc<[Diagnostic]>,
-    closed: bool,
 }
 
 #[derive(Clone, Default)]
 struct MainJournal {
     reflection: ReflectionJournal,
     consumed_diagnostics: usize,
-    consumed_emitted_diagnostics: usize,
     stderr: Vec<Bytes>,
 }
 
@@ -344,32 +342,16 @@ fn read_log(
                 .map(RequestResult::Return)
                 .map_err(|error| glam::reflection::TaskError::new(error.to_string()));
         }
-        if let Some(diagnostic) = journal
-            .reflection
-            .diagnostics()
-            .get(journal.consumed_emitted_diagnostics)
-        {
-            journal.consumed_emitted_diagnostics += 1;
-            return diagnostic
-                .enrich()
-                .map(RequestResult::Return)
-                .map_err(|error| glam::reflection::TaskError::new(error.to_string()));
-        }
-        return Ok(if snapshot.closed {
-            RequestResult::Cancelled
-        } else {
-            RequestResult::Fail
-        });
+        // Queue reads observe only the host snapshot. Journaled writes remain
+        // invisible until commit, just as writes from concurrent tasks do.
+        return Ok(RequestResult::Fail);
     }
 
     loop {
         let host = context.host();
         let snapshot = host.snapshot();
         let Some(diagnostic) = snapshot.extra().diagnostics.first() else {
-            if snapshot.extra().closed || !host.wait_for_change(snapshot.generation()) {
-                return Ok(RequestResult::Cancelled);
-            }
-            continue;
+            return Ok(RequestResult::Fail);
         };
         let value = diagnostic
             .enrich()
@@ -380,7 +362,6 @@ fn read_log(
             MainJournal {
                 reflection: ReflectionJournal::default(),
                 consumed_diagnostics: 1,
-                consumed_emitted_diagnostics: 0,
                 stderr: Vec::new(),
             },
         );
@@ -522,7 +503,6 @@ impl TaskHost<MainEffects> for LogHost {
             state.heap.clone(),
             MainSnapshot {
                 diagnostics: Arc::from(state.diagnostics.iter().cloned().collect::<Vec<_>>()),
-                closed: state.closed,
             },
         )
     }
@@ -542,14 +522,7 @@ impl TaskHost<MainEffects> for LogHost {
             state
                 .diagnostics
                 .drain(..commit.extra().consumed_diagnostics);
-            for diagnostic in commit
-                .extra()
-                .reflection
-                .diagnostics()
-                .iter()
-                .skip(commit.extra().consumed_emitted_diagnostics)
-                .cloned()
-            {
+            for diagnostic in commit.extra().reflection.diagnostics().iter().cloned() {
                 self.push_diagnostic(&mut state, diagnostic);
             }
             state.stderr.extend(commit.extra().stderr.iter().cloned());
