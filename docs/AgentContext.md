@@ -97,9 +97,9 @@ design in the design documents.
   merge upward; an outer success validates and commits. The bootstrap is
   currently serial and uses a coarse generation, but the boundary is shaped
   for finer optimistic observations later.
-- `fix` currently handles the ordinary single-success case. Rebase its pending
-  future per alternative before relying on a fixpoint whose chosen result can
-  later backtrack into a sibling branch.
+- Each `fix` alternative receives its own pending future. When a chosen result
+  later fails, the handler restarts at the fixpoint boundary and replays its
+  transactional `alt` choices rather than reusing an initialized future.
 - `main` queues diagnostics before configuration exists. Defined `conf.log`
   consumes enriched messages effectfully; undefined, completed, or failed
   custom logging falls back to the Rust terminal logger. Stderr effects commit

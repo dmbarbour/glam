@@ -257,6 +257,61 @@ impl EffectTask {
         ))
     }
 
+    fn start_fixpoint(
+        &mut self,
+        root: Arc<FixRoot>,
+        choices: Vec<FixChoice>,
+    ) -> Result<Branch, TaskError> {
+        let mut branch = root.entry.clone();
+        let handle = LazyValue::pending("reflection effect fixpoint");
+        let marker = Value::Lazy(handle.clone());
+        let operation = apply(root.function.clone(), vec![marker])?;
+        let outer_control = std::mem::take(&mut branch.control);
+        let reset_stack = reset_stack_value(&branch.state, &self.tags.continuation_state)?;
+        branch.state = with_reset_frames(branch.state, &self.tags.continuation_state, &[])?;
+        branch.active_fixes.push(ActiveFix {
+            root: root.clone(),
+            choices,
+            next_choice: 0,
+            handle: handle.clone(),
+        });
+        branch.control.sequence.push(Continuation::Fix(handle));
+        branch.control.delimiters.push(Delimiter::Restore {
+            outer: Box::new(outer_control),
+            reset_stack,
+            scope_depth: root.scope_depth,
+            order: self.allocate_control_order()?,
+        });
+        branch.effect = operation;
+        Ok(branch)
+    }
+
+    fn restart_fixpoint_at_scope(
+        &mut self,
+        branch: &mut Branch,
+        scope_depth: usize,
+    ) -> Result<Option<Branch>, TaskError> {
+        let Some(restart) = branch.fix_restarts.last() else {
+            return Ok(None);
+        };
+        if restart.root.scope_depth < scope_depth {
+            return Ok(None);
+        }
+        if restart.root.scope_depth > scope_depth {
+            return Err(TaskError::new(
+                "reflection fixpoint restart escaped its evaluation scope",
+            ));
+        }
+
+        let restart = branch
+            .fix_restarts
+            .pop()
+            .expect("restart observed above must exist");
+        let mut restarted = self.start_fixpoint(restart.root, restart.choices)?;
+        restarted.fix_restarts = restart.inherited_restarts;
+        Ok(Some(restarted))
+    }
+
     fn install_captured_control(
         &mut self,
         branch: &mut Branch,
@@ -338,6 +393,34 @@ impl EffectTask {
                     branch.effect = operation;
                 }
                 Request::Alt(left, right) => {
+                    if scope_depth > 0 && !branch.active_fixes.is_empty() {
+                        let inherited_restarts = branch.fix_restarts.clone();
+                        let active = branch
+                            .active_fixes
+                            .first_mut()
+                            .expect("checked nonempty fixpoint stack");
+                        if let Some(choice) = active.choices.get(active.next_choice).copied() {
+                            active.next_choice += 1;
+                            branch.effect = match choice {
+                                FixChoice::Left => left,
+                                FixChoice::Right => right,
+                            };
+                            continue;
+                        }
+
+                        let root = active.root.clone();
+                        let mut right_choices = active.choices.clone();
+                        right_choices.push(FixChoice::Right);
+                        active.choices.push(FixChoice::Left);
+                        active.next_choice += 1;
+                        branch.effect = left;
+                        branch.fix_restarts.push(FixRestart {
+                            root,
+                            choices: right_choices,
+                            inherited_restarts,
+                        });
+                        continue;
+                    }
                     return Ok(Drive::Fork(
                         Box::new(branch.with_effect(left)),
                         Box::new(branch.with_effect(right)),
@@ -361,7 +444,15 @@ impl EffectTask {
                                 }
                             }
                         }
-                        CutResult::Retry(branch) => return Ok(Drive::Retry(branch)),
+                        CutResult::Retry(mut failed) => {
+                            if let Some(restarted) =
+                                self.restart_fixpoint_at_scope(&mut failed, scope_depth)?
+                            {
+                                branch = restarted;
+                                continue;
+                            }
+                            return Ok(Drive::Retry(failed));
+                        }
                         CutResult::Cancelled => return Ok(Drive::Cancelled),
                     }
                 }
@@ -488,26 +579,12 @@ impl EffectTask {
                     deliver_value!(value);
                 }
                 Request::Fix(function) => {
-                    // TODO(reflection backtracking): if a fixpoint result is
-                    // initialized and a later continuation fails, a sibling
-                    // alternative needs its own future rather than this
-                    // already-initialized handle.
-                    let handle = LazyValue::pending("reflection effect fixpoint");
-                    let marker = Value::Lazy(handle.clone());
-                    let operation = apply(function, vec![marker])?;
-                    let outer_control = std::mem::take(&mut branch.control);
-                    let reset_stack =
-                        reset_stack_value(&branch.state, &self.tags.continuation_state)?;
-                    branch.state =
-                        with_reset_frames(branch.state, &self.tags.continuation_state, &[])?;
-                    branch.control.sequence.push(Continuation::Fix(handle));
-                    branch.control.delimiters.push(Delimiter::Restore {
-                        outer: Box::new(outer_control),
-                        reset_stack,
+                    let root = Arc::new(FixRoot {
+                        function,
+                        entry: branch,
                         scope_depth,
-                        order: self.allocate_control_order()?,
                     });
-                    branch.effect = operation;
+                    branch = self.start_fixpoint(root, Vec::new())?;
                 }
                 Request::ReadLog => {
                     let Some(transaction) = branch.transaction.as_mut() else {
@@ -604,12 +681,27 @@ impl EffectTask {
                         alternatives.push(*right);
                         alternatives.push(*left);
                     }
-                    Drive::Fail(failed) | Drive::Retry(failed) => retry = Some(failed),
+                    Drive::Fail(mut failed) | Drive::Retry(mut failed) => {
+                        if let Some(restarted) =
+                            self.restart_fixpoint_at_scope(&mut failed, scope_depth)?
+                        {
+                            alternatives.push(restarted);
+                        } else {
+                            retry = Some(failed);
+                        }
+                    }
                     Drive::Cancelled => return Ok(CutResult::Cancelled),
                 }
             }
 
             let failed = retry.unwrap_or_else(|| outer.clone());
+            if failed
+                .fix_restarts
+                .last()
+                .is_some_and(|restart| restart.root.scope_depth < scope_depth)
+            {
+                return Ok(CutResult::Retry(failed));
+            }
             if !owns_transaction {
                 return Ok(CutResult::Retry(failed));
             }
@@ -681,6 +773,8 @@ struct Branch {
     control: Control,
     state: Value,
     transaction: Option<Transaction>,
+    active_fixes: Vec<ActiveFix>,
+    fix_restarts: Vec<FixRestart>,
 }
 
 impl Branch {
@@ -690,6 +784,8 @@ impl Branch {
             control: Control::default(),
             state,
             transaction: None,
+            active_fixes: Vec::new(),
+            fix_restarts: Vec::new(),
         }
     }
 
@@ -698,6 +794,34 @@ impl Branch {
         branch.effect = effect;
         branch
     }
+}
+
+#[derive(Clone)]
+struct FixRoot {
+    function: Value,
+    entry: Branch,
+    scope_depth: usize,
+}
+
+#[derive(Clone)]
+struct ActiveFix {
+    root: Arc<FixRoot>,
+    choices: Vec<FixChoice>,
+    next_choice: usize,
+    handle: LazyValue,
+}
+
+#[derive(Clone)]
+struct FixRestart {
+    root: Arc<FixRoot>,
+    choices: Vec<FixChoice>,
+    inherited_restarts: Vec<FixRestart>,
+}
+
+#[derive(Clone, Copy)]
+enum FixChoice {
+    Left,
+    Right,
 }
 
 #[derive(Clone, Default)]
@@ -841,6 +965,17 @@ fn deliver(
                     return Ok(Delivery::Continue(branch));
                 }
                 Continuation::Fix(handle) => {
+                    let active = branch.active_fixes.pop().ok_or_else(|| {
+                        TaskError::new("reflection fixpoint lost its active branch")
+                    })?;
+                    if active.handle != handle {
+                        return Err(TaskError::new(
+                            "reflection fixpoint control became unbalanced",
+                        ));
+                    }
+                    if active.next_choice != active.choices.len() {
+                        return Err(TaskError::new("reflection fixpoint choice replay diverged"));
+                    }
                     handle
                         .set(value.clone())
                         .map_err(|_| TaskError::new("reflection fixpoint initialized twice"))?;
@@ -1376,6 +1511,29 @@ mod tests {
     }
 
     #[test]
+    fn fixpoint_alternatives_receive_independent_futures() {
+        let (assembler, value) = completed(
+            ".cut (.fix (\\self -> .alt (.alt (.r \"left\") (.r \"middle\")) (.r \"right\")) >>= (\\value -> (value == \"right\") =>> .r value))",
+        );
+        assert_eq!(assembler.to_binary(&value).unwrap(), b"right".as_slice());
+
+        let (assembler, value) =
+            completed(".fix (\\self -> .cut (.alt .fail (.r \"nested cut\")))");
+        assert_eq!(
+            assembler.to_binary(&value).unwrap(),
+            b"nested cut".as_slice()
+        );
+
+        let (assembler, value) = completed(
+            ".cut (.fix (\\outer -> .fix (\\inner -> .alt (.r \"nested left\") (.r \"nested right\"))) >>= (\\value -> (value == \"nested right\") =>> .r value))",
+        );
+        assert_eq!(
+            assembler.to_binary(&value).unwrap(),
+            b"nested right".as_slice()
+        );
+    }
+
+    #[test]
     fn fixpoint_hides_then_restores_the_reset_stack() {
         let (_, hidden) = compile_effect(
             ".reset \"prompt\" (.fix (\\self -> .shift \"prompt\" (\\continuation -> continuation \"wrong\")))",
@@ -1498,6 +1656,14 @@ mod tests {
         let (_, alternative) = compile_effect(".alt (.r 1) (.r 2)");
         assert!(
             run(&alternative, Arc::new(TestHost::default()))
+                .unwrap_err()
+                .to_string()
+                .contains("requires an enclosing `.cut`")
+        );
+
+        let (_, fixpoint_alternative) = compile_effect(".fix (\\self -> .alt (.r 1) (.r 2))");
+        assert!(
+            run(&fixpoint_alternative, Arc::new(TestHost::default()))
                 .unwrap_err()
                 .to_string()
                 .contains("requires an enclosing `.cut`")
