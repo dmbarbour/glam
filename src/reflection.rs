@@ -5,40 +5,106 @@
 //! performs the state, control, transaction, and host operations.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use bytes::Bytes;
-
-use crate::api::{Diagnostic, Value as PublicValue};
+use crate::api::Value as PublicValue;
 use crate::core::{Atom, Dict, FunctionValue, Key, LazyValue, List, NetValue, Value, keys};
 use crate::core_net::CoreSpecialization;
 use crate::eval;
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
 
-/// Immutable host state observed at the start of an optimistic transaction.
-#[derive(Debug, Clone)]
-pub struct HostSnapshot {
-    generation: u64,
-    heap: PublicValue,
-    diagnostics: Arc<[Diagnostic]>,
-    closed: bool,
+/// One additional effect constructor contributed by a task specialization.
+pub struct EffectRequestSpec<R> {
+    api_name: Arc<str>,
+    tag_path: Arc<[Arc<str>]>,
+    arity: usize,
+    request: R,
 }
 
-impl HostSnapshot {
-    pub fn new(
-        generation: u64,
-        heap: PublicValue,
-        diagnostics: impl Into<Arc<[Diagnostic]>>,
-        closed: bool,
-    ) -> Self {
+impl<R> EffectRequestSpec<R> {
+    pub fn new<I, P>(api_name: impl Into<Arc<str>>, tag_path: I, arity: usize, request: R) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<Arc<str>>,
+    {
+        Self {
+            api_name: api_name.into(),
+            tag_path: tag_path.into_iter().map(Into::into).collect(),
+            arity,
+            request,
+        }
+    }
+}
+
+/// Result of handling one specialization-owned request.
+pub enum RequestResult {
+    Return(PublicValue),
+    ReturnUnit,
+    Fail,
+    Cancelled,
+}
+
+/// Extra effects and transactional resources available to one task kind.
+///
+/// A specialization is immutable dispatch policy; mutable resources belong to
+/// its [`TaskHost`], so cloning the specialization should remain inexpensive.
+pub trait TaskSpecialization: Clone + Sized + Send + Sync + 'static {
+    type Host: TaskHost<Self> + ?Sized;
+    type Request: Clone + Send + Sync + 'static;
+    type Snapshot: Clone + Send + Sync + 'static;
+    type Journal: Clone + Default + Send + Sync + 'static;
+
+    fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>>;
+
+    fn handle_request(
+        &self,
+        request: Self::Request,
+        arguments: Vec<PublicValue>,
+        context: &mut RequestContext<'_, Self>,
+    ) -> Result<RequestResult, TaskError>;
+}
+
+/// A task exposing only the standard effect machine.
+#[derive(Clone, Copy, Default)]
+pub struct StandardEffects;
+
+impl TaskSpecialization for StandardEffects {
+    type Host = dyn TaskHost<Self>;
+    type Request = Infallible;
+    type Snapshot = ();
+    type Journal = ();
+
+    fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>> {
+        Vec::new()
+    }
+
+    fn handle_request(
+        &self,
+        request: Self::Request,
+        _arguments: Vec<PublicValue>,
+        _context: &mut RequestContext<'_, Self>,
+    ) -> Result<RequestResult, TaskError> {
+        match request {}
+    }
+}
+
+/// Immutable host state observed at the start of an optimistic transaction.
+pub struct HostSnapshot<S: TaskSpecialization> {
+    generation: u64,
+    heap: PublicValue,
+    extra: S::Snapshot,
+}
+
+impl<S: TaskSpecialization> HostSnapshot<S> {
+    pub fn new(generation: u64, heap: PublicValue, extra: S::Snapshot) -> Self {
         Self {
             generation,
             heap,
-            diagnostics: diagnostics.into(),
-            closed,
+            extra,
         }
     }
 
@@ -50,25 +116,37 @@ impl HostSnapshot {
         &self.heap
     }
 
-    pub fn diagnostics(&self) -> &[Diagnostic] {
-        &self.diagnostics
+    pub fn extra(&self) -> &S::Snapshot {
+        &self.extra
     }
+}
 
-    pub fn is_closed(&self) -> bool {
-        self.closed
+impl<S: TaskSpecialization> Clone for HostSnapshot<S> {
+    fn clone(&self) -> Self {
+        Self {
+            generation: self.generation,
+            heap: self.heap.clone(),
+            extra: self.extra.clone(),
+        }
     }
 }
 
 /// Changes to host-owned resources produced by one successful outer cut.
-#[derive(Debug)]
-pub struct TaskCommit {
+pub struct TaskCommit<S: TaskSpecialization> {
     generation: u64,
     heap: PublicValue,
-    consumed_diagnostics: usize,
-    stderr: Vec<Bytes>,
+    extra: S::Journal,
 }
 
-impl TaskCommit {
+impl<S: TaskSpecialization> TaskCommit<S> {
+    pub fn new(generation: u64, heap: PublicValue, extra: S::Journal) -> Self {
+        Self {
+            generation,
+            heap,
+            extra,
+        }
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -77,12 +155,8 @@ impl TaskCommit {
         &self.heap
     }
 
-    pub fn consumed_diagnostics(&self) -> usize {
-        self.consumed_diagnostics
-    }
-
-    pub fn stderr(&self) -> &[Bytes] {
-        &self.stderr
+    pub fn extra(&self) -> &S::Journal {
+        &self.extra
     }
 }
 
@@ -94,16 +168,13 @@ pub enum CommitResult {
 }
 
 /// Host-owned transactional resources available to a reflection task.
-pub trait TaskHost: Send + Sync {
-    fn snapshot(&self) -> HostSnapshot;
-    fn commit(&self, commit: TaskCommit) -> CommitResult;
+pub trait TaskHost<S: TaskSpecialization>: Send + Sync {
+    fn snapshot(&self) -> HostSnapshot<S>;
+    fn commit(&self, commit: TaskCommit<S>) -> CommitResult;
 
     /// Waits until the observed generation changes. Returns false when the
     /// task should stop rather than retry.
     fn wait_for_change(&self, observed_generation: u64) -> bool;
-
-    /// Enqueues output outside an explicit cut as a single-operation commit.
-    fn write_stderr(&self, bytes: Bytes);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +187,7 @@ pub enum TaskOutcome {
 pub struct TaskError(Arc<str>);
 
 impl TaskError {
-    fn new(message: impl Into<Arc<str>>) -> Self {
+    pub fn new(message: impl Into<Arc<str>>) -> Self {
         Self(message.into())
     }
 }
@@ -141,9 +212,21 @@ fn allocate_task_id() -> Result<TaskId, TaskError> {
         .map_err(|_| TaskError::new("reflection task IDs exhausted"))
 }
 
-/// Runs one reflection effect until it returns or its host closes.
-pub fn run(effect: &PublicValue, host: Arc<dyn TaskHost>) -> Result<TaskOutcome, TaskError> {
-    EffectTask::new(host)?.run(effect.as_core().clone())
+/// Runs one reflection effect with a statically selected set of extra effects.
+pub fn run<S: TaskSpecialization>(
+    effect: &PublicValue,
+    specialization: S,
+    host: Arc<S::Host>,
+) -> Result<TaskOutcome, TaskError> {
+    EffectTask::new(specialization, host)?.run(effect.as_core().clone())
+}
+
+/// Runs a task with standard effects and no specialization-owned requests.
+pub fn run_standard(
+    effect: &PublicValue,
+    host: Arc<dyn TaskHost<StandardEffects>>,
+) -> Result<TaskOutcome, TaskError> {
+    run(effect, StandardEffects, host)
 }
 
 #[derive(Clone)]
@@ -159,8 +242,6 @@ struct Tags {
     reset: Key,
     shift: Key,
     resume: Key,
-    read_log: Key,
-    write_stderr: Key,
     continuation_state: Key,
 }
 
@@ -186,8 +267,6 @@ impl Tags {
             reset: tag("reset"),
             shift: tag("shift"),
             resume: tag("resume"),
-            read_log: tag("read_log"),
-            write_stderr: tag("write_stderr"),
             // The key is private, but its value deliberately travels with
             // whole-user-state get/set operations.
             continuation_state: Key::abstract_global_path([
@@ -200,10 +279,12 @@ impl Tags {
     }
 }
 
-struct EffectTask {
+struct EffectTask<S: TaskSpecialization> {
     id: TaskId,
-    host: Arc<dyn TaskHost>,
+    specialization: S,
+    host: Arc<S::Host>,
     tags: Tags,
+    specialized_requests: Vec<SpecializedRequest<S::Request>>,
     api: Value,
     local_state: Value,
     next_continuation: u64,
@@ -211,14 +292,16 @@ struct EffectTask {
     continuations: HashMap<u64, CapturedContinuation>,
 }
 
-impl EffectTask {
-    fn new(host: Arc<dyn TaskHost>) -> Result<Self, TaskError> {
+impl<S: TaskSpecialization> EffectTask<S> {
+    fn new(specialization: S, host: Arc<S::Host>) -> Result<Self, TaskError> {
         let tags = Tags::new();
-        let api = effect_api(&tags);
+        let (api, specialized_requests) = effect_api(&tags, specialization.requests())?;
         Ok(Self {
             id: allocate_task_id()?,
+            specialization,
             host,
             tags,
+            specialized_requests,
             api,
             local_state: Value::Dict(Dict::new_sync()),
             next_continuation: 1,
@@ -259,9 +342,9 @@ impl EffectTask {
 
     fn start_fixpoint(
         &mut self,
-        root: Arc<FixRoot>,
+        root: Arc<FixRoot<S>>,
         choices: Vec<FixChoice>,
-    ) -> Result<Branch, TaskError> {
+    ) -> Result<Branch<S>, TaskError> {
         let mut branch = root.entry.clone();
         let handle = LazyValue::pending("reflection effect fixpoint");
         let marker = Value::Lazy(handle.clone());
@@ -288,9 +371,9 @@ impl EffectTask {
 
     fn restart_fixpoint_at_scope(
         &mut self,
-        branch: &mut Branch,
+        branch: &mut Branch<S>,
         scope_depth: usize,
-    ) -> Result<Option<Branch>, TaskError> {
+    ) -> Result<Option<Branch<S>>, TaskError> {
         let Some(restart) = branch.fix_restarts.last() else {
             return Ok(None);
         };
@@ -314,7 +397,7 @@ impl EffectTask {
 
     fn install_captured_control(
         &mut self,
-        branch: &mut Branch,
+        branch: &mut Branch<S>,
         captured: &mut CapturedContinuation,
         scope_depth: usize,
     ) -> Result<(), TaskError> {
@@ -363,7 +446,7 @@ impl EffectTask {
         }
     }
 
-    fn drive(&mut self, mut branch: Branch, scope_depth: usize) -> Result<Drive, TaskError> {
+    fn drive(&mut self, mut branch: Branch<S>, scope_depth: usize) -> Result<Drive<S>, TaskError> {
         macro_rules! deliver_value {
             ($value:expr) => {
                 match deliver($value, branch, scope_depth, &self.tags.continuation_state)? {
@@ -482,12 +565,11 @@ impl EffectTask {
                             value.clone(),
                         )?;
                         let (local, heap) = split_user_state(state);
-                        let commit = TaskCommit {
-                            generation: snapshot.generation(),
-                            heap: PublicValue::from_core(heap.clone()),
-                            consumed_diagnostics: 0,
-                            stderr: Vec::new(),
-                        };
+                        let commit = TaskCommit::new(
+                            snapshot.generation(),
+                            PublicValue::from_core(heap.clone()),
+                            S::Journal::default(),
+                        );
                         match self.host.commit(commit) {
                             CommitResult::Committed => {
                                 self.local_state = local;
@@ -586,39 +668,21 @@ impl EffectTask {
                     });
                     branch = self.start_fixpoint(root, Vec::new())?;
                 }
-                Request::ReadLog => {
-                    let Some(transaction) = branch.transaction.as_mut() else {
-                        match self.read_log_autocommit()? {
-                            Some(value) => deliver_value!(value),
-                            None => return Ok(Drive::Cancelled),
-                        }
-                        continue;
-                    };
-                    if let Some(diagnostic) = transaction
-                        .snapshot
-                        .diagnostics()
-                        .get(transaction.consumed_diagnostics)
-                    {
-                        let value = diagnostic
-                            .enrich()
-                            .map_err(|error| TaskError::new(error.to_string()))?
-                            .into_core();
-                        transaction.consumed_diagnostics += 1;
-                        deliver_value!(value);
-                    } else if transaction.snapshot.is_closed() {
-                        return Ok(Drive::Cancelled);
-                    } else {
-                        return Ok(Drive::Fail(branch));
+                Request::Specialized(request, arguments) => {
+                    let result = self.specialization.handle_request(
+                        request,
+                        arguments,
+                        &mut RequestContext {
+                            host: self.host.as_ref(),
+                            transaction: branch.transaction.as_mut(),
+                        },
+                    )?;
+                    match result {
+                        RequestResult::Return(value) => deliver_value!(value.into_core()),
+                        RequestResult::ReturnUnit => deliver_value!(unit_value()),
+                        RequestResult::Fail => return Ok(Drive::Fail(branch)),
+                        RequestResult::Cancelled => return Ok(Drive::Cancelled),
                     }
-                }
-                Request::WriteStderr(value) => {
-                    let bytes = value_bytes(&value)?;
-                    if let Some(transaction) = branch.transaction.as_mut() {
-                        transaction.stderr.push(bytes);
-                    } else {
-                        self.host.write_stderr(bytes);
-                    }
-                    deliver_value!(unit_value());
                 }
             }
         }
@@ -627,9 +691,9 @@ impl EffectTask {
     fn run_cut(
         &mut self,
         operation: Value,
-        mut outer: Branch,
+        mut outer: Branch<S>,
         scope_depth: usize,
-    ) -> Result<CutResult, TaskError> {
+    ) -> Result<CutResult<S>, TaskError> {
         let owns_transaction = outer.transaction.is_none();
         loop {
             let snapshot = owns_transaction.then(|| self.host.snapshot());
@@ -654,12 +718,11 @@ impl EffectTask {
                             .transaction
                             .as_ref()
                             .expect("outer cut must own a transaction");
-                        let commit = TaskCommit {
-                            generation: transaction.snapshot.generation(),
-                            heap: PublicValue::from_core(heap),
-                            consumed_diagnostics: transaction.consumed_diagnostics,
-                            stderr: transaction.stderr.clone(),
-                        };
+                        let commit = TaskCommit::new(
+                            transaction.snapshot.generation(),
+                            PublicValue::from_core(heap),
+                            transaction.journal.clone(),
+                        );
                         match self.host.commit(commit) {
                             CommitResult::Committed => {
                                 self.local_state = local_state;
@@ -717,33 +780,6 @@ impl EffectTask {
         }
     }
 
-    fn read_log_autocommit(&mut self) -> Result<Option<Value>, TaskError> {
-        loop {
-            let snapshot = self.host.snapshot();
-            let Some(diagnostic) = snapshot.diagnostics().first() else {
-                if snapshot.is_closed() || !self.host.wait_for_change(snapshot.generation()) {
-                    return Ok(None);
-                }
-                continue;
-            };
-            let value = diagnostic
-                .enrich()
-                .map_err(|error| TaskError::new(error.to_string()))?
-                .into_core();
-            let commit = TaskCommit {
-                generation: snapshot.generation(),
-                heap: snapshot.heap().clone(),
-                consumed_diagnostics: 1,
-                stderr: Vec::new(),
-            };
-            match self.host.commit(commit) {
-                CommitResult::Committed => return Ok(Some(value)),
-                CommitResult::Conflict => {}
-                CommitResult::Closed => return Ok(None),
-            }
-        }
-    }
-
     fn visible_state(&self, heap: &PublicValue) -> Value {
         let Value::Dict(local) = &self.local_state else {
             return Value::error("reflection user state must remain a dictionary");
@@ -751,7 +787,7 @@ impl EffectTask {
         Value::Dict(local.insert((*keys::HEAP).clone(), heap.as_core().clone()))
     }
 
-    fn effect_request(&self, effect: Value) -> Result<Request, TaskError> {
+    fn effect_request(&self, effect: Value) -> Result<Request<S::Request>, TaskError> {
         let effect = evaluate(effect)?;
         let Value::Dict(effect) = effect else {
             return Err(TaskError::new(format!(
@@ -763,21 +799,21 @@ impl EffectTask {
             .cloned()
             .ok_or_else(|| TaskError::new("reflection effect has no `eff` member"))?;
         let request = evaluate(apply(evaluate(function)?, vec![self.api.clone()])?)?;
-        parse_request(request, &self.tags)
+        parse_request(request, &self.tags, &self.specialized_requests)
     }
 }
 
 #[derive(Clone)]
-struct Branch {
+struct Branch<S: TaskSpecialization> {
     effect: Value,
     control: Control,
     state: Value,
-    transaction: Option<Transaction>,
-    active_fixes: Vec<ActiveFix>,
-    fix_restarts: Vec<FixRestart>,
+    transaction: Option<Transaction<S>>,
+    active_fixes: Vec<ActiveFix<S>>,
+    fix_restarts: Vec<FixRestart<S>>,
 }
 
-impl Branch {
+impl<S: TaskSpecialization> Branch<S> {
     fn new(effect: Value, state: Value) -> Self {
         Self {
             effect,
@@ -797,25 +833,25 @@ impl Branch {
 }
 
 #[derive(Clone)]
-struct FixRoot {
+struct FixRoot<S: TaskSpecialization> {
     function: Value,
-    entry: Branch,
+    entry: Branch<S>,
     scope_depth: usize,
 }
 
 #[derive(Clone)]
-struct ActiveFix {
-    root: Arc<FixRoot>,
+struct ActiveFix<S: TaskSpecialization> {
+    root: Arc<FixRoot<S>>,
     choices: Vec<FixChoice>,
     next_choice: usize,
     handle: LazyValue,
 }
 
 #[derive(Clone)]
-struct FixRestart {
-    root: Arc<FixRoot>,
+struct FixRestart<S: TaskSpecialization> {
+    root: Arc<FixRoot<S>>,
     choices: Vec<FixChoice>,
-    inherited_restarts: Vec<FixRestart>,
+    inherited_restarts: Vec<FixRestart<S>>,
 }
 
 #[derive(Clone, Copy)]
@@ -916,47 +952,77 @@ impl CapturedLayer {
 }
 
 #[derive(Clone)]
-struct Transaction {
-    snapshot: HostSnapshot,
-    consumed_diagnostics: usize,
-    stderr: Vec<Bytes>,
+struct Transaction<S: TaskSpecialization> {
+    snapshot: HostSnapshot<S>,
+    journal: S::Journal,
 }
 
-impl Transaction {
-    fn new(snapshot: HostSnapshot) -> Self {
+impl<S: TaskSpecialization> Transaction<S> {
+    fn new(snapshot: HostSnapshot<S>) -> Self {
         Self {
             snapshot,
-            consumed_diagnostics: 0,
-            stderr: Vec::new(),
+            journal: S::Journal::default(),
         }
     }
 }
 
-enum Drive {
-    Complete(Value, Branch),
-    Fork(Box<Branch>, Box<Branch>),
-    Fail(Branch),
-    Retry(Branch),
+/// Restricted access to the host and current transaction for extra effects.
+pub struct RequestContext<'a, S: TaskSpecialization> {
+    host: &'a S::Host,
+    transaction: Option<&'a mut Transaction<S>>,
+}
+
+impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
+    pub fn host(&self) -> &S::Host {
+        self.host
+    }
+
+    pub fn transaction(&mut self) -> Option<TransactionContext<'_, S>> {
+        self.transaction
+            .as_deref_mut()
+            .map(|transaction| TransactionContext { transaction })
+    }
+}
+
+/// Specialization-owned portions of one active transaction.
+pub struct TransactionContext<'a, S: TaskSpecialization> {
+    transaction: &'a mut Transaction<S>,
+}
+
+impl<S: TaskSpecialization> TransactionContext<'_, S> {
+    pub fn parts(&mut self) -> (&S::Snapshot, &mut S::Journal) {
+        (
+            self.transaction.snapshot.extra(),
+            &mut self.transaction.journal,
+        )
+    }
+}
+
+enum Drive<S: TaskSpecialization> {
+    Complete(Value, Branch<S>),
+    Fork(Box<Branch<S>>, Box<Branch<S>>),
+    Fail(Branch<S>),
+    Retry(Branch<S>),
     Cancelled,
 }
 
-enum CutResult {
-    Success(Value, Branch),
-    Retry(Branch),
+enum CutResult<S: TaskSpecialization> {
+    Success(Value, Branch<S>),
+    Retry(Branch<S>),
     Cancelled,
 }
 
-enum Delivery {
-    Continue(Branch),
-    Complete(Value, Branch),
+enum Delivery<S: TaskSpecialization> {
+    Continue(Branch<S>),
+    Complete(Value, Branch<S>),
 }
 
-fn deliver(
+fn deliver<S: TaskSpecialization>(
     value: Value,
-    mut branch: Branch,
+    mut branch: Branch<S>,
     scope_depth: usize,
     continuation_state: &Key,
-) -> Result<Delivery, TaskError> {
+) -> Result<Delivery<S>, TaskError> {
     loop {
         if let Some(continuation) = branch.control.sequence.pop() {
             match continuation {
@@ -1026,7 +1092,7 @@ fn deliver(
     }
 }
 
-enum Request {
+enum Request<R> {
     Return(Value),
     Seq(Value, Value),
     Alt(Value, Value),
@@ -1038,11 +1104,20 @@ enum Request {
     Reset(Value, Value),
     Shift(Value, Value),
     Resume(TaskId, u64, Value),
-    ReadLog,
-    WriteStderr(Value),
+    Specialized(R, Vec<PublicValue>),
 }
 
-fn parse_request(value: Value, tags: &Tags) -> Result<Request, TaskError> {
+struct SpecializedRequest<R> {
+    tag: Key,
+    arity: usize,
+    request: R,
+}
+
+fn parse_request<R: Clone>(
+    value: Value,
+    tags: &Tags,
+    specialized: &[SpecializedRequest<R>],
+) -> Result<Request<R>, TaskError> {
     let Value::Dict(dict) = value else {
         return Err(TaskError::new("effect API returned a non-request value"));
     };
@@ -1102,10 +1177,19 @@ fn parse_request(value: Value, tags: &Tags) -> Result<Request, TaskError> {
             value,
         ));
     }
-    args!(&tags.read_log, 0, |[]: [Value; 0]| Request::ReadLog);
-    args!(&tags.write_stderr, 1, |[value]: [Value; 1]| {
-        Request::WriteStderr(value)
-    });
+    for specialized in specialized {
+        if let Some(arguments) = parse(&specialized.tag)? {
+            if arguments.len() != specialized.arity {
+                return Err(TaskError::new(
+                    "effect request contained the wrong number of arguments",
+                ));
+            }
+            return Ok(Request::Specialized(
+                specialized.request.clone(),
+                arguments.into_iter().map(PublicValue::from_core).collect(),
+            ));
+        }
+    }
     Err(TaskError::new("effect API returned an unknown request"))
 }
 
@@ -1120,55 +1204,83 @@ fn request_id(value: Value, kind: &str) -> Result<u64, TaskError> {
         .ok_or_else(|| TaskError::new(format!("resume request has an invalid {kind} ID")))
 }
 
-fn effect_api(tags: &Tags) -> Value {
+fn effect_api<R: Clone>(
+    tags: &Tags,
+    specs: Vec<EffectRequestSpec<R>>,
+) -> Result<(Value, Vec<SpecializedRequest<R>>), TaskError> {
     let entry = |name: &str, value| (Key::atom_from_text(name), value);
-    Value::Dict(
-        [
-            entry("r", request_function(tags.r.clone(), 1, Vec::new(), false)),
-            entry(
-                "seq",
-                request_function(tags.seq.clone(), 2, Vec::new(), false),
-            ),
-            entry(
-                "alt",
-                request_function(tags.alt.clone(), 2, Vec::new(), false),
-            ),
-            entry("fail", nullary_request(tags.fail.clone())),
-            entry(
-                "cut",
-                request_function(tags.cut.clone(), 1, Vec::new(), false),
-            ),
-            entry(
-                "fix",
-                request_function(tags.fix.clone(), 1, Vec::new(), false),
-            ),
-            entry(
-                "get",
-                request_function(tags.get.clone(), 1, Vec::new(), false),
-            ),
-            entry(
-                "set",
-                request_function(tags.set.clone(), 2, Vec::new(), false),
-            ),
-            entry(
-                "reset",
-                request_function(tags.reset.clone(), 2, Vec::new(), false),
-            ),
-            entry(
-                "shift",
-                request_function(tags.shift.clone(), 2, Vec::new(), false),
-            ),
-            entry("read_log", nullary_request(tags.read_log.clone())),
-            entry(
-                "write_stderr",
-                request_function(tags.write_stderr.clone(), 1, Vec::new(), false),
-            ),
-        ]
-        .into_iter()
-        .fold(Dict::new_sync(), |dict, (key, value)| {
-            dict.insert(key, value)
-        }),
-    )
+    let mut api = [
+        entry("r", request_function(tags.r.clone(), 1, Vec::new(), false)),
+        entry(
+            "seq",
+            request_function(tags.seq.clone(), 2, Vec::new(), false),
+        ),
+        entry(
+            "alt",
+            request_function(tags.alt.clone(), 2, Vec::new(), false),
+        ),
+        entry("fail", nullary_request(tags.fail.clone())),
+        entry(
+            "cut",
+            request_function(tags.cut.clone(), 1, Vec::new(), false),
+        ),
+        entry(
+            "fix",
+            request_function(tags.fix.clone(), 1, Vec::new(), false),
+        ),
+        entry(
+            "get",
+            request_function(tags.get.clone(), 1, Vec::new(), false),
+        ),
+        entry(
+            "set",
+            request_function(tags.set.clone(), 2, Vec::new(), false),
+        ),
+        entry(
+            "reset",
+            request_function(tags.reset.clone(), 2, Vec::new(), false),
+        ),
+        entry(
+            "shift",
+            request_function(tags.shift.clone(), 2, Vec::new(), false),
+        ),
+    ]
+    .into_iter()
+    .fold(Dict::new_sync(), |dict, (key, value)| {
+        dict.insert(key, value)
+    });
+    let mut requests = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let tag = Key::abstract_global_path(spec.tag_path.iter().map(Arc::as_ref));
+        let api_key = Key::atom_from_text(&spec.api_name);
+        if api.get(&api_key).is_some() {
+            return Err(TaskError::new(format!(
+                "duplicate effect API name `{}`",
+                spec.api_name
+            )));
+        }
+        if requests
+            .iter()
+            .any(|request: &SpecializedRequest<R>| request.tag == tag)
+        {
+            return Err(TaskError::new(format!(
+                "duplicate private tag for effect API name `{}`",
+                spec.api_name
+            )));
+        }
+        let value = if spec.arity == 0 {
+            nullary_request(tag.clone())
+        } else {
+            request_function(tag.clone(), spec.arity, Vec::new(), false)
+        };
+        api = api.insert(api_key, value);
+        requests.push(SpecializedRequest {
+            tag,
+            arity: spec.arity,
+            request: spec.request,
+        });
+    }
+    Ok((Value::Dict(api), requests))
 }
 
 fn request_function(tag: Key, arity: usize, supplied: Vec<Value>, wrap_effect: bool) -> Value {
@@ -1380,16 +1492,6 @@ fn key_value(key: Key) -> Value {
     }
 }
 
-fn value_bytes(value: &Value) -> Result<Bytes, TaskError> {
-    match evaluate(value.clone())? {
-        Value::Binary(bytes) => Ok(bytes),
-        Value::List(list) => eval::list_output_bytes(&list)
-            .map(Bytes::from)
-            .map_err(TaskError::new),
-        _ => Err(TaskError::new("`.write_stderr` requires binary data")),
-    }
-}
-
 fn unit_value() -> Value {
     (*keys::UNIT_VALUE).clone()
 }
@@ -1398,8 +1500,96 @@ fn unit_value() -> Value {
 mod tests {
     use std::sync::Mutex;
 
+    use bytes::Bytes;
+
     use super::*;
-    use crate::api::Assembler;
+    use crate::api::{Assembler, Diagnostic};
+
+    #[derive(Clone)]
+    struct TestEffects;
+
+    #[derive(Clone)]
+    enum TestRequest {
+        ReadLog,
+        WriteStderr,
+    }
+
+    #[derive(Clone)]
+    struct TestSnapshot {
+        diagnostics: Arc<[Diagnostic]>,
+        closed: bool,
+    }
+
+    #[derive(Clone, Default)]
+    struct TestJournal {
+        consumed_diagnostics: usize,
+        stderr: Vec<Bytes>,
+    }
+
+    impl TaskSpecialization for TestEffects {
+        type Host = TestHost;
+        type Request = TestRequest;
+        type Snapshot = TestSnapshot;
+        type Journal = TestJournal;
+
+        fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>> {
+            vec![
+                EffectRequestSpec::new(
+                    "read_log",
+                    ["reflection_test", "request", "read_log"],
+                    0,
+                    TestRequest::ReadLog,
+                ),
+                EffectRequestSpec::new(
+                    "write_stderr",
+                    ["reflection_test", "request", "write_stderr"],
+                    1,
+                    TestRequest::WriteStderr,
+                ),
+            ]
+        }
+
+        fn handle_request(
+            &self,
+            request: Self::Request,
+            arguments: Vec<PublicValue>,
+            context: &mut RequestContext<'_, Self>,
+        ) -> Result<RequestResult, TaskError> {
+            match request {
+                TestRequest::ReadLog => {
+                    let Some(mut transaction) = context.transaction() else {
+                        return Ok(RequestResult::Cancelled);
+                    };
+                    let (snapshot, journal) = transaction.parts();
+                    if let Some(diagnostic) = snapshot.diagnostics.get(journal.consumed_diagnostics)
+                    {
+                        journal.consumed_diagnostics += 1;
+                        return diagnostic
+                            .enrich()
+                            .map(RequestResult::Return)
+                            .map_err(|error| TaskError::new(error.to_string()));
+                    }
+                    Ok(if snapshot.closed {
+                        RequestResult::Cancelled
+                    } else {
+                        RequestResult::Fail
+                    })
+                }
+                TestRequest::WriteStderr => {
+                    let [value]: [PublicValue; 1] = arguments.try_into().map_err(|_| {
+                        TaskError::new("test stderr request received the wrong arity")
+                    })?;
+                    let bytes = value_bytes(value.as_core())?;
+                    if let Some(mut transaction) = context.transaction() {
+                        transaction.parts().1.stderr.push(bytes);
+                    } else {
+                        context.host().write_stderr(bytes);
+                    }
+                    Ok(RequestResult::ReturnUnit)
+                }
+            }
+        }
+    }
 
     #[derive(Default)]
     struct TestHost {
@@ -1443,20 +1633,26 @@ mod tests {
         fn heap(&self) -> PublicValue {
             self.state.lock().unwrap().heap.clone()
         }
+
+        fn write_stderr(&self, bytes: Bytes) {
+            self.state.lock().unwrap().stderr.push(bytes);
+        }
     }
 
-    impl TaskHost for TestHost {
-        fn snapshot(&self) -> HostSnapshot {
+    impl TaskHost<TestEffects> for TestHost {
+        fn snapshot(&self) -> HostSnapshot<TestEffects> {
             let state = self.state.lock().unwrap();
             HostSnapshot::new(
                 state.generation,
                 state.heap.clone(),
-                Arc::from(state.diagnostics.clone()),
-                state.closed,
+                TestSnapshot {
+                    diagnostics: Arc::from(state.diagnostics.clone()),
+                    closed: state.closed,
+                },
             )
         }
 
-        fn commit(&self, commit: TaskCommit) -> CommitResult {
+        fn commit(&self, commit: TaskCommit<TestEffects>) -> CommitResult {
             let mut state = self.state.lock().unwrap();
             if state.closed {
                 return CommitResult::Closed;
@@ -1465,9 +1661,12 @@ mod tests {
                 return CommitResult::Conflict;
             }
             state.heap = commit.heap().clone();
-            let consumed = commit.consumed_diagnostics().min(state.diagnostics.len());
+            let consumed = commit
+                .extra()
+                .consumed_diagnostics
+                .min(state.diagnostics.len());
             state.diagnostics.drain(..consumed);
-            state.stderr.extend_from_slice(commit.stderr());
+            state.stderr.extend_from_slice(&commit.extra().stderr);
             state.generation += 1;
             CommitResult::Committed
         }
@@ -1475,10 +1674,55 @@ mod tests {
         fn wait_for_change(&self, _observed_generation: u64) -> bool {
             false
         }
+    }
 
-        fn write_stderr(&self, bytes: Bytes) {
-            self.state.lock().unwrap().stderr.push(bytes);
+    impl TaskHost<StandardEffects> for TestHost {
+        fn snapshot(&self) -> HostSnapshot<StandardEffects> {
+            let state = self.state.lock().unwrap();
+            HostSnapshot::new(state.generation, state.heap.clone(), ())
         }
+
+        fn commit(&self, commit: TaskCommit<StandardEffects>) -> CommitResult {
+            let mut state = self.state.lock().unwrap();
+            if state.closed {
+                return CommitResult::Closed;
+            }
+            if state.generation != commit.generation() {
+                return CommitResult::Conflict;
+            }
+            state.heap = commit.heap().clone();
+            state.generation += 1;
+            CommitResult::Committed
+        }
+
+        fn wait_for_change(&self, _observed_generation: u64) -> bool {
+            false
+        }
+    }
+
+    fn value_bytes(value: &Value) -> Result<Bytes, TaskError> {
+        match evaluate(value.clone())? {
+            Value::Binary(bytes) => Ok(bytes),
+            Value::List(list) => eval::list_output_bytes(&list)
+                .map(Bytes::from)
+                .map_err(TaskError::new),
+            _ => Err(TaskError::new("test stderr request requires binary data")),
+        }
+    }
+
+    fn run_log_test(effect: &PublicValue, host: Arc<TestHost>) -> Result<TaskOutcome, TaskError> {
+        run(effect, TestEffects, host)
+    }
+
+    fn run_standard_test(effect: &PublicValue) -> Result<TaskOutcome, TaskError> {
+        run_standard(effect, Arc::new(TestHost::default()))
+    }
+
+    fn run_standard_on(
+        effect: &PublicValue,
+        host: Arc<TestHost>,
+    ) -> Result<TaskOutcome, TaskError> {
+        run_standard(effect, host)
     }
 
     fn compile_effect(source: &str) -> (Assembler, PublicValue) {
@@ -1496,8 +1740,7 @@ mod tests {
 
     fn completed(source: &str) -> (Assembler, PublicValue) {
         let (assembler, effect) = compile_effect(source);
-        let TaskOutcome::Complete(value) = run(&effect, Arc::new(TestHost::default())).unwrap()
-        else {
+        let TaskOutcome::Complete(value) = run_standard_test(&effect).unwrap() else {
             panic!("finite effect should complete")
         };
         (assembler, value)
@@ -1508,6 +1751,12 @@ mod tests {
         let (assembler, value) =
             completed(".fix (\\self -> .r \"A\") >>= (\\x -> .r (x ++ \"B\"))");
         assert_eq!(assembler.to_binary(&value).unwrap(), b"AB".as_slice());
+    }
+
+    #[test]
+    fn standard_task_does_not_expose_specialized_requests() {
+        let (_, effect) = compile_effect(".read_log");
+        assert!(run_standard_test(&effect).is_err());
     }
 
     #[test]
@@ -1539,7 +1788,7 @@ mod tests {
             ".reset \"prompt\" (.fix (\\self -> .shift \"prompt\" (\\continuation -> continuation \"wrong\")))",
         );
         assert!(
-            run(&hidden, Arc::new(TestHost::default()))
+            run_standard_test(&hidden)
                 .unwrap_err()
                 .to_string()
                 .contains("not in reset scope")
@@ -1580,9 +1829,7 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".reset \"prompt\" (.shift \"prompt\" (\\continuation -> .r continuation))",
         );
-        let TaskOutcome::Complete(continuation) =
-            run(&effect, Arc::new(TestHost::default())).unwrap()
-        else {
+        let TaskOutcome::Complete(continuation) = run_standard_test(&effect).unwrap() else {
             panic!("continuation capture should complete")
         };
         let foreign_invocation = assembler
@@ -1590,7 +1837,7 @@ mod tests {
             .expect("continuation should remain an applicable value");
 
         assert!(
-            run(&foreign_invocation, Arc::new(TestHost::default()))
+            run_standard_test(&foreign_invocation)
                 .unwrap_err()
                 .to_string()
                 .contains("belongs to another reflection task")
@@ -1603,7 +1850,7 @@ mod tests {
             ".reset \"prompt\" ((.set [] {}) =>> .shift \"prompt\" (\\continuation -> continuation \"wrong\"))",
         );
         assert!(
-            run(&effect, Arc::new(TestHost::default()))
+            run_standard_test(&effect)
                 .unwrap_err()
                 .to_string()
                 .contains("not in reset scope")
@@ -1628,11 +1875,16 @@ mod tests {
             "good",
         )]));
         assert!(matches!(
-            run(&effect, host.clone()).unwrap(),
+            run_log_test(&effect, host.clone()).unwrap(),
             TaskOutcome::Complete(_)
         ));
         assert_eq!(host.stderr(), [Bytes::from_static(b"good")]);
-        assert!(host.snapshot().diagnostics().is_empty());
+        assert!(
+            <TestHost as TaskHost<TestEffects>>::snapshot(host.as_ref())
+                .extra()
+                .diagnostics
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1641,7 +1893,7 @@ mod tests {
             ".cut ((.set [] { heap:{ answer:\"shared\" }, local:\"owned\" }) =>> .get ['heap,'answer])",
         );
         let host = Arc::new(TestHost::default());
-        let TaskOutcome::Complete(value) = run(&effect, host.clone()).unwrap() else {
+        let TaskOutcome::Complete(value) = run_standard_on(&effect, host.clone()).unwrap() else {
             panic!("state effect should complete")
         };
         assert_eq!(assembler.to_binary(&value).unwrap(), b"shared".as_slice());
@@ -1655,7 +1907,7 @@ mod tests {
     fn top_level_alternative_and_unmatched_shift_are_rejected() {
         let (_, alternative) = compile_effect(".alt (.r 1) (.r 2)");
         assert!(
-            run(&alternative, Arc::new(TestHost::default()))
+            run_standard_test(&alternative)
                 .unwrap_err()
                 .to_string()
                 .contains("requires an enclosing `.cut`")
@@ -1663,7 +1915,7 @@ mod tests {
 
         let (_, fixpoint_alternative) = compile_effect(".fix (\\self -> .alt (.r 1) (.r 2))");
         assert!(
-            run(&fixpoint_alternative, Arc::new(TestHost::default()))
+            run_standard_test(&fixpoint_alternative)
                 .unwrap_err()
                 .to_string()
                 .contains("requires an enclosing `.cut`")
@@ -1671,7 +1923,7 @@ mod tests {
 
         let (_, shift) = compile_effect(".shift \"missing\" (\\continuation -> .r continuation)");
         assert!(
-            run(&shift, Arc::new(TestHost::default()))
+            run_standard_test(&shift)
                 .unwrap_err()
                 .to_string()
                 .contains("not in reset scope")

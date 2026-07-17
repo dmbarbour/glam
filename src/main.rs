@@ -8,7 +8,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use bytes::Bytes;
-use glam::reflection::{CommitResult, HostSnapshot, TaskCommit, TaskHost, TaskOutcome};
+use glam::reflection::{
+    CommitResult, EffectRequestSpec, HostSnapshot, RequestContext, RequestResult, TaskCommit,
+    TaskHost, TaskOutcome, TaskSpecialization,
+};
 use glam::{
     Assembler, Builtin, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticSink, Error,
     ModuleInput, Severity, Value,
@@ -212,13 +215,14 @@ fn start_logger(
     host: Arc<LogHost>,
 ) -> thread::JoinHandle<()> {
     let logger = DefaultLogger::new(assembler.clone());
+    let effect_assembler = assembler.clone();
     let custom = assembler
         .get(configuration, "conf.log")
         .ok()
         .filter(|logger| !logger.is_undefined());
     thread::spawn(move || {
         if let Some(custom) = custom {
-            match glam::reflection::run(&custom, host.clone()) {
+            match glam::reflection::run(&custom, LogEffects::new(effect_assembler), host.clone()) {
                 Ok(TaskOutcome::Complete(_)) | Ok(TaskOutcome::Cancelled) => {}
                 Err(error) => {
                     let message = format!("error: configured logger failed: {error}\n");
@@ -228,6 +232,134 @@ fn start_logger(
         }
         host.drain_default(&logger);
     })
+}
+
+#[derive(Clone)]
+struct LogEffects {
+    assembler: Assembler,
+}
+
+impl LogEffects {
+    fn new(assembler: Assembler) -> Self {
+        Self { assembler }
+    }
+}
+
+#[derive(Clone)]
+enum LogRequest {
+    Read,
+    Write,
+}
+
+#[derive(Clone)]
+struct LogSnapshot {
+    diagnostics: Arc<[Diagnostic]>,
+    closed: bool,
+}
+
+#[derive(Clone, Default)]
+struct LogJournal {
+    consumed_diagnostics: usize,
+    stderr: Vec<Bytes>,
+}
+
+impl TaskSpecialization for LogEffects {
+    type Host = LogHost;
+    type Request = LogRequest;
+    type Snapshot = LogSnapshot;
+    type Journal = LogJournal;
+
+    fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>> {
+        vec![
+            EffectRequestSpec::new(
+                "read_log",
+                ["glam_cli", "v0", "request", "read_log"],
+                0,
+                LogRequest::Read,
+            ),
+            EffectRequestSpec::new(
+                "write_stderr",
+                ["glam_cli", "v0", "request", "write_stderr"],
+                1,
+                LogRequest::Write,
+            ),
+        ]
+    }
+
+    fn handle_request(
+        &self,
+        request: Self::Request,
+        arguments: Vec<Value>,
+        context: &mut RequestContext<'_, Self>,
+    ) -> Result<RequestResult, glam::reflection::TaskError> {
+        match request {
+            LogRequest::Read => read_log(context),
+            LogRequest::Write => {
+                let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
+                    glam::reflection::TaskError::new(
+                        "`.write_stderr` received the wrong number of arguments",
+                    )
+                })?;
+                let bytes = self
+                    .assembler
+                    .to_binary(&value)
+                    .map_err(|error| glam::reflection::TaskError::new(error.to_string()))?;
+                if let Some(mut transaction) = context.transaction() {
+                    transaction.parts().1.stderr.push(bytes);
+                } else {
+                    context.host().write_stderr(bytes);
+                }
+                Ok(RequestResult::ReturnUnit)
+            }
+        }
+    }
+}
+
+fn read_log(
+    context: &mut RequestContext<'_, LogEffects>,
+) -> Result<RequestResult, glam::reflection::TaskError> {
+    if let Some(mut transaction) = context.transaction() {
+        let (snapshot, journal) = transaction.parts();
+        if let Some(diagnostic) = snapshot.diagnostics.get(journal.consumed_diagnostics) {
+            journal.consumed_diagnostics += 1;
+            return diagnostic
+                .enrich()
+                .map(RequestResult::Return)
+                .map_err(|error| glam::reflection::TaskError::new(error.to_string()));
+        }
+        return Ok(if snapshot.closed {
+            RequestResult::Cancelled
+        } else {
+            RequestResult::Fail
+        });
+    }
+
+    loop {
+        let host = context.host();
+        let snapshot = host.snapshot();
+        let Some(diagnostic) = snapshot.extra().diagnostics.first() else {
+            if snapshot.extra().closed || !host.wait_for_change(snapshot.generation()) {
+                return Ok(RequestResult::Cancelled);
+            }
+            continue;
+        };
+        let value = diagnostic
+            .enrich()
+            .map_err(|error| glam::reflection::TaskError::new(error.to_string()))?;
+        let commit = TaskCommit::new(
+            snapshot.generation(),
+            snapshot.heap().clone(),
+            LogJournal {
+                consumed_diagnostics: 1,
+                stderr: Vec::new(),
+            },
+        );
+        match host.commit(commit) {
+            CommitResult::Committed => return Ok(RequestResult::Return(value)),
+            CommitResult::Conflict => {}
+            CommitResult::Closed => return Ok(RequestResult::Cancelled),
+        }
+    }
 }
 
 struct LogHost {
@@ -310,6 +442,15 @@ impl LogHost {
             let _ = stderr.write_all(&bytes);
         }
     }
+
+    fn write_stderr(&self, bytes: Bytes) {
+        self.state
+            .lock()
+            .expect("log host mutex should not be poisoned")
+            .stderr
+            .push_back(bytes);
+        self.flush_stderr();
+    }
 }
 
 impl DiagnosticSink for LogHost {
@@ -330,8 +471,8 @@ impl DiagnosticSink for LogHost {
     }
 }
 
-impl TaskHost for LogHost {
-    fn snapshot(&self) -> HostSnapshot {
+impl TaskHost<LogEffects> for LogHost {
+    fn snapshot(&self) -> HostSnapshot<LogEffects> {
         let state = self
             .state
             .lock()
@@ -339,25 +480,29 @@ impl TaskHost for LogHost {
         HostSnapshot::new(
             state.generation,
             state.heap.clone(),
-            Arc::from(state.diagnostics.iter().cloned().collect::<Vec<_>>()),
-            state.closed,
+            LogSnapshot {
+                diagnostics: Arc::from(state.diagnostics.iter().cloned().collect::<Vec<_>>()),
+                closed: state.closed,
+            },
         )
     }
 
-    fn commit(&self, commit: TaskCommit) -> CommitResult {
+    fn commit(&self, commit: TaskCommit<LogEffects>) -> CommitResult {
         {
             let mut state = self
                 .state
                 .lock()
                 .expect("log host mutex should not be poisoned");
             if state.generation != commit.generation()
-                || state.diagnostics.len() < commit.consumed_diagnostics()
+                || state.diagnostics.len() < commit.extra().consumed_diagnostics
             {
                 return CommitResult::Conflict;
             }
             state.heap = commit.heap().clone();
-            state.diagnostics.drain(..commit.consumed_diagnostics());
-            state.stderr.extend(commit.stderr().iter().cloned());
+            state
+                .diagnostics
+                .drain(..commit.extra().consumed_diagnostics);
+            state.stderr.extend(commit.extra().stderr.iter().cloned());
             state.generation = state.generation.wrapping_add(1);
             self.changed.notify_all();
         }
@@ -377,15 +522,6 @@ impl TaskHost for LogHost {
                 .expect("log host mutex should not be poisoned");
         }
         !(state.closed && state.diagnostics.is_empty())
-    }
-
-    fn write_stderr(&self, bytes: Bytes) {
-        self.state
-            .lock()
-            .expect("log host mutex should not be poisoned")
-            .stderr
-            .push_back(bytes);
-        self.flush_stderr();
     }
 }
 

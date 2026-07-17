@@ -73,17 +73,18 @@ default terminal logger is not part of `Assembler`.
 
 `main` installs a queue-backed diagnostic sink before compiling configuration,
 so bootstrap diagnostics are available to the configured logger. If `conf.log`
-is defined, it runs as an external freer-effect task with standard effects plus
-`read_log` and `write_stderr`; otherwise the Rust terminal logger drains the
-queue. Normal early termination or task failure also returns remaining messages
-to the fallback logger. Effect requests are ordinary singleton dictionaries
-identified by host-only abstract-global atoms. Core operators only construct
-requests; reflection state and external I/O are never performed by interaction-
-net reduction. The standard handler stores its active reset stack as a private
-entry in ordinary user state. Whole-state replacement therefore also switches
-the delimited-continuation environment, which supports cooperative threads
-within one reflection task; transaction and host-resource bookkeeping remains
-outside that state.
+is defined, it runs through the generic external freer-effect task machine.
+That machine owns the standard effects and delegates additional private request
+tags to a `TaskSpecialization`; `main` supplies the logging specialization,
+including `read_log`, `write_stderr`, and their atomic snapshot/journal data.
+Otherwise the Rust terminal logger drains the queue. Normal early termination
+or task failure also returns remaining messages to the fallback logger. Core
+operators only construct requests; reflection state and external I/O are never
+performed by interaction-net reduction. The standard handler stores its active
+reset stack as a private entry in ordinary user state. Whole-state replacement
+therefore also switches the delimited-continuation environment, which supports
+cooperative threads within one reflection task; transaction and host-resource
+bookkeeping remains outside that state.
 
 `main` chooses the `configuration` and `assembly` module paths and constructs
 their initial definitions. Those names and roles are CLI policy, not library

@@ -76,12 +76,14 @@ design in the design documents.
 - `reflection::run` interprets freer effects outside interaction-net
   evaluation. Generic request operators only construct singleton dictionaries
   tagged by host-only abstract-global atoms.
-- The current task API provides `r`, `seq`, `alt`, `fail`, `cut`, `fix`, `get`,
-  `set`, `reset`, and `shift`, plus provisional `read_log` and `write_stderr`
-  host effects. A top-level `alt` is rejected; alternatives belong to `cut`.
-  This and task-local `.shift` continuations are the conservative standard-
-  effect contract: general-purpose utilities must not assume broader behavior,
-  although a specialized handler may explicitly provide it.
+- The standard task machine provides `r`, `seq`, `alt`, `fail`, `cut`, `fix`,
+  `get`, `set`, `reset`, and `shift`. `TaskSpecialization` contributes an API
+  fragment, private request tags, and specialization-owned transaction data;
+  the executable's logger specialization adds provisional `read_log` and
+  `write_stderr` effects. A top-level `alt` is rejected; alternatives belong to
+  `cut`. This and task-local `.shift` continuations are the conservative
+  standard-effect contract: general-purpose utilities must not assume broader
+  behavior, although a specialized handler may explicitly provide it.
 - Every `get`/`set` path is implicitly under user-owned `user_state`. The
   ordinary `heap` subtree is shared through the host transaction snapshot.
   The active reset stack lives under a private key in that same state, so a
@@ -92,18 +94,20 @@ design in the design documents.
   remain task-owned. Opaque captured continuations are valid only within the
   reflection task that created them; a process-global `u64` task ID makes
   foreign invocation fail before its task-local continuation ID is inspected.
-- An outer `cut` snapshots the heap and diagnostic queue. Failed alternatives
-  discard state, reserved reads, and buffered writes; successful nested cuts
-  merge upward; an outer success validates and commits. The bootstrap is
-  currently serial and uses a coarse generation, but the boundary is shaped
-  for finer optimistic observations later.
+- An outer `cut` snapshots the heap and specialization-owned resources. For the
+  logger those resources are the diagnostic queue and buffered stderr. Failed
+  alternatives discard state, reserved reads, and buffered writes; successful
+  nested cuts merge upward; an outer success validates and commits. The
+  bootstrap is currently serial and uses a coarse generation, but the boundary
+  is shaped for finer optimistic observations later.
 - Each `fix` alternative receives its own pending future. When a chosen result
   later fails, the handler restarts at the fixpoint boundary and replays its
   transactional `alt` choices rather than reusing an initialized future.
-- `main` queues diagnostics before configuration exists. Defined `conf.log`
-  consumes enriched messages effectfully; undefined, completed, or failed
-  custom logging falls back to the Rust terminal logger. Stderr effects commit
-  to a host buffer before bytes are written to the OS.
+- `main` owns the diagnostic queue, logging request dispatcher, and logging
+  transaction snapshot/journal. Defined `conf.log` consumes enriched messages
+  effectfully; undefined, completed, or failed custom logging falls back to the
+  Rust terminal logger. Stderr effects commit to a host buffer before bytes are
+  written to the OS.
 
 ### Values and evaluation
 
