@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::core::{Key, LazyValue, List, Value, keys};
+use crate::evaluation::EvalContext;
 use crate::list::ListItem;
 use crate::number::Number;
 
@@ -30,42 +31,42 @@ impl fmt::Display for EvalError {
 
 impl std::error::Error for EvalError {}
 
-pub fn eval_value(value: &Value) -> Result<Value, EvalError> {
+pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvalError> {
     match value {
-        Value::Lazy(lazy) => eval_lazy(lazy),
-        Value::Net(net) => observe_net(net.clone()),
+        Value::Lazy(lazy) => eval_lazy(context, lazy),
+        Value::Net(net) => observe_net(context, net.clone()),
         other => Ok(other.clone()),
     }
 }
 
-pub(super) fn eval_lazy(lazy: &LazyValue) -> Result<Value, EvalError> {
+pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvalError> {
     let net_computation = lazy.net_computation();
     let function_call = lazy.function_call();
     let continue_through_result = net_computation.is_some() || function_call.is_some();
     if let Some(result) = lazy.cached() {
         let result = result.map_err(|message| EvalError::new(message.as_ref()))?;
         return if continue_through_result {
-            eval_value(&result)
+            eval_value(context, &result)
         } else {
             Ok(result)
         };
     }
-    let result = if let Some(result) = lazy.force_deferred() {
+    let result = if let Some(result) = lazy.force_deferred(context) {
         result.map_err(|message| EvalError::new(message.as_ref()))
     } else if let Some((path, arguments)) = lazy.access() {
-        resolve_core_access(arguments, path)
+        resolve_core_access(context, arguments, path)
     } else if let Some(call) = lazy.builtin() {
         let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
         let argument = arguments
             .pop()
             .expect("saturated builtin thunk must contain an argument");
-        apply_builtin(call.builtin, arguments, argument)
+        apply_builtin(context, call.builtin, arguments, argument)
     } else if let Some((function, arguments)) = function_call.as_ref() {
-        evaluate_function_call(function, arguments)
+        evaluate_function_call(context, function, arguments)
     } else if let Some(net) = net_computation.as_ref() {
         let runtime = net.runtime().clone();
         let exposed = runtime.with(|runtime| runtime.exposed());
-        extract_net_data(runtime, exposed, "lazy net computation")
+        extract_net_data(context, runtime, exposed, "lazy net computation")
     } else if lazy.is_pending() {
         // TODO(parallel evaluation): an unfulfilled lazy value currently
         // fails fast. Parallel evaluation needs a thunk-level scheduler,
@@ -87,7 +88,7 @@ pub(super) fn eval_lazy(lazy: &LazyValue) -> Result<Value, EvalError> {
         // surrounding computation (including an ordinary function-call
         // stage) may perform the next lazy step without re-entering the
         // source runtime.
-        eval_value(&result)
+        eval_value(context, &result)
     } else {
         Ok(result)
     }
@@ -106,17 +107,17 @@ pub(super) fn format_name_part(key: &Key) -> String {
     }
 }
 
-pub(super) fn value_to_key(value: &Value) -> Result<Key, EvalError> {
+pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, EvalError> {
     match value {
         Value::Atom(atom) => Ok(Key::Atom(*atom)),
         Value::Number(number) => Ok(Key::Number(number.clone())),
         Value::Binary(bytes) => Ok(Key::Binary(bytes.clone())),
-        Value::List(list) => Ok(Key::List(list_to_key_items(list)?)),
+        Value::List(list) => Ok(Key::List(list_to_key_items(context, list)?)),
         Value::Dict(dict) => Ok(Key::Dict(Arc::from(
             dict.iter()
                 .map(|(key, value)| {
-                    let value = eval_value(value)?;
-                    let value = value_to_key(&value)?;
+                    let value = eval_value(context, value)?;
+                    let value = value_to_key(context, &value)?;
                     if matches!(&value, Key::Dict(entries) if entries.is_empty()) {
                         return Ok(None);
                     }
@@ -136,16 +137,19 @@ pub(super) fn value_to_key(value: &Value) -> Result<Key, EvalError> {
     }
 }
 
-pub(super) fn force_value_shell(value: &Value) -> Result<Value, EvalError> {
-    let mut current = eval_value(value)?;
+pub(super) fn force_value_shell(context: &EvalContext, value: &Value) -> Result<Value, EvalError> {
+    let mut current = eval_value(context, value)?;
     while matches!(current, Value::Lazy(_)) {
-        current = eval_value(&current)?;
+        current = eval_value(context, &current)?;
     }
     Ok(current)
 }
 
-pub(super) fn force_list_thunk(thunk: &LazyValue) -> Result<List, EvalError> {
-    match force_value_shell(&Value::Lazy(thunk.clone()))? {
+pub(super) fn force_list_thunk(
+    context: &EvalContext,
+    thunk: &LazyValue,
+) -> Result<List, EvalError> {
+    match force_value_shell(context, &Value::Lazy(thunk.clone()))? {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
         other => Err(EvalError::new(format!(
@@ -154,9 +158,12 @@ pub(super) fn force_list_thunk(thunk: &LazyValue) -> Result<List, EvalError> {
     }
 }
 
-pub(super) fn pop_list_front(list: &List) -> Result<Option<(Value, List)>, EvalError> {
+pub(super) fn pop_list_front(
+    context: &EvalContext,
+    list: &List,
+) -> Result<Option<(Value, List)>, EvalError> {
     Ok(list
-        .try_pop_front(&mut force_list_thunk)?
+        .try_pop_front(&mut |thunk| force_list_thunk(context, thunk))?
         .map(|(item, tail)| {
             let value = match item {
                 ListItem::Byte(byte) => Value::Number(Number::from_u8(byte)),
@@ -174,8 +181,12 @@ pub(super) fn split_result_value(left: Value, right: Value) -> Value {
     )
 }
 
-pub(super) fn eval_number(value: &Value, builtin_name: &str) -> Result<Number, EvalError> {
-    let value = force_value_shell(value)?;
+pub(super) fn eval_number(
+    context: &EvalContext,
+    value: &Value,
+    builtin_name: &str,
+) -> Result<Number, EvalError> {
+    let value = force_value_shell(context, value)?;
     let Value::Number(number) = value else {
         return Err(EvalError::new(format!(
             "{builtin_name} builtin requires number values"
@@ -184,8 +195,12 @@ pub(super) fn eval_number(value: &Value, builtin_name: &str) -> Result<Number, E
     Ok(number)
 }
 
-pub(super) fn eval_index_number(value: &Value, builtin_name: &str) -> Result<usize, EvalError> {
-    let number = eval_number(value, builtin_name)?;
+pub(super) fn eval_index_number(
+    context: &EvalContext,
+    value: &Value,
+    builtin_name: &str,
+) -> Result<usize, EvalError> {
+    let number = eval_number(context, value, builtin_name)?;
     number.to_usize_if_integer().ok_or_else(|| {
         EvalError::new(format!(
             "{builtin_name} builtin requires non-negative integer indices"
@@ -211,20 +226,20 @@ pub(super) fn is_undefined_dict_value(value: &Value) -> bool {
 /// evaluate to undefined dictionaries. The tagged payload must itself be
 /// semantically defined.
 pub(super) trait TaggedDictExt {
-    fn tagged_payload(&self, tag: &Key) -> Result<Option<Value>, EvalError>;
+    fn tagged_payload(&self, context: &EvalContext, tag: &Key) -> Result<Option<Value>, EvalError>;
 }
 
 impl TaggedDictExt for crate::core::Dict {
-    fn tagged_payload(&self, tag: &Key) -> Result<Option<Value>, EvalError> {
+    fn tagged_payload(&self, context: &EvalContext, tag: &Key) -> Result<Option<Value>, EvalError> {
         let Some(payload) = self.get(tag) else {
             return Ok(None);
         };
-        if is_semantically_undefined(payload)? {
+        if is_semantically_undefined(context, payload)? {
             return Ok(None);
         }
 
         for (key, value) in self.iter() {
-            if key != tag && !is_semantically_undefined(value)? {
+            if key != tag && !is_semantically_undefined(context, value)? {
                 return Ok(None);
             }
         }
@@ -232,13 +247,13 @@ impl TaggedDictExt for crate::core::Dict {
     }
 }
 
-fn is_semantically_undefined(value: &Value) -> Result<bool, EvalError> {
-    let value = force_value_shell(value)?;
+fn is_semantically_undefined(context: &EvalContext, value: &Value) -> Result<bool, EvalError> {
+    let value = force_value_shell(context, value)?;
     let Value::Dict(dict) = value else {
         return Ok(false);
     };
     for (_, value) in dict.iter() {
-        if !is_semantically_undefined(value)? {
+        if !is_semantically_undefined(context, value)? {
             return Ok(false);
         }
     }

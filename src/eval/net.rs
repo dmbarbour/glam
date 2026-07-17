@@ -1,10 +1,15 @@
 use super::*;
 
-pub(super) fn apply_net(function: NetValue, argument: Value) -> Result<Value, EvalError> {
-    apply_explicit_net_many(function, vec![argument])
+pub(super) fn apply_net(
+    context: &EvalContext,
+    function: NetValue,
+    argument: Value,
+) -> Result<Value, EvalError> {
+    apply_explicit_net_many(context, function, vec![argument])
 }
 
 pub(super) fn apply_explicit_net_many(
+    context: &EvalContext,
     function: NetValue,
     arguments: Vec<Value>,
 ) -> Result<Value, EvalError> {
@@ -15,7 +20,7 @@ pub(super) fn apply_explicit_net_many(
     let net = attach_net_many(Value::Net(function), arguments);
     let runtime = net.into_runtime();
     let exposed = runtime.with(|net| net.exposed());
-    finish_explicit_net_application(runtime, exposed)
+    finish_explicit_net_application(context, runtime, exposed)
 }
 
 pub(super) fn attach_net_many(function: Value, arguments: Vec<Value>) -> NetValue {
@@ -31,10 +36,10 @@ pub(super) fn attach_net_many(function: Value, arguments: Vec<Value>) -> NetValu
     NetValue::new(net.finish(spine.result).instantiate_shared())
 }
 
-pub(super) fn observe_net(net: NetValue) -> Result<Value, EvalError> {
+pub(super) fn observe_net(context: &EvalContext, net: NetValue) -> Result<Value, EvalError> {
     let runtime = net.runtime().clone();
     let exposed = runtime.with(|runtime| runtime.exposed());
-    match drive_net_interface(&runtime, exposed)? {
+    match drive_net_interface(context, &runtime, exposed)? {
         NetInterfaceOutcome::Data => {
             let data = runtime
                 .with(|runtime| runtime.interface_data(exposed).cloned())
@@ -46,11 +51,12 @@ pub(super) fn observe_net(net: NetValue) -> Result<Value, EvalError> {
 }
 
 pub(super) fn extract_net_data(
+    context: &EvalContext,
     runtime: crate::core_net::CoreRuntimeNet,
     interface: Port,
     operation: &str,
 ) -> Result<Value, EvalError> {
-    match drive_net_interface(&runtime, interface)? {
+    match drive_net_interface(context, &runtime, interface)? {
         NetInterfaceOutcome::Data => {
             let data = runtime
                 .with(|runtime| runtime.interface_data(interface).cloned())
@@ -70,10 +76,11 @@ pub(super) fn extract_net_data(
 }
 
 pub(super) fn finish_explicit_net_application(
+    context: &EvalContext,
     runtime: crate::core_net::CoreRuntimeNet,
     interface: Port,
 ) -> Result<Value, EvalError> {
-    match drive_net_interface(&runtime, interface)? {
+    match drive_net_interface(context, &runtime, interface)? {
         NetInterfaceOutcome::Data => {
             let data = runtime
                 .with(|runtime| runtime.interface_data(interface).cloned())
@@ -88,23 +95,25 @@ pub(super) fn finish_explicit_net_application(
 }
 
 pub(super) fn evaluate_function_call(
+    context: &EvalContext,
     function: &FunctionValue,
     arguments: &[Value],
 ) -> Result<Value, EvalError> {
     let net = attach_net_many(Value::Net(function.stage().clone()), arguments.to_vec());
     let runtime = net.into_runtime();
     let exposed = runtime.with(|runtime| runtime.exposed());
-    extract_net_data(runtime, exposed, "function call")
+    extract_net_data(context, runtime, exposed, "function call")
 }
 
 pub(super) fn advance_function_stage(
+    context: &EvalContext,
     function: NetValue,
     arguments: Vec<Value>,
 ) -> Result<NetValue, EvalError> {
     let net = attach_net_many(Value::Net(function), arguments);
     let runtime = net.into_runtime();
     let exposed = runtime.with(|runtime| runtime.exposed());
-    match drive_net_interface(&runtime, exposed)? {
+    match drive_net_interface(context, &runtime, exposed)? {
         NetInterfaceOutcome::Bind => Ok(NetValue::new(runtime)),
         NetInterfaceOutcome::Data => Err(EvalError::new(
             "partial function stage produced data before exposing its next bind",
@@ -123,6 +132,7 @@ enum NetInterfaceOutcome {
 }
 
 fn drive_net_interface(
+    context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
     interface: Port,
 ) -> Result<NetInterfaceOutcome, EvalError> {
@@ -155,7 +165,7 @@ fn drive_net_interface(
                 continue;
             }
             if let Some(cursor) = cursor
-                && progress_cursor_dependency(runtime, cursor, 0)?
+                && progress_cursor_dependency(context, runtime, cursor, 0)?
             {
                 continue;
             }
@@ -164,17 +174,17 @@ fn drive_net_interface(
         if let Some(pair) = runtime.with(|net| net.interface_dependency(interface))
             && let Some(reduction) = runtime.with_mut(|net| net.reduce_pair(pair))
         {
-            handle_core_reduction(runtime, reduction)?;
+            handle_core_reduction(context, runtime, reduction)?;
             continue;
         }
 
         let reduction = runtime.with_mut(|net| net.reduce_next());
         if let Some(reduction) = reduction {
-            handle_core_reduction(runtime, reduction)?;
+            handle_core_reduction(context, runtime, reduction)?;
             continue;
         }
 
-        if progress_core_net(runtime)? {
+        if progress_core_net(context, runtime)? {
             continue;
         }
 
@@ -213,16 +223,18 @@ fn drive_net_interface(
 }
 
 pub(super) fn progress_core_net(
+    context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
 ) -> Result<bool, EvalError> {
     if let Some(reduction) = runtime.with_mut(|net| net.reduce_next()) {
-        handle_core_reduction(runtime, reduction)?;
+        handle_core_reduction(context, runtime, reduction)?;
         return Ok(true);
     }
     Ok(false)
 }
 
 pub(super) fn progress_cursor_dependency(
+    context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
     cursor: crate::interaction_net::NodeId,
     depth: usize,
@@ -237,19 +249,20 @@ pub(super) fn progress_cursor_dependency(
     };
     match dependency {
         CursorDependency::LocalCursor(local_cursor) => {
-            progress_dependent_cursor(runtime, local_cursor, depth)
+            progress_dependent_cursor(context, runtime, local_cursor, depth)
         }
         CursorDependency::SourceCursor {
             source,
             cursor: source_cursor,
-        } => progress_dependent_cursor(&source, source_cursor, depth),
+        } => progress_dependent_cursor(context, &source, source_cursor, depth),
         CursorDependency::SourcePair { source, pair } => {
-            progress_exact_core_pair(&source, pair, depth + 1)
+            progress_exact_core_pair(context, &source, pair, depth + 1)
         }
     }
 }
 
 pub(super) fn progress_dependent_cursor(
+    context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
     cursor: crate::interaction_net::NodeId,
     depth: usize,
@@ -258,7 +271,7 @@ pub(super) fn progress_dependent_cursor(
     let progress = progress.map(|progress| finish_core_cursor_claim(runtime, cursor, progress));
     match progress {
         Some(crate::interaction_net::CursorProgress::Blocked) => {
-            let progressed = progress_cursor_dependency(runtime, cursor, depth + 1)?;
+            let progressed = progress_cursor_dependency(context, runtime, cursor, depth + 1)?;
             if progressed {
                 runtime.with_mut(|source| source.retry_blocked_cursor(cursor));
             }
@@ -270,16 +283,17 @@ pub(super) fn progress_dependent_cursor(
 }
 
 pub(super) fn progress_exact_core_pair(
+    context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
     pair: ActivePairKey,
     depth: usize,
 ) -> Result<bool, EvalError> {
     if let Some(reduction) = runtime.with_mut(|net| net.reduce_pair(pair)) {
-        handle_core_reduction(runtime, reduction)?;
+        handle_core_reduction(context, runtime, reduction)?;
         return Ok(true);
     }
     if let Some(blocked) = runtime.with(|net| net.blocked_cursor(pair)) {
-        let progressed = progress_cursor_dependency(runtime, blocked.cursor, depth)?;
+        let progressed = progress_cursor_dependency(context, runtime, blocked.cursor, depth)?;
         if progressed {
             runtime.with_mut(|net| net.retry_blocked_cursor(blocked.cursor));
         }
@@ -297,17 +311,6 @@ impl NetSpecialization for CoreSpecialization {
     type WaitToken = crate::core_net::CoreWaitToken;
     type StuckReason = EvalError;
 
-    fn callable(data: Self::Data) -> Result<Callable<Self>, Self::StuckReason> {
-        lower_core_callable(data)
-    }
-
-    fn apply_operator(
-        operator: &Self::Operator,
-        data: &Self::Data,
-    ) -> Result<OperatorYield<Self>, Self::StuckReason> {
-        apply_core_operator(operator, data)
-    }
-
     fn operator_name(operator: &Self::Operator) -> &str {
         match operator {
             CoreOperator::ApplyArity { .. } => "semantic apply",
@@ -323,9 +326,12 @@ impl NetSpecialization for CoreSpecialization {
     }
 }
 
-pub(super) fn lower_core_callable(value: Value) -> Result<Callable<CoreSpecialization>, EvalError> {
+pub(super) fn lower_core_callable(
+    context: &EvalContext,
+    value: Value,
+) -> Result<Callable<CoreSpecialization>, EvalError> {
     let value = if matches!(value, Value::Lazy(_)) {
-        force_value_shell(&value)?
+        force_value_shell(context, &value)?
     } else {
         value
     };
@@ -346,13 +352,33 @@ pub(super) fn lower_core_callable(value: Value) -> Result<Callable<CoreSpecializ
 }
 
 pub(super) fn progress_exact_core_call(
+    context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
     call: Call,
 ) -> Result<bool, EvalError> {
-    runtime.resolve_call(call)
+    let Some(data) = runtime.with_mut(|runtime| runtime.claim_call(call)) else {
+        return Ok(false);
+    };
+    match lower_core_callable(context, data) {
+        Ok(Callable::Net(source)) => {
+            runtime.with_mut(|runtime| runtime.resume_claimed_call_with_copy(call, source));
+            Ok(true)
+        }
+        Ok(Callable::Operator(operator)) => {
+            runtime.with_mut(|runtime| {
+                runtime.resume_claimed_call_with_operator(call, operator);
+            });
+            Ok(true)
+        }
+        Err(error) => {
+            runtime.with_mut(|runtime| runtime.fail_claimed_call(call, error.clone()));
+            Err(error)
+        }
+    }
 }
 
 pub(super) fn handle_core_reduction(
+    context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
     reduction: Reduction,
 ) -> Result<(), EvalError> {
@@ -364,7 +390,7 @@ pub(super) fn handle_core_reduction(
                 bind,
                 data,
             };
-            if !progress_exact_core_call(runtime, call)? {
+            if !progress_exact_core_call(context, runtime, call)? {
                 return Err(EvalError::new("interaction-net call lost its claim"));
             }
             Ok(())
@@ -375,7 +401,7 @@ pub(super) fn handle_core_reduction(
                 operator,
                 data,
             };
-            if !progress_core_operator_call(runtime, call)? {
+            if !progress_core_operator_call(context, runtime, call)? {
                 return Err(EvalError::new(
                     "interaction-net operator call lost its claim",
                 ));
@@ -387,7 +413,7 @@ pub(super) fn handle_core_reduction(
             if progress != crate::interaction_net::CursorProgress::Blocked {
                 return Ok(());
             }
-            if progress_cursor_dependency(runtime, cursor, 0)? {
+            if progress_cursor_dependency(context, runtime, cursor, 0)? {
                 runtime.with_mut(|net| net.retry_blocked_cursor(cursor));
             }
             Ok(())
@@ -431,11 +457,12 @@ pub(super) fn stuck_pair_error(
 }
 
 pub(super) fn progress_core_operator_call(
+    context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
     call: OperatorCall,
 ) -> Result<bool, EvalError> {
     let (operator, data) = runtime.with(|net| net.operator_call_parts(call));
-    match CoreSpecialization::apply_operator(&operator, &data) {
+    match apply_core_operator(context, &operator, &data) {
         Ok(result) => runtime.with_mut(|net| {
             net.complete_operator_call(call, result);
         }),
@@ -453,6 +480,7 @@ pub(super) fn progress_core_operator_call(
 }
 
 pub(super) fn resolve_core_access(
+    context: &EvalContext,
     arguments: &[Value],
     path: &[CoreDataKey],
 ) -> Result<Value, EvalError> {
@@ -466,17 +494,18 @@ pub(super) fn resolve_core_access(
             CoreDataKey::Key(key) => vec![key.clone()],
             CoreDataKey::Index => {
                 let value = dynamic.next().expect("lowered access index must exist");
-                let value = force_value_shell(value)?;
-                vec![value_to_key(&value)?]
+                let value = force_value_shell(context, value)?;
+                vec![value_to_key(context, &value)?]
             }
             CoreDataKey::PathIndex => eval_key_path_list(
+                context,
                 dynamic
                     .next()
                     .expect("lowered access path index must exist"),
             )?,
         };
         for key in keys {
-            let value = force_value_shell(&current)?;
+            let value = force_value_shell(context, &current)?;
             let Value::Dict(dict) = value else {
                 return Err(EvalError::new(
                     "interaction-net access base is not a dictionary",
@@ -488,5 +517,5 @@ pub(super) fn resolve_core_access(
                 .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
         }
     }
-    eval_value(&current)
+    eval_value(context, &current)
 }

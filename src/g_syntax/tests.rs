@@ -16,13 +16,19 @@ fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> 
     final_defs
         .set(lowered.definitions.clone())
         .expect("future should not be set yet");
-    crate::eval::eval_value(&lowered.definitions).expect("lowered module should evaluate")
+    crate::eval::eval_value(
+        &crate::evaluation::EvalContext::standalone(),
+        &lowered.definitions,
+    )
+    .expect("lowered module should evaluate")
 }
 
 fn value_at_atom_path(definitions: &Value, path: &[&str]) -> Option<Value> {
     let mut current = definitions.clone();
     for part in path {
-        let current_value = crate::eval::eval_value(&current).ok()?;
+        let current_value =
+            crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), &current)
+                .ok()?;
         let Value::Dict(dict) = current_value else {
             return None;
         };
@@ -35,12 +41,14 @@ fn value_at_atom_path(definitions: &Value, path: &[&str]) -> Option<Value> {
 
 fn resolved_value_at_path(definitions: &Value, path: &[&str]) -> Value {
     let value = value_at_atom_path(definitions, path).expect("binding should exist");
-    crate::eval::eval_value(&value).expect("binding should resolve")
+    crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), &value)
+        .expect("binding should resolve")
 }
 
 fn fully_evaluated_value(mut value: Value) -> Value {
     while matches!(value, Value::Lazy(_)) {
-        value = crate::eval::eval_value(&value).expect("value should fully evaluate");
+        value = crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), &value)
+            .expect("value should fully evaluate");
     }
     value
 }
@@ -49,7 +57,8 @@ fn output_bytes(value: &Value) -> Vec<u8> {
     match value {
         Value::Binary(bytes) => bytes.to_vec(),
         Value::List(list) => {
-            crate::eval::list_output_bytes(list).expect("output list should render as bytes")
+            crate::eval::list_output_bytes(&crate::evaluation::EvalContext::standalone(), list)
+                .expect("output list should render as bytes")
         }
         other => panic!("expected binary output value, got {other:?}"),
     }
@@ -68,14 +77,18 @@ fn output_binary_result_list(value: &Value) -> Vec<u8> {
         &mut |values| {
             for value in values {
                 let value = fully_evaluated_value(
-                    crate::eval::eval_value(value).map_err(|err| err.to_string())?,
+                    crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), value)
+                        .map_err(|err| err.to_string())?,
                 );
                 bytes.borrow_mut().extend(output_bytes(&value));
             }
             Ok(())
         },
-        &mut |thunk| match crate::eval::eval_value(&Value::Lazy(thunk.clone()))
-            .map_err(|err| err.to_string())?
+        &mut |thunk| match crate::eval::eval_value(
+            &crate::evaluation::EvalContext::standalone(),
+            &Value::Lazy(thunk.clone()),
+        )
+        .map_err(|err| err.to_string())?
         {
             Value::Binary(bytes) => Ok(crate::core::List::from_bytes(bytes)),
             Value::List(list) => Ok(list),
@@ -2088,7 +2101,7 @@ fn effect_then_requires_unit_result_when_observed() {
     let value = evaluated_module_value(&context, &lowered);
     let mut result = value_at_atom_path(&value, &["asm", "result"]).expect("result should exist");
     let err = loop {
-        match crate::eval::eval_value(&result) {
+        match crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), &result) {
             Ok(Value::Lazy(next)) => result = Value::Lazy(next),
             Ok(other) => panic!("non-unit result should not evaluate to {other:?}"),
             Err(err) => break err,
@@ -2365,37 +2378,53 @@ fn lowers_builtin_imports_to_module_dictionaries() {
     let std = value
         .get_atom_path(&[Atom::from_key(&Key::binary_from_text("std"))])
         .expect("std import should exist");
-    let std = crate::eval::eval_value(std).expect("std import should evaluate to a dictionary");
+    let std = crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), std)
+        .expect("std import should evaluate to a dictionary");
     let floor = value
         .get_atom_path(&[Atom::from_key(&Key::binary_from_text("floor"))])
         .expect("inline math import should expose floor");
     let mod_fn = value
         .get_atom_path(&[Atom::from_key(&Key::binary_from_text("mod"))])
         .expect("inline math import should expose mod");
-    let list_len_import = crate::eval::eval_value(&core_global_access(
-        &context,
-        vec![Key::atom_from_text("list"), Key::atom_from_text("len")],
-    ))
+    let list_len_import = crate::eval::eval_value(
+        &crate::evaluation::EvalContext::standalone(),
+        &core_global_access(
+            &context,
+            vec![Key::atom_from_text("list"), Key::atom_from_text("len")],
+        ),
+    )
     .expect("list.len import should resolve");
-    let list_spec = crate::eval::eval_value(&core_global_access(
-        &context,
-        vec![Key::atom_from_text("list"), Key::atom_from_text("spec")],
-    ))
+    let list_spec = crate::eval::eval_value(
+        &crate::evaluation::EvalContext::standalone(),
+        &core_global_access(
+            &context,
+            vec![Key::atom_from_text("list"), Key::atom_from_text("spec")],
+        ),
+    )
     .expect("list.spec import should resolve");
-    let list_head_import = crate::eval::eval_value(&core_global_access(
-        &context,
-        vec![Key::atom_from_text("list"), Key::atom_from_text("head")],
-    ))
+    let list_head_import = crate::eval::eval_value(
+        &crate::evaluation::EvalContext::standalone(),
+        &core_global_access(
+            &context,
+            vec![Key::atom_from_text("list"), Key::atom_from_text("head")],
+        ),
+    )
     .expect("list.head import should resolve");
-    let list_tail_import = crate::eval::eval_value(&core_global_access(
-        &context,
-        vec![Key::atom_from_text("list"), Key::atom_from_text("tail")],
-    ))
+    let list_tail_import = crate::eval::eval_value(
+        &crate::evaluation::EvalContext::standalone(),
+        &core_global_access(
+            &context,
+            vec![Key::atom_from_text("list"), Key::atom_from_text("tail")],
+        ),
+    )
     .expect("list.tail import should resolve");
-    let list_pure_import = crate::eval::eval_value(&core_global_access(
-        &context,
-        vec![Key::atom_from_text("list"), Key::atom_from_text("pure")],
-    ))
+    let list_pure_import = crate::eval::eval_value(
+        &crate::evaluation::EvalContext::standalone(),
+        &core_global_access(
+            &context,
+            vec![Key::atom_from_text("list"), Key::atom_from_text("pure")],
+        ),
+    )
     .expect("list.pure import should resolve");
     let (
         anno,
@@ -2422,7 +2451,8 @@ fn lowers_builtin_imports_to_module_dictionaries() {
                 .get(&Key::atom_from_text("list"))
                 .expect("std import should expose list");
             let Value::Dict(std_list) =
-                crate::eval::eval_value(std_list).expect("std.list should evaluate")
+                crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), std_list)
+                    .expect("std.list should evaluate")
             else {
                 panic!("std.list should evaluate to a dictionary");
             };
@@ -2484,11 +2514,11 @@ fn lowers_builtin_imports_to_module_dictionaries() {
     assert!(matches!(std, Value::Dict(_)));
     assert!(matches!(anno, Value::Builtin(crate::core::Builtin::Anno)));
     assert!(matches!(
-        crate::eval::eval_value(&std_not).unwrap(),
+        crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), &std_not).unwrap(),
         Value::Function(_) | Value::Net(_)
     ));
     assert!(matches!(
-        crate::eval::eval_value(&std_could).unwrap(),
+        crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), &std_could).unwrap(),
         Value::Function(_) | Value::Net(_)
     ));
     assert!(matches!(floor, Value::Builtin(crate::core::Builtin::Floor)));
@@ -2643,7 +2673,8 @@ fn inline_builtin_imports_follow_ordered_module_updates() {
     let math = value
         .get_atom_path(&[Atom::from_key(&Key::binary_from_text("math"))])
         .expect("std import should merge into existing math");
-    let math = crate::eval::eval_value(math).expect("merged math binding should evaluate");
+    let math = crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), math)
+        .expect("merged math binding should evaluate");
 
     let Value::Dict(math) = math else {
         panic!("math should evaluate to a dictionary");
@@ -2651,7 +2682,9 @@ fn inline_builtin_imports_follow_ordered_module_updates() {
 
     assert_eq!(
         math.get(&Key::atom_from_text("answer"))
-            .map(crate::eval::eval_value)
+            .map(|value| {
+                crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), value)
+            })
             .transpose()
             .expect("math.answer should resolve"),
         Some(Value::Number(42.into()))
@@ -2682,13 +2715,16 @@ fn introduce_and_override_checks_are_deferred_until_observed() {
     let foo = value
         .get_atom_path(&[Atom::from_key(&Key::binary_from_text("foo"))])
         .expect("foo binding should exist lazily");
-    let foo =
-        crate::eval::eval_value(foo).expect("foo binding should resolve to a stuck expression");
+    let foo = crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), foo)
+        .expect("foo binding should resolve to a stuck expression");
     let Value::Lazy(foo) = foo else {
         panic!("foo binding should resolve to a stuck expression");
     };
-    let err = crate::eval::eval_value(&Value::Lazy(foo))
-        .expect_err("override check should fail on demand");
+    let err = crate::eval::eval_value(
+        &crate::evaluation::EvalContext::standalone(),
+        &Value::Lazy(foo),
+    )
+    .expect_err("override check should fail on demand");
     assert_eq!(
         err.to_string(),
         "cannot override `foo` because it is not defined"
@@ -2711,13 +2747,16 @@ fn duplicate_introductions_fail_lazily_against_prior_module_updates() {
     let foo = value
         .get_atom_path(&[Atom::from_key(&Key::binary_from_text("foo"))])
         .expect("duplicate foo binding should exist lazily");
-    let foo = crate::eval::eval_value(foo)
+    let foo = crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), foo)
         .expect("duplicate foo binding should resolve to a stuck expression");
     let Value::Lazy(foo) = foo else {
         panic!("duplicate foo binding should resolve to a stuck expression");
     };
-    let err = crate::eval::eval_value(&Value::Lazy(foo))
-        .expect_err("duplicate introductions should fail on demand");
+    let err = crate::eval::eval_value(
+        &crate::evaluation::EvalContext::standalone(),
+        &Value::Lazy(foo),
+    )
+    .expect_err("duplicate introductions should fail on demand");
     assert_eq!(
         err.to_string(),
         "cannot introduce `foo` because it is already defined"

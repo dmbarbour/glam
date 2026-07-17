@@ -120,6 +120,11 @@ design in the design documents.
   `eval/test_support.rs` must lower to interaction nets before evaluation; do
   not restore a second expression interpreter or thread a local environment
   through evaluator APIs.
+- Production evaluator entry points receive an explicit `EvalContext` borrowed
+  from their caller. `Assembler` clones share one `EvaluationSession`, while
+  standalone tests and reflection tasks create their own. Deferred work must
+  receive the active context when forced; do not capture whichever session
+  happened to construct the lazy value.
 - `Value::Net` is an explicit first-class closed net. `Value::Lazy` is a
   memoized computation whose net-backed forms must expose `Data` when forced;
   an exposed `Bind` is an error, not an implicit function conversion.

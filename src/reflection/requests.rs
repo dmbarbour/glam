@@ -1,6 +1,7 @@
 use crate::api::{Diagnostic, Value};
 use crate::core::{Atom, Key, Value as CoreValue, keys};
 use crate::diagnostic::Severity;
+use crate::evaluation::EvalContext;
 
 use super::{
     EffectRequestSpec, RequestContext, RequestResult, TaskError, TaskHost, TaskSpecialization,
@@ -67,8 +68,11 @@ where
             let [severity, message]: [Value; 2] = arguments
                 .try_into()
                 .map_err(|_| TaskError::new("`.log` received the wrong number of arguments"))?;
-            let message = prepare_message(message)?;
-            let diagnostic = Diagnostic::from_emission(parse_severity(severity)?, message);
+            let message = prepare_message(context.eval_context(), message)?;
+            let diagnostic = Diagnostic::from_emission(
+                parse_severity(context.eval_context(), severity)?,
+                message,
+            );
             if let Some(mut transaction) = context.transaction() {
                 transaction
                     .parts()
@@ -84,18 +88,18 @@ where
     }
 }
 
-fn prepare_message(message: Value) -> Result<Value, TaskError> {
-    let CoreValue::Dict(mut message) = evaluate(message.into_core())? else {
+fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskError> {
+    let CoreValue::Dict(mut message) = evaluate(context, message.into_core())? else {
         return Err(TaskError::new("`.log` message must evaluate to an object"));
     };
     if let Some(interface) = message.get(&*keys::MSG) {
-        message = message.insert((*keys::MSG).clone(), evaluate(interface.clone())?);
+        message = message.insert((*keys::MSG).clone(), evaluate(context, interface.clone())?);
     }
     Ok(Value::from_core(CoreValue::Dict(message)))
 }
 
-fn parse_severity(value: Value) -> Result<Severity, TaskError> {
-    let value = evaluate(value.into_core())?;
+fn parse_severity(context: &EvalContext, value: Value) -> Result<Severity, TaskError> {
+    let value = evaluate(context, value.into_core())?;
     if severity_matches(&value, "info", &keys::INFO_VALUE) {
         Ok(Severity::Info)
     } else if severity_matches(&value, "warn", &keys::WARN_VALUE) {

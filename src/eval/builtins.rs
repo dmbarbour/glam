@@ -13,6 +13,7 @@ use super::*;
 pub(super) use annotation::is_undefined_value;
 
 pub(super) fn apply_builtin(
+    context: &EvalContext,
     builtin: Builtin,
     mut arguments: Vec<Value>,
     argument: Value,
@@ -31,13 +32,13 @@ pub(super) fn apply_builtin(
         | Builtin::Multiply
         | Builtin::Divide
         | Builtin::Floor
-        | Builtin::Mod => numeric::apply(builtin, arguments),
+        | Builtin::Mod => numeric::apply(context, builtin, arguments),
         Builtin::Greater
         | Builtin::GreaterEqual
         | Builtin::Equal
         | Builtin::NotEqual
         | Builtin::LessEqual
-        | Builtin::Less => comparison::apply(builtin, arguments),
+        | Builtin::Less => comparison::apply(context, builtin, arguments),
         Builtin::Append
         | Builtin::Slice
         | Builtin::Map
@@ -45,17 +46,17 @@ pub(super) fn apply_builtin(
         | Builtin::ListSplit
         | Builtin::ListSplitEnd
         | Builtin::ListHead
-        | Builtin::ListTail => list::apply(builtin, arguments),
+        | Builtin::ListTail => list::apply(context, builtin, arguments),
         Builtin::ListEffect
         | Builtin::ListEffectReturn
         | Builtin::ListEffectSeq
         | Builtin::ListEffectAlt
         | Builtin::ListEffectCut
-        | Builtin::ListEffectFix => list_effect::apply(builtin, arguments),
+        | Builtin::ListEffectFix => list_effect::apply(context, builtin, arguments),
         Builtin::DictSingleton
         | Builtin::DictUnion
         | Builtin::DictUpdate
-        | Builtin::MergeDuplicate => dict::apply(builtin, arguments),
+        | Builtin::MergeDuplicate => dict::apply(context, builtin, arguments),
         Builtin::ObjectSpec
         | Builtin::ObjectLocalName
         | Builtin::ObjectInstanceFromParts
@@ -64,11 +65,11 @@ pub(super) fn apply_builtin(
         | Builtin::ObjectDictDefs
         | Builtin::ObjectWithDefs
         | Builtin::ObjectComposedDefs
-        | Builtin::ObjectOverrideDefs => object::apply(builtin, arguments),
+        | Builtin::ObjectOverrideDefs => object::apply(context, builtin, arguments),
         Builtin::Fixpoint | Builtin::EffectApply | Builtin::EffectCall => {
-            effect::apply(builtin, arguments)
+            effect::apply(context, builtin, arguments)
         }
-        Builtin::Anno => annotation::apply(arguments),
+        Builtin::Anno => annotation::apply(context, arguments),
     }
 }
 

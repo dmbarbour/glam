@@ -65,17 +65,6 @@ impl<D: TestData> NetSpecialization for D {
     type WaitToken = u64;
     type StuckReason = Arc<str>;
 
-    fn callable(_data: D) -> Result<Callable<Self>, Self::StuckReason> {
-        Err(Arc::from("test data is not callable"))
-    }
-
-    fn apply_operator(
-        operator: &Self::Operator,
-        data: &D,
-    ) -> Result<OperatorYield<Self>, Self::StuckReason> {
-        operator.apply(data)
-    }
-
     fn operator_name(operator: &Self::Operator) -> &str {
         operator.name
     }
@@ -101,20 +90,6 @@ impl NetSpecialization for StructuredSpecialization {
     type Operator = ();
     type WaitToken = u64;
     type StuckReason = StructuredStuckReason;
-
-    fn callable(_data: Self::Data) -> Result<Callable<Self>, Self::StuckReason> {
-        Err(StructuredStuckReason {
-            code: 42,
-            detail: Arc::from("not callable"),
-        })
-    }
-
-    fn apply_operator(
-        _operator: &Self::Operator,
-        _data: &Self::Data,
-    ) -> Result<OperatorYield<Self>, Self::StuckReason> {
-        unreachable!("structured test specialization has no operators")
-    }
 
     fn operator_name(_operator: &Self::Operator) -> &str {
         "unreachable test operator"
@@ -491,7 +466,7 @@ fn blocked_call_requires_its_current_wait_token_to_be_reclaimed() {
 }
 
 #[test]
-fn callable_failure_remains_structured_in_the_stuck_pair() {
+fn specialization_failure_remains_structured_in_the_stuck_pair() {
     let mut net = RuntimeNet::<StructuredSpecialization>::empty();
     let bind = net.add_node(RuntimeNode::Bind);
     let data = net.add_node(RuntimeNode::Data(7));
@@ -502,15 +477,15 @@ fn callable_failure_remains_structured_in_the_stuck_pair() {
         panic!("expected a claimed call");
     };
     let call = Call { pair, bind, data };
-    let net = SharedRuntimeNet::new(net);
-
-    let error = net
-        .resolve_call(call)
-        .expect_err("test data must not be callable");
+    let error = StructuredStuckReason {
+        code: 42,
+        detail: Arc::from("not callable"),
+    };
+    net.fail_claimed_call(call, error.clone());
 
     assert_eq!(error.code, 42);
     assert_eq!(
-        net.with(|net| net.stuck_reason(pair).cloned()),
+        net.stuck_reason(pair).cloned(),
         Some(StuckReason::Specialization(error))
     );
 }

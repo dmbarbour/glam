@@ -227,8 +227,10 @@ pub(crate) fn assembler_metadata(severity: Severity, origin: Option<Value>) -> D
 /// operation separate lets observers add their own context without mutating
 /// the original emission.
 pub(crate) fn apply_updates(message: Value, updates: Value) -> Result<Value, String> {
+    let context = crate::evaluation::EvalContext::standalone();
     let extension_defs = Value::builtin_call(Builtin::ObjectOverrideDefs, vec![updates]);
     eval::apply_values(
+        &context,
         Value::Builtin(Builtin::ObjectWithDefs),
         vec![message, extension_defs],
     )

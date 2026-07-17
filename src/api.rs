@@ -25,6 +25,7 @@ use crate::core::{Builtin, Dict, Key, List, NetValue};
 use crate::core_net::CoreSpecialization;
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity, SourceIdentity};
 use crate::eval;
+use crate::evaluation::{EvalContext, EvaluationSession};
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
 use crate::number::Number;
@@ -690,6 +691,7 @@ pub struct Assembler {
     host: Arc<dyn Host>,
     diagnostic_sink: Arc<dyn DiagnosticSink>,
     next_compilation_invocation: Arc<AtomicU64>,
+    evaluation_session: Arc<EvaluationSession>,
 }
 
 impl Default for Assembler {
@@ -698,6 +700,7 @@ impl Default for Assembler {
             host: Arc::new(SystemHost),
             diagnostic_sink: Arc::new(DiagnosticBuffer::new(DEFAULT_DIAGNOSTIC_CAPACITY)),
             next_compilation_invocation: Arc::new(AtomicU64::new(1)),
+            evaluation_session: Arc::new(EvaluationSession::new()),
         }
     }
 }
@@ -705,6 +708,10 @@ impl Default for Assembler {
 impl Assembler {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn eval_context(&self) -> EvalContext {
+        EvalContext::new(self.evaluation_session.clone())
     }
 
     pub fn with_host(mut self, host: impl Host + 'static) -> Self {
@@ -767,7 +774,7 @@ impl Assembler {
 
     /// Evaluates a value far enough to expose its outer semantic value.
     pub fn evaluate(&self, value: &Value) -> Result<Value, Error> {
-        eval::eval_value(value.as_core())
+        eval::eval_value(&self.eval_context(), value.as_core())
             .map(Value::from_core)
             .map_err(|error| Error::new(error.to_string()))
     }
@@ -780,6 +787,7 @@ impl Assembler {
         arguments: impl IntoIterator<Item = Value>,
     ) -> Result<Value, Error> {
         eval::apply_values(
+            &self.eval_context(),
             function.as_core().clone(),
             arguments.into_iter().map(Value::into_core).collect(),
         )
@@ -890,7 +898,8 @@ impl Assembler {
         }
 
         let module_value = self.seal_module(&module_context, &definitions);
-        eval::eval_value(&module_value).map_err(|error| Error::new(error.to_string()))
+        eval::eval_value(&self.eval_context(), &module_value)
+            .map_err(|error| Error::new(error.to_string()))
     }
 
     fn prepare_input(
@@ -1055,10 +1064,11 @@ impl Assembler {
 
     fn core_value_at_path(&self, root: &CoreValue, path: &str) -> Result<CoreValue, Error> {
         let mut current = root.clone();
+        let context = self.eval_context();
 
         for part in path.split('.') {
-            let current_value =
-                eval::eval_value(&current).map_err(|error| Error::new(error.to_string()))?;
+            let current_value = eval::eval_value(&context, &current)
+                .map_err(|error| Error::new(error.to_string()))?;
             let CoreValue::Dict(dict) = current_value else {
                 return Err(Error::new(format!("module did not define `{path}`")));
             };
@@ -1074,12 +1084,12 @@ impl Assembler {
     fn core_value_bytes(&self, value: &CoreValue, label: &str) -> Result<Bytes, Error> {
         match value {
             CoreValue::Binary(bytes) => Ok(bytes.clone()),
-            CoreValue::List(list) => eval::list_output_bytes(list)
+            CoreValue::List(list) => eval::list_output_bytes(&self.eval_context(), list)
                 .map(Bytes::from)
                 .map_err(|error| Error::new(format!("`{label}` {error}"))),
             CoreValue::Lazy(_) => {
-                let value =
-                    eval::eval_value(value).map_err(|error| Error::new(error.to_string()))?;
+                let value = eval::eval_value(&self.eval_context(), value)
+                    .map_err(|error| Error::new(error.to_string()))?;
                 self.core_value_bytes(&value, label)
             }
             CoreValue::Atom(_)
@@ -1111,12 +1121,14 @@ impl Assembler {
             CoreValue::Binary(bytes) => {
                 (range.end <= bytes.len()).then(|| bytes.slice(range.clone()))
             }
-            CoreValue::List(list) => eval::list_output_bytes_range(list, range.clone())
-                .map(|bytes| bytes.map(Bytes::from))
-                .map_err(|error| Error::new(format!("`{label}` {error}")))?,
+            CoreValue::List(list) => {
+                { eval::list_output_bytes_range(&self.eval_context(), list, range.clone()) }
+                    .map(|bytes| bytes.map(Bytes::from))
+                    .map_err(|error| Error::new(format!("`{label}` {error}")))?
+            }
             CoreValue::Lazy(_) | CoreValue::Net(_) => {
-                let value =
-                    eval::eval_value(value).map_err(|error| Error::new(error.to_string()))?;
+                let value = eval::eval_value(&self.eval_context(), value)
+                    .map_err(|error| Error::new(error.to_string()))?;
                 return self.core_value_binary_slice(&value, range, label);
             }
             CoreValue::Atom(_)
@@ -1230,6 +1242,23 @@ mod tests {
             SourceIdentity::file(Arc::<str>::from(source)),
             Arc::from(["test".to_owned()]),
         )
+    }
+
+    #[test]
+    fn assembler_clones_share_one_evaluation_session() {
+        let assembler = Assembler::new();
+        let clone = assembler.clone();
+
+        assert!(
+            assembler
+                .eval_context()
+                .shares_session_with(&clone.eval_context())
+        );
+        assert!(
+            !assembler
+                .eval_context()
+                .shares_session_with(&Assembler::new().eval_context())
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@ mod core;
 mod core_net;
 pub mod diagnostic;
 mod eval;
+mod evaluation;
 pub mod g_syntax;
 mod interaction_net;
 mod list;

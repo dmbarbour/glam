@@ -4,31 +4,35 @@ mod implementation;
 
 use implementation::*;
 
-pub(super) fn apply(builtin: Builtin, arguments: Vec<Value>) -> Result<Value, EvalError> {
+pub(super) fn apply(
+    context: &EvalContext,
+    builtin: Builtin,
+    arguments: Vec<Value>,
+) -> Result<Value, EvalError> {
     match builtin {
         Builtin::Add => {
             let [left, right] = super::exact(arguments, "add")?;
-            eval_numeric_builtin("add", &left, &right, Number::add)
+            eval_numeric_builtin(context, "add", &left, &right, Number::add)
         }
         Builtin::Subtract => {
             let [left, right] = super::exact(arguments, "subtract")?;
-            eval_numeric_builtin("subtract", &left, &right, Number::sub)
+            eval_numeric_builtin(context, "subtract", &left, &right, Number::sub)
         }
         Builtin::Multiply => {
             let [left, right] = super::exact(arguments, "multiply")?;
-            eval_numeric_builtin("multiply", &left, &right, Number::mul)
+            eval_numeric_builtin(context, "multiply", &left, &right, Number::mul)
         }
         Builtin::Divide => {
             let [left, right] = super::exact(arguments, "divide")?;
-            eval_numeric_divide_builtin(&left, &right)
+            eval_numeric_divide_builtin(context, &left, &right)
         }
         Builtin::Floor => {
             let [value] = super::exact(arguments, "floor")?;
-            eval_floor_builtin(&value)
+            eval_floor_builtin(context, &value)
         }
         Builtin::Mod => {
             let [left, right] = super::exact(arguments, "mod")?;
-            eval_numeric_mod_builtin(&left, &right)
+            eval_numeric_mod_builtin(context, &left, &right)
         }
         _ => unreachable!("numeric dispatcher received a non-numeric builtin"),
     }

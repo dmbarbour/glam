@@ -23,7 +23,8 @@ implementation constraints.
 | `interaction_net.rs` | Facade for generic topology, checked templates, and mutable runtime reduction |
 | `interaction_net/model.rs`, `builder.rs` | Packed ports/node identity, net agents, specialization protocol, and checked construction |
 | `interaction_net/runtime/` | Runtime graph storage, active-pair rewrites, cursor materialization, and focused tests |
-| `eval.rs` | Evaluation facade and shared evaluator context |
+| `evaluation.rs` | Shared evaluation-session ownership and the cheap context threaded through evaluator work |
+| `eval.rs` | Evaluation facade |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing, application, semantic operator staging, and interaction-net driving |
 | `eval/builtins/` | Small builtin dispatcher with implementations split by semantic family |
 | `eval/sequence.rs` | List-to-binary observation and range extraction |
@@ -118,10 +119,16 @@ front-end facade returns only lowered definitions plus source diagnostics.
 
 ## Evaluation and Application Flow
 
+An `Assembler` owns one `EvaluationSession`; its clones share that session.
+Each evaluator entry borrows an `EvalContext` pointing to it, including work
+performed later by a lazy value. The session currently carries no facilities,
+but establishes the ownership boundary for later reflection scheduling, heap,
+diagnostics, cancellation, and blocked-work tracking.
+
 The evaluator exposes outer semantic values on demand:
 
 ```text
-Value
+Assembler -> EvalContext -> Value
   -> eval_value / force_value_shell
        -> return already-observable data
        -> force and memoize LazyValue work

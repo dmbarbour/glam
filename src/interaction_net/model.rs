@@ -104,13 +104,6 @@ pub trait NetSpecialization: Clone + fmt::Debug + PartialEq + Eq + Sized + 'stat
     /// reduce an otherwise valid active pair.
     type StuckReason: Clone + fmt::Debug + 'static;
 
-    fn callable(data: Self::Data) -> Result<Callable<Self>, Self::StuckReason>;
-
-    fn apply_operator(
-        operator: &Self::Operator,
-        data: &Self::Data,
-    ) -> Result<OperatorYield<Self>, Self::StuckReason>;
-
     fn operator_name(operator: &Self::Operator) -> &str;
 }
 

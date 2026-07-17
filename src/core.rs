@@ -7,6 +7,7 @@ use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
+use crate::evaluation::EvalContext;
 use crate::number::Number;
 
 pub(crate) mod keys;
@@ -35,9 +36,9 @@ impl LazyValue {
         Self::with_source(label, LazySource::Pending)
     }
 
-    pub fn deferred(
+    pub(crate) fn deferred(
         label: impl Into<Arc<str>>,
-        thunk: impl Fn() -> Result<Value, String> + Send + Sync + 'static,
+        thunk: impl Fn(&EvalContext) -> Result<Value, String> + Send + Sync + 'static,
     ) -> Self {
         Self::with_source(label, LazySource::Deferred(Arc::new(thunk)))
     }
@@ -77,11 +78,11 @@ impl LazyValue {
         matches!(self.source, LazySource::Pending) && self.result.get().is_none()
     }
 
-    pub(crate) fn force_deferred(&self) -> Option<Result<Value, Arc<str>>> {
+    pub(crate) fn force_deferred(&self, context: &EvalContext) -> Option<Result<Value, Arc<str>>> {
         match &self.source {
             LazySource::Deferred(thunk) => Some(
                 self.result
-                    .get_or_init(|| thunk().map_err(Arc::from))
+                    .get_or_init(|| thunk(context).map_err(Arc::from))
                     .clone(),
             ),
             _ => None,
@@ -318,7 +319,7 @@ impl BuiltinCall {
 #[derive(Clone)]
 enum LazySource {
     Pending,
-    Deferred(Arc<dyn Fn() -> Result<Value, String> + Send + Sync>),
+    Deferred(Arc<DeferredComputation>),
     Access {
         path: Arc<[CoreDataKey]>,
         arguments: Arc<[Value]>,
@@ -330,6 +331,8 @@ enum LazySource {
         arguments: Arc<[Value]>,
     },
 }
+
+type DeferredComputation = dyn Fn(&EvalContext) -> Result<Value, String> + Send + Sync;
 
 impl LazyValue {
     pub(crate) fn from_access(path: Arc<[CoreDataKey]>, arguments: Arc<[Value]>) -> Self {
@@ -514,9 +517,9 @@ impl Value {
         Self::Binary(Bytes::copy_from_slice(text.as_bytes()))
     }
 
-    pub fn deferred(
+    pub(crate) fn deferred(
         label: impl Into<Arc<str>>,
-        thunk: impl Fn() -> Result<Value, String> + Send + Sync + 'static,
+        thunk: impl Fn(&EvalContext) -> Result<Value, String> + Send + Sync + 'static,
     ) -> Self {
         Self::Lazy(LazyValue::deferred(label, thunk))
     }
@@ -687,7 +690,7 @@ mod tests {
     #[test]
     fn keys_reject_lazy_values() {
         assert_eq!(
-            Key::from_value(&Value::deferred("number", || Ok(Value::Number(1.into())))),
+            Key::from_value(&Value::deferred("number", |_| Ok(Value::Number(1.into())))),
             None
         );
     }

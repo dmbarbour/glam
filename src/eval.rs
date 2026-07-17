@@ -9,6 +9,7 @@ use crate::core::{
     Builtin, BuiltinCall, FunctionCode, FunctionValue, Key, LazyValue, List, NetValue, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
+use crate::evaluation::EvalContext;
 use crate::interaction_net::{
     ActivePairKey, Call, Callable, CursorDependency, NetBuilder, NetSpecialization, OperatorCall,
     OperatorYield, Port, Reduction, ReductionKind, StuckReason,

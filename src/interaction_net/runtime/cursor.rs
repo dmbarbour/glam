@@ -32,7 +32,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 
     /// Completes claimed applicable lowering by loading the
     /// resulting closed net at the original application's principal port.
-    pub(in crate::interaction_net::runtime) fn resume_claimed_call_with_copy(
+    pub fn resume_claimed_call_with_copy(
         &mut self,
         call: Call,
         source: SharedRuntimeNet<S>,
@@ -64,7 +64,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     /// Completes applicable lowering by replacing callable data with
     /// an explicit unary function net. The newly introduced Bind then joins
     /// the original application Bind through the ordinary interaction rule.
-    pub(in crate::interaction_net::runtime) fn resume_claimed_call_with_operator(
+    pub fn resume_claimed_call_with_operator(
         &mut self,
         call: Call,
         operator: S::Operator,

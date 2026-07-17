@@ -1,8 +1,11 @@
 use super::super::super::*;
 
-pub(super) fn eval_object_instance_builtin(spec: &Value) -> Result<Value, EvalError> {
-    let spec_dict = object_spec_dict(spec)?;
-    let specs = object_application_order(&spec_dict)?;
+pub(super) fn eval_object_instance_builtin(
+    context: &EvalContext,
+    spec: &Value,
+) -> Result<Value, EvalError> {
+    let spec_dict = object_spec_dict(context, spec)?;
+    let specs = object_application_order(context, &spec_dict)?;
 
     let handle = LazyValue::pending("object self");
     let self_marker = Value::Lazy(handle.clone());
@@ -12,9 +15,9 @@ pub(super) fn eval_object_instance_builtin(spec: &Value) -> Result<Value, EvalEr
             .get(&*keys::DEFS)
             .cloned()
             .unwrap_or_else(default_object_defs_value);
-        let mixed = apply_value(eval_value(&defs)?, base)?;
-        let mixed = apply_value(eval_value(&mixed)?, self_marker.clone())?;
-        let Value::Dict(mixed_dict) = force_value_shell(&mixed)? else {
+        let mixed = apply_value(context, eval_value(context, &defs)?, base)?;
+        let mixed = apply_value(context, eval_value(context, &mixed)?, self_marker.clone())?;
+        let Value::Dict(mixed_dict) = force_value_shell(context, &mixed)? else {
             return Err(EvalError::new(
                 "object definition mixin must produce a dictionary",
             ));
@@ -33,6 +36,7 @@ pub(super) fn eval_object_instance_builtin(spec: &Value) -> Result<Value, EvalEr
 }
 
 pub(super) fn eval_object_instance_from_parts_builtin(
+    context: &EvalContext,
     name: Value,
     deps: Value,
     defs: Value,
@@ -41,7 +45,7 @@ pub(super) fn eval_object_instance_from_parts_builtin(
         .insert((*keys::NAME).clone(), name)
         .insert((*keys::DEPS).clone(), deps)
         .insert((*keys::DEFS).clone(), defs);
-    eval_object_instance_builtin(&Value::Dict(spec))
+    eval_object_instance_builtin(context, &Value::Dict(spec))
 }
 
 /// Re-instantiates an object with an additional stateless definitions mixin.
@@ -50,10 +54,11 @@ pub(super) fn eval_object_instance_from_parts_builtin(
 /// updating the instance dictionary would lose the extension when a later
 /// observer inherits the object again.
 pub(super) fn eval_object_with_defs_builtin(
+    context: &EvalContext,
     object: &Value,
     extension_defs: Value,
 ) -> Result<Value, EvalError> {
-    let spec = object_spec_dict(&eval_object_spec_builtin(object)?)?;
+    let spec = object_spec_dict(context, &eval_object_spec_builtin(context, object)?)?;
     let name = spec
         .get(&*keys::NAME)
         .cloned()
@@ -70,30 +75,32 @@ pub(super) fn eval_object_with_defs_builtin(
         builtin: Builtin::ObjectComposedDefs,
         arguments: Arc::from([prior_defs, extension_defs]),
     });
-    eval_object_instance_from_parts_builtin(name, deps, composed_defs)
+    eval_object_instance_from_parts_builtin(context, name, deps, composed_defs)
 }
 
 pub(super) fn eval_object_composed_defs_builtin(
+    context: &EvalContext,
     prior_defs: Value,
     extension_defs: Value,
     base: Value,
     self_value: Value,
 ) -> Result<Value, EvalError> {
-    let prior = apply_value(prior_defs, base)?;
-    let prior = apply_value(prior, self_value.clone())?;
-    let extended = apply_value(extension_defs, prior)?;
-    apply_value(extended, self_value)
+    let prior = apply_value(context, prior_defs, base)?;
+    let prior = apply_value(context, prior, self_value.clone())?;
+    let extended = apply_value(context, extension_defs, prior)?;
+    apply_value(context, extended, self_value)
 }
 
 /// Implements the small right-biased record mixin used for assembler-owned
 /// diagnostic fields. It is an internal definitions adapter, not the language
 /// `with` surface or its assertion policy.
 pub(super) fn eval_object_override_defs_builtin(
+    context: &EvalContext,
     updates: &Value,
     base: &Value,
 ) -> Result<Value, EvalError> {
-    let updates = force_value_shell(updates)?;
-    let base = force_value_shell(base)?;
+    let updates = force_value_shell(context, updates)?;
+    let base = force_value_shell(context, base)?;
     let (Value::Dict(updates), Value::Dict(base)) = (updates, base) else {
         return Err(EvalError::new(
             "object override definitions require dictionary values",
@@ -114,8 +121,11 @@ fn override_dict(base: &crate::core::Dict, updates: &crate::core::Dict) -> crate
     })
 }
 
-pub(super) fn eval_object_spec_builtin(value: &Value) -> Result<Value, EvalError> {
-    let value = force_value_shell(value)?;
+pub(super) fn eval_object_spec_builtin(
+    context: &EvalContext,
+    value: &Value,
+) -> Result<Value, EvalError> {
+    let value = force_value_shell(context, value)?;
     let Value::Dict(dict) = value else {
         return Err(EvalError::new(
             "object spec builtin requires an object or dictionary value",
@@ -123,7 +133,7 @@ pub(super) fn eval_object_spec_builtin(value: &Value) -> Result<Value, EvalError
     };
 
     if let Some(spec) = dict.get(&*keys::SPEC) {
-        let spec = force_value_shell(spec)?;
+        let spec = force_value_shell(context, spec)?;
         if !is_undefined_dict_value(&spec) {
             return Ok(spec);
         }
@@ -133,18 +143,19 @@ pub(super) fn eval_object_spec_builtin(value: &Value) -> Result<Value, EvalError
 }
 
 pub(super) fn eval_object_local_name_builtin(
+    context: &EvalContext,
     host: &Value,
     parts: &Value,
 ) -> Result<Value, EvalError> {
-    let host_spec = eval_object_spec_builtin(host)?;
-    let host_spec = object_spec_dict(&host_spec)?;
+    let host_spec = eval_object_spec_builtin(context, host)?;
+    let host_spec = object_spec_dict(context, &host_spec)?;
     let Some(host_name) = host_spec.get(&*keys::NAME).cloned() else {
         return Err(EvalError::new("object specification requires a name"));
     };
 
-    let mut name_parts = vec![eval_value(&host_name)?];
-    name_parts.extend(match force_value_shell(parts)? {
-        Value::List(parts) => list_to_value_items(&parts)?,
+    let mut name_parts = vec![eval_value(context, &host_name)?];
+    name_parts.extend(match force_value_shell(context, parts)? {
+        Value::List(parts) => list_to_value_items(context, &parts)?,
         Value::Dict(dict) if dict.is_empty() => Vec::new(),
         _ => {
             return Err(EvalError::new(
@@ -155,8 +166,8 @@ pub(super) fn eval_object_local_name_builtin(
     Ok(Value::List(List::from_values(name_parts)))
 }
 
-fn object_spec_dict(spec: &Value) -> Result<crate::core::Dict, EvalError> {
-    let spec = force_value_shell(spec)?;
+fn object_spec_dict(context: &EvalContext, spec: &Value) -> Result<crate::core::Dict, EvalError> {
+    let spec = force_value_shell(context, spec)?;
     let Value::Dict(spec_dict) = spec else {
         return Err(EvalError::new(
             "object instance builtin requires a specification dictionary",
@@ -180,10 +191,13 @@ fn dict_object_spec(dict: crate::core::Dict) -> Value {
     Value::Dict(spec)
 }
 
-fn object_application_order(spec: &crate::core::Dict) -> Result<Vec<crate::core::Dict>, EvalError> {
+fn object_application_order(
+    context: &EvalContext,
+    spec: &crate::core::Dict,
+) -> Result<Vec<crate::core::Dict>, EvalError> {
     let mut seen = BTreeMap::new();
     let mut next_anonymous_id = 0;
-    let mut linearized = object_c3_linearization(spec, &mut seen, &mut next_anonymous_id)?;
+    let mut linearized = object_c3_linearization(context, spec, &mut seen, &mut next_anonymous_id)?;
     linearized.reverse();
     Ok(linearized
         .into_iter()
@@ -199,8 +213,12 @@ struct LinearizedObjectSpec {
 }
 
 impl LinearizedObjectSpec {
-    fn new(spec: crate::core::Dict, next_anonymous_id: &mut u64) -> Result<Self, EvalError> {
-        let name = object_spec_name(&spec)?;
+    fn new(
+        context: &EvalContext,
+        spec: crate::core::Dict,
+        next_anonymous_id: &mut u64,
+    ) -> Result<Self, EvalError> {
+        let name = object_spec_name(context, &spec)?;
         let anonymous_id = if is_anonymous_object_name(&name) {
             let id = *next_anonymous_id;
             *next_anonymous_id += 1;
@@ -217,11 +235,12 @@ impl LinearizedObjectSpec {
 }
 
 fn object_c3_linearization(
+    context: &EvalContext,
     spec: &crate::core::Dict,
     seen: &mut BTreeMap<Key, ()>,
     next_anonymous_id: &mut u64,
 ) -> Result<Vec<LinearizedObjectSpec>, EvalError> {
-    let entry = LinearizedObjectSpec::new(spec.clone(), next_anonymous_id)?;
+    let entry = LinearizedObjectSpec::new(context, spec.clone(), next_anonymous_id)?;
     if entry.anonymous_id.is_none() {
         remember_object_spec(&entry.name, spec, seen)?;
     }
@@ -229,13 +248,14 @@ fn object_c3_linearization(
         .get(&*keys::DEPS)
         .cloned()
         .unwrap_or_else(|| Value::List(List::empty()));
-    let deps = object_dep_specs(&deps)?;
+    let deps = object_dep_specs(context, &deps)?;
     let mut sequences: Vec<Vec<LinearizedObjectSpec>> = Vec::new();
     let mut direct_deps = Vec::new();
     let mut saw_named_dep = false;
     for dep_spec in &deps {
-        let dep_spec = object_spec_dict(dep_spec)?;
-        let dep_linearization = object_c3_linearization(&dep_spec, seen, next_anonymous_id)?;
+        let dep_spec = object_spec_dict(context, dep_spec)?;
+        let dep_linearization =
+            object_c3_linearization(context, &dep_spec, seen, next_anonymous_id)?;
         let dep_entry = dep_linearization
             .first()
             .cloned()
@@ -312,12 +332,12 @@ fn same_linearized_object_spec(left: &LinearizedObjectSpec, right: &LinearizedOb
     }
 }
 
-fn object_spec_name(spec: &crate::core::Dict) -> Result<Key, EvalError> {
+fn object_spec_name(context: &EvalContext, spec: &crate::core::Dict) -> Result<Key, EvalError> {
     let Some(name) = spec.get(&*keys::NAME) else {
         return Err(EvalError::new("object specification requires a name"));
     };
-    let name = force_value_shell(name)?;
-    value_to_key(&name)
+    let name = force_value_shell(context, name)?;
+    value_to_key(context, &name)
 }
 
 fn is_anonymous_object_name(name: &Key) -> bool {
@@ -333,9 +353,9 @@ fn remember_object_spec(
     Ok(())
 }
 
-fn object_dep_specs(deps: &Value) -> Result<Vec<Value>, EvalError> {
-    match force_value_shell(deps)? {
-        Value::List(list) => list_to_value_items(&list),
+fn object_dep_specs(context: &EvalContext, deps: &Value) -> Result<Vec<Value>, EvalError> {
+    match force_value_shell(context, deps)? {
+        Value::List(list) => list_to_value_items(context, &list),
         Value::Dict(dict) if dict.is_empty() => Ok(Vec::new()),
         _ => Err(EvalError::new(
             "object specification deps must evaluate to a list",

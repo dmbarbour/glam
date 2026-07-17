@@ -2,11 +2,12 @@ use super::super::super::*;
 use super::super::annotation::{annotation_error_value, atom_name, is_undefined_value};
 
 pub(super) fn eval_merge_duplicate_builtin(
+    context: &EvalContext,
     name: &Value,
     left: &Value,
     right: &Value,
 ) -> Result<Value, EvalError> {
-    let name = force_value_shell(name)?;
+    let name = force_value_shell(context, name)?;
     let name = match name {
         Value::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Value::Atom(atom) => atom_name(&atom)
@@ -14,8 +15,8 @@ pub(super) fn eval_merge_duplicate_builtin(
             .unwrap_or_else(|| format!("{atom:?}")),
         other => format!("{other:?}"),
     };
-    let left = eval_value(left)?;
-    let right = eval_value(right)?;
+    let left = eval_value(context, left)?;
+    let right = eval_value(context, right)?;
 
     if is_undefined_value(&left) {
         return Ok(right);

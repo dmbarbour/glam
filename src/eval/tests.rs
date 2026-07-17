@@ -18,7 +18,7 @@ fn fixture_computation(expr: TestExpr) -> Value {
 }
 
 fn apply_test_values(function: Value, arguments: impl IntoIterator<Item = Value>) -> Value {
-    apply_values(function, arguments.into_iter().collect())
+    apply_values(&test_context(), function, arguments.into_iter().collect())
         .expect("test application should accept a callable value")
 }
 
@@ -27,8 +27,8 @@ fn closed_net_values_can_expose_ordinary_data_repeatedly() {
     let net = closed_net(|builder| builder.data(n(42)));
     let value = Value::Net(net);
 
-    assert_eq!(eval_value(&value).unwrap(), n(42));
-    assert_eq!(eval_value(&value).unwrap(), n(42));
+    assert_eq!(eval_value(&test_context(), &value).unwrap(), n(42));
+    assert_eq!(eval_value(&test_context(), &value).unwrap(), n(42));
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn observing_a_function_net_preserves_the_net_value() {
     let expected = identity.clone();
 
     assert_eq!(
-        eval_value(&Value::Net(identity)).unwrap(),
+        eval_value(&test_context(), &Value::Net(identity)).unwrap(),
         Value::Net(expected)
     );
 }
@@ -71,7 +71,7 @@ fn net_backed_lazy_values_require_an_exposed_data_node() {
     let value = Value::Lazy(LazyValue::from_net_computation(identity));
 
     assert_eq!(
-        eval_value(&value).unwrap_err().to_string(),
+        eval_value(&test_context(), &value).unwrap_err().to_string(),
         "lazy net computation exposed a bind instead of data"
     );
 }
@@ -89,10 +89,12 @@ fn saturated_function_calls_reject_a_remaining_bind() {
         spine.input
     });
     let malformed = FunctionValue::new(two_argument_stage, 1);
-    let result = apply_function_values(malformed, vec![n(0)]).unwrap();
+    let result = apply_function_values(&test_context(), malformed, vec![n(0)]).unwrap();
 
     assert_eq!(
-        eval_value(&result).unwrap_err().to_string(),
+        eval_value(&test_context(), &result)
+            .unwrap_err()
+            .to_string(),
         "function call exposed a bind instead of data"
     );
 }
@@ -111,7 +113,7 @@ fn explicit_net_application_may_return_a_residual_bind() {
     });
 
     assert!(matches!(
-        apply_net(two_argument_net, n(0)).unwrap(),
+        apply_net(&test_context(), two_argument_net, n(0)).unwrap(),
         Value::Net(_)
     ));
 }
@@ -122,7 +124,7 @@ fn zero_arity_apply_operator_is_data_identity() {
     let data = n(42);
 
     assert_eq!(
-        CoreSpecialization::apply_operator(&operator, &data).unwrap(),
+        apply_core_operator(&test_context(), &operator, &data).unwrap(),
         OperatorYield::Data(data)
     );
 }
@@ -131,8 +133,8 @@ fn zero_arity_apply_operator_is_data_identity() {
 fn compiled_function_values_reuse_one_shared_interaction_net() {
     let function = closed_function_value(1, TestExpr::Local(0));
     let (Value::Function(first), Value::Function(second)) = (
-        eval_value(&function).unwrap(),
-        eval_value(&function).unwrap(),
+        eval_value(&test_context(), &function).unwrap(),
+        eval_value(&test_context(), &function).unwrap(),
     ) else {
         panic!("closed functions should evaluate to shared function stages");
     };
@@ -142,7 +144,7 @@ fn compiled_function_values_reuse_one_shared_interaction_net() {
 #[test]
 fn curried_function_partial_application_exposes_the_next_bind() {
     let function = closed_function_value(3, TestExpr::Local(2));
-    let partially_applied = eval_value(&apply_test_values(function, [n(11)]))
+    let partially_applied = eval_value(&test_context(), &apply_test_values(function, [n(11)]))
         .expect("first application should expose the remaining bind chain");
     let Value::Function(first_stage) = &partially_applied else {
         panic!("partial application should produce another function stage");
@@ -160,7 +162,7 @@ fn curried_function_partial_application_exposes_the_next_bind() {
     );
 
     let result = apply_test_values(partially_applied, [n(22), n(33)]);
-    assert_eq!(eval_value(&result).unwrap(), n(11));
+    assert_eq!(eval_value(&test_context(), &result).unwrap(), n(11));
 }
 
 #[test]
@@ -175,12 +177,15 @@ fn function_application_accepts_a_cursor_backed_function_argument_without_forcin
     );
     let unresolved_function = closed_function_value(1, TestExpr::Local(0));
 
-    let partial = eval_value(&apply_test_values(forwards_argument, [unresolved_function]))
-        .expect("net attachment must not demand a callable argument as embedded data");
+    let partial = eval_value(
+        &test_context(),
+        &apply_test_values(forwards_argument, [unresolved_function]),
+    )
+    .expect("net attachment must not demand a callable argument as embedded data");
     assert!(matches!(partial, Value::Function(_)));
 
     assert_eq!(
-        eval_value(&apply_test_values(partial, [n(42)])).unwrap(),
+        eval_value(&test_context(), &apply_test_values(partial, [n(42)])).unwrap(),
         n(42)
     );
 }
@@ -190,7 +195,7 @@ fn batched_application_spine_keeps_unused_arguments_lazy() {
     let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let lazy_argument = |label: &'static str| {
         let forced = forced.clone();
-        Value::deferred(label, move || {
+        Value::deferred(label, move |_| {
             forced.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(n(99))
         })
@@ -201,7 +206,7 @@ fn batched_application_spine_keeps_unused_arguments_lazy() {
         [n(11), lazy_argument("second"), lazy_argument("third")],
     );
 
-    assert_eq!(eval_value(&application).unwrap(), n(11));
+    assert_eq!(eval_value(&test_context(), &application).unwrap(), n(11));
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
@@ -218,7 +223,7 @@ fn batched_application_preserves_captured_access() {
     let dict = Value::Dict(Dict::new_sync().insert(key, n(42)));
     let application = apply_test_values(function, [dict, n(0)]);
 
-    assert_eq!(eval_value(&application).unwrap(), n(42));
+    assert_eq!(eval_value(&test_context(), &application).unwrap(), n(42));
 }
 
 #[test]
@@ -238,11 +243,23 @@ fn pending_lazy_values_fail_fast_until_initialized() {
     let value = Value::Lazy(pending.clone());
 
     assert_eq!(
-        eval_value(&value).unwrap_err().to_string(),
+        eval_value(&test_context(), &value).unwrap_err().to_string(),
         "lazy value was observed before initialization"
     );
     pending.set(n(42)).unwrap();
-    assert_eq!(eval_value(&value).unwrap(), n(42));
+    assert_eq!(eval_value(&test_context(), &value).unwrap(), n(42));
+}
+
+#[test]
+fn deferred_values_use_the_context_that_forces_them() {
+    let context = test_context();
+    let expected_context = context.clone();
+    let value = Value::deferred("context-sensitive test value", move |actual_context| {
+        assert!(actual_context.shares_session_with(&expected_context));
+        Ok(n(42))
+    });
+
+    assert_eq!(eval_value(&context, &value).unwrap(), n(42));
 }
 
 #[test]
@@ -250,7 +267,7 @@ fn ready_lazy_errors_fail_when_observed() {
     let value = Value::error("deliberate failure");
 
     assert_eq!(
-        eval_value(&value).unwrap_err().to_string(),
+        eval_value(&test_context(), &value).unwrap_err().to_string(),
         "deliberate failure"
     );
 }
@@ -371,8 +388,12 @@ fn fixpoint_dict(dict: Dict) -> TestExpr {
 }
 
 fn apply_rooted_fixture(root: &Value, expr: TestExpr) -> Value {
-    apply_values(closed_function_value(1, expr), vec![root.clone()])
-        .expect("rooted test expression should lower to a callable function")
+    apply_values(
+        &test_context(),
+        closed_function_value(1, expr),
+        vec![root.clone()],
+    )
+    .expect("rooted test expression should lower to a callable function")
 }
 
 #[test]
@@ -389,7 +410,8 @@ fn evaluates_recursive_dictionary_net() {
             &crate::core::Key::binary_from_text("asm"),
         )])
         .expect("asm should exist");
-    let asm = eval_value(asm).expect("asm binding should evaluate lazily to a dictionary");
+    let asm = eval_value(&test_context(), asm)
+        .expect("asm binding should evaluate lazily to a dictionary");
     let Value::Dict(asm) = asm else {
         panic!("asm should evaluate to a dictionary");
     };
@@ -505,7 +527,7 @@ fn append_preserves_lazy_list_chunks_until_observed() {
     };
     assert_eq!(list.known_len(), None);
     assert_eq!(
-        list_output_bytes(&list).expect("lazy chunk should force"),
+        list_output_bytes(&test_context(), &list).expect("lazy chunk should force"),
         b"Hi!"
     );
 }
@@ -523,7 +545,8 @@ fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
         panic!("append should produce a list");
     };
 
-    let err = list_output_bytes(&list).expect_err("bad lazy chunk should fail when observed");
+    let err = list_output_bytes(&test_context(), &list)
+        .expect_err("bad lazy chunk should fail when observed");
     assert!(err.contains("lazy list chunk must evaluate to a list or binary value"));
 }
 
@@ -548,7 +571,7 @@ fn split_end_does_not_force_lazy_left_branch_when_suffix_is_in_right_branch() {
         panic!("right suffix should be a list");
     };
     assert_eq!(
-        list_output_bytes(suffix).expect("right suffix should render"),
+        list_output_bytes(&test_context(), suffix).expect("right suffix should render"),
         b"c"
     );
 }
@@ -582,7 +605,7 @@ fn evaluates_arithmetic_builtins() {
 fn lazy_arguments_share_forced_values() {
     let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = force_count.clone();
-    let counted = TestExpr::Value(Value::deferred("counted", move || {
+    let counted = TestExpr::Value(Value::deferred("counted", move |_| {
         count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(n(2))
     }));
@@ -675,10 +698,10 @@ fn evaluates_slice_and_map_builtins() {
     let Value::List(mapped) = mapped else {
         panic!("map should produce a list");
     };
-    let items = list_to_value_items(&mapped)
+    let items = list_to_value_items(&test_context(), &mapped)
         .expect("mapped list should be readable")
         .iter()
-        .map(eval_value)
+        .map(|value| eval_value(&test_context(), value))
         .collect::<Result<Vec<_>, _>>()
         .expect("mapped values should evaluate");
     assert_eq!(items, vec![n(2), n(3), n(4)]);
@@ -733,11 +756,11 @@ fn evaluates_split_and_split_end_builtins() {
     };
 
     assert_eq!(
-        list_to_value_items(prefix).expect("prefix should be readable"),
+        list_to_value_items(&test_context(), prefix).expect("prefix should be readable"),
         vec![n(1), n(2), Value::Number(Number::from_u8(b'a'))]
     );
     assert_eq!(
-        list_to_value_items(suffix).expect("suffix should be readable"),
+        list_to_value_items(&test_context(), suffix).expect("suffix should be readable"),
         vec![
             Value::Number(Number::from_u8(b'b')),
             Value::Number(Number::from_u8(b'c'))
@@ -806,7 +829,7 @@ fn function_nets_capture_outer_values() {
 fn partial_builtins_share_lazy_arguments() {
     let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = force_count.clone();
-    let argument = TestExpr::Value(Value::deferred("partial argument", move || {
+    let argument = TestExpr::Value(Value::deferred("partial argument", move |_| {
         count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(n(40))
     }));
@@ -822,8 +845,11 @@ fn partial_builtins_share_lazy_arguments() {
 
     assert!(matches!(partial, Value::PartialBuiltin(_)));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(apply_value(partial.clone(), n(2)).unwrap(), n(42));
-    assert_eq!(apply_value(partial, n(3)).unwrap(), n(43));
+    assert_eq!(
+        apply_value(&test_context(), partial.clone(), n(2)).unwrap(),
+        n(42)
+    );
+    assert_eq!(apply_value(&test_context(), partial, n(3)).unwrap(), n(43));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
@@ -836,7 +862,7 @@ fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
             1,
             TestExpr::List(Arc::from([Arc::new(TestExpr::Local(0))])),
         )),
-        Arc::new(TestExpr::Value(Value::deferred("list value", move || {
+        Arc::new(TestExpr::Value(Value::deferred("list value", move |_| {
             count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(n(42))
         }))),
@@ -857,29 +883,29 @@ fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
     };
     assert!(matches!(item, Value::Lazy(_)));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(eval_value(&item).unwrap(), n(42));
+    assert_eq!(eval_value(&test_context(), &item).unwrap(), n(42));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert!(pop_list_front(&tail).unwrap().is_none());
+    assert!(pop_list_front(&test_context(), &tail).unwrap().is_none());
 }
 
 #[test]
 fn closed_semantic_list_holes_remain_host_observable() {
-    let Value::Lazy(hole) = Value::deferred("list hole", || {
+    let Value::Lazy(hole) = Value::deferred("list hole", |_| {
         Ok(Value::List(List::from_values(vec![n(42)])))
     }) else {
         unreachable!()
     };
     let list = List::from_thunk(hole);
 
-    let (value, tail) = pop_list_front(&list).unwrap().unwrap();
+    let (value, tail) = pop_list_front(&test_context(), &list).unwrap().unwrap();
     assert_eq!(value, n(42));
-    assert!(pop_list_front(&tail).unwrap().is_none());
+    assert!(pop_list_front(&test_context(), &tail).unwrap().is_none());
 }
 
 #[test]
 fn dropped_arguments_do_not_prevent_later_bindings_from_resolving() {
     let function = closed_function_value(2, TestExpr::Local(0));
-    let value = eval_value(&apply_test_values(function, [n(1), n(42)]))
+    let value = eval_value(&test_context(), &apply_test_values(function, [n(1), n(42)]))
         .expect("function with dropped argument should evaluate");
 
     assert_eq!(value, n(42));
@@ -932,9 +958,13 @@ fn effect_values_apply_by_extending_the_effect_function() {
         ),
     ));
 
-    let value = apply_value(eval_value(&function).unwrap(), api)
-        .and_then(|value| eval_value(&value))
-        .expect("extended effect function should evaluate with an API");
+    let value = apply_value(
+        &test_context(),
+        eval_value(&test_context(), &function).unwrap(),
+        api,
+    )
+    .and_then(|value| eval_value(&test_context(), &value))
+    .expect("extended effect function should evaluate with an API");
     assert_eq!(value, n(42));
 }
 
@@ -960,7 +990,7 @@ fn effect_application_requires_singleton_eff_tag() {
 #[test]
 fn tagged_payload_ignores_only_semantically_undefined_extra_entries() {
     let payload = n(42);
-    let lazy_empty = Value::Lazy(LazyValue::deferred("empty tag field", || {
+    let lazy_empty = Value::Lazy(LazyValue::deferred("empty tag field", |_| {
         Ok(Value::Dict(Dict::new_sync()))
     }));
     let recursively_empty =
@@ -969,18 +999,23 @@ fn tagged_payload_ignores_only_semantically_undefined_extra_entries() {
         .insert((*keys::TUPLE).clone(), payload.clone())
         .insert(Key::atom_from_text("ignored"), recursively_empty.clone());
 
-    assert_eq!(tagged.tagged_payload(&keys::TUPLE).unwrap(), Some(payload));
+    assert_eq!(
+        tagged
+            .tagged_payload(&test_context(), &keys::TUPLE)
+            .unwrap(),
+        Some(payload)
+    );
     assert_eq!(
         tagged
             .insert(Key::atom_from_text("defined"), n(1))
-            .tagged_payload(&keys::TUPLE)
+            .tagged_payload(&test_context(), &keys::TUPLE)
             .unwrap(),
         None
     );
     assert_eq!(
         Dict::new_sync()
             .insert((*keys::TUPLE).clone(), recursively_empty)
-            .tagged_payload(&keys::TUPLE)
+            .tagged_payload(&test_context(), &keys::TUPLE)
             .unwrap(),
         None
     );
@@ -1080,7 +1115,7 @@ fn dictionaries_remain_lazy_under_eval_value() {
         fixture_computation(TestExpr::Value(n(42))),
     ));
 
-    let evaluated = eval_value(&value).expect("dict should stay lazy");
+    let evaluated = eval_value(&test_context(), &value).expect("dict should stay lazy");
 
     assert_eq!(evaluated, value);
 }
@@ -1178,7 +1213,7 @@ fn dictionary_unions_merge_nested_dictionaries_transitively() {
     let Value::Lazy(greeting) = greeting else {
         panic!("greeting should stay lazy until demanded");
     };
-    let greeting = eval_value(&Value::Lazy(greeting.clone()))
+    let greeting = eval_value(&test_context(), &Value::Lazy(greeting.clone()))
         .expect("nested dict union should evaluate when demanded");
     let Value::Dict(greeting) = greeting else {
         panic!("greeting should evaluate to a merged dictionary");
@@ -1239,7 +1274,7 @@ fn dictionary_unions_defer_ambiguous_keys_until_observed() {
         panic!("ambiguous duplicate should stay as a stuck expression");
     };
 
-    let err = eval_value(&Value::Lazy(ambiguous.clone()))
+    let err = eval_value(&test_context(), &Value::Lazy(ambiguous.clone()))
         .expect_err("ambiguous key should fail only when demanded");
 
     assert_eq!(
@@ -1335,10 +1370,13 @@ fn names_can_traverse_dictionary_union_bindings() {
     );
 
     let value = eval_closed_expr(&fixpoint_dict(root)).expect("root should evaluate");
-    let resolved = eval_value(&apply_rooted_fixture(
-        &value,
-        global_access(vec![TestKey::Key(d), TestKey::Key(hello)]),
-    ))
+    let resolved = eval_value(
+        &test_context(),
+        &apply_rooted_fixture(
+            &value,
+            global_access(vec![TestKey::Key(d), TestKey::Key(hello)]),
+        ),
+    )
     .expect("dotted name should force intermediate dict unions");
 
     assert_eq!(resolved, Value::binary_from_text("Hello"));
@@ -1368,22 +1406,25 @@ fn names_can_expand_list_valued_path_segments() {
 
     let root = crate::core::Dict::new_sync().insert(foo.clone(), nested);
     let value = eval_closed_expr(&fixpoint_dict(root)).expect("root should evaluate");
-    let resolved = eval_value(&apply_rooted_fixture(
-        &value,
-        global_access(vec![
-            TestKey::Key(foo),
-            TestKey::PathIndex(Arc::new(TestExpr::Apply(
-                Arc::new(TestExpr::Apply(
-                    Arc::new(TestExpr::Value(Value::Builtin(Builtin::Append))),
-                    Arc::new(TestExpr::List(Arc::from([
-                        Arc::new(TestExpr::Value(n(1))),
-                        Arc::new(TestExpr::Value(n(2))),
-                    ]))),
-                )),
-                Arc::new(TestExpr::List(Arc::from([Arc::new(TestExpr::Value(n(3)))]))),
-            ))),
-        ]),
-    ))
+    let resolved = eval_value(
+        &test_context(),
+        &apply_rooted_fixture(
+            &value,
+            global_access(vec![
+                TestKey::Key(foo),
+                TestKey::PathIndex(Arc::new(TestExpr::Apply(
+                    Arc::new(TestExpr::Apply(
+                        Arc::new(TestExpr::Value(Value::Builtin(Builtin::Append))),
+                        Arc::new(TestExpr::List(Arc::from([
+                            Arc::new(TestExpr::Value(n(1))),
+                            Arc::new(TestExpr::Value(n(2))),
+                        ]))),
+                    )),
+                    Arc::new(TestExpr::List(Arc::from([Arc::new(TestExpr::Value(n(3)))]))),
+                ))),
+            ]),
+        ),
+    )
     .expect("list-valued path segment should expand into multiple lookups");
 
     assert_eq!(resolved, Value::binary_from_text("World"));
@@ -1395,13 +1436,16 @@ fn missing_dictionary_members_resolve_to_empty_dictionary() {
         Key::atom_from_text("present"),
         Value::Dict(crate::core::Dict::new_sync()),
     ));
-    let resolved = eval_value(&apply_rooted_fixture(
-        &root,
-        global_access(vec![
-            TestKey::Key(Key::atom_from_text("present")),
-            TestKey::Key(Key::atom_from_text("missing")),
-        ]),
-    ))
+    let resolved = eval_value(
+        &test_context(),
+        &apply_rooted_fixture(
+            &root,
+            global_access(vec![
+                TestKey::Key(Key::atom_from_text("present")),
+                TestKey::Key(Key::atom_from_text("missing")),
+            ]),
+        ),
+    )
     .expect("missing member access should stay evaluable");
 
     assert_eq!(resolved, Value::Dict(crate::core::Dict::new_sync()));
@@ -1431,24 +1475,28 @@ fn anno_builtin_preserves_lazy_targets_when_assertions_pass() {
         ),
     );
 
-    let value = eval_value(&apply_rooted_fixture(
-        &root,
-        TestExpr::Apply(
-            Arc::new(TestExpr::Apply(
-                Arc::new(TestExpr::Value(Value::Builtin(Builtin::Anno))),
-                Arc::new(annotation),
-            )),
-            Arc::new(global_access(vec![TestKey::Key(Key::atom_from_text(
-                "later",
-            ))])),
+    let value = eval_value(
+        &test_context(),
+        &apply_rooted_fixture(
+            &root,
+            TestExpr::Apply(
+                Arc::new(TestExpr::Apply(
+                    Arc::new(TestExpr::Value(Value::Builtin(Builtin::Anno))),
+                    Arc::new(annotation),
+                )),
+                Arc::new(global_access(vec![TestKey::Key(Key::atom_from_text(
+                    "later",
+                ))])),
+            ),
         ),
-    ))
+    )
     .expect("anno should pass through successful assertions");
 
     let Value::Lazy(thunk) = value else {
         panic!("anno should preserve lazy target evaluation");
     };
-    let resolved = eval_value(&Value::Lazy(thunk)).expect("returned target should still evaluate");
+    let resolved = eval_value(&test_context(), &Value::Lazy(thunk))
+        .expect("returned target should still evaluate");
     assert_eq!(resolved, n(42));
 }
 
@@ -1474,22 +1522,26 @@ fn anno_builtin_returns_stuck_errors_for_failed_assertions() {
         ),
     );
 
-    let value = eval_value(&apply_rooted_fixture(
-        &Value::Dict(crate::core::Dict::new_sync()),
-        TestExpr::Apply(
-            Arc::new(TestExpr::Apply(
-                Arc::new(TestExpr::Value(Value::Builtin(Builtin::Anno))),
-                Arc::new(annotation),
-            )),
-            Arc::new(TestExpr::Value(n(1))),
+    let value = eval_value(
+        &test_context(),
+        &apply_rooted_fixture(
+            &Value::Dict(crate::core::Dict::new_sync()),
+            TestExpr::Apply(
+                Arc::new(TestExpr::Apply(
+                    Arc::new(TestExpr::Value(Value::Builtin(Builtin::Anno))),
+                    Arc::new(annotation),
+                )),
+                Arc::new(TestExpr::Value(n(1))),
+            ),
         ),
-    ))
+    )
     .expect("failed anno should still produce a stuck value");
 
     let Value::Lazy(thunk) = value else {
         panic!("failed anno should produce a stuck expression");
     };
-    let err = eval_value(&Value::Lazy(thunk)).expect_err("failed anno should raise on demand");
+    let err = eval_value(&test_context(), &Value::Lazy(thunk))
+        .expect_err("failed anno should raise on demand");
     assert_eq!(
         err.to_string(),
         "cannot override `foo` because it is not defined"
@@ -1538,7 +1590,10 @@ fn list_annotations_rebalance_and_flatten_lists() {
     let Value::List(array) = array else {
         panic!("array annotation should produce a list");
     };
-    assert_eq!(list_to_value_items(&array).unwrap(), vec![n(72), n(105)]);
+    assert_eq!(
+        list_to_value_items(&test_context(), &array).unwrap(),
+        vec![n(72), n(105)]
+    );
 }
 
 #[test]
@@ -1553,7 +1608,7 @@ fn list_annotations_return_stuck_errors_for_wrong_targets() {
     .expect("annotation should evaluate to a stuck expression");
 
     assert_eq!(
-        eval_value(&value).unwrap_err().to_string(),
+        eval_value(&test_context(), &value).unwrap_err().to_string(),
         "`binary` annotation cannot encode number `300` as a byte"
     );
 
@@ -1567,7 +1622,7 @@ fn list_annotations_return_stuck_errors_for_wrong_targets() {
     .expect("annotation should evaluate to a stuck expression");
 
     assert!(
-        eval_value(&value)
+        eval_value(&test_context(), &value)
             .unwrap_err()
             .to_string()
             .contains("`deque` annotation requires a list target")
@@ -1595,11 +1650,15 @@ fn unknown_annotations_pass_through_targets() {
 
 #[test]
 fn builtins_are_curried_and_do_not_force_arguments_early() {
-    let unforced = Value::deferred("unforced builtin argument", || {
+    let unforced = Value::deferred("unforced builtin argument", |_| {
         panic!("partial builtin application forced its first argument")
     });
-    let partial = apply_values(Value::Builtin(Builtin::Append), vec![unforced])
-        .expect("partial builtin application should accept its first argument");
+    let partial = apply_values(
+        &test_context(),
+        Value::Builtin(Builtin::Append),
+        vec![unforced],
+    )
+    .expect("partial builtin application should accept its first argument");
 
     match partial {
         Value::PartialBuiltin(call) => {

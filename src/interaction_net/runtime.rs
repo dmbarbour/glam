@@ -197,36 +197,6 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
     }
 }
 
-impl<S: NetSpecialization> SharedRuntimeNet<S> {
-    /// Resolves one exact claimed `Data >< Bind` pair using client callable
-    /// policy. Claiming and finishing each take a short target lock; callable
-    /// conversion itself runs without holding the runtime mutex.
-    pub fn resolve_call(&self, call: Call) -> Result<bool, S::StuckReason> {
-        let Some(data) = self.with_mut(|runtime| runtime.claim_call(call)) else {
-            return Ok(false);
-        };
-
-        match S::callable(data) {
-            Ok(Callable::Net(source)) => {
-                self.with_mut(|runtime| runtime.resume_claimed_call_with_copy(call, source));
-                Ok(true)
-            }
-            Ok(Callable::Operator(operator)) => {
-                self.with_mut(|runtime| {
-                    runtime.resume_claimed_call_with_operator(call, operator);
-                });
-                Ok(true)
-            }
-            Err(error) => {
-                self.with_mut(|runtime| {
-                    runtime.fail_claimed_call(call, error.clone());
-                });
-                Err(error)
-            }
-        }
-    }
-}
-
 impl<S: NetSpecialization> Clone for SharedRuntimeNet<S> {
     fn clone(&self) -> Self {
         Self {
@@ -478,7 +448,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     /// Reads callable data from an active pair already claimed by reduction.
-    fn claim_call(&mut self, call: Call) -> Option<S::Data> {
+    pub fn claim_call(&mut self, call: Call) -> Option<S::Data> {
         if !self
             .active
             .get(&call.pair)
@@ -495,7 +465,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 
     /// Leaves a claimed call permanently stuck after applicable lowering
     /// fails.
-    fn fail_claimed_call(&mut self, call: Call, reason: S::StuckReason) {
+    pub fn fail_claimed_call(&mut self, call: Call, reason: S::StuckReason) {
         let previous = self.active.insert(
             call.pair,
             ActivePairState::Stuck(StuckReason::Specialization(reason)),

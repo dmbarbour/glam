@@ -6,31 +6,43 @@ mod implementation;
 
 use implementation::*;
 
-pub(super) fn apply(builtin: Builtin, arguments: Vec<Value>) -> Result<Value, EvalError> {
+pub(super) fn apply(
+    context: &EvalContext,
+    builtin: Builtin,
+    arguments: Vec<Value>,
+) -> Result<Value, EvalError> {
     let [left, right] = super::exact(arguments, comparison_name(builtin))?;
     match builtin {
         Builtin::Greater => {
-            eval_compare_ordering_builtin("greater-than", &left, &right, |ordering| {
+            eval_compare_ordering_builtin(context, "greater-than", &left, &right, |ordering| {
                 ordering == Ordering::Greater
             })
         }
-        Builtin::GreaterEqual => {
-            eval_compare_ordering_builtin("greater-than-or-equal", &left, &right, |ordering| {
-                ordering != Ordering::Less
-            })
+        Builtin::GreaterEqual => eval_compare_ordering_builtin(
+            context,
+            "greater-than-or-equal",
+            &left,
+            &right,
+            |ordering| ordering != Ordering::Less,
+        ),
+        Builtin::Equal => {
+            eval_compare_equality_builtin(context, "equal", &left, &right, |equal| equal)
         }
-        Builtin::Equal => eval_compare_equality_builtin("equal", &left, &right, |equal| equal),
         Builtin::NotEqual => {
-            eval_compare_equality_builtin("not-equal", &left, &right, |equal| !equal)
+            eval_compare_equality_builtin(context, "not-equal", &left, &right, |equal| !equal)
         }
-        Builtin::LessEqual => {
-            eval_compare_ordering_builtin("less-than-or-equal", &left, &right, |ordering| {
-                ordering != Ordering::Greater
+        Builtin::LessEqual => eval_compare_ordering_builtin(
+            context,
+            "less-than-or-equal",
+            &left,
+            &right,
+            |ordering| ordering != Ordering::Greater,
+        ),
+        Builtin::Less => {
+            eval_compare_ordering_builtin(context, "less-than", &left, &right, |ordering| {
+                ordering == Ordering::Less
             })
         }
-        Builtin::Less => eval_compare_ordering_builtin("less-than", &left, &right, |ordering| {
-            ordering == Ordering::Less
-        }),
         _ => unreachable!("comparison dispatcher received a non-comparison builtin"),
     }
 }

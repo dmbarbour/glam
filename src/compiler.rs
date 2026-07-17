@@ -232,7 +232,7 @@ impl CompileContext {
         let label: Arc<str> = Arc::from(format!("import {}", args.request));
         let loader = self.local_module_loader.clone();
 
-        Value::deferred(label, move || {
+        Value::deferred(label, move |_| {
             let Some(loader) = &loader else {
                 return Err(format!(
                     "local import `{}` cannot be loaded without a module loader",
@@ -254,7 +254,7 @@ impl CompileContext {
         let label: Arc<str> = Arc::from(format!("import binary {}", args.request));
         let loader = self.local_binary_loader.clone();
 
-        Value::deferred(label, move || {
+        Value::deferred(label, move |_| {
             let Some(loader) = &loader else {
                 return Err(format!(
                     "binary import `{}` cannot be loaded without a binary loader",
@@ -315,12 +315,15 @@ mod tests {
         let context = CompileContext::default().with_local_module_loader(Arc::new(|args| {
             panic!("invalid request reached loader: {}", args.request)
         }));
-        let error = crate::eval::eval_value(&context.import_module(
-            "../outside.g",
-            None,
-            Value::Dict(Dict::new_sync()),
-            Value::Dict(Dict::new_sync()),
-        ))
+        let error = crate::eval::eval_value(
+            &crate::evaluation::EvalContext::standalone(),
+            &context.import_module(
+                "../outside.g",
+                None,
+                Value::Dict(Dict::new_sync()),
+                Value::Dict(Dict::new_sync()),
+            ),
+        )
         .expect_err("parent-relative request should be a stuck error");
         assert!(error.to_string().contains("must not traverse to a parent"));
     }
@@ -338,8 +341,11 @@ mod tests {
                 Ok(Value::binary_from_text("loaded"))
             }));
 
-        crate::eval::eval_value(&context.import_binary("message.txt"))
-            .expect("binary import should load");
+        crate::eval::eval_value(
+            &crate::evaluation::EvalContext::standalone(),
+            &context.import_binary("message.txt"),
+        )
+        .expect("binary import should load");
 
         let received = received
             .lock()
@@ -373,12 +379,15 @@ mod tests {
                 Ok(Value::Dict(Dict::new_sync()))
             }));
 
-        crate::eval::eval_value(&context.import_module(
-            "child.g",
-            Some("nested.child"),
-            Value::Number(1.into()),
-            Value::Number(2.into()),
-        ))
+        crate::eval::eval_value(
+            &crate::evaluation::EvalContext::standalone(),
+            &context.import_module(
+                "child.g",
+                Some("nested.child"),
+                Value::Number(1.into()),
+                Value::Number(2.into()),
+            ),
+        )
         .expect("module import should load");
 
         let received = received

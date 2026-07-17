@@ -9,6 +9,7 @@ pub(crate) fn apply_arity_operator(arity: usize, supplied: Arc<[Value]>) -> Core
 /// saturated call. Net construction may place that call in a lazy aggregate;
 /// evaluating it here would make enclosing construction accidentally strict.
 pub(super) fn apply_builtin_values_lazily(
+    context: &EvalContext,
     builtin: Builtin,
     mut supplied: Vec<Value>,
     arguments: Vec<Value>,
@@ -34,7 +35,7 @@ pub(super) fn apply_builtin_values_lazily(
     if rest.is_empty() {
         Ok(result)
     } else {
-        apply_values(result, rest.to_vec())
+        apply_values(context, result, rest.to_vec())
     }
 }
 
@@ -102,6 +103,7 @@ pub(crate) fn request_operator(
 }
 
 pub(super) fn apply_core_operator(
+    context: &EvalContext,
     operator: &CoreOperator,
     data: &Value,
 ) -> Result<OperatorYield<CoreSpecialization>, EvalError> {
@@ -122,14 +124,15 @@ pub(super) fn apply_core_operator(
             }
             let result = match function {
                 Value::Builtin(builtin) => {
-                    apply_builtin_values_lazily(builtin, Vec::new(), operands)
+                    apply_builtin_values_lazily(context, builtin, Vec::new(), operands)
                 }
                 Value::PartialBuiltin(call) => apply_builtin_values_lazily(
+                    context,
                     call.builtin,
                     call.arguments.iter().cloned().collect(),
                     operands,
                 ),
-                function => apply_values(function, operands),
+                function => apply_values(context, function, operands),
             }?;
             Ok(OperatorYield::Data(result))
         }
@@ -142,7 +145,9 @@ pub(super) fn apply_core_operator(
                     Arc::from(captures),
                 )));
             }
-            Ok(OperatorYield::Data(instantiate_function(code, captures)?))
+            Ok(OperatorYield::Data(instantiate_function(
+                context, code, captures,
+            )?))
         }
         CoreOperator::ComputationCaptures { code, supplied } => {
             let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
@@ -198,9 +203,11 @@ pub(super) fn apply_core_operator(
                 },
             ))))
         }
-        CoreOperator::Applicable(function) => {
-            Ok(OperatorYield::Data(apply_value(function.clone(), operand)?))
-        }
+        CoreOperator::Applicable(function) => Ok(OperatorYield::Data(apply_value(
+            context,
+            function.clone(),
+            operand,
+        )?)),
         CoreOperator::List { arity, supplied } => {
             let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
             arguments.push(operand);

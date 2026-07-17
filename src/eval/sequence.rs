@@ -1,7 +1,10 @@
 use super::*;
 
-pub(crate) fn eval_key_path_list(value: &Value) -> Result<Vec<Key>, EvalError> {
-    let value = eval_value(value)?;
+pub(crate) fn eval_key_path_list(
+    context: &EvalContext,
+    value: &Value,
+) -> Result<Vec<Key>, EvalError> {
+    let value = eval_value(context, value)?;
     let Value::List(list) = value else {
         return Err(EvalError::new(
             "path-list operand must evaluate to a list value",
@@ -18,17 +21,20 @@ pub(crate) fn eval_key_path_list(value: &Value) -> Result<Vec<Key>, EvalError> {
         },
         &mut |values| {
             for value in values.iter() {
-                let value = eval_value(value)?;
-                items.borrow_mut().push(value_to_key(&value)?);
+                let value = eval_value(context, value)?;
+                items.borrow_mut().push(value_to_key(context, &value)?);
             }
             Ok(())
         },
-        &mut force_list_thunk,
+        &mut |thunk| force_list_thunk(context, thunk),
     )?;
     Ok(items.into_inner())
 }
 
-pub(super) fn list_to_key_items(list: &List) -> Result<Arc<[Key]>, EvalError> {
+pub(super) fn list_to_key_items(
+    context: &EvalContext,
+    list: &List,
+) -> Result<Arc<[Key]>, EvalError> {
     let items = std::cell::RefCell::new(Vec::new());
     list.try_for_each_segment(
         &mut |bytes| {
@@ -39,17 +45,20 @@ pub(super) fn list_to_key_items(list: &List) -> Result<Arc<[Key]>, EvalError> {
         },
         &mut |values| {
             for value in values.iter() {
-                let value = eval_value(value)?;
-                items.borrow_mut().push(value_to_key(&value)?);
+                let value = eval_value(context, value)?;
+                items.borrow_mut().push(value_to_key(context, &value)?);
             }
             Ok(())
         },
-        &mut force_list_thunk,
+        &mut |thunk| force_list_thunk(context, thunk),
     )?;
     Ok(Arc::from(items.into_inner()))
 }
 
-pub(crate) fn list_to_value_items(list: &List) -> Result<Vec<Value>, EvalError> {
+pub(crate) fn list_to_value_items(
+    context: &EvalContext,
+    list: &List,
+) -> Result<Vec<Value>, EvalError> {
     let items = std::cell::RefCell::new(Vec::new());
     list.try_for_each_segment(
         &mut |bytes| {
@@ -64,12 +73,12 @@ pub(crate) fn list_to_value_items(list: &List) -> Result<Vec<Value>, EvalError> 
             items.borrow_mut().extend(values.iter().cloned());
             Ok(())
         },
-        &mut force_list_thunk,
+        &mut |thunk| force_list_thunk(context, thunk),
     )?;
     Ok(items.into_inner())
 }
 
-pub(super) fn list_to_binary_bytes(list: &List) -> Result<Vec<u8>, String> {
+pub(super) fn list_to_binary_bytes(context: &EvalContext, list: &List) -> Result<Vec<u8>, String> {
     let bytes = std::cell::RefCell::new(Vec::new());
     list.try_for_each_segment(
         &mut |segment| {
@@ -78,7 +87,7 @@ pub(super) fn list_to_binary_bytes(list: &List) -> Result<Vec<u8>, String> {
         },
         &mut |values| {
             for value in values.iter() {
-                match force_value_shell(value).map_err(|err| err.to_string())? {
+                match force_value_shell(context, value).map_err(|err| err.to_string())? {
                     Value::Number(number) => {
                         let byte = number.to_u8_if_integer().ok_or_else(|| {
                             format!("`binary` annotation cannot encode number `{number}` as a byte")
@@ -89,7 +98,7 @@ pub(super) fn list_to_binary_bytes(list: &List) -> Result<Vec<u8>, String> {
                     Value::List(list) => {
                         bytes
                             .borrow_mut()
-                            .extend(list_to_binary_bytes(&list)?);
+                            .extend(list_to_binary_bytes(context, &list)?);
                     }
                     other => {
                         return Err(format!(
@@ -100,12 +109,12 @@ pub(super) fn list_to_binary_bytes(list: &List) -> Result<Vec<u8>, String> {
             }
             Ok(())
         },
-        &mut |thunk| force_list_thunk(thunk).map_err(|err| err.to_string()),
+        &mut |thunk| force_list_thunk(context, thunk).map_err(|err| err.to_string()),
     )?;
     Ok(bytes.into_inner())
 }
 
-pub fn list_output_bytes(list: &List) -> Result<Vec<u8>, String> {
+pub fn list_output_bytes(context: &EvalContext, list: &List) -> Result<Vec<u8>, String> {
     let bytes = std::cell::RefCell::new(Vec::new());
     list.try_for_each_segment(
         &mut |segment| {
@@ -114,7 +123,7 @@ pub fn list_output_bytes(list: &List) -> Result<Vec<u8>, String> {
         },
         &mut |segment| {
             for item in segment.iter() {
-                let item = force_value_shell(item).map_err(|err| err.to_string())?;
+                let item = force_value_shell(context, item).map_err(|err| err.to_string())?;
                 let Value::Number(number) = item else {
                     return Err("must contain only integers and binary segments".to_owned());
                 };
@@ -126,22 +135,25 @@ pub fn list_output_bytes(list: &List) -> Result<Vec<u8>, String> {
             }
             Ok(())
         },
-        &mut |thunk| force_list_thunk(thunk).map_err(|err| err.to_string()),
+        &mut |thunk| force_list_thunk(context, thunk).map_err(|err| err.to_string()),
     )?;
     Ok(bytes.into_inner())
 }
 
 pub(crate) fn list_output_bytes_range(
+    context: &EvalContext,
     list: &List,
     range: std::ops::Range<usize>,
 ) -> Result<Option<Vec<u8>>, String> {
     let Some(slice) = list
-        .try_slice(range.start, range.end, &mut force_list_thunk)
+        .try_slice(range.start, range.end, &mut |thunk| {
+            force_list_thunk(context, thunk)
+        })
         .map_err(|error| error.to_string())?
     else {
         return Ok(None);
     };
-    list_output_bytes(&slice).map(Some)
+    list_output_bytes(context, &slice).map(Some)
 }
 
 pub(super) fn append_values(left: Value, right: Value) -> Result<Value, EvalError> {

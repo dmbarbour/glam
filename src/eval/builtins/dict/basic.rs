@@ -1,9 +1,13 @@
 use super::super::super::*;
 use super::merge::{merge_dicts, update_dict_path};
 
-pub(super) fn eval_singleton_builtin(key: &Value, value: &Value) -> Result<Value, EvalError> {
-    let key = eval_value(key)?;
-    let key = value_to_key(&key)?;
+pub(super) fn eval_singleton_builtin(
+    context: &EvalContext,
+    key: &Value,
+    value: &Value,
+) -> Result<Value, EvalError> {
+    let key = eval_value(context, key)?;
+    let key = value_to_key(context, &key)?;
     if matches!(value, Value::Dict(dict) if dict.is_empty()) {
         return Ok(Value::Dict(crate::core::Dict::new_sync()));
     }
@@ -14,11 +18,12 @@ pub(super) fn eval_singleton_builtin(key: &Value, value: &Value) -> Result<Value
 }
 
 pub(in crate::eval::builtins) fn eval_dict_union_builtin(
+    context: &EvalContext,
     left: &Value,
     right: &Value,
 ) -> Result<Value, EvalError> {
-    let left = force_value_shell(left)?;
-    let right = force_value_shell(right)?;
+    let left = force_value_shell(context, left)?;
+    let right = force_value_shell(context, right)?;
     let Value::Dict(left_dict) = left else {
         return Err(EvalError::new(
             "dictionary union requires dictionary values",
@@ -34,17 +39,18 @@ pub(in crate::eval::builtins) fn eval_dict_union_builtin(
 }
 
 pub(super) fn eval_dict_update_builtin(
+    context: &EvalContext,
     path: &Value,
     new_value: &Value,
     dict: &Value,
 ) -> Result<Value, EvalError> {
-    let path = eval_key_path_list(path)?;
+    let path = eval_key_path_list(context, path)?;
     if path.is_empty() {
         return Err(EvalError::new(
             "dict update builtin requires a non-empty path",
         ));
     }
-    let dict = force_value_shell(dict)?;
+    let dict = force_value_shell(context, dict)?;
     let Value::Dict(dict) = dict else {
         return Err(EvalError::new("dict update builtin requires a dictionary"));
     };
