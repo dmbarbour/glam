@@ -4,7 +4,7 @@ pub(super) fn eval_key_path_list(value: &Value) -> Result<Vec<Key>, EvalError> {
     let value = eval_value(value)?;
     let Value::List(list) = value else {
         return Err(EvalError::new(
-            "path list expression must evaluate to a list value",
+            "path-list operand must evaluate to a list value",
         ));
     };
 

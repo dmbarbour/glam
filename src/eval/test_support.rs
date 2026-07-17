@@ -1,6 +1,6 @@
-//! Test-only expression fixtures, their direct interpreter, and net lowerer.
-//! Fixture locals never cross into production evaluator state: deferred test
-//! values close over any locals they need before entering ordinary evaluation.
+//! Test-only expression fixtures and their interaction-net lowerer.
+//! Every fixture is lowered before evaluation; this module does not provide a
+//! second expression interpreter or evaluator-local environment.
 
 use super::*;
 
@@ -18,42 +18,25 @@ pub(super) enum TestExpr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(super) enum TestKey {
     Key(Key),
-    Index(Arc<TestExpr>),
     PathIndex(Arc<TestExpr>),
 }
 
 pub(super) fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvalError> {
-    eval_expr(expr, &[])
+    let mut value = eval_value(&lower_test_computation_value(expr.clone()))?;
+    while matches!(&value, Value::Lazy(lazy) if lazy.function_call().is_some()) {
+        value = eval_value(&value)?;
+    }
+    Ok(value)
 }
 
-pub(super) fn eval_expr(expr: &TestExpr, local_env: &[Value]) -> Result<Value, EvalError> {
-    match expr {
-        TestExpr::Value(value) => eval_value(value),
-        TestExpr::List(items) => {
-            let mut list = List::empty();
-            for item in items.iter() {
-                let value = eval_expr(item, local_env)?;
-                list = List::concat(list, list_literal_segment(value));
-            }
-            Ok(Value::List(list))
-        }
-        TestExpr::Apply(function, argument) => eval_apply(function, argument, local_env),
-        TestExpr::Function { code, captures } => {
-            let captures = captures
-                .iter()
-                .map(|capture| thunk_value(capture, local_env))
-                .collect();
-            instantiate_function(code, captures)
-        }
-        TestExpr::Local(index) => eval_local(*index, local_env),
-        TestExpr::Access(base, path) => {
-            let base = eval_expr(base, local_env)?;
-            resolve_key_path(base, path, path, local_env)
-        }
-    }
+pub(super) fn lower_test_computation_value(expr: TestExpr) -> Value {
+    let code = lower_test_function_code(0, expr);
+    assert_eq!(code.capture_count(), 0, "test computation must be closed");
+    Value::Lazy(LazyValue::from_net_computation(NetValue::new(
+        code.runtime().clone(),
+    )))
 }
 
 pub(super) fn eval_key(value: &Value) -> Result<Key, EvalError> {
@@ -61,143 +44,6 @@ pub(super) fn eval_key(value: &Value) -> Result<Key, EvalError> {
     value_to_key(&value)
 }
 
-fn format_name(path: &[TestKey]) -> String {
-    path.iter()
-        .map(format_name_key_expr)
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
-fn format_name_key_expr(key: &TestKey) -> String {
-    match key {
-        TestKey::Key(key) => format_name_part(key),
-        TestKey::Index(_) => "[index]".to_owned(),
-        TestKey::PathIndex(_) => "(path-index)".to_owned(),
-    }
-}
-
-fn eval_local(index: usize, local_env: &[Value]) -> Result<Value, EvalError> {
-    let Some(value) = local_env.get(
-        local_env
-            .len()
-            .checked_sub(index + 1)
-            .ok_or_else(|| EvalError::new(format!("local `{index}` is out of scope")))?,
-    ) else {
-        return Err(EvalError::new(format!("local `{index}` is out of scope")));
-    };
-
-    eval_value(value)
-}
-
-fn resolve_key_path(
-    current: Value,
-    remaining: &[TestKey],
-    full_path: &[TestKey],
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
-    let Some((head, rest)) = remaining.split_first() else {
-        return eval_value(&current);
-    };
-
-    let expanded = expand_key_expr(head, local_env)?;
-    let next = resolve_expanded_keys(current, &expanded, full_path, remaining)?;
-    resolve_key_path(next, rest, full_path, local_env)
-}
-
-fn resolve_expanded_keys(
-    mut current: Value,
-    expanded: &[Key],
-    full_path: &[TestKey],
-    remaining: &[TestKey],
-) -> Result<Value, EvalError> {
-    for key in expanded {
-        let dict = force_dict_shell(&current, full_path, remaining)?;
-        current = dict
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
-    }
-    Ok(current)
-}
-
-fn force_dict_shell(
-    value: &Value,
-    full_path: &[TestKey],
-    remaining: &[TestKey],
-) -> Result<crate::core::Dict, EvalError> {
-    match force_value_shell(value)? {
-        Value::Dict(dict) => Ok(dict),
-        _ => {
-            let traversed = &full_path[..full_path.len() - remaining.len()];
-            let culprit = if traversed.is_empty() {
-                full_path
-            } else {
-                traversed
-            };
-            Err(EvalError::new(format!(
-                "name `{}` is not a dictionary",
-                format_name(culprit)
-            )))
-        }
-    }
-}
-
-fn expand_key_expr(key: &TestKey, local_env: &[Value]) -> Result<Vec<Key>, EvalError> {
-    match key {
-        TestKey::Key(key) => Ok(vec![key.clone()]),
-        TestKey::Index(expr) => {
-            let value = thunk_value(expr, local_env);
-            let value = force_value_shell(&value)?;
-            Ok(vec![value_to_key(&value)?])
-        }
-        TestKey::PathIndex(expr) => eval_key_path_list(&thunk_value(expr, local_env)),
-    }
-}
-
-pub(super) fn eval_apply(
-    function: &TestExpr,
-    argument: &TestExpr,
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
-    let mut head = function;
-    let mut arguments = vec![argument];
-    while let TestExpr::Apply(next, argument) = head {
-        arguments.push(argument);
-        head = next;
-    }
-    arguments.reverse();
-
-    let function = eval_expr(head, local_env)?;
-    let arguments = arguments
-        .into_iter()
-        .map(|argument| thunk_value(argument, local_env))
-        .collect::<Vec<_>>();
-    let result = apply_values(function, arguments)?;
-    match &result {
-        // A source-level function application evaluates its call stage, just
-        // as the former closure evaluator evaluated the body. Do not
-        // recursively force an arbitrary expression returned by that body:
-        // annotations and aggregate members deliberately return lazy values.
-        Value::Lazy(thunk) if thunk.function_call().is_some() => eval_lazy(thunk),
-        _ => Ok(result),
-    }
-}
-
-#[cfg(test)]
-pub(super) fn thunk_value(expr: &TestExpr, local_env: &[Value]) -> Value {
-    match expr {
-        TestExpr::Value(value) => value.clone(),
-        _ => {
-            let expr = expr.clone();
-            let local_env = local_env.to_vec();
-            Value::deferred("test expression", move || {
-                eval_expr(&expr, &local_env).map_err(|error| error.to_string())
-            })
-        }
-    }
-}
-
-#[cfg(test)]
 pub(super) fn closed_function_value(arity: usize, body: TestExpr) -> Value {
     let code = lower_test_function_code(arity, body);
     assert_eq!(code.capture_count(), 0, "test function must be closed");
@@ -207,9 +53,8 @@ pub(super) fn closed_function_value(arity: usize, body: TestExpr) -> Value {
     ))
 }
 
-#[cfg(test)]
 pub(super) fn lower_test_function_code(arity: usize, body: TestExpr) -> FunctionCode {
-    let mut lowerer = TestExprLowerer {
+    let mut lowerer = FixtureNetLowerer {
         net: NetBuilder::new(),
         local_uses: Vec::new(),
     };
@@ -238,14 +83,12 @@ pub(super) fn lower_test_function_code(arity: usize, body: TestExpr) -> Function
     FunctionCode::new(runtime, arity, capture_count)
 }
 
-#[cfg(test)]
-struct TestExprLowerer {
+struct FixtureNetLowerer {
     net: NetBuilder<CoreSpecialization>,
     local_uses: Vec<Vec<Port>>,
 }
 
-#[cfg(test)]
-impl TestExprLowerer {
+impl FixtureNetLowerer {
     fn compile_into(&mut self, expr: &TestExpr, target: Port) {
         match expr {
             TestExpr::Value(value) => self.data_into(value.clone(), target),
@@ -301,10 +144,6 @@ impl TestExprLowerer {
                     .iter()
                     .map(|part| match part {
                         TestKey::Key(key) => CoreDataKey::Key(key.clone()),
-                        TestKey::Index(expr) => {
-                            arguments.push(expr);
-                            CoreDataKey::Index
-                        }
                         TestKey::PathIndex(expr) => {
                             arguments.push(expr);
                             CoreDataKey::PathIndex

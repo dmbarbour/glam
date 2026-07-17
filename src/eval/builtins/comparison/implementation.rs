@@ -25,13 +25,13 @@ pub(super) fn eval_compare_equality_builtin(
 
 fn condition_effect_value(success: bool) -> Value {
     if success {
-        effect_call_expr_value("r", vec![builtin_unit_value()])
+        effect_call_value("r", vec![builtin_unit_value()])
     } else {
-        effect_call_expr_value("fail", Vec::new())
+        effect_call_value("fail", Vec::new())
     }
 }
 
-fn effect_call_expr_value(name: &str, arguments: Vec<Value>) -> Value {
+fn effect_call_value(name: &str, arguments: Vec<Value>) -> Value {
     effect_value(Value::PartialBuiltin(BuiltinCall {
         builtin: Builtin::EffectCall,
         arguments: Arc::from([

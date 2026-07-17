@@ -13,19 +13,13 @@ fn closed_net(build: impl FnOnce(&mut NetBuilder<CoreSpecialization>) -> Port) -
     NetValue::new(builder.finish(exposed).instantiate_shared())
 }
 
-fn expr_value(expr: TestExpr) -> Value {
-    Value::deferred("test expression", move || {
-        eval_closed_expr(&expr).map_err(|error| error.to_string())
-    })
+fn fixture_computation(expr: TestExpr) -> Value {
+    lower_test_computation_value(expr)
 }
 
-fn apply_expr_values(function: Value, arguments: impl IntoIterator<Item = Value>) -> Value {
-    let expr = arguments
-        .into_iter()
-        .fold(TestExpr::Value(function), |function, argument| {
-            TestExpr::Apply(Arc::new(function), Arc::new(TestExpr::Value(argument)))
-        });
-    expr_value(expr)
+fn apply_test_values(function: Value, arguments: impl IntoIterator<Item = Value>) -> Value {
+    apply_values(function, arguments.into_iter().collect())
+        .expect("test application should accept a callable value")
 }
 
 #[test]
@@ -146,9 +140,9 @@ fn compiled_function_values_reuse_one_shared_interaction_net() {
 }
 
 #[test]
-fn curried_lambda_partial_application_exposes_the_next_bind() {
+fn curried_function_partial_application_exposes_the_next_bind() {
     let function = closed_function_value(3, TestExpr::Local(2));
-    let partially_applied = eval_value(&apply_expr_values(function, [n(11)]))
+    let partially_applied = eval_value(&apply_test_values(function, [n(11)]))
         .expect("first application should expose the remaining bind chain");
     let Value::Function(first_stage) = &partially_applied else {
         panic!("partial application should produce another function stage");
@@ -165,7 +159,7 @@ fn curried_lambda_partial_application_exposes_the_next_bind() {
             .ptr_eq(cloned_stage.stage().runtime())
     );
 
-    let result = apply_expr_values(partially_applied, [n(22), n(33)]);
+    let result = apply_test_values(partially_applied, [n(22), n(33)]);
     assert_eq!(eval_value(&result).unwrap(), n(11));
 }
 
@@ -181,12 +175,12 @@ fn function_application_accepts_a_cursor_backed_function_argument_without_forcin
     );
     let unresolved_function = closed_function_value(1, TestExpr::Local(0));
 
-    let partial = eval_value(&apply_expr_values(forwards_argument, [unresolved_function]))
+    let partial = eval_value(&apply_test_values(forwards_argument, [unresolved_function]))
         .expect("net attachment must not demand a callable argument as embedded data");
     assert!(matches!(partial, Value::Function(_)));
 
     assert_eq!(
-        eval_value(&apply_expr_values(partial, [n(42)])).unwrap(),
+        eval_value(&apply_test_values(partial, [n(42)])).unwrap(),
         n(42)
     );
 }
@@ -202,7 +196,7 @@ fn batched_application_spine_keeps_unused_arguments_lazy() {
         })
     };
     let function = closed_function_value(3, TestExpr::Local(2));
-    let application = apply_expr_values(
+    let application = apply_test_values(
         function,
         [n(11), lazy_argument("second"), lazy_argument("third")],
     );
@@ -212,7 +206,7 @@ fn batched_application_spine_keeps_unused_arguments_lazy() {
 }
 
 #[test]
-fn batched_application_preserves_access_closure_compatibility() {
+fn batched_application_preserves_captured_access() {
     let key = Key::atom_from_text("answer");
     let function = closed_function_value(
         2,
@@ -222,7 +216,7 @@ fn batched_application_preserves_access_closure_compatibility() {
         ),
     );
     let dict = Value::Dict(Dict::new_sync().insert(key, n(42)));
-    let application = apply_expr_values(function, [dict, n(0)]);
+    let application = apply_test_values(function, [dict, n(0)]);
 
     assert_eq!(eval_value(&application).unwrap(), n(42));
 }
@@ -376,19 +370,13 @@ fn fixpoint_dict(dict: Dict) -> TestExpr {
     )
 }
 
-fn rooted_expr_value(root: &Value, expr: TestExpr) -> Value {
-    let handle = LazyValue::pending("test root");
-    handle
-        .set(root.clone())
-        .expect("rooted test expression should initialize handle once");
-    let env = vec![Value::Lazy(handle)];
-    Value::deferred("rooted test expression", move || {
-        eval_expr(&expr, &env).map_err(|error| error.to_string())
-    })
+fn apply_rooted_fixture(root: &Value, expr: TestExpr) -> Value {
+    apply_values(closed_function_value(1, expr), vec![root.clone()])
+        .expect("rooted test expression should lower to a callable function")
 }
 
 #[test]
-fn evaluates_dictionary_terms_to_values() {
+fn evaluates_recursive_dictionary_net() {
     let asm = Dict::new_sync().insert(
         crate::core::Key::atom_from_text("result"),
         Value::binary_from_text("Hello, World!"),
@@ -453,13 +441,8 @@ fn evaluates_mixed_list_segments() {
     let expr = TestExpr::List(Arc::from([
         Arc::new(TestExpr::Value(n(1))),
         Arc::new(TestExpr::Value(Value::binary_from_text("Hi"))),
-        Arc::new(TestExpr::Apply(
-            Arc::new(TestExpr::Apply(
-                Arc::new(TestExpr::Value(Value::Builtin(Builtin::Append))),
-                Arc::new(TestExpr::Value(Value::List(List::from_values(vec![n(2)])))),
-            )),
-            Arc::new(TestExpr::Value(Value::binary_from_text("!"))),
-        )),
+        Arc::new(TestExpr::Value(n(2))),
+        Arc::new(TestExpr::Value(Value::binary_from_text("!"))),
     ]));
 
     let value = eval_closed_expr(&expr).expect("list should evaluate");
@@ -596,7 +579,7 @@ fn evaluates_arithmetic_builtins() {
 }
 
 #[test]
-fn expression_arguments_share_forced_values() {
+fn lazy_arguments_share_forced_values() {
     let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = force_count.clone();
     let counted = TestExpr::Value(Value::deferred("counted", move || {
@@ -781,7 +764,7 @@ fn slice_builtin_shares_binary_storage() {
 }
 
 #[test]
-fn evaluates_lambda_application_lazily() {
+fn evaluates_function_net_application_lazily() {
     let expr = TestExpr::Apply(
         Arc::new(function_expr(1, TestExpr::Local(0))),
         Arc::new(builtin2_expr(
@@ -797,7 +780,7 @@ fn evaluates_lambda_application_lazily() {
 }
 
 #[test]
-fn closures_capture_outer_locals() {
+fn function_nets_capture_outer_values() {
     let invoke = function_expr(
         1,
         TestExpr::Apply(
@@ -894,9 +877,9 @@ fn closed_semantic_list_holes_remain_host_observable() {
 }
 
 #[test]
-fn dropped_arguments_do_not_prevent_later_locals_from_resolving() {
+fn dropped_arguments_do_not_prevent_later_bindings_from_resolving() {
     let function = closed_function_value(2, TestExpr::Local(0));
-    let value = eval_value(&apply_expr_values(function, [n(1), n(42)]))
+    let value = eval_value(&apply_test_values(function, [n(1), n(42)]))
         .expect("function with dropped argument should evaluate");
 
     assert_eq!(value, n(42));
@@ -1083,9 +1066,9 @@ fn evaluates_keyable_values_into_keys() {
 }
 
 #[test]
-fn evaluates_expressions_before_key_validation() {
-    let key = eval_key(&expr_value(TestExpr::Value(n(1))))
-        .expect("expressions should be allowed when they evaluate to keyable values");
+fn evaluates_lazy_values_before_key_validation() {
+    let key = eval_key(&fixture_computation(TestExpr::Value(n(1))))
+        .expect("lazy values should be allowed when they evaluate to keyable values");
 
     assert_eq!(key, k(1));
 }
@@ -1094,7 +1077,7 @@ fn evaluates_expressions_before_key_validation() {
 fn dictionaries_remain_lazy_under_eval_value() {
     let value = Value::Dict(crate::core::Dict::new_sync().insert(
         Key::atom_from_text("answer"),
-        expr_value(TestExpr::Value(n(42))),
+        fixture_computation(TestExpr::Value(n(42))),
     ));
 
     let evaluated = eval_value(&value).expect("dict should stay lazy");
@@ -1103,9 +1086,9 @@ fn dictionaries_remain_lazy_under_eval_value() {
 }
 
 #[test]
-fn rejects_unevaluable_keys() {
+fn missing_access_can_evaluate_to_an_undefined_key() {
     let root = Value::Dict(crate::core::Dict::new_sync());
-    let key = eval_key(&rooted_expr_value(
+    let key = eval_key(&apply_rooted_fixture(
         &root,
         global_access(vec![TestKey::Key(Key::atom_from_text("missing"))]),
     ))
@@ -1115,15 +1098,18 @@ fn rejects_unevaluable_keys() {
 }
 
 #[test]
-fn raw_value_to_key_rejects_expressions() {
-    assert_eq!(Key::from_value(&expr_value(TestExpr::Value(n(1)))), None);
+fn raw_value_to_key_rejects_lazy_values() {
+    assert_eq!(
+        Key::from_value(&fixture_computation(TestExpr::Value(n(1)))),
+        None
+    );
 }
 
 #[test]
 fn eval_key_forces_nested_dictionary_values() {
     let key = eval_key(&Value::Dict(crate::core::Dict::new_sync().insert(
         Key::atom_from_text("answer"),
-        expr_value(TestExpr::Value(n(42))),
+        fixture_computation(TestExpr::Value(n(42))),
     )))
     .expect("dict key should force nested values");
 
@@ -1339,7 +1325,7 @@ fn names_can_traverse_dictionary_union_bindings() {
 
     let root = crate::core::Dict::new_sync().insert(
         d.clone(),
-        expr_value(dict_union_expr(
+        fixture_computation(dict_union_expr(
             TestExpr::Value(Value::Dict(
                 crate::core::Dict::new_sync()
                     .insert(hello.clone(), Value::binary_from_text("Hello")),
@@ -1349,7 +1335,7 @@ fn names_can_traverse_dictionary_union_bindings() {
     );
 
     let value = eval_closed_expr(&fixpoint_dict(root)).expect("root should evaluate");
-    let resolved = eval_value(&rooted_expr_value(
+    let resolved = eval_value(&apply_rooted_fixture(
         &value,
         global_access(vec![TestKey::Key(d), TestKey::Key(hello)]),
     ))
@@ -1382,7 +1368,7 @@ fn names_can_expand_list_valued_path_segments() {
 
     let root = crate::core::Dict::new_sync().insert(foo.clone(), nested);
     let value = eval_closed_expr(&fixpoint_dict(root)).expect("root should evaluate");
-    let resolved = eval_value(&rooted_expr_value(
+    let resolved = eval_value(&apply_rooted_fixture(
         &value,
         global_access(vec![
             TestKey::Key(foo),
@@ -1409,7 +1395,7 @@ fn missing_dictionary_members_resolve_to_empty_dictionary() {
         Key::atom_from_text("present"),
         Value::Dict(crate::core::Dict::new_sync()),
     ));
-    let resolved = eval_value(&rooted_expr_value(
+    let resolved = eval_value(&apply_rooted_fixture(
         &root,
         global_access(vec![
             TestKey::Key(Key::atom_from_text("present")),
@@ -1445,7 +1431,7 @@ fn anno_builtin_preserves_lazy_targets_when_assertions_pass() {
         ),
     );
 
-    let value = eval_value(&rooted_expr_value(
+    let value = eval_value(&apply_rooted_fixture(
         &root,
         TestExpr::Apply(
             Arc::new(TestExpr::Apply(
@@ -1488,7 +1474,7 @@ fn anno_builtin_returns_stuck_errors_for_failed_assertions() {
         ),
     );
 
-    let value = eval_value(&rooted_expr_value(
+    let value = eval_value(&apply_rooted_fixture(
         &Value::Dict(crate::core::Dict::new_sync()),
         TestExpr::Apply(
             Arc::new(TestExpr::Apply(
@@ -1609,13 +1595,11 @@ fn unknown_annotations_pass_through_targets() {
 
 #[test]
 fn builtins_are_curried_and_do_not_force_arguments_early() {
-    let partial = eval_closed_expr(&TestExpr::Apply(
-        Arc::new(TestExpr::Value(Value::Builtin(Builtin::Append))),
-        Arc::new(global_access(vec![TestKey::Key(Key::atom_from_text(
-            "missing",
-        ))])),
-    ))
-    .expect("partial builtin application should not force its first argument");
+    let unforced = Value::deferred("unforced builtin argument", || {
+        panic!("partial builtin application forced its first argument")
+    });
+    let partial = apply_values(Value::Builtin(Builtin::Append), vec![unforced])
+        .expect("partial builtin application should accept its first argument");
 
     match partial {
         Value::PartialBuiltin(call) => {
