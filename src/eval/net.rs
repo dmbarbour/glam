@@ -317,6 +317,7 @@ impl NetSpecialization for CoreSpecialization {
             CoreOperator::Applicable(_) => "core applicable",
             CoreOperator::List { .. } => "list literal",
             CoreOperator::Access { .. } => "dictionary access",
+            CoreOperator::Request { .. } => "effect request",
         }
     }
 }

@@ -85,6 +85,22 @@ pub(crate) fn access_operator(path: Arc<[CoreDataKey]>, supplied: Arc<[Value]>) 
     CoreOperator::Access { path, supplied }
 }
 
+pub(crate) fn request_operator(
+    tag: Key,
+    arity: usize,
+    supplied: Arc<[Value]>,
+    wrap_effect: bool,
+) -> CoreOperator {
+    assert!(arity > 0, "nullary requests are already data values");
+    assert!(supplied.len() < arity);
+    CoreOperator::Request {
+        tag,
+        arity,
+        supplied,
+        wrap_effect,
+    }
+}
+
 pub(super) fn apply_core_operator(
     operator: &CoreOperator,
     data: &Value,
@@ -217,5 +233,45 @@ pub(super) fn apply_core_operator(
                 Arc::from(arguments),
             ))))
         }
+        CoreOperator::Request {
+            tag,
+            arity,
+            supplied,
+            wrap_effect,
+        } => {
+            let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
+            arguments.push(operand);
+            if arguments.len() < *arity {
+                return Ok(OperatorYield::Operator(request_operator(
+                    tag.clone(),
+                    *arity,
+                    Arc::from(arguments),
+                    *wrap_effect,
+                )));
+            }
+            let request = Value::Dict(
+                crate::core::Dict::new_sync()
+                    .insert(tag.clone(), Value::List(List::from_values(arguments))),
+            );
+            Ok(OperatorYield::Data(if *wrap_effect {
+                constant_effect(request)
+            } else {
+                request
+            }))
+        }
     }
+}
+
+fn constant_effect(request: Value) -> Value {
+    let mut net = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+    let [input, argument, result] = net.bind();
+    let erase = net.copy(0).input;
+    net.wire(argument, erase);
+    let data = net.data(request);
+    net.wire(result, data);
+    let function = Value::Function(FunctionValue::new(
+        NetValue::new(net.finish(input).instantiate_shared()),
+        1,
+    ));
+    Value::Dict(crate::core::Dict::new_sync().insert((*keys::EFF).clone(), function))
 }

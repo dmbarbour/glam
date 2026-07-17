@@ -341,6 +341,36 @@ fn parse_success_writes_summary_to_stderr() {
     assert!(stderr.contains("definition"));
 }
 
+#[test]
+fn configured_logger_reads_diagnostics_and_writes_stderr_effectfully() {
+    let dir = unique_temp_dir("glam-conf-log");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    let invalid = dir.join("invalid.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = .read_log >>= (\\message -> .write_stderr (\"CUSTOM: \" ++ message.msg.text ++ [10]))\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+    fs::write(&invalid, b"language g0\nvalue = \xff\n")
+        .unwrap_or_else(|err| panic!("failed to write {}: {err}", invalid.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--file")
+        .arg(&invalid)
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("CUSTOM: source is not valid UTF-8"),
+        "configured logger did not render the diagnostic:\n{stderr}"
+    );
+}
+
 fn hello_sample_files() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/assembly");
     let mut files = fs::read_dir(&root)

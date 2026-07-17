@@ -1,11 +1,18 @@
+use std::collections::VecDeque;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 
 use bytes::Bytes;
-use glam::{Assembler, Builtin, Diagnostic, Error, ModuleInput, Severity, Value};
+use glam::reflection::{CommitResult, HostSnapshot, TaskCommit, TaskHost, TaskOutcome};
+use glam::{
+    Assembler, Builtin, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticSink, Error,
+    ModuleInput, Severity, Value,
+};
 
 // Parse inspection intentionally remains on the front-end API while ordinary
 // assembly uses only the embedding facade.
@@ -124,12 +131,21 @@ fn script_extension(option: &str) -> Option<&str> {
 }
 
 fn assemble_inputs(inputs: Vec<ModuleInput>, cli_args: Vec<String>) -> ExitCode {
-    let assembler = Assembler::default();
-    let logger = DefaultLogger::new(assembler.clone());
-    let assembler = assembler.with_diagnostic_callback(move |diagnostic| {
-        logger.emit(&diagnostic);
-    });
-    let result = assemble(&assembler, inputs, cli_args);
+    let log_host = Arc::new(LogHost::new(DEFAULT_DIAGNOSTIC_CAPACITY));
+    let assembler = Assembler::default().with_diagnostic_sink(log_host.clone());
+    let configuration = match load_configuration(&assembler) {
+        Ok(configuration) => configuration,
+        Err(error) => {
+            log_host.close();
+            log_host.drain_default(&DefaultLogger::new(assembler.clone()));
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let logger = start_logger(&assembler, &configuration.value, log_host.clone());
+    let result = assemble(&assembler, inputs, cli_args, configuration.environment);
+    log_host.close();
+    logger.join().expect("logger task should not panic");
 
     let bytes = match result {
         Ok(bytes) => bytes,
@@ -151,8 +167,8 @@ fn assemble(
     assembler: &Assembler,
     inputs: Vec<ModuleInput>,
     cli_args: Vec<String>,
+    environment: Value,
 ) -> Result<Bytes, Error> {
-    let environment = load_configuration(assembler)?;
     let arguments = Value::list(cli_args.into_iter().map(Value::text));
     let initial_definitions = Value::record([
         ("asm", Value::record([("args", arguments)])),
@@ -166,7 +182,12 @@ fn assemble(
     assembler.binary_at(module.value(), "asm.result")
 }
 
-fn load_configuration(assembler: &Assembler) -> Result<Value, Error> {
+struct LoadedConfiguration {
+    value: Value,
+    environment: Value,
+}
+
+fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Error> {
     let default_environment = empty_environment_object();
     let initial_definitions = Value::record([("env", default_environment.clone())]);
     let module = assembler
@@ -175,9 +196,196 @@ fn load_configuration(assembler: &Assembler) -> Result<Value, Error> {
         .inputs(configuration_paths().into_iter().map(ModuleInput::file))
         .build()?;
 
-    match assembler.get(module.value(), "conf.env") {
-        Ok(environment) if !environment.is_undefined() => assembler.evaluate(&environment),
-        Ok(_) | Err(_) => Ok(default_environment),
+    let environment = match assembler.get(module.value(), "conf.env") {
+        Ok(environment) if !environment.is_undefined() => assembler.evaluate(&environment)?,
+        Ok(_) | Err(_) => default_environment,
+    };
+    Ok(LoadedConfiguration {
+        value: module.into_value(),
+        environment,
+    })
+}
+
+fn start_logger(
+    assembler: &Assembler,
+    configuration: &Value,
+    host: Arc<LogHost>,
+) -> thread::JoinHandle<()> {
+    let logger = DefaultLogger::new(assembler.clone());
+    let custom = assembler
+        .get(configuration, "conf.log")
+        .ok()
+        .filter(|logger| !logger.is_undefined());
+    thread::spawn(move || {
+        if let Some(custom) = custom {
+            match glam::reflection::run(&custom, host.clone()) {
+                Ok(TaskOutcome::Complete(_)) | Ok(TaskOutcome::Cancelled) => {}
+                Err(error) => {
+                    let message = format!("error: configured logger failed: {error}\n");
+                    host.write_stderr(Bytes::from(message));
+                }
+            }
+        }
+        host.drain_default(&logger);
+    })
+}
+
+struct LogHost {
+    capacity: usize,
+    state: Mutex<LogHostState>,
+    changed: Condvar,
+}
+
+struct LogHostState {
+    generation: u64,
+    heap: Value,
+    diagnostics: VecDeque<Diagnostic>,
+    stderr: VecDeque<Bytes>,
+    closed: bool,
+}
+
+impl LogHost {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            state: Mutex::new(LogHostState {
+                generation: 1,
+                heap: Value::empty_record(),
+                diagnostics: VecDeque::new(),
+                stderr: VecDeque::new(),
+                closed: false,
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("log host mutex should not be poisoned");
+        state.closed = true;
+        state.generation = state.generation.wrapping_add(1);
+        self.changed.notify_all();
+    }
+
+    fn drain_default(&self, logger: &DefaultLogger) {
+        while let Some(diagnostic) = self.take_diagnostic() {
+            logger.emit(&diagnostic);
+        }
+        self.flush_stderr();
+    }
+
+    fn take_diagnostic(&self) -> Option<Diagnostic> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("log host mutex should not be poisoned");
+        loop {
+            if let Some(diagnostic) = state.diagnostics.pop_front() {
+                state.generation = state.generation.wrapping_add(1);
+                self.changed.notify_all();
+                return Some(diagnostic);
+            }
+            if state.closed {
+                return None;
+            }
+            state = self
+                .changed
+                .wait(state)
+                .expect("log host mutex should not be poisoned");
+        }
+    }
+
+    fn flush_stderr(&self) {
+        let output = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("log host mutex should not be poisoned");
+            state.stderr.drain(..).collect::<Vec<_>>()
+        };
+        let mut stderr = io::stderr().lock();
+        for bytes in output {
+            let _ = stderr.write_all(&bytes);
+        }
+    }
+}
+
+impl DiagnosticSink for LogHost {
+    fn emit(&self, diagnostic: Diagnostic) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("log host mutex should not be poisoned");
+        if self.capacity == 0 {
+            return;
+        }
+        if state.diagnostics.len() == self.capacity {
+            state.diagnostics.pop_front();
+        }
+        state.diagnostics.push_back(diagnostic);
+        state.generation = state.generation.wrapping_add(1);
+        self.changed.notify_all();
+    }
+}
+
+impl TaskHost for LogHost {
+    fn snapshot(&self) -> HostSnapshot {
+        let state = self
+            .state
+            .lock()
+            .expect("log host mutex should not be poisoned");
+        HostSnapshot::new(
+            state.generation,
+            state.heap.clone(),
+            Arc::from(state.diagnostics.iter().cloned().collect::<Vec<_>>()),
+            state.closed,
+        )
+    }
+
+    fn commit(&self, commit: TaskCommit) -> CommitResult {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("log host mutex should not be poisoned");
+            if state.generation != commit.generation()
+                || state.diagnostics.len() < commit.consumed_diagnostics()
+            {
+                return CommitResult::Conflict;
+            }
+            state.heap = commit.heap().clone();
+            state.diagnostics.drain(..commit.consumed_diagnostics());
+            state.stderr.extend(commit.stderr().iter().cloned());
+            state.generation = state.generation.wrapping_add(1);
+            self.changed.notify_all();
+        }
+        self.flush_stderr();
+        CommitResult::Committed
+    }
+
+    fn wait_for_change(&self, observed_generation: u64) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("log host mutex should not be poisoned");
+        while state.generation == observed_generation && !state.closed {
+            state = self
+                .changed
+                .wait(state)
+                .expect("log host mutex should not be poisoned");
+        }
+        !(state.closed && state.diagnostics.is_empty())
+    }
+
+    fn write_stderr(&self, bytes: Bytes) {
+        self.state
+            .lock()
+            .expect("log host mutex should not be poisoned")
+            .stderr
+            .push_back(bytes);
+        self.flush_stderr();
     }
 }
 

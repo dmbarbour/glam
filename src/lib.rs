@@ -12,6 +12,7 @@ pub mod g_syntax;
 mod interaction_net;
 mod list;
 mod number;
+pub mod reflection;
 
 pub use api::{
     Assembler, BuiltModule, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticBuffer,

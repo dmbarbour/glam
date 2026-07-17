@@ -29,10 +29,10 @@ mod value;
 pub(crate) use application::apply_values;
 pub(crate) use operator::{
     access_operator, apply_arity_operator, computation_capture_operator, function_capture_operator,
-    list_operator,
+    list_operator, request_operator,
 };
 pub use sequence::list_output_bytes;
-pub(crate) use sequence::list_output_bytes_range;
+pub(crate) use sequence::{eval_key_path_list, list_output_bytes_range, list_to_value_items};
 pub use value::{EvalError, eval_value};
 
 use application::*;

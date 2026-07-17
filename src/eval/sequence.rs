@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn eval_key_path_list(value: &Value) -> Result<Vec<Key>, EvalError> {
+pub(crate) fn eval_key_path_list(value: &Value) -> Result<Vec<Key>, EvalError> {
     let value = eval_value(value)?;
     let Value::List(list) = value else {
         return Err(EvalError::new(
@@ -49,7 +49,7 @@ pub(super) fn list_to_key_items(list: &List) -> Result<Arc<[Key]>, EvalError> {
     Ok(Arc::from(items.into_inner()))
 }
 
-pub(super) fn list_to_value_items(list: &List) -> Result<Vec<Value>, EvalError> {
+pub(crate) fn list_to_value_items(list: &List) -> Result<Vec<Value>, EvalError> {
     let items = std::cell::RefCell::new(Vec::new());
     list.try_for_each_segment(
         &mut |bytes| {

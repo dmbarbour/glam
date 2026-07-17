@@ -71,6 +71,32 @@ design in the design documents.
   compact text view. More elaborate logging and IDE policy belongs to glam
   configuration, not to the assembler library.
 
+### Reflection effects
+
+- `reflection::run` interprets freer effects outside interaction-net
+  evaluation. Generic request operators only construct singleton dictionaries
+  tagged by host-only abstract-global atoms.
+- The current task API provides `r`, `seq`, `alt`, `fail`, `cut`, `fix`, `get`,
+  `set`, `reset`, and `shift`, plus provisional `read_log` and `write_stderr`
+  host effects. A top-level `alt` is rejected; alternatives belong to `cut`.
+- Every `get`/`set` path is implicitly under user-owned `user_state`. The
+  ordinary `heap` subtree is shared through the host transaction snapshot.
+  Machine continuations, choice bookkeeping, queue storage, and other
+  main-owned state are outside that subtree. Do not protect user state from
+  root replacement or rearrangement; those consequences belong to the user.
+- An outer `cut` snapshots the heap and diagnostic queue. Failed alternatives
+  discard state, reserved reads, and buffered writes; successful nested cuts
+  merge upward; an outer success validates and commits. The bootstrap is
+  currently serial and uses a coarse generation, but the boundary is shaped
+  for finer optimistic observations later.
+- `fix` currently handles the ordinary single-success case. Rebase its pending
+  future per alternative before relying on a fixpoint whose chosen result can
+  later backtrack into a sibling branch.
+- `main` queues diagnostics before configuration exists. Defined `conf.log`
+  consumes enriched messages effectfully; undefined, completed, or failed
+  custom logging falls back to the Rust terminal logger. Stderr effects commit
+  to a host buffer before bytes are written to the OS.
+
 ### Values and evaluation
 
 - Production evaluation consumes only closed `Value`s. The small fixture IR in

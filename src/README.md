@@ -30,6 +30,7 @@ implementation constraints.
 | `list.rs` | Generic compact/lazy persistent list ropes |
 | `number.rs` | Exact-rational wrapper and public conversion boundary |
 | `diagnostic.rs` | Diagnostic severity plus conventional `msg` values and assembler metadata records |
+| `reflection.rs` | External opaque-request effect tasks, task-local control/state, cut transactions, and host-resource boundary |
 
 The detailed interaction-net invariants live in
 [`docs/agent_context/interaction_nets.md`](../docs/agent_context/interaction_nets.md),
@@ -51,7 +52,7 @@ main
        -> the final-definition lazy cell closes the module fixpoint
        -> eval exposes the assembled module value
   -> Assembler::binary_at(module, "asm.result")
-  -> main writes bytes and drains retained diagnostics
+  -> main closes the log queue, joins `conf.log` or the fallback logger, and writes bytes
 ```
 
 Inputs are processed from last to first so earlier command-line inputs override
@@ -69,6 +70,16 @@ viewer context. Sources and requests are tagged values, `namespace` is globally
 qualified, and `import_chain` contains ordered root-to-parent
 `{importer,request,extends}` edges. Rendering is client policy; the executable's
 default terminal logger is not part of `Assembler`.
+
+`main` installs a queue-backed diagnostic sink before compiling configuration,
+so bootstrap diagnostics are available to the configured logger. If `conf.log`
+is defined, it runs as an external freer-effect task with standard effects plus
+`read_log` and `write_stderr`; otherwise the Rust terminal logger drains the
+queue. Normal early termination or task failure also returns remaining messages
+to the fallback logger. Effect requests are ordinary singleton dictionaries
+identified by host-only abstract-global atoms. Core operators only construct
+requests; reflection state and external I/O are never performed by interaction-
+net reduction.
 
 `main` chooses the `configuration` and `assembly` module paths and constructs
 their initial definitions. Those names and roles are CLI policy, not library

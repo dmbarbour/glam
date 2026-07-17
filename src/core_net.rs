@@ -43,6 +43,14 @@ pub enum CoreOperator {
         path: Arc<[CoreDataKey]>,
         supplied: Arc<[Value]>,
     },
+    /// Reifies an opaque-tagged external effect request without performing it
+    /// during interaction-net evaluation.
+    Request {
+        tag: Key,
+        arity: usize,
+        supplied: Arc<[Value]>,
+        wrap_effect: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
