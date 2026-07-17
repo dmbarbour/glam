@@ -299,6 +299,7 @@ It is very convenient to assume a standard effects API for generic extensions. P
 - `.r Result` - pass result to next step
 - `.seq op k` - equivalent to `op >>= k`
 - `.alt A B` - run `A`; on fail, backtrack then run `B`
+  - invalid outside `.cut` scope in general usage
 - `.fail` - failure for `.alt`, does not continue
 - `.cut op` - scope for `.alt`, selects first success
 - `.fix fn` - `fn` receives result as input but hides `.reset` scope
@@ -306,6 +307,7 @@ It is very convenient to assume a standard effects API for generic extensions. P
 - `.set Path Val` - overwrite data in state; set `{}` to erase key
 - `.reset Key op` - scope for delimited continuations
 - `.shift Key fn` - exits corresponding `.reset` with continuation 
+  - continuation invalid outside current task in general usage
 
 The `Path` type for `.get/.set` is a list of keys, assuming state is a hierarchical dictionary. The empty list represents the toplevel dictionary. Some contexts may recognize other `Path` types, e.g. lenses or opaque keys.
 

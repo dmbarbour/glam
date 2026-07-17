@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 
@@ -128,9 +129,21 @@ impl fmt::Display for TaskError {
 
 impl std::error::Error for TaskError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TaskId(u64);
+
+static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_task_id() -> Result<TaskId, TaskError> {
+    NEXT_TASK_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .map(TaskId)
+        .map_err(|_| TaskError::new("reflection task IDs exhausted"))
+}
+
 /// Runs one reflection effect until it returns or its host closes.
 pub fn run(effect: &PublicValue, host: Arc<dyn TaskHost>) -> Result<TaskOutcome, TaskError> {
-    EffectTask::new(host).run(effect.as_core().clone())
+    EffectTask::new(host)?.run(effect.as_core().clone())
 }
 
 #[derive(Clone)]
@@ -188,6 +201,7 @@ impl Tags {
 }
 
 struct EffectTask {
+    id: TaskId,
     host: Arc<dyn TaskHost>,
     tags: Tags,
     api: Value,
@@ -198,10 +212,11 @@ struct EffectTask {
 }
 
 impl EffectTask {
-    fn new(host: Arc<dyn TaskHost>) -> Self {
+    fn new(host: Arc<dyn TaskHost>) -> Result<Self, TaskError> {
         let tags = Tags::new();
         let api = effect_api(&tags);
-        Self {
+        Ok(Self {
+            id: allocate_task_id()?,
             host,
             tags,
             api,
@@ -209,7 +224,7 @@ impl EffectTask {
             next_continuation: 1,
             next_control_order: 1,
             continuations: HashMap::new(),
-        }
+        })
     }
 
     fn allocate_control_order(&mut self) -> Result<usize, TaskError> {
@@ -233,8 +248,11 @@ impl EffectTask {
         self.continuations.insert(id, continuation);
         Ok(request_function(
             self.tags.resume.clone(),
-            2,
-            vec![Value::Number(Number::from_u64(id))],
+            3,
+            vec![
+                Value::Number(Number::from_u64(self.id.0)),
+                Value::Number(Number::from_u64(id)),
+            ],
             true,
         ))
     }
@@ -448,7 +466,12 @@ impl EffectTask {
                         .push(Continuation::Glam(target.continuation));
                     branch.effect = apply(function, vec![continuation])?;
                 }
-                Request::Resume(id, value) => {
+                Request::Resume(task_id, id, value) => {
+                    if task_id != self.id {
+                        return Err(TaskError::new(
+                            "captured continuation belongs to another reflection task",
+                        ));
+                    }
                     let mut captured = self
                         .continuations
                         .get(&id)
@@ -879,7 +902,7 @@ enum Request {
     Set(Value, Value),
     Reset(Value, Value),
     Shift(Value, Value),
-    Resume(u64, Value),
+    Resume(TaskId, u64, Value),
     ReadLog,
     WriteStderr(Value),
 }
@@ -934,21 +957,32 @@ fn parse_request(value: Value, tags: &Tags) -> Result<Request, TaskError> {
         2,
         |[key, function]: [Value; 2]| Request::Shift(key, function)
     );
-    args!(&tags.resume, 2, |[id, value]: [Value; 2]| {
-        let Value::Number(id) = id else {
-            return Request::Resume(0, Value::error("invalid continuation ID"));
-        };
-        let id = id
-            .to_i64_if_integer()
-            .and_then(|id| u64::try_from(id).ok())
-            .unwrap_or(0);
-        Request::Resume(id, value)
-    });
+    if let Some(arguments) = parse(&tags.resume)? {
+        let [task_id, continuation_id, value]: [Value; 3] = arguments.try_into().map_err(|_| {
+            TaskError::new("resume request contained the wrong number of arguments")
+        })?;
+        return Ok(Request::Resume(
+            TaskId(request_id(task_id, "task")?),
+            request_id(continuation_id, "continuation")?,
+            value,
+        ));
+    }
     args!(&tags.read_log, 0, |[]: [Value; 0]| Request::ReadLog);
     args!(&tags.write_stderr, 1, |[value]: [Value; 1]| {
         Request::WriteStderr(value)
     });
     Err(TaskError::new("effect API returned an unknown request"))
+}
+
+fn request_id(value: Value, kind: &str) -> Result<u64, TaskError> {
+    let Value::Number(value) = evaluate(value)? else {
+        return Err(TaskError::new(format!(
+            "resume request has an invalid {kind} ID"
+        )));
+    };
+    value
+        .to_u64_if_integer()
+        .ok_or_else(|| TaskError::new(format!("resume request has an invalid {kind} ID")))
 }
 
 fn effect_api(tags: &Tags) -> Value {
@@ -1380,6 +1414,28 @@ mod tests {
         assert_eq!(
             assembler.to_binary(&value).unwrap(),
             b"after cut".as_slice()
+        );
+    }
+
+    #[test]
+    fn continuation_task_identity_prevents_cross_task_aliasing() {
+        let (assembler, effect) = compile_effect(
+            ".reset \"prompt\" (.shift \"prompt\" (\\continuation -> .r continuation))",
+        );
+        let TaskOutcome::Complete(continuation) =
+            run(&effect, Arc::new(TestHost::default())).unwrap()
+        else {
+            panic!("continuation capture should complete")
+        };
+        let foreign_invocation = assembler
+            .apply(&continuation, [PublicValue::text("foreign")])
+            .expect("continuation should remain an applicable value");
+
+        assert!(
+            run(&foreign_invocation, Arc::new(TestHost::default()))
+                .unwrap_err()
+                .to_string()
+                .contains("belongs to another reflection task")
         );
     }
 

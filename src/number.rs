@@ -109,6 +109,14 @@ impl Number {
         self.0.to_integer().to_i64()
     }
 
+    pub fn to_u64_if_integer(&self) -> Option<u64> {
+        if !self.0.is_integer() || self.0.is_negative() {
+            return None;
+        }
+
+        self.0.to_integer().to_u64()
+    }
+
     pub fn to_ratio_i64(&self) -> Option<(i64, i64)> {
         Some((self.0.numer().to_i64()?, self.0.denom().to_i64()?))
     }
@@ -358,6 +366,11 @@ mod tests {
         assert_eq!(Number::from_f64(f64::INFINITY), None);
         assert_eq!(Number::from_f64(f64::NEG_INFINITY), None);
         assert_eq!(Number::from_f64(1.5).unwrap(), ratio);
+
+        let unsigned = Number::from_u64(u64::MAX);
+        assert_eq!(unsigned.to_u64_if_integer(), Some(u64::MAX));
+        assert_eq!(unsigned.to_i64_if_integer(), None);
+        assert_eq!(Number::integer(-1).to_u64_if_integer(), None);
     }
 
     #[test]

@@ -79,6 +79,9 @@ design in the design documents.
 - The current task API provides `r`, `seq`, `alt`, `fail`, `cut`, `fix`, `get`,
   `set`, `reset`, and `shift`, plus provisional `read_log` and `write_stderr`
   host effects. A top-level `alt` is rejected; alternatives belong to `cut`.
+  This and task-local `.shift` continuations are the conservative standard-
+  effect contract: general-purpose utilities must not assume broader behavior,
+  although a specialized handler may explicitly provide it.
 - Every `get`/`set` path is implicitly under user-owned `user_state`. The
   ordinary `heap` subtree is shared through the host transaction snapshot.
   The active reset stack lives under a private key in that same state, so a
@@ -87,7 +90,8 @@ design in the design documents.
   reset stack; those consequences belong to the user. Immediate sequence and
   fixpoint bookkeeping, choice search, transaction journals, and host queues
   remain task-owned. Opaque captured continuations are valid only within the
-  reflection task that created them.
+  reflection task that created them; a process-global `u64` task ID makes
+  foreign invocation fail before its task-local continuation ID is inspected.
 - An outer `cut` snapshots the heap and diagnostic queue. Failed alternatives
   discard state, reserved reads, and buffered writes; successful nested cuts
   merge upward; an outer success validates and commits. The bootstrap is
