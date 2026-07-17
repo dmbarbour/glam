@@ -17,6 +17,6 @@ pub use model::{
 };
 #[allow(unused_imports)]
 pub use runtime::{
-    BlockedCursor, Call, CursorDependency, CursorProgress, OperatorCall, Reduction, ReductionKind,
-    RuntimeNet, SharedRuntimeNet, StuckPair, StuckReason,
+    BlockedCall, BlockedCursor, Call, CursorDependency, CursorProgress, OperatorCall, Reduction,
+    ReductionKind, RuntimeNet, SharedRuntimeNet, StuckPair, StuckReason,
 };

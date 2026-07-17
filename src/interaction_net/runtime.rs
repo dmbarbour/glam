@@ -118,15 +118,21 @@ pub struct OperatorCall {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StuckReason {
+pub enum StuckReason<R> {
     NoRule,
-    SpecializationError(Arc<str>),
+    Specialization(R),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StuckPair {
+pub struct StuckPair<R> {
     pub pair: ActivePairKey,
-    pub reason: StuckReason,
+    pub reason: StuckReason<R>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedCall<W> {
+    pub pair: ActivePairKey,
+    pub wait: W,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,11 +142,22 @@ pub struct BlockedCursor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ActivePairState {
+pub(super) enum ActivePairState<S: NetSpecialization> {
     Ready,
     Claimed,
+    BlockedCall { wait: S::WaitToken },
     BlockedCursor { cursor: NodeId },
-    Stuck(StuckReason),
+    Stuck(StuckReason<S::StuckReason>),
+}
+
+impl<S: NetSpecialization> ActivePairState<S> {
+    fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    fn is_claimed(&self) -> bool {
+        matches!(self, Self::Claimed)
+    }
 }
 
 pub struct SharedRuntimeNet<S: NetSpecialization> {
@@ -184,7 +201,7 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
     /// Resolves one exact claimed `Data >< Bind` pair using client callable
     /// policy. Claiming and finishing each take a short target lock; callable
     /// conversion itself runs without holding the runtime mutex.
-    pub fn resolve_call(&self, call: Call) -> Result<bool, S::Error> {
+    pub fn resolve_call(&self, call: Call) -> Result<bool, S::StuckReason> {
         let Some(data) = self.with_mut(|runtime| runtime.claim_call(call)) else {
             return Ok(false);
         };
@@ -202,7 +219,7 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
             }
             Err(error) => {
                 self.with_mut(|runtime| {
-                    runtime.fail_claimed_call(call, Arc::<str>::from(error.to_string()));
+                    runtime.fail_claimed_call(call, error.clone());
                 });
                 Err(error)
             }
@@ -291,8 +308,9 @@ pub struct RuntimeNet<S: NetSpecialization> {
 
     // Every live principal-principal wire has exactly one authoritative state.
     // External work changes Ready to Claimed while the runtime lock is held,
-    // then completes as a rewrite, a blocked cursor, or a permanent error.
-    pub(super) active: BTreeMap<ActivePairKey, ActivePairState>,
+    // then completes as a rewrite, a blocked call or cursor, or a permanent
+    // stuck reason.
+    pub(super) active: BTreeMap<ActivePairKey, ActivePairState<S>>,
 }
 
 impl<S: NetSpecialization> RuntimeNet<S> {
@@ -409,6 +427,26 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    pub fn blocked_calls(&self) -> impl Iterator<Item = BlockedCall<S::WaitToken>> + '_ {
+        self.active.iter().filter_map(|(pair, state)| match state {
+            ActivePairState::BlockedCall { wait } => Some(BlockedCall {
+                pair: *pair,
+                wait: wait.clone(),
+            }),
+            _ => None,
+        })
+    }
+
+    pub fn blocked_call(&self, pair: ActivePairKey) -> Option<BlockedCall<S::WaitToken>> {
+        match self.active.get(&pair) {
+            Some(ActivePairState::BlockedCall { wait }) => Some(BlockedCall {
+                pair,
+                wait: wait.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     pub fn cursor_dependency(&self, cursor: NodeId) -> Option<CursorDependency<S>> {
         self.cursor_dependencies.get(&cursor).cloned()
     }
@@ -418,7 +456,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.cursor_across(interface)
     }
 
-    pub fn stuck_pairs(&self) -> impl Iterator<Item = StuckPair> + '_ {
+    pub fn stuck_pairs(&self) -> impl Iterator<Item = StuckPair<S::StuckReason>> + '_ {
         self.active.iter().filter_map(|(pair, state)| match state {
             ActivePairState::Stuck(reason) => Some(StuckPair {
                 pair: *pair,
@@ -428,7 +466,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         })
     }
 
-    pub fn stuck_reason(&self, pair: ActivePairKey) -> Option<&StuckReason> {
+    pub fn stuck_reason(&self, pair: ActivePairKey) -> Option<&StuckReason<S::StuckReason>> {
         match self.active.get(&pair) {
             Some(ActivePairState::Stuck(reason)) => Some(reason),
             _ => None,
@@ -441,7 +479,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 
     /// Reads callable data from an active pair already claimed by reduction.
     fn claim_call(&mut self, call: Call) -> Option<S::Data> {
-        if self.active.get(&call.pair) != Some(&ActivePairState::Claimed) {
+        if !self
+            .active
+            .get(&call.pair)
+            .is_some_and(ActivePairState::is_claimed)
+        {
             return None;
         }
         let callable = match self.node(call.data) {
@@ -453,21 +495,50 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 
     /// Leaves a claimed call permanently stuck after applicable lowering
     /// fails.
-    fn fail_claimed_call(&mut self, call: Call, error: Arc<str>) {
-        assert_eq!(
-            self.active.insert(
-                call.pair,
-                ActivePairState::Stuck(StuckReason::SpecializationError(error))
-            ),
-            Some(ActivePairState::Claimed),
+    fn fail_claimed_call(&mut self, call: Call, reason: S::StuckReason) {
+        let previous = self.active.insert(
+            call.pair,
+            ActivePairState::Stuck(StuckReason::Specialization(reason)),
+        );
+        assert!(
+            matches!(previous, Some(ActivePairState::Claimed)),
             "failed call must still be claimed"
         );
+    }
+
+    /// Suspends an exact claimed call on specialization-owned external work.
+    /// No evaluator currently produces this state; this transition is the
+    /// runtime contract for the later blocking-callable spike.
+    pub fn block_claimed_call(&mut self, call: Call, wait: S::WaitToken) {
+        let previous = self
+            .active
+            .insert(call.pair, ActivePairState::BlockedCall { wait });
+        assert!(
+            matches!(previous, Some(ActivePairState::Claimed)),
+            "blocked call must still be claimed"
+        );
+    }
+
+    /// Claims a blocked call only when the wakeup identifies its current wait.
+    pub fn retry_blocked_call(&mut self, call: Call, wait: &S::WaitToken) -> bool {
+        if !matches!(
+            self.active.get(&call.pair),
+            Some(ActivePairState::BlockedCall { wait: current }) if current == wait
+        ) {
+            return false;
+        }
+        self.active.insert(call.pair, ActivePairState::Claimed);
+        true
     }
 
     /// Clones a pending operator transition so specialization code can run without
     /// holding the shared runtime-net mutex.
     pub fn operator_call_parts(&self, call: OperatorCall) -> (S::Operator, S::Data) {
-        assert_eq!(self.active.get(&call.pair), Some(&ActivePairState::Claimed));
+        assert!(
+            self.active
+                .get(&call.pair)
+                .is_some_and(ActivePairState::is_claimed)
+        );
         let operator = match self.node(call.operator) {
             Some(RuntimeNode::Operator(operator)) => operator.clone(),
             _ => panic!("pending operator call agent must exist"),
@@ -502,13 +573,13 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
-    pub fn fail_operator_call(&mut self, call: OperatorCall, error: Arc<str>) {
-        assert_eq!(
-            self.active.insert(
-                call.pair,
-                ActivePairState::Stuck(StuckReason::SpecializationError(error))
-            ),
-            Some(ActivePairState::Claimed),
+    pub fn fail_operator_call(&mut self, call: OperatorCall, reason: S::StuckReason) {
+        let previous = self.active.insert(
+            call.pair,
+            ActivePairState::Stuck(StuckReason::Specialization(reason)),
+        );
+        assert!(
+            matches!(previous, Some(ActivePairState::Claimed)),
             "failed operator call must still be claimed"
         );
     }
@@ -591,7 +662,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     /// Reduces one exact ready pair. Cursor demand uses this to make progress
     /// in the source runtime without searching or sweeping unrelated work.
     pub fn reduce_pair(&mut self, pair: ActivePairKey) -> Option<Reduction> {
-        if self.active.get(&pair) != Some(&ActivePairState::Ready) {
+        if !self
+            .active
+            .get(&pair)
+            .is_some_and(ActivePairState::is_ready)
+        {
             return None;
         }
         *self.active.get_mut(&pair).unwrap() = ActivePairState::Claimed;
@@ -721,7 +796,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 | ReductionKind::RemoteCursor { .. }
                 | ReductionKind::Stuck
         ) {
-            assert_eq!(self.active.remove(&pair), Some(ActivePairState::Claimed));
+            assert!(
+                self.active
+                    .remove(&pair)
+                    .is_some_and(|state| state.is_claimed())
+            );
         }
         Some(Reduction { pair, kind })
     }

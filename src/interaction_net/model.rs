@@ -95,14 +95,21 @@ impl FanIdentity {
 pub trait NetSpecialization: Clone + fmt::Debug + PartialEq + Eq + Sized + 'static {
     type Data: Clone + fmt::Debug + PartialEq + Eq + 'static;
     type Operator: Clone + fmt::Debug + PartialEq + Eq + 'static;
-    type Error: fmt::Display;
+    /// Opaque identity for one externally blocked operation.
+    ///
+    /// Equality lets an evaluator reject a stale wakeup after a pair has been
+    /// retried and blocked on different work.
+    type WaitToken: Clone + fmt::Debug + PartialEq + Eq + 'static;
+    /// Structured explanation retained when specialization policy cannot
+    /// reduce an otherwise valid active pair.
+    type StuckReason: Clone + fmt::Debug + 'static;
 
-    fn callable(data: Self::Data) -> Result<Callable<Self>, Self::Error>;
+    fn callable(data: Self::Data) -> Result<Callable<Self>, Self::StuckReason>;
 
     fn apply_operator(
         operator: &Self::Operator,
         data: &Self::Data,
-    ) -> Result<OperatorYield<Self>, Self::Error>;
+    ) -> Result<OperatorYield<Self>, Self::StuckReason>;
 
     fn operator_name(operator: &Self::Operator) -> &str;
 }

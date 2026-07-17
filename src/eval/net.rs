@@ -294,16 +294,17 @@ pub(super) fn progress_exact_core_pair(
 impl NetSpecialization for CoreSpecialization {
     type Data = Value;
     type Operator = CoreOperator;
-    type Error = EvalError;
+    type WaitToken = crate::core_net::CoreWaitToken;
+    type StuckReason = EvalError;
 
-    fn callable(data: Self::Data) -> Result<Callable<Self>, Self::Error> {
+    fn callable(data: Self::Data) -> Result<Callable<Self>, Self::StuckReason> {
         lower_core_callable(data)
     }
 
     fn apply_operator(
         operator: &Self::Operator,
         data: &Self::Data,
-    ) -> Result<OperatorYield<Self>, Self::Error> {
+    ) -> Result<OperatorYield<Self>, Self::StuckReason> {
         apply_core_operator(operator, data)
     }
 
@@ -416,7 +417,7 @@ pub(super) fn stuck_pair_error(
     runtime.with(|net| {
         let reason = net.stuck_reason(pair);
         match reason {
-            Some(StuckReason::SpecializationError(error)) => EvalError::new(error.as_ref()),
+            Some(StuckReason::Specialization(error)) => error.clone(),
             Some(StuckReason::NoRule) | None => match net.active_pair_nodes(pair) {
                 Some((left, right)) => EvalError::new(format!(
                     "interaction net reached a stuck active pair: {:?} >< {:?}",
@@ -440,13 +441,12 @@ pub(super) fn progress_core_operator_call(
         }),
         Err(error) => {
             // Core operator errors already identify the failed semantic
-            // operation. Preserve that diagnostic verbatim while retaining
+            // operation. Preserve that structured error while retaining
             // the operator itself in the stuck pair for runtime inspection.
-            let error: Arc<str> = error.to_string().into();
             runtime.with_mut(|net| {
                 net.fail_operator_call(call, error.clone());
             });
-            return Err(EvalError::new(error.as_ref()));
+            return Err(error);
         }
     }
     Ok(true)

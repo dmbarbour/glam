@@ -62,21 +62,62 @@ impl<D: TestData> Eq for TestOperator<D> {}
 impl<D: TestData> NetSpecialization for D {
     type Data = D;
     type Operator = TestOperator<D>;
-    type Error = Arc<str>;
+    type WaitToken = u64;
+    type StuckReason = Arc<str>;
 
-    fn callable(_data: D) -> Result<Callable<Self>, Self::Error> {
+    fn callable(_data: D) -> Result<Callable<Self>, Self::StuckReason> {
         Err(Arc::from("test data is not callable"))
     }
 
     fn apply_operator(
         operator: &Self::Operator,
         data: &D,
-    ) -> Result<OperatorYield<Self>, Self::Error> {
+    ) -> Result<OperatorYield<Self>, Self::StuckReason> {
         operator.apply(data)
     }
 
     fn operator_name(operator: &Self::Operator) -> &str {
         operator.name
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StructuredSpecialization;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StructuredStuckReason {
+    code: u32,
+    detail: Arc<str>,
+}
+
+impl fmt::Display for StructuredStuckReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl NetSpecialization for StructuredSpecialization {
+    type Data = i32;
+    type Operator = ();
+    type WaitToken = u64;
+    type StuckReason = StructuredStuckReason;
+
+    fn callable(_data: Self::Data) -> Result<Callable<Self>, Self::StuckReason> {
+        Err(StructuredStuckReason {
+            code: 42,
+            detail: Arc::from("not callable"),
+        })
+    }
+
+    fn apply_operator(
+        _operator: &Self::Operator,
+        _data: &Self::Data,
+    ) -> Result<OperatorYield<Self>, Self::StuckReason> {
+        unreachable!("structured test specialization has no operators")
+    }
+
+    fn operator_name(_operator: &Self::Operator) -> &str {
+        "unreachable test operator"
     }
 }
 
@@ -423,6 +464,58 @@ fn claimed_and_stuck_pairs_remain_in_the_active_tree() {
 }
 
 #[test]
+fn blocked_call_requires_its_current_wait_token_to_be_reclaimed() {
+    let mut net = RuntimeNet::<()>::empty();
+    let bind = net.add_node(RuntimeNode::Bind);
+    let data = net.add_node(RuntimeNode::Data(()));
+    net.connect(Port::principal(bind), Port::principal(data));
+    let pair = ActivePairKey::new(bind, data);
+    let reduction = net.reduce_next().expect("bind-data must claim a call");
+    let ReductionKind::Call { bind, data } = reduction.kind else {
+        panic!("expected a claimed call");
+    };
+    let call = Call { pair, bind, data };
+
+    net.block_claimed_call(call, 17);
+
+    assert_eq!(net.blocked_call(pair), Some(BlockedCall { pair, wait: 17 }));
+    assert_eq!(
+        net.blocked_calls().collect::<Vec<_>>(),
+        vec![BlockedCall { pair, wait: 17 }]
+    );
+    assert!(!net.retry_blocked_call(call, &16));
+    assert_eq!(net.blocked_call(pair).unwrap().wait, 17);
+    assert!(net.retry_blocked_call(call, &17));
+    assert_eq!(net.claim_call(call), Some(()));
+    assert!(net.principals_connect(pair));
+}
+
+#[test]
+fn callable_failure_remains_structured_in_the_stuck_pair() {
+    let mut net = RuntimeNet::<StructuredSpecialization>::empty();
+    let bind = net.add_node(RuntimeNode::Bind);
+    let data = net.add_node(RuntimeNode::Data(7));
+    net.connect(Port::principal(bind), Port::principal(data));
+    let pair = ActivePairKey::new(bind, data);
+    let reduction = net.reduce_next().expect("bind-data must claim a call");
+    let ReductionKind::Call { bind, data } = reduction.kind else {
+        panic!("expected a claimed call");
+    };
+    let call = Call { pair, bind, data };
+    let net = SharedRuntimeNet::new(net);
+
+    let error = net
+        .resolve_call(call)
+        .expect_err("test data must not be callable");
+
+    assert_eq!(error.code, 42);
+    assert_eq!(
+        net.with(|net| net.stuck_reason(pair).cloned()),
+        Some(StuckReason::Specialization(error))
+    );
+}
+
+#[test]
 fn claimed_callable_data_lowers_to_an_explicit_operator_bind() {
     let mut net = RuntimeNet::<i32>::empty();
     let application = net.add_node(RuntimeNode::Bind);
@@ -562,7 +655,7 @@ fn operator_error_preserves_the_stuck_active_pair() {
         failed.stuck_pairs().collect::<Vec<_>>(),
         vec![StuckPair {
             pair: call.pair,
-            reason: StuckReason::SpecializationError(Arc::from("invalid input")),
+            reason: StuckReason::Specialization(Arc::from("invalid input")),
         }]
     );
     assert!(failed.principals_connect(call.pair));

@@ -90,7 +90,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                     entry.insert(ActivePairState::Ready);
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry)
-                    if entry.get() == &ActivePairState::Claimed =>
+                    if entry.get().is_claimed() =>
                 {
                     *entry.get_mut() = ActivePairState::Ready;
                 }

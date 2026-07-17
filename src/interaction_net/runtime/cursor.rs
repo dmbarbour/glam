@@ -45,10 +45,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         call: Call,
         source: SharedRuntimeNet<S>,
     ) -> NodeId {
-        assert_eq!(
-            self.active.remove(&call.pair),
-            Some(ActivePairState::Claimed),
-            "resumed interaction-net call must still be claimed"
+        assert!(
+            self.active
+                .remove(&call.pair)
+                .is_some_and(|state| state.is_claimed()),
+            "resumed interaction-net call must still be claimed",
         );
         assert_eq!(
             self.disconnect(Port::principal(call.bind)),
@@ -68,10 +69,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         call: Call,
         operator: S::Operator,
     ) -> NodeId {
-        assert_eq!(
-            self.active.remove(&call.pair),
-            Some(ActivePairState::Claimed),
-            "lowered operator call must still be claimed"
+        assert!(
+            self.active
+                .remove(&call.pair)
+                .is_some_and(|state| state.is_claimed()),
+            "lowered operator call must still be claimed",
         );
         assert_eq!(
             self.disconnect(Port::principal(call.bind)),
@@ -123,10 +125,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         &mut self,
         call: OperatorCall,
     ) {
-        assert_eq!(
-            self.active.remove(&call.pair),
-            Some(ActivePairState::Claimed),
-            "completed operator call must still be pending"
+        assert!(
+            self.active
+                .remove(&call.pair)
+                .is_some_and(|state| state.is_claimed()),
+            "completed operator call must still be pending",
         );
     }
 
@@ -158,7 +161,12 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         cursor: NodeId,
     ) -> Option<CursorClaim<S>> {
         let pair = self.active_pair_key(cursor);
-        if pair.is_some_and(|pair| self.active.get(&pair) != Some(&ActivePairState::Claimed)) {
+        if pair.is_some_and(|pair| {
+            !self
+                .active
+                .get(&pair)
+                .is_some_and(ActivePairState::is_claimed)
+        }) {
             return None;
         }
         let RuntimeNode::RemoteCursor { copy, remote } = self.node(cursor)?.clone() else {
@@ -224,7 +232,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         frontier: SourceFrontier<S>,
     ) -> CursorProgress {
         if let Some(pair) = claim.pair {
-            assert_eq!(self.active.get(&pair), Some(&ActivePairState::Claimed));
+            assert!(
+                self.active
+                    .get(&pair)
+                    .is_some_and(ActivePairState::is_claimed)
+            );
         }
         assert!(matches!(
             self.node(claim.cursor),
@@ -319,7 +331,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 };
             }
         } else if let Some(pair) = claim.pair
-            && self.active.get(&pair) == Some(&ActivePairState::Claimed)
+            && self
+                .active
+                .get(&pair)
+                .is_some_and(ActivePairState::is_claimed)
         {
             self.active.remove(&pair);
         }
@@ -412,10 +427,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         // A converging frontier may be inspected concurrently from its other
         // end. Leave both frontier records intact until that active-pair claim
         // is released.
-        if self
-            .active_pair_key(peer)
-            .is_some_and(|pair| self.active.get(&pair) == Some(&ActivePairState::Claimed))
-        {
+        if self.active_pair_key(peer).is_some_and(|pair| {
+            self.active
+                .get(&pair)
+                .is_some_and(ActivePairState::is_claimed)
+        }) {
             return CursorProgress::Blocked;
         }
         let copy_finished = {
