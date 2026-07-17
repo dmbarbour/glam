@@ -5,6 +5,13 @@ use std::path::{Path, PathBuf};
 use bytes::Bytes;
 use glam::{Assembler, Host, HostError, ModuleInput, Severity, Value};
 
+fn absolute_path_text(path: impl AsRef<Path>) -> String {
+    std::path::absolute(path)
+        .expect("test path should become absolute")
+        .display()
+        .to_string()
+}
+
 #[test]
 fn public_api_builds_a_script_module_and_extracts_binary_data() {
     let assembler = Assembler::default();
@@ -56,6 +63,26 @@ fn public_api_can_load_sources_and_binaries_from_a_custom_host() {
 }
 
 #[test]
+fn top_level_file_inputs_may_be_absolute() {
+    let source_path = absolute_path_text("absolute-input.g");
+    let assembler = Assembler::default().with_host(MemoryHost::new([(
+        source_path.as_str(),
+        b"language g0\nasm.result = \"absolute\"\n".as_slice(),
+    )]));
+    let module = assembler
+        .module(["absolute"])
+        .file(&source_path)
+        .build()
+        .expect("top-level callers may supply an absolute source path");
+    assert_eq!(
+        assembler
+            .binary_at(module.value(), "asm.result")
+            .expect("absolute-path module should assemble"),
+        b"absolute".as_slice()
+    );
+}
+
+#[test]
 fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
     let assembler = Assembler::default().with_host(MemoryHost::new([(
         "invalid.g",
@@ -70,7 +97,8 @@ fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
 
     assert_eq!(error.diagnostics().len(), 1);
     let diagnostic = &error.diagnostics()[0];
-    assert_eq!(diagnostic.source(), Some("invalid.g"));
+    let source_path = absolute_path_text("invalid.g");
+    assert_eq!(diagnostic.source(), Some(source_path.as_str()));
     assert_eq!(diagnostic.line(), Some(1));
     assert_eq!(diagnostic.severity(), Severity::Error);
     assert!(diagnostic.message().contains("not valid UTF-8"));
@@ -83,10 +111,10 @@ fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
     );
     assert_eq!(
         assembler
-            .get(diagnostic.value(), "msg.origin.source")
+            .get(diagnostic.value(), "msg.origin.source.file")
             .expect("assembler source provenance should be mixed in")
             .as_binary(),
-        Some(b"invalid.g".as_slice())
+        Some(source_path.as_bytes())
     );
     assert_eq!(
         assembler
@@ -124,11 +152,12 @@ fn repeated_source_compilations_have_distinct_invocations() {
         invocation(&error.diagnostics()[0]),
         invocation(&error.diagnostics()[1])
     );
+    let source_path = absolute_path_text("invalid.g");
     assert!(
         error
             .diagnostics()
             .iter()
-            .all(|diagnostic| diagnostic.source() == Some("invalid.g"))
+            .all(|diagnostic| diagnostic.source() == Some(source_path.as_str()))
     );
 }
 
@@ -155,10 +184,11 @@ fn imported_source_diagnostics_include_the_import_chain() {
         .expect("default assembler should retain diagnostics");
     assert_eq!(diagnostics.entries().len(), 1);
     let diagnostic = &diagnostics.entries()[0];
-    assert_eq!(diagnostic.source(), Some("child.g"));
+    let source_path = absolute_path_text("child.g");
+    assert_eq!(diagnostic.source(), Some(source_path.as_str()));
     assert_eq!(
         assembler
-            .get(diagnostic.value(), "msg.origin.imports")
+            .get(diagnostic.value(), "msg.origin.import_chain")
             .expect("imported diagnostic should carry its parent chain")
             .kind(),
         glam::ValueKind::List

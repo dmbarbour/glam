@@ -61,9 +61,11 @@ the originating build session.
 
 Each source compilation receives an assembler-local invocation ID. A hidden
 immutable trace links imported compilations to their parent invocation and
-relative import reference. Diagnostic enrichment projects that compact trace
+relative import request. Diagnostic enrichment projects that compact trace
 into `msg.origin` before callbacks or retained histories observe the message;
-front ends never receive it.
+front ends never receive it. Sources and requests are tagged values, `namespace`
+is globally qualified, and `import_chain` contains ordered root-to-parent
+`{importer,request,extends}` edges.
 
 `main` chooses the `configuration` and `assembly` module paths and constructs
 their initial definitions. Those names and roles are CLI policy, not library

@@ -7,6 +7,10 @@ pub(in crate::g_syntax) fn lower_import(
     context: &CompileContext,
     definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
+    if let ImportReference::Local(request) = &import.reference {
+        crate::compiler::validate_local_source_request(request)
+            .map_err(|message| Diagnostic::error(line, message))?;
+    }
     match &import.reference {
         ImportReference::Builtin(name) => {
             if import.binary {
@@ -17,11 +21,11 @@ pub(in crate::g_syntax) fn lower_import(
             }
             lower_builtin_import(name, &import.placement, line, context, definitions)
         }
-        ImportReference::Local(reference) if import.binary => {
-            lower_local_binary_import(reference, &import.placement, line, context, definitions)
+        ImportReference::Local(request) if import.binary => {
+            lower_local_binary_import(request, &import.placement, line, context, definitions)
         }
-        ImportReference::Local(reference) => {
-            lower_local_import(reference, &import.placement, context, definitions)
+        ImportReference::Local(request) => {
+            lower_local_import(request, &import.placement, context, definitions)
         }
     }
 }
@@ -59,7 +63,7 @@ pub(in crate::g_syntax) fn lower_builtin_import(
 }
 
 pub(in crate::g_syntax) fn lower_local_import(
-    reference: &str,
+    request: &str,
     placement: &ImportPlacement,
     context: &CompileContext,
     definitions: &mut Value,
@@ -67,7 +71,7 @@ pub(in crate::g_syntax) fn lower_local_import(
     match placement {
         ImportPlacement::Inline => {
             *definitions = context.import_module(
-                reference,
+                request,
                 None,
                 definitions.clone(),
                 context.final_defs().clone(),
@@ -75,7 +79,7 @@ pub(in crate::g_syntax) fn lower_local_import(
         }
         ImportPlacement::As(target) => {
             let prior_defs = import_as_prior_defs(target, definitions.clone(), context)?;
-            let loaded = scoped_local_import_value(reference, target, prior_defs, context)?;
+            let loaded = scoped_local_import_value(request, target, prior_defs, context)?;
             *definitions = update_module_value(
                 definitions.clone(),
                 target,
@@ -85,7 +89,7 @@ pub(in crate::g_syntax) fn lower_local_import(
         }
         ImportPlacement::At(target) => {
             let scoped_prior = path_value_in_definitions(target, definitions.clone())?;
-            let loaded = scoped_local_import_value(reference, target, scoped_prior, context)?;
+            let loaded = scoped_local_import_value(request, target, scoped_prior, context)?;
             let object = extend_object_with_defs(
                 target,
                 constant_object_defs(loaded),
@@ -100,7 +104,7 @@ pub(in crate::g_syntax) fn lower_local_import(
 }
 
 pub(in crate::g_syntax) fn lower_local_binary_import(
-    reference: &str,
+    request: &str,
     placement: &ImportPlacement,
     line: usize,
     context: &CompileContext,
@@ -113,19 +117,19 @@ pub(in crate::g_syntax) fn lower_local_binary_import(
         ));
     };
 
-    let loaded = context.import_binary(reference);
+    let loaded = context.import_binary(request);
     *definitions = update_module_value(definitions.clone(), target, loaded, context);
     Ok(())
 }
 
 pub(in crate::g_syntax) fn scoped_local_import_value(
-    reference: &str,
+    request: &str,
     target: &str,
     prior_defs: Value,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
     let final_defs = path_value_in_definitions(target, context.final_defs().clone())?;
-    Ok(context.import_module(reference, Some(target), prior_defs, final_defs))
+    Ok(context.import_module(request, Some(target), prior_defs, final_defs))
 }
 
 pub(in crate::g_syntax) fn import_as_prior_defs(

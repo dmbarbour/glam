@@ -171,6 +171,31 @@ fn parses_local_imports() {
 }
 
 #[test]
+fn rejects_non_child_local_import_requests_during_lowering() {
+    for request in [
+        "../parent.g",
+        "/absolute.g",
+        "C:/absolute.g",
+        "./current.g",
+        ".hidden.g",
+        "lib/.hidden/child.g",
+        "lib\\child.g",
+    ] {
+        let source = format!("language g0\nimport \"{request}\" as imported\n");
+        let lowered =
+            lower_to_core_with_context(parse_source(source.as_bytes()), &CompileContext::default());
+        assert!(
+            lowered.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == Severity::Error
+                    && diagnostic.message.contains("local source request")
+            }),
+            "request `{request}` should report a lowering diagnostic: {:#?}",
+            lowered.diagnostics
+        );
+    }
+}
+
+#[test]
 fn parses_builtin_imports() {
     let parsed = parse("language g0\nimport 'std as std\nimport 'math\nimport 'list as list\n");
 

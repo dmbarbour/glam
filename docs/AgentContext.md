@@ -49,14 +49,20 @@ design in the design documents.
 - Front ends pass relative names to `CompileContext::abstract_global_path` and
   relative import requests to `import_module`/`import_binary`. Absolute module
   paths and importer provenance remain handler-owned and must not be exposed
-  back to the front end.
+  back to the front end. Local requests are portable child paths: reject
+  absolute paths, backslashes, empty components, and `.`/`..` or other
+  dot-prefixed components. Top-level host inputs such as `--file` and
+  `GLAM_CONF` are exempt because the caller, not a front end, supplies them.
 - Diagnostic severity is a front-end emission-effect argument, not a field the
   assembler discovers by evaluating the message. Before dispatch, the
   assembler mixes authoritative `msg.severity` and `msg.origin` fields into
   the message and composes that mixin into the resulting object `spec`.
-  `msg.origin` separates source kind/label from a fresh assembler-local
-  compilation invocation ID and carries a compact root-to-parent import chain;
-  it must not retain source bytes, module values, or compilation environments.
+  `msg.origin.source` is tagged (`file:Path`, `script:Bytes`, and future source
+  kinds), while `invocation` is a fresh assembler-local compilation ID.
+  `namespace` is the globally qualified definition namespace. `import_chain`
+  contains root-to-parent `{importer,request,extends}` edges; local requests are
+  tagged `file:RelativePath`, and `extends` is relative to the importer namespace.
+  Provenance must not retain module values or compilation environments.
 
 ### Values and evaluation
 

@@ -1,6 +1,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use crate::core::{Builtin, Dict, List, Value, keys};
 use crate::eval;
 use crate::number::Number;
@@ -12,47 +14,40 @@ pub enum Severity {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SourceKind {
-    File,
-    Script,
-}
-
-impl SourceKind {
-    fn value(self) -> Value {
-        match self {
-            Self::File => (*keys::FILE_VALUE).clone(),
-            Self::Script => (*keys::SCRIPT_VALUE).clone(),
-        }
-    }
-}
-
-/// Assembler-owned identity for source content. The bootstrap uses a source
-/// label as its identity; invocation identity remains separate so the same
-/// file can be compiled repeatedly under different module environments.
+/// Assembler-owned identity for source content. Reloadable files retain their
+/// path; inline scripts retain their bytes because no external source handle
+/// exists. Invocation identity remains separate in either case.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SourceIdentity {
-    kind: SourceKind,
-    label: Arc<str>,
+pub(crate) enum SourceIdentity {
+    File { path: Arc<str> },
+    Script { label: Arc<str>, text: Bytes },
 }
 
 impl SourceIdentity {
-    pub(crate) fn file(label: impl Into<Arc<str>>) -> Self {
-        Self {
-            kind: SourceKind::File,
-            label: label.into(),
-        }
+    pub(crate) fn file(path: impl Into<Arc<str>>) -> Self {
+        Self::File { path: path.into() }
     }
 
-    pub(crate) fn script(label: impl Into<Arc<str>>) -> Self {
-        Self {
-            kind: SourceKind::Script,
+    pub(crate) fn script(label: impl Into<Arc<str>>, text: Bytes) -> Self {
+        Self::Script {
             label: label.into(),
+            text,
         }
     }
 
     pub(crate) fn label(&self) -> &Arc<str> {
-        &self.label
+        match self {
+            Self::File { path } => path,
+            Self::Script { label, .. } => label,
+        }
+    }
+
+    fn value(&self) -> Value {
+        let (tag, payload) = match self {
+            Self::File { path } => (&*keys::FILE, Value::binary_from_text(path)),
+            Self::Script { text, .. } => (&*keys::SCRIPT, Value::Binary(text.clone())),
+        };
+        Value::Dict(Dict::new_sync().insert(tag.clone(), payload))
     }
 }
 
@@ -73,17 +68,18 @@ impl CompilationInvocationId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ImportOrigin {
     parent: Arc<CompilationTrace>,
-    reference: Arc<str>,
+    request: Arc<str>,
+    extends: Arc<[String]>,
 }
 
-/// Compact immutable provenance for one compilation invocation. Import traces
-/// retain identifiers and labels only, never source bytes or environment
-/// values.
+/// Immutable provenance for one compilation invocation. Import traces retain
+/// source identities and namespace labels, but never module or environment
+/// values. Inline source bytes are shared through `Bytes` clones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompilationTrace {
     invocation: CompilationInvocationId,
     source: SourceIdentity,
-    module_path: Arc<[String]>,
+    namespace: Arc<[String]>,
     imported_from: Option<ImportOrigin>,
 }
 
@@ -91,12 +87,12 @@ impl CompilationTrace {
     pub(crate) fn root(
         invocation: CompilationInvocationId,
         source: SourceIdentity,
-        module_path: Arc<[String]>,
+        namespace: Arc<[String]>,
     ) -> Self {
         Self {
             invocation,
             source,
-            module_path,
+            namespace,
             imported_from: None,
         }
     }
@@ -104,15 +100,20 @@ impl CompilationTrace {
     pub(crate) fn imported(
         invocation: CompilationInvocationId,
         source: SourceIdentity,
-        module_path: Arc<[String]>,
+        namespace: Arc<[String]>,
         parent: Arc<Self>,
-        reference: Arc<str>,
+        request: Arc<str>,
+        extends: Arc<[String]>,
     ) -> Self {
         Self {
             invocation,
             source,
-            module_path,
-            imported_from: Some(ImportOrigin { parent, reference }),
+            namespace,
+            imported_from: Some(ImportOrigin {
+                parent,
+                request,
+                extends,
+            }),
         }
     }
 
@@ -121,53 +122,56 @@ impl CompilationTrace {
     }
 
     pub(crate) fn origin_value(&self) -> Value {
-        let Value::Dict(origin) = self.frame_value(None) else {
+        let Value::Dict(origin) = self.frame_value() else {
             unreachable!()
         };
-        Value::Dict(origin.insert((*keys::IMPORTS).clone(), self.import_chain_value()))
+        Value::Dict(origin.insert((*keys::IMPORT_CHAIN).clone(), self.import_chain_value()))
     }
 
     fn import_chain_value(&self) -> Value {
         let mut chain = Vec::new();
         let mut current = self;
         while let Some(import) = &current.imported_from {
-            chain.push((import.parent.clone(), import.reference.clone()));
+            chain.push(import.clone());
             current = &import.parent;
         }
         chain.reverse();
         Value::List(List::from_values(
             chain
                 .into_iter()
-                .map(|(parent, reference)| parent.frame_value(Some(&reference)))
+                .map(|import| import.edge_value())
                 .collect(),
         ))
     }
 
-    fn frame_value(&self, reference: Option<&str>) -> Value {
-        let mut frame = Dict::new_sync()
-            .insert((*keys::INVOCATION).clone(), self.invocation.value())
-            .insert(
-                (*keys::SOURCE).clone(),
-                Value::binary_from_text(&self.source.label),
-            )
-            .insert((*keys::SOURCE_KIND).clone(), self.source.kind.value())
-            .insert(
-                (*keys::MODULE).clone(),
-                module_path_value(&self.module_path),
-            );
-        if let Some(reference) = reference {
-            frame = frame.insert(
-                (*keys::REFERENCE).clone(),
-                Value::binary_from_text(reference),
-            );
-        }
-        Value::Dict(frame)
+    fn frame_value(&self) -> Value {
+        Value::Dict(
+            Dict::new_sync()
+                .insert((*keys::INVOCATION).clone(), self.invocation.value())
+                .insert((*keys::SOURCE).clone(), self.source.value())
+                .insert((*keys::NAMESPACE).clone(), namespace_value(&self.namespace)),
+        )
     }
 }
 
-fn module_path_value(module_path: &[String]) -> Value {
+impl ImportOrigin {
+    fn edge_value(&self) -> Value {
+        let request = Value::Dict(Dict::new_sync().insert(
+            (*keys::FILE).clone(),
+            Value::binary_from_text(&self.request),
+        ));
+        Value::Dict(
+            Dict::new_sync()
+                .insert((*keys::IMPORTER).clone(), self.parent.frame_value())
+                .insert((*keys::REQUEST).clone(), request)
+                .insert((*keys::EXTENDS).clone(), namespace_value(&self.extends)),
+        )
+    }
+}
+
+fn namespace_value(namespace: &[String]) -> Value {
     Value::List(List::from_values(
-        module_path
+        namespace
             .iter()
             .map(|part| Value::binary_from_text(part))
             .collect(),
@@ -291,6 +295,7 @@ mod tests {
             Arc::from(["pkg".to_owned(), "child".to_owned()]),
             root,
             Arc::from("lib/child.g"),
+            Arc::from(["child".to_owned()]),
         ));
         let leaf = CompilationTrace::imported(
             CompilationInvocationId::new(3),
@@ -298,6 +303,7 @@ mod tests {
             Arc::from(["pkg".to_owned(), "child".to_owned()]),
             child,
             Arc::from("leaf.g"),
+            Arc::from([]),
         );
 
         let Value::Dict(origin) = leaf.origin_value() else {
@@ -309,30 +315,78 @@ mod tests {
         );
         assert_eq!(
             origin.get(&*keys::SOURCE),
-            Some(&Value::binary_from_text("lib/leaf.g"))
+            Some(&Value::Dict(Dict::new_sync().insert(
+                (*keys::FILE).clone(),
+                Value::binary_from_text("lib/leaf.g")
+            )))
         );
-        let Some(Value::List(imports)) = origin.get(&*keys::IMPORTS) else {
+        let Some(Value::List(namespace)) = origin.get(&*keys::NAMESPACE) else {
+            panic!("origin should contain its global namespace");
+        };
+        assert_eq!(
+            list_values(namespace),
+            [
+                Value::binary_from_text("pkg"),
+                Value::binary_from_text("child")
+            ]
+        );
+        let Some(Value::List(imports)) = origin.get(&*keys::IMPORT_CHAIN) else {
             panic!("origin should contain an import chain");
         };
         let imports = list_values(imports);
         assert_eq!(imports.len(), 2);
-        let Value::Dict(root_frame) = &imports[0] else {
+        let Value::Dict(root_edge) = &imports[0] else {
             unreachable!()
         };
-        let Value::Dict(child_frame) = &imports[1] else {
+        let Value::Dict(child_edge) = &imports[1] else {
             unreachable!()
+        };
+        let Some(Value::Dict(root_request)) = root_edge.get(&*keys::REQUEST) else {
+            panic!("import edge should contain a tagged request");
         };
         assert_eq!(
-            root_frame.get(&*keys::REFERENCE),
+            root_request.get(&*keys::FILE),
             Some(&Value::binary_from_text("lib/child.g"))
         );
+        let Some(Value::List(extends)) = root_edge.get(&*keys::EXTENDS) else {
+            panic!("import edge should say which relative namespace it extends");
+        };
+        assert_eq!(list_values(extends), [Value::binary_from_text("child")]);
+        let Some(Value::Dict(child_request)) = child_edge.get(&*keys::REQUEST) else {
+            panic!("import edge should contain a tagged request");
+        };
         assert_eq!(
-            child_frame.get(&*keys::REFERENCE),
+            child_request.get(&*keys::FILE),
             Some(&Value::binary_from_text("leaf.g"))
         );
+        let Some(Value::Dict(child_importer)) = child_edge.get(&*keys::IMPORTER) else {
+            panic!("import edge should identify its importer");
+        };
         assert_eq!(
-            child_frame.get(&*keys::INVOCATION),
+            child_importer.get(&*keys::INVOCATION),
             Some(&Value::Number(Number::from_u64(2)))
         );
+    }
+
+    #[test]
+    fn inline_script_source_is_tagged_with_its_text() {
+        let trace = CompilationTrace::root(
+            CompilationInvocationId::new(1),
+            SourceIdentity::script("<script.g>", Bytes::from_static(b"language g0\nbroken =\n")),
+            Arc::from(["assembly".to_owned()]),
+        );
+        let Value::Dict(origin) = trace.origin_value() else {
+            unreachable!()
+        };
+        let Some(Value::Dict(source)) = origin.get(&*keys::SOURCE) else {
+            panic!("source should be tagged");
+        };
+        assert_eq!(
+            source.get(&*keys::SCRIPT),
+            Some(&Value::Binary(Bytes::from_static(
+                b"language g0\nbroken =\n"
+            )))
+        );
+        assert!(source.get(&*keys::FILE).is_none());
     }
 }

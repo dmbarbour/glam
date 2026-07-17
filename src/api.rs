@@ -884,15 +884,16 @@ impl Assembler {
         match input {
             ModuleInput::File(path) => {
                 let bytes = self.read_source(path)?;
-                let label: Arc<str> = Arc::from(path.display().to_string());
+                let loader_label: Arc<str> = Arc::from(path.display().to_string());
+                let source_label = absolute_source_label(path)?;
                 let trace = Arc::new(CompilationTrace::root(
                     self.next_compilation_invocation(),
-                    SourceIdentity::file(label.clone()),
+                    SourceIdentity::file(source_label),
                     module_path.clone(),
                 ));
                 let had_errors = Arc::new(AtomicBool::new(false));
                 let context = CompileContext::from_module_path(module_path.iter().cloned())
-                    .with_importer_source_path(label.clone())
+                    .with_importer_source_path(loader_label)
                     .with_compilation_trace(trace.clone())
                     .with_prior_defs(prior_defs)
                     .with_final_defs(final_defs)
@@ -913,7 +914,7 @@ impl Assembler {
                 let label: Arc<str> = Arc::from(format!("<script.{extension}>"));
                 let trace = Arc::new(CompilationTrace::root(
                     self.next_compilation_invocation(),
-                    SourceIdentity::script(label),
+                    SourceIdentity::script(label, body.clone()),
                     module_path.clone(),
                 ));
                 let had_errors = Arc::new(AtomicBool::new(false));
@@ -954,10 +955,11 @@ impl Assembler {
     ) -> Result<CoreValue, String> {
         let path = resolve_local_import_path(
             args.importer_source_path.as_deref(),
-            &args.reference,
+            &args.request,
             "local import",
         )?;
-        let label: Arc<str> = Arc::from(path.display().to_string());
+        let loader_label: Arc<str> = Arc::from(path.display().to_string());
+        let source_label = absolute_source_label(&path).map_err(|error| error.to_string())?;
         let source = self.read_source(&path).map_err(|error| error.to_string())?;
         let module_loader = self.module_loader(session.clone());
         let binary_loader = self.binary_loader();
@@ -965,19 +967,20 @@ impl Assembler {
         let trace = match args.importer_trace {
             Some(parent) => Arc::new(CompilationTrace::imported(
                 self.next_compilation_invocation(),
-                SourceIdentity::file(label.clone()),
+                SourceIdentity::file(source_label.clone()),
                 args.module_path.clone(),
                 parent,
-                args.reference.clone(),
+                args.request.clone(),
+                args.extends.clone(),
             )),
             None => Arc::new(CompilationTrace::root(
                 self.next_compilation_invocation(),
-                SourceIdentity::file(label.clone()),
+                SourceIdentity::file(source_label),
                 args.module_path.clone(),
             )),
         };
         let context = CompileContext::from_module_path(args.module_path.iter().cloned())
-            .with_importer_source_path(label.clone())
+            .with_importer_source_path(loader_label.clone())
             .with_compilation_trace(trace.clone())
             .with_prior_defs(args.prior_defs)
             .with_final_defs(args.final_defs)
@@ -991,7 +994,7 @@ impl Assembler {
         let definitions = compile_source(&source, &context);
 
         if had_errors.load(Ordering::Relaxed) {
-            Err(format!("local import `{label}` failed to compile"))
+            Err(format!("local import `{loader_label}` failed to compile"))
         } else {
             Ok(definitions)
         }
@@ -1000,7 +1003,7 @@ impl Assembler {
     fn load_local_binary(&self, args: BinaryLoadArgs) -> Result<CoreValue, String> {
         let path = resolve_local_import_path(
             args.importer_source_path.as_deref(),
-            &args.reference,
+            &args.request,
             "binary import",
         )?;
         self.host
@@ -1168,16 +1171,28 @@ impl ModuleBuilder<'_> {
 
 fn resolve_local_import_path(
     importer_source_path: Option<&str>,
-    reference: &str,
+    request: &str,
     kind: &str,
 ) -> Result<PathBuf, String> {
+    crate::compiler::validate_local_source_request(request)?;
     let importer = importer_source_path.ok_or_else(|| {
-        format!("{kind} `{reference}` cannot be loaded from a source without a file path")
+        format!("{kind} `{request}` cannot be loaded from a source without a file path")
     })?;
     let base = Path::new(importer)
         .parent()
         .unwrap_or_else(|| Path::new("."));
-    Ok(base.join(reference))
+    Ok(base.join(request))
+}
+
+fn absolute_source_label(path: &Path) -> Result<Arc<str>, Error> {
+    std::path::absolute(path)
+        .map(|path| Arc::from(path.display().to_string()))
+        .map_err(|error| {
+            Error::new(format!(
+                "could not make source path `{}` absolute: {error}",
+                path.display()
+            ))
+        })
 }
 
 #[cfg(test)]
@@ -1288,6 +1303,10 @@ mod tests {
                 .get(&*crate::core::keys::ORIGIN)
                 .and_then(|origin| match origin {
                     CoreValue::Dict(origin) => origin.get(&*crate::core::keys::SOURCE),
+                    _ => None,
+                })
+                .and_then(|source| match source {
+                    CoreValue::Dict(source) => source.get(&*crate::core::keys::FILE),
                     _ => None,
                 }),
             Some(&CoreValue::binary_from_text("test.g"))
