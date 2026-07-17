@@ -79,7 +79,11 @@ queue. Normal early termination or task failure also returns remaining messages
 to the fallback logger. Effect requests are ordinary singleton dictionaries
 identified by host-only abstract-global atoms. Core operators only construct
 requests; reflection state and external I/O are never performed by interaction-
-net reduction.
+net reduction. The standard handler stores its active reset stack as a private
+entry in ordinary user state. Whole-state replacement therefore also switches
+the delimited-continuation environment, which supports cooperative threads
+within one reflection task; transaction and host-resource bookkeeping remains
+outside that state.
 
 `main` chooses the `configuration` and `assembly` module paths and constructs
 their initial definitions. Those names and roles are CLI policy, not library

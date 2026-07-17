@@ -148,6 +148,7 @@ struct Tags {
     resume: Key,
     read_log: Key,
     write_stderr: Key,
+    continuation_state: Key,
 }
 
 impl Tags {
@@ -174,6 +175,14 @@ impl Tags {
             resume: tag("resume"),
             read_log: tag("read_log"),
             write_stderr: tag("write_stderr"),
+            // The key is private, but its value deliberately travels with
+            // whole-user-state get/set operations.
+            continuation_state: Key::abstract_global_path([
+                "reflection_runtime",
+                "v0",
+                "state",
+                "continuations",
+            ]),
         }
     }
 }
@@ -184,6 +193,7 @@ struct EffectTask {
     api: Value,
     local_state: Value,
     next_continuation: u64,
+    next_control_order: usize,
     continuations: HashMap<u64, CapturedContinuation>,
 }
 
@@ -197,8 +207,73 @@ impl EffectTask {
             api,
             local_state: Value::Dict(Dict::new_sync()),
             next_continuation: 1,
+            next_control_order: 1,
             continuations: HashMap::new(),
         }
+    }
+
+    fn allocate_control_order(&mut self) -> Result<usize, TaskError> {
+        let order = self.next_control_order;
+        self.next_control_order = self
+            .next_control_order
+            .checked_add(1)
+            .ok_or_else(|| TaskError::new("reflection control order exhausted"))?;
+        Ok(order)
+    }
+
+    fn capture_continuation(
+        &mut self,
+        continuation: CapturedContinuation,
+    ) -> Result<Value, TaskError> {
+        let id = self.next_continuation;
+        self.next_continuation = self
+            .next_continuation
+            .checked_add(1)
+            .ok_or_else(|| TaskError::new("reflection continuation IDs exhausted"))?;
+        self.continuations.insert(id, continuation);
+        Ok(request_function(
+            self.tags.resume.clone(),
+            2,
+            vec![Value::Number(Number::from_u64(id))],
+            true,
+        ))
+    }
+
+    fn install_captured_control(
+        &mut self,
+        branch: &mut Branch,
+        captured: &mut CapturedContinuation,
+        scope_depth: usize,
+    ) -> Result<(), TaskError> {
+        let mut layers = captured
+            .reset_frames
+            .drain(..)
+            .map(CapturedLayer::Reset)
+            .chain(captured.delimiters.drain(..).map(CapturedLayer::Delimiter))
+            .collect::<Vec<_>>();
+        layers.sort_by_key(CapturedLayer::order);
+
+        let mut reset_frames = reset_frames(&branch.state, &self.tags.continuation_state)?;
+        for layer in layers {
+            let order = self.allocate_control_order()?;
+            match layer {
+                CapturedLayer::Reset(mut frame) => {
+                    frame.scope_depth = scope_depth;
+                    frame.order = order;
+                    reset_frames.push(frame);
+                }
+                CapturedLayer::Delimiter(mut delimiter) => {
+                    delimiter.rebase(scope_depth, order);
+                    branch.control.delimiters.push(delimiter);
+                }
+            }
+        }
+        branch.state = with_reset_frames(
+            branch.state.clone(),
+            &self.tags.continuation_state,
+            &reset_frames,
+        )?;
+        Ok(())
     }
 
     fn run(&mut self, effect: Value) -> Result<TaskOutcome, TaskError> {
@@ -218,7 +293,7 @@ impl EffectTask {
     fn drive(&mut self, mut branch: Branch, scope_depth: usize) -> Result<Drive, TaskError> {
         macro_rules! deliver_value {
             ($value:expr) => {
-                match deliver($value, branch, scope_depth)? {
+                match deliver($value, branch, scope_depth, &self.tags.continuation_state)? {
                     Delivery::Continue(next) => branch = next,
                     Delivery::Complete(value, completed) => {
                         return Ok(Drive::Complete(value, completed));
@@ -229,12 +304,14 @@ impl EffectTask {
         loop {
             let request = self.effect_request(branch.effect.clone())?;
             match request {
-                Request::Return(value) => match deliver(value, branch, scope_depth)? {
-                    Delivery::Continue(next) => branch = next,
-                    Delivery::Complete(value, completed) => {
-                        return Ok(Drive::Complete(value, completed));
+                Request::Return(value) => {
+                    match deliver(value, branch, scope_depth, &self.tags.continuation_state)? {
+                        Delivery::Continue(next) => branch = next,
+                        Delivery::Complete(value, completed) => {
+                            return Ok(Drive::Complete(value, completed));
+                        }
                     }
-                },
+                }
                 Request::Seq(operation, continuation) => {
                     branch
                         .control
@@ -254,7 +331,12 @@ impl EffectTask {
                     match self.run_cut(operation, branch, scope_depth + 1)? {
                         CutResult::Success(value, mut completed) => {
                             completed.control.sequence = outer_sequence;
-                            match deliver(value, completed, scope_depth)? {
+                            match deliver(
+                                value,
+                                completed,
+                                scope_depth,
+                                &self.tags.continuation_state,
+                            )? {
                                 Delivery::Continue(next) => branch = next,
                                 Delivery::Complete(value, completed) => {
                                     return Ok(Drive::Complete(value, completed));
@@ -311,53 +393,63 @@ impl EffectTask {
                 }
                 Request::Reset(key, operation) => {
                     let key = value_key(key)?;
-                    let outer_sequence = std::mem::take(&mut branch.control.sequence);
-                    branch.control.delimiters.push(Delimiter::Reset {
+                    let continuation = self.capture_continuation(CapturedContinuation {
+                        sequence: std::mem::take(&mut branch.control.sequence),
+                        delimiters: Vec::new(),
+                        reset_frames: Vec::new(),
+                    })?;
+                    let frame = ResetFrame {
                         key,
-                        outer_sequence,
+                        continuation,
                         scope_depth,
-                    });
+                        order: self.allocate_control_order()?,
+                    };
+                    let mut reset_frames =
+                        reset_frames(&branch.state, &self.tags.continuation_state)?;
+                    reset_frames.push(frame);
+                    branch.state = with_reset_frames(
+                        branch.state,
+                        &self.tags.continuation_state,
+                        &reset_frames,
+                    )?;
                     branch.effect = operation;
                 }
                 Request::Shift(key, function) => {
                     let key = value_key(key)?;
-                    let Some(index) = branch.control.delimiters.iter().rposition(
-                        |delimiter| matches!(delimiter, Delimiter::Reset { key: candidate, .. } if candidate == &key),
-                    ) else {
+                    let mut reset_frames =
+                        reset_frames(&branch.state, &self.tags.continuation_state)?;
+                    let Some(index) = reset_frames.iter().rposition(|frame| frame.key == key)
+                    else {
                         return Err(TaskError::new("`.shift` key is not in reset scope"));
                     };
-                    let inner = branch.control.delimiters.split_off(index + 1);
-                    let Delimiter::Reset { outer_sequence, .. } = branch
+                    let inner_reset_frames = reset_frames.split_off(index + 1);
+                    let target = reset_frames.pop().expect("matching reset frame must exist");
+                    let first_inner_delimiter = branch
                         .control
                         .delimiters
-                        .pop()
-                        .expect("matched reset delimiter must exist")
-                    else {
-                        unreachable!()
-                    };
-                    let id = self.next_continuation;
-                    self.next_continuation = self
-                        .next_continuation
-                        .checked_add(1)
-                        .ok_or_else(|| TaskError::new("reflection continuation IDs exhausted"))?;
-                    self.continuations.insert(
-                        id,
-                        CapturedContinuation {
-                            sequence: std::mem::take(&mut branch.control.sequence),
-                            delimiters: inner,
-                        },
-                    );
-                    let continuation = request_function(
-                        self.tags.resume.clone(),
-                        2,
-                        vec![Value::Number(Number::from_u64(id))],
-                        true,
-                    );
-                    branch.control.sequence = outer_sequence;
+                        .iter()
+                        .position(|delimiter| delimiter.order() > target.order)
+                        .unwrap_or(branch.control.delimiters.len());
+                    let inner_delimiters =
+                        branch.control.delimiters.split_off(first_inner_delimiter);
+                    branch.state = with_reset_frames(
+                        branch.state,
+                        &self.tags.continuation_state,
+                        &reset_frames,
+                    )?;
+                    let continuation = self.capture_continuation(CapturedContinuation {
+                        sequence: std::mem::take(&mut branch.control.sequence),
+                        delimiters: inner_delimiters,
+                        reset_frames: inner_reset_frames,
+                    })?;
+                    branch
+                        .control
+                        .sequence
+                        .push(Continuation::Glam(target.continuation));
                     branch.effect = apply(function, vec![continuation])?;
                 }
                 Request::Resume(id, value) => {
-                    let captured = self
+                    let mut captured = self
                         .continuations
                         .get(&id)
                         .cloned()
@@ -366,14 +458,9 @@ impl EffectTask {
                     branch.control.delimiters.push(Delimiter::Resume {
                         outer_sequence: caller_sequence,
                         scope_depth,
+                        order: self.allocate_control_order()?,
                     });
-                    branch
-                        .control
-                        .delimiters
-                        .extend(captured.delimiters.into_iter().map(|mut delimiter| {
-                            delimiter.rebase(scope_depth);
-                            delimiter
-                        }));
+                    self.install_captured_control(&mut branch, &mut captured, scope_depth)?;
                     branch.control.sequence = captured.sequence;
                     deliver_value!(value);
                 }
@@ -386,10 +473,16 @@ impl EffectTask {
                     let marker = Value::Lazy(handle.clone());
                     let operation = apply(function, vec![marker])?;
                     let outer_control = std::mem::take(&mut branch.control);
+                    let reset_stack =
+                        reset_stack_value(&branch.state, &self.tags.continuation_state)?;
+                    branch.state =
+                        with_reset_frames(branch.state, &self.tags.continuation_state, &[])?;
                     branch.control.sequence.push(Continuation::Fix(handle));
                     branch.control.delimiters.push(Delimiter::Restore {
                         outer: Box::new(outer_control),
+                        reset_stack,
                         scope_depth,
+                        order: self.allocate_control_order()?,
                     });
                     branch.effect = operation;
                 }
@@ -441,6 +534,7 @@ impl EffectTask {
         loop {
             let snapshot = owns_transaction.then(|| self.host.snapshot());
             if let Some(snapshot) = &snapshot {
+                self.local_state = split_user_state(outer.state).0;
                 outer.state = self.visible_state(snapshot.heap());
                 outer.transaction = Some(Transaction::new(snapshot.clone()));
             }
@@ -597,41 +691,47 @@ enum Continuation {
 
 #[derive(Clone)]
 enum Delimiter {
-    Reset {
-        key: Key,
-        outer_sequence: Vec<Continuation>,
-        scope_depth: usize,
-    },
     Resume {
         outer_sequence: Vec<Continuation>,
         scope_depth: usize,
+        order: usize,
     },
     Restore {
         outer: Box<Control>,
+        reset_stack: Value,
         scope_depth: usize,
+        order: usize,
     },
 }
 
 impl Delimiter {
     fn scope_depth(&self) -> usize {
         match self {
-            Self::Reset { scope_depth, .. }
-            | Self::Resume { scope_depth, .. }
-            | Self::Restore { scope_depth, .. } => *scope_depth,
+            Self::Resume { scope_depth, .. } | Self::Restore { scope_depth, .. } => *scope_depth,
         }
     }
 
-    fn rebase(&mut self, scope_depth: usize) {
+    fn order(&self) -> usize {
         match self {
-            Self::Reset {
-                scope_depth: depth, ..
-            }
-            | Self::Resume {
-                scope_depth: depth, ..
+            Self::Resume { order, .. } | Self::Restore { order, .. } => *order,
+        }
+    }
+
+    fn rebase(&mut self, scope_depth: usize, order: usize) {
+        match self {
+            Self::Resume {
+                scope_depth: depth,
+                order: position,
+                ..
             }
             | Self::Restore {
-                scope_depth: depth, ..
-            } => *depth = scope_depth,
+                scope_depth: depth,
+                order: position,
+                ..
+            } => {
+                *depth = scope_depth;
+                *position = order;
+            }
         }
     }
 }
@@ -640,6 +740,32 @@ impl Delimiter {
 struct CapturedContinuation {
     sequence: Vec<Continuation>,
     delimiters: Vec<Delimiter>,
+    reset_frames: Vec<ResetFrame>,
+}
+
+#[derive(Clone)]
+struct ResetFrame {
+    // Reset frames are encoded as ordinary Values under continuation_state.
+    // scope_depth and order preserve nesting with the handler's temporary
+    // cut/resume/fix control without creating a second authoritative stack.
+    key: Key,
+    continuation: Value,
+    scope_depth: usize,
+    order: usize,
+}
+
+enum CapturedLayer {
+    Reset(ResetFrame),
+    Delimiter(Delimiter),
+}
+
+impl CapturedLayer {
+    fn order(&self) -> usize {
+        match self {
+            Self::Reset(frame) => frame.order,
+            Self::Delimiter(delimiter) => delimiter.order(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -678,7 +804,12 @@ enum Delivery {
     Complete(Value, Branch),
 }
 
-fn deliver(value: Value, mut branch: Branch, scope_depth: usize) -> Result<Delivery, TaskError> {
+fn deliver(
+    value: Value,
+    mut branch: Branch,
+    scope_depth: usize,
+    continuation_state: &Key,
+) -> Result<Delivery, TaskError> {
     loop {
         if let Some(continuation) = branch.control.sequence.pop() {
             match continuation {
@@ -695,22 +826,44 @@ fn deliver(value: Value, mut branch: Branch, scope_depth: usize) -> Result<Deliv
             continue;
         }
 
-        let Some(delimiter) = branch.control.delimiters.last() else {
+        let mut resets = reset_frames(&branch.state, continuation_state)?;
+        let reset_order = resets
+            .last()
+            .filter(|frame| frame.scope_depth >= scope_depth)
+            .map(|frame| frame.order);
+        let delimiter_order = branch
+            .control
+            .delimiters
+            .last()
+            .filter(|delimiter| delimiter.scope_depth() >= scope_depth)
+            .map(Delimiter::order);
+
+        if reset_order > delimiter_order {
+            let frame = resets.pop().expect("reset order came from a frame");
+            branch.state = with_reset_frames(branch.state, continuation_state, &resets)?;
+            branch.effect = apply(frame.continuation, vec![value])?;
+            return Ok(Delivery::Continue(branch));
+        }
+
+        let Some(_) = delimiter_order else {
             return Ok(Delivery::Complete(value, branch));
         };
-        if delimiter.scope_depth() < scope_depth {
-            return Ok(Delivery::Complete(value, branch));
-        }
         match branch
             .control
             .delimiters
             .pop()
-            .expect("delimiter observed above")
+            .expect("delimiter order came from a delimiter")
         {
-            Delimiter::Reset { outer_sequence, .. } | Delimiter::Resume { outer_sequence, .. } => {
+            Delimiter::Resume { outer_sequence, .. } => {
                 branch.control.sequence = outer_sequence;
             }
-            Delimiter::Restore { outer, .. } => branch.control = *outer,
+            Delimiter::Restore {
+                outer, reset_stack, ..
+            } => {
+                branch.state =
+                    with_reset_stack_value(branch.state, continuation_state, reset_stack)?;
+                branch.control = *outer;
+            }
         }
     }
 }
@@ -924,6 +1077,104 @@ fn require_state_dict(value: Value) -> Result<Value, TaskError> {
     }
 }
 
+fn reset_stack_value(state: &Value, continuation_state: &Key) -> Result<Value, TaskError> {
+    let Value::Dict(state) = state else {
+        return Err(TaskError::new("reflection user state must be a dictionary"));
+    };
+    let stack = state
+        .get(continuation_state)
+        .cloned()
+        .unwrap_or_else(|| Value::List(List::empty()));
+    reset_frames_from_value(&stack)?;
+    Ok(stack)
+}
+
+fn reset_frames(state: &Value, continuation_state: &Key) -> Result<Vec<ResetFrame>, TaskError> {
+    reset_frames_from_value(&reset_stack_value(state, continuation_state)?)
+}
+
+fn reset_frames_from_value(stack: &Value) -> Result<Vec<ResetFrame>, TaskError> {
+    let Value::List(stack) = evaluate(stack.clone())? else {
+        return Err(TaskError::new(
+            "reflection continuation state must be a list",
+        ));
+    };
+    eval::list_to_value_items(&stack)
+        .map_err(task_eval_error)?
+        .into_iter()
+        .map(|frame| {
+            let Value::List(frame) = evaluate(frame)? else {
+                return Err(TaskError::new(
+                    "reflection continuation frame must be a list",
+                ));
+            };
+            let [key, continuation, scope_depth, order]: [Value; 4] =
+                eval::list_to_value_items(&frame)
+                    .map_err(task_eval_error)?
+                    .try_into()
+                    .map_err(|_| {
+                        TaskError::new("reflection continuation frame has the wrong size")
+                    })?;
+            let Value::Number(scope_depth) = scope_depth else {
+                return Err(TaskError::new(
+                    "reflection continuation frame has an invalid scope",
+                ));
+            };
+            let Value::Number(order) = order else {
+                return Err(TaskError::new(
+                    "reflection continuation frame has an invalid order",
+                ));
+            };
+            Ok(ResetFrame {
+                key: value_key(key)?,
+                continuation,
+                scope_depth: scope_depth.to_usize_if_integer().ok_or_else(|| {
+                    TaskError::new("reflection continuation frame has an invalid scope")
+                })?,
+                order: order.to_usize_if_integer().ok_or_else(|| {
+                    TaskError::new("reflection continuation frame has an invalid order")
+                })?,
+            })
+        })
+        .collect()
+}
+
+fn reset_frames_value(frames: &[ResetFrame]) -> Value {
+    Value::List(List::from_values(
+        frames
+            .iter()
+            .map(|frame| {
+                Value::List(List::from_values(vec![
+                    key_value(frame.key.clone()),
+                    frame.continuation.clone(),
+                    Value::Number(Number::from_usize(frame.scope_depth)),
+                    Value::Number(Number::from_usize(frame.order)),
+                ]))
+            })
+            .collect(),
+    ))
+}
+
+fn with_reset_frames(
+    state: Value,
+    continuation_state: &Key,
+    frames: &[ResetFrame],
+) -> Result<Value, TaskError> {
+    with_reset_stack_value(state, continuation_state, reset_frames_value(frames))
+}
+
+fn with_reset_stack_value(
+    state: Value,
+    continuation_state: &Key,
+    stack: Value,
+) -> Result<Value, TaskError> {
+    reset_frames_from_value(&stack)?;
+    let Value::Dict(state) = require_state_dict(state)? else {
+        unreachable!("require_state_dict returned a non-dictionary")
+    };
+    Ok(Value::Dict(state.insert(continuation_state.clone(), stack)))
+}
+
 fn split_user_state(state: Value) -> (Value, Value) {
     let Value::Dict(state) = state else {
         return (
@@ -1091,6 +1342,24 @@ mod tests {
     }
 
     #[test]
+    fn fixpoint_hides_then_restores_the_reset_stack() {
+        let (_, hidden) = compile_effect(
+            ".reset \"prompt\" (.fix (\\self -> .shift \"prompt\" (\\continuation -> continuation \"wrong\")))",
+        );
+        assert!(
+            run(&hidden, Arc::new(TestHost::default()))
+                .unwrap_err()
+                .to_string()
+                .contains("not in reset scope")
+        );
+
+        let (assembler, value) = completed(
+            ".reset \"prompt\" ((.fix (\\self -> .r ())) =>> .shift \"prompt\" (\\continuation -> continuation \"restored\"))",
+        );
+        assert_eq!(assembler.to_binary(&value).unwrap(), b"restored".as_slice());
+    }
+
+    #[test]
     fn cut_rolls_back_failed_alternative_user_state() {
         let (assembler, value) = completed(
             ".cut (.alt ((.set [\"x\"] \"bad\") =>> .fail) ((.get [\"x\"]) >>= (\\x -> (x == {}) =>> .r \"clean\")))",
@@ -1102,6 +1371,35 @@ mod tests {
     fn shift_captures_only_a_matching_task_local_reset() {
         let (assembler, value) = completed(
             ".reset \"prompt\" (.shift \"prompt\" (\\continuation -> continuation \"resumed\"))",
+        );
+        assert_eq!(assembler.to_binary(&value).unwrap(), b"resumed".as_slice());
+
+        let (assembler, value) = completed(
+            ".reset \"prompt\" ((.cut (.r ())) =>> .shift \"prompt\" (\\continuation -> continuation \"after cut\"))",
+        );
+        assert_eq!(
+            assembler.to_binary(&value).unwrap(),
+            b"after cut".as_slice()
+        );
+    }
+
+    #[test]
+    fn replacing_root_state_replaces_the_active_reset_stack() {
+        let (_, effect) = compile_effect(
+            ".reset \"prompt\" ((.set [] {}) =>> .shift \"prompt\" (\\continuation -> continuation \"wrong\"))",
+        );
+        assert!(
+            run(&effect, Arc::new(TestHost::default()))
+                .unwrap_err()
+                .to_string()
+                .contains("not in reset scope")
+        );
+    }
+
+    #[test]
+    fn restoring_root_state_restores_its_reset_stack() {
+        let (assembler, value) = completed(
+            ".reset \"prompt\" (.get [] >>= (\\saved -> (.set [] {}) =>> (.set [] saved) =>> .shift \"prompt\" (\\continuation -> continuation \"resumed\")))",
         );
         assert_eq!(assembler.to_binary(&value).unwrap(), b"resumed".as_slice());
     }

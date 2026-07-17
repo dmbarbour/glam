@@ -81,9 +81,13 @@ design in the design documents.
   host effects. A top-level `alt` is rejected; alternatives belong to `cut`.
 - Every `get`/`set` path is implicitly under user-owned `user_state`. The
   ordinary `heap` subtree is shared through the host transaction snapshot.
-  Machine continuations, choice bookkeeping, queue storage, and other
-  main-owned state are outside that subtree. Do not protect user state from
-  root replacement or rearrangement; those consequences belong to the user.
+  The active reset stack lives under a private key in that same state, so a
+  whole-state value carries its delimited-continuation environment between
+  cooperative threads. Root replacement may therefore replace or corrupt the
+  reset stack; those consequences belong to the user. Immediate sequence and
+  fixpoint bookkeeping, choice search, transaction journals, and host queues
+  remain task-owned. Opaque captured continuations are valid only within the
+  reflection task that created them.
 - An outer `cut` snapshots the heap and diagnostic queue. Failed alternatives
   discard state, reserved reads, and buffered writes; successful nested cuts
   merge upward; an outer success validates and commits. The bootstrap is
