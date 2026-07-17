@@ -8,7 +8,7 @@ pub(super) fn eval_fixpoint_builtin(function: &Value) -> Result<Value, EvalError
 
     let handle = LazyValue::pending("fixpoint");
     let marker = Value::Lazy(handle.clone());
-    let value = apply_value(function, marker.clone(), &[])?;
+    let value = apply_value(function, marker.clone())?;
     handle
         .set(value.clone())
         .map_err(|_| EvalError::new("fixpoint builtin initialized twice"))?;

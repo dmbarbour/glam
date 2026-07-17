@@ -1,31 +1,22 @@
 use super::*;
 
-pub(super) fn apply_value(
-    function: Value,
-    argument: Value,
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
+pub(super) fn apply_value(function: Value, argument: Value) -> Result<Value, EvalError> {
     match function {
-        Value::Builtin(builtin) => apply_builtin(builtin, Vec::new(), argument, local_env),
+        Value::Builtin(builtin) => apply_builtin(builtin, Vec::new(), argument),
         Value::PartialBuiltin(call) => apply_builtin(
             call.builtin,
             call.arguments.iter().cloned().collect(),
             argument,
-            local_env,
         ),
         Value::Function(function) => apply_function_values(function, vec![argument]),
         Value::Net(net) => apply_net(net, argument),
-        Value::Dict(dict) => apply_dict_value(&dict, argument, local_env),
-        Value::Lazy(thunk) => apply_value(eval_lazy(&thunk)?, argument, local_env),
+        Value::Dict(dict) => apply_dict_value(&dict, argument),
+        Value::Lazy(thunk) => apply_value(eval_lazy(&thunk)?, argument),
         _ => Err(EvalError::new("application requires a function value")),
     }
 }
 
-pub(crate) fn apply_values(
-    mut function: Value,
-    arguments: Vec<Value>,
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
+pub(crate) fn apply_values(mut function: Value, arguments: Vec<Value>) -> Result<Value, EvalError> {
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match function {
@@ -37,7 +28,7 @@ pub(crate) fn apply_values(
                 let arguments = std::iter::once(argument).chain(arguments).collect();
                 return apply_explicit_net_many(net, arguments);
             }
-            other => function = apply_value(other, argument, local_env)?,
+            other => function = apply_value(other, argument)?,
         }
     }
     Ok(function)
@@ -69,14 +60,13 @@ pub(super) fn apply_function_values(
     if rest.is_empty() {
         Ok(result)
     } else {
-        apply_values(result, rest.to_vec(), &[])
+        apply_values(result, rest.to_vec())
     }
 }
 
 pub(super) fn apply_dict_value(
     dict: &crate::core::Dict,
     argument: Value,
-    local_env: &[Value],
 ) -> Result<Value, EvalError> {
     if let Some(function) = dict.tagged_payload(&keys::EFF)? {
         return Ok(effect_value(apply_effect_function_value(
@@ -87,7 +77,7 @@ pub(super) fn apply_dict_value(
     if let Some(function) = dict.get(&*keys::APPLY)
         && !is_undefined_dict_value(function)
     {
-        return apply_value(eval_value(function)?, argument, local_env);
+        return apply_value(eval_value(function)?, argument);
     }
 
     Err(EvalError::new("application requires a function value"))

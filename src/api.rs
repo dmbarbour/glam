@@ -756,7 +756,6 @@ impl Assembler {
         eval::apply_values(
             function.as_core().clone(),
             arguments.into_iter().map(Value::into_core).collect(),
-            &[],
         )
         .map(Value::from_core)
         .map_err(|error| Error::new(error.to_string()))
@@ -1339,7 +1338,6 @@ mod tests {
             eval::apply_values(
                 CoreValue::Builtin(Builtin::ObjectWithDefs),
                 vec![diagnostic.value().as_core().clone(), defs],
-                &[],
             )
             .expect("viewer mixin should apply")
         };

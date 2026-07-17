@@ -839,8 +839,8 @@ fn partial_builtins_share_lazy_arguments() {
 
     assert!(matches!(partial, Value::PartialBuiltin(_)));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(apply_value(partial.clone(), n(2), &[]).unwrap(), n(42));
-    assert_eq!(apply_value(partial, n(3), &[]).unwrap(), n(43));
+    assert_eq!(apply_value(partial.clone(), n(2)).unwrap(), n(42));
+    assert_eq!(apply_value(partial, n(3)).unwrap(), n(43));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
@@ -949,7 +949,7 @@ fn effect_values_apply_by_extending_the_effect_function() {
         ),
     ));
 
-    let value = apply_value(eval_value(&function).unwrap(), api, &[])
+    let value = apply_value(eval_value(&function).unwrap(), api)
         .and_then(|value| eval_value(&value))
         .expect("extended effect function should evaluate with an API");
     assert_eq!(value, n(42));

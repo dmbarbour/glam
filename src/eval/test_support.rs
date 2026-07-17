@@ -1,4 +1,158 @@
+//! Test-only expression fixtures, their direct interpreter, and net lowerer.
+//! Fixture locals never cross into production evaluator state: deferred test
+//! values close over any locals they need before entering ordinary evaluation.
+
 use super::*;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TestExpr {
+    Value(Value),
+    List(Arc<[Arc<TestExpr>]>),
+    Apply(Arc<TestExpr>, Arc<TestExpr>),
+    Function {
+        code: Arc<FunctionCode>,
+        captures: Arc<[Arc<TestExpr>]>,
+    },
+    Local(usize),
+    Access(Arc<TestExpr>, Arc<[TestKey]>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(super) enum TestKey {
+    Key(Key),
+    Index(Arc<TestExpr>),
+    PathIndex(Arc<TestExpr>),
+}
+
+pub(super) fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvalError> {
+    eval_expr(expr, &[])
+}
+
+pub(super) fn eval_expr(expr: &TestExpr, local_env: &[Value]) -> Result<Value, EvalError> {
+    match expr {
+        TestExpr::Value(value) => eval_value(value),
+        TestExpr::List(items) => {
+            let mut list = List::empty();
+            for item in items.iter() {
+                let value = eval_expr(item, local_env)?;
+                list = List::concat(list, list_literal_segment(value));
+            }
+            Ok(Value::List(list))
+        }
+        TestExpr::Apply(function, argument) => eval_apply(function, argument, local_env),
+        TestExpr::Function { code, captures } => {
+            let captures = captures
+                .iter()
+                .map(|capture| thunk_value(capture, local_env))
+                .collect();
+            instantiate_function(code, captures)
+        }
+        TestExpr::Local(index) => eval_local(*index, local_env),
+        TestExpr::Access(base, path) => {
+            let base = eval_expr(base, local_env)?;
+            resolve_key_path(base, path, path, local_env)
+        }
+    }
+}
+
+pub(super) fn eval_key(value: &Value) -> Result<Key, EvalError> {
+    let value = force_value_shell(value)?;
+    value_to_key(&value)
+}
+
+fn format_name(path: &[TestKey]) -> String {
+    path.iter()
+        .map(format_name_key_expr)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn format_name_key_expr(key: &TestKey) -> String {
+    match key {
+        TestKey::Key(key) => format_name_part(key),
+        TestKey::Index(_) => "[index]".to_owned(),
+        TestKey::PathIndex(_) => "(path-index)".to_owned(),
+    }
+}
+
+fn eval_local(index: usize, local_env: &[Value]) -> Result<Value, EvalError> {
+    let Some(value) = local_env.get(
+        local_env
+            .len()
+            .checked_sub(index + 1)
+            .ok_or_else(|| EvalError::new(format!("local `{index}` is out of scope")))?,
+    ) else {
+        return Err(EvalError::new(format!("local `{index}` is out of scope")));
+    };
+
+    eval_value(value)
+}
+
+fn resolve_key_path(
+    current: Value,
+    remaining: &[TestKey],
+    full_path: &[TestKey],
+    local_env: &[Value],
+) -> Result<Value, EvalError> {
+    let Some((head, rest)) = remaining.split_first() else {
+        return eval_value(&current);
+    };
+
+    let expanded = expand_key_expr(head, local_env)?;
+    let next = resolve_expanded_keys(current, &expanded, full_path, remaining)?;
+    resolve_key_path(next, rest, full_path, local_env)
+}
+
+fn resolve_expanded_keys(
+    mut current: Value,
+    expanded: &[Key],
+    full_path: &[TestKey],
+    remaining: &[TestKey],
+) -> Result<Value, EvalError> {
+    for key in expanded {
+        let dict = force_dict_shell(&current, full_path, remaining)?;
+        current = dict
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
+    }
+    Ok(current)
+}
+
+fn force_dict_shell(
+    value: &Value,
+    full_path: &[TestKey],
+    remaining: &[TestKey],
+) -> Result<crate::core::Dict, EvalError> {
+    match force_value_shell(value)? {
+        Value::Dict(dict) => Ok(dict),
+        _ => {
+            let traversed = &full_path[..full_path.len() - remaining.len()];
+            let culprit = if traversed.is_empty() {
+                full_path
+            } else {
+                traversed
+            };
+            Err(EvalError::new(format!(
+                "name `{}` is not a dictionary",
+                format_name(culprit)
+            )))
+        }
+    }
+}
+
+fn expand_key_expr(key: &TestKey, local_env: &[Value]) -> Result<Vec<Key>, EvalError> {
+    match key {
+        TestKey::Key(key) => Ok(vec![key.clone()]),
+        TestKey::Index(expr) => {
+            let value = thunk_value(expr, local_env);
+            let value = force_value_shell(&value)?;
+            Ok(vec![value_to_key(&value)?])
+        }
+        TestKey::PathIndex(expr) => eval_key_path_list(&thunk_value(expr, local_env)),
+    }
+}
 
 pub(super) fn eval_apply(
     function: &TestExpr,
@@ -18,7 +172,7 @@ pub(super) fn eval_apply(
         .into_iter()
         .map(|argument| thunk_value(argument, local_env))
         .collect::<Vec<_>>();
-    let result = apply_values(function, arguments, local_env)?;
+    let result = apply_values(function, arguments)?;
     match &result {
         // A source-level function application evaluates its call stage, just
         // as the former closure evaluator evaluated the body. Do not

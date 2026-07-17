@@ -1,70 +1,48 @@
 use super::super::super::*;
 
-pub(super) fn eval_list_effect_builtin(
-    effect: &Value,
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
-    Ok(Value::List(lazy_run_list_effect(
-        effect.clone(),
-        Arc::from(local_env.to_vec()),
-    )))
+pub(super) fn eval_list_effect_builtin(effect: &Value) -> Result<Value, EvalError> {
+    Ok(Value::List(lazy_run_list_effect(effect.clone())))
 }
 
 pub(super) fn eval_list_effect_seq_builtin(
     operation: &Value,
     continuation: &Value,
-    local_env: &[Value],
 ) -> Result<Value, EvalError> {
     Ok(Value::List(flat_map_list_effect_results(
-        lazy_run_list_effect(operation.clone(), Arc::from(local_env.to_vec())),
+        lazy_run_list_effect(operation.clone()),
         continuation.clone(),
-        Arc::from(local_env.to_vec()),
     )))
 }
 
 pub(super) fn eval_list_effect_alt_builtin(
     left: &Value,
     right: &Value,
-    local_env: &[Value],
 ) -> Result<Value, EvalError> {
     Ok(Value::List(List::concat(
-        lazy_run_list_effect(left.clone(), Arc::from(local_env.to_vec())),
-        lazy_run_list_effect(right.clone(), Arc::from(local_env.to_vec())),
+        lazy_run_list_effect(left.clone()),
+        lazy_run_list_effect(right.clone()),
     )))
 }
 
-pub(super) fn eval_list_effect_cut_builtin(
-    operation: &Value,
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
-    Ok(Value::List(cut_list_effect_results(
-        operation.clone(),
-        Arc::from(local_env.to_vec()),
-    )))
+pub(super) fn eval_list_effect_cut_builtin(operation: &Value) -> Result<Value, EvalError> {
+    Ok(Value::List(cut_list_effect_results(operation.clone())))
 }
 
-pub(super) fn eval_list_effect_fix_builtin(
-    function: &Value,
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
+pub(super) fn eval_list_effect_fix_builtin(function: &Value) -> Result<Value, EvalError> {
     let function = eval_value(function)?;
     let handle = LazyValue::pending("list effect fixpoint");
     let marker = Value::Lazy(handle.clone());
-    let operation = apply_value(function, marker.clone(), local_env)?;
-    Ok(Value::List(fix_list_effect_results(
-        operation,
-        handle,
-        Arc::from(local_env.to_vec()),
-    )))
+    let operation = apply_value(function, marker.clone())?;
+    Ok(Value::List(fix_list_effect_results(operation, handle)))
 }
 
-fn lazy_run_list_effect(effect: Value, local_env: Arc<[Value]>) -> List {
+fn lazy_run_list_effect(effect: Value) -> List {
     deferred_list("list effect", move || {
-        run_list_effect_to_list(effect.clone(), local_env.clone())
+        run_list_effect_to_list(effect.clone())
     })
 }
 
-fn run_list_effect_to_list(effect: Value, local_env: Arc<[Value]>) -> Result<List, EvalError> {
+fn run_list_effect_to_list(effect: Value) -> Result<List, EvalError> {
     let effect = force_value_shell(&effect)?;
     let Value::Dict(dict) = effect else {
         return Err(EvalError::new(format!(
@@ -81,7 +59,7 @@ fn run_list_effect_to_list(effect: Value, local_env: Arc<[Value]>) -> Result<Lis
         ));
     };
 
-    let handled = apply_value(eval_value(&function)?, list_effect_api(), &local_env)?;
+    let handled = apply_value(eval_value(&function)?, list_effect_api())?;
     let handled = force_value_shell(&handled)?;
     let Value::List(results) = handled else {
         return Err(EvalError::new(format!(
@@ -91,27 +69,23 @@ fn run_list_effect_to_list(effect: Value, local_env: Arc<[Value]>) -> Result<Lis
     Ok(results)
 }
 
-fn flat_map_list_effect_results(
-    results: List,
-    continuation: Value,
-    local_env: Arc<[Value]>,
-) -> List {
+fn flat_map_list_effect_results(results: List, continuation: Value) -> List {
     deferred_list("list effect seq", move || {
         let Some((head, tail)) = pop_list_front(&results)? else {
             return Ok(List::empty());
         };
         let continuation = eval_value(&continuation)?;
-        let next = apply_value(continuation.clone(), head, &local_env)?;
+        let next = apply_value(continuation.clone(), head)?;
         Ok(List::concat(
-            lazy_run_list_effect(next, local_env.clone()),
-            flat_map_list_effect_results(tail, continuation, local_env.clone()),
+            lazy_run_list_effect(next),
+            flat_map_list_effect_results(tail, continuation),
         ))
     })
 }
 
-fn cut_list_effect_results(operation: Value, local_env: Arc<[Value]>) -> List {
+fn cut_list_effect_results(operation: Value) -> List {
     deferred_list("list effect cut", move || {
-        let results = lazy_run_list_effect(operation.clone(), local_env.clone());
+        let results = lazy_run_list_effect(operation.clone());
         let Some((head, _)) = pop_list_front(&results)? else {
             return Ok(List::empty());
         };
@@ -119,9 +93,9 @@ fn cut_list_effect_results(operation: Value, local_env: Arc<[Value]>) -> List {
     })
 }
 
-fn fix_list_effect_results(operation: Value, handle: LazyValue, local_env: Arc<[Value]>) -> List {
+fn fix_list_effect_results(operation: Value, handle: LazyValue) -> List {
     deferred_list("list effect fix", move || {
-        let results = lazy_run_list_effect(operation.clone(), local_env.clone());
+        let results = lazy_run_list_effect(operation.clone());
         let Some((head, tail)) = pop_list_front(&results)? else {
             handle
                 .set(Value::List(List::empty()))

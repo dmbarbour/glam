@@ -5,41 +5,9 @@ use crate::core::{Key, LazyValue, List, Value, keys};
 use crate::list::ListItem;
 use crate::number::Number;
 
-#[cfg(test)]
-use crate::core::FunctionCode;
-
-#[cfg(test)]
-use super::application::*;
 use super::builtins::{apply_builtin, is_undefined_value};
 use super::net::*;
 use super::sequence::list_to_key_items;
-#[cfg(test)]
-use super::sequence::{eval_key_path_list, list_literal_segment};
-#[cfg(test)]
-use super::test_support::{eval_apply, thunk_value};
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum TestExpr {
-    Value(Value),
-    List(Arc<[Arc<TestExpr>]>),
-    Apply(Arc<TestExpr>, Arc<TestExpr>),
-    Function {
-        code: Arc<FunctionCode>,
-        captures: Arc<[Arc<TestExpr>]>,
-    },
-    Local(usize),
-    Access(Arc<TestExpr>, Arc<[TestKey]>),
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(super) enum TestKey {
-    Key(Key),
-    Index(Arc<TestExpr>),
-    PathIndex(Arc<TestExpr>),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalError {
@@ -61,39 +29,6 @@ impl fmt::Display for EvalError {
 }
 
 impl std::error::Error for EvalError {}
-
-#[cfg(test)]
-pub(super) fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvalError> {
-    eval_expr(expr, &[])
-}
-
-#[cfg(test)]
-pub(super) fn eval_expr(expr: &TestExpr, local_env: &[Value]) -> Result<Value, EvalError> {
-    match expr {
-        TestExpr::Value(value) => eval_value(value),
-        TestExpr::List(items) => {
-            let mut list = List::empty();
-            for item in items.iter() {
-                let value = eval_expr(item, local_env)?;
-                list = List::concat(list, list_literal_segment(value));
-            }
-            Ok(Value::List(list))
-        }
-        TestExpr::Apply(function, argument) => eval_apply(function, argument, local_env),
-        TestExpr::Function { code, captures } => {
-            let captures = captures
-                .iter()
-                .map(|capture| thunk_value(capture, local_env))
-                .collect();
-            instantiate_function(code, captures)
-        }
-        TestExpr::Local(index) => eval_local(*index, local_env),
-        TestExpr::Access(base, path) => {
-            let base = eval_expr(base, local_env)?;
-            resolve_key_path(base, path, path, local_env)
-        }
-    }
-}
 
 pub fn eval_value(value: &Value) -> Result<Value, EvalError> {
     match value {
@@ -124,7 +59,7 @@ pub(super) fn eval_lazy(lazy: &LazyValue) -> Result<Value, EvalError> {
         let argument = arguments
             .pop()
             .expect("saturated builtin thunk must contain an argument");
-        apply_builtin(call.builtin, arguments, argument, &[])
+        apply_builtin(call.builtin, arguments, argument)
     } else if let Some((function, arguments)) = function_call.as_ref() {
         evaluate_function_call(function, arguments)
     } else if let Some(net) = net_computation.as_ref() {
@@ -158,20 +93,6 @@ pub(super) fn eval_lazy(lazy: &LazyValue) -> Result<Value, EvalError> {
     }
 }
 
-#[cfg(test)]
-pub(super) fn eval_key(value: &Value) -> Result<Key, EvalError> {
-    let value = force_value_shell(value)?;
-    value_to_key(&value, &[])
-}
-
-#[cfg(test)]
-pub(super) fn format_name(path: &[TestKey]) -> String {
-    path.iter()
-        .map(format_name_key_expr)
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
 pub(super) fn format_name_part(key: &Key) -> String {
     match key {
         Key::Binary(bytes) => String::from_utf8_lossy(bytes).into_owned(),
@@ -185,40 +106,17 @@ pub(super) fn format_name_part(key: &Key) -> String {
     }
 }
 
-#[cfg(test)]
-pub(super) fn format_name_key_expr(key: &TestKey) -> String {
-    match key {
-        TestKey::Key(key) => format_name_part(key),
-        TestKey::Index(_) => "[index]".to_owned(),
-        TestKey::PathIndex(_) => "(path-index)".to_owned(),
-    }
-}
-
-#[cfg(test)]
-pub(super) fn eval_local(index: usize, local_env: &[Value]) -> Result<Value, EvalError> {
-    let Some(value) = local_env.get(
-        local_env
-            .len()
-            .checked_sub(index + 1)
-            .ok_or_else(|| EvalError::new(format!("local `{index}` is out of scope")))?,
-    ) else {
-        return Err(EvalError::new(format!("local `{index}` is out of scope")));
-    };
-
-    eval_value(value)
-}
-
-pub(super) fn value_to_key(value: &Value, local_env: &[Value]) -> Result<Key, EvalError> {
+pub(super) fn value_to_key(value: &Value) -> Result<Key, EvalError> {
     match value {
         Value::Atom(atom) => Ok(Key::Atom(*atom)),
         Value::Number(number) => Ok(Key::Number(number.clone())),
         Value::Binary(bytes) => Ok(Key::Binary(bytes.clone())),
-        Value::List(list) => Ok(Key::List(list_to_key_items(list, local_env)?)),
+        Value::List(list) => Ok(Key::List(list_to_key_items(list)?)),
         Value::Dict(dict) => Ok(Key::Dict(Arc::from(
             dict.iter()
                 .map(|(key, value)| {
                     let value = eval_value(value)?;
-                    let value = value_to_key(&value, local_env)?;
+                    let value = value_to_key(&value)?;
                     if matches!(&value, Key::Dict(entries) if entries.is_empty()) {
                         return Ok(None);
                     }
@@ -235,64 +133,6 @@ pub(super) fn value_to_key(value: &Value, local_env: &[Value]) -> Result<Key, Ev
         Value::Lazy(_) => Err(EvalError::new(
             "dictionary keys must evaluate to keyable values",
         )),
-    }
-}
-
-#[cfg(test)]
-pub(super) fn resolve_key_path(
-    current: Value,
-    remaining: &[TestKey],
-    full_path: &[TestKey],
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
-    let Some((head, rest)) = remaining.split_first() else {
-        return eval_value(&current);
-    };
-
-    let expanded = expand_key_expr(head, local_env)?;
-    let next = resolve_expanded_keys(current, &expanded, full_path, remaining, local_env)?;
-    resolve_key_path(next, rest, full_path, local_env)
-}
-
-#[cfg(test)]
-pub(super) fn resolve_expanded_keys(
-    mut current: Value,
-    expanded: &[Key],
-    full_path: &[TestKey],
-    remaining: &[TestKey],
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
-    for key in expanded {
-        let dict = force_dict_shell(&current, local_env, full_path, remaining)?;
-        current = dict
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
-    }
-    Ok(current)
-}
-
-#[cfg(test)]
-pub(super) fn force_dict_shell(
-    value: &Value,
-    _local_env: &[Value],
-    full_path: &[TestKey],
-    remaining: &[TestKey],
-) -> Result<crate::core::Dict, EvalError> {
-    match force_value_shell(value)? {
-        Value::Dict(dict) => Ok(dict),
-        _ => {
-            let traversed = &full_path[..full_path.len() - remaining.len()];
-            let culprit = if traversed.is_empty() {
-                full_path
-            } else {
-                traversed
-            };
-            Err(EvalError::new(format!(
-                "name `{}` is not a dictionary",
-                format_name(culprit)
-            )))
-        }
     }
 }
 
@@ -334,11 +174,7 @@ pub(super) fn split_result_value(left: Value, right: Value) -> Value {
     )
 }
 
-pub(super) fn eval_number(
-    value: &Value,
-    _local_env: &[Value],
-    builtin_name: &str,
-) -> Result<Number, EvalError> {
+pub(super) fn eval_number(value: &Value, builtin_name: &str) -> Result<Number, EvalError> {
     let value = force_value_shell(value)?;
     let Value::Number(number) = value else {
         return Err(EvalError::new(format!(
@@ -348,12 +184,8 @@ pub(super) fn eval_number(
     Ok(number)
 }
 
-pub(super) fn eval_index_number(
-    value: &Value,
-    local_env: &[Value],
-    builtin_name: &str,
-) -> Result<usize, EvalError> {
-    let number = eval_number(value, local_env, builtin_name)?;
+pub(super) fn eval_index_number(value: &Value, builtin_name: &str) -> Result<usize, EvalError> {
+    let number = eval_number(value, builtin_name)?;
     number.to_usize_if_integer().ok_or_else(|| {
         EvalError::new(format!(
             "{builtin_name} builtin requires non-negative integer indices"
@@ -411,17 +243,4 @@ fn is_semantically_undefined(value: &Value) -> Result<bool, EvalError> {
         }
     }
     Ok(true)
-}
-
-#[cfg(test)]
-pub(super) fn expand_key_expr(key: &TestKey, local_env: &[Value]) -> Result<Vec<Key>, EvalError> {
-    match key {
-        TestKey::Key(key) => Ok(vec![key.clone()]),
-        TestKey::Index(expr) => {
-            let value = thunk_value(expr, local_env);
-            let value = force_value_shell(&value)?;
-            Ok(vec![value_to_key(&value, local_env)?])
-        }
-        TestKey::PathIndex(expr) => eval_key_path_list(&thunk_value(expr, local_env), local_env),
-    }
 }

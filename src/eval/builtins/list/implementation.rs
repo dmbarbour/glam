@@ -17,10 +17,9 @@ pub(super) fn eval_slice_builtin(
     start: &Value,
     end: &Value,
     value: &Value,
-    local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let start = eval_index_number(start, local_env, "slice")?;
-    let end = eval_index_number(end, local_env, "slice")?;
+    let start = eval_index_number(start, "slice")?;
+    let end = eval_index_number(end, "slice")?;
     if start > end {
         return Err(EvalError::new(
             "slice builtin requires start to be less than or equal to end",
@@ -46,26 +45,16 @@ pub(super) fn eval_slice_builtin(
     }
 }
 
-pub(super) fn eval_map_builtin(
-    function: &Value,
-    value: &Value,
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
+pub(super) fn eval_map_builtin(function: &Value, value: &Value) -> Result<Value, EvalError> {
     let function = force_value_shell(function)?;
     let mapped = match force_value_shell(value)? {
         Value::Binary(bytes) => bytes
             .iter()
-            .map(|byte| {
-                apply_value(
-                    function.clone(),
-                    Value::Number(Number::from_u8(*byte)),
-                    local_env,
-                )
-            })
+            .map(|byte| apply_value(function.clone(), Value::Number(Number::from_u8(*byte))))
             .collect::<Result<Vec<_>, _>>()?,
         Value::List(list) => list_to_value_items(&list)?
             .into_iter()
-            .map(|item| apply_value(function.clone(), item, local_env))
+            .map(|item| apply_value(function.clone(), item))
             .collect::<Result<Vec<_>, _>>()?,
         _ => {
             return Err(EvalError::new(
@@ -89,12 +78,8 @@ pub(super) fn eval_list_len_builtin(value: &Value) -> Result<Value, EvalError> {
     }
 }
 
-pub(super) fn eval_list_split_builtin(
-    index: &Value,
-    value: &Value,
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
-    let index = eval_index_number(index, local_env, "split")?;
+pub(super) fn eval_list_split_builtin(index: &Value, value: &Value) -> Result<Value, EvalError> {
+    let index = eval_index_number(index, "split")?;
     match force_value_shell(value)? {
         Value::Binary(bytes) => {
             if index > bytes.len() {
@@ -120,9 +105,8 @@ pub(super) fn eval_list_split_builtin(
 pub(super) fn eval_list_split_end_builtin(
     count: &Value,
     value: &Value,
-    local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let count = eval_index_number(count, local_env, "split_end")?;
+    let count = eval_index_number(count, "split_end")?;
     match force_value_shell(value)? {
         Value::Binary(bytes) => {
             if count > bytes.len() {

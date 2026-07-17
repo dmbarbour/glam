@@ -466,13 +466,12 @@ pub(super) fn resolve_core_access(
             CoreDataKey::Index => {
                 let value = dynamic.next().expect("lowered access index must exist");
                 let value = force_value_shell(value)?;
-                vec![value_to_key(&value, &[])?]
+                vec![value_to_key(&value)?]
             }
             CoreDataKey::PathIndex => eval_key_path_list(
                 dynamic
                     .next()
                     .expect("lowered access path index must exist"),
-                &[],
             )?,
         };
         for key in keys {

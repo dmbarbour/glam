@@ -34,7 +34,7 @@ pub(super) fn apply_builtin_values_lazily(
     if rest.is_empty() {
         Ok(result)
     } else {
-        apply_values(result, rest.to_vec(), &[])
+        apply_values(result, rest.to_vec())
     }
 }
 
@@ -113,7 +113,7 @@ pub(super) fn apply_core_operator(
                     call.arguments.iter().cloned().collect(),
                     operands,
                 ),
-                function => apply_values(function, operands, &[]),
+                function => apply_values(function, operands),
             }?;
             Ok(OperatorYield::Data(result))
         }
@@ -182,11 +182,9 @@ pub(super) fn apply_core_operator(
                 },
             ))))
         }
-        CoreOperator::Applicable(function) => Ok(OperatorYield::Data(apply_value(
-            function.clone(),
-            operand,
-            &[],
-        )?)),
+        CoreOperator::Applicable(function) => {
+            Ok(OperatorYield::Data(apply_value(function.clone(), operand)?))
+        }
         CoreOperator::List { arity, supplied } => {
             let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
             arguments.push(operand);

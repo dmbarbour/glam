@@ -5,7 +5,6 @@ pub(super) fn eval_merge_duplicate_builtin(
     name: &Value,
     left: &Value,
     right: &Value,
-    _local_env: &[Value],
 ) -> Result<Value, EvalError> {
     let name = force_value_shell(name)?;
     let name = match name {

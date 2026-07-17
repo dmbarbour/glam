@@ -16,7 +16,6 @@ pub(super) fn apply_builtin(
     builtin: Builtin,
     mut arguments: Vec<Value>,
     argument: Value,
-    local_env: &[Value],
 ) -> Result<Value, EvalError> {
     arguments.push(argument);
     if arguments.len() < builtin.arity() {
@@ -32,13 +31,13 @@ pub(super) fn apply_builtin(
         | Builtin::Multiply
         | Builtin::Divide
         | Builtin::Floor
-        | Builtin::Mod => numeric::apply(builtin, arguments, local_env),
+        | Builtin::Mod => numeric::apply(builtin, arguments),
         Builtin::Greater
         | Builtin::GreaterEqual
         | Builtin::Equal
         | Builtin::NotEqual
         | Builtin::LessEqual
-        | Builtin::Less => comparison::apply(builtin, arguments, local_env),
+        | Builtin::Less => comparison::apply(builtin, arguments),
         Builtin::Append
         | Builtin::Slice
         | Builtin::Map
@@ -46,17 +45,17 @@ pub(super) fn apply_builtin(
         | Builtin::ListSplit
         | Builtin::ListSplitEnd
         | Builtin::ListHead
-        | Builtin::ListTail => list::apply(builtin, arguments, local_env),
+        | Builtin::ListTail => list::apply(builtin, arguments),
         Builtin::ListEffect
         | Builtin::ListEffectReturn
         | Builtin::ListEffectSeq
         | Builtin::ListEffectAlt
         | Builtin::ListEffectCut
-        | Builtin::ListEffectFix => list_effect::apply(builtin, arguments, local_env),
+        | Builtin::ListEffectFix => list_effect::apply(builtin, arguments),
         Builtin::DictSingleton
         | Builtin::DictUnion
         | Builtin::DictUpdate
-        | Builtin::MergeDuplicate => dict::apply(builtin, arguments, local_env),
+        | Builtin::MergeDuplicate => dict::apply(builtin, arguments),
         Builtin::ObjectSpec
         | Builtin::ObjectLocalName
         | Builtin::ObjectInstanceFromParts
@@ -65,11 +64,11 @@ pub(super) fn apply_builtin(
         | Builtin::ObjectDictDefs
         | Builtin::ObjectWithDefs
         | Builtin::ObjectComposedDefs
-        | Builtin::ObjectOverrideDefs => object::apply(builtin, arguments, local_env),
+        | Builtin::ObjectOverrideDefs => object::apply(builtin, arguments),
         Builtin::Fixpoint | Builtin::EffectApply | Builtin::EffectCall => {
-            effect::apply(builtin, arguments, local_env)
+            effect::apply(builtin, arguments)
         }
-        Builtin::Anno => annotation::apply(arguments, local_env),
+        Builtin::Anno => annotation::apply(arguments),
     }
 }
 

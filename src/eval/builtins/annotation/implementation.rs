@@ -1,11 +1,7 @@
 use super::super::super::*;
 
-pub(super) fn eval_anno_builtin(
-    annotation: &Value,
-    target: &Value,
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
-    match recognize_annotation(annotation, local_env)? {
+pub(super) fn eval_anno_builtin(annotation: &Value, target: &Value) -> Result<Value, EvalError> {
+    match recognize_annotation(annotation)? {
         RecognizedAnnotation::AssertDefined { name, defined } => {
             if defined {
                 Ok(target.clone())
@@ -56,10 +52,7 @@ enum RecognizedAnnotation {
     Unknown(String),
 }
 
-fn recognize_annotation(
-    annotation: &Value,
-    local_env: &[Value],
-) -> Result<RecognizedAnnotation, EvalError> {
+fn recognize_annotation(annotation: &Value) -> Result<RecognizedAnnotation, EvalError> {
     let annotation = force_value_shell(annotation)?;
     if let Value::Atom(atom) = &annotation {
         return Ok(recognize_simple_annotation(atom)
@@ -79,7 +72,7 @@ fn recognize_annotation(
 
     match tag {
         Key::Atom(atom) if atom_name(atom) == Some("assert_defined") => Ok(
-            match parse_assertion_annotation(payload, local_env, "assert_defined")? {
+            match parse_assertion_annotation(payload, "assert_defined")? {
                 ParsedAssertion::Valid { name, defined } => {
                     RecognizedAnnotation::AssertDefined { name, defined }
                 }
@@ -87,7 +80,7 @@ fn recognize_annotation(
             },
         ),
         Key::Atom(atom) if atom_name(atom) == Some("assert_undefined") => Ok(
-            match parse_assertion_annotation(payload, local_env, "assert_undefined")? {
+            match parse_assertion_annotation(payload, "assert_undefined")? {
                 ParsedAssertion::Valid { name, defined } => {
                     RecognizedAnnotation::AssertUndefined { name, defined }
                 }
@@ -133,7 +126,6 @@ enum ParsedValueAnnotation {
 
 fn parse_assertion_annotation(
     payload: &Value,
-    local_env: &[Value],
     tag_name: &str,
 ) -> Result<ParsedAssertion, EvalError> {
     let payload = force_value_shell(payload)?;
@@ -154,7 +146,7 @@ fn parse_assertion_annotation(
         )));
     };
 
-    let name = annotation_name(name_value, local_env)?;
+    let name = annotation_name(name_value)?;
     let defined = !is_undefined_value(&force_value_shell(value)?);
     Ok(ParsedAssertion::Valid { name, defined })
 }
@@ -181,7 +173,7 @@ fn parse_value_annotation(
     })
 }
 
-fn annotation_name(value: &Value, _local_env: &[Value]) -> Result<String, EvalError> {
+fn annotation_name(value: &Value) -> Result<String, EvalError> {
     let value = force_value_shell(value)?;
     Ok(match value {
         Value::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),

@@ -1,9 +1,6 @@
 use super::*;
 
-pub(super) fn eval_key_path_list(
-    value: &Value,
-    local_env: &[Value],
-) -> Result<Vec<Key>, EvalError> {
+pub(super) fn eval_key_path_list(value: &Value) -> Result<Vec<Key>, EvalError> {
     let value = eval_value(value)?;
     let Value::List(list) = value else {
         return Err(EvalError::new(
@@ -22,7 +19,7 @@ pub(super) fn eval_key_path_list(
         &mut |values| {
             for value in values.iter() {
                 let value = eval_value(value)?;
-                items.borrow_mut().push(value_to_key(&value, local_env)?);
+                items.borrow_mut().push(value_to_key(&value)?);
             }
             Ok(())
         },
@@ -31,7 +28,7 @@ pub(super) fn eval_key_path_list(
     Ok(items.into_inner())
 }
 
-pub(super) fn list_to_key_items(list: &List, local_env: &[Value]) -> Result<Arc<[Key]>, EvalError> {
+pub(super) fn list_to_key_items(list: &List) -> Result<Arc<[Key]>, EvalError> {
     let items = std::cell::RefCell::new(Vec::new());
     list.try_for_each_segment(
         &mut |bytes| {
@@ -43,7 +40,7 @@ pub(super) fn list_to_key_items(list: &List, local_env: &[Value]) -> Result<Arc<
         &mut |values| {
             for value in values.iter() {
                 let value = eval_value(value)?;
-                items.borrow_mut().push(value_to_key(&value, local_env)?);
+                items.borrow_mut().push(value_to_key(&value)?);
             }
             Ok(())
         },

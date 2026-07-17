@@ -1,11 +1,8 @@
 use super::super::super::*;
 
-pub(super) fn eval_object_instance_builtin(
-    spec: &Value,
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
+pub(super) fn eval_object_instance_builtin(spec: &Value) -> Result<Value, EvalError> {
     let spec_dict = object_spec_dict(spec)?;
-    let specs = object_application_order(&spec_dict, local_env)?;
+    let specs = object_application_order(&spec_dict)?;
 
     let handle = LazyValue::pending("object self");
     let self_marker = Value::Lazy(handle.clone());
@@ -15,8 +12,8 @@ pub(super) fn eval_object_instance_builtin(
             .get(&*keys::DEFS)
             .cloned()
             .unwrap_or_else(default_object_defs_value);
-        let mixed = apply_value(eval_value(&defs)?, base, local_env)?;
-        let mixed = apply_value(eval_value(&mixed)?, self_marker.clone(), local_env)?;
+        let mixed = apply_value(eval_value(&defs)?, base)?;
+        let mixed = apply_value(eval_value(&mixed)?, self_marker.clone())?;
         let Value::Dict(mixed_dict) = force_value_shell(&mixed)? else {
             return Err(EvalError::new(
                 "object definition mixin must produce a dictionary",
@@ -39,13 +36,12 @@ pub(super) fn eval_object_instance_from_parts_builtin(
     name: Value,
     deps: Value,
     defs: Value,
-    local_env: &[Value],
 ) -> Result<Value, EvalError> {
     let spec = crate::core::Dict::new_sync()
         .insert((*keys::NAME).clone(), name)
         .insert((*keys::DEPS).clone(), deps)
         .insert((*keys::DEFS).clone(), defs);
-    eval_object_instance_builtin(&Value::Dict(spec), local_env)
+    eval_object_instance_builtin(&Value::Dict(spec))
 }
 
 /// Re-instantiates an object with an additional stateless definitions mixin.
@@ -56,7 +52,6 @@ pub(super) fn eval_object_instance_from_parts_builtin(
 pub(super) fn eval_object_with_defs_builtin(
     object: &Value,
     extension_defs: Value,
-    local_env: &[Value],
 ) -> Result<Value, EvalError> {
     let spec = object_spec_dict(&eval_object_spec_builtin(object)?)?;
     let name = spec
@@ -75,7 +70,7 @@ pub(super) fn eval_object_with_defs_builtin(
         builtin: Builtin::ObjectComposedDefs,
         arguments: Arc::from([prior_defs, extension_defs]),
     });
-    eval_object_instance_from_parts_builtin(name, deps, composed_defs, local_env)
+    eval_object_instance_from_parts_builtin(name, deps, composed_defs)
 }
 
 pub(super) fn eval_object_composed_defs_builtin(
@@ -83,12 +78,11 @@ pub(super) fn eval_object_composed_defs_builtin(
     extension_defs: Value,
     base: Value,
     self_value: Value,
-    local_env: &[Value],
 ) -> Result<Value, EvalError> {
-    let prior = apply_value(prior_defs, base, local_env)?;
-    let prior = apply_value(prior, self_value.clone(), local_env)?;
-    let extended = apply_value(extension_defs, prior, local_env)?;
-    apply_value(extended, self_value, local_env)
+    let prior = apply_value(prior_defs, base)?;
+    let prior = apply_value(prior, self_value.clone())?;
+    let extended = apply_value(extension_defs, prior)?;
+    apply_value(extended, self_value)
 }
 
 /// Implements the small right-biased record mixin used for assembler-owned
@@ -186,14 +180,10 @@ fn dict_object_spec(dict: crate::core::Dict) -> Value {
     Value::Dict(spec)
 }
 
-fn object_application_order(
-    spec: &crate::core::Dict,
-    local_env: &[Value],
-) -> Result<Vec<crate::core::Dict>, EvalError> {
+fn object_application_order(spec: &crate::core::Dict) -> Result<Vec<crate::core::Dict>, EvalError> {
     let mut seen = BTreeMap::new();
     let mut next_anonymous_id = 0;
-    let mut linearized =
-        object_c3_linearization(spec, local_env, &mut seen, &mut next_anonymous_id)?;
+    let mut linearized = object_c3_linearization(spec, &mut seen, &mut next_anonymous_id)?;
     linearized.reverse();
     Ok(linearized
         .into_iter()
@@ -209,12 +199,8 @@ struct LinearizedObjectSpec {
 }
 
 impl LinearizedObjectSpec {
-    fn new(
-        spec: crate::core::Dict,
-        local_env: &[Value],
-        next_anonymous_id: &mut u64,
-    ) -> Result<Self, EvalError> {
-        let name = object_spec_name(&spec, local_env)?;
+    fn new(spec: crate::core::Dict, next_anonymous_id: &mut u64) -> Result<Self, EvalError> {
+        let name = object_spec_name(&spec)?;
         let anonymous_id = if is_anonymous_object_name(&name) {
             let id = *next_anonymous_id;
             *next_anonymous_id += 1;
@@ -232,11 +218,10 @@ impl LinearizedObjectSpec {
 
 fn object_c3_linearization(
     spec: &crate::core::Dict,
-    local_env: &[Value],
     seen: &mut BTreeMap<Key, ()>,
     next_anonymous_id: &mut u64,
 ) -> Result<Vec<LinearizedObjectSpec>, EvalError> {
-    let entry = LinearizedObjectSpec::new(spec.clone(), local_env, next_anonymous_id)?;
+    let entry = LinearizedObjectSpec::new(spec.clone(), next_anonymous_id)?;
     if entry.anonymous_id.is_none() {
         remember_object_spec(&entry.name, spec, seen)?;
     }
@@ -250,8 +235,7 @@ fn object_c3_linearization(
     let mut saw_named_dep = false;
     for dep_spec in &deps {
         let dep_spec = object_spec_dict(dep_spec)?;
-        let dep_linearization =
-            object_c3_linearization(&dep_spec, local_env, seen, next_anonymous_id)?;
+        let dep_linearization = object_c3_linearization(&dep_spec, seen, next_anonymous_id)?;
         let dep_entry = dep_linearization
             .first()
             .cloned()
@@ -271,13 +255,12 @@ fn object_c3_linearization(
     sequences.push(direct_deps);
 
     let mut linearized = vec![entry];
-    linearized.extend(c3_merge(sequences, local_env)?);
+    linearized.extend(c3_merge(sequences)?);
     Ok(linearized)
 }
 
 fn c3_merge(
     mut sequences: Vec<Vec<LinearizedObjectSpec>>,
-    _local_env: &[Value],
 ) -> Result<Vec<LinearizedObjectSpec>, EvalError> {
     let mut result = Vec::new();
 
@@ -329,12 +312,12 @@ fn same_linearized_object_spec(left: &LinearizedObjectSpec, right: &LinearizedOb
     }
 }
 
-fn object_spec_name(spec: &crate::core::Dict, local_env: &[Value]) -> Result<Key, EvalError> {
+fn object_spec_name(spec: &crate::core::Dict) -> Result<Key, EvalError> {
     let Some(name) = spec.get(&*keys::NAME) else {
         return Err(EvalError::new("object specification requires a name"));
     };
     let name = force_value_shell(name)?;
-    value_to_key(&name, local_env)
+    value_to_key(&name)
 }
 
 fn is_anonymous_object_name(name: &Key) -> bool {

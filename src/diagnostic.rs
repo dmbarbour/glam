@@ -235,7 +235,6 @@ pub(crate) fn enrich(
     eval::apply_values(
         Value::Builtin(Builtin::ObjectWithDefs),
         vec![message, extension_defs],
-        &[],
     )
     .map_err(|error| error.to_string())
 }

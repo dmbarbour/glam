@@ -5,11 +5,7 @@ mod implementation;
 pub(super) use implementation::list_like_value;
 use implementation::*;
 
-pub(super) fn apply(
-    builtin: Builtin,
-    arguments: Vec<Value>,
-    local_env: &[Value],
-) -> Result<Value, EvalError> {
+pub(super) fn apply(builtin: Builtin, arguments: Vec<Value>) -> Result<Value, EvalError> {
     match builtin {
         Builtin::Append => {
             let [left, right] = super::exact(arguments, "append")?;
@@ -17,11 +13,11 @@ pub(super) fn apply(
         }
         Builtin::Slice => {
             let [start, end, value] = super::exact(arguments, "slice")?;
-            eval_slice_builtin(&start, &end, &value, local_env)
+            eval_slice_builtin(&start, &end, &value)
         }
         Builtin::Map => {
             let [function, value] = super::exact(arguments, "map")?;
-            eval_map_builtin(&function, &value, local_env)
+            eval_map_builtin(&function, &value)
         }
         Builtin::ListLen => {
             let [value] = super::exact(arguments, "list len")?;
@@ -29,11 +25,11 @@ pub(super) fn apply(
         }
         Builtin::ListSplit => {
             let [index, value] = super::exact(arguments, "list split")?;
-            eval_list_split_builtin(&index, &value, local_env)
+            eval_list_split_builtin(&index, &value)
         }
         Builtin::ListSplitEnd => {
             let [count, value] = super::exact(arguments, "list split_end")?;
-            eval_list_split_end_builtin(&count, &value, local_env)
+            eval_list_split_end_builtin(&count, &value)
         }
         Builtin::ListHead => {
             let [value] = super::exact(arguments, "list head")?;

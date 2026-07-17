@@ -66,6 +66,9 @@ design in the design documents.
 
 ### Values and evaluation
 
+- Production evaluation consumes only closed `Value`s. Lexical locals and the
+  small expression interpreter in `eval/test_support.rs` exist only for test
+  fixtures; do not thread a local environment through evaluator APIs.
 - `Value::Net` is an explicit first-class closed net. `Value::Lazy` is a
   memoized computation whose net-backed forms must expose `Data` when forced;
   an exposed `Bind` is an error, not an implicit function conversion.
