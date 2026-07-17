@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
-use std::io::{self, Write};
-use std::path::PathBuf;
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use bytes::Bytes;
@@ -124,8 +124,10 @@ fn script_extension(option: &str) -> Option<&str> {
 }
 
 fn assemble_inputs(inputs: Vec<ModuleInput>, cli_args: Vec<String>) -> ExitCode {
-    let assembler = Assembler::default().with_diagnostic_callback(|diagnostic| {
-        print_diagnostic(&diagnostic);
+    let assembler = Assembler::default();
+    let logger = DefaultLogger::new(assembler.clone());
+    let assembler = assembler.with_diagnostic_callback(move |diagnostic| {
+        logger.emit(&diagnostic);
     });
     let result = assemble(&assembler, inputs, cli_args);
 
@@ -249,14 +251,162 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn print_diagnostic(diagnostic: &Diagnostic) {
-    match (diagnostic.source(), diagnostic.line()) {
-        (Some(source), Some(line)) => eprintln!(
-            "{source}:{line}: {}: {}",
-            diagnostic.severity(),
-            diagnostic.message()
-        ),
-        _ => eprintln!("{}: {}", diagnostic.severity(), diagnostic.message()),
+struct DefaultLogger {
+    evaluator: Assembler,
+    working_directory: PathBuf,
+}
+
+impl DefaultLogger {
+    const AUTO_INDENT: usize = 2;
+
+    fn new(evaluator: Assembler) -> Self {
+        Self {
+            evaluator,
+            working_directory: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        }
+    }
+
+    fn emit(&self, diagnostic: &Diagnostic) {
+        let terminal = TerminalContext::snapshot();
+        let updates = self.viewer_updates(diagnostic, &terminal);
+        let text = diagnostic
+            .enrich_with(updates)
+            .and_then(|message| self.evaluator.get(&message, "msg.text"))
+            .and_then(|text| self.evaluator.to_binary(&text))
+            .map(|text| String::from_utf8_lossy(&text).into_owned())
+            .unwrap_or_else(|_| diagnostic.message().to_owned());
+        let rendered = self.render(diagnostic, &text, terminal.color);
+
+        let _ = io::stderr().lock().write_all(rendered.as_bytes());
+    }
+
+    fn viewer_updates(&self, diagnostic: &Diagnostic, terminal: &TerminalContext) -> Value {
+        let mut viewer = vec![
+            ("kind", Value::text("terminal")),
+            (
+                "columns",
+                Value::integer(i64::try_from(terminal.columns).unwrap_or(i64::MAX)),
+            ),
+            ("color", Value::text(terminal.color.name())),
+            ("auto_indent", Value::integer(Self::AUTO_INDENT as i64)),
+        ];
+        if let Some(term) = &terminal.term {
+            viewer.push(("term", Value::text(term)));
+        }
+        if let Some(language) = &terminal.language {
+            viewer.push(("lang", Value::text(language)));
+        }
+        if let Some(source) = diagnostic.source().and_then(|source| {
+            let path = Path::new(source);
+            path.is_absolute().then(|| self.display_source(path))
+        }) {
+            viewer.push(("source", Value::record([("file", Value::text(source))])));
+        }
+        Value::record([("viewer", Value::record(viewer))])
+    }
+
+    fn render(&self, diagnostic: &Diagnostic, text: &str, color: TerminalColor) -> String {
+        let severity = diagnostic.severity().to_string();
+        let severity = color.paint(diagnostic.severity(), &severity);
+        let location = match (diagnostic.source(), diagnostic.line()) {
+            (Some(source), Some(line)) => {
+                format!("{}:{line}: ", self.display_source(Path::new(source)))
+            }
+            (Some(source), None) => format!("{}: ", self.display_source(Path::new(source))),
+            (None, Some(line)) => format!("line {line}: "),
+            (None, None) => String::new(),
+        };
+        let mut rendered = format!("{location}{severity}: ");
+        let mut lines = text.split('\n');
+        rendered.push_str(lines.next().unwrap_or_default());
+        for line in lines {
+            rendered.push('\n');
+            if !line.is_empty() {
+                rendered.push_str(&" ".repeat(Self::AUTO_INDENT));
+                rendered.push_str(line);
+            }
+        }
+        rendered.push('\n');
+        rendered
+    }
+
+    fn display_source(&self, source: &Path) -> String {
+        source
+            .strip_prefix(&self.working_directory)
+            .unwrap_or(source)
+            .display()
+            .to_string()
+    }
+}
+
+struct TerminalContext {
+    columns: usize,
+    color: TerminalColor,
+    term: Option<String>,
+    language: Option<String>,
+}
+
+impl TerminalContext {
+    fn snapshot() -> Self {
+        let term = env::var("TERM").ok();
+        let color = TerminalColor::detect(term.as_deref());
+        Self {
+            columns: env::var("COLUMNS")
+                .ok()
+                .and_then(|columns| columns.parse().ok())
+                .filter(|columns| *columns > 0)
+                .unwrap_or(80),
+            color,
+            term,
+            language: ["LC_ALL", "LC_MESSAGES", "LANG"]
+                .into_iter()
+                .find_map(|name| env::var(name).ok().filter(|value| !value.is_empty())),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TerminalColor {
+    None,
+    Ansi16,
+    Ansi256,
+    TrueColor,
+}
+
+impl TerminalColor {
+    fn detect(term: Option<&str>) -> Self {
+        if !io::stderr().is_terminal() || env::var_os("NO_COLOR").is_some() || term == Some("dumb")
+        {
+            return Self::None;
+        }
+        if env::var("COLORTERM").is_ok_and(|value| {
+            value.eq_ignore_ascii_case("truecolor") || value.eq_ignore_ascii_case("24bit")
+        }) {
+            Self::TrueColor
+        } else if term.is_some_and(|term| term.contains("256color")) {
+            Self::Ansi256
+        } else {
+            Self::Ansi16
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Ansi16 => "ansi16",
+            Self::Ansi256 => "ansi256",
+            Self::TrueColor => "truecolor",
+        }
+    }
+
+    fn paint(self, severity: Severity, text: &str) -> String {
+        let code = match (self, severity) {
+            (Self::None, _) => return text.to_owned(),
+            (_, Severity::Info) => 36,
+            (_, Severity::Warning) => 33,
+            (_, Severity::Error) => 31,
+        };
+        format!("\x1b[{code}m{text}\x1b[0m")
     }
 }
 
@@ -287,10 +437,11 @@ fn print_parse_summary(path: &str, parsed: &ParsedSource) -> ExitCode {
         .iter()
         .any(|diagnostic| matches!(diagnostic.severity, Severity::Error));
 
+    let logger = DefaultLogger::new(Assembler::default());
     for diagnostic in &parsed.diagnostics {
-        eprintln!(
-            "{path}:{}: {}: {}",
-            diagnostic.line, diagnostic.severity, diagnostic.message
+        logger.emit(
+            &Diagnostic::new(diagnostic.severity, diagnostic.message.clone())
+                .with_source_location(path, diagnostic.line),
         );
     }
 
@@ -342,4 +493,62 @@ Bare arguments are reserved for configured `conf.cli` rewriting.
 ";
 
     print!("{HELP}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_logger_indents_nonempty_continuation_lines_by_two_spaces() {
+        let logger = DefaultLogger {
+            evaluator: Assembler::default(),
+            working_directory: PathBuf::from("/work"),
+        };
+        let diagnostic = Diagnostic::new(Severity::Warning, "first\nsecond\n\nfourth")
+            .with_source_location("/work/src/test.g", 4);
+
+        assert_eq!(
+            logger.render(&diagnostic, diagnostic.message(), TerminalColor::None),
+            "src/test.g:4: warning: first\n  second\n\n  fourth\n"
+        );
+    }
+
+    #[test]
+    fn terminal_viewer_context_is_an_independent_diagnostic_mixin() {
+        let logger = DefaultLogger::new(Assembler::default());
+        let diagnostic = Diagnostic::new(Severity::Info, "hello");
+        let terminal = TerminalContext {
+            columns: 100,
+            color: TerminalColor::Ansi256,
+            term: Some("xterm-256color".to_owned()),
+            language: Some("en_US.UTF-8".to_owned()),
+        };
+        let enriched = diagnostic
+            .enrich_with(logger.viewer_updates(&diagnostic, &terminal))
+            .expect("terminal viewer metadata should mix into a diagnostic");
+
+        assert_eq!(
+            logger
+                .evaluator
+                .get(&enriched, "viewer.auto_indent")
+                .expect("viewer should declare automatic indentation")
+                .as_i64(),
+            Some(2)
+        );
+        assert_eq!(
+            logger
+                .evaluator
+                .get(&enriched, "viewer.term")
+                .expect("viewer should declare its terminal")
+                .as_binary(),
+            Some(b"xterm-256color".as_slice())
+        );
+        assert!(
+            logger
+                .evaluator
+                .get(diagnostic.emission(), "viewer")
+                .is_err()
+        );
+    }
 }

@@ -61,11 +61,14 @@ the originating build session.
 
 Each source compilation receives an assembler-local invocation ID. A hidden
 immutable trace links imported compilations to their parent invocation and
-relative import request. Diagnostic enrichment projects that compact trace
-into `msg.origin` before callbacks or retained histories observe the message;
-front ends never receive it. Sources and requests are tagged values, `namespace`
-is globally qualified, and `import_chain` contains ordered root-to-parent
-`{importer,request,extends}` edges.
+relative import request. Diagnostic callbacks and retained histories receive a
+raw envelope containing the emitted value, severity, and that compact trace;
+front ends never receive the trace. An observer calls `Diagnostic::enrich` to
+project it into `msg.origin`, and may call `enrich_with` to add an independent
+viewer context. Sources and requests are tagged values, `namespace` is globally
+qualified, and `import_chain` contains ordered root-to-parent
+`{importer,request,extends}` edges. Rendering is client policy; the executable's
+default terminal logger is not part of `Assembler`.
 
 `main` chooses the `configuration` and `assembly` module paths and constructs
 their initial definitions. Those names and roles are CLI policy, not library

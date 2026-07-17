@@ -224,8 +224,6 @@ We'll express annotations as a builtin function.
 
 Annotations are not observable within the computation, but may guide performance, debugging, and other use cases. To avoid silent degradation of performance or reasoning, the assembler shall warn about unrecognized annotations. 
 
-Effectful annotations of form `eff:(\api -> ...)` should receive access to the reflection API. The assembler will run it before returning the associated term. The reflection API should receive relevant context, e.g. associated term and continuation.
-
 ## Local Definitions
 
 We'll support Haskell-style locals. 

@@ -42,7 +42,7 @@ impl SourceIdentity {
         }
     }
 
-    fn value(&self) -> Value {
+    pub(crate) fn value(&self) -> Value {
         let (tag, payload) = match self {
             Self::File { path } => (&*keys::FILE, Value::binary_from_text(path)),
             Self::Script { text, .. } => (&*keys::SCRIPT, Value::Binary(text.clone())),
@@ -223,6 +223,18 @@ pub(crate) fn assembler_metadata(severity: Severity, origin: Option<Value>) -> D
     Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message))
 }
 
+/// Applies one set of object updates as a definitions mixin. Keeping this
+/// operation separate lets observers add their own context without mutating
+/// the original emission.
+pub(crate) fn apply_updates(message: Value, updates: Value) -> Result<Value, String> {
+    let extension_defs = Value::builtin_call(Builtin::ObjectOverrideDefs, vec![updates]);
+    eval::apply_values(
+        Value::Builtin(Builtin::ObjectWithDefs),
+        vec![message, extension_defs],
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// Applies assembler-owned metadata as a real object definitions mixin so the
 /// resulting `spec` also records the extension for subsequent observers.
 pub(crate) fn enrich(
@@ -230,13 +242,7 @@ pub(crate) fn enrich(
     severity: Severity,
     origin: Option<Value>,
 ) -> Result<Value, String> {
-    let metadata = Value::Dict(assembler_metadata(severity, origin));
-    let extension_defs = Value::builtin_call(Builtin::ObjectOverrideDefs, vec![metadata]);
-    eval::apply_values(
-        Value::Builtin(Builtin::ObjectWithDefs),
-        vec![message, extension_defs],
-    )
-    .map_err(|error| error.to_string())
+    apply_updates(message, Value::Dict(assembler_metadata(severity, origin)))
 }
 
 pub(crate) fn conventional_summary(message: &Value) -> (Option<usize>, Option<Arc<str>>) {

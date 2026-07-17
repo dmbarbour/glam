@@ -54,15 +54,22 @@ design in the design documents.
   dot-prefixed components. Top-level host inputs such as `--file` and
   `GLAM_CONF` are exempt because the caller, not a front end, supplies them.
 - Diagnostic severity is a front-end emission-effect argument, not a field the
-  assembler discovers by evaluating the message. Before dispatch, the
-  assembler mixes authoritative `msg.severity` and `msg.origin` fields into
-  the message and composes that mixin into the resulting object `spec`.
+  assembler discovers by evaluating the message. Diagnostic sinks receive a
+  raw envelope containing the original emission, severity, and hidden
+  assembler provenance. Observers explicitly call `Diagnostic::enrich` (or
+  `enrich_with`) to mix authoritative `msg.severity` and `msg.origin` into an
+  independent object view whose `spec` records each mixin. The assembler does
+  not render diagnostics.
   `msg.origin.source` is tagged (`file:Path`, `script:Bytes`, and future source
   kinds), while `invocation` is a fresh assembler-local compilation ID.
   `namespace` is the globally qualified definition namespace. `import_chain`
   contains root-to-parent `{importer,request,extends}` edges; local requests are
   tagged `file:RelativePath`, and `extends` is relative to the importer namespace.
   Provenance must not retain module values or compilation environments.
+- The executable's default logger is one diagnostic observer. It applies
+  assembler enrichment, adds terminal context under `viewer`, and renders a
+  compact text view. More elaborate logging and IDE policy belongs to glam
+  configuration, not to the assembler library.
 
 ### Values and evaluation
 

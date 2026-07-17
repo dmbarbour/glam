@@ -291,12 +291,17 @@ impl<'net> NetBuilder<'net> {
     }
 }
 
-/// One source or runtime diagnostic retained by an [`Assembler`].
+/// One raw diagnostic emission retained or dispatched by an [`Assembler`].
+///
+/// The emission stays unchanged in the envelope. Observers may explicitly
+/// apply assembler provenance, then add viewer-specific context, without
+/// affecting other observers of the same diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
-    value: Value,
-    // Transitional projections for the text-only embedding API. The enriched
-    // Value is the semantic message delivered to future loggers and viewers.
+    emission: Value,
+    origin: Option<Value>,
+    // Transitional projections for simple embedding clients that do not yet
+    // inspect the object message.
     source: Option<Arc<str>>,
     severity: Severity,
     line: Option<usize>,
@@ -318,7 +323,7 @@ impl Diagnostic {
         let source = source.into();
         let origin = CoreValue::Dict(Dict::new_sync().insert(
             (*crate::core::keys::SOURCE).clone(),
-            CoreValue::binary_from_text(&source),
+            SourceIdentity::file(source.clone()).value(),
         ));
         Self::from_emission(
             Some(source.clone()),
@@ -328,10 +333,34 @@ impl Diagnostic {
         )
     }
 
-    /// Returns the complete enriched diagnostic object. Conventional text,
-    /// severity, and provenance accessors below are compatibility projections.
-    pub fn value(&self) -> &Value {
-        &self.value
+    /// Returns the front-end or runtime value exactly as it was emitted.
+    pub fn emission(&self) -> &Value {
+        &self.emission
+    }
+
+    /// Returns assembler provenance before it is mixed into the emission.
+    pub fn origin(&self) -> Option<&Value> {
+        self.origin.as_ref()
+    }
+
+    /// Applies authoritative assembler metadata to a fresh diagnostic object.
+    pub fn enrich(&self) -> Result<Value, Error> {
+        crate::diagnostic::enrich(
+            self.emission.as_core().clone(),
+            self.severity,
+            self.origin.as_ref().map(|origin| origin.as_core().clone()),
+        )
+        .map(Value::from_core)
+        .map_err(Error::new)
+    }
+
+    /// Applies assembler metadata followed by observer-specific object updates.
+    /// The raw emission and other enriched views remain unchanged.
+    pub fn enrich_with(&self, updates: Value) -> Result<Value, Error> {
+        let enriched = self.enrich()?;
+        crate::diagnostic::apply_updates(enriched.into_core(), updates.into_core())
+            .map(Value::from_core)
+            .map_err(Error::new)
     }
 
     pub fn source(&self) -> Option<&str> {
@@ -366,18 +395,9 @@ impl Diagnostic {
         origin: Option<CoreValue>,
     ) -> Self {
         let (line, text) = crate::diagnostic::conventional_summary(&message);
-        let enriched =
-            crate::diagnostic::enrich(message, severity, origin.clone()).unwrap_or_else(|error| {
-                let text = format!("invalid diagnostic message: {error}");
-                crate::diagnostic::enrich(
-                    crate::diagnostic::text_message(line, &text),
-                    severity,
-                    origin,
-                )
-                .expect("canonical fallback diagnostic must be valid")
-            });
         Self {
-            value: Value::from_core(enriched),
+            emission: Value::from_core(message),
+            origin: origin.map(Value::from_core),
             source,
             severity,
             line,
@@ -1260,6 +1280,13 @@ mod tests {
                 .message(),
             "hello"
         );
+        let received = received
+            .lock()
+            .expect("callback collection mutex should not be poisoned");
+        let CoreValue::Dict(emission) = received[0].emission().as_core() else {
+            unreachable!()
+        };
+        assert!(emission.get(&*crate::core::keys::SPEC).is_none());
     }
 
     #[test]
@@ -1287,7 +1314,21 @@ mod tests {
         let diagnostic = Diagnostic::from_compile(&trace, Severity::Warning, message);
         assert_eq!(diagnostic.severity(), Severity::Warning);
 
-        let CoreValue::Dict(enriched) = diagnostic.value().as_core() else {
+        let CoreValue::Dict(emission) = diagnostic.emission().as_core() else {
+            panic!("raw diagnostic should be a dictionary");
+        };
+        let Some(CoreValue::Dict(interface)) = emission.get(&*crate::core::keys::MSG) else {
+            panic!("raw diagnostic should provide msg");
+        };
+        assert_eq!(
+            interface.get(&*crate::core::keys::SEVERITY),
+            Some(&*crate::core::keys::ERROR_VALUE)
+        );
+        assert!(interface.get(&*crate::core::keys::ORIGIN).is_none());
+        assert!(emission.get(&*crate::core::keys::SPEC).is_none());
+
+        let enriched = diagnostic.enrich().expect("diagnostic should enrich");
+        let CoreValue::Dict(enriched) = enriched.as_core() else {
             panic!("enriched diagnostic should be an object dictionary");
         };
         let Some(CoreValue::Dict(interface)) = enriched.get(&*crate::core::keys::MSG) else {
@@ -1331,26 +1372,20 @@ mod tests {
         );
         let viewer_key = Key::atom_from_text("viewer");
         let inherit = |name: &str| {
-            let updates = CoreValue::Dict(
-                Dict::new_sync().insert(viewer_key.clone(), CoreValue::binary_from_text(name)),
-            );
-            let defs = CoreValue::builtin_call(Builtin::ObjectOverrideDefs, vec![updates]);
-            eval::apply_values(
-                CoreValue::Builtin(Builtin::ObjectWithDefs),
-                vec![diagnostic.value().as_core().clone(), defs],
-            )
-            .expect("viewer mixin should apply")
+            diagnostic
+                .enrich_with(Value::record([("viewer", Value::text(name))]))
+                .expect("viewer mixin should apply")
         };
 
         let first = inherit("terminal");
         let second = inherit("ide");
-        let CoreValue::Dict(original) = diagnostic.value().as_core() else {
+        let CoreValue::Dict(original) = diagnostic.emission().as_core() else {
             unreachable!()
         };
-        let CoreValue::Dict(first) = first else {
+        let CoreValue::Dict(first) = first.as_core() else {
             unreachable!()
         };
-        let CoreValue::Dict(second) = second else {
+        let CoreValue::Dict(second) = second.as_core() else {
             unreachable!()
         };
         assert!(original.get(&viewer_key).is_none());

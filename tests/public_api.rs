@@ -102,23 +102,26 @@ fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
     assert_eq!(diagnostic.line(), Some(1));
     assert_eq!(diagnostic.severity(), Severity::Error);
     assert!(diagnostic.message().contains("not valid UTF-8"));
+    let enriched = diagnostic
+        .enrich()
+        .expect("assembler metadata should enrich the diagnostic");
     assert_eq!(
         assembler
-            .get(diagnostic.value(), "msg.text")
+            .get(&enriched, "msg.text")
             .expect("diagnostic text should be available")
             .as_binary(),
         Some(diagnostic.message().as_bytes())
     );
     assert_eq!(
         assembler
-            .get(diagnostic.value(), "msg.origin.source.file")
+            .get(&enriched, "msg.origin.source.file")
             .expect("assembler source provenance should be mixed in")
             .as_binary(),
         Some(source_path.as_bytes())
     );
     assert_eq!(
         assembler
-            .get(diagnostic.value(), "spec")
+            .get(&enriched, "spec")
             .expect("diagnostic enrichment should update its object spec")
             .kind(),
         glam::ValueKind::Dict
@@ -142,8 +145,11 @@ fn repeated_source_compilations_have_distinct_invocations() {
 
     assert_eq!(error.diagnostics().len(), 2);
     let invocation = |diagnostic: &glam::Diagnostic| {
+        let enriched = diagnostic
+            .enrich()
+            .expect("assembler metadata should enrich the diagnostic");
         assembler
-            .get(diagnostic.value(), "msg.origin.invocation")
+            .get(&enriched, "msg.origin.invocation")
             .expect("diagnostic should identify its compilation invocation")
             .as_i64()
             .expect("small invocation ID should fit i64")
@@ -186,9 +192,12 @@ fn imported_source_diagnostics_include_the_import_chain() {
     let diagnostic = &diagnostics.entries()[0];
     let source_path = absolute_path_text("child.g");
     assert_eq!(diagnostic.source(), Some(source_path.as_str()));
+    let enriched = diagnostic
+        .enrich()
+        .expect("assembler metadata should enrich the diagnostic");
     assert_eq!(
         assembler
-            .get(diagnostic.value(), "msg.origin.import_chain")
+            .get(&enriched, "msg.origin.import_chain")
             .expect("imported diagnostic should carry its parent chain")
             .kind(),
         glam::ValueKind::List
