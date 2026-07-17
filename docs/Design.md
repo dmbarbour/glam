@@ -485,7 +485,9 @@ Machine-code mnemonics are left to libraries. Effectively, we have a generic 'as
 
 Reflection is expressed effectfully, i.e. `eff:(\api -> ...)`. To keep implementation small and simple, the reflection API is version-specific beyond the *Standard Effects*, specialized to the assembler executable's representations and capabilities. Most bloat of portability and policy is pushed to user-defined adapters.
 
-Reflection may be triggered by compilers (`refl.*`), configurations (`conf.log` and `conf.ide`), or anonymous term annotations (`anno (.log Msg) Term`). In the general case, reflection tasks run concurrently and interact through shared state. To control concurrency, the reflection API shall support software-transactional memory (STM), with transaction per scoped 'cut'. A failed transaction is implicitly retried when observed conditions change.
+Reflection may be triggered by compilers (`refl.*`), configurations (`conf.log` and `conf.ide`), or anonymous term annotations (`anno refl:(.log Msg) Term`). In the general case, reflection tasks run concurrently and interact through shared state. An annotation runs its reflection task to completion before exposing `Expr`, and may observe `Expr` (triggering evaluation) or further annotate `Expr`, but does not alter the observable value of `Expr`. 
+
+To control concurrency, the reflection API shall support software-transactional memory (STM), with transaction per scoped 'cut'. A failed transaction is implicitly retried when observed conditions change.
 
 Reflection is not reproducible. Between resource and scheduling variability, caching, timestamps, user interactions, etc. it's infeasible to reproduce the exact same log messages. It's left to users to ensure a reflection-based typechecker is confluent and doesn't depend on timestamps. A critical constraint on the reflection API is that it shall not observably influence pure computations. Thus, assembly 'result' remains robustly reproducible.
 
@@ -493,7 +495,80 @@ Reflection is not reproducible. Between resource and scheduling variability, cac
 
 ### Logging
 
-We can emit log messages via annotations or reflection API. Each message should be implicitly tagged with metadata visible only to reflection, e.g. timestamp and continuation, then delivered on its way. There should be some default behavior to write log to standard error in batch mode, with `conf.log` reading the log and writing to standard error. In interactive mode, `conf.ide` displaces the logger and has more freedom to render messages through other media.
+Reflection emits diagnostics through the effect:
+
+```glam
+.log Severity Message
+```
+
+`Severity` is a separate effect argument rather than a field discovered by
+evaluating `Message`. This allows queues and observers to classify a diagnostic
+without first interpreting an arbitrary object. The conventional severities are
+`'info`, `'warn`, and `'error`.
+
+`Message` is normally an object. Its controlled public interface is the `msg`
+member; fields outside `msg.*` are open for application-specific data and object
+implementation details. The simplest useful message is:
+
+```glam
+{msg:{text:"something happened"}}
+```
+
+The conventional `msg` interface includes:
+
+- `msg.text`: a plain-text view suitable for simple loggers;
+- `msg.severity`: the authoritative severity supplied separately to `.log`;
+- `msg.origin`: provenance the assembler or reflection host can attest;
+- `msg.event`: an optional, user-supplied semantic identity for the event.
+
+`msg.text` is a conventional fallback view, not the only possible rendering.
+A message object may use its `spec` to derive text, structured terminal output,
+SVG, interactive views, or other representations. More elaborate observers
+may ignore `msg.text` entirely.
+
+`msg.event` belongs to the emitter, not the assembler. Reusable libraries are
+encouraged to use an abstract-global path or similarly stable value for this
+field. Such an identity is often more useful for filtering, suppression,
+documentation, and tests than a dynamic call location.
+
+The raw queue entry is an envelope containing the original `Message`, the
+separate `Severity`, and hidden host metadata. Emission does not mutate the
+message. Before observation, the assembler may enrich a fresh view of the
+object by authoritatively mixing `msg.severity` and `msg.origin` into it.
+A logger or IDE may then apply another independent mixin, conventionally under
+`viewer.*`, for properties such as terminal capabilities, language, display
+width, or automatic indentation. Each observer may construct its own view;
+the raw emission and views constructed by other observers remain unchanged.
+
+`msg.origin` is structured provenance, not necessarily a single source
+location. Depending on how a diagnostic was produced, it may describe a source
+identity, compilation invocation, namespace, import chain, annotation emitter,
+or reflection task. Consumers must not assume that it contains a meaningful
+line number or a unique dynamic caller. Reusable logging functions, lazy
+sharing, and tail calls can make any single “call site” misleading.
+
+An annotation-launched reflection task has tacit access to the pure evaluator
+continuation suspended behind that annotation. Reflection may query this
+context and receive ordinary data—for example, a nearest definition or a
+bounded source-level frame summary—but it cannot obtain, retain, compare, or
+resume a first-class reference to the continuation. A logging library may
+include selected context data in its message when dynamic context is useful.
+
+Fine-grained provenance for result data is a separate concern. It should be
+provided by an explicitly traced evaluation mode rather than by permanently
+attaching histories to ordinary values.
+
+Logging participates in reflection transactions. A `.log` inside `.cut` becomes
+visible only when the surrounding transaction commits; failed alternatives
+discard it. Queue reads observe committed host state only, never writes from
+their own transaction, and fail immediately when no input is available.
+Ordering between concurrently produced messages is host policy and must not
+influence pure assembly results.
+
+The assembler library does not render diagnostics. In batch mode, the
+executable provides a small default terminal logger when no configured observer
+handles a message. `conf.log` or `conf.ide` may instead enrich, filter, group,
+store, or render messages according to user policy.
 
 ### Interaction
 
