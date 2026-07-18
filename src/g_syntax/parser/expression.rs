@@ -274,6 +274,11 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             SyntaxOperator::Builtin(crate::core::Builtin::ObjectInstance) => "object_instance",
             SyntaxOperator::Builtin(crate::core::Builtin::EffectApply) => "effect_apply",
             SyntaxOperator::Builtin(crate::core::Builtin::EffectCall) => "effect_call",
+            SyntaxOperator::Builtin(crate::core::Builtin::EffectMap) => "eff.map",
+            SyntaxOperator::Builtin(crate::core::Builtin::EffectMapRun) => "effect_map_run",
+            SyntaxOperator::Builtin(crate::core::Builtin::EffectMapContinue) => {
+                "effect_map_continue"
+            }
             SyntaxOperator::Builtin(crate::core::Builtin::ObjectDefaultDefs) => {
                 "object_default_defs"
             }

@@ -24,7 +24,6 @@ pub enum ReflectionRequest {
     DictItems,
     Log,
     ReflTask,
-    ReflTasks,
     JoinTask,
     TaskResult,
     TaskError,
@@ -127,12 +126,6 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
             ReflectionRequest::ReflTask,
         ),
         EffectRequestSpec::new(
-            "refl_tasks",
-            ["reflection_runtime", "v0", "request", "refl_tasks"],
-            1,
-            ReflectionRequest::ReflTasks,
-        ),
-        EffectRequestSpec::new(
             "join_task",
             ["reflection_runtime", "v0", "request", "join_task"],
             1,
@@ -212,13 +205,11 @@ where
                 crate::core::List::from_values(
                     dict.iter()
                         .map(|(key, value)| {
-                            CoreValue::Dict(Dict::new_sync().insert(
-                                (*keys::TUPLE).clone(),
-                                CoreValue::List(crate::core::List::from_values(vec![
-                                    key_value(key),
-                                    value.clone(),
-                                ])),
-                            ))
+                            CoreValue::Dict(
+                                Dict::new_sync()
+                                    .insert((*keys::KEY).clone(), key_value(key))
+                                    .insert((*keys::VALUE).clone(), value.clone()),
+                            )
                         })
                         .collect(),
                 ),
@@ -271,51 +262,6 @@ where
                 handle
             };
             Ok(RequestResult::Return(task_handle_value(&handle)))
-        }
-        ReflectionRequest::ReflTasks => {
-            let [effects]: [Value; 1] = arguments.try_into().map_err(|_| {
-                TaskError::new("`.refl_tasks` received the wrong number of arguments")
-            })?;
-            let CoreValue::Dict(effects) = evaluate(context.eval_context(), effects.into_core())?
-            else {
-                return Err(TaskError::new("`.refl_tasks` requires a dictionary"));
-            };
-            let eval_context = context.eval_context().clone();
-            let handles = if let Some(mut transaction) = context.transaction() {
-                let mut handles = Dict::new_sync();
-                for (key, effect) in effects.iter() {
-                    if matches!(effect, CoreValue::Dict(dict) if dict.is_empty()) {
-                        continue;
-                    }
-                    let pending = eval_context
-                        .reserve_reflection_task(effect.clone())
-                        .map_err(|error| TaskError::new(error.as_ref()))?;
-                    handles = handles.insert(key.clone(), task_handle_core_value(pending.handle()));
-                    transaction
-                        .parts()
-                        .1
-                        .reflection_journal()
-                        .task_updates
-                        .push(ReflectionTaskUpdate::Launch(pending));
-                }
-                handles
-            } else {
-                let mut handles = Dict::new_sync();
-                for (key, effect) in effects.iter() {
-                    if matches!(effect, CoreValue::Dict(dict) if dict.is_empty()) {
-                        continue;
-                    }
-                    let handle = eval_context
-                        .start_joinable_reflection_task(effect.clone())
-                        .map_err(|error| TaskError::new(error.as_ref()))?;
-                    handles = handles.insert(key.clone(), task_handle_core_value(&handle));
-                }
-                context.committed();
-                handles
-            };
-            Ok(RequestResult::Return(Value::from_core(CoreValue::Dict(
-                handles,
-            ))))
         }
         ReflectionRequest::JoinTask => {
             let handle = task_handle_argument(context.eval_context(), arguments, "join_task")?;

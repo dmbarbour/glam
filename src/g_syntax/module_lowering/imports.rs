@@ -269,6 +269,13 @@ pub(in crate::g_syntax) fn builtin_std_module(context: &CompileContext) -> Dict 
             name_as_key("list"),
             context.value_dict(builtin_list_module(context)),
         )
+        .insert(
+            name_as_key("eff"),
+            context.value_dict(Dict::new_sync().insert(
+                name_as_key("map"),
+                context.value_builtin(Builtin::EffectMap),
+            )),
+        )
 }
 
 pub(in crate::g_syntax) fn builtin_not_value(context: &CompileContext) -> Value {

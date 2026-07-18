@@ -82,8 +82,8 @@ design in the design documents.
   Reusable request families compose by mapping their requests into the host
   specialization's request enum. The reusable reflection family contributes
   `glam_ver`, `os_env`, `cli_args`, `dict_items`, `log`, and the task operations
-  `refl_task`, `refl_tasks`, `join_task`, `task_result`, `task_error`,
-  `task_status`, and `cancel_task`;
+  `refl_task`, `join_task`, `task_result`, `task_error`, `task_status`, and
+  `cancel_task`;
   `main` adds provisional `read_log` and `write_stderr` effects. OS environment
   values and command-line arguments preserve Rust's platform encoding as binary
   values rather than forcing UTF-8. Spawned tasks receive only
@@ -102,10 +102,11 @@ design in the design documents.
   task-local `.shift` continuations are the conservative
   standard-effect contract: general-purpose utilities must not assume broader
   behavior, although a specialized handler may explicitly provide it.
-- `dict_items` exposes immediate dictionary entries as key-ordered tuple
-  values. `refl_tasks` is the transactional batch form of `refl_task`: it
-  launches each nonempty immediate dictionary value and returns a dictionary
-  of handles under the original keys.
+- `dict_items` is the narrow privileged dictionary-iteration boundary. It
+  exposes immediate entries as key-ordered `{key,value}` records. The g
+  compiler's `eff.map` helper sequences mapped effects left-to-right and
+  preserves result order; batching does not require a separate reflection
+  request.
 - `ReflectionEffects` is the reusable annotation specialization: standard
   effects plus `.log`, with no logger-consumer operations such as `read_log` or
   `write_stderr`. Every ordinary `Assembler` session installs a type-erased
@@ -144,9 +145,16 @@ design in the design documents.
   inherited definitions use the derived object's final reflection namespace
   and direct extensions share that object's one-shot guard. The `refl`, `meta`,
   and `spec` subtrees, computed-root definitions, and object expressions remain
-  inert. The scanner result is the child handle dictionary. This decoration is
-  unconditional g-front-end lowering policy; `CompileContext` does not select
-  it, and direct lowering has the same semantics as normal compilation.
+  inert. The demand transaction claims the boundary by storing a scanner task
+  handle. That scanner waits for the final `refl.*`, then atomically launches
+  its named tasks and stores their ordered `{key,task}` records under the
+  boundary's `tasks` state entry. Every named task is wrapped to require a unit
+  result. Keeping the scanner `claim` separate remains meaningful when the
+  resulting task list is empty and avoids inspecting a module's final
+  definitions while constructing it. This
+  decoration is unconditional g-front-end lowering policy; `CompileContext`
+  does not select it, and direct lowering has the same semantics as normal
+  compilation.
 - `cut` supplies choice and transaction scope, not retryability. A failed branch
   may retry only if it observed changeable host state: `.fail` and `.cut .fail`
   are permanent failures, while an empty `read_log` is retryable. Outside a

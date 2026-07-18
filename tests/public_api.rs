@@ -38,7 +38,7 @@ fn public_api_builds_a_script_module_and_extracts_binary_data() {
 }
 
 #[test]
-fn public_evaluation_cooperatively_pumps_automatic_refl_tasks() {
+fn public_evaluation_cooperatively_pumps_automatic_reflection_tasks() {
     let assembler = Assembler::default();
     let module = assembler
         .module(["automatic_refl"])

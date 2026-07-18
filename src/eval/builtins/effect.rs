@@ -36,6 +36,19 @@ pub(super) fn apply(
             };
             apply_values(context, function, arguments)
         }
+        Builtin::EffectMap => {
+            let [function, items] = super::exact(arguments, "effect map")?;
+            eval_effect_map_builtin(&function, &items)
+        }
+        Builtin::EffectMapRun => {
+            let [function, items, results, api] = super::exact(arguments, "effect map run")?;
+            eval_effect_map_run_builtin(context, &function, &items, &results, &api)
+        }
+        Builtin::EffectMapContinue => {
+            let [function, items, results, result] =
+                super::exact(arguments, "effect map continuation")?;
+            eval_effect_map_continue_builtin(&function, &items, &results, &result)
+        }
         _ => unreachable!("effect dispatcher received another builtin"),
     }
 }

@@ -67,9 +67,12 @@ pub(super) fn apply_builtin(
         | Builtin::ObjectWithDefs
         | Builtin::ObjectComposedDefs
         | Builtin::ObjectOverrideDefs => object::apply(context, builtin, arguments),
-        Builtin::Fixpoint | Builtin::EffectApply | Builtin::EffectCall => {
-            effect::apply(context, builtin, arguments)
-        }
+        Builtin::Fixpoint
+        | Builtin::EffectApply
+        | Builtin::EffectCall
+        | Builtin::EffectMap
+        | Builtin::EffectMapRun
+        | Builtin::EffectMapContinue => effect::apply(context, builtin, arguments),
         Builtin::Anno => annotation::apply(context, arguments),
     }
 }
