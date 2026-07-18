@@ -147,14 +147,21 @@ design in the design documents.
 - `Value::Function` is an independently observable curried function stage.
   Partial application shares the staged runtime; saturated application returns
   a memoized computation.
+- Ordinary `fix` and object-self knots are computed fixpoint cells, claimed by
+  their first observing evaluation task. Recursive demand while that task is
+  actively producing the cell is an error. If production instead suspends on
+  other work, the same task may resume it while other tasks wait on the cell's
+  stable token. Do not replace this state with a stack guard: blocked evaluation
+  unwinds the Rust stack before the task is scheduled again.
 - `list.rs` owns compact persistent list ropes. Keep `Bytes` as compact leaves;
   lazy holes are opaque to the list and are forced only through evaluator-owned
   operations.
 - The current dictionary/access evaluator is compatibility code. Preserve its
   behavior until a first-class persistent lazy dictionary design replaces it.
-- Anonymous `Promised` lazy cells currently fail if observed before assignment.
-  Parallel evaluation will need thunk scheduling and continuations; do not turn
-  this temporary fail-fast rule into a blocking join without that design.
+- Anonymous `Promised` lazy cells used by module assembly and the deferred-list
+  effect currently fail if observed before assignment. Do not silently turn
+  those remaining producer-less holes into blocking joins; migrate each use to
+  an explicit producer model when its scheduling semantics are defined.
 - A reflection annotation is a boxed lazy gate, not reflection performed by an
   interaction-net operator. Its task handle and result are monotonic cells;
   mutable queued/running/blocked state belongs to `EvaluationSession`. Task

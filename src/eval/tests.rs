@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::core::{Dict, LazyValue, Value};
+use crate::core::{Dict, FixpointComputation, LazyValue, Value};
 use crate::number::Number;
 
 use super::*;
@@ -291,6 +291,74 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
         eval_value(&observer, &value).unwrap_err().to_string(),
         "producer failed deliberately"
     );
+}
+
+#[test]
+fn value_fixpoint_reports_recursive_self_observation() {
+    let context = test_context();
+    let function = closed_function_value(1, TestExpr::Local(0));
+    let fixpoint = Value::Lazy(
+        LazyValue::computed_fixpoint(
+            "recursive value fixpoint",
+            FixpointComputation::Function(function),
+        )
+        .unwrap(),
+    );
+
+    let error = eval_value(&context, &fixpoint).unwrap_err();
+    assert!(
+        error.to_string().contains("recursively observed itself"),
+        "{error}"
+    );
+    assert!(error.blocked_on().is_none());
+
+    let observer = context.with_new_task().unwrap();
+    assert_eq!(
+        eval_value(&observer, &fixpoint).unwrap_err().to_string(),
+        error.to_string()
+    );
+}
+
+#[test]
+fn fixpoint_builtin_uses_task_owned_recursive_observation() {
+    let expression = builtin1_expr(Builtin::Fixpoint, function_expr(1, TestExpr::Local(0)));
+
+    let error = eval_closed_expr(&expression).unwrap_err();
+    assert!(
+        error.to_string().contains("recursively observed itself"),
+        "{error}"
+    );
+    assert!(error.blocked_on().is_none());
+}
+
+#[test]
+fn suspended_value_fixpoint_keeps_one_knot_for_concurrent_observers() {
+    let session = test_context();
+    let owner = session.with_new_task().unwrap();
+    let observer = session.with_new_task().unwrap();
+    let gate = reflection_annotation(&owner, n(0), n(42));
+    let function = closed_function_value(1, TestExpr::Value(gate));
+    let fixpoint = Value::Lazy(
+        LazyValue::computed_fixpoint(
+            "suspended value fixpoint",
+            FixpointComputation::Function(function),
+        )
+        .unwrap(),
+    );
+
+    let producer_block = eval_value(&owner, &fixpoint).unwrap_err();
+    let producer_wait = producer_block
+        .blocked_on()
+        .expect("producer should suspend on its reflection gate");
+    let observer_block = eval_value(&observer, &fixpoint).unwrap_err();
+    let fixpoint_wait = observer_block
+        .blocked_on()
+        .expect("observer should wait on the fixpoint itself");
+    assert_ne!(producer_wait, fixpoint_wait);
+
+    owner.complete_wait(&producer_wait.0);
+    assert_eq!(eval_value(&owner, &fixpoint).unwrap(), n(42));
+    assert_eq!(eval_value(&observer, &fixpoint).unwrap(), n(42));
 }
 
 #[test]

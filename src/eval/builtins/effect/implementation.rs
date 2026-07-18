@@ -1,4 +1,5 @@
 use super::super::super::*;
+use crate::core::FixpointComputation;
 
 pub(super) fn eval_fixpoint_builtin(
     context: &EvalContext,
@@ -9,11 +10,7 @@ pub(super) fn eval_fixpoint_builtin(
         return Err(EvalError::new("fixpoint builtin requires a function value"));
     }
 
-    let handle = LazyValue::promised("fixpoint");
-    let marker = Value::Lazy(handle.clone());
-    let value = apply_value(context, function, marker.clone())?;
-    handle
-        .set(value.clone())
-        .map_err(|_| EvalError::new("fixpoint builtin initialized twice"))?;
-    Ok(value)
+    LazyValue::computed_fixpoint("fixpoint", FixpointComputation::Function(function))
+        .map(Value::Lazy)
+        .map_err(|error| EvalError::new(error.as_ref()))
 }

@@ -1,13 +1,16 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::core::{Key, LazyValue, List, Value, keys};
+use crate::core::{
+    Builtin, ComputedFixpointAction, FixpointComputation, Key, LazyValue, List, Value, keys,
+};
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{EvalContext, EvaluationTaskPoll};
 use crate::list::ListItem;
 use crate::number::Number;
 
-use super::builtins::{apply_builtin, is_undefined_value};
+use super::application::apply_value;
+use super::builtins::{apply_builtin, construct_fixpoint_object, is_undefined_value};
 use super::net::*;
 use super::sequence::list_to_key_items;
 
@@ -67,7 +70,18 @@ pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvalErr
 pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvalError> {
     let net_computation = lazy.net_computation();
     let function_call = lazy.function_call();
-    let continue_through_result = net_computation.is_some() || function_call.is_some();
+    let builtin = lazy.builtin();
+    let continue_through_result = net_computation.is_some()
+        || function_call.is_some()
+        || builtin.is_some_and(|call| {
+            matches!(
+                call.builtin,
+                Builtin::Fixpoint
+                    | Builtin::ObjectInstance
+                    | Builtin::ObjectInstanceFromParts
+                    | Builtin::ObjectWithDefs
+            )
+        });
     if let Some(result) = lazy.cached() {
         let result = result.map_err(|message| EvalError::new(message.as_ref()))?;
         return if continue_through_result {
@@ -95,8 +109,13 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
                 ));
             }
         }
+    } else if let Some(fixpoint) = lazy.computed_fixpoint_cell() {
+        return eval_computed_fixpoint(context, lazy, fixpoint);
     } else if let Some(fixpoint) = lazy.fixpoint_cell() {
-        if context.task_id() == Some(fixpoint.owner()) {
+        let observer = context
+            .task_id()
+            .map_err(|error| EvalError::new(error.as_ref()))?;
+        if observer == fixpoint.owner() {
             return Err(EvalError::new(format!(
                 "reflection fixpoint {} recursively observed itself in task {}",
                 fixpoint.id(),
@@ -123,7 +142,7 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
         result.map_err(|message| EvalError::new(message.as_ref()))
     } else if let Some((path, arguments)) = lazy.access() {
         resolve_core_access(context, arguments, path)
-    } else if let Some(call) = lazy.builtin() {
+    } else if let Some(call) = builtin {
         let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
         let argument = arguments
             .pop()
@@ -164,6 +183,53 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
         eval_value(context, &result)
     } else {
         Ok(result)
+    }
+}
+
+fn eval_computed_fixpoint(
+    context: &EvalContext,
+    lazy: &LazyValue,
+    fixpoint: &crate::core::ComputedFixpointCell,
+) -> Result<Value, EvalError> {
+    match fixpoint
+        .begin(context, lazy.result_cell())
+        .map_err(|error| EvalError::new(error.as_ref()))?
+    {
+        ComputedFixpointAction::Recursive { id, owner } => Err(EvalError::new(format!(
+            "fixpoint {id} recursively observed itself in task {}",
+            owner.get()
+        ))),
+        ComputedFixpointAction::Wait(wait) => match context.poll_wait(&wait) {
+            EvaluationTaskPoll::Pending(wait) => Err(EvalError::blocked(CoreWaitToken(wait))),
+            EvaluationTaskPoll::Complete => eval_lazy(context, lazy),
+            EvaluationTaskPoll::Failed(error) => Err(EvalError::new(error.as_ref())),
+            EvaluationTaskPoll::Cancelled => Err(EvalError::new("fixpoint producer was cancelled")),
+            EvaluationTaskPoll::ForeignSession => Err(EvalError::new(
+                "fixpoint belongs to another evaluation session",
+            )),
+        },
+        ComputedFixpointAction::Produce { owner, computation } => {
+            let marker = Value::Lazy(lazy.clone());
+            let produced = match computation {
+                FixpointComputation::Function(function) => apply_value(context, function, marker)
+                    .and_then(|application| force_value_shell(context, &application)),
+                FixpointComputation::ObjectInstance(spec) => {
+                    construct_fixpoint_object(context, &spec, marker)
+                }
+            };
+            if let Err(error) = &produced
+                && error.blocked_on().is_some()
+            {
+                fixpoint.suspend(owner);
+                return Err(error.clone());
+            }
+            let produced = produced.map_err(|error| Arc::<str>::from(error.to_string()));
+            let result = lazy
+                .cache(produced)
+                .map_err(|message| EvalError::new(message.as_ref()));
+            fixpoint.complete(context, owner);
+            result
+        }
     }
 }
 

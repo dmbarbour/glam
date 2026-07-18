@@ -99,5 +99,7 @@ updates from accidentally treating runtime metadata as a user definition.
   abstraction.
 - Dictionary/object compatibility uses the current eager dictionary
   representation and will need review when persistent lazy dictionaries land.
-- Final-self uses the same fail-fast pending lazy cell as module fixpoints;
-  parallel observation semantics remain future work.
+- Final-self uses a computed fixpoint cell. Its first evaluator owns production;
+  recursive self-demand fails, while concurrent observation waits if that
+  producer has suspended on other work. Module final definitions still use a
+  separate fail-fast `Promised` assignment hole.

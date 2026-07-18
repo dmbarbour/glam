@@ -1,14 +1,26 @@
 use super::super::super::*;
+use crate::core::FixpointComputation;
 
 pub(super) fn eval_object_instance_builtin(
+    _context: &EvalContext,
+    spec: &Value,
+) -> Result<Value, EvalError> {
+    LazyValue::computed_fixpoint(
+        "object self",
+        FixpointComputation::ObjectInstance(spec.clone()),
+    )
+    .map(Value::Lazy)
+    .map_err(|error| EvalError::new(error.as_ref()))
+}
+
+pub(in crate::eval) fn construct_object_instance(
     context: &EvalContext,
     spec: &Value,
+    self_marker: Value,
 ) -> Result<Value, EvalError> {
     let spec_dict = object_spec_dict(context, spec)?;
     let specs = object_application_order(context, &spec_dict)?;
 
-    let handle = LazyValue::promised("object self");
-    let self_marker = Value::Lazy(handle.clone());
     let mut base = Value::Dict(crate::core::Dict::new_sync());
     for spec in specs {
         let defs = spec
@@ -29,9 +41,6 @@ pub(super) fn eval_object_instance_builtin(
         return Err(EvalError::new("object base is not a dictionary"));
     };
     let object = Value::Dict(base_dict.insert((*keys::SPEC).clone(), Value::Dict(spec_dict)));
-    handle
-        .set(object.clone())
-        .map_err(|_| EvalError::new("object instance initialized twice"))?;
     Ok(object)
 }
 

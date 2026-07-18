@@ -156,14 +156,14 @@ impl EvaluationSession {
 #[derive(Debug, Clone)]
 pub(crate) struct EvalContext {
     session: Arc<EvaluationSession>,
-    task: Option<EvaluationTaskId>,
+    task: Arc<OnceLock<Result<EvaluationTaskId, Arc<str>>>>,
 }
 
 impl EvalContext {
     pub(crate) fn new(session: Arc<EvaluationSession>) -> Self {
         Self {
             session,
-            task: None,
+            task: Arc::new(OnceLock::new()),
         }
     }
 
@@ -173,24 +173,25 @@ impl EvalContext {
         Self::new(Arc::new(EvaluationSession::new()))
     }
 
+    #[allow(dead_code)] // Used by spawned work once the cooperative executor is connected.
     pub(crate) fn with_new_task(&self) -> Result<Self, Arc<str>> {
-        Ok(Self {
+        let context = Self {
             session: self.session.clone(),
-            task: Some(allocate_task_id()?),
-        })
+            task: Arc::new(OnceLock::new()),
+        };
+        context.task_id()?;
+        Ok(context)
     }
 
-    pub(crate) fn task_id(&self) -> Option<EvaluationTaskId> {
-        self.task
+    pub(crate) fn task_id(&self) -> Result<EvaluationTaskId, Arc<str>> {
+        self.task.get_or_init(allocate_task_id).clone()
     }
 
     pub(crate) fn register_promise(
         &self,
         result: &Arc<OnceLock<Result<Value, Arc<str>>>>,
     ) -> Result<(EvaluationTaskId, EvaluationWaitToken), Arc<str>> {
-        let owner = self
-            .task
-            .ok_or_else(|| Arc::<str>::from("fixpoint promise requires an evaluation task"))?;
+        let owner = self.task_id()?;
         let wait = allocate_wait_token(&self.session)?;
         let mut tasks = self
             .session
@@ -213,9 +214,10 @@ impl EvalContext {
     }
 
     pub(crate) fn fail_unresolved_promises(&self, reason: impl Into<Arc<str>>) {
-        let Some(owner) = self.task else {
+        let Some(Ok(owner)) = self.task.get() else {
             return;
         };
+        let owner = *owner;
         let reason = reason.into();
         let mut tasks = self
             .session
@@ -230,6 +232,27 @@ impl EvalContext {
             if let Some(result) = promise.result.upgrade() {
                 let _ = result.set(Err(reason.clone()));
             }
+        }
+    }
+
+    pub(crate) fn release_owned_promise(
+        &self,
+        owner: EvaluationTaskId,
+        wait: &EvaluationWaitToken,
+    ) {
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let remove_owner = if let Some(waits) = tasks.owned_promises.get_mut(&owner) {
+            waits.retain(|candidate| candidate != wait);
+            waits.is_empty()
+        } else {
+            false
+        };
+        if remove_owner {
+            tasks.owned_promises.remove(&owner);
         }
     }
 

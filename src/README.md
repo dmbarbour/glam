@@ -145,11 +145,13 @@ apply(function, arguments)
   -> dictionary applicability compatibility
 ```
 
-Reflection fixpoints are task-owned lazy cells. Their producer task receives a
-recursive-observation error if it demands an unresolved cell; another task in
-the session receives the cell's precise wait token. Anonymous assignment holes
-used by module and object construction remain `Promised` values and retain the
-bootstrap's fail-fast observation rule.
+Reflection fixpoints fulfilled by the effect interpreter are task-owned lazy
+cells. Ordinary `fix` and object-self knots use computed fixpoint cells instead:
+the first observer claims production, recursive demand by that active producer
+fails, and a suspended producer retains ownership while other tasks receive the
+cell's stable wait token. Anonymous assignment holes used by module construction
+and the deferred-list effect remain `Promised` values and retain the bootstrap's
+fail-fast observation rule.
 
 An undersaturated source function produces another `FunctionValue` sharing a
 curried runtime stage. Saturation produces a memoized computation. Explicit

@@ -307,12 +307,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
     fn new(specialization: S, host: Arc<S::Host>) -> Result<Self, TaskError> {
         let tags = Tags::new();
         let (api, specialized_requests) = effect_api(&tags, specialization.requests())?;
-        let eval_context = EvalContext::standalone()
-            .with_new_task()
-            .map_err(|error| TaskError::new(error.as_ref()))?;
+        let eval_context = EvalContext::standalone();
         let id = eval_context
             .task_id()
-            .expect("new reflection evaluation context must own a task ID");
+            .map_err(|error| TaskError::new(error.as_ref()))?;
         Ok(Self {
             eval_context,
             id,

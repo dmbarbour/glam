@@ -229,12 +229,13 @@ pub(crate) fn assembler_metadata(severity: Severity, origin: Option<Value>) -> D
 pub(crate) fn apply_updates(message: Value, updates: Value) -> Result<Value, String> {
     let context = crate::evaluation::EvalContext::standalone();
     let extension_defs = Value::builtin_call(Builtin::ObjectOverrideDefs, vec![updates]);
-    eval::apply_values(
+    let value = eval::apply_values(
         &context,
         Value::Builtin(Builtin::ObjectWithDefs),
         vec![message, extension_defs],
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    eval::eval_value(&context, &value).map_err(|error| error.to_string())
 }
 
 /// Applies assembler-owned metadata as a real object definitions mixin so the

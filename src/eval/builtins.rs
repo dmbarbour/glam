@@ -11,6 +11,7 @@ mod object;
 
 use super::*;
 pub(super) use annotation::is_undefined_value;
+pub(super) use object::construct_fixpoint_object;
 
 pub(super) fn apply_builtin(
     context: &EvalContext,
