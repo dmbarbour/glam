@@ -275,7 +275,8 @@ pub(super) fn format_name_part(key: &Key) -> String {
 }
 
 pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, EvalError> {
-    match value {
+    let value = force_value_shell(context, value)?;
+    match &value {
         Value::Atom(atom) => Ok(Key::Atom(*atom)),
         Value::Number(number) => Ok(Key::Number(number.clone())),
         Value::Binary(bytes) => Ok(Key::Binary(bytes.clone())),
@@ -283,8 +284,7 @@ pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, 
         Value::Dict(dict) => Ok(Key::Dict(Arc::from(
             dict.iter()
                 .map(|(key, value)| {
-                    let value = eval_value(context, value)?;
-                    let value = value_to_key(context, &value)?;
+                    let value = value_to_key(context, value)?;
                     if matches!(&value, Key::Dict(entries) if entries.is_empty()) {
                         return Ok(None);
                     }

@@ -18,7 +18,7 @@ pub(in crate::g_syntax) fn lower_object(
         scope.clone(),
         &mut locals,
         name,
-        automatic_reflection_for_declared_target(&object.target, context),
+        declared_target_has_reflection(&object.target),
     )?;
     let target_context = DefinitionTargetContext::new(&definitions_root, line, context, &scope);
     let object_value = target_context.annotate(
@@ -88,7 +88,7 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
     parent_scope: NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
     name: ResolvedExpr<Value>,
-    automatic_reflection: bool,
+    declared_reflection: bool,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let defs = object_body_defs_resolved_in_scope(
         &object.body,
@@ -97,7 +97,7 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
         context,
         parent_scope.clone(),
         locals,
-        automatic_reflection,
+        declared_reflection,
     )?;
     let deps = object
         .deps
@@ -124,14 +124,14 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
     context: &CompileContext,
     parent_scope: NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
-    automatic_reflection: bool,
+    declared_reflection: bool,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let base_len = locals.len();
     let prior_self = locals.push_binding("<object-prior-self>");
     let final_self = locals.push_binding("<object-final-self>");
     let object_final_defs = ResolvedRoot::Local(final_self);
     let mut bindings = ResolvedBindings::default();
-    let reflection_guard = automatic_reflection.then(|| {
+    let reflection_guard = declared_reflection.then(|| {
         bindings.bind(
             locals,
             "<object-reflection-guard>",
@@ -210,8 +210,7 @@ pub(in crate::g_syntax) fn lower_nested_object_resolved(
         scope.clone(),
         locals,
         name,
-        scope.reflection.is_some()
-            && automatic_reflection_for_declared_target(&object.target, context),
+        scope.reflection.is_some() && declared_target_has_reflection(&object.target),
     )?;
     let target_context = DefinitionTargetContext::new(definitions, line, context, scope);
     let object_value = target_context.annotate(
@@ -282,9 +281,8 @@ fn object_reflection_guard_resolved(
     ])
 }
 
-fn automatic_reflection_for_declared_target(target: &str, context: &CompileContext) -> bool {
-    context.automatic_reflection_boundaries()
-        && !matches!(target.split('.').next(), Some("refl" | "meta" | "spec"))
+fn declared_target_has_reflection(target: &str) -> bool {
+    !matches!(target.split('.').next(), Some("refl" | "meta" | "spec"))
 }
 
 pub(in crate::g_syntax) fn object_body_scope_resolved(
@@ -335,7 +333,7 @@ pub(in crate::g_syntax) fn lower_extend(
         context,
         scope.clone(),
         &mut locals,
-        automatic_reflection_for_declared_target(&extend.target, context),
+        declared_target_has_reflection(&extend.target),
     )?;
     let prior_object = path_resolved_in_definitions(&extend.target, definitions_root.expr());
     let prior_spec = object_spec_resolved(prior_object, context);

@@ -144,9 +144,9 @@ design in the design documents.
   inherited definitions use the derived object's final reflection namespace
   and direct extensions share that object's one-shot guard. The `refl`, `meta`,
   and `spec` subtrees, computed-root definitions, and object expressions remain
-  inert. The scanner result is the child handle dictionary. Raw
-  `lower_to_core_with_context` leaves this mode disabled for structural
-  inspection, while normal `compile_source` enables it.
+  inert. The scanner result is the child handle dictionary. This decoration is
+  unconditional g-front-end lowering policy; `CompileContext` does not select
+  it, and direct lowering has the same semantics as normal compilation.
 - `cut` supplies choice and transaction scope, not retryability. A failed branch
   may retry only if it observed changeable host state: `.fail` and `.cut .fail`
   are permanent failures, while an empty `read_log` is retryable. Outside a

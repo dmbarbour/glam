@@ -45,11 +45,10 @@ pub struct Diagnostic {
 }
 
 pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
-    let context = context.clone().with_automatic_reflection_boundaries(true);
     let LoweredSource {
         definitions,
         diagnostics,
-    } = lower_to_core_with_context(parse_source(source), &context);
+    } = lower_to_core_with_context(parse_source(source), context);
     for diagnostic in diagnostics {
         let message = crate::diagnostic::text_message(Some(diagnostic.line), &diagnostic.message);
         context.emit_diagnostic(diagnostic.severity, message);

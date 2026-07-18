@@ -399,12 +399,10 @@ impl NameScope<Value> {
             object_alias: None,
             object_final_defs: None,
             object_prior_defs: None,
-            reflection: context
-                .automatic_reflection_boundaries()
-                .then(|| ReflectionBoundary {
-                    final_defs: context.final_defs().clone(),
-                    guard: context.abstract_global_path("refl"),
-                }),
+            reflection: Some(ReflectionBoundary {
+                final_defs: context.final_defs().clone(),
+                guard: context.abstract_global_path("refl"),
+            }),
             parent: None,
         }
     }
