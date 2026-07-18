@@ -111,12 +111,20 @@ producer task IDs for this shallow dependency prioritization. Fine-grained
 observation indexes, persistent waiter graphs, worker threads, and evaluator
 reduction fuel are intentionally deferred.
 
+The reusable reflection API can reserve `.refl_task Effect` children and
+observe them through opaque handles. `.join_task` returns success or propagates
+the child's error; `.task_error` extracts error text and otherwise fails.
+Pending queries are failed effect choices carrying the child's exact wait
+token. Transaction journals activate child tasks only after the winning outer
+commit, while abandoned journals cancel their unused reservations.
+
 An ordinary `Assembler` installs a reflection-task launcher when it creates its
 session. The launcher wraps annotation effects in the reusable
 `ReflectionEffects` specialization: standard effects plus `.log`. Its host
 stores the session's reflection heap and sends diagnostics to the assembler's
 configured sink. CLI-only logger-consumer requests remain in `main`'s separate
-`MainEffects` specialization.
+`MainEffects` specialization. Children spawned by that logger still receive
+only `ReflectionEffects`; the synchronous parent cooperatively pumps them.
 
 `main` chooses the `configuration` and `assembly` module paths and constructs
 their initial definitions. Those names and roles are CLI policy, not library

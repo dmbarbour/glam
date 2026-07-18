@@ -593,6 +593,7 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
         for diagnostic in diagnostics {
             self.diagnostic_sink.emit(diagnostic);
         }
+        commit.extra().activate_pending_tasks();
         CommitResult::Committed
     }
 

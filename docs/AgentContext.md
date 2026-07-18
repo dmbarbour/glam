@@ -80,10 +80,16 @@ design in the design documents.
   `get`, `set`, `reset`, and `shift`. `TaskSpecialization` contributes an API
   fragment, private request tags, and specialization-owned transaction data.
   Reusable request families compose by mapping their requests into the host
-  specialization's request enum. The first reflection family contributes
-  `log Severity Message`; `main` adds provisional `read_log` and `write_stderr`
-  effects. Logged diagnostics join the current transaction or go directly to
-  the host outside `cut`. Queue reads inspect only their host snapshot, never
+  specialization's request enum. The reusable reflection family contributes
+  `log Severity Message`, `refl_task Effect`, `join_task Handle`, and
+  `task_error Handle`; `main` adds provisional `read_log` and `write_stderr`
+  effects. Spawned tasks receive only `ReflectionEffects`, even when their
+  parent has broader host capabilities. `join_task` propagates terminal task
+  errors, while `task_error` returns error text as data and fails unless the
+  task failed. Both fail observably while a task is pending, so an exhausted
+  choice suspends on that task's exact wait token and retries on any terminal
+  transition. Logged diagnostics join the current transaction or go directly
+  to the host outside `cut`. Queue reads inspect only their host snapshot, never
   journaled writes, and yield failure when no input is available. That failure
   retains the queue observation, so the task waits for a host change and retries
   even outside `cut`. A
@@ -114,6 +120,10 @@ design in the design documents.
   nested cuts merge upward; an outer success validates and commits. The
   bootstrap is currently serial and uses a coarse generation, but the boundary
   is shaped for finer optimistic observations later.
+- `refl_task` reserves an opaque task handle immediately but journals the
+  launch inside a transaction. Only the winning outer commit activates it;
+  discarded journal branches cancel their unused reservations. Outside a
+  transaction, scheduling is an immediate retry barrier.
 - `cut` supplies choice and transaction scope, not retryability. A failed branch
   may retry only if it observed changeable host state: `.fail` and `.cut .fail`
   are permanent failures, while an empty `read_log` is retryable. Outside a
@@ -143,9 +153,9 @@ design in the design documents.
   worker threads, and evaluator reduction fuel remain deferred.
 - `reflection::run` is the synchronous compatibility driver for that machine.
   It polls with bounded effect-step fuel and calls `TaskHost::wait_for_change`
-  only after polling reports a state block. The same machine has a session
-  adapter, but the synchronous driver still reports an unscheduled lazy
-  dependency as an error.
+  only after polling reports a state block. `run_with_reflection_host` also
+  installs the restricted child-task launcher and cooperatively pumps scheduled
+  lazy dependencies; a dependency with no runnable producer remains an error.
 - Each reflection `fix` alternative receives its own task-owned fixpoint cell.
   Recursive observation by its producer is an error; another task observes its
   precise wait token. When a chosen result later fails, the handler restarts at

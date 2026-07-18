@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::core::Value;
@@ -89,6 +89,10 @@ pub(crate) struct EvaluationTaskHandle {
 }
 
 impl EvaluationTaskHandle {
+    pub(crate) fn id(&self) -> EvaluationTaskId {
+        self.id
+    }
+
     #[allow(dead_code)] // Scheduler-facing inspection, currently used by focused tests.
     pub(crate) fn wait(&self) -> &EvaluationWaitToken {
         &self.wait
@@ -107,7 +111,7 @@ impl fmt::Debug for EvaluationTaskHandle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EvaluationTaskPoll {
     Pending(EvaluationWaitToken),
-    Complete,
+    Complete(Value),
     Failed(Arc<str>),
     Cancelled,
     ForeignSession,
@@ -122,7 +126,7 @@ pub(crate) struct EvaluationTaskBlock {
 pub(crate) enum EvaluationMachinePoll {
     Yielded,
     Blocked(EvaluationTaskBlock),
-    Complete,
+    Complete(Value),
     Failed(Arc<str>),
     Cancelled,
 }
@@ -132,11 +136,18 @@ pub(crate) trait EvaluationTaskMachine: Send {
 }
 
 pub(crate) trait ReflectionTaskLauncher: Send + Sync {
-    fn launch(
+    fn build(
         &self,
-        context: &EvalContext,
+        context: EvalContext,
         effect: Value,
-    ) -> Result<EvaluationTaskHandle, Arc<str>>;
+        kind: ReflectionTaskKind,
+    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReflectionTaskKind {
+    Annotation,
+    Joinable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,10 +161,11 @@ pub(crate) enum EvaluationPumpOutcome {
 enum EvaluationTaskState {
     /// A task registered in an intentionally bare standalone session.
     Dormant,
+    Reserved,
     Queued,
     Running,
     Blocked(EvaluationTaskBlock),
-    Complete,
+    Complete(Value),
     Failed(Arc<str>),
     Cancelled,
 }
@@ -162,6 +174,43 @@ struct ReflectionTaskRecord {
     id: EvaluationTaskId,
     state: EvaluationTaskState,
     machine: Option<Box<dyn EvaluationTaskMachine>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingReflectionTask {
+    inner: Arc<PendingReflectionTaskInner>,
+}
+
+struct PendingReflectionTaskInner {
+    context: EvalContext,
+    handle: EvaluationTaskHandle,
+    effect: Value,
+    activated: AtomicBool,
+}
+
+impl PendingReflectionTask {
+    pub(crate) fn handle(&self) -> &EvaluationTaskHandle {
+        &self.inner.handle
+    }
+
+    pub(crate) fn activate(&self) {
+        if self.inner.activated.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.inner.context.activate_reflection_task(
+            &self.inner.handle,
+            self.inner.effect.clone(),
+            ReflectionTaskKind::Joinable,
+        );
+    }
+}
+
+impl Drop for PendingReflectionTaskInner {
+    fn drop(&mut self) {
+        if !self.activated.load(Ordering::Acquire) {
+            self.context.cancel_reserved_task(&self.handle);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -237,6 +286,14 @@ impl EvalContext {
     /// assembler, notably standalone reflection tasks and focused tests.
     pub(crate) fn standalone() -> Self {
         Self::new(Arc::new(EvaluationSession::new()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_reflection_launcher(
+        &self,
+        launcher: Arc<dyn ReflectionTaskLauncher>,
+    ) -> Result<(), Arc<str>> {
+        self.session.install_reflection_launcher(launcher)
     }
 
     #[allow(dead_code)] // Used once reflection exposes task spawning.
@@ -327,6 +384,7 @@ impl EvalContext {
     /// hidden behind [`EvaluationTaskMachine`]. Construction happens before
     /// the task registry is locked, so host snapshots and evaluator work may
     /// safely use this same session.
+    #[cfg(test)]
     pub(crate) fn schedule_task<F>(&self, build: F) -> Result<EvaluationTaskHandle, Arc<str>>
     where
         F: FnOnce(EvalContext) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>,
@@ -357,12 +415,122 @@ impl EvalContext {
         Ok(EvaluationTaskHandle { id, wait })
     }
 
+    fn reserve_task(&self) -> Result<EvaluationTaskHandle, Arc<str>> {
+        let id = allocate_task_id()?;
+        let wait = allocate_wait_token(&self.session)?;
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let replaced = tasks.reflection.insert(
+            wait.clone(),
+            ReflectionTaskRecord {
+                id,
+                state: EvaluationTaskState::Reserved,
+                machine: None,
+            },
+        );
+        let replaced_id = tasks.reflection_by_id.insert(id, wait.clone());
+        assert!(
+            replaced.is_none() && replaced_id.is_none(),
+            "evaluation task identities must be unique"
+        );
+        Ok(EvaluationTaskHandle { id, wait })
+    }
+
+    fn activate_reflection_task(
+        &self,
+        handle: &EvaluationTaskHandle,
+        effect: Value,
+        kind: ReflectionTaskKind,
+    ) {
+        let result = self
+            .session
+            .reflection_launcher
+            .get()
+            .ok_or_else(|| Arc::from("evaluation session has no reflection task launcher"))
+            .and_then(|launcher| {
+                launcher.build(
+                    Self::for_task(self.session.clone(), handle.id),
+                    effect,
+                    kind,
+                )
+            });
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let Some(record) = tasks.reflection.get_mut(&handle.wait) else {
+            return;
+        };
+        if !matches!(record.state, EvaluationTaskState::Reserved) {
+            return;
+        }
+        match result {
+            Ok(machine) => {
+                record.machine = Some(machine);
+                record.state = EvaluationTaskState::Queued;
+                tasks.ready.push_back(handle.id);
+            }
+            Err(error) => record.state = EvaluationTaskState::Failed(error),
+        }
+    }
+
+    fn cancel_reserved_task(&self, handle: &EvaluationTaskHandle) {
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        if tasks
+            .reflection
+            .get(&handle.wait)
+            .is_some_and(|record| matches!(record.state, EvaluationTaskState::Reserved))
+        {
+            tasks.reflection.remove(&handle.wait);
+            tasks.reflection_by_id.remove(&handle.id);
+        }
+    }
+
+    pub(crate) fn reserve_reflection_task(
+        &self,
+        effect: Value,
+    ) -> Result<PendingReflectionTask, Arc<str>> {
+        if self.session.reflection_launcher.get().is_none() {
+            return Err(Arc::from(
+                "evaluation session has no reflection task launcher",
+            ));
+        }
+        Ok(PendingReflectionTask {
+            inner: Arc::new(PendingReflectionTaskInner {
+                context: self.clone(),
+                handle: self.reserve_task()?,
+                effect,
+                activated: AtomicBool::new(false),
+            }),
+        })
+    }
+
+    pub(crate) fn start_joinable_reflection_task(
+        &self,
+        effect: Value,
+    ) -> Result<EvaluationTaskHandle, Arc<str>> {
+        let pending = self.reserve_reflection_task(effect)?;
+        let handle = pending.handle().clone();
+        pending.activate();
+        Ok(handle)
+    }
+
     pub(crate) fn start_reflection_task(
         &self,
         effect: Value,
     ) -> Result<EvaluationTaskHandle, Arc<str>> {
-        if let Some(launcher) = self.session.reflection_launcher.get().cloned() {
-            return launcher.launch(self, effect);
+        if self.session.reflection_launcher.get().is_some() {
+            let handle = self.reserve_task()?;
+            self.activate_reflection_task(&handle, effect, ReflectionTaskKind::Annotation);
+            return Ok(handle);
         }
 
         // Focused evaluator tests and internal clients may intentionally use a
@@ -395,6 +563,20 @@ impl EvalContext {
         self.poll_wait(&task.wait)
     }
 
+    pub(crate) fn poll_reflection_task_id(&self, id: EvaluationTaskId) -> EvaluationTaskPoll {
+        let wait = {
+            let tasks = self
+                .session
+                .tasks
+                .lock()
+                .expect("evaluation task registry was poisoned");
+            tasks.reflection_by_id.get(&id).cloned()
+        };
+        wait.map_or(EvaluationTaskPoll::ForeignSession, |wait| {
+            self.poll_wait(&wait)
+        })
+    }
+
     pub(crate) fn poll_wait(&self, wait: &EvaluationWaitToken) -> EvaluationTaskPoll {
         let Some(owner) = wait.owner.upgrade() else {
             return EvaluationTaskPoll::Failed(Arc::from(
@@ -415,7 +597,7 @@ impl EvalContext {
                 return EvaluationTaskPoll::Failed(Arc::from("promised value no longer exists"));
             };
             return match result.get() {
-                Some(Ok(_)) => EvaluationTaskPoll::Complete,
+                Some(Ok(value)) => EvaluationTaskPoll::Complete(value.clone()),
                 Some(Err(error)) => EvaluationTaskPoll::Failed(error.clone()),
                 None if Arc::ptr_eq(&self.session, &owner) => {
                     EvaluationTaskPoll::Pending(wait.clone())
@@ -424,10 +606,11 @@ impl EvalContext {
             };
         };
         match &record.state {
-            EvaluationTaskState::Complete => EvaluationTaskPoll::Complete,
+            EvaluationTaskState::Complete(value) => EvaluationTaskPoll::Complete(value.clone()),
             EvaluationTaskState::Failed(error) => EvaluationTaskPoll::Failed(error.clone()),
             EvaluationTaskState::Cancelled => EvaluationTaskPoll::Cancelled,
             EvaluationTaskState::Dormant
+            | EvaluationTaskState::Reserved
             | EvaluationTaskState::Queued
             | EvaluationTaskState::Running
             | EvaluationTaskState::Blocked(_) => {
@@ -459,7 +642,7 @@ impl EvalContext {
             .reflection
             .get_mut(wait)
             .expect("test task must belong to this session")
-            .state = EvaluationTaskState::Complete;
+            .state = EvaluationTaskState::Complete((*crate::core::keys::UNIT_VALUE).clone());
     }
 
     #[cfg(test)]
@@ -581,7 +764,9 @@ impl EvaluationSession {
                 );
                 (EvaluationTaskState::Blocked(block), !unchanged, true)
             }
-            EvaluationMachinePoll::Complete => (EvaluationTaskState::Complete, true, false),
+            EvaluationMachinePoll::Complete(value) => {
+                (EvaluationTaskState::Complete(value), true, false)
+            }
             EvaluationMachinePoll::Failed(error) => {
                 (EvaluationTaskState::Failed(error), true, false)
             }
@@ -700,7 +885,7 @@ mod tests {
 
     impl EvaluationTaskMachine for Complete {
         fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
-            EvaluationMachinePoll::Complete
+            EvaluationMachinePoll::Complete((*crate::core::keys::UNIT_VALUE).clone())
         }
     }
 
@@ -718,7 +903,7 @@ mod tests {
                         observed_generation: None,
                     })
                 }
-                EvaluationTaskPoll::Complete => EvaluationMachinePoll::Complete,
+                EvaluationTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value),
                 EvaluationTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error),
                 EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
                 EvaluationTaskPoll::ForeignSession => EvaluationMachinePoll::Failed(Arc::from(
@@ -767,14 +952,14 @@ mod tests {
             context.pump_wait(&target.wait, 256),
             EvaluationPumpOutcome::TargetReady
         );
-        assert_eq!(
+        assert!(matches!(
             context.poll_reflection_task(&dependency),
-            EvaluationTaskPoll::Complete
-        );
-        assert_eq!(
+            EvaluationTaskPoll::Complete(_)
+        ));
+        assert!(matches!(
             context.poll_reflection_task(&target),
-            EvaluationTaskPoll::Complete
-        );
+            EvaluationTaskPoll::Complete(_)
+        ));
     }
 
     #[test]

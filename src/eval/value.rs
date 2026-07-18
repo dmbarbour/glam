@@ -114,7 +114,7 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
             EvaluationTaskPoll::Pending(wait) => {
                 return Err(EvalError::blocked(CoreWaitToken(wait)));
             }
-            EvaluationTaskPoll::Complete => Ok(gate.target().clone()),
+            EvaluationTaskPoll::Complete(_) => Ok(gate.target().clone()),
             EvaluationTaskPoll::Failed(error) => Err(EvalError::new(error.as_ref())),
             EvaluationTaskPoll::Cancelled => {
                 Err(EvalError::new("reflection annotation task was cancelled"))
@@ -142,7 +142,7 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
             EvaluationTaskPoll::Pending(wait) => {
                 return Err(EvalError::blocked(CoreWaitToken(wait)));
             }
-            EvaluationTaskPoll::Complete => lazy
+            EvaluationTaskPoll::Complete(_) => lazy
                 .cached()
                 .expect("completed fixpoint promise must contain a result")
                 .map_err(|message| EvalError::new(message.as_ref())),
@@ -229,7 +229,7 @@ fn eval_computed_fixpoint(
         ))),
         ComputedFixpointAction::Wait(wait) => match context.poll_wait(&wait) {
             EvaluationTaskPoll::Pending(wait) => Err(EvalError::blocked(CoreWaitToken(wait))),
-            EvaluationTaskPoll::Complete => eval_lazy(context, lazy),
+            EvaluationTaskPoll::Complete(_) => eval_lazy(context, lazy),
             EvaluationTaskPoll::Failed(error) => Err(EvalError::new(error.as_ref())),
             EvaluationTaskPoll::Cancelled => Err(EvalError::new("fixpoint producer was cancelled")),
             EvaluationTaskPoll::ForeignSession => Err(EvalError::new(

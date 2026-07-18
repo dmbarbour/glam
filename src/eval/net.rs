@@ -307,7 +307,7 @@ pub(super) fn progress_exact_core_pair(
             crate::evaluation::EvaluationTaskPoll::ForeignSession => Err(EvalError::new(
                 "blocked interaction-net call belongs to another evaluation session",
             )),
-            crate::evaluation::EvaluationTaskPoll::Complete
+            crate::evaluation::EvaluationTaskPoll::Complete(_)
             | crate::evaluation::EvaluationTaskPoll::Failed(_)
             | crate::evaluation::EvaluationTaskPoll::Cancelled => {
                 let call = runtime

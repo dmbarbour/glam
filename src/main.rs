@@ -9,9 +9,10 @@ use std::thread;
 
 use bytes::Bytes;
 use glam::reflection::{
-    CommitResult, EffectRequestSpec, HostSnapshot, ReflectionHost, ReflectionJournal,
-    ReflectionRequest, ReflectionTransaction, RequestContext, RequestResult, TaskCommit, TaskHost,
-    TaskOutcome, TaskSpecialization, handle_reflection_request, reflection_request_specs,
+    CommitResult, EffectRequestSpec, HostSnapshot, ReflectionEffects, ReflectionHost,
+    ReflectionJournal, ReflectionRequest, ReflectionTransaction, RequestContext, RequestResult,
+    TaskCommit, TaskHost, TaskOutcome, TaskSpecialization, handle_reflection_request,
+    reflection_request_specs, run_with_reflection_host,
 };
 use glam::{
     Assembler, Builtin, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticSink, Error,
@@ -223,7 +224,13 @@ fn start_logger(
         .filter(|logger| !logger.is_undefined());
     thread::spawn(move || {
         if let Some(custom) = custom {
-            match glam::reflection::run(&custom, MainEffects::new(effect_assembler), host.clone()) {
+            let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
+            match run_with_reflection_host(
+                &custom,
+                MainEffects::new(effect_assembler),
+                host.clone(),
+                reflection_host,
+            ) {
                 Ok(TaskOutcome::Complete(_)) | Ok(TaskOutcome::Cancelled) => {}
                 Err(error) => {
                     logger.emit(&Diagnostic::new(
@@ -355,7 +362,7 @@ fn read_log(
     }
 
     loop {
-        let snapshot = context.host().snapshot();
+        let snapshot = <LogHost as TaskHost<MainEffects>>::snapshot(context.host());
         context.observe_host_generation(snapshot.generation());
         let Some(diagnostic) = snapshot.extra().diagnostics.first() else {
             return Ok(RequestResult::Fail);
@@ -372,7 +379,7 @@ fn read_log(
                 stderr: Vec::new(),
             },
         );
-        match context.host().commit(commit) {
+        match <LogHost as TaskHost<MainEffects>>::commit(context.host(), commit) {
             CommitResult::Committed => {
                 context.committed();
                 return Ok(RequestResult::Return(value));
@@ -502,6 +509,12 @@ impl ReflectionHost<MainEffects> for LogHost {
     }
 }
 
+impl ReflectionHost<ReflectionEffects> for LogHost {
+    fn emit_diagnostic(&self, diagnostic: Diagnostic) {
+        self.emit(diagnostic);
+    }
+}
+
 impl TaskHost<MainEffects> for LogHost {
     fn snapshot(&self) -> HostSnapshot<MainEffects> {
         let state = self
@@ -539,6 +552,7 @@ impl TaskHost<MainEffects> for LogHost {
             state.generation = state.generation.wrapping_add(1);
             self.changed.notify_all();
         }
+        commit.extra().reflection.activate_pending_tasks();
         self.flush_stderr();
         CommitResult::Committed
     }
@@ -555,6 +569,40 @@ impl TaskHost<MainEffects> for LogHost {
                 .expect("log host mutex should not be poisoned");
         }
         !(state.closed && state.diagnostics.is_empty())
+    }
+}
+
+impl TaskHost<ReflectionEffects> for LogHost {
+    fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
+        let state = self
+            .state
+            .lock()
+            .expect("log host mutex should not be poisoned");
+        HostSnapshot::new(state.generation, state.heap.clone(), ())
+    }
+
+    fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("log host mutex should not be poisoned");
+            if state.generation != commit.generation() {
+                return CommitResult::Conflict;
+            }
+            state.heap = commit.heap().clone();
+            for diagnostic in commit.extra().diagnostics().iter().cloned() {
+                self.push_diagnostic(&mut state, diagnostic);
+            }
+            state.generation = state.generation.wrapping_add(1);
+            self.changed.notify_all();
+        }
+        commit.extra().activate_pending_tasks();
+        CommitResult::Committed
+    }
+
+    fn wait_for_change(&self, observed_generation: u64) -> bool {
+        <Self as TaskHost<MainEffects>>::wait_for_change(self, observed_generation)
     }
 }
 

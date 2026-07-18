@@ -21,9 +21,9 @@ use crate::core::{Atom, Dict, FunctionValue, Key, LazyValue, List, NetValue, Val
 use crate::core_net::CoreSpecialization;
 use crate::eval;
 use crate::evaluation::{
-    EvalContext, EvaluationMachinePoll, EvaluationTaskBlock, EvaluationTaskHandle,
-    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskPoll, EvaluationWaitToken,
-    ReflectionTaskLauncher,
+    EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSession,
+    EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskPoll,
+    EvaluationWaitToken, ReflectionTaskKind, ReflectionTaskLauncher,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -71,6 +71,7 @@ pub enum RequestResult {
 #[derive(Default)]
 struct RequestActivity {
     observed_generation: Option<u64>,
+    observed_wait: Option<EvaluationWaitToken>,
     committed: bool,
 }
 
@@ -285,7 +286,28 @@ pub fn run<S: TaskSpecialization>(
     EffectTask::new(effect.as_core().clone(), specialization, host)?.run()
 }
 
-/// Builds a type-erased launcher for annotation reflection tasks.
+/// Runs one composed task while giving `.refl_task` children only the reusable
+/// reflection capabilities, independent of the parent's specialization.
+pub fn run_with_reflection_host<S: TaskSpecialization>(
+    effect: &PublicValue,
+    specialization: S,
+    host: Arc<S::Host>,
+    reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
+) -> Result<TaskOutcome, TaskError> {
+    let session = Arc::new(EvaluationSession::new());
+    session
+        .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
+        .map_err(|error| TaskError::new(error.as_ref()))?;
+    EffectTask::new_in_context(
+        effect.as_core().clone(),
+        specialization,
+        host,
+        EvalContext::new(session),
+    )?
+    .run()
+}
+
+/// Builds a type-erased launcher for annotation and joinable reflection tasks.
 pub(crate) fn task_launcher<S: TaskSpecialization>(
     specialization: S,
     host: Arc<S::Host>,
@@ -302,17 +324,22 @@ struct EffectTaskLauncher<S: TaskSpecialization> {
 }
 
 impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
-    fn launch(
+    fn build(
         &self,
-        context: &EvalContext,
+        context: EvalContext,
         effect: Value,
-    ) -> Result<EvaluationTaskHandle, Arc<str>> {
-        let specialization = self.specialization.clone();
-        let host = self.host.clone();
-        context.schedule_task(move |task_context| {
-            EffectTask::new_in_context(effect, specialization, host, task_context)
-                .map(|task| Box::new(AnnotationEffectTask(task)) as Box<dyn EvaluationTaskMachine>)
-                .map_err(|error| Arc::from(error.to_string()))
+        kind: ReflectionTaskKind,
+    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>> {
+        let task = EffectTask::new_in_context(
+            effect,
+            self.specialization.clone(),
+            self.host.clone(),
+            context,
+        )
+        .map_err(|error| Arc::from(error.to_string()))?;
+        Ok(match kind {
+            ReflectionTaskKind::Annotation => Box::new(AnnotationEffectTask(task)),
+            ReflectionTaskKind::Joinable => Box::new(JoinableEffectTask(task)),
         })
     }
 }
@@ -600,12 +627,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
             match self.poll(256) {
                 EffectTaskPoll::Yielded => {}
                 EffectTaskPoll::Blocked(blocked) => {
-                    if blocked.lazy.is_some() {
-                        let error = TaskError::new(
-                            "synchronous reflection task is blocked on another evaluation task",
-                        );
-                        self.finish(TaskTerminal::Failed(error.clone()));
-                        return Err(error);
+                    if let Some(wait) = blocked.lazy {
+                        match self.eval_context.pump_wait(&wait, 4_096) {
+                            EvaluationPumpOutcome::TargetReady
+                            | EvaluationPumpOutcome::BudgetExhausted => continue,
+                            EvaluationPumpOutcome::NoProgress => {
+                                let error = TaskError::new(
+                                    "synchronous reflection task has no runnable producer for its dependency",
+                                );
+                                self.finish(TaskTerminal::Failed(error.clone()));
+                                return Err(error);
+                            }
+                        }
                     }
                     let generation = blocked.observed_generation.ok_or_else(|| {
                         TaskError::new("blocked reflection task has no wake condition")
@@ -944,7 +977,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     },
                 )?;
                 if let Some(generation) = activity.observed_generation {
-                    branch.observe(checkpoint, generation);
+                    branch.observe(checkpoint.clone(), generation);
+                }
+                if let Some(wait) = activity.observed_wait {
+                    branch.observe_wait(checkpoint, wait);
                 }
                 if activity.committed {
                     branch.retry = None;
@@ -1099,6 +1135,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             alternatives: Vec::new(),
             retry: None,
             observed_failure: false,
+            lazy_failure: None,
         };
         frame.owns_transaction = frame.outer.transaction.is_none();
         self.begin_cut_attempt(&mut frame);
@@ -1111,6 +1148,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         frame.alternatives.clear();
         frame.retry = None;
         frame.observed_failure = false;
+        frame.lazy_failure = None;
         if frame.owns_transaction {
             let snapshot = self.host.snapshot();
             self.local_state = split_user_state(frame.outer.state.clone()).0;
@@ -1226,6 +1264,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .transaction
                     .as_ref()
                     .is_some_and(|transaction| transaction.observed);
+                if frame.lazy_failure.is_none() {
+                    frame.lazy_failure = failed
+                        .transaction
+                        .as_ref()
+                        .and_then(|transaction| transaction.wait.clone())
+                        .or_else(|| failed.retry.as_ref().and_then(|retry| retry.wait.clone()));
+                }
                 frame.retry = Some(failed);
                 if !frame.alternatives.is_empty() {
                     return Ok(MachineStep::Continue(frame.next_alternative()));
@@ -1259,6 +1304,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
         {
             transaction.observed = true;
         }
+        if let Some(wait) = frame.lazy_failure.clone() {
+            if let Some(transaction) = failed.transaction.as_mut() {
+                transaction.wait = Some(wait);
+            } else if let Some(retry) = failed.retry.as_mut() {
+                retry.wait = Some(wait);
+            }
+        }
         if failed
             .fix_restarts
             .last()
@@ -1275,7 +1327,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 scope_depth: frame.parent_scope_depth,
             }));
         }
-        if !frame.observed_failure {
+        if !frame.observed_failure && frame.lazy_failure.is_none() {
             failed.transaction = None;
             return Ok(MachineStep::Continue(MachineWork::Outcome {
                 outcome: failed.into_failure(),
@@ -1288,13 +1340,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .as_ref()
             .map(|transaction| transaction.snapshot.generation())
             .unwrap_or_else(|| self.host.snapshot().generation());
+        let lazy = frame.lazy_failure.clone();
+        let observed_generation = frame.observed_failure.then_some(generation);
         frame.retry = Some(failed);
         let index = self.execution.cuts.len();
         self.execution.cuts.push(frame);
         Ok(MachineStep::Blocked(BlockedExecution {
-            lazy: None,
-            observed_generation: Some(generation),
+            lazy,
+            observed_generation,
             wake: Some(WakeAction::RestartCut(index)),
+            wake_on_terminal: true,
         }))
     }
 
@@ -1324,12 +1379,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     TaskError::new("retryable reflection failure lost its observation")
                 })?;
                 Ok(MachineStep::Blocked(BlockedExecution {
-                    lazy: None,
-                    observed_generation: Some(checkpoint.generation),
+                    lazy: checkpoint.wait,
+                    observed_generation: checkpoint.generation,
                     wake: Some(WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
                         branch: *checkpoint.branch,
                         scope_depth,
                     }))),
+                    wake_on_terminal: true,
                 }))
             }
             BranchOutcome::Cancelled => Ok(MachineStep::Terminal(TaskTerminal::Cancelled)),
@@ -1342,6 +1398,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             lazy: Some(wait),
             observed_generation,
             wake,
+            wake_on_terminal: false,
         }
     }
 
@@ -1379,7 +1436,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             return (None, None);
         };
         (
-            Some(checkpoint.generation),
+            checkpoint.generation,
             Some(WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
                 branch: (*checkpoint.branch).clone(),
                 scope_depth: self.execution.work.scope_depth(),
@@ -1403,15 +1460,32 @@ impl<S: TaskSpecialization> EffectTask<S> {
         };
         match self.eval_context.poll_wait(&wait) {
             EvaluationTaskPoll::Pending(_) => Some(self.blocked_poll()),
-            EvaluationTaskPoll::Complete => {
-                self.blocked = None;
+            EvaluationTaskPoll::Complete(_) => {
+                let wake = self.blocked.take().and_then(|blocked| blocked.wake);
+                if let Some(wake) = wake {
+                    self.apply_wake(wake);
+                }
                 None
             }
             EvaluationTaskPoll::Failed(error) => {
+                if blocked.wake_on_terminal {
+                    let wake = self.blocked.take().and_then(|blocked| blocked.wake);
+                    if let Some(wake) = wake {
+                        self.apply_wake(wake);
+                    }
+                    return None;
+                }
                 self.finish(TaskTerminal::Failed(TaskError::new(error)));
                 Some(self.terminal.as_ref().expect("terminal set above").poll())
             }
             EvaluationTaskPoll::Cancelled => {
+                if blocked.wake_on_terminal {
+                    let wake = self.blocked.take().and_then(|blocked| blocked.wake);
+                    if let Some(wake) = wake {
+                        self.apply_wake(wake);
+                    }
+                    return None;
+                }
                 self.finish(TaskTerminal::Cancelled);
                 Some(self.terminal.as_ref().expect("terminal set above").poll())
             }
@@ -1517,6 +1591,27 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
 struct AnnotationEffectTask<S: TaskSpecialization>(EffectTask<S>);
 
+struct JoinableEffectTask<S: TaskSpecialization>(EffectTask<S>);
+
+impl<S: TaskSpecialization> EvaluationTaskMachine for JoinableEffectTask<S> {
+    fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
+        match self.0.poll(step_budget) {
+            EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
+            EffectTaskPoll::Blocked(blocked) => {
+                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    lazy: blocked.lazy,
+                    observed_generation: blocked.observed_generation,
+                })
+            }
+            EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value.into_core()),
+            EffectTaskPoll::Failed(error) => {
+                EvaluationMachinePoll::Failed(Arc::from(error.to_string()))
+            }
+            EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
+        }
+    }
+}
+
 impl<S: TaskSpecialization> EvaluationTaskMachine for AnnotationEffectTask<S> {
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
         match self.0.poll(step_budget) {
@@ -1528,7 +1623,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for AnnotationEffectTask<S> {
                 })
             }
             EffectTaskPoll::Complete(value) if value.as_core() == &*keys::UNIT_VALUE => {
-                EvaluationMachinePoll::Complete
+                EvaluationMachinePoll::Complete((*keys::UNIT_VALUE).clone())
             }
             EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Failed(Arc::from(format!(
                 "reflection annotation requires its effect to return unit, got {:?}",
@@ -1594,7 +1689,25 @@ impl<S: TaskSpecialization> Branch<S> {
         } else if self.retry.is_none()
             && let Some(branch) = checkpoint
         {
-            self.retry = Some(RetryCheckpoint { generation, branch });
+            self.retry = Some(RetryCheckpoint {
+                generation: Some(generation),
+                wait: None,
+                branch,
+            });
+        }
+    }
+
+    fn observe_wait(&mut self, checkpoint: Option<Box<Self>>, wait: EvaluationWaitToken) {
+        if let Some(transaction) = self.transaction.as_mut() {
+            transaction.wait.get_or_insert(wait);
+        } else if let Some(retry) = self.retry.as_mut() {
+            retry.wait.get_or_insert(wait);
+        } else if let Some(branch) = checkpoint {
+            self.retry = Some(RetryCheckpoint {
+                generation: None,
+                wait: Some(wait),
+                branch,
+            });
         }
     }
 
@@ -1603,7 +1716,7 @@ impl<S: TaskSpecialization> Branch<S> {
             || self
                 .transaction
                 .as_ref()
-                .is_some_and(|transaction| transaction.observed)
+                .is_some_and(|transaction| transaction.observed || transaction.wait.is_some())
     }
 
     fn into_failure(self) -> BranchOutcome<S> {
@@ -1711,6 +1824,7 @@ struct CutFrame<S: TaskSpecialization> {
     alternatives: Vec<Branch<S>>,
     retry: Option<Branch<S>>,
     observed_failure: bool,
+    lazy_failure: Option<EvaluationWaitToken>,
 }
 
 impl<S: TaskSpecialization> CutFrame<S> {
@@ -1739,6 +1853,7 @@ struct BlockedExecution<S: TaskSpecialization> {
     lazy: Option<EvaluationWaitToken>,
     observed_generation: Option<u64>,
     wake: Option<WakeAction<S>>,
+    wake_on_terminal: bool,
 }
 
 enum WakeAction<S: TaskSpecialization> {
@@ -1778,7 +1893,8 @@ impl TaskTerminal {
 
 #[derive(Clone)]
 struct RetryCheckpoint<S: TaskSpecialization> {
-    generation: u64,
+    generation: Option<u64>,
+    wait: Option<EvaluationWaitToken>,
     branch: Box<Branch<S>>,
 }
 
@@ -1906,6 +2022,7 @@ struct Transaction<S: TaskSpecialization> {
     snapshot: HostSnapshot<S>,
     journal: S::Journal,
     observed: bool,
+    wait: Option<EvaluationWaitToken>,
 }
 
 impl<S: TaskSpecialization> Transaction<S> {
@@ -1914,6 +2031,7 @@ impl<S: TaskSpecialization> Transaction<S> {
             snapshot,
             journal: S::Journal::default(),
             observed: false,
+            wait: None,
         }
     }
 }
@@ -1948,6 +2066,16 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
             transaction.observed = true;
         } else if self.activity.observed_generation.is_none() {
             self.activity.observed_generation = Some(generation);
+        }
+    }
+
+    /// Records a task whose terminal transition can make a failed request
+    /// worth retrying.
+    pub(crate) fn observe_task_wait(&mut self, wait: EvaluationWaitToken) {
+        if let Some(transaction) = self.transaction.as_deref_mut() {
+            transaction.wait.get_or_insert(wait);
+        } else if self.activity.observed_wait.is_none() {
+            self.activity.observed_wait = Some(wait);
         }
     }
 
@@ -2444,6 +2572,7 @@ mod tests {
 
     use super::*;
     use crate::api::{Assembler, Diagnostic};
+    use crate::evaluation::EvaluationTaskHandle;
 
     #[derive(Clone)]
     struct TestEffects;
@@ -2690,24 +2819,27 @@ mod tests {
         }
 
         fn commit(&self, commit: TaskCommit<TestEffects>) -> CommitResult {
-            let mut state = self.state.lock().unwrap();
-            if state.closed {
-                return CommitResult::Closed;
+            {
+                let mut state = self.state.lock().unwrap();
+                if state.closed {
+                    return CommitResult::Closed;
+                }
+                if state.generation != commit.generation() {
+                    return CommitResult::Conflict;
+                }
+                state.heap = commit.heap().clone();
+                let consumed = commit
+                    .extra()
+                    .consumed_diagnostics
+                    .min(state.diagnostics.len());
+                state.diagnostics.drain(..consumed);
+                state
+                    .diagnostics
+                    .extend(commit.extra().reflection.diagnostics().iter().cloned());
+                state.stderr.extend_from_slice(&commit.extra().stderr);
+                state.generation += 1;
             }
-            if state.generation != commit.generation() {
-                return CommitResult::Conflict;
-            }
-            state.heap = commit.heap().clone();
-            let consumed = commit
-                .extra()
-                .consumed_diagnostics
-                .min(state.diagnostics.len());
-            state.diagnostics.drain(..consumed);
-            state
-                .diagnostics
-                .extend(commit.extra().reflection.diagnostics().iter().cloned());
-            state.stderr.extend_from_slice(&commit.extra().stderr);
-            state.generation += 1;
+            commit.extra().reflection.activate_pending_tasks();
             CommitResult::Committed
         }
 
@@ -2747,18 +2879,21 @@ mod tests {
         }
 
         fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
-            let mut state = self.state.lock().unwrap();
-            if state.closed {
-                return CommitResult::Closed;
+            {
+                let mut state = self.state.lock().unwrap();
+                if state.closed {
+                    return CommitResult::Closed;
+                }
+                if state.generation != commit.generation() {
+                    return CommitResult::Conflict;
+                }
+                state.heap = commit.heap().clone();
+                state
+                    .diagnostics
+                    .extend(commit.extra().diagnostics().iter().cloned());
+                state.generation += 1;
             }
-            if state.generation != commit.generation() {
-                return CommitResult::Conflict;
-            }
-            state.heap = commit.heap().clone();
-            state
-                .diagnostics
-                .extend(commit.extra().diagnostics().iter().cloned());
-            state.generation += 1;
+            commit.extra().activate_pending_tasks();
             CommitResult::Committed
         }
 
@@ -2847,8 +2982,15 @@ mod tests {
         let (_, effect) = compile_effect("(.write_stderr \"scheduled\") =>> .r ()");
         let context = EvalContext::standalone();
         let host = Arc::new(TestHost::default());
-        let task = task_launcher(TestEffects, host.clone())
-            .launch(&context, effect.as_core().clone())
+        let launcher = task_launcher(TestEffects, host.clone());
+        let task = context
+            .schedule_task(|task_context| {
+                launcher.build(
+                    task_context,
+                    effect.as_core().clone(),
+                    ReflectionTaskKind::Annotation,
+                )
+            })
             .expect("effect task should schedule");
 
         assert!(matches!(
@@ -2863,11 +3005,161 @@ mod tests {
             context.pump_wait(task.wait(), 4096),
             crate::evaluation::EvaluationPumpOutcome::TargetReady
         );
-        assert_eq!(
+        assert!(matches!(
             context.poll_reflection_task(&task),
-            EvaluationTaskPoll::Complete
-        );
+            EvaluationTaskPoll::Complete(_)
+        ));
         assert_eq!(host.stderr(), [Bytes::from_static(b"scheduled")]);
+    }
+
+    fn schedule_composed_test_task(
+        effect: &PublicValue,
+        host: Arc<TestHost>,
+    ) -> (EvalContext, EvaluationTaskHandle) {
+        let context = EvalContext::standalone();
+        let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
+        context
+            .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
+            .expect("fresh test session should accept a reflection launcher");
+        let effect = effect.as_core().clone();
+        let task = context
+            .schedule_task(move |task_context| {
+                EffectTask::new_in_context(effect, TestEffects, host, task_context)
+                    .map(|task| {
+                        Box::new(JoinableEffectTask(task)) as Box<dyn EvaluationTaskMachine>
+                    })
+                    .map_err(|error| Arc::from(error.to_string()))
+            })
+            .expect("test task should schedule");
+        (context, task)
+    }
+
+    fn pump_composed_test_task(
+        context: &EvalContext,
+        task: &EvaluationTaskHandle,
+    ) -> EvaluationTaskPoll {
+        assert_eq!(
+            context.pump_wait(task.wait(), 16_384),
+            crate::evaluation::EvaluationPumpOutcome::TargetReady
+        );
+        context.poll_reflection_task(task)
+    }
+
+    #[test]
+    fn reflection_task_returns_a_joinable_result() {
+        let (assembler, effect) =
+            compile_effect(".refl_task (.r \"child\") >>= (\\task -> .join_task task)");
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host);
+        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+            panic!("joined task should complete")
+        };
+        assert_eq!(
+            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            b"child".as_slice()
+        );
+    }
+
+    #[test]
+    fn reflection_task_launch_is_buffered_until_cut_commit() {
+        let (assembler, effect) =
+            compile_effect(".cut (.refl_task (.r \"committed\")) >>= (\\task -> .join_task task)");
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host);
+        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+            panic!("committed child task should complete")
+        };
+        assert_eq!(
+            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            b"committed".as_slice()
+        );
+    }
+
+    #[test]
+    fn failed_transaction_discards_its_reflection_task_launch() {
+        let (_, effect) = compile_effect(
+            ".cut (.alt (.refl_task (.log 'error { msg:{ text:\"discarded\" } }) >>= (\\task -> .fail)) (.r \"kept\"))",
+        );
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host.clone());
+        let poll = pump_composed_test_task(&context, &task);
+        assert!(
+            matches!(poll, EvaluationTaskPoll::Complete(_)),
+            "winning alternative should complete, got {poll:?}"
+        );
+        assert!(host.diagnostics().is_empty());
+        assert_eq!(context.reflection_task_count(), 1);
+    }
+
+    #[test]
+    fn join_propagates_task_error_and_task_error_extracts_it() {
+        let (_, join) = compile_effect(".refl_task .fail >>= (\\task -> .join_task task)");
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&join, host.clone());
+        let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
+            panic!("join should propagate its child task error")
+        };
+        assert!(error.contains("failed permanently"));
+
+        let (assembler, extract) =
+            compile_effect(".refl_task .fail >>= (\\task -> .task_error task)");
+        let (context, task) = schedule_composed_test_task(&extract, host);
+        let poll = pump_composed_test_task(&context, &task);
+        let EvaluationTaskPoll::Complete(value) = poll else {
+            panic!("task_error should return the child task error, got {poll:?}")
+        };
+        let text = assembler
+            .to_binary(&PublicValue::from_core(value))
+            .expect("task error should be text");
+        assert!(String::from_utf8_lossy(&text).contains("failed permanently"));
+    }
+
+    #[test]
+    fn task_error_fails_for_a_successful_task() {
+        let (_, effect) = compile_effect(".refl_task (.r ()) >>= (\\task -> .task_error task)");
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host);
+        let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
+            panic!("task_error should fail for a successful task")
+        };
+        assert!(error.contains("failed permanently"));
+    }
+
+    #[test]
+    fn pending_task_error_is_an_effect_failure_before_it_is_a_wait() {
+        let (assembler, effect) = compile_effect(
+            ".refl_task (.r \"child\") >>= (\\task -> .cut (.alt (.task_error task) (.r \"fallback\")))",
+        );
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host);
+        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+            panic!("task_error alternative should fall through")
+        };
+        assert_eq!(
+            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            b"fallback".as_slice()
+        );
+    }
+
+    #[test]
+    fn spawned_tasks_receive_only_reusable_reflection_capabilities() {
+        let (assembler, effect) = compile_effect(
+            ".refl_task (.write_stderr \"forbidden\") >>= (\\task -> .task_error task)",
+        );
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host.clone());
+        let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
+            panic!("child capability error should be observable through task_error")
+        };
+        let error = assembler
+            .to_binary(&PublicValue::from_core(error))
+            .expect("task error should be text");
+        assert!(
+            String::from_utf8_lossy(&error).contains("could not be applied"),
+            "unexpected capability error: {}",
+            String::from_utf8_lossy(&error)
+        );
+        assert!(host.stderr().is_empty());
     }
 
     #[test]
