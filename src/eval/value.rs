@@ -5,7 +5,7 @@ use crate::core::{
     Builtin, ComputedFixpointAction, FixpointComputation, Key, LazyValue, List, Value, keys,
 };
 use crate::core_net::CoreWaitToken;
-use crate::evaluation::{EvalContext, EvaluationTaskPoll};
+use crate::evaluation::{EvalContext, EvaluationPumpOutcome, EvaluationTaskPoll};
 use crate::list::ListItem;
 use crate::number::Number;
 
@@ -94,7 +94,16 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
         let task = gate
             .task(context)
             .map_err(|error| EvalError::new(error.as_ref()))?;
-        match context.poll_reflection_task(task) {
+        let mut poll = context.poll_reflection_task(task);
+        if let EvaluationTaskPoll::Pending(wait) = &poll
+            && matches!(
+                context.pump_wait(wait, 256),
+                EvaluationPumpOutcome::TargetReady
+            )
+        {
+            poll = context.poll_reflection_task(task);
+        }
+        match poll {
             EvaluationTaskPoll::Pending(wait) => {
                 return Err(EvalError::blocked(CoreWaitToken(wait)));
             }

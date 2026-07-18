@@ -125,10 +125,19 @@ design in the design documents.
   can wake it, a changed host generation restarts the recorded transaction or
   retry boundary before the lazy continuation is resumed. One poll step must
   not leave the machine positioned to repeat an already committed host effect.
+- `EvaluationSession` stores executable tasks behind a type-erased machine
+  interface, plus a FIFO ready queue and stable task/wait lookup. The serial
+  pump claims a machine under the session mutex, polls it outside the mutex,
+  and then restores its queued, blocked, or terminal state. It prioritizes the
+  producer of a demanded wait token, follows a blocked task's one lazy
+  dependency when that producer is known, and otherwise polls ready tasks in
+  bounded round-robin order. A per-pump visited set stops dependency cycles and
+  repeated polling of unchanged blocked tasks. Fine-grained wake indexes,
+  worker threads, and evaluator reduction fuel remain deferred.
 - `reflection::run` is the synchronous compatibility driver for that machine.
   It polls with bounded effect-step fuel and calls `TaskHost::wait_for_change`
-  only after polling reports a state block. The shared-session task pump is not
-  connected yet, so the synchronous driver still reports an unscheduled lazy
+  only after polling reports a state block. The same machine has a session
+  adapter, but the synchronous driver still reports an unscheduled lazy
   dependency as an error.
 - Each reflection `fix` alternative receives its own task-owned fixpoint cell.
   Recursive observation by its producer is an error; another task observes its
@@ -181,7 +190,10 @@ design in the design documents.
   original target without forcing it.
 - The first observer owns a reflection gate's running task. A different session
   must not drive it, though either session may consume the completed result.
-  Wait tokens retain only a weak reference to the owner.
+  Wait tokens retain only a weak reference to the owner. The evaluator now
+  invokes the serial pump when it observes a pending gate, but annotation tasks
+  remain dormant until the next slice installs a reflection-task factory in
+  each assembler session.
 
 ### Interaction nets
 

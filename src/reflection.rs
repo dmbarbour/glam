@@ -20,7 +20,10 @@ use crate::api::Value as PublicValue;
 use crate::core::{Atom, Dict, FunctionValue, Key, LazyValue, List, NetValue, Value, keys};
 use crate::core_net::CoreSpecialization;
 use crate::eval;
-use crate::evaluation::{EvalContext, EvaluationTaskId, EvaluationTaskPoll, EvaluationWaitToken};
+use crate::evaluation::{
+    EvalContext, EvaluationMachinePoll, EvaluationTaskBlock, EvaluationTaskHandle,
+    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskPoll, EvaluationWaitToken,
+};
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
 
@@ -257,6 +260,25 @@ pub fn run<S: TaskSpecialization>(
     EffectTask::new(effect.as_core().clone(), specialization, host)?.run()
 }
 
+/// Installs one concrete reflection machine in an evaluation session while
+/// keeping its specialization and host type-erased from the scheduler.
+#[allow(dead_code)] // The annotation task factory will call this next.
+pub(crate) fn schedule<S: TaskSpecialization>(
+    context: &EvalContext,
+    effect: &PublicValue,
+    specialization: S,
+    host: Arc<S::Host>,
+) -> Result<EvaluationTaskHandle, TaskError> {
+    let effect = effect.as_core().clone();
+    context
+        .schedule_task(move |task_context| {
+            EffectTask::new_in_context(effect, specialization, host, task_context)
+                .map(|task| Box::new(task) as Box<dyn EvaluationTaskMachine>)
+                .map_err(|error| Arc::from(error.to_string()))
+        })
+        .map_err(TaskError::new)
+}
+
 /// Runs a task with standard effects and no specialization-owned requests.
 pub fn run_standard(
     effect: &PublicValue,
@@ -334,9 +356,17 @@ struct EffectTask<S: TaskSpecialization> {
 
 impl<S: TaskSpecialization> EffectTask<S> {
     fn new(effect: Value, specialization: S, host: Arc<S::Host>) -> Result<Self, TaskError> {
+        Self::new_in_context(effect, specialization, host, EvalContext::standalone())
+    }
+
+    fn new_in_context(
+        effect: Value,
+        specialization: S,
+        host: Arc<S::Host>,
+        eval_context: EvalContext,
+    ) -> Result<Self, TaskError> {
         let tags = Tags::new();
         let (api, specialized_requests) = effect_api(&tags, specialization.requests())?;
-        let eval_context = EvalContext::standalone();
         let id = eval_context
             .task_id()
             .map_err(|error| TaskError::new(error.as_ref()))?;
@@ -1431,6 +1461,25 @@ impl<S: TaskSpecialization> EffectTask<S> {
             &self.tags,
             &self.specialized_requests,
         )
+    }
+}
+
+impl<S: TaskSpecialization> EvaluationTaskMachine for EffectTask<S> {
+    fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
+        match EffectTask::poll(self, step_budget) {
+            EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
+            EffectTaskPoll::Blocked(blocked) => {
+                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    lazy: blocked.lazy,
+                    observed_generation: blocked.observed_generation,
+                })
+            }
+            EffectTaskPoll::Complete(_) => EvaluationMachinePoll::Complete,
+            EffectTaskPoll::Failed(error) => {
+                EvaluationMachinePoll::Failed(Arc::from(error.to_string()))
+            }
+            EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
+        }
     }
 }
 
@@ -2754,6 +2803,33 @@ mod tests {
             }
         };
         assert_eq!(assembler.to_binary(&value).unwrap(), b"AB".as_slice());
+    }
+
+    #[test]
+    fn evaluation_session_pumps_a_type_erased_effect_task() {
+        let (_, effect) = compile_effect("(.write_stderr \"scheduled\") =>> .r ()");
+        let context = EvalContext::standalone();
+        let host = Arc::new(TestHost::default());
+        let task = schedule(&context, &effect, TestEffects, host.clone())
+            .expect("effect task should schedule");
+
+        assert!(matches!(
+            context.poll_reflection_task(&task),
+            EvaluationTaskPoll::Pending(_)
+        ));
+        assert_eq!(
+            context.pump_wait(task.wait(), 1),
+            crate::evaluation::EvaluationPumpOutcome::BudgetExhausted
+        );
+        assert_eq!(
+            context.pump_wait(task.wait(), 4096),
+            crate::evaluation::EvaluationPumpOutcome::TargetReady
+        );
+        assert_eq!(
+            context.poll_reflection_task(&task),
+            EvaluationTaskPoll::Complete
+        );
+        assert_eq!(host.stderr(), [Bytes::from_static(b"scheduled")]);
     }
 
     #[test]

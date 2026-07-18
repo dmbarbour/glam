@@ -1,10 +1,10 @@
 //! Session-scoped capabilities threaded through semantic evaluation.
 //!
-//! The session currently owns the registry and identity of reflection work.
-//! The cooperative executor, heap, diagnostics, and cancellation facilities
-//! will join that boundary in later slices.
+//! The session owns evaluation-task identity, wait-token provenance, and the
+//! serial cooperative executor. Reflection specializations remain outside this
+//! module behind a small type-erased task-machine boundary.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::core::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct EvaluationTaskId(NonZeroU64);
 
 impl EvaluationTaskId {
@@ -88,6 +88,13 @@ pub(crate) struct EvaluationTaskHandle {
     wait: EvaluationWaitToken,
 }
 
+impl EvaluationTaskHandle {
+    #[allow(dead_code)] // Used by the reflection task-factory integration.
+    pub(crate) fn wait(&self) -> &EvaluationWaitToken {
+        &self.wait
+    }
+}
+
 impl fmt::Debug for EvaluationTaskHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -106,41 +113,75 @@ pub(crate) enum EvaluationTaskPoll {
     ForeignSession,
 }
 
-#[allow(dead_code)] // The executor will exercise post-queued states in the next slice.
-#[derive(Debug)]
-enum EvaluationTaskState {
-    Queued,
-    Running,
-    Blocked,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvaluationTaskBlock {
+    pub(crate) lazy: Option<EvaluationWaitToken>,
+    pub(crate) observed_generation: Option<u64>,
+}
+
+pub(crate) enum EvaluationMachinePoll {
+    Yielded,
+    Blocked(EvaluationTaskBlock),
     Complete,
     Failed(Arc<str>),
     Cancelled,
 }
 
-#[derive(Debug)]
+pub(crate) trait EvaluationTaskMachine: Send {
+    fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvaluationPumpOutcome {
+    TargetReady,
+    NoProgress,
+    BudgetExhausted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EvaluationTaskState {
+    /// Transitional annotation record awaiting the task-factory slice.
+    Dormant,
+    Queued,
+    Running,
+    Blocked(EvaluationTaskBlock),
+    Complete,
+    Failed(Arc<str>),
+    Cancelled,
+}
+
 struct ReflectionTaskRecord {
-    #[allow(dead_code)] // Used when the cooperative executor enters the task.
     id: EvaluationTaskId,
-    #[allow(dead_code)] // Retained for the upcoming reflection executor.
-    effect: Value,
     state: EvaluationTaskState,
+    machine: Option<Box<dyn EvaluationTaskMachine>>,
 }
 
 #[derive(Debug)]
 struct PromiseRecord {
+    producer: EvaluationTaskId,
     result: Weak<OnceLock<Result<Value, Arc<str>>>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct EvaluationTasks {
     reflection: HashMap<EvaluationWaitToken, ReflectionTaskRecord>,
+    reflection_by_id: BTreeMap<EvaluationTaskId, EvaluationWaitToken>,
+    ready: VecDeque<EvaluationTaskId>,
     promises: HashMap<EvaluationWaitToken, PromiseRecord>,
     owned_promises: HashMap<EvaluationTaskId, Vec<EvaluationWaitToken>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct EvaluationSession {
     tasks: Mutex<EvaluationTasks>,
+}
+
+impl fmt::Debug for EvaluationSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EvaluationSession")
+            .finish_non_exhaustive()
+    }
 }
 
 impl EvaluationSession {
@@ -167,13 +208,21 @@ impl EvalContext {
         }
     }
 
+    #[allow(dead_code)] // Used when the annotation task factory is installed.
+    fn for_task(session: Arc<EvaluationSession>, id: EvaluationTaskId) -> Self {
+        let task = Arc::new(OnceLock::new());
+        task.set(Ok(id))
+            .expect("fresh task identity cell must be empty");
+        Self { session, task }
+    }
+
     /// Creates a session for internal clients that do not yet run under an
     /// assembler, notably standalone reflection tasks and focused tests.
     pub(crate) fn standalone() -> Self {
         Self::new(Arc::new(EvaluationSession::new()))
     }
 
-    #[allow(dead_code)] // Used by spawned work once the cooperative executor is connected.
+    #[allow(dead_code)] // Used once reflection exposes task spawning.
     pub(crate) fn with_new_task(&self) -> Result<Self, Arc<str>> {
         let context = Self {
             session: self.session.clone(),
@@ -201,6 +250,7 @@ impl EvalContext {
         let replaced = tasks.promises.insert(
             wait.clone(),
             PromiseRecord {
+                producer: owner,
                 result: Arc::downgrade(result),
             },
         );
@@ -256,27 +306,68 @@ impl EvalContext {
         }
     }
 
-    pub(crate) fn start_reflection_task(
-        &self,
-        effect: Value,
-    ) -> Result<EvaluationTaskHandle, Arc<str>> {
+    /// Registers an executable task whose concrete specialization remains
+    /// hidden behind [`EvaluationTaskMachine`]. Construction happens before
+    /// the task registry is locked, so host snapshots and evaluator work may
+    /// safely use this same session.
+    #[allow(dead_code)] // Used by reflection::schedule and the next task-factory slice.
+    pub(crate) fn schedule_task<F>(&self, build: F) -> Result<EvaluationTaskHandle, Arc<str>>
+    where
+        F: FnOnce(EvalContext) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>,
+    {
         let id = allocate_task_id()?;
         let wait = allocate_wait_token(&self.session)?;
-        let replaced = self
+        let context = Self::for_task(self.session.clone(), id);
+        let machine = build(context)?;
+        let mut tasks = self
             .session
             .tasks
             .lock()
-            .expect("evaluation task registry was poisoned")
-            .reflection
-            .insert(
-                wait.clone(),
-                ReflectionTaskRecord {
-                    id,
-                    effect,
-                    state: EvaluationTaskState::Queued,
-                },
-            );
-        assert!(replaced.is_none(), "evaluation task IDs must be unique");
+            .expect("evaluation task registry was poisoned");
+        let replaced = tasks.reflection.insert(
+            wait.clone(),
+            ReflectionTaskRecord {
+                id,
+                state: EvaluationTaskState::Queued,
+                machine: Some(machine),
+            },
+        );
+        let replaced_id = tasks.reflection_by_id.insert(id, wait.clone());
+        assert!(
+            replaced.is_none() && replaced_id.is_none(),
+            "evaluation task identities must be unique"
+        );
+        tasks.ready.push_back(id);
+        Ok(EvaluationTaskHandle { id, wait })
+    }
+
+    /// Registers the annotation gate's task identity before a reflection host
+    /// has been installed. The next slice replaces this transitional dormant
+    /// record with a task built by the session's reflection-task factory.
+    pub(crate) fn start_reflection_task(
+        &self,
+        _effect: Value,
+    ) -> Result<EvaluationTaskHandle, Arc<str>> {
+        let id = allocate_task_id()?;
+        let wait = allocate_wait_token(&self.session)?;
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let replaced = tasks.reflection.insert(
+            wait.clone(),
+            ReflectionTaskRecord {
+                id,
+                state: EvaluationTaskState::Dormant,
+                machine: None,
+            },
+        );
+        let replaced_id = tasks.reflection_by_id.insert(id, wait.clone());
+        assert!(
+            replaced.is_none() && replaced_id.is_none(),
+            "evaluation task identities must be unique"
+        );
         Ok(EvaluationTaskHandle { id, wait })
     }
 
@@ -316,9 +407,10 @@ impl EvalContext {
             EvaluationTaskState::Complete => EvaluationTaskPoll::Complete,
             EvaluationTaskState::Failed(error) => EvaluationTaskPoll::Failed(error.clone()),
             EvaluationTaskState::Cancelled => EvaluationTaskPoll::Cancelled,
-            EvaluationTaskState::Queued
+            EvaluationTaskState::Dormant
+            | EvaluationTaskState::Queued
             | EvaluationTaskState::Running
-            | EvaluationTaskState::Blocked => {
+            | EvaluationTaskState::Blocked(_) => {
                 if Arc::ptr_eq(&self.session, &owner) {
                     EvaluationTaskPoll::Pending(wait.clone())
                 } else {
@@ -326,6 +418,14 @@ impl EvalContext {
                 }
             }
         }
+    }
+
+    pub(crate) fn pump_wait(
+        &self,
+        wait: &EvaluationWaitToken,
+        step_budget: usize,
+    ) -> EvaluationPumpOutcome {
+        self.session.pump(self, wait, step_budget)
     }
 
     #[cfg(test)]
@@ -369,5 +469,321 @@ impl EvalContext {
     #[cfg(test)]
     pub(crate) fn shares_session_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.session, &other.session)
+    }
+}
+
+const TASK_POLL_QUANTUM: usize = 64;
+
+struct ClaimedTask {
+    id: EvaluationTaskId,
+    wait: EvaluationWaitToken,
+    prior_state: EvaluationTaskState,
+    machine: Box<dyn EvaluationTaskMachine>,
+}
+
+impl EvaluationSession {
+    fn pump(
+        &self,
+        context: &EvalContext,
+        target: &EvaluationWaitToken,
+        mut step_budget: usize,
+    ) -> EvaluationPumpOutcome {
+        if !target
+            .owner
+            .upgrade()
+            .is_some_and(|owner| Arc::ptr_eq(&context.session, &owner))
+        {
+            return EvaluationPumpOutcome::NoProgress;
+        }
+
+        let mut attempted_blocked = HashSet::new();
+        loop {
+            if !matches!(context.poll_wait(target), EvaluationTaskPoll::Pending(_)) {
+                return EvaluationPumpOutcome::TargetReady;
+            }
+            if step_budget == 0 {
+                return EvaluationPumpOutcome::BudgetExhausted;
+            }
+
+            let claimed = {
+                let mut tasks = self
+                    .tasks
+                    .lock()
+                    .expect("evaluation task registry was poisoned");
+                let prioritized = prioritized_task(&tasks, target, &attempted_blocked);
+                prioritized
+                    .and_then(|id| claim_task(&mut tasks, id))
+                    .or_else(|| claim_ready_task(&mut tasks))
+                    .or_else(|| claim_blocked_task(&mut tasks, &attempted_blocked))
+            };
+            let Some(mut claimed) = claimed else {
+                return EvaluationPumpOutcome::NoProgress;
+            };
+
+            let quantum = step_budget.min(TASK_POLL_QUANTUM);
+            step_budget -= quantum;
+            let poll = claimed.machine.poll(quantum);
+            let claimed_id = claimed.id;
+            let (made_progress, remains_blocked) = self.release_task(claimed, poll);
+            if remains_blocked {
+                attempted_blocked.insert(claimed_id);
+            }
+            if made_progress {
+                // A completed producer or host commit may have made an earlier
+                // blocked task runnable. Reconsider it within this same pump.
+                attempted_blocked.clear();
+            }
+        }
+    }
+
+    fn release_task(&self, claimed: ClaimedTask, poll: EvaluationMachinePoll) -> (bool, bool) {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let record = tasks
+            .reflection
+            .get_mut(&claimed.wait)
+            .expect("claimed task must remain registered");
+        assert!(
+            matches!(record.state, EvaluationTaskState::Running),
+            "only a running task may release its machine"
+        );
+        assert!(record.machine.is_none(), "claimed machine must be absent");
+        record.machine = Some(claimed.machine);
+
+        let (state, made_progress, remains_blocked) = match poll {
+            EvaluationMachinePoll::Yielded => (EvaluationTaskState::Queued, true, false),
+            EvaluationMachinePoll::Blocked(block) => {
+                let unchanged = matches!(
+                    &claimed.prior_state,
+                    EvaluationTaskState::Blocked(prior) if prior == &block
+                );
+                (EvaluationTaskState::Blocked(block), !unchanged, true)
+            }
+            EvaluationMachinePoll::Complete => (EvaluationTaskState::Complete, true, false),
+            EvaluationMachinePoll::Failed(error) => {
+                (EvaluationTaskState::Failed(error), true, false)
+            }
+            EvaluationMachinePoll::Cancelled => (EvaluationTaskState::Cancelled, true, false),
+        };
+        record.state = state;
+        if matches!(record.state, EvaluationTaskState::Queued) {
+            tasks.ready.push_back(claimed.id);
+        }
+        (made_progress, remains_blocked)
+    }
+}
+
+fn producer_for_wait(
+    tasks: &EvaluationTasks,
+    wait: &EvaluationWaitToken,
+) -> Option<EvaluationTaskId> {
+    tasks
+        .reflection
+        .get(wait)
+        .map(|record| record.id)
+        .or_else(|| tasks.promises.get(wait).map(|promise| promise.producer))
+}
+
+fn prioritized_task(
+    tasks: &EvaluationTasks,
+    target: &EvaluationWaitToken,
+    attempted_blocked: &HashSet<EvaluationTaskId>,
+) -> Option<EvaluationTaskId> {
+    let mut chain = Vec::new();
+    let mut seen = HashSet::new();
+    let mut wait = target.clone();
+    while let Some(id) = producer_for_wait(tasks, &wait) {
+        if !seen.insert(id) {
+            break;
+        }
+        let Some(task_wait) = tasks.reflection_by_id.get(&id) else {
+            break;
+        };
+        let Some(record) = tasks.reflection.get(task_wait) else {
+            break;
+        };
+        chain.push(id);
+        let EvaluationTaskState::Blocked(block) = &record.state else {
+            break;
+        };
+        let Some(dependency) = &block.lazy else {
+            break;
+        };
+        wait = dependency.clone();
+    }
+
+    chain.into_iter().rev().find(|id| {
+        let Some(wait) = tasks.reflection_by_id.get(id) else {
+            return false;
+        };
+        let Some(record) = tasks.reflection.get(wait) else {
+            return false;
+        };
+        matches!(record.state, EvaluationTaskState::Queued)
+            || matches!(record.state, EvaluationTaskState::Blocked(_))
+                && !attempted_blocked.contains(id)
+    })
+}
+
+fn claim_task(tasks: &mut EvaluationTasks, id: EvaluationTaskId) -> Option<ClaimedTask> {
+    let wait = tasks.reflection_by_id.get(&id)?.clone();
+    let record = tasks.reflection.get_mut(&wait)?;
+    if !matches!(
+        record.state,
+        EvaluationTaskState::Queued | EvaluationTaskState::Blocked(_)
+    ) {
+        return None;
+    }
+    let machine = record.machine.take()?;
+    let prior_state = std::mem::replace(&mut record.state, EvaluationTaskState::Running);
+    Some(ClaimedTask {
+        id,
+        wait,
+        prior_state,
+        machine,
+    })
+}
+
+fn claim_ready_task(tasks: &mut EvaluationTasks) -> Option<ClaimedTask> {
+    while let Some(id) = tasks.ready.pop_front() {
+        let is_queued = tasks
+            .reflection_by_id
+            .get(&id)
+            .and_then(|wait| tasks.reflection.get(wait))
+            .is_some_and(|record| matches!(record.state, EvaluationTaskState::Queued));
+        if is_queued && let Some(claimed) = claim_task(tasks, id) {
+            return Some(claimed);
+        }
+    }
+    None
+}
+
+fn claim_blocked_task(
+    tasks: &mut EvaluationTasks,
+    attempted: &HashSet<EvaluationTaskId>,
+) -> Option<ClaimedTask> {
+    let id = tasks.reflection_by_id.iter().find_map(|(id, wait)| {
+        let record = tasks.reflection.get(wait)?;
+        (matches!(record.state, EvaluationTaskState::Blocked(_)) && !attempted.contains(id))
+            .then_some(*id)
+    })?;
+    claim_task(tasks, id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Complete;
+
+    impl EvaluationTaskMachine for Complete {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            EvaluationMachinePoll::Complete
+        }
+    }
+
+    struct Await {
+        context: EvalContext,
+        dependency: EvaluationWaitToken,
+    }
+
+    impl EvaluationTaskMachine for Await {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            match self.context.poll_wait(&self.dependency) {
+                EvaluationTaskPoll::Pending(wait) => {
+                    EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                        lazy: Some(wait),
+                        observed_generation: None,
+                    })
+                }
+                EvaluationTaskPoll::Complete => EvaluationMachinePoll::Complete,
+                EvaluationTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error),
+                EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
+                EvaluationTaskPoll::ForeignSession => EvaluationMachinePoll::Failed(Arc::from(
+                    "test dependency unexpectedly belongs to another session",
+                )),
+            }
+        }
+    }
+
+    struct AlwaysBlocked;
+
+    impl EvaluationTaskMachine for AlwaysBlocked {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                lazy: None,
+                observed_generation: Some(7),
+            })
+        }
+    }
+
+    struct AlwaysYields;
+
+    impl EvaluationTaskMachine for AlwaysYields {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            EvaluationMachinePoll::Yielded
+        }
+    }
+
+    #[test]
+    fn pump_follows_a_lazy_dependency_to_its_producer() {
+        let context = EvalContext::standalone();
+        let dependency = context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("dependency should schedule");
+        let dependency_wait = dependency.wait.clone();
+        let target = context
+            .schedule_task(move |task_context| {
+                Ok(Box::new(Await {
+                    context: task_context,
+                    dependency: dependency_wait,
+                }))
+            })
+            .expect("dependent task should schedule");
+
+        assert_eq!(
+            context.pump_wait(&target.wait, 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert_eq!(
+            context.poll_reflection_task(&dependency),
+            EvaluationTaskPoll::Complete
+        );
+        assert_eq!(
+            context.poll_reflection_task(&target),
+            EvaluationTaskPoll::Complete
+        );
+    }
+
+    #[test]
+    fn pump_stops_after_rechecking_an_unchanged_block() {
+        let context = EvalContext::standalone();
+        let target = context
+            .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+            .expect("blocked task should schedule");
+
+        assert_eq!(
+            context.pump_wait(&target.wait, 256),
+            EvaluationPumpOutcome::NoProgress
+        );
+        assert!(matches!(
+            context.poll_reflection_task(&target),
+            EvaluationTaskPoll::Pending(_)
+        ));
+    }
+
+    #[test]
+    fn pump_reports_budget_exhaustion_for_runnable_work() {
+        let context = EvalContext::standalone();
+        let target = context
+            .schedule_task(|_| Ok(Box::new(AlwaysYields)))
+            .expect("yielding task should schedule");
+
+        assert_eq!(
+            context.pump_wait(&target.wait, 1),
+            EvaluationPumpOutcome::BudgetExhausted
+        );
     }
 }

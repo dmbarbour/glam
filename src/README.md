@@ -98,8 +98,16 @@ application, and cut frames advance under an effect-step budget. State failure
 returns a coarse generation block instead of waiting inside the interpreter,
 and lazy evaluator demand retains its exact wait token without selecting a
 sibling alternative. `reflection::run` remains a synchronous wrapper that
-polls this machine and performs the legacy host wait. Session scheduling and
-annotation-task pumping are the next integration boundary.
+polls this machine and performs the legacy host wait.
+
+`EvaluationSession` can also own these machines through a type-erased polling
+interface. Its serial pump removes one machine under the session lock, polls it
+without that lock, then records its new state. It first follows the producer
+chain for the demanded wait token, then uses a bounded FIFO ready queue, and
+coarsely rechecks blocked tasks once per pump. Promise records retain their
+producer task IDs for this shallow dependency prioritization. Fine-grained
+observation indexes, persistent waiter graphs, worker threads, and evaluator
+reduction fuel are intentionally deferred.
 
 `main` chooses the `configuration` and `assembly` module paths and constructs
 their initial definitions. Those names and roles are CLI policy, not library
@@ -133,9 +141,10 @@ front-end facade returns only lowered definitions plus source diagnostics.
 
 An `Assembler` owns one `EvaluationSession`; its clones share that session.
 Each evaluator entry borrows an `EvalContext` pointing to it, including work
-performed later by a lazy value. The session owns reflection task identity and
-queued/completion state; later slices will add the cooperative executor, heap,
-diagnostics, and cancellation facilities at the same boundary.
+performed later by a lazy value. The session owns reflection task identity,
+queued/blocked/terminal state, and the serial cooperative executor; later
+slices will add the shared heap, diagnostics, and cancellation facilities at
+the same boundary.
 
 The evaluator exposes outer semantic values on demand:
 
@@ -171,9 +180,11 @@ The singleton annotation `refl:Effect` constructs a boxed lazy gate. Its first
 observer registers one task in that observer's session and receives a precise
 wait until the task completes; it then yields the original target without
 forcing it. A `Data >< Bind` demand records the same wait in the exact active
-pair rather than turning suspension into a stuck error. The executor is not yet
-connected, so annotation reflection tasks remain queued in this slice even
-though standalone effect tasks can now suspend and resume cooperatively.
+pair rather than turning suspension into a stuck error. Gate observation now
+offers that wait to the serial pump. The gate's record remains dormant until a
+following slice installs the assembler's specialization/host task factory, so
+the current manual gate tests retain their earlier behavior while scheduled
+effect machines are executable today.
 
 Builtins are identified in `core`, dispatched once in `eval/builtins.rs`, and
 implemented by semantic family below `eval/builtins/`. Net-lowered application
