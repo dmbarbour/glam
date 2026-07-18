@@ -12,7 +12,7 @@ use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use bytes::Bytes;
 
@@ -29,6 +29,10 @@ use crate::evaluation::{EvalContext, EvaluationSession};
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
 use crate::number::Number;
+use crate::reflection::{
+    CommitResult, HostSnapshot, ReflectionEffects, ReflectionHost, TaskCommit, TaskHost,
+    task_launcher,
+};
 
 pub const DEFAULT_DIAGNOSTIC_CAPACITY: usize = 1_000;
 
@@ -533,6 +537,90 @@ impl DiagnosticHistory {
     }
 }
 
+struct AssemblerReflectionHost {
+    diagnostic_sink: Arc<dyn DiagnosticSink>,
+    state: Mutex<AssemblerReflectionState>,
+    changed: Condvar,
+}
+
+struct AssemblerReflectionState {
+    generation: u64,
+    heap: Value,
+}
+
+impl AssemblerReflectionHost {
+    fn new(diagnostic_sink: Arc<dyn DiagnosticSink>) -> Self {
+        Self {
+            diagnostic_sink,
+            state: Mutex::new(AssemblerReflectionState {
+                generation: 1,
+                heap: Value::empty_record(),
+            }),
+            changed: Condvar::new(),
+        }
+    }
+}
+
+impl ReflectionHost<ReflectionEffects> for AssemblerReflectionHost {
+    fn emit_diagnostic(&self, diagnostic: Diagnostic) {
+        self.diagnostic_sink.emit(diagnostic);
+    }
+}
+
+impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
+    fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
+        let state = self
+            .state
+            .lock()
+            .expect("assembler reflection host mutex should not be poisoned");
+        HostSnapshot::new(state.generation, state.heap.clone(), ())
+    }
+
+    fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
+        let diagnostics = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("assembler reflection host mutex should not be poisoned");
+            if state.generation != commit.generation() {
+                return CommitResult::Conflict;
+            }
+            state.heap = commit.heap().clone();
+            state.generation = state.generation.wrapping_add(1);
+            self.changed.notify_all();
+            commit.extra().diagnostics().to_vec()
+        };
+        for diagnostic in diagnostics {
+            self.diagnostic_sink.emit(diagnostic);
+        }
+        CommitResult::Committed
+    }
+
+    fn wait_for_change(&self, observed_generation: u64) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("assembler reflection host mutex should not be poisoned");
+        while state.generation == observed_generation {
+            state = self
+                .changed
+                .wait(state)
+                .expect("assembler reflection host mutex should not be poisoned");
+        }
+        true
+    }
+}
+
+fn evaluation_session(diagnostic_sink: Arc<dyn DiagnosticSink>) -> Arc<EvaluationSession> {
+    let session = Arc::new(EvaluationSession::new());
+    let host: Arc<dyn ReflectionHost<ReflectionEffects>> =
+        Arc::new(AssemblerReflectionHost::new(diagnostic_sink));
+    session
+        .install_reflection_launcher(task_launcher(ReflectionEffects, host))
+        .expect("fresh evaluation session must accept its reflection launcher");
+    session
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostError {
     message: Arc<str>,
@@ -696,11 +784,14 @@ pub struct Assembler {
 
 impl Default for Assembler {
     fn default() -> Self {
+        let diagnostic_sink: Arc<dyn DiagnosticSink> =
+            Arc::new(DiagnosticBuffer::new(DEFAULT_DIAGNOSTIC_CAPACITY));
+        let evaluation_session = evaluation_session(diagnostic_sink.clone());
         Self {
             host: Arc::new(SystemHost),
-            diagnostic_sink: Arc::new(DiagnosticBuffer::new(DEFAULT_DIAGNOSTIC_CAPACITY)),
+            diagnostic_sink,
             next_compilation_invocation: Arc::new(AtomicU64::new(1)),
-            evaluation_session: Arc::new(EvaluationSession::new()),
+            evaluation_session,
         }
     }
 }
@@ -720,7 +811,9 @@ impl Assembler {
     }
 
     pub fn with_diagnostic_sink(mut self, sink: impl DiagnosticSink + 'static) -> Self {
-        self.diagnostic_sink = Arc::new(sink);
+        let diagnostic_sink: Arc<dyn DiagnosticSink> = Arc::new(sink);
+        self.evaluation_session = evaluation_session(diagnostic_sink.clone());
+        self.diagnostic_sink = diagnostic_sink;
         self
     }
 
@@ -1259,6 +1352,89 @@ mod tests {
                 .eval_context()
                 .shares_session_with(&Assembler::new().eval_context())
         );
+    }
+
+    #[test]
+    fn reflection_annotations_launch_tasks_and_return_their_targets() {
+        let assembler = Assembler::new();
+        let module = assembler
+            .module(["annotation_test"])
+            .script(
+                "g",
+                "language g0\nimport 'std\neffect = .r ()\nresult = anno { refl:effect } \"ready\"\n",
+            )
+            .build()
+            .expect("reflection annotation fixture should compile");
+        let result = assembler
+            .get(module.value(), "result")
+            .expect("fixture should define result");
+
+        assert_eq!(
+            assembler
+                .to_binary(&assembler.evaluate(&result).unwrap())
+                .unwrap(),
+            b"ready".as_slice()
+        );
+    }
+
+    #[test]
+    fn reflection_annotations_require_their_tasks_to_return_unit() {
+        let assembler = Assembler::new();
+        let module = assembler
+            .module(["annotation_test"])
+            .script(
+                "g",
+                "language g0\nimport 'std\neffect = .r \"not unit\"\nresult = anno { refl:effect } \"unreachable\"\n",
+            )
+            .build()
+            .expect("reflection annotation fixture should compile");
+        let result = assembler
+            .get(module.value(), "result")
+            .expect("fixture should define result");
+
+        assert!(
+            assembler
+                .to_binary(&result)
+                .unwrap_err()
+                .to_string()
+                .contains("reflection annotation requires its effect to return unit")
+        );
+    }
+
+    #[test]
+    fn reflection_annotation_logs_use_the_assembler_diagnostic_sink() {
+        let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let received = diagnostics.clone();
+        let assembler = Assembler::new().with_diagnostic_callback(move |diagnostic| {
+            received
+                .lock()
+                .expect("diagnostic collection mutex should not be poisoned")
+                .push(diagnostic);
+        });
+        let module = assembler
+            .module(["annotation_test"])
+            .script(
+                "g",
+                "language g0\nimport 'std\neffect = .log 'warn { msg:{ text:\"from annotation\" } }\nresult = anno { refl:effect } \"ready\"\n",
+            )
+            .build()
+            .expect("reflection annotation fixture should compile");
+        let result = assembler
+            .get(module.value(), "result")
+            .expect("fixture should define result");
+
+        assert_eq!(
+            assembler
+                .to_binary(&result)
+                .expect("logging annotation should complete"),
+            b"ready".as_slice()
+        );
+        let diagnostics = diagnostics
+            .lock()
+            .expect("diagnostic collection mutex should not be poisoned");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity(), Severity::Warning);
+        assert_eq!(diagnostics[0].message(), "from annotation");
     }
 
     #[test]

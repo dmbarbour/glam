@@ -109,6 +109,13 @@ producer task IDs for this shallow dependency prioritization. Fine-grained
 observation indexes, persistent waiter graphs, worker threads, and evaluator
 reduction fuel are intentionally deferred.
 
+An ordinary `Assembler` installs a reflection-task launcher when it creates its
+session. The launcher wraps annotation effects in the reusable
+`ReflectionEffects` specialization: standard effects plus `.log`. Its host
+stores the session's reflection heap and sends diagnostics to the assembler's
+configured sink. CLI-only logger-consumer requests remain in `main`'s separate
+`MainEffects` specialization.
+
 `main` chooses the `configuration` and `assembly` module paths and constructs
 their initial definitions. Those names and roles are CLI policy, not library
 policy. `--parse` is the one temporary exception to the facade boundary: it
@@ -181,10 +188,11 @@ observer registers one task in that observer's session and receives a precise
 wait until the task completes; it then yields the original target without
 forcing it. A `Data >< Bind` demand records the same wait in the exact active
 pair rather than turning suspension into a stuck error. Gate observation now
-offers that wait to the serial pump. The gate's record remains dormant until a
-following slice installs the assembler's specialization/host task factory, so
-the current manual gate tests retain their earlier behavior while scheduled
-effect machines are executable today.
+offers that wait to the serial pump. Completion exposes the original target
+without forcing it, but only after verifying that the effect returned unit;
+the implicitly discarded non-unit result is a task error. Bare standalone
+evaluator contexts retain dormant records for low-level tests, while ordinary
+assembler annotations launch executable machines immediately on demand.
 
 Builtins are identified in `core`, dispatched once in `eval/builtins.rs`, and
 implemented by semantic family below `eval/builtins/`. Net-lowered application

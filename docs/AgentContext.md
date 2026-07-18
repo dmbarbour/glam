@@ -91,6 +91,13 @@ design in the design documents.
   task-local `.shift` continuations are the conservative
   standard-effect contract: general-purpose utilities must not assume broader
   behavior, although a specialized handler may explicitly provide it.
+- `ReflectionEffects` is the reusable annotation specialization: standard
+  effects plus `.log`, with no logger-consumer operations such as `read_log` or
+  `write_stderr`. Every ordinary `Assembler` session installs a type-erased
+  launcher for that specialization. Its host owns the session's current
+  reflection heap and routes emitted diagnostics to the assembler's configured
+  sink. Replacing an assembler's diagnostic sink creates a fresh evaluation
+  session so the launcher cannot retain the prior sink.
 - Every `get`/`set` path is implicitly under user-owned `user_state`. The
   ordinary `heap` subtree is shared through the host transaction snapshot.
   The active reset stack lives under a private key in that same state, so a
@@ -190,10 +197,12 @@ design in the design documents.
   original target without forcing it.
 - The first observer owns a reflection gate's running task. A different session
   must not drive it, though either session may consume the completed result.
-  Wait tokens retain only a weak reference to the owner. The evaluator now
-  invokes the serial pump when it observes a pending gate, but annotation tasks
-  remain dormant until the next slice installs a reflection-task factory in
-  each assembler session.
+  Wait tokens retain only a weak reference to the owner. The evaluator invokes
+  the serial pump when it observes a pending gate. A successful annotation task
+  must return the canonical unit value, because the annotation implicitly
+  discards its result; any other value fails the gate. Success exposes the
+  original target without forcing it. Bare standalone evaluator contexts have
+  no launcher and retain dormant task records only for focused manual tests.
 
 ### Interaction nets
 

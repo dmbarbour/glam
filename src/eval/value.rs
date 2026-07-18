@@ -71,6 +71,7 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
     let net_computation = lazy.net_computation();
     let function_call = lazy.function_call();
     let builtin = lazy.builtin();
+    let reflection_annotation = builtin.is_some_and(|call| call.builtin == Builtin::Anno);
     let continue_through_result = net_computation.is_some()
         || function_call.is_some()
         || builtin.is_some_and(|call| {
@@ -84,7 +85,9 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
         });
     if let Some(result) = lazy.cached() {
         let result = result.map_err(|message| EvalError::new(message.as_ref()))?;
-        return if continue_through_result {
+        return if reflection_annotation {
+            eval_reflection_annotation_result(context, result)
+        } else if continue_through_result {
             eval_value(context, &result)
         } else {
             Ok(result)
@@ -95,13 +98,17 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
             .task(context)
             .map_err(|error| EvalError::new(error.as_ref()))?;
         let mut poll = context.poll_reflection_task(task);
-        if let EvaluationTaskPoll::Pending(wait) = &poll
-            && matches!(
-                context.pump_wait(wait, 256),
-                EvaluationPumpOutcome::TargetReady
-            )
-        {
-            poll = context.poll_reflection_task(task);
+        if let EvaluationTaskPoll::Pending(wait) = &poll {
+            loop {
+                match context.pump_wait(wait, 256) {
+                    EvaluationPumpOutcome::TargetReady => {
+                        poll = context.poll_reflection_task(task);
+                        break;
+                    }
+                    EvaluationPumpOutcome::NoProgress => break,
+                    EvaluationPumpOutcome::BudgetExhausted => {}
+                }
+            }
         }
         match poll {
             EvaluationTaskPoll::Pending(wait) => {
@@ -183,7 +190,9 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
     let result = lazy
         .cache(result)
         .map_err(|message| EvalError::new(message.as_ref()))?;
-    if continue_through_result {
+    if reflection_annotation {
+        eval_reflection_annotation_result(context, result)
+    } else if continue_through_result {
         // A net computation itself has exactly one meaning: extract the
         // exposed Data payload and cache it. Once that has happened, the
         // surrounding computation (including an ordinary function-call
@@ -192,6 +201,16 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
         eval_value(context, &result)
     } else {
         Ok(result)
+    }
+}
+
+fn eval_reflection_annotation_result(
+    context: &EvalContext,
+    result: Value,
+) -> Result<Value, EvalError> {
+    match &result {
+        Value::Lazy(lazy) if lazy.reflection_gate().is_some() => eval_lazy(context, lazy),
+        _ => Ok(result),
     }
 }
 

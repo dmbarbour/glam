@@ -89,7 +89,7 @@ pub(crate) struct EvaluationTaskHandle {
 }
 
 impl EvaluationTaskHandle {
-    #[allow(dead_code)] // Used by the reflection task-factory integration.
+    #[allow(dead_code)] // Scheduler-facing inspection, currently used by focused tests.
     pub(crate) fn wait(&self) -> &EvaluationWaitToken {
         &self.wait
     }
@@ -131,6 +131,14 @@ pub(crate) trait EvaluationTaskMachine: Send {
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll;
 }
 
+pub(crate) trait ReflectionTaskLauncher: Send + Sync {
+    fn launch(
+        &self,
+        context: &EvalContext,
+        effect: Value,
+    ) -> Result<EvaluationTaskHandle, Arc<str>>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvaluationPumpOutcome {
     TargetReady,
@@ -140,7 +148,7 @@ pub(crate) enum EvaluationPumpOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EvaluationTaskState {
-    /// Transitional annotation record awaiting the task-factory slice.
+    /// A task registered in an intentionally bare standalone session.
     Dormant,
     Queued,
     Running,
@@ -174,6 +182,7 @@ struct EvaluationTasks {
 #[derive(Default)]
 pub(crate) struct EvaluationSession {
     tasks: Mutex<EvaluationTasks>,
+    reflection_launcher: OnceLock<Arc<dyn ReflectionTaskLauncher>>,
 }
 
 impl fmt::Debug for EvaluationSession {
@@ -187,6 +196,15 @@ impl fmt::Debug for EvaluationSession {
 impl EvaluationSession {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn install_reflection_launcher(
+        &self,
+        launcher: Arc<dyn ReflectionTaskLauncher>,
+    ) -> Result<(), Arc<str>> {
+        self.reflection_launcher
+            .set(launcher)
+            .map_err(|_| Arc::from("evaluation session already has a reflection task launcher"))
     }
 }
 
@@ -208,7 +226,6 @@ impl EvalContext {
         }
     }
 
-    #[allow(dead_code)] // Used when the annotation task factory is installed.
     fn for_task(session: Arc<EvaluationSession>, id: EvaluationTaskId) -> Self {
         let task = Arc::new(OnceLock::new());
         task.set(Ok(id))
@@ -310,7 +327,6 @@ impl EvalContext {
     /// hidden behind [`EvaluationTaskMachine`]. Construction happens before
     /// the task registry is locked, so host snapshots and evaluator work may
     /// safely use this same session.
-    #[allow(dead_code)] // Used by reflection::schedule and the next task-factory slice.
     pub(crate) fn schedule_task<F>(&self, build: F) -> Result<EvaluationTaskHandle, Arc<str>>
     where
         F: FnOnce(EvalContext) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>,
@@ -341,13 +357,17 @@ impl EvalContext {
         Ok(EvaluationTaskHandle { id, wait })
     }
 
-    /// Registers the annotation gate's task identity before a reflection host
-    /// has been installed. The next slice replaces this transitional dormant
-    /// record with a task built by the session's reflection-task factory.
     pub(crate) fn start_reflection_task(
         &self,
-        _effect: Value,
+        effect: Value,
     ) -> Result<EvaluationTaskHandle, Arc<str>> {
+        if let Some(launcher) = self.session.reflection_launcher.get().cloned() {
+            return launcher.launch(self, effect);
+        }
+
+        // Focused evaluator tests and internal clients may intentionally use a
+        // bare session. Preserve an inspectable wait record for them; ordinary
+        // Assembler sessions always install a launcher.
         let id = allocate_task_id()?;
         let wait = allocate_wait_token(&self.session)?;
         let mut tasks = self

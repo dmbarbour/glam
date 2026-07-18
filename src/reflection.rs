@@ -23,6 +23,7 @@ use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationTaskBlock, EvaluationTaskHandle,
     EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskPoll, EvaluationWaitToken,
+    ReflectionTaskLauncher,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -114,6 +115,30 @@ impl TaskSpecialization for StandardEffects {
         _context: &mut RequestContext<'_, Self>,
     ) -> Result<RequestResult, TaskError> {
         match request {}
+    }
+}
+
+/// Standard control/state effects plus the reusable reflection request family.
+#[derive(Clone, Copy, Default)]
+pub struct ReflectionEffects;
+
+impl TaskSpecialization for ReflectionEffects {
+    type Host = dyn ReflectionHost<Self>;
+    type Request = ReflectionRequest;
+    type Snapshot = ();
+    type Journal = ReflectionJournal;
+
+    fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>> {
+        reflection_request_specs()
+    }
+
+    fn handle_request(
+        &self,
+        request: Self::Request,
+        arguments: Vec<PublicValue>,
+        context: &mut RequestContext<'_, Self>,
+    ) -> Result<RequestResult, TaskError> {
+        handle_reflection_request(request, arguments, context)
     }
 }
 
@@ -260,23 +285,36 @@ pub fn run<S: TaskSpecialization>(
     EffectTask::new(effect.as_core().clone(), specialization, host)?.run()
 }
 
-/// Installs one concrete reflection machine in an evaluation session while
-/// keeping its specialization and host type-erased from the scheduler.
-#[allow(dead_code)] // The annotation task factory will call this next.
-pub(crate) fn schedule<S: TaskSpecialization>(
-    context: &EvalContext,
-    effect: &PublicValue,
+/// Builds a type-erased launcher for annotation reflection tasks.
+pub(crate) fn task_launcher<S: TaskSpecialization>(
     specialization: S,
     host: Arc<S::Host>,
-) -> Result<EvaluationTaskHandle, TaskError> {
-    let effect = effect.as_core().clone();
-    context
-        .schedule_task(move |task_context| {
+) -> Arc<dyn ReflectionTaskLauncher> {
+    Arc::new(EffectTaskLauncher {
+        specialization,
+        host,
+    })
+}
+
+struct EffectTaskLauncher<S: TaskSpecialization> {
+    specialization: S,
+    host: Arc<S::Host>,
+}
+
+impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
+    fn launch(
+        &self,
+        context: &EvalContext,
+        effect: Value,
+    ) -> Result<EvaluationTaskHandle, Arc<str>> {
+        let specialization = self.specialization.clone();
+        let host = self.host.clone();
+        context.schedule_task(move |task_context| {
             EffectTask::new_in_context(effect, specialization, host, task_context)
-                .map(|task| Box::new(task) as Box<dyn EvaluationTaskMachine>)
+                .map(|task| Box::new(AnnotationEffectTask(task)) as Box<dyn EvaluationTaskMachine>)
                 .map_err(|error| Arc::from(error.to_string()))
         })
-        .map_err(TaskError::new)
+    }
 }
 
 /// Runs a task with standard effects and no specialization-owned requests.
@@ -1452,9 +1490,22 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .get(&*keys::EFF)
             .cloned()
             .ok_or_else(|| TaskError::new("reflection effect has no `eff` member"))?;
-        let function = evaluate(&self.eval_context, function)?;
-        let request = apply(&self.eval_context, function, vec![self.api.clone()])?;
-        let request = evaluate(&self.eval_context, request)?;
+        let function = evaluate(&self.eval_context, function).map_err(|error| {
+            TaskError::new(format!(
+                "reflection effect function could not be evaluated: {error}"
+            ))
+        })?;
+        let request =
+            apply(&self.eval_context, function, vec![self.api.clone()]).map_err(|error| {
+                TaskError::new(format!(
+                    "reflection effect function could not be applied: {error}"
+                ))
+            })?;
+        let request = evaluate(&self.eval_context, request).map_err(|error| {
+            TaskError::new(format!(
+                "reflection effect application could not be evaluated: {error}"
+            ))
+        })?;
         parse_request(
             &self.eval_context,
             request,
@@ -1464,9 +1515,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 }
 
-impl<S: TaskSpecialization> EvaluationTaskMachine for EffectTask<S> {
+struct AnnotationEffectTask<S: TaskSpecialization>(EffectTask<S>);
+
+impl<S: TaskSpecialization> EvaluationTaskMachine for AnnotationEffectTask<S> {
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
-        match EffectTask::poll(self, step_budget) {
+        match self.0.poll(step_budget) {
             EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
             EffectTaskPoll::Blocked(blocked) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -1474,7 +1527,13 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for EffectTask<S> {
                     observed_generation: blocked.observed_generation,
                 })
             }
-            EffectTaskPoll::Complete(_) => EvaluationMachinePoll::Complete,
+            EffectTaskPoll::Complete(value) if value.as_core() == &*keys::UNIT_VALUE => {
+                EvaluationMachinePoll::Complete
+            }
+            EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Failed(Arc::from(format!(
+                "reflection annotation requires its effect to return unit, got {:?}",
+                value.as_core()
+            ))),
             EffectTaskPoll::Failed(error) => {
                 EvaluationMachinePoll::Failed(Arc::from(error.to_string()))
             }
@@ -2390,29 +2449,6 @@ mod tests {
     struct TestEffects;
 
     #[derive(Clone)]
-    struct ReflectionOnlyEffects;
-
-    impl TaskSpecialization for ReflectionOnlyEffects {
-        type Host = TestHost;
-        type Request = ReflectionRequest;
-        type Snapshot = ();
-        type Journal = ReflectionJournal;
-
-        fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>> {
-            reflection_request_specs()
-        }
-
-        fn handle_request(
-            &self,
-            request: Self::Request,
-            arguments: Vec<PublicValue>,
-            context: &mut RequestContext<'_, Self>,
-        ) -> Result<RequestResult, TaskError> {
-            handle_reflection_request(request, arguments, context)
-        }
-    }
-
-    #[derive(Clone)]
     enum TestRequest {
         Reflection(ReflectionRequest),
         ReadLog,
@@ -2635,7 +2671,7 @@ mod tests {
         }
     }
 
-    impl ReflectionHost<ReflectionOnlyEffects> for TestHost {
+    impl ReflectionHost<ReflectionEffects> for TestHost {
         fn emit_diagnostic(&self, diagnostic: Diagnostic) {
             TestHost::emit_diagnostic(self, diagnostic);
         }
@@ -2704,13 +2740,13 @@ mod tests {
         }
     }
 
-    impl TaskHost<ReflectionOnlyEffects> for TestHost {
-        fn snapshot(&self) -> HostSnapshot<ReflectionOnlyEffects> {
+    impl TaskHost<ReflectionEffects> for TestHost {
+        fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
             let state = self.state.lock().unwrap();
             HostSnapshot::new(state.generation, state.heap.clone(), ())
         }
 
-        fn commit(&self, commit: TaskCommit<ReflectionOnlyEffects>) -> CommitResult {
+        fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
             let mut state = self.state.lock().unwrap();
             if state.closed {
                 return CommitResult::Closed;
@@ -2750,7 +2786,8 @@ mod tests {
         effect: &PublicValue,
         host: Arc<TestHost>,
     ) -> Result<TaskOutcome, TaskError> {
-        run(effect, ReflectionOnlyEffects, host)
+        let host: Arc<dyn ReflectionHost<ReflectionEffects>> = host;
+        run(effect, ReflectionEffects, host)
     }
 
     fn run_standard_test(effect: &PublicValue) -> Result<TaskOutcome, TaskError> {
@@ -2810,7 +2847,8 @@ mod tests {
         let (_, effect) = compile_effect("(.write_stderr \"scheduled\") =>> .r ()");
         let context = EvalContext::standalone();
         let host = Arc::new(TestHost::default());
-        let task = schedule(&context, &effect, TestEffects, host.clone())
+        let task = task_launcher(TestEffects, host.clone())
+            .launch(&context, effect.as_core().clone())
             .expect("effect task should schedule");
 
         assert!(matches!(
