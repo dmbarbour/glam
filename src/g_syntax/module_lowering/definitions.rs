@@ -172,8 +172,7 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
             )?,
         ),
     };
-    let value =
-        decorate_reflection_boundary(&definition.target, line, value, context, scope, locals)?;
+    let value = decorate_reflection_boundary(&definition.target, line, value, scope)?;
     let value = match assertion {
         Some(assertion) => target_context.annotate(assertion, &definition.target, value, locals)?,
         None => value,
@@ -193,9 +192,7 @@ fn decorate_reflection_boundary(
     target: &str,
     line: usize,
     value: ResolvedExpr<Value>,
-    context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
-    locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let Some(boundary) = &scope.reflection else {
         return Ok(value);
@@ -211,162 +208,14 @@ fn decorate_reflection_boundary(
         return Ok(value);
     }
 
-    Ok(apply_reflection_boundary(value, boundary, context, locals))
+    Ok(apply_reflection_boundary(value, boundary))
 }
 
 fn apply_reflection_boundary(
     value: ResolvedExpr<Value>,
     boundary: &ReflectionBoundary<ResolvedRoot>,
-    context: &CompileContext,
-    locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
-    let base_len = locals.len();
-    let state_path = |field: &str| {
-        ResolvedExpr::List(vec![
-            ResolvedExpr::Embedded(context.value_atom(atom_from_str("heap"))),
-            boundary.guard.expr(),
-            ResolvedExpr::Embedded(context.value_atom(atom_from_str(field))),
-        ])
-    };
-
-    let final_refl = ResolvedExpr::Access {
-        base: Box::new(boundary.final_defs.expr()),
-        path: vec![ResolvedPathPart::Key(name_as_key("refl"))],
-    };
-
-    let item = locals.push_binding("<reflection-item>");
-    let item_field = |name| ResolvedExpr::Access {
-        base: Box::new(ResolvedExpr::Local(item)),
-        path: vec![ResolvedPathPart::Key(name_as_key(name))],
-    };
-    let require_unit = effect_then_resolved(
-        item_field("value"),
-        effect_call_resolved(
-            "r",
-            [ResolvedExpr::Embedded(context.unit_value())],
-            context,
-            locals,
-        ),
-        context,
-        locals,
-    );
-    let handle = locals.push_binding("<reflection-task-handle>");
-    let task_record = apply_builtin_resolved(
-        Builtin::DictUnion,
-        [
-            apply_builtin_resolved(
-                Builtin::DictSingleton,
-                [
-                    ResolvedExpr::Embedded(context.value_atom(atom_from_str("key"))),
-                    item_field("key"),
-                ],
-                context,
-            ),
-            apply_builtin_resolved(
-                Builtin::DictSingleton,
-                [
-                    ResolvedExpr::Embedded(context.value_atom(atom_from_str("task"))),
-                    ResolvedExpr::Local(handle),
-                ],
-                context,
-            ),
-        ],
-        context,
-    );
-    let return_record = effect_call_resolved("r", [task_record], context, locals);
-    let launch = effect_call_resolved("refl_task", [require_unit], context, locals);
-    let launch_item = effect_call_resolved(
-        "seq",
-        [launch, ResolvedExpr::lambda(vec![handle], return_record)],
-        context,
-        locals,
-    );
-    let launcher = ResolvedExpr::lambda(vec![item], launch_item);
-
-    let items = locals.push_binding("<reflection-items>");
-    let mapped = ResolvedExpr::apply(
-        ResolvedExpr::Embedded(context.value_builtin(Builtin::EffectMap)),
-        [launcher, ResolvedExpr::Local(items)],
-    );
-    let records = locals.push_binding("<reflection-task-records>");
-    let store_records = effect_call_resolved(
-        "set",
-        [state_path("tasks"), ResolvedExpr::Local(records)],
-        context,
-        locals,
-    );
-    let map_and_store = effect_call_resolved(
-        "seq",
-        [mapped, ResolvedExpr::lambda(vec![records], store_records)],
-        context,
-        locals,
-    );
-    let map_and_store = effect_call_resolved("cut", [map_and_store], context, locals);
-    let enumerate = effect_call_resolved("dict_items", [final_refl], context, locals);
-    let scanner = effect_call_resolved(
-        "seq",
-        [enumerate, ResolvedExpr::lambda(vec![items], map_and_store)],
-        context,
-        locals,
-    );
-
-    // Claim the boundary with the scanner's task handle before inspecting its
-    // final definitions. Inspecting them inline can depend on the annotated
-    // value whose demand started this transaction.
-    let scanner_handle = locals.push_binding("<reflection-scanner-handle>");
-    let remember_scanner = effect_call_resolved(
-        "set",
-        [state_path("claim"), ResolvedExpr::Local(scanner_handle)],
-        context,
-        locals,
-    );
-    let launch_scanner = effect_call_resolved("refl_task", [scanner], context, locals);
-    let launch_and_remember = effect_call_resolved(
-        "seq",
-        [
-            launch_scanner,
-            ResolvedExpr::lambda(vec![scanner_handle], remember_scanner),
-        ],
-        context,
-        locals,
-    );
-
-    let existing = locals.push_binding("<reflection-claim>");
-    let guard_is_empty = ResolvedExpr::apply(
-        ResolvedExpr::Embedded(context.value_builtin(Builtin::Equal)),
-        [
-            ResolvedExpr::Local(existing),
-            ResolvedExpr::Embedded(context.empty_dict_value()),
-        ],
-    );
-    let start_if_missing =
-        effect_then_resolved(guard_is_empty, launch_and_remember, context, locals);
-    let already_started = effect_call_resolved(
-        "r",
-        [ResolvedExpr::Embedded(context.unit_value())],
-        context,
-        locals,
-    );
-    let choose = effect_call_resolved("alt", [start_if_missing, already_started], context, locals);
-    let check_claim = effect_call_resolved("get", [state_path("claim")], context, locals);
-    let ensure_tasks = effect_call_resolved(
-        "seq",
-        [check_claim, ResolvedExpr::lambda(vec![existing], choose)],
-        context,
-        locals,
-    );
-    let ensure_tasks = effect_call_resolved("cut", [ensure_tasks], context, locals);
-    locals.truncate(base_len);
-
-    let annotation = apply_builtin_resolved(
-        Builtin::DictSingleton,
-        [
-            ResolvedExpr::Embedded(context.value_atom(atom_from_str("refl"))),
-            ensure_tasks,
-        ],
-        context,
-    );
-    apply_builtin_resolved(Builtin::Anno, [annotation, value], context)
+    ResolvedExpr::apply(boundary.annotator.expr(), [value])
 }
 
 pub(in crate::g_syntax) fn definition_target_scope_resolved(

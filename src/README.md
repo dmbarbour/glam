@@ -16,6 +16,7 @@ implementation constraints.
 | `g_syntax.rs` | `.g` front-end facade and source diagnostics |
 | `g_syntax/parser/` | Layout, declarations, expressions, and compound syntax parsing |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs` | Lexical resolution, affine semantic IR, capture discovery, and front-end warnings |
+| `g_syntax/compiler_values.rs` | Closed functions, effect selectors, and built-in modules owned and shared by the built-in g compiler |
 | `g_syntax/module_lowering/` | Declaration, import, definition, and object orchestration into a module value |
 | `g_syntax/net_lowering.rs` | One-pass lowering of resolved expressions, functions, and applications into closed interaction nets |
 | `core.rs` | Syntax-independent assembly values, lazy cells, function stages, keys, dictionaries, and builtin identifiers |

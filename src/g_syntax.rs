@@ -8,6 +8,7 @@ use crate::diagnostic::Severity;
 
 mod analysis;
 mod ast;
+mod compiler_values;
 mod module_lowering;
 mod net_lowering;
 mod parser;

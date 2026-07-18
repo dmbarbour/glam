@@ -37,24 +37,22 @@ pub(in crate::g_syntax) fn lower_builtin_import(
     context: &CompileContext,
     definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
-    let module = builtin_module_value(context, name)
+    let module = compiler_values::builtin_module(name)
         .ok_or_else(|| Diagnostic::error(line, format!("unknown built-in module `'{name}`")))?;
 
     *definitions = match placement {
-        ImportPlacement::Inline => update_module_dict_value(definitions.clone(), module, context),
+        ImportPlacement::Inline => {
+            update_module_dict_value(definitions.clone(), module.value, context)
+        }
         ImportPlacement::As(target) => update_module_value(
             definitions.clone(),
             target,
-            module_object_value(target, module, context),
+            module_object_value_with_defs(target, module.definitions, context),
             context,
         ),
         ImportPlacement::At(target) => {
-            let object = extend_object_with_defs(
-                target,
-                constant_object_defs(module),
-                context,
-                definitions.clone(),
-            )?;
+            let object =
+                extend_object_with_defs(target, module.definitions, context, definitions.clone())?;
             update_module_value(definitions.clone(), target, object, context)
         }
     };
@@ -160,18 +158,8 @@ pub(in crate::g_syntax) fn inherited_import_env_object_value(
     Ok(object_instance_from_parts_value(
         name,
         deps,
-        empty_object_defs(context),
+        compiler_values::empty_object_defs(),
         context,
-    ))
-}
-
-pub(in crate::g_syntax) fn empty_object_defs(context: &CompileContext) -> Value {
-    let mut locals = ResolverContext::default();
-    let prior_self = locals.push_binding("<object-prior-self>");
-    let final_self = locals.push_binding("<object-final-self>");
-    lower_resolved_expr(ResolvedExpr::lambda(
-        vec![prior_self, final_self],
-        remove_object_spec_resolved(ResolvedExpr::Local(prior_self), context),
     ))
 }
 
@@ -180,22 +168,24 @@ pub(in crate::g_syntax) fn module_object_value(
     module: Value,
     context: &CompileContext,
 ) -> Value {
+    module_object_value_with_defs(target, constant_object_defs(module), context)
+}
+
+fn module_object_value_with_defs(
+    target: &str,
+    definitions: Value,
+    context: &CompileContext,
+) -> Value {
     lower_resolved_expr(object_instance_from_parts_resolved(
         ResolvedExpr::Embedded(context.abstract_global_path(target)),
         ResolvedExpr::List(Vec::new()),
-        ResolvedExpr::Provided(constant_object_defs(module)),
+        ResolvedExpr::Provided(definitions),
         context,
     ))
 }
 
 pub(in crate::g_syntax) fn constant_object_defs(value: Value) -> Value {
-    let mut locals = ResolverContext::default();
-    let prior_self = locals.push_binding("<object-prior-self>");
-    let final_self = locals.push_binding("<object-final-self>");
-    lower_resolved_expr(ResolvedExpr::lambda(
-        vec![prior_self, final_self],
-        ResolvedExpr::Provided(value),
-    ))
+    compiler_values::constant_object_defs(value)
 }
 
 pub(in crate::g_syntax) fn lower_unique(
@@ -211,121 +201,7 @@ pub(in crate::g_syntax) fn lower_unique(
     Ok(())
 }
 
-pub(in crate::g_syntax) fn builtin_module_value(
-    context: &CompileContext,
-    name: &str,
-) -> Option<Value> {
-    match name {
-        "math" => Some(context.value_dict(builtin_math_module(context))),
-        "list" => Some(context.value_dict(builtin_list_module(context))),
-        "std" | "prelude" => Some(context.value_dict(builtin_std_module(context))),
-        _ => None,
-    }
-}
-
-pub(in crate::g_syntax) fn builtin_math_module(context: &CompileContext) -> Dict {
-    Dict::new_sync()
-        .insert(name_as_key("floor"), context.value_builtin(Builtin::Floor))
-        .insert(name_as_key("mod"), context.value_builtin(Builtin::Mod))
-}
-
-pub(in crate::g_syntax) fn builtin_list_module(context: &CompileContext) -> Dict {
-    Dict::new_sync()
-        .insert(name_as_key("slice"), context.value_builtin(Builtin::Slice))
-        .insert(
-            name_as_key("split"),
-            context.value_builtin(Builtin::ListSplit),
-        )
-        .insert(
-            name_as_key("split_end"),
-            context.value_builtin(Builtin::ListSplitEnd),
-        )
-        .insert(name_as_key("map"), context.value_builtin(Builtin::Map))
-        .insert(name_as_key("len"), context.value_builtin(Builtin::ListLen))
-        .insert(
-            name_as_key("head"),
-            context.value_builtin(Builtin::ListHead),
-        )
-        .insert(
-            name_as_key("tail"),
-            context.value_builtin(Builtin::ListTail),
-        )
-        .insert(
-            name_as_key("pure"),
-            context.value_builtin(Builtin::ListEffect),
-        )
-}
-
-pub(in crate::g_syntax) fn builtin_std_module(context: &CompileContext) -> Dict {
-    Dict::new_sync()
-        .insert(name_as_key("anno"), context.value_builtin(Builtin::Anno))
-        .insert(name_as_key("not"), builtin_not_value(context))
-        .insert(name_as_key("could"), builtin_could_value(context))
-        .insert(
-            name_as_key("math"),
-            context.value_dict(builtin_math_module(context)),
-        )
-        .insert(
-            name_as_key("list"),
-            context.value_dict(builtin_list_module(context)),
-        )
-        .insert(
-            name_as_key("eff"),
-            context.value_dict(Dict::new_sync().insert(
-                name_as_key("map"),
-                context.value_builtin(Builtin::EffectMap),
-            )),
-        )
-}
-
-pub(in crate::g_syntax) fn builtin_not_value(context: &CompileContext) -> Value {
-    let mut locals = ResolverContext::default();
-    let condition = locals.push_binding("<not-condition>");
-    let fail_operation = lower_effect_expr_resolved("fail", context, &mut locals);
-    let true_operation = effect_call_resolved(
-        "r",
-        [ResolvedExpr::Embedded(context.unit_value())],
-        context,
-        &mut locals,
-    );
-    let returned_failure = effect_call_resolved("r", [fail_operation], context, &mut locals);
-    let fail_if_condition_succeeds = effect_then_resolved(
-        ResolvedExpr::Local(condition),
-        returned_failure,
-        context,
-        &mut locals,
-    );
-    let succeed_if_condition_fails =
-        effect_call_resolved("r", [true_operation], context, &mut locals);
-    let alternate = effect_call_resolved(
-        "alt",
-        [fail_if_condition_succeeds, succeed_if_condition_fails],
-        context,
-        &mut locals,
-    );
-    let select_operation = effect_call_resolved("cut", [alternate], context, &mut locals);
-    let selected = locals.push_binding("<selected-operation>");
-    let run_selected_operation =
-        ResolvedExpr::lambda(vec![selected], ResolvedExpr::Local(selected));
-    let body = effect_call_resolved(
-        "seq",
-        [select_operation, run_selected_operation],
-        context,
-        &mut locals,
-    );
-    lower_resolved_expr(ResolvedExpr::lambda(vec![condition], body))
-}
-
-pub(in crate::g_syntax) fn builtin_could_value(context: &CompileContext) -> Value {
-    let not = builtin_not_value(context);
-    let mut locals = ResolverContext::default();
-    let condition = locals.push_binding("<could-condition>");
-    let inner = ResolvedExpr::apply(
-        ResolvedExpr::Provided(not.clone()),
-        [ResolvedExpr::Local(condition)],
-    );
-    lower_resolved_expr(ResolvedExpr::lambda(
-        vec![condition],
-        ResolvedExpr::apply(ResolvedExpr::Provided(not), [inner]),
-    ))
+#[cfg(test)]
+pub(in crate::g_syntax) fn builtin_list_module(_context: &CompileContext) -> Dict {
+    compiler_values::builtin_list_module()
 }

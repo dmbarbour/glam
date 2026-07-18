@@ -44,7 +44,7 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::Number(number) => ResolvedExpr::Embedded(context.value_number(number.clone())),
         SyntaxExpr::Text(text) => ResolvedExpr::Embedded(context.value_binary(text)),
         SyntaxExpr::Atom(name) => ResolvedExpr::Embedded(context.value_atom(atom_from_str(name))),
-        SyntaxExpr::Effect(name) => lower_effect_expr_resolved(name, context, locals),
+        SyntaxExpr::Effect(name) => lower_effect_expr_resolved(name),
         SyntaxExpr::SingletonDict(key, value) => ResolvedExpr::apply(
             ResolvedExpr::Embedded(context.value_builtin(Builtin::DictSingleton)),
             [
@@ -277,26 +277,8 @@ pub(in crate::g_syntax) fn lower_builtin_expr_resolved(
     ))
 }
 
-pub(in crate::g_syntax) fn lower_effect_expr_resolved(
-    name: &str,
-    context: &CompileContext,
-    locals: &mut ResolverContext,
-) -> ResolvedExpr<Value> {
-    let base_len = locals.len();
-    let api = locals.push_binding("<effect-api>");
-    let body = ResolvedExpr::Access {
-        base: Box::new(ResolvedExpr::Local(api)),
-        path: vec![ResolvedPathPart::Key(Key::atom_from_text(name))],
-    };
-    locals.truncate(base_len);
-
-    ResolvedExpr::apply(
-        ResolvedExpr::Embedded(context.value_builtin(Builtin::DictSingleton)),
-        [
-            ResolvedExpr::Embedded(context.value_atom(atom_from_str("eff"))),
-            ResolvedExpr::lambda(vec![api], body),
-        ],
-    )
+pub(in crate::g_syntax) fn lower_effect_expr_resolved(name: &str) -> ResolvedExpr<Value> {
+    ResolvedExpr::Embedded(compiler_values::effect_value(name))
 }
 
 pub(in crate::g_syntax) fn lower_operator_section_resolved(
@@ -397,15 +379,15 @@ pub(in crate::g_syntax) fn lower_syntax_operator_values_resolved(
             ResolvedExpr::Embedded(context.value_builtin(builtin)),
             [left, right],
         ),
-        SyntaxOperator::BoolAnd => effect_then_resolved(left, right, context, locals),
-        SyntaxOperator::BoolOr => effect_call_resolved("alt", [left, right], context, locals),
+        SyntaxOperator::BoolAnd => effect_then_resolved(left, right, locals),
+        SyntaxOperator::BoolOr => effect_call_resolved("alt", [left, right]),
         SyntaxOperator::PipeForward => ResolvedExpr::apply(right, [left]),
         SyntaxOperator::PipeBackward => ResolvedExpr::apply(left, [right]),
         SyntaxOperator::ComposeForward => compose_resolved(left, right, locals),
         SyntaxOperator::ComposeBackward => compose_resolved(right, left, locals),
-        SyntaxOperator::EffectBind => effect_call_resolved("seq", [left, right], context, locals),
-        SyntaxOperator::KleisliCompose => kleisli_compose_resolved(left, right, context, locals),
-        SyntaxOperator::EffectThen => effect_then_resolved(left, right, context, locals),
+        SyntaxOperator::EffectBind => effect_call_resolved("seq", [left, right]),
+        SyntaxOperator::KleisliCompose => kleisli_compose_resolved(left, right, locals),
+        SyntaxOperator::EffectThen => effect_then_resolved(left, right, locals),
     }
 }
 
@@ -427,13 +409,12 @@ pub(in crate::g_syntax) fn compose_resolved(
 pub(in crate::g_syntax) fn kleisli_compose_resolved(
     first: ResolvedExpr<Value>,
     second: ResolvedExpr<Value>,
-    context: &CompileContext,
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
     let base_len = locals.len();
     let input = locals.push_binding("<kleisli-input>");
     let operation = ResolvedExpr::apply(first, [ResolvedExpr::Local(input)]);
-    let body = effect_call_resolved("seq", [operation, second], context, locals);
+    let body = effect_call_resolved("seq", [operation, second]);
     locals.truncate(base_len);
     ResolvedExpr::lambda(vec![input], body)
 }
@@ -441,48 +422,44 @@ pub(in crate::g_syntax) fn kleisli_compose_resolved(
 pub(in crate::g_syntax) fn effect_then_resolved(
     operation: ResolvedExpr<Value>,
     next: ResolvedExpr<Value>,
-    context: &CompileContext,
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
     let base_len = locals.len();
     let result = locals.push_binding("<effect-result>");
-    let body = annotate_assert_unit_resolved(ResolvedExpr::Local(result), next, context);
+    let body = annotate_assert_unit_resolved(ResolvedExpr::Local(result), next);
     let continuation = ResolvedExpr::lambda(vec![result], body);
     locals.truncate(base_len);
-    effect_call_resolved("seq", [operation, continuation], context, locals)
+    effect_call_resolved("seq", [operation, continuation])
 }
 
 pub(in crate::g_syntax) fn effect_call_resolved(
     name: &str,
     arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
-    context: &CompileContext,
-    locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
-    ResolvedExpr::apply(lower_effect_expr_resolved(name, context, locals), arguments)
+    ResolvedExpr::apply(lower_effect_expr_resolved(name), arguments)
 }
 
 pub(in crate::g_syntax) fn annotate_assert_unit_resolved(
     value: ResolvedExpr<Value>,
     target: ResolvedExpr<Value>,
-    context: &CompileContext,
 ) -> ResolvedExpr<Value> {
-    let singleton = || ResolvedExpr::Embedded(context.value_builtin(Builtin::DictSingleton));
+    let singleton = || ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton));
     let payload = ResolvedExpr::apply(
         singleton(),
         [
-            ResolvedExpr::Embedded(context.value_atom(atom_from_str("value"))),
+            ResolvedExpr::Embedded(Value::Atom(atom_from_str("value"))),
             value,
         ],
     );
     let annotation = ResolvedExpr::apply(
         singleton(),
         [
-            ResolvedExpr::Embedded(context.value_atom(atom_from_str("assert_unit"))),
+            ResolvedExpr::Embedded(Value::Atom(atom_from_str("assert_unit"))),
             payload,
         ],
     );
     ResolvedExpr::apply(
-        ResolvedExpr::Embedded(context.value_builtin(Builtin::Anno)),
+        ResolvedExpr::Embedded(Value::Builtin(Builtin::Anno)),
         [annotation, target],
     )
 }

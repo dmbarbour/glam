@@ -107,6 +107,13 @@ design in the design documents.
   compiler's `eff.map` helper sequences mapped effects left-to-right and
   preserves result order; batching does not require a separate reflection
   request.
+- The Rust bootstrap treats the built-in g compiler like one ordinary shared
+  compiler value. `g_syntax/compiler_values.rs` lowers its closed effect
+  selectors, helper functions, and built-in modules once. Cached helpers are
+  normalized far enough to expose stable data or function values before they
+  are shared across evaluator sessions; unresolved lazy computations are not
+  process-global. Module paths, environments, final-definition promises, and
+  reflection tasks remain module- or session-local.
 - `ReflectionEffects` is the reusable annotation specialization: standard
   effects plus `.log`, with no logger-consumer operations such as `read_log` or
   `write_stderr`. Every ordinary `Assembler` session installs a type-erased
@@ -145,13 +152,15 @@ design in the design documents.
   inherited definitions use the derived object's final reflection namespace
   and direct extensions share that object's one-shot guard. The `refl`, `meta`,
   and `spec` subtrees, computed-root definitions, and object expressions remain
-  inert. The demand transaction claims the boundary by storing a scanner task
-  handle. That scanner waits for the final `refl.*`, then atomically launches
-  its named tasks and stores their ordered `{key,task}` records under the
-  boundary's `tasks` state entry. Every named task is wrapped to require a unit
-  result. Keeping the scanner `claim` separate remains meaningful when the
-  resulting task list is empty and avoids inspecting a module's final
-  definitions while constructing it. This
+  inert. One closed compiler helper implements the boundary protocol; it is
+  partially applied once per module or declared object and shared by that
+  boundary's definitions. The demand transaction claims the boundary by
+  storing a scanner task handle. That scanner waits for the final `refl.*`,
+  then atomically launches its named tasks and stores their ordered
+  `{key,task}` records under the boundary's `tasks` state entry. Every named
+  task is wrapped to require a unit result. Keeping the scanner `claim`
+  separate remains meaningful when the resulting task list is empty and avoids
+  inspecting a module's final definitions while constructing it. This
   decoration is unconditional g-front-end lowering policy; `CompileContext`
   does not select it, and direct lowering has the same semantics as normal
   compilation.

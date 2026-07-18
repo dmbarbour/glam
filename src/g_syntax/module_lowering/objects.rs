@@ -6,9 +6,10 @@ pub(in crate::g_syntax) fn lower_object(
     line: usize,
     context: &CompileContext,
     definitions: &mut Value,
+    module_scope: &NameScope<Value>,
 ) -> Result<(), Diagnostic> {
     let mut locals = ResolverContext::default();
-    let scope = NameScope::module(context, definitions.clone()).resolved();
+    let scope = module_scope.resolved();
     let definitions_root = ResolvedRoot::Provided(definitions.clone());
     let name = ResolvedExpr::Embedded(context.abstract_global_path(&object.target));
     let object_value = object_decl_resolved_in_scope(
@@ -138,6 +139,13 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
             object_reflection_guard_resolved(object_final_defs.expr(), context),
         )
     });
+    let reflection_annotator = reflection_guard.map(|guard| {
+        bindings.bind(
+            locals,
+            "<object-reflection-annotator>",
+            compiler_values::reflection_annotator_resolved(guard.expr(), object_final_defs.expr()),
+        )
+    });
     let mut definitions = bindings.bind(
         locals,
         "<object-visible-defs>",
@@ -150,7 +158,7 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
             object_final_defs.clone(),
             definitions.clone(),
             parent_scope.clone(),
-            reflection_guard.clone(),
+            reflection_annotator.clone(),
         );
         let updated = lower_object_body_item_resolved(
             body_definition,
@@ -290,7 +298,7 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
     object_final_defs: ResolvedRoot,
     object_prior_defs: ResolvedRoot,
     parent: NameScope<ResolvedRoot>,
-    reflection_guard: Option<ResolvedRoot>,
+    reflection_annotator: Option<ResolvedRoot>,
 ) -> NameScope<ResolvedRoot> {
     let object_alias = alias
         .map(local_name_metadata)
@@ -309,10 +317,7 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
         object_alias,
         object_final_defs: Some(object_final_defs.clone()),
         object_prior_defs: Some(object_prior_defs),
-        reflection: reflection_guard.map(|guard| ReflectionBoundary {
-            final_defs: object_final_defs,
-            guard,
-        }),
+        reflection: reflection_annotator.map(|annotator| ReflectionBoundary { annotator }),
         parent: Some(Box::new(parent)),
     }
 }
@@ -322,9 +327,10 @@ pub(in crate::g_syntax) fn lower_extend(
     line: usize,
     context: &CompileContext,
     definitions: &mut Value,
+    module_scope: &NameScope<Value>,
 ) -> Result<(), Diagnostic> {
     let mut locals = ResolverContext::default();
-    let scope = NameScope::module(context, definitions.clone()).resolved();
+    let scope = module_scope.resolved();
     let definitions_root = ResolvedRoot::Provided(definitions.clone());
     let extension_defs = object_body_defs_resolved_in_scope(
         &extend.body,

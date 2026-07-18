@@ -339,8 +339,7 @@ pub(in crate::g_syntax) struct NameScope<V = Value> {
 
 #[derive(Debug, Clone)]
 pub(in crate::g_syntax) struct ReflectionBoundary<V> {
-    pub(in crate::g_syntax) final_defs: V,
-    pub(in crate::g_syntax) guard: V,
+    pub(in crate::g_syntax) annotator: V,
 }
 
 /// A name root is deliberately atomic. Reusing it creates another local
@@ -387,9 +386,24 @@ impl ResolvedBindings {
 }
 
 impl NameScope<Value> {
+    #[cfg(test)]
     pub(in crate::g_syntax) fn module(
         context: &CompileContext,
         visible_definitions: Value,
+    ) -> Self {
+        let reflection = ReflectionBoundary {
+            annotator: compiler_values::reflection_annotator_value(
+                context.abstract_global_path("refl"),
+                context.final_defs().clone(),
+            ),
+        };
+        Self::module_with_reflection(context, visible_definitions, reflection)
+    }
+
+    pub(in crate::g_syntax) fn module_with_reflection(
+        context: &CompileContext,
+        visible_definitions: Value,
+        reflection: ReflectionBoundary<Value>,
     ) -> Self {
         Self {
             final_defs: context.final_defs().clone(),
@@ -399,10 +413,7 @@ impl NameScope<Value> {
             object_alias: None,
             object_final_defs: None,
             object_prior_defs: None,
-            reflection: Some(ReflectionBoundary {
-                final_defs: context.final_defs().clone(),
-                guard: context.abstract_global_path("refl"),
-            }),
+            reflection: Some(reflection),
             parent: None,
         }
     }
@@ -417,8 +428,7 @@ impl NameScope<Value> {
             object_final_defs: self.object_final_defs.clone().map(ResolvedRoot::Provided),
             object_prior_defs: self.object_prior_defs.clone().map(ResolvedRoot::Provided),
             reflection: self.reflection.as_ref().map(|boundary| ReflectionBoundary {
-                final_defs: ResolvedRoot::Provided(boundary.final_defs.clone()),
-                guard: ResolvedRoot::Provided(boundary.guard.clone()),
+                annotator: ResolvedRoot::Provided(boundary.annotator.clone()),
             }),
             parent: self
                 .parent
