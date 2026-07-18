@@ -81,14 +81,18 @@ design in the design documents.
   fragment, private request tags, and specialization-owned transaction data.
   Reusable request families compose by mapping their requests into the host
   specialization's request enum. The reusable reflection family contributes
-  `log Severity Message`, `refl_task Effect`, `join_task Handle`, and
-  `task_error Handle`; `main` adds provisional `read_log` and `write_stderr`
-  effects. Spawned tasks receive only `ReflectionEffects`, even when their
-  parent has broader host capabilities. `join_task` propagates terminal task
-  errors, while `task_error` returns error text as data and fails unless the
-  task failed. Both fail observably while a task is pending, so an exhausted
-  choice suspends on that task's exact wait token and retries on any terminal
-  transition. Logged diagnostics join the current transaction or go directly
+  `glam_ver`, `os_env`, `cli_args`, `log`, and the task operations `refl_task`,
+  `join_task`, `task_result`, `task_error`, `task_status`, and `cancel_task`;
+  `main` adds provisional `read_log` and `write_stderr` effects. OS environment
+  values and command-line arguments preserve Rust's platform encoding as binary
+  values rather than forcing UTF-8. Spawned tasks receive only
+  `ReflectionEffects`, even when their parent has broader host capabilities.
+  `join_task` propagates terminal task errors; `task_result` and `task_error`
+  symmetrically extract only their terminal state and otherwise fail.
+  `task_status` returns `'pending`, `'complete`, `'error`, `'foreign`, or
+  `'canceled`. Pending extractors fail observably, so an exhausted choice
+  suspends on that task's exact wait token and retries on any terminal transition. Logged
+  diagnostics join the current transaction or go directly
   to the host outside `cut`. Queue reads inspect only their host snapshot, never
   journaled writes, and yield failure when no input is available. That failure
   retains the queue observation, so the task waits for a host change and retries
@@ -121,9 +125,12 @@ design in the design documents.
   bootstrap is currently serial and uses a coarse generation, but the boundary
   is shaped for finer optimistic observations later.
 - `refl_task` reserves an opaque task handle immediately but journals the
-  launch inside a transaction. Only the winning outer commit activates it;
-  discarded journal branches cancel their unused reservations. Outside a
-  transaction, scheduling is an immediate retry barrier.
+  launch inside a transaction. `cancel_task` is another commit-ordered task
+  journal entry. Only the winning outer commit applies either request;
+  discarded journal branches cancel unused launch reservations and discard
+  cancellation requests. A cancellation that reaches a terminal task is a
+  no-op. Outside a transaction, scheduling or requesting cancellation is an
+  immediate retry barrier when it changes task state.
 - `cut` supplies choice and transaction scope, not retryability. A failed branch
   may retry only if it observed changeable host state: `.fail` and `.cut .fail`
   are permanent failures, while an empty `read_log` is retryable. Outside a

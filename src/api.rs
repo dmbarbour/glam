@@ -538,6 +538,7 @@ impl DiagnosticHistory {
 }
 
 struct AssemblerReflectionHost {
+    host: Arc<dyn Host>,
     diagnostic_sink: Arc<dyn DiagnosticSink>,
     state: Mutex<AssemblerReflectionState>,
     changed: Condvar,
@@ -549,8 +550,9 @@ struct AssemblerReflectionState {
 }
 
 impl AssemblerReflectionHost {
-    fn new(diagnostic_sink: Arc<dyn DiagnosticSink>) -> Self {
+    fn new(host: Arc<dyn Host>, diagnostic_sink: Arc<dyn DiagnosticSink>) -> Self {
         Self {
+            host,
             diagnostic_sink,
             state: Mutex::new(AssemblerReflectionState {
                 generation: 1,
@@ -564,6 +566,14 @@ impl AssemblerReflectionHost {
 impl ReflectionHost<ReflectionEffects> for AssemblerReflectionHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
         self.diagnostic_sink.emit(diagnostic);
+    }
+
+    fn os_environment_variable(&self, name: &str) -> Option<OsString> {
+        self.host.environment_variable(name)
+    }
+
+    fn command_line_arguments(&self) -> Vec<OsString> {
+        self.host.command_line_arguments()
     }
 }
 
@@ -593,7 +603,7 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
         for diagnostic in diagnostics {
             self.diagnostic_sink.emit(diagnostic);
         }
-        commit.extra().activate_pending_tasks();
+        commit.extra().commit_task_updates();
         CommitResult::Committed
     }
 
@@ -612,10 +622,13 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
     }
 }
 
-fn evaluation_session(diagnostic_sink: Arc<dyn DiagnosticSink>) -> Arc<EvaluationSession> {
+fn evaluation_session(
+    host: Arc<dyn Host>,
+    diagnostic_sink: Arc<dyn DiagnosticSink>,
+) -> Arc<EvaluationSession> {
     let session = Arc::new(EvaluationSession::new());
     let host: Arc<dyn ReflectionHost<ReflectionEffects>> =
-        Arc::new(AssemblerReflectionHost::new(diagnostic_sink));
+        Arc::new(AssemblerReflectionHost::new(host, diagnostic_sink));
     session
         .install_reflection_launcher(task_launcher(ReflectionEffects, host))
         .expect("fresh evaluation session must accept its reflection launcher");
@@ -643,13 +656,19 @@ impl fmt::Display for HostError {
 
 impl std::error::Error for HostError {}
 
-/// External capabilities used by module and binary loading.
+/// External capabilities used by module loading and reflection host queries.
 pub trait Host: Send + Sync {
     fn read(&self, path: &Path) -> Result<Bytes, HostError>;
 
     fn path_exists(&self, path: &Path) -> bool;
 
     fn environment_variable(&self, name: &str) -> Option<OsString>;
+
+    /// Process-style arguments exposed to reflection. Embedded hosts default
+    /// to no arguments unless they opt in.
+    fn command_line_arguments(&self) -> Vec<OsString> {
+        Vec::new()
+    }
 }
 
 impl<T: Host + ?Sized> Host for Arc<T> {
@@ -663,6 +682,10 @@ impl<T: Host + ?Sized> Host for Arc<T> {
 
     fn environment_variable(&self, name: &str) -> Option<OsString> {
         (**self).environment_variable(name)
+    }
+
+    fn command_line_arguments(&self) -> Vec<OsString> {
+        (**self).command_line_arguments()
     }
 }
 
@@ -682,6 +705,10 @@ impl Host for SystemHost {
 
     fn environment_variable(&self, name: &str) -> Option<OsString> {
         env::var_os(name)
+    }
+
+    fn command_line_arguments(&self) -> Vec<OsString> {
+        env::args_os().collect()
     }
 }
 
@@ -787,9 +814,10 @@ impl Default for Assembler {
     fn default() -> Self {
         let diagnostic_sink: Arc<dyn DiagnosticSink> =
             Arc::new(DiagnosticBuffer::new(DEFAULT_DIAGNOSTIC_CAPACITY));
-        let evaluation_session = evaluation_session(diagnostic_sink.clone());
+        let host: Arc<dyn Host> = Arc::new(SystemHost);
+        let evaluation_session = evaluation_session(host.clone(), diagnostic_sink.clone());
         Self {
-            host: Arc::new(SystemHost),
+            host,
             diagnostic_sink,
             next_compilation_invocation: Arc::new(AtomicU64::new(1)),
             evaluation_session,
@@ -808,12 +836,14 @@ impl Assembler {
 
     pub fn with_host(mut self, host: impl Host + 'static) -> Self {
         self.host = Arc::new(host);
+        self.evaluation_session =
+            evaluation_session(self.host.clone(), self.diagnostic_sink.clone());
         self
     }
 
     pub fn with_diagnostic_sink(mut self, sink: impl DiagnosticSink + 'static) -> Self {
         let diagnostic_sink: Arc<dyn DiagnosticSink> = Arc::new(sink);
-        self.evaluation_session = evaluation_session(diagnostic_sink.clone());
+        self.evaluation_session = evaluation_session(self.host.clone(), diagnostic_sink.clone());
         self.diagnostic_sink = diagnostic_sink;
         self
     }

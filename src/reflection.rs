@@ -1610,6 +1610,10 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for JoinableEffectTask<S> {
             EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
         }
     }
+
+    fn cancel(&mut self) {
+        self.0.finish(TaskTerminal::Cancelled);
+    }
 }
 
 impl<S: TaskSpecialization> EvaluationTaskMachine for AnnotationEffectTask<S> {
@@ -1634,6 +1638,10 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for AnnotationEffectTask<S> {
             }
             EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
         }
+    }
+
+    fn cancel(&mut self) {
+        self.0.finish(TaskTerminal::Cancelled);
     }
 }
 
@@ -2798,11 +2806,33 @@ mod tests {
         fn emit_diagnostic(&self, diagnostic: Diagnostic) {
             TestHost::emit_diagnostic(self, diagnostic);
         }
+
+        fn os_environment_variable(&self, name: &str) -> Option<std::ffi::OsString> {
+            (name == "GLAM_TEST_ENV").then(|| std::ffi::OsString::from("present"))
+        }
+
+        fn command_line_arguments(&self) -> Vec<std::ffi::OsString> {
+            ["glam", "--test"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect()
+        }
     }
 
     impl ReflectionHost<ReflectionEffects> for TestHost {
         fn emit_diagnostic(&self, diagnostic: Diagnostic) {
             TestHost::emit_diagnostic(self, diagnostic);
+        }
+
+        fn os_environment_variable(&self, name: &str) -> Option<std::ffi::OsString> {
+            (name == "GLAM_TEST_ENV").then(|| std::ffi::OsString::from("present"))
+        }
+
+        fn command_line_arguments(&self) -> Vec<std::ffi::OsString> {
+            ["glam", "--test"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect()
         }
     }
 
@@ -2839,7 +2869,7 @@ mod tests {
                 state.stderr.extend_from_slice(&commit.extra().stderr);
                 state.generation += 1;
             }
-            commit.extra().reflection.activate_pending_tasks();
+            commit.extra().reflection.commit_task_updates();
             CommitResult::Committed
         }
 
@@ -2893,7 +2923,7 @@ mod tests {
                     .extend(commit.extra().diagnostics().iter().cloned());
                 state.generation += 1;
             }
-            commit.extra().activate_pending_tasks();
+            commit.extra().commit_task_updates();
             CommitResult::Committed
         }
 
@@ -3058,6 +3088,162 @@ mod tests {
             assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
             b"child".as_slice()
         );
+    }
+
+    #[test]
+    fn reflection_host_information_is_available_as_plain_data() {
+        let (assembler, version) = compile_effect(".glam_ver");
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&version, host.clone());
+        let EvaluationTaskPoll::Complete(version) = pump_composed_test_task(&context, &task) else {
+            panic!("glam_ver should complete")
+        };
+        assert_eq!(
+            assembler
+                .to_binary(&PublicValue::from_core(version))
+                .unwrap(),
+            env!("CARGO_PKG_VERSION").as_bytes()
+        );
+
+        let (_, environment) = compile_effect(
+            ".os_env \"GLAM_TEST_ENV\" >>= (\\value -> (value == \"present\") =>> .r \"environment\")",
+        );
+        let (context, task) = schedule_composed_test_task(&environment, host.clone());
+        assert!(matches!(
+            pump_composed_test_task(&context, &task),
+            EvaluationTaskPoll::Complete(_)
+        ));
+
+        let (_, arguments) = compile_effect(".cli_args");
+        let (context, task) = schedule_composed_test_task(&arguments, host.clone());
+        let poll = pump_composed_test_task(&context, &task);
+        let EvaluationTaskPoll::Complete(Value::List(arguments)) = poll else {
+            panic!("cli_args should return a list, got {poll:?}")
+        };
+        assert_eq!(
+            eval::list_to_value_items(&context, &arguments).unwrap(),
+            [
+                Value::binary_from_text("glam"),
+                Value::binary_from_text("--test")
+            ]
+        );
+
+        let (_, missing) =
+            compile_effect(".cut (.alt (.os_env \"GLAM_TEST_MISSING\") (.r \"missing\"))");
+        let (context, task) = schedule_composed_test_task(&missing, host);
+        assert!(matches!(
+            pump_composed_test_task(&context, &task),
+            EvaluationTaskPoll::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn task_result_is_symmetric_with_task_error() {
+        let (assembler, effect) = compile_effect(
+            ".refl_task (.r \"result\") >>= (\\task -> .join_task task >>= (\\_value -> .task_result task))",
+        );
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host);
+        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+            panic!("task_result should return a completed task result")
+        };
+        assert_eq!(
+            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            b"result".as_slice()
+        );
+    }
+
+    #[test]
+    fn task_status_reports_pending_complete_error_and_canceled() {
+        let host = Arc::new(TestHost::default());
+        for (source, expected) in [
+            (
+                ".refl_task (.r ()) >>= (\\task -> .task_status task)",
+                "pending",
+            ),
+            (
+                ".refl_task (.r ()) >>= (\\task -> .join_task task >>= (\\_value -> .task_status task))",
+                "complete",
+            ),
+            (
+                ".refl_task .fail >>= (\\task -> .task_error task >>= (\\_error -> .task_status task))",
+                "error",
+            ),
+            (
+                ".refl_task (.r ()) >>= (\\task -> (.cancel_task task) =>> .task_status task)",
+                "canceled",
+            ),
+        ] {
+            let (_, effect) = compile_effect(&format!(
+                "{source} >>= (\\status -> (status == '{expected}) =>> .r ())"
+            ));
+            let (context, task) = schedule_composed_test_task(&effect, host.clone());
+            assert!(
+                matches!(
+                    pump_composed_test_task(&context, &task),
+                    EvaluationTaskPoll::Complete(_)
+                ),
+                "task status should be '{expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_status_reports_a_handle_from_another_session_as_foreign() {
+        let (assembler, spawn) = compile_effect(".refl_task (.r ())");
+        let host = Arc::new(TestHost::default());
+        let (first_context, first_task) = schedule_composed_test_task(&spawn, host.clone());
+        let EvaluationTaskPoll::Complete(handle) =
+            pump_composed_test_task(&first_context, &first_task)
+        else {
+            panic!("first session should return a task handle")
+        };
+
+        let (_, inspect) = compile_effect(
+            "\\task -> .task_status task >>= (\\status -> (status == 'foreign) =>> .r ())",
+        );
+        let inspect = assembler
+            .apply(&inspect, [PublicValue::from_core(handle)])
+            .expect("foreign handle inspection should apply");
+        let (second_context, second_task) = schedule_composed_test_task(&inspect, host);
+        assert!(matches!(
+            pump_composed_test_task(&second_context, &second_task),
+            EvaluationTaskPoll::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn cancellation_is_transactional_and_late_cancellation_is_harmless() {
+        let (assembler, rolled_back) = compile_effect(
+            ".refl_task (.r \"alive\") >>= (\\task -> (.cut (.alt ((.cancel_task task) =>> .fail) (.r ()))) =>> .join_task task)",
+        );
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&rolled_back, host.clone());
+        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+            panic!("rolled-back cancellation should not cancel the child")
+        };
+        assert_eq!(
+            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            b"alive".as_slice()
+        );
+
+        let (_, committed) = compile_effect(
+            ".cut (.refl_task (.r ()) >>= (\\task -> (.cancel_task task) =>> .r task)) >>= (\\task -> .task_status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
+        );
+        let (context, task) = schedule_composed_test_task(&committed, host.clone());
+        assert!(matches!(
+            pump_composed_test_task(&context, &task),
+            EvaluationTaskPoll::Complete(_)
+        ));
+
+        let (_, late) = compile_effect(
+            ".refl_task (.r \"done\") >>= (\\task -> .join_task task >>= (\\value -> (.cancel_task task) =>> .r value))",
+        );
+        let (context, task) = schedule_composed_test_task(&late, host);
+        assert!(matches!(
+            pump_composed_test_task(&context, &task),
+            EvaluationTaskPoll::Complete(_)
+        ));
     }
 
     #[test]

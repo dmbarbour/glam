@@ -111,12 +111,15 @@ producer task IDs for this shallow dependency prioritization. Fine-grained
 observation indexes, persistent waiter graphs, worker threads, and evaluator
 reduction fuel are intentionally deferred.
 
-The reusable reflection API can reserve `.refl_task Effect` children and
-observe them through opaque handles. `.join_task` returns success or propagates
-the child's error; `.task_error` extracts error text and otherwise fails.
-Pending queries are failed effect choices carrying the child's exact wait
-token. Transaction journals activate child tasks only after the winning outer
-commit, while abandoned journals cancel their unused reservations.
+The reusable reflection API exposes `.glam_ver`, `.os_env`, and `.cli_args` as
+basic host information, and can reserve `.refl_task Effect` children behind
+opaque handles. `.join_task` returns success or propagates the child's error;
+`.task_result` and `.task_error` are symmetric state-specific extractors, and
+`.task_status` provides a nonblocking status atom. Pending extractors are failed
+effect choices carrying the child's exact wait token. Transaction journals
+apply task launches and `.cancel_task` requests in effect order only after the
+winning outer commit; abandoned journals cancel unused reservations and discard
+cancellations.
 
 An ordinary `Assembler` installs a reflection-task launcher when it creates its
 session. The launcher wraps annotation effects in the reusable

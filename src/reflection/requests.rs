@@ -1,10 +1,12 @@
+use std::ffi::OsString;
 use std::sync::LazyLock;
 
 use crate::api::{Diagnostic, Value};
 use crate::core::{Atom, Dict, Key, Value as CoreValue, keys};
 use crate::diagnostic::Severity;
 use crate::evaluation::{
-    EvalContext, EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskPoll, PendingReflectionTask,
+    EvalContext, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId,
+    EvaluationTaskPoll, PendingReflectionTask,
 };
 use crate::number::Number;
 
@@ -16,17 +18,29 @@ use super::{
 /// Requests shared by every full reflection task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReflectionRequest {
+    GlamVersion,
+    OsEnvironment,
+    CommandLineArguments,
     Log,
     ReflTask,
     JoinTask,
+    TaskResult,
     TaskError,
+    TaskStatus,
+    CancelTask,
+}
+
+#[derive(Clone)]
+enum ReflectionTaskUpdate {
+    Launch(PendingReflectionTask),
+    Cancel(EvalContext, EvaluationTaskId),
 }
 
 /// Diagnostics produced transactionally by reflection requests.
 #[derive(Clone, Default)]
 pub struct ReflectionJournal {
     diagnostics: Vec<Diagnostic>,
-    pending_tasks: Vec<PendingReflectionTask>,
+    task_updates: Vec<ReflectionTaskUpdate>,
 }
 
 impl ReflectionJournal {
@@ -35,9 +49,14 @@ impl ReflectionJournal {
     }
 
     #[doc(hidden)]
-    pub fn activate_pending_tasks(&self) {
-        for task in &self.pending_tasks {
-            task.activate();
+    pub fn commit_task_updates(&self) {
+        for update in &self.task_updates {
+            match update {
+                ReflectionTaskUpdate::Launch(task) => task.activate(),
+                ReflectionTaskUpdate::Cancel(context, task) => {
+                    context.cancel_reflection_task_id(*task);
+                }
+            }
         }
     }
 }
@@ -56,11 +75,37 @@ impl ReflectionTransaction for ReflectionJournal {
 /// Immediate host operations used by reflection requests outside `.cut`.
 pub trait ReflectionHost<S: TaskSpecialization>: TaskHost<S> {
     fn emit_diagnostic(&self, diagnostic: Diagnostic);
+
+    fn os_environment_variable(&self, _name: &str) -> Option<OsString> {
+        None
+    }
+
+    fn command_line_arguments(&self) -> Vec<OsString> {
+        Vec::new()
+    }
 }
 
 /// API constructors contributed by the reusable reflection request family.
 pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
     vec![
+        EffectRequestSpec::new(
+            "glam_ver",
+            ["reflection_runtime", "v0", "request", "glam_ver"],
+            0,
+            ReflectionRequest::GlamVersion,
+        ),
+        EffectRequestSpec::new(
+            "os_env",
+            ["reflection_runtime", "v0", "request", "os_env"],
+            1,
+            ReflectionRequest::OsEnvironment,
+        ),
+        EffectRequestSpec::new(
+            "cli_args",
+            ["reflection_runtime", "v0", "request", "cli_args"],
+            0,
+            ReflectionRequest::CommandLineArguments,
+        ),
         EffectRequestSpec::new(
             "log",
             ["reflection_runtime", "v0", "request", "log"],
@@ -80,10 +125,28 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
             ReflectionRequest::JoinTask,
         ),
         EffectRequestSpec::new(
+            "task_result",
+            ["reflection_runtime", "v0", "request", "task_result"],
+            1,
+            ReflectionRequest::TaskResult,
+        ),
+        EffectRequestSpec::new(
             "task_error",
             ["reflection_runtime", "v0", "request", "task_error"],
             1,
             ReflectionRequest::TaskError,
+        ),
+        EffectRequestSpec::new(
+            "task_status",
+            ["reflection_runtime", "v0", "request", "task_status"],
+            1,
+            ReflectionRequest::TaskStatus,
+        ),
+        EffectRequestSpec::new(
+            "cancel_task",
+            ["reflection_runtime", "v0", "request", "cancel_task"],
+            1,
+            ReflectionRequest::CancelTask,
         ),
     ]
 }
@@ -100,6 +163,30 @@ where
     S::Journal: ReflectionTransaction,
 {
     match request {
+        ReflectionRequest::GlamVersion => {
+            require_no_arguments(arguments, "glam_ver")?;
+            Ok(RequestResult::Return(Value::text(env!(
+                "CARGO_PKG_VERSION"
+            ))))
+        }
+        ReflectionRequest::OsEnvironment => {
+            let name = text_argument(context.eval_context(), arguments, "os_env")?;
+            Ok(context
+                .host()
+                .os_environment_variable(&name)
+                .map(|value| RequestResult::Return(os_value(value)))
+                .unwrap_or(RequestResult::Fail))
+        }
+        ReflectionRequest::CommandLineArguments => {
+            require_no_arguments(arguments, "cli_args")?;
+            Ok(RequestResult::Return(Value::list(
+                context
+                    .host()
+                    .command_line_arguments()
+                    .into_iter()
+                    .map(os_value),
+            )))
+        }
         ReflectionRequest::Log => {
             let [severity, message]: [Value; 2] = arguments
                 .try_into()
@@ -136,8 +223,8 @@ where
                     .parts()
                     .1
                     .reflection_journal()
-                    .pending_tasks
-                    .push(pending);
+                    .task_updates
+                    .push(ReflectionTaskUpdate::Launch(pending));
                 handle
             } else {
                 let handle = eval_context
@@ -167,6 +254,24 @@ where
                 )),
             }
         }
+        ReflectionRequest::TaskResult => {
+            let handle = task_handle_argument(context.eval_context(), arguments, "task_result")?;
+            match context.eval_context().poll_reflection_task_id(handle) {
+                EvaluationTaskPoll::Pending(wait) => {
+                    context.observe_task_wait(wait);
+                    Ok(RequestResult::Fail)
+                }
+                EvaluationTaskPoll::Complete(value) => {
+                    Ok(RequestResult::Return(Value::from_core(value)))
+                }
+                EvaluationTaskPoll::Failed(_) | EvaluationTaskPoll::Cancelled => {
+                    Ok(RequestResult::Fail)
+                }
+                EvaluationTaskPoll::ForeignSession => Err(TaskError::new(
+                    "task handle does not belong to this evaluation session",
+                )),
+            }
+        }
         ReflectionRequest::TaskError => {
             let handle = task_handle_argument(context.eval_context(), arguments, "task_error")?;
             match context.eval_context().poll_reflection_task_id(handle) {
@@ -185,7 +290,94 @@ where
                 )),
             }
         }
+        ReflectionRequest::TaskStatus => {
+            let handle = task_handle_argument(context.eval_context(), arguments, "task_status")?;
+            let status = match context.eval_context().poll_reflection_task_id(handle) {
+                EvaluationTaskPoll::Pending(wait) => {
+                    context.observe_task_wait(wait);
+                    "pending"
+                }
+                EvaluationTaskPoll::Complete(_) => "complete",
+                EvaluationTaskPoll::Failed(_) => "error",
+                EvaluationTaskPoll::Cancelled => "canceled",
+                EvaluationTaskPoll::ForeignSession => "foreign",
+            };
+            Ok(RequestResult::Return(atom(status)))
+        }
+        ReflectionRequest::CancelTask => {
+            let handle = task_handle_argument(context.eval_context(), arguments, "cancel_task")?;
+            let eval_context = context.eval_context().clone();
+            match eval_context.poll_reflection_task_id(handle) {
+                EvaluationTaskPoll::ForeignSession => {
+                    return Err(TaskError::new(
+                        "task handle does not belong to this evaluation session",
+                    ));
+                }
+                EvaluationTaskPoll::Complete(_)
+                | EvaluationTaskPoll::Failed(_)
+                | EvaluationTaskPoll::Cancelled => return Ok(RequestResult::ReturnUnit),
+                EvaluationTaskPoll::Pending(_) => {}
+            }
+            if let Some(mut transaction) = context.transaction() {
+                transaction
+                    .parts()
+                    .1
+                    .reflection_journal()
+                    .task_updates
+                    .push(ReflectionTaskUpdate::Cancel(eval_context, handle));
+            } else {
+                match eval_context.cancel_reflection_task_id(handle) {
+                    EvaluationTaskCancellation::Requested => context.committed(),
+                    EvaluationTaskCancellation::Late => {}
+                    EvaluationTaskCancellation::ForeignSession => {
+                        return Err(TaskError::new(
+                            "task handle does not belong to this evaluation session",
+                        ));
+                    }
+                }
+            }
+            Ok(RequestResult::ReturnUnit)
+        }
     }
+}
+
+fn require_no_arguments(arguments: Vec<Value>, request: &str) -> Result<(), TaskError> {
+    if arguments.is_empty() {
+        Ok(())
+    } else {
+        Err(TaskError::new(format!(
+            "`.{request}` received the wrong number of arguments"
+        )))
+    }
+}
+
+fn text_argument(
+    context: &EvalContext,
+    arguments: Vec<Value>,
+    request: &str,
+) -> Result<String, TaskError> {
+    let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
+        TaskError::new(format!(
+            "`.{request}` received the wrong number of arguments"
+        ))
+    })?;
+    let CoreValue::Binary(value) = evaluate(context, value.into_core())? else {
+        return Err(TaskError::new(format!(
+            "`.{request}` requires a text argument"
+        )));
+    };
+    String::from_utf8(value.to_vec())
+        .map_err(|_| TaskError::new(format!("`.{request}` requires UTF-8 text")))
+}
+
+fn os_value(value: OsString) -> Value {
+    Value::binary(value.as_encoded_bytes().to_vec())
+}
+
+fn atom(name: &str) -> Value {
+    Value::from_core(CoreValue::Atom(Atom::from_key(&Key::binary_from_text(
+        name,
+    ))))
 }
 
 static TASK_HANDLE_TAG: LazyLock<Key> = LazyLock::new(|| {

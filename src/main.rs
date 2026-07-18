@@ -507,11 +507,27 @@ impl ReflectionHost<MainEffects> for LogHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
         self.emit(diagnostic);
     }
+
+    fn os_environment_variable(&self, name: &str) -> Option<std::ffi::OsString> {
+        env::var_os(name)
+    }
+
+    fn command_line_arguments(&self) -> Vec<std::ffi::OsString> {
+        env::args_os().collect()
+    }
 }
 
 impl ReflectionHost<ReflectionEffects> for LogHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
         self.emit(diagnostic);
+    }
+
+    fn os_environment_variable(&self, name: &str) -> Option<std::ffi::OsString> {
+        env::var_os(name)
+    }
+
+    fn command_line_arguments(&self) -> Vec<std::ffi::OsString> {
+        env::args_os().collect()
     }
 }
 
@@ -552,7 +568,7 @@ impl TaskHost<MainEffects> for LogHost {
             state.generation = state.generation.wrapping_add(1);
             self.changed.notify_all();
         }
-        commit.extra().reflection.activate_pending_tasks();
+        commit.extra().reflection.commit_task_updates();
         self.flush_stderr();
         CommitResult::Committed
     }
@@ -597,7 +613,7 @@ impl TaskHost<ReflectionEffects> for LogHost {
             state.generation = state.generation.wrapping_add(1);
             self.changed.notify_all();
         }
-        commit.extra().activate_pending_tasks();
+        commit.extra().commit_task_updates();
         CommitResult::Committed
     }
 

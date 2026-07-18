@@ -117,6 +117,13 @@ pub(crate) enum EvaluationTaskPoll {
     ForeignSession,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvaluationTaskCancellation {
+    Requested,
+    Late,
+    ForeignSession,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EvaluationTaskBlock {
     pub(crate) lazy: Option<EvaluationWaitToken>,
@@ -133,6 +140,8 @@ pub(crate) enum EvaluationMachinePoll {
 
 pub(crate) trait EvaluationTaskMachine: Send {
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll;
+
+    fn cancel(&mut self) {}
 }
 
 pub(crate) trait ReflectionTaskLauncher: Send + Sync {
@@ -174,6 +183,7 @@ struct ReflectionTaskRecord {
     id: EvaluationTaskId,
     state: EvaluationTaskState,
     machine: Option<Box<dyn EvaluationTaskMachine>>,
+    cancel_requested: bool,
 }
 
 #[derive(Clone)]
@@ -404,6 +414,7 @@ impl EvalContext {
                 id,
                 state: EvaluationTaskState::Queued,
                 machine: Some(machine),
+                cancel_requested: false,
             },
         );
         let replaced_id = tasks.reflection_by_id.insert(id, wait.clone());
@@ -429,6 +440,7 @@ impl EvalContext {
                 id,
                 state: EvaluationTaskState::Reserved,
                 machine: None,
+                cancel_requested: false,
             },
         );
         let replaced_id = tasks.reflection_by_id.insert(id, wait.clone());
@@ -549,6 +561,7 @@ impl EvalContext {
                 id,
                 state: EvaluationTaskState::Dormant,
                 machine: None,
+                cancel_requested: false,
             },
         );
         let replaced_id = tasks.reflection_by_id.insert(id, wait.clone());
@@ -575,6 +588,46 @@ impl EvalContext {
         wait.map_or(EvaluationTaskPoll::ForeignSession, |wait| {
             self.poll_wait(&wait)
         })
+    }
+
+    pub(crate) fn cancel_reflection_task_id(
+        &self,
+        id: EvaluationTaskId,
+    ) -> EvaluationTaskCancellation {
+        let machine = {
+            let mut tasks = self
+                .session
+                .tasks
+                .lock()
+                .expect("evaluation task registry was poisoned");
+            let Some(wait) = tasks.reflection_by_id.get(&id).cloned() else {
+                return EvaluationTaskCancellation::ForeignSession;
+            };
+            let record = tasks
+                .reflection
+                .get_mut(&wait)
+                .expect("task ID index must refer to a task record");
+            match record.state {
+                EvaluationTaskState::Complete(_)
+                | EvaluationTaskState::Failed(_)
+                | EvaluationTaskState::Cancelled => return EvaluationTaskCancellation::Late,
+                EvaluationTaskState::Running => {
+                    record.cancel_requested = true;
+                    return EvaluationTaskCancellation::Requested;
+                }
+                EvaluationTaskState::Dormant
+                | EvaluationTaskState::Reserved
+                | EvaluationTaskState::Queued
+                | EvaluationTaskState::Blocked(_) => {
+                    record.state = EvaluationTaskState::Cancelled;
+                    record.machine.take()
+                }
+            }
+        };
+        if let Some(mut machine) = machine {
+            machine.cancel();
+        }
+        EvaluationTaskCancellation::Requested
     }
 
     pub(crate) fn poll_wait(&self, wait: &EvaluationWaitToken) -> EvaluationTaskPoll {
@@ -727,7 +780,10 @@ impl EvaluationSession {
             step_budget -= quantum;
             let poll = claimed.machine.poll(quantum);
             let claimed_id = claimed.id;
-            let (made_progress, remains_blocked) = self.release_task(claimed, poll);
+            let (made_progress, remains_blocked, cancelled) = self.release_task(claimed, poll);
+            if let Some(mut machine) = cancelled {
+                machine.cancel();
+            }
             if remains_blocked {
                 attempted_blocked.insert(claimed_id);
             }
@@ -739,7 +795,11 @@ impl EvaluationSession {
         }
     }
 
-    fn release_task(&self, claimed: ClaimedTask, poll: EvaluationMachinePoll) -> (bool, bool) {
+    fn release_task(
+        &self,
+        claimed: ClaimedTask,
+        poll: EvaluationMachinePoll,
+    ) -> (bool, bool, Option<Box<dyn EvaluationTaskMachine>>) {
         let mut tasks = self
             .tasks
             .lock()
@@ -753,6 +813,11 @@ impl EvaluationSession {
             "only a running task may release its machine"
         );
         assert!(record.machine.is_none(), "claimed machine must be absent");
+        if record.cancel_requested {
+            record.cancel_requested = false;
+            record.state = EvaluationTaskState::Cancelled;
+            return (true, false, Some(claimed.machine));
+        }
         record.machine = Some(claimed.machine);
 
         let (state, made_progress, remains_blocked) = match poll {
@@ -776,7 +841,7 @@ impl EvaluationSession {
         if matches!(record.state, EvaluationTaskState::Queued) {
             tasks.ready.push_back(claimed.id);
         }
-        (made_progress, remains_blocked)
+        (made_progress, remains_blocked, None)
     }
 }
 
@@ -932,6 +997,20 @@ mod tests {
         }
     }
 
+    struct Cancellable {
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl EvaluationTaskMachine for Cancellable {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            EvaluationMachinePoll::Yielded
+        }
+
+        fn cancel(&mut self) {
+            self.cancelled.store(true, Ordering::Release);
+        }
+    }
+
     #[test]
     fn pump_follows_a_lazy_dependency_to_its_producer() {
         let context = EvalContext::standalone();
@@ -989,6 +1068,39 @@ mod tests {
         assert_eq!(
             context.pump_wait(&target.wait, 1),
             EvaluationPumpOutcome::BudgetExhausted
+        );
+    }
+
+    #[test]
+    fn cancellation_stops_a_queued_task_and_late_requests_are_noops() {
+        let context = EvalContext::standalone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let observed = cancelled.clone();
+        let task = context
+            .schedule_task(move |_| {
+                Ok(Box::new(Cancellable {
+                    cancelled: observed,
+                }))
+            })
+            .expect("cancellable task should schedule");
+        assert_eq!(
+            context.cancel_reflection_task_id(task.id()),
+            EvaluationTaskCancellation::Requested
+        );
+        assert!(cancelled.load(Ordering::Acquire));
+        assert_eq!(
+            context.poll_reflection_task(&task),
+            EvaluationTaskPoll::Cancelled
+        );
+        assert_eq!(
+            context.cancel_reflection_task_id(task.id()),
+            EvaluationTaskCancellation::Late
+        );
+
+        let foreign = EvalContext::standalone();
+        assert_eq!(
+            foreign.cancel_reflection_task_id(task.id()),
+            EvaluationTaskCancellation::ForeignSession
         );
     }
 }

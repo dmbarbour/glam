@@ -63,6 +63,44 @@ fn public_api_can_load_sources_and_binaries_from_a_custom_host() {
 }
 
 #[test]
+fn custom_host_process_info_is_visible_to_reflection_annotations() {
+    let host = MemoryHost::new([]).with_process_info(
+        [("GLAM_PUBLIC_API_TEST", "HOST VALUE")],
+        ["embedded-glam", "inspect"],
+    );
+    let assembler = Assembler::default().with_host(host);
+    let module = assembler
+        .module(["reflection_host"])
+        .script(
+            "g",
+            "language g0\nimport 'std\nvalue = anno {refl:(.os_env \"GLAM_PUBLIC_API_TEST\" >>= (\\value -> (value == \"HOST VALUE\") =>> .log 'info { msg:{ text:\"HOST VALUE\" } }))} \"done\"\n",
+        )
+        .build()
+        .expect("reflection host fixture should build");
+    let value = assembler
+        .get(module.value(), "value")
+        .expect("fixture should define value");
+    let value = assembler
+        .evaluate(&value)
+        .expect("reflection annotation should complete");
+    assert_eq!(
+        assembler
+            .to_binary(&value)
+            .expect("annotation target should remain observable"),
+        b"done".as_slice()
+    );
+    let diagnostics = assembler
+        .read_diagnostics()
+        .expect("default diagnostic buffer should exist");
+    assert!(
+        diagnostics
+            .entries()
+            .iter()
+            .any(|diagnostic| diagnostic.message() == "HOST VALUE")
+    );
+}
+
+#[test]
 fn top_level_file_inputs_may_be_absolute() {
     let source_path = absolute_path_text("absolute-input.g");
     let assembler = Assembler::default().with_host(MemoryHost::new([(
@@ -358,6 +396,8 @@ fn checked_net_builder_reports_wiring_and_finalization_errors() {
 
 struct MemoryHost {
     files: HashMap<PathBuf, Bytes>,
+    environment: HashMap<String, OsString>,
+    arguments: Vec<OsString>,
 }
 
 impl MemoryHost {
@@ -367,7 +407,22 @@ impl MemoryHost {
                 .into_iter()
                 .map(|(path, bytes)| (PathBuf::from(path), Bytes::copy_from_slice(bytes)))
                 .collect(),
+            environment: HashMap::new(),
+            arguments: Vec::new(),
         }
+    }
+
+    fn with_process_info<const N: usize>(
+        mut self,
+        environment: [(&str, &str); N],
+        arguments: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        self.environment = environment
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), OsString::from(value)))
+            .collect();
+        self.arguments = arguments.into_iter().map(OsString::from).collect();
+        self
     }
 }
 
@@ -383,7 +438,11 @@ impl Host for MemoryHost {
         self.files.contains_key(path)
     }
 
-    fn environment_variable(&self, _name: &str) -> Option<OsString> {
-        None
+    fn environment_variable(&self, name: &str) -> Option<OsString> {
+        self.environment.get(name).cloned()
+    }
+
+    fn command_line_arguments(&self) -> Vec<OsString> {
+        self.arguments.clone()
     }
 }
