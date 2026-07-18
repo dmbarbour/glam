@@ -407,6 +407,45 @@ fn configured_logger_composes_reusable_reflection_requests() {
     );
 }
 
+#[test]
+fn configured_logger_failure_is_reported_before_default_fallback_messages() {
+    let dir = unique_temp_dir("glam-conf-log-failure");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = (.log 'warn { msg:{ text:\"REMAINING MESSAGE\" } }) =>> .get 42\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--script.g")
+        .arg("language g0\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ok");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let failure = stderr
+        .find("configured logger failed")
+        .unwrap_or_else(|| panic!("logger failure diagnostic was not rendered:\n{stderr}"));
+    let remaining = stderr
+        .find("REMAINING MESSAGE")
+        .unwrap_or_else(|| panic!("remaining diagnostic did not use fallback logger:\n{stderr}"));
+    assert!(
+        failure < remaining,
+        "logger failure must be the next diagnostic before fallback draining:\n{stderr}"
+    );
+}
+
 fn hello_sample_files() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/assembly");
     let mut files = fs::read_dir(&root)

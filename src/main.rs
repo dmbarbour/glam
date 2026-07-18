@@ -226,8 +226,10 @@ fn start_logger(
             match glam::reflection::run(&custom, MainEffects::new(effect_assembler), host.clone()) {
                 Ok(TaskOutcome::Complete(_)) | Ok(TaskOutcome::Cancelled) => {}
                 Err(error) => {
-                    let message = format!("error: configured logger failed: {error}\n");
-                    host.write_stderr(Bytes::from(message));
+                    logger.emit(&Diagnostic::new(
+                        Severity::Error,
+                        format!("configured logger failed: {error}"),
+                    ));
                 }
             }
         }

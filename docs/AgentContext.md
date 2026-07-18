@@ -155,8 +155,10 @@ design in the design documents.
 - `main` owns the diagnostic queue, logging request dispatcher, and logging
   transaction snapshot/journal. Defined `conf.log` consumes enriched messages
   effectfully; undefined, completed, or failed custom logging falls back to the
-  Rust terminal logger. Stderr effects commit to a host buffer before bytes are
-  written to the OS.
+  Rust terminal logger. If configured logging fails, the terminal logger first
+  renders one synthetic error diagnostic, then drains the remaining queue in
+  FIFO order. Stderr effects commit to a host buffer before bytes are written
+  to the OS.
 
 ### Values and evaluation
 

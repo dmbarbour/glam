@@ -85,13 +85,15 @@ Failure becomes retryable only after a request observes changeable host state;
 `.fail` remains permanent, while an empty `read_log` can suspend and replay from
 the checkpoint immediately before its queue observation.
 Otherwise the Rust terminal logger drains the queue. Normal early termination
-or task failure also returns remaining messages to the fallback logger. Core
-operators only construct requests; reflection state and external I/O are never
-performed by interaction-net reduction. The standard handler stores its active
-reset stack as a private entry in ordinary user state. Whole-state replacement
-therefore also switches the delimited-continuation environment, which supports
-cooperative threads within one reflection task; transaction and host-resource
-bookkeeping remains outside that state.
+or task failure also returns remaining messages to the fallback logger. A
+configured-logger failure is itself rendered as the next default diagnostic
+before that queue is drained. Core operators only construct requests;
+reflection state and external I/O are never performed by interaction-net
+reduction. The standard handler stores its active reset stack as a private
+entry in ordinary user state. Whole-state replacement therefore also switches
+the delimited-continuation environment, which supports cooperative threads
+within one reflection task; transaction and host-resource bookkeeping remains
+outside that state.
 
 The effect interpreter itself is resumable: persistent drive, delivery,
 application, and cut frames advance under an effect-step budget. State failure
