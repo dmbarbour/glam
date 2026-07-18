@@ -118,6 +118,18 @@ design in the design documents.
   and therefore leaves a task waiting on at most one lazy value. The same task
   may also retain multiple prior state observations. Any future racing or
   nondeterministic choice must be an explicit effect distinct from `.alt`.
+- `EffectTask` is a persistent cooperative machine. Its drive, delivery,
+  application, and nested-cut frames survive `poll` calls; evaluator waits are
+  suspension tokens rather than textual task failures. A blocked task reports
+  at most one lazy dependency plus the current coarse host generation. If both
+  can wake it, a changed host generation restarts the recorded transaction or
+  retry boundary before the lazy continuation is resumed. One poll step must
+  not leave the machine positioned to repeat an already committed host effect.
+- `reflection::run` is the synchronous compatibility driver for that machine.
+  It polls with bounded effect-step fuel and calls `TaskHost::wait_for_change`
+  only after polling reports a state block. The shared-session task pump is not
+  connected yet, so the synchronous driver still reports an unscheduled lazy
+  dependency as an error.
 - Each reflection `fix` alternative receives its own task-owned fixpoint cell.
   Recursive observation by its producer is an error; another task observes its
   precise wait token. When a chosen result later fails, the handler restarts at

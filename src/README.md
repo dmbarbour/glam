@@ -93,6 +93,14 @@ therefore also switches the delimited-continuation environment, which supports
 cooperative threads within one reflection task; transaction and host-resource
 bookkeeping remains outside that state.
 
+The effect interpreter itself is resumable: persistent drive, delivery,
+application, and cut frames advance under an effect-step budget. State failure
+returns a coarse generation block instead of waiting inside the interpreter,
+and lazy evaluator demand retains its exact wait token without selecting a
+sibling alternative. `reflection::run` remains a synchronous wrapper that
+polls this machine and performs the legacy host wait. Session scheduling and
+annotation-task pumping are the next integration boundary.
+
 `main` chooses the `configuration` and `assembly` module paths and constructs
 their initial definitions. Those names and roles are CLI policy, not library
 policy. `--parse` is the one temporary exception to the facade boundary: it
@@ -164,7 +172,8 @@ observer registers one task in that observer's session and receives a precise
 wait until the task completes; it then yields the original target without
 forcing it. A `Data >< Bind` demand records the same wait in the exact active
 pair rather than turning suspension into a stuck error. The executor is not yet
-connected, so reflection tasks remain queued in this slice.
+connected, so annotation reflection tasks remain queued in this slice even
+though standalone effect tasks can now suspend and resume cooperatively.
 
 Builtins are identified in `core`, dispatched once in `eval/builtins.rs`, and
 implemented by semantic family below `eval/builtins/`. Net-lowered application

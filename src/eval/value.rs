@@ -38,7 +38,7 @@ impl EvalError {
         }
     }
 
-    pub(super) fn blocked_on(&self) -> Option<CoreWaitToken> {
+    pub(crate) fn blocked_on(&self) -> Option<CoreWaitToken> {
         match &self.kind {
             EvalErrorKind::Blocked(wait) => Some(wait.clone()),
             EvalErrorKind::Message(_) => None,

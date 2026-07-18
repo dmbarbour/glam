@@ -20,7 +20,7 @@ use crate::api::Value as PublicValue;
 use crate::core::{Atom, Dict, FunctionValue, Key, LazyValue, List, NetValue, Value, keys};
 use crate::core_net::CoreSpecialization;
 use crate::eval;
-use crate::evaluation::{EvalContext, EvaluationTaskId};
+use crate::evaluation::{EvalContext, EvaluationTaskId, EvaluationTaskPoll, EvaluationWaitToken};
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
 
@@ -206,17 +206,43 @@ pub enum TaskOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskError(Arc<str>);
+pub struct TaskError(TaskErrorKind);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TaskErrorKind {
+    Message(Arc<str>),
+    Blocked(EvaluationWaitToken),
+}
 
 impl TaskError {
     pub fn new(message: impl Into<Arc<str>>) -> Self {
-        Self(message.into())
+        Self(TaskErrorKind::Message(message.into()))
+    }
+
+    fn blocked(wait: EvaluationWaitToken) -> Self {
+        Self(TaskErrorKind::Blocked(wait))
+    }
+
+    fn blocked_on(&self) -> Option<&EvaluationWaitToken> {
+        match &self.0 {
+            TaskErrorKind::Blocked(wait) => Some(wait),
+            TaskErrorKind::Message(_) => None,
+        }
     }
 }
 
 impl fmt::Display for TaskError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        match &self.0 {
+            TaskErrorKind::Message(message) => formatter.write_str(message),
+            TaskErrorKind::Blocked(wait) => {
+                write!(
+                    formatter,
+                    "reflection task blocked on wait token {}",
+                    wait.get()
+                )
+            }
+        }
     }
 }
 
@@ -228,7 +254,7 @@ pub fn run<S: TaskSpecialization>(
     specialization: S,
     host: Arc<S::Host>,
 ) -> Result<TaskOutcome, TaskError> {
-    EffectTask::new(specialization, host)?.run(effect.as_core().clone())
+    EffectTask::new(effect.as_core().clone(), specialization, host)?.run()
 }
 
 /// Runs a task with standard effects and no specialization-owned requests.
@@ -301,16 +327,23 @@ struct EffectTask<S: TaskSpecialization> {
     next_continuation: u64,
     next_control_order: usize,
     continuations: HashMap<u64, CapturedContinuation>,
+    execution: TaskExecution<S>,
+    blocked: Option<BlockedExecution<S>>,
+    terminal: Option<TaskTerminal>,
 }
 
 impl<S: TaskSpecialization> EffectTask<S> {
-    fn new(specialization: S, host: Arc<S::Host>) -> Result<Self, TaskError> {
+    fn new(effect: Value, specialization: S, host: Arc<S::Host>) -> Result<Self, TaskError> {
         let tags = Tags::new();
         let (api, specialized_requests) = effect_api(&tags, specialization.requests())?;
         let eval_context = EvalContext::standalone();
         let id = eval_context
             .task_id()
             .map_err(|error| TaskError::new(error.as_ref()))?;
+        let initial_state = Value::Dict(Dict::new_sync().insert(
+            (*keys::HEAP).clone(),
+            host.snapshot().heap().as_core().clone(),
+        ));
         Ok(Self {
             eval_context,
             id,
@@ -323,6 +356,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
             next_continuation: 1,
             next_control_order: 1,
             continuations: HashMap::new(),
+            execution: TaskExecution {
+                work: MachineWork::Drive {
+                    branch: Branch::new(effect, initial_state),
+                    scope_depth: 0,
+                },
+                cuts: Vec::new(),
+            },
+            blocked: None,
+            terminal: None,
         })
     }
 
@@ -360,24 +402,25 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         root: Arc<FixRoot<S>>,
         choices: Vec<FixChoice>,
-    ) -> Result<Branch<S>, TaskError> {
+    ) -> Result<MachineWork<S>, TaskError> {
         let mut branch = root.entry.clone();
-        let handle = LazyValue::fixpoint(&self.eval_context, "reflection effect fixpoint")
-            .map_err(|error| TaskError::new(error.as_ref()))?;
-        let marker = Value::Lazy(handle.clone());
-        let operation = apply(&self.eval_context, root.function.clone(), vec![marker])?;
-        let outer_control = std::mem::take(&mut branch.control);
         let reset_stack = reset_stack_value(
             &self.eval_context,
             &branch.state,
             &self.tags.continuation_state,
         )?;
-        branch.state = with_reset_frames(
+        let state = with_reset_frames(
             &self.eval_context,
-            branch.state,
+            branch.state.clone(),
             &self.tags.continuation_state,
             &[],
         )?;
+        let order = self.allocate_control_order()?;
+        let handle = LazyValue::fixpoint(&self.eval_context, "reflection effect fixpoint")
+            .map_err(|error| TaskError::new(error.as_ref()))?;
+        let marker = Value::Lazy(handle.clone());
+        let outer_control = std::mem::take(&mut branch.control);
+        branch.state = state;
         branch.active_fixes.push(ActiveFix {
             root: root.clone(),
             choices,
@@ -389,17 +432,21 @@ impl<S: TaskSpecialization> EffectTask<S> {
             outer: Box::new(outer_control),
             reset_stack,
             scope_depth: root.scope_depth,
-            order: self.allocate_control_order()?,
+            order,
         });
-        branch.effect = operation;
-        Ok(branch)
+        Ok(MachineWork::Apply {
+            function: root.function.clone(),
+            arguments: vec![marker],
+            branch,
+            scope_depth: root.scope_depth,
+        })
     }
 
     fn restart_fixpoint_at_scope(
         &mut self,
         branch: &mut Branch<S>,
         scope_depth: usize,
-    ) -> Result<Option<Branch<S>>, TaskError> {
+    ) -> Result<Option<MachineWork<S>>, TaskError> {
         let Some(restart) = branch.fix_restarts.last() else {
             return Ok(None);
         };
@@ -417,21 +464,31 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .pop()
             .expect("restart observed above must exist");
         let mut restarted = self.start_fixpoint(restart.root, restart.choices)?;
-        restarted.fix_restarts = restart.inherited_restarts;
+        restarted
+            .branch_mut()
+            .expect("fixpoint restart must retain its branch")
+            .fix_restarts = restart.inherited_restarts;
         Ok(Some(restarted))
     }
 
     fn install_captured_control(
         &mut self,
         branch: &mut Branch<S>,
-        captured: &mut CapturedContinuation,
+        captured: &CapturedContinuation,
         scope_depth: usize,
     ) -> Result<(), TaskError> {
         let mut layers = captured
             .reset_frames
-            .drain(..)
+            .iter()
+            .cloned()
             .map(CapturedLayer::Reset)
-            .chain(captured.delimiters.drain(..).map(CapturedLayer::Delimiter))
+            .chain(
+                captured
+                    .delimiters
+                    .iter()
+                    .cloned()
+                    .map(CapturedLayer::Delimiter),
+            )
             .collect::<Vec<_>>();
         layers.sort_by_key(CapturedLayer::order);
 
@@ -440,8 +497,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
             &branch.state,
             &self.tags.continuation_state,
         )?;
-        for layer in layers {
-            let order = self.allocate_control_order()?;
+        let next_order = self
+            .next_control_order
+            .checked_add(layers.len())
+            .ok_or_else(|| TaskError::new("reflection control order exhausted"))?;
+        let mut delimiters = Vec::new();
+        for (order, layer) in (self.next_control_order..).zip(layers) {
             match layer {
                 CapturedLayer::Reset(mut frame) => {
                     frame.scope_depth = scope_depth;
@@ -450,118 +511,148 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
                 CapturedLayer::Delimiter(mut delimiter) => {
                     delimiter.rebase(scope_depth, order);
-                    branch.control.delimiters.push(delimiter);
+                    delimiters.push(delimiter);
                 }
             }
         }
-        branch.state = with_reset_frames(
+        let state = with_reset_frames(
             &self.eval_context,
             branch.state.clone(),
             &self.tags.continuation_state,
             &reset_frames,
         )?;
+        self.next_control_order = next_order;
+        branch.state = state;
+        branch.control.delimiters.extend(delimiters);
         Ok(())
     }
 
-    fn run(&mut self, effect: Value) -> Result<TaskOutcome, TaskError> {
-        let result = self.run_inner(effect);
-        let unfinished_reason: Arc<str> = match &result {
-            Ok(TaskOutcome::Complete(_)) => {
-                Arc::from("reflection task completed without fulfilling its fixpoint")
-            }
-            Ok(TaskOutcome::Cancelled) => Arc::from("reflection fixpoint producer was cancelled"),
-            Err(error) => Arc::from(format!("reflection fixpoint producer failed: {error}")),
-        };
-        self.eval_context
-            .fail_unresolved_promises(unfinished_reason);
-        result
-    }
-
-    fn run_inner(&mut self, effect: Value) -> Result<TaskOutcome, TaskError> {
-        let mut branch = Branch::new(effect, self.visible_state(self.host.snapshot().heap()));
+    fn run(&mut self) -> Result<TaskOutcome, TaskError> {
         loop {
-            match self.drive(branch, 0)? {
-                Drive::Complete(value, completed) => {
-                    self.local_state = split_user_state(completed.state).0;
-                    return Ok(TaskOutcome::Complete(PublicValue::from_core(value)));
-                }
-                Drive::Fail(_) => {
-                    return Err(TaskError::new("reflection task failed permanently"));
-                }
-                Drive::Fork(_, _) => {
-                    return Err(TaskError::new("`.alt` requires an enclosing `.cut`"));
-                }
-                Drive::Retry(mut failed) => {
-                    let checkpoint = failed.retry.take().ok_or_else(|| {
-                        TaskError::new("retryable reflection failure lost its observation")
-                    })?;
-                    if !self.host.wait_for_change(checkpoint.generation) {
-                        return Ok(TaskOutcome::Cancelled);
+            match self.poll(256) {
+                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::Blocked(blocked) => {
+                    if blocked.lazy.is_some() {
+                        let error = TaskError::new(
+                            "synchronous reflection task is blocked on another evaluation task",
+                        );
+                        self.finish(TaskTerminal::Failed(error.clone()));
+                        return Err(error);
                     }
-                    branch = *checkpoint.branch;
+                    let generation = blocked.observed_generation.ok_or_else(|| {
+                        TaskError::new("blocked reflection task has no wake condition")
+                    })?;
+                    if !self.host.wait_for_change(generation) {
+                        self.finish(TaskTerminal::Cancelled);
+                    }
                 }
-                Drive::Cancelled => return Ok(TaskOutcome::Cancelled),
+                EffectTaskPoll::Complete(value) => return Ok(TaskOutcome::Complete(value)),
+                EffectTaskPoll::Failed(error) => return Err(error),
+                EffectTaskPoll::Cancelled => return Ok(TaskOutcome::Cancelled),
             }
         }
     }
 
-    fn drive(&mut self, mut branch: Branch<S>, scope_depth: usize) -> Result<Drive<S>, TaskError> {
-        macro_rules! deliver_value {
-            ($value:expr) => {
-                match deliver(
-                    &self.eval_context,
-                    $value,
+    fn poll(&mut self, steps: usize) -> EffectTaskPoll {
+        if let Some(terminal) = &self.terminal {
+            return terminal.poll();
+        }
+        if let Some(blocked) = self.poll_blocked() {
+            return blocked;
+        }
+
+        for _ in 0..steps {
+            let work = self.execution.work.clone();
+            match self.step(work) {
+                Ok(MachineStep::Continue(work)) => self.execution.work = work,
+                Ok(MachineStep::Blocked(blocked)) => {
+                    self.blocked = Some(blocked);
+                    return self.blocked_poll();
+                }
+                Ok(MachineStep::Terminal(terminal)) => {
+                    self.finish(terminal);
+                    return self.terminal.as_ref().expect("terminal set above").poll();
+                }
+                Err(error) => {
+                    if let Some(wait) = error.blocked_on().cloned() {
+                        self.blocked = Some(self.lazy_block(wait));
+                        return self.blocked_poll();
+                    }
+                    self.finish(TaskTerminal::Failed(error));
+                    return self.terminal.as_ref().expect("terminal set above").poll();
+                }
+            }
+        }
+        EffectTaskPoll::Yielded
+    }
+
+    fn step(&mut self, work: MachineWork<S>) -> Result<MachineStep<S>, TaskError> {
+        match work {
+            MachineWork::Drive {
+                branch,
+                scope_depth,
+            } => self.drive_step(branch, scope_depth),
+            MachineWork::Deliver {
+                value,
+                branch,
+                scope_depth,
+            } => self.deliver_step(value, branch, scope_depth),
+            MachineWork::Apply {
+                function,
+                arguments,
+                mut branch,
+                scope_depth,
+            } => {
+                branch.effect = apply(&self.eval_context, function, arguments)?;
+                Ok(MachineStep::Continue(MachineWork::Drive {
                     branch,
                     scope_depth,
-                    &self.tags.continuation_state,
-                )? {
-                    Delivery::Continue(next) => branch = next,
-                    Delivery::Complete(value, completed) => {
-                        return Ok(Drive::Complete(value, completed));
-                    }
-                }
-            };
+                }))
+            }
+            MachineWork::Outcome {
+                outcome,
+                scope_depth,
+            } => self.handle_outcome(outcome, scope_depth),
         }
-        loop {
-            let request = self.effect_request(branch.effect.clone())?;
-            match request {
-                Request::Return(value) => {
-                    match deliver(
-                        &self.eval_context,
-                        value,
-                        branch,
-                        scope_depth,
-                        &self.tags.continuation_state,
-                    )? {
-                        Delivery::Continue(next) => branch = next,
-                        Delivery::Complete(value, completed) => {
-                            return Ok(Drive::Complete(value, completed));
-                        }
-                    }
-                }
-                Request::Seq(operation, continuation) => {
-                    branch
-                        .control
-                        .sequence
-                        .push(Continuation::Glam(continuation));
-                    branch.effect = operation;
-                }
-                Request::Alt(left, right) => {
-                    if scope_depth > 0 && !branch.active_fixes.is_empty() {
-                        let inherited_restarts = branch.fix_restarts.clone();
-                        let active = branch
-                            .active_fixes
-                            .first_mut()
-                            .expect("checked nonempty fixpoint stack");
-                        if let Some(choice) = active.choices.get(active.next_choice).copied() {
-                            active.next_choice += 1;
-                            branch.effect = match choice {
-                                FixChoice::Left => left,
-                                FixChoice::Right => right,
-                            };
-                            continue;
-                        }
+    }
 
+    fn drive_step(
+        &mut self,
+        mut branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Result<MachineStep<S>, TaskError> {
+        let request = self.effect_request(branch.effect.clone())?;
+        let work = match request {
+            Request::Return(value) => MachineWork::Deliver {
+                value,
+                branch,
+                scope_depth,
+            },
+            Request::Seq(operation, continuation) => {
+                branch
+                    .control
+                    .sequence
+                    .push(Continuation::Glam(continuation));
+                branch.effect = operation;
+                MachineWork::Drive {
+                    branch,
+                    scope_depth,
+                }
+            }
+            Request::Alt(left, right) => {
+                if scope_depth > 0 && !branch.active_fixes.is_empty() {
+                    let inherited_restarts = branch.fix_restarts.clone();
+                    let active = branch
+                        .active_fixes
+                        .first_mut()
+                        .expect("checked nonempty fixpoint stack");
+                    if let Some(choice) = active.choices.get(active.next_choice).copied() {
+                        active.next_choice += 1;
+                        branch.effect = match choice {
+                            FixChoice::Left => left,
+                            FixChoice::Right => right,
+                        };
+                    } else {
                         let root = active.root.clone();
                         let mut right_choices = active.choices.clone();
                         right_choices.push(FixChoice::Right);
@@ -573,341 +664,751 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             choices: right_choices,
                             inherited_restarts,
                         });
-                        continue;
                     }
-                    return Ok(Drive::Fork(
-                        Box::new(branch.with_effect(left)),
-                        Box::new(branch.with_effect(right)),
-                    ));
-                }
-                Request::Fail => return Ok(branch.into_failure()),
-                Request::Cut(operation) => {
-                    let outer_sequence = std::mem::take(&mut branch.control.sequence);
-                    match self.run_cut(operation, branch, scope_depth + 1)? {
-                        CutResult::Success(value, mut completed) => {
-                            completed.control.sequence = outer_sequence;
-                            match deliver(
-                                &self.eval_context,
-                                value,
-                                completed,
-                                scope_depth,
-                                &self.tags.continuation_state,
-                            )? {
-                                Delivery::Continue(next) => branch = next,
-                                Delivery::Complete(value, completed) => {
-                                    return Ok(Drive::Complete(value, completed));
-                                }
-                            }
-                        }
-                        CutResult::Retry(mut failed) => {
-                            if let Some(restarted) =
-                                self.restart_fixpoint_at_scope(&mut failed, scope_depth)?
-                            {
-                                branch = restarted;
-                                continue;
-                            }
-                            return Ok(Drive::Retry(failed));
-                        }
-                        CutResult::Fail(failed) => return Ok(failed.into_failure()),
-                        CutResult::Cancelled => return Ok(Drive::Cancelled),
-                    }
-                }
-                Request::Get(path) => {
-                    let path = eval::eval_key_path_list(&self.eval_context, &path)
-                        .map_err(task_eval_error)?;
-                    let checkpoint = branch.retry_candidate();
-                    if branch.transaction.is_none() {
-                        let snapshot = self.host.snapshot();
-                        if path_observes_heap(&path) {
-                            branch.observe(checkpoint, snapshot.generation());
-                        }
-                        let (local, _) = split_user_state(branch.state);
-                        self.local_state = local;
-                        branch.state = self.visible_state(snapshot.heap());
-                    } else if path_observes_heap(&path) {
-                        branch.observe(checkpoint, 0);
-                    }
-                    let value = get_state_path(&self.eval_context, &branch.state, &path)?;
-                    deliver_value!(value);
-                }
-                Request::Set(path, value) => {
-                    if branch.transaction.is_some() {
-                        branch.state =
-                            set_state_path(&self.eval_context, branch.state, &path, value)?;
-                        deliver_value!(unit_value());
-                        continue;
-                    }
-                    loop {
-                        let snapshot = self.host.snapshot();
-                        let (local, _) = split_user_state(branch.state.clone());
-                        self.local_state = local;
-                        let state = set_state_path(
-                            &self.eval_context,
-                            self.visible_state(snapshot.heap()),
-                            &path,
-                            value.clone(),
-                        )?;
-                        let (local, heap) = split_user_state(state);
-                        let commit = TaskCommit::new(
-                            snapshot.generation(),
-                            PublicValue::from_core(heap.clone()),
-                            S::Journal::default(),
-                        );
-                        match self.host.commit(commit) {
-                            CommitResult::Committed => {
-                                self.local_state = local;
-                                branch.state = self.visible_state(&PublicValue::from_core(heap));
-                                branch.retry = None;
-                                break;
-                            }
-                            CommitResult::Conflict => {}
-                            CommitResult::Closed => return Ok(Drive::Cancelled),
-                        }
-                    }
-                    deliver_value!(unit_value());
-                }
-                Request::Reset(key, operation) => {
-                    let key = value_key(&self.eval_context, key)?;
-                    let continuation = self.capture_continuation(CapturedContinuation {
-                        sequence: std::mem::take(&mut branch.control.sequence),
-                        delimiters: Vec::new(),
-                        reset_frames: Vec::new(),
-                    })?;
-                    let frame = ResetFrame {
-                        key,
-                        continuation,
+                    MachineWork::Drive {
+                        branch,
                         scope_depth,
-                        order: self.allocate_control_order()?,
-                    };
-                    let mut reset_frames = reset_frames(
-                        &self.eval_context,
-                        &branch.state,
-                        &self.tags.continuation_state,
-                    )?;
-                    reset_frames.push(frame);
-                    branch.state = with_reset_frames(
-                        &self.eval_context,
-                        branch.state,
-                        &self.tags.continuation_state,
-                        &reset_frames,
-                    )?;
-                    branch.effect = operation;
-                }
-                Request::Shift(key, function) => {
-                    let key = value_key(&self.eval_context, key)?;
-                    let mut reset_frames = reset_frames(
-                        &self.eval_context,
-                        &branch.state,
-                        &self.tags.continuation_state,
-                    )?;
-                    let Some(index) = reset_frames.iter().rposition(|frame| frame.key == key)
-                    else {
-                        return Err(TaskError::new("`.shift` key is not in reset scope"));
-                    };
-                    let inner_reset_frames = reset_frames.split_off(index + 1);
-                    let target = reset_frames.pop().expect("matching reset frame must exist");
-                    let first_inner_delimiter = branch
-                        .control
-                        .delimiters
-                        .iter()
-                        .position(|delimiter| delimiter.order() > target.order)
-                        .unwrap_or(branch.control.delimiters.len());
-                    let inner_delimiters =
-                        branch.control.delimiters.split_off(first_inner_delimiter);
-                    branch.state = with_reset_frames(
-                        &self.eval_context,
-                        branch.state,
-                        &self.tags.continuation_state,
-                        &reset_frames,
-                    )?;
-                    let continuation = self.capture_continuation(CapturedContinuation {
-                        sequence: std::mem::take(&mut branch.control.sequence),
-                        delimiters: inner_delimiters,
-                        reset_frames: inner_reset_frames,
-                    })?;
-                    branch
-                        .control
-                        .sequence
-                        .push(Continuation::Glam(target.continuation));
-                    branch.effect = apply(&self.eval_context, function, vec![continuation])?;
-                }
-                Request::Resume(task_id, id, value) => {
-                    if task_id != self.id {
-                        return Err(TaskError::new(
-                            "captured continuation belongs to another reflection task",
-                        ));
                     }
-                    let mut captured = self
-                        .continuations
-                        .get(&id)
-                        .cloned()
-                        .ok_or_else(|| TaskError::new("unknown reflection continuation"))?;
-                    let caller_sequence = std::mem::take(&mut branch.control.sequence);
-                    branch.control.delimiters.push(Delimiter::Resume {
-                        outer_sequence: caller_sequence,
+                } else {
+                    MachineWork::Outcome {
+                        outcome: BranchOutcome::Fork(
+                            Box::new(branch.with_effect(left)),
+                            Box::new(branch.with_effect(right)),
+                        ),
                         scope_depth,
-                        order: self.allocate_control_order()?,
-                    });
-                    self.install_captured_control(&mut branch, &mut captured, scope_depth)?;
-                    branch.control.sequence = captured.sequence;
-                    deliver_value!(value);
-                }
-                Request::Fix(function) => {
-                    let root = Arc::new(FixRoot {
-                        function,
-                        entry: branch,
-                        scope_depth,
-                    });
-                    branch = self.start_fixpoint(root, Vec::new())?;
-                }
-                Request::Specialized(request, arguments) => {
-                    let checkpoint = branch.retry_candidate();
-                    let mut activity = RequestActivity::default();
-                    let result = self.specialization.handle_request(
-                        request,
-                        arguments,
-                        &mut RequestContext {
-                            eval_context: &self.eval_context,
-                            host: self.host.as_ref(),
-                            transaction: branch.transaction.as_mut(),
-                            activity: &mut activity,
-                        },
-                    )?;
-                    if let Some(generation) = activity.observed_generation {
-                        branch.observe(checkpoint, generation);
-                    }
-                    if activity.committed {
-                        branch.retry = None;
-                    }
-                    match result {
-                        RequestResult::Return(value) => deliver_value!(value.into_core()),
-                        RequestResult::ReturnUnit => deliver_value!(unit_value()),
-                        RequestResult::Fail => return Ok(branch.into_failure()),
-                        RequestResult::Cancelled => return Ok(Drive::Cancelled),
                     }
                 }
             }
-        }
+            Request::Fail => MachineWork::Outcome {
+                outcome: branch.into_failure(),
+                scope_depth,
+            },
+            Request::Cut(operation) => {
+                return Ok(MachineStep::Continue(self.enter_cut(
+                    operation,
+                    branch,
+                    scope_depth,
+                )));
+            }
+            Request::Get(path) => {
+                let path =
+                    eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
+                let checkpoint = branch.retry_candidate();
+                let local_update;
+                if branch.transaction.is_none() {
+                    let snapshot = self.host.snapshot();
+                    if path_observes_heap(&path) {
+                        branch.observe(checkpoint, snapshot.generation());
+                    }
+                    let local = split_user_state(branch.state.clone()).0;
+                    branch.state = visible_state_from(&local, snapshot.heap());
+                    local_update = Some(local);
+                } else {
+                    local_update = None;
+                    if path_observes_heap(&path) {
+                        branch.observe(checkpoint, 0);
+                    }
+                }
+                let value = get_state_path(&self.eval_context, &branch.state, &path)?;
+                if let Some(local) = local_update {
+                    self.local_state = local;
+                }
+                MachineWork::Deliver {
+                    value,
+                    branch,
+                    scope_depth,
+                }
+            }
+            Request::Set(path, value) => {
+                if branch.transaction.is_some() {
+                    branch.state = set_state_path(&self.eval_context, branch.state, &path, value)?;
+                    MachineWork::Deliver {
+                        value: unit_value(),
+                        branch,
+                        scope_depth,
+                    }
+                } else {
+                    let snapshot = self.host.snapshot();
+                    let (prior_local, _) = split_user_state(branch.state.clone());
+                    let state = set_state_path(
+                        &self.eval_context,
+                        visible_state_from(&prior_local, snapshot.heap()),
+                        &path,
+                        value,
+                    )?;
+                    let (local, heap) = split_user_state(state);
+                    let commit = TaskCommit::new(
+                        snapshot.generation(),
+                        PublicValue::from_core(heap.clone()),
+                        S::Journal::default(),
+                    );
+                    match self.host.commit(commit) {
+                        CommitResult::Committed => {
+                            self.local_state = local;
+                            branch.state = self.visible_state(&PublicValue::from_core(heap));
+                            branch.retry = None;
+                            MachineWork::Deliver {
+                                value: unit_value(),
+                                branch,
+                                scope_depth,
+                            }
+                        }
+                        CommitResult::Conflict => MachineWork::Drive {
+                            branch,
+                            scope_depth,
+                        },
+                        CommitResult::Closed => MachineWork::Outcome {
+                            outcome: BranchOutcome::Cancelled,
+                            scope_depth,
+                        },
+                    }
+                }
+            }
+            Request::Reset(key, operation) => {
+                let key = value_key(&self.eval_context, key)?;
+                let mut frames = reset_frames(
+                    &self.eval_context,
+                    &branch.state,
+                    &self.tags.continuation_state,
+                )?;
+                let order = self.allocate_control_order()?;
+                let continuation = self.capture_continuation(CapturedContinuation {
+                    sequence: std::mem::take(&mut branch.control.sequence),
+                    delimiters: Vec::new(),
+                    reset_frames: Vec::new(),
+                })?;
+                frames.push(ResetFrame {
+                    key,
+                    continuation,
+                    scope_depth,
+                    order,
+                });
+                branch.state =
+                    replace_reset_frames(branch.state, &self.tags.continuation_state, &frames);
+                branch.effect = operation;
+                MachineWork::Drive {
+                    branch,
+                    scope_depth,
+                }
+            }
+            Request::Shift(key, function) => {
+                let key = value_key(&self.eval_context, key)?;
+                let mut frames = reset_frames(
+                    &self.eval_context,
+                    &branch.state,
+                    &self.tags.continuation_state,
+                )?;
+                let Some(index) = frames.iter().rposition(|frame| frame.key == key) else {
+                    return Err(TaskError::new("`.shift` key is not in reset scope"));
+                };
+                let inner_reset_frames = frames.split_off(index + 1);
+                let target = frames.pop().expect("matching reset frame must exist");
+                let first_inner_delimiter = branch
+                    .control
+                    .delimiters
+                    .iter()
+                    .position(|delimiter| delimiter.order() > target.order)
+                    .unwrap_or(branch.control.delimiters.len());
+                let inner_delimiters = branch.control.delimiters.split_off(first_inner_delimiter);
+                let continuation = self.capture_continuation(CapturedContinuation {
+                    sequence: std::mem::take(&mut branch.control.sequence),
+                    delimiters: inner_delimiters,
+                    reset_frames: inner_reset_frames,
+                })?;
+                branch.state =
+                    replace_reset_frames(branch.state, &self.tags.continuation_state, &frames);
+                branch
+                    .control
+                    .sequence
+                    .push(Continuation::Glam(target.continuation));
+                MachineWork::Apply {
+                    function,
+                    arguments: vec![continuation],
+                    branch,
+                    scope_depth,
+                }
+            }
+            Request::Resume(task_id, id, value) => {
+                if task_id != self.id {
+                    return Err(TaskError::new(
+                        "captured continuation belongs to another reflection task",
+                    ));
+                }
+                let captured = self
+                    .continuations
+                    .get(&id)
+                    .cloned()
+                    .ok_or_else(|| TaskError::new("unknown reflection continuation"))?;
+                let order = self.allocate_control_order()?;
+                let caller_sequence = std::mem::take(&mut branch.control.sequence);
+                branch.control.delimiters.push(Delimiter::Resume {
+                    outer_sequence: caller_sequence,
+                    scope_depth,
+                    order,
+                });
+                self.install_captured_control(&mut branch, &captured, scope_depth)?;
+                branch.control.sequence = captured.sequence.clone();
+                MachineWork::Deliver {
+                    value,
+                    branch,
+                    scope_depth,
+                }
+            }
+            Request::Fix(function) => {
+                let root = Arc::new(FixRoot {
+                    function,
+                    entry: branch,
+                    scope_depth,
+                });
+                self.start_fixpoint(root, Vec::new())?
+            }
+            Request::Specialized(request, arguments) => {
+                let checkpoint = branch.retry_candidate();
+                let mut activity = RequestActivity::default();
+                let result = self.specialization.handle_request(
+                    request,
+                    arguments,
+                    &mut RequestContext {
+                        eval_context: &self.eval_context,
+                        host: self.host.as_ref(),
+                        transaction: branch.transaction.as_mut(),
+                        activity: &mut activity,
+                    },
+                )?;
+                if let Some(generation) = activity.observed_generation {
+                    branch.observe(checkpoint, generation);
+                }
+                if activity.committed {
+                    branch.retry = None;
+                }
+                match result {
+                    RequestResult::Return(value) => MachineWork::Deliver {
+                        value: value.into_core(),
+                        branch,
+                        scope_depth,
+                    },
+                    RequestResult::ReturnUnit => MachineWork::Deliver {
+                        value: unit_value(),
+                        branch,
+                        scope_depth,
+                    },
+                    RequestResult::Fail => MachineWork::Outcome {
+                        outcome: branch.into_failure(),
+                        scope_depth,
+                    },
+                    RequestResult::Cancelled => MachineWork::Outcome {
+                        outcome: BranchOutcome::Cancelled,
+                        scope_depth,
+                    },
+                }
+            }
+        };
+        Ok(MachineStep::Continue(work))
     }
 
-    fn run_cut(
+    fn deliver_step(
+        &mut self,
+        value: Value,
+        mut branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Result<MachineStep<S>, TaskError> {
+        if let Some(continuation) = branch.control.sequence.last().cloned() {
+            return match continuation {
+                Continuation::Glam(function) => {
+                    let function = evaluate(&self.eval_context, function)?;
+                    branch.control.sequence.pop();
+                    Ok(MachineStep::Continue(MachineWork::Apply {
+                        function,
+                        arguments: vec![value],
+                        branch,
+                        scope_depth,
+                    }))
+                }
+                Continuation::Fix(handle) => {
+                    let active = branch.active_fixes.last().ok_or_else(|| {
+                        TaskError::new("reflection fixpoint lost its active branch")
+                    })?;
+                    if active.handle != handle {
+                        return Err(TaskError::new(
+                            "reflection fixpoint control became unbalanced",
+                        ));
+                    }
+                    if active.next_choice != active.choices.len() {
+                        return Err(TaskError::new("reflection fixpoint choice replay diverged"));
+                    }
+                    handle
+                        .set(value.clone())
+                        .map_err(|_| TaskError::new("reflection fixpoint initialized twice"))?;
+                    branch.control.sequence.pop();
+                    branch.active_fixes.pop();
+                    Ok(MachineStep::Continue(MachineWork::Deliver {
+                        value,
+                        branch,
+                        scope_depth,
+                    }))
+                }
+            };
+        }
+
+        let mut resets = reset_frames(
+            &self.eval_context,
+            &branch.state,
+            &self.tags.continuation_state,
+        )?;
+        let reset_order = resets
+            .last()
+            .filter(|frame| frame.scope_depth >= scope_depth)
+            .map(|frame| frame.order);
+        let delimiter_order = branch
+            .control
+            .delimiters
+            .last()
+            .filter(|delimiter| delimiter.scope_depth() >= scope_depth)
+            .map(Delimiter::order);
+        if reset_order > delimiter_order {
+            let frame = resets.pop().expect("reset order came from a frame");
+            branch.state =
+                replace_reset_frames(branch.state, &self.tags.continuation_state, &resets);
+            return Ok(MachineStep::Continue(MachineWork::Apply {
+                function: frame.continuation,
+                arguments: vec![value],
+                branch,
+                scope_depth,
+            }));
+        }
+        let Some(_) = delimiter_order else {
+            return Ok(MachineStep::Continue(MachineWork::Outcome {
+                outcome: BranchOutcome::Complete(value, branch),
+                scope_depth,
+            }));
+        };
+        match branch
+            .control
+            .delimiters
+            .last()
+            .cloned()
+            .expect("delimiter order came from a delimiter")
+        {
+            Delimiter::Resume { outer_sequence, .. } => {
+                branch.control.delimiters.pop();
+                branch.control.sequence = outer_sequence;
+            }
+            Delimiter::Restore {
+                outer, reset_stack, ..
+            } => {
+                let state = with_reset_stack_value(
+                    &self.eval_context,
+                    branch.state.clone(),
+                    &self.tags.continuation_state,
+                    reset_stack,
+                )?;
+                branch.control.delimiters.pop();
+                branch.state = state;
+                branch.control = *outer;
+            }
+        }
+        Ok(MachineStep::Continue(MachineWork::Deliver {
+            value,
+            branch,
+            scope_depth,
+        }))
+    }
+
+    fn enter_cut(
         &mut self,
         operation: Value,
         mut outer: Branch<S>,
+        parent_scope_depth: usize,
+    ) -> MachineWork<S> {
+        let outer_sequence = std::mem::take(&mut outer.control.sequence);
+        let mut frame = CutFrame {
+            operation,
+            outer,
+            outer_sequence,
+            parent_scope_depth,
+            scope_depth: parent_scope_depth + 1,
+            owns_transaction: false,
+            alternatives: Vec::new(),
+            retry: None,
+            observed_failure: false,
+        };
+        frame.owns_transaction = frame.outer.transaction.is_none();
+        self.begin_cut_attempt(&mut frame);
+        let work = frame.next_alternative();
+        self.execution.cuts.push(frame);
+        work
+    }
+
+    fn begin_cut_attempt(&mut self, frame: &mut CutFrame<S>) {
+        frame.alternatives.clear();
+        frame.retry = None;
+        frame.observed_failure = false;
+        if frame.owns_transaction {
+            let snapshot = self.host.snapshot();
+            self.local_state = split_user_state(frame.outer.state.clone()).0;
+            frame.outer.state = self.visible_state(snapshot.heap());
+            frame.outer.transaction = Some(Transaction::new(snapshot));
+        }
+        let mut initial = frame.outer.clone().with_effect(frame.operation.clone());
+        initial.control.sequence.clear();
+        frame.alternatives.push(initial);
+    }
+
+    fn handle_outcome(
+        &mut self,
+        outcome: BranchOutcome<S>,
         scope_depth: usize,
-    ) -> Result<CutResult<S>, TaskError> {
-        let owns_transaction = outer.transaction.is_none();
-        loop {
-            let snapshot = owns_transaction.then(|| self.host.snapshot());
-            if let Some(snapshot) = &snapshot {
-                self.local_state = split_user_state(outer.state).0;
-                outer.state = self.visible_state(snapshot.heap());
-                outer.transaction = Some(Transaction::new(snapshot.clone()));
-            }
-            let mut initial = outer.clone().with_effect(operation.clone());
-            initial.control.sequence.clear();
-            let mut alternatives = vec![initial];
-            let mut retry = None;
-            let mut observed_failure = false;
+    ) -> Result<MachineStep<S>, TaskError> {
+        if self.execution.cuts.is_empty() {
+            return self.handle_top_level_outcome(outcome, scope_depth);
+        }
+        let expected_scope = self
+            .execution
+            .cuts
+            .last()
+            .expect("checked nonempty cut stack")
+            .scope_depth;
+        if scope_depth != expected_scope {
+            return Err(TaskError::new(
+                "reflection cut stack became unbalanced during polling",
+            ));
+        }
 
-            while let Some(branch) = alternatives.pop() {
-                match self.drive(branch, scope_depth)? {
-                    Drive::Complete(value, completed) => {
-                        if !owns_transaction {
-                            return Ok(CutResult::Success(value, completed));
+        match outcome {
+            BranchOutcome::Complete(value, mut completed) => {
+                let owns_transaction = self
+                    .execution
+                    .cuts
+                    .last()
+                    .expect("checked nonempty cut stack")
+                    .owns_transaction;
+                if owns_transaction {
+                    let (local_state, heap) = split_user_state(completed.state.clone());
+                    let transaction = completed
+                        .transaction
+                        .as_ref()
+                        .expect("outer cut must own a transaction");
+                    let commit = TaskCommit::new(
+                        transaction.snapshot.generation(),
+                        PublicValue::from_core(heap.clone()),
+                        transaction.journal.clone(),
+                    );
+                    match self.host.commit(commit) {
+                        CommitResult::Committed => {
+                            self.local_state = local_state;
+                            completed.transaction = None;
+                            completed.state = self.visible_state(&PublicValue::from_core(heap));
                         }
-                        let (local_state, heap) = split_user_state(completed.state.clone());
-                        let transaction = completed
-                            .transaction
-                            .as_ref()
-                            .expect("outer cut must own a transaction");
-                        let commit = TaskCommit::new(
-                            transaction.snapshot.generation(),
-                            PublicValue::from_core(heap),
-                            transaction.journal.clone(),
-                        );
-                        match self.host.commit(commit) {
-                            CommitResult::Committed => {
-                                self.local_state = local_state;
-                                let mut completed = completed;
-                                completed.transaction = None;
-                                completed.state = self.visible_state(&PublicValue::from_core(
-                                    split_user_state(completed.state).1,
-                                ));
-                                return Ok(CutResult::Success(value, completed));
-                            }
-                            CommitResult::Conflict => {
-                                observed_failure = true;
-                                retry = Some(completed);
-                                break;
-                            }
-                            CommitResult::Closed => return Ok(CutResult::Cancelled),
+                        CommitResult::Conflict => {
+                            let frame = self
+                                .execution
+                                .cuts
+                                .last_mut()
+                                .expect("checked nonempty cut stack");
+                            frame.observed_failure = true;
+                            frame.retry = Some(completed);
+                            return self.finish_cut_attempt();
                         }
-                    }
-                    Drive::Fork(left, right) => {
-                        alternatives.push(*right);
-                        alternatives.push(*left);
-                    }
-                    Drive::Fail(mut failed) | Drive::Retry(mut failed) => {
-                        if let Some(restarted) =
-                            self.restart_fixpoint_at_scope(&mut failed, scope_depth)?
-                        {
-                            alternatives.push(restarted);
-                        } else {
-                            observed_failure |= failed
-                                .transaction
-                                .as_ref()
-                                .is_some_and(|transaction| transaction.observed);
-                            retry = Some(failed);
+                        CommitResult::Closed => {
+                            let parent_scope = self
+                                .execution
+                                .cuts
+                                .pop()
+                                .expect("checked nonempty cut stack")
+                                .parent_scope_depth;
+                            return Ok(MachineStep::Continue(MachineWork::Outcome {
+                                outcome: BranchOutcome::Cancelled,
+                                scope_depth: parent_scope,
+                            }));
                         }
                     }
-                    Drive::Cancelled => return Ok(CutResult::Cancelled),
                 }
+                let frame = self
+                    .execution
+                    .cuts
+                    .pop()
+                    .expect("checked nonempty cut stack");
+                completed.control.sequence = frame.outer_sequence;
+                Ok(MachineStep::Continue(MachineWork::Deliver {
+                    value,
+                    branch: completed,
+                    scope_depth: frame.parent_scope_depth,
+                }))
             }
-
-            let mut failed = retry.unwrap_or_else(|| outer.clone());
-            if observed_failure && let Some(transaction) = failed.transaction.as_mut() {
-                transaction.observed = true;
+            BranchOutcome::Fork(left, right) => {
+                let frame = self
+                    .execution
+                    .cuts
+                    .last_mut()
+                    .expect("checked nonempty cut stack");
+                frame.alternatives.push(*right);
+                frame.alternatives.push(*left);
+                Ok(MachineStep::Continue(frame.next_alternative()))
             }
-            if failed
-                .fix_restarts
-                .last()
-                .is_some_and(|restart| restart.root.scope_depth < scope_depth)
-            {
-                return Ok(CutResult::Retry(failed));
+            BranchOutcome::Fail(mut failed) | BranchOutcome::Retry(mut failed) => {
+                if let Some(restarted) = self.restart_fixpoint_at_scope(&mut failed, scope_depth)? {
+                    return Ok(MachineStep::Continue(restarted));
+                }
+                let frame = self
+                    .execution
+                    .cuts
+                    .last_mut()
+                    .expect("checked nonempty cut stack");
+                frame.observed_failure |= failed
+                    .transaction
+                    .as_ref()
+                    .is_some_and(|transaction| transaction.observed);
+                frame.retry = Some(failed);
+                if !frame.alternatives.is_empty() {
+                    return Ok(MachineStep::Continue(frame.next_alternative()));
+                }
+                self.finish_cut_attempt()
             }
-            if !owns_transaction {
-                return Ok(if failed.is_retryable() {
-                    CutResult::Retry(failed)
-                } else {
-                    CutResult::Fail(failed)
-                });
+            BranchOutcome::Cancelled => {
+                let parent_scope = self
+                    .execution
+                    .cuts
+                    .pop()
+                    .expect("checked nonempty cut stack")
+                    .parent_scope_depth;
+                Ok(MachineStep::Continue(MachineWork::Outcome {
+                    outcome: BranchOutcome::Cancelled,
+                    scope_depth: parent_scope,
+                }))
             }
-            if !observed_failure {
-                failed.transaction = None;
-                return Ok(if failed.is_retryable() {
-                    CutResult::Retry(failed)
-                } else {
-                    CutResult::Fail(failed)
-                });
-            }
-            let generation = failed
-                .transaction
-                .as_ref()
-                .map(|transaction| transaction.snapshot.generation())
-                .unwrap_or_else(|| self.host.snapshot().generation());
-            if !self.host.wait_for_change(generation) {
-                return Ok(CutResult::Cancelled);
-            }
-            outer.transaction = None;
         }
     }
 
-    fn visible_state(&self, heap: &PublicValue) -> Value {
-        let Value::Dict(local) = &self.local_state else {
-            return Value::error("reflection user state must remain a dictionary");
+    fn finish_cut_attempt(&mut self) -> Result<MachineStep<S>, TaskError> {
+        let mut frame = self
+            .execution
+            .cuts
+            .pop()
+            .expect("cut attempt requires a cut frame");
+        let mut failed = frame.retry.take().unwrap_or_else(|| frame.outer.clone());
+        if frame.observed_failure
+            && let Some(transaction) = failed.transaction.as_mut()
+        {
+            transaction.observed = true;
+        }
+        if failed
+            .fix_restarts
+            .last()
+            .is_some_and(|restart| restart.root.scope_depth < frame.scope_depth)
+        {
+            return Ok(MachineStep::Continue(MachineWork::Outcome {
+                outcome: BranchOutcome::Retry(failed),
+                scope_depth: frame.parent_scope_depth,
+            }));
+        }
+        if !frame.owns_transaction {
+            return Ok(MachineStep::Continue(MachineWork::Outcome {
+                outcome: failed.into_failure(),
+                scope_depth: frame.parent_scope_depth,
+            }));
+        }
+        if !frame.observed_failure {
+            failed.transaction = None;
+            return Ok(MachineStep::Continue(MachineWork::Outcome {
+                outcome: failed.into_failure(),
+                scope_depth: frame.parent_scope_depth,
+            }));
+        }
+
+        let generation = failed
+            .transaction
+            .as_ref()
+            .map(|transaction| transaction.snapshot.generation())
+            .unwrap_or_else(|| self.host.snapshot().generation());
+        frame.retry = Some(failed);
+        let index = self.execution.cuts.len();
+        self.execution.cuts.push(frame);
+        Ok(MachineStep::Blocked(BlockedExecution {
+            lazy: None,
+            observed_generation: Some(generation),
+            wake: Some(WakeAction::RestartCut(index)),
+        }))
+    }
+
+    fn handle_top_level_outcome(
+        &mut self,
+        outcome: BranchOutcome<S>,
+        scope_depth: usize,
+    ) -> Result<MachineStep<S>, TaskError> {
+        match outcome {
+            BranchOutcome::Complete(value, completed) => {
+                self.local_state = split_user_state(completed.state).0;
+                Ok(MachineStep::Terminal(TaskTerminal::Complete(
+                    PublicValue::from_core(value),
+                )))
+            }
+            BranchOutcome::Fail(_) => Ok(MachineStep::Terminal(TaskTerminal::Failed(
+                TaskError::new("reflection task failed permanently"),
+            ))),
+            BranchOutcome::Fork(_, _) => Ok(MachineStep::Terminal(TaskTerminal::Failed(
+                TaskError::new("`.alt` requires an enclosing `.cut`"),
+            ))),
+            BranchOutcome::Retry(mut failed) => {
+                if let Some(restarted) = self.restart_fixpoint_at_scope(&mut failed, scope_depth)? {
+                    return Ok(MachineStep::Continue(restarted));
+                }
+                let checkpoint = failed.retry.take().ok_or_else(|| {
+                    TaskError::new("retryable reflection failure lost its observation")
+                })?;
+                Ok(MachineStep::Blocked(BlockedExecution {
+                    lazy: None,
+                    observed_generation: Some(checkpoint.generation),
+                    wake: Some(WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
+                        branch: *checkpoint.branch,
+                        scope_depth,
+                    }))),
+                }))
+            }
+            BranchOutcome::Cancelled => Ok(MachineStep::Terminal(TaskTerminal::Cancelled)),
+        }
+    }
+
+    fn lazy_block(&self, wait: EvaluationWaitToken) -> BlockedExecution<S> {
+        let (observed_generation, wake) = self.observation_wake();
+        BlockedExecution {
+            lazy: Some(wait),
+            observed_generation,
+            wake,
+        }
+    }
+
+    fn observation_wake(&self) -> (Option<u64>, Option<WakeAction<S>>) {
+        if let Some(index) = self
+            .execution
+            .cuts
+            .iter()
+            .rposition(|frame| frame.owns_transaction)
+        {
+            let frame_observed = self.execution.cuts[index..]
+                .iter()
+                .any(|frame| frame.observed_failure);
+            let branch_observed = self
+                .execution
+                .work
+                .branch()
+                .and_then(|branch| branch.transaction.as_ref())
+                .is_some_and(|transaction| transaction.observed);
+            if frame_observed || branch_observed {
+                let generation = self.execution.cuts[index]
+                    .outer
+                    .transaction
+                    .as_ref()
+                    .map(|transaction| transaction.snapshot.generation());
+                if let Some(generation) = generation {
+                    return (Some(generation), Some(WakeAction::RestartCut(index)));
+                }
+            }
+        }
+        let Some(branch) = self.execution.work.branch() else {
+            return (None, None);
         };
-        Value::Dict(local.insert((*keys::HEAP).clone(), heap.as_core().clone()))
+        let Some(checkpoint) = &branch.retry else {
+            return (None, None);
+        };
+        (
+            Some(checkpoint.generation),
+            Some(WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
+                branch: (*checkpoint.branch).clone(),
+                scope_depth: self.execution.work.scope_depth(),
+            }))),
+        )
+    }
+
+    fn poll_blocked(&mut self) -> Option<EffectTaskPoll> {
+        let blocked = self.blocked.as_ref()?;
+        if let Some(generation) = blocked.observed_generation
+            && self.host.snapshot().generation() != generation
+        {
+            let wake = self.blocked.take().and_then(|blocked| blocked.wake);
+            if let Some(wake) = wake {
+                self.apply_wake(wake);
+            }
+            return None;
+        }
+        let Some(wait) = blocked.lazy.clone() else {
+            return Some(self.blocked_poll());
+        };
+        match self.eval_context.poll_wait(&wait) {
+            EvaluationTaskPoll::Pending(_) => Some(self.blocked_poll()),
+            EvaluationTaskPoll::Complete => {
+                self.blocked = None;
+                None
+            }
+            EvaluationTaskPoll::Failed(error) => {
+                self.finish(TaskTerminal::Failed(TaskError::new(error)));
+                Some(self.terminal.as_ref().expect("terminal set above").poll())
+            }
+            EvaluationTaskPoll::Cancelled => {
+                self.finish(TaskTerminal::Cancelled);
+                Some(self.terminal.as_ref().expect("terminal set above").poll())
+            }
+            EvaluationTaskPoll::ForeignSession => {
+                self.finish(TaskTerminal::Failed(TaskError::new(
+                    "lazy dependency belongs to another evaluation session",
+                )));
+                Some(self.terminal.as_ref().expect("terminal set above").poll())
+            }
+        }
+    }
+
+    fn blocked_poll(&self) -> EffectTaskPoll {
+        let blocked = self
+            .blocked
+            .as_ref()
+            .expect("blocked poll requires blocked state");
+        EffectTaskPoll::Blocked(TaskBlock {
+            lazy: blocked.lazy.clone(),
+            observed_generation: blocked.observed_generation,
+        })
+    }
+
+    fn apply_wake(&mut self, wake: WakeAction<S>) {
+        match wake {
+            WakeAction::ReplaceWork(work) => self.execution.work = *work,
+            WakeAction::RestartCut(index) => self.restart_cut(index),
+        }
+    }
+
+    fn restart_cut(&mut self, index: usize) {
+        self.execution.cuts.truncate(index + 1);
+        let mut frame = self
+            .execution
+            .cuts
+            .pop()
+            .expect("blocked cut must remain on the cut stack");
+        frame.outer.transaction = None;
+        self.begin_cut_attempt(&mut frame);
+        let work = frame.next_alternative();
+        self.execution.cuts.push(frame);
+        self.execution.work = work;
+    }
+
+    fn finish(&mut self, terminal: TaskTerminal) {
+        if self.terminal.is_some() {
+            return;
+        }
+        let unfinished_reason: Arc<str> = match &terminal {
+            TaskTerminal::Complete(_) => {
+                Arc::from("reflection task completed without fulfilling its fixpoint")
+            }
+            TaskTerminal::Cancelled => Arc::from("reflection fixpoint producer was cancelled"),
+            TaskTerminal::Failed(error) => {
+                Arc::from(format!("reflection fixpoint producer failed: {error}"))
+            }
+        };
+        self.eval_context
+            .fail_unresolved_promises(unfinished_reason);
+        self.blocked = None;
+        self.terminal = Some(terminal);
+    }
+
+    fn visible_state(&self, heap: &PublicValue) -> Value {
+        visible_state_from(&self.local_state, heap)
     }
 
     fn effect_request(&self, effect: Value) -> Result<Request<S::Request>, TaskError> {
@@ -931,6 +1432,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
             &self.specialized_requests,
         )
     }
+}
+
+fn visible_state_from(local: &Value, heap: &PublicValue) -> Value {
+    let Value::Dict(local) = local else {
+        return Value::error("reflection user state must remain a dictionary");
+    };
+    Value::Dict(local.insert((*keys::HEAP).clone(), heap.as_core().clone()))
 }
 
 #[derive(Clone)]
@@ -990,11 +1498,172 @@ impl<S: TaskSpecialization> Branch<S> {
                 .is_some_and(|transaction| transaction.observed)
     }
 
-    fn into_failure(self) -> Drive<S> {
+    fn into_failure(self) -> BranchOutcome<S> {
         if self.is_retryable() {
-            Drive::Retry(self)
+            BranchOutcome::Retry(self)
         } else {
-            Drive::Fail(self)
+            BranchOutcome::Fail(self)
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TaskExecution<S: TaskSpecialization> {
+    work: MachineWork<S>,
+    cuts: Vec<CutFrame<S>>,
+}
+
+#[derive(Clone)]
+enum MachineWork<S: TaskSpecialization> {
+    Drive {
+        branch: Branch<S>,
+        scope_depth: usize,
+    },
+    Deliver {
+        value: Value,
+        branch: Branch<S>,
+        scope_depth: usize,
+    },
+    Apply {
+        function: Value,
+        arguments: Vec<Value>,
+        branch: Branch<S>,
+        scope_depth: usize,
+    },
+    Outcome {
+        outcome: BranchOutcome<S>,
+        scope_depth: usize,
+    },
+}
+
+impl<S: TaskSpecialization> MachineWork<S> {
+    fn branch(&self) -> Option<&Branch<S>> {
+        match self {
+            Self::Drive { branch, .. }
+            | Self::Deliver { branch, .. }
+            | Self::Apply { branch, .. } => Some(branch),
+            Self::Outcome { outcome, .. } => outcome.branch(),
+        }
+    }
+
+    fn branch_mut(&mut self) -> Option<&mut Branch<S>> {
+        match self {
+            Self::Drive { branch, .. }
+            | Self::Deliver { branch, .. }
+            | Self::Apply { branch, .. } => Some(branch),
+            Self::Outcome { outcome, .. } => outcome.branch_mut(),
+        }
+    }
+
+    fn scope_depth(&self) -> usize {
+        match self {
+            Self::Drive { scope_depth, .. }
+            | Self::Deliver { scope_depth, .. }
+            | Self::Apply { scope_depth, .. }
+            | Self::Outcome { scope_depth, .. } => *scope_depth,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum BranchOutcome<S: TaskSpecialization> {
+    Complete(Value, Branch<S>),
+    Fork(Box<Branch<S>>, Box<Branch<S>>),
+    Fail(Branch<S>),
+    Retry(Branch<S>),
+    Cancelled,
+}
+
+impl<S: TaskSpecialization> BranchOutcome<S> {
+    fn branch(&self) -> Option<&Branch<S>> {
+        match self {
+            Self::Complete(_, branch) | Self::Fail(branch) | Self::Retry(branch) => Some(branch),
+            Self::Fork(left, _) => Some(left),
+            Self::Cancelled => None,
+        }
+    }
+
+    fn branch_mut(&mut self) -> Option<&mut Branch<S>> {
+        match self {
+            Self::Complete(_, branch) | Self::Fail(branch) | Self::Retry(branch) => Some(branch),
+            Self::Fork(left, _) => Some(left),
+            Self::Cancelled => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CutFrame<S: TaskSpecialization> {
+    operation: Value,
+    outer: Branch<S>,
+    outer_sequence: Vec<Continuation>,
+    parent_scope_depth: usize,
+    scope_depth: usize,
+    owns_transaction: bool,
+    alternatives: Vec<Branch<S>>,
+    retry: Option<Branch<S>>,
+    observed_failure: bool,
+}
+
+impl<S: TaskSpecialization> CutFrame<S> {
+    fn next_alternative(&mut self) -> MachineWork<S> {
+        MachineWork::Drive {
+            branch: self
+                .alternatives
+                .pop()
+                .expect("cut attempt must have another alternative"),
+            scope_depth: self.scope_depth,
+        }
+    }
+}
+
+// This value is short-lived on the Rust stack. Boxing `Continue` would add an
+// allocation to every cooperative machine transition merely to shrink the two
+// uncommon terminal variants.
+#[allow(clippy::large_enum_variant)]
+enum MachineStep<S: TaskSpecialization> {
+    Continue(MachineWork<S>),
+    Blocked(BlockedExecution<S>),
+    Terminal(TaskTerminal),
+}
+
+struct BlockedExecution<S: TaskSpecialization> {
+    lazy: Option<EvaluationWaitToken>,
+    observed_generation: Option<u64>,
+    wake: Option<WakeAction<S>>,
+}
+
+enum WakeAction<S: TaskSpecialization> {
+    ReplaceWork(Box<MachineWork<S>>),
+    RestartCut(usize),
+}
+
+struct TaskBlock {
+    lazy: Option<EvaluationWaitToken>,
+    observed_generation: Option<u64>,
+}
+
+enum EffectTaskPoll {
+    Yielded,
+    Blocked(TaskBlock),
+    Complete(PublicValue),
+    Failed(TaskError),
+    Cancelled,
+}
+
+#[derive(Clone)]
+enum TaskTerminal {
+    Complete(PublicValue),
+    Failed(TaskError),
+    Cancelled,
+}
+
+impl TaskTerminal {
+    fn poll(&self) -> EffectTaskPoll {
+        match self {
+            Self::Complete(value) => EffectTaskPoll::Complete(value.clone()),
+            Self::Failed(error) => EffectTaskPoll::Failed(error.clone()),
+            Self::Cancelled => EffectTaskPoll::Cancelled,
         }
     }
 }
@@ -1201,102 +1870,6 @@ impl<S: TaskSpecialization> TransactionContext<'_, S> {
             self.transaction.snapshot.extra(),
             &mut self.transaction.journal,
         )
-    }
-}
-
-enum Drive<S: TaskSpecialization> {
-    Complete(Value, Branch<S>),
-    Fork(Box<Branch<S>>, Box<Branch<S>>),
-    Fail(Branch<S>),
-    Retry(Branch<S>),
-    Cancelled,
-}
-
-enum CutResult<S: TaskSpecialization> {
-    Success(Value, Branch<S>),
-    Retry(Branch<S>),
-    Fail(Branch<S>),
-    Cancelled,
-}
-
-enum Delivery<S: TaskSpecialization> {
-    Continue(Branch<S>),
-    Complete(Value, Branch<S>),
-}
-
-fn deliver<S: TaskSpecialization>(
-    context: &EvalContext,
-    value: Value,
-    mut branch: Branch<S>,
-    scope_depth: usize,
-    continuation_state: &Key,
-) -> Result<Delivery<S>, TaskError> {
-    loop {
-        if let Some(continuation) = branch.control.sequence.pop() {
-            match continuation {
-                Continuation::Glam(function) => {
-                    branch.effect = apply(context, evaluate(context, function)?, vec![value])?;
-                    return Ok(Delivery::Continue(branch));
-                }
-                Continuation::Fix(handle) => {
-                    let active = branch.active_fixes.pop().ok_or_else(|| {
-                        TaskError::new("reflection fixpoint lost its active branch")
-                    })?;
-                    if active.handle != handle {
-                        return Err(TaskError::new(
-                            "reflection fixpoint control became unbalanced",
-                        ));
-                    }
-                    if active.next_choice != active.choices.len() {
-                        return Err(TaskError::new("reflection fixpoint choice replay diverged"));
-                    }
-                    handle
-                        .set(value.clone())
-                        .map_err(|_| TaskError::new("reflection fixpoint initialized twice"))?;
-                }
-            }
-            continue;
-        }
-
-        let mut resets = reset_frames(context, &branch.state, continuation_state)?;
-        let reset_order = resets
-            .last()
-            .filter(|frame| frame.scope_depth >= scope_depth)
-            .map(|frame| frame.order);
-        let delimiter_order = branch
-            .control
-            .delimiters
-            .last()
-            .filter(|delimiter| delimiter.scope_depth() >= scope_depth)
-            .map(Delimiter::order);
-
-        if reset_order > delimiter_order {
-            let frame = resets.pop().expect("reset order came from a frame");
-            branch.state = with_reset_frames(context, branch.state, continuation_state, &resets)?;
-            branch.effect = apply(context, frame.continuation, vec![value])?;
-            return Ok(Delivery::Continue(branch));
-        }
-
-        let Some(_) = delimiter_order else {
-            return Ok(Delivery::Complete(value, branch));
-        };
-        match branch
-            .control
-            .delimiters
-            .pop()
-            .expect("delimiter order came from a delimiter")
-        {
-            Delimiter::Resume { outer_sequence, .. } => {
-                branch.control.sequence = outer_sequence;
-            }
-            Delimiter::Restore {
-                outer, reset_stack, ..
-            } => {
-                branch.state =
-                    with_reset_stack_value(context, branch.state, continuation_state, reset_stack)?;
-                branch.control = *outer;
-            }
-        }
     }
 }
 
@@ -1531,7 +2104,10 @@ fn evaluate(context: &EvalContext, value: Value) -> Result<Value, TaskError> {
 }
 
 fn task_eval_error(error: eval::EvalError) -> TaskError {
-    TaskError::new(error.to_string())
+    match error.blocked_on() {
+        Some(wait) => TaskError::blocked(wait.0),
+        None => TaskError::new(error.to_string()),
+    }
 }
 
 fn value_key(context: &EvalContext, value: Value) -> Result<Key, TaskError> {
@@ -1686,6 +2262,13 @@ fn with_reset_frames(
         continuation_state,
         reset_frames_value(frames),
     )
+}
+
+fn replace_reset_frames(state: Value, continuation_state: &Key, frames: &[ResetFrame]) -> Value {
+    let Value::Dict(state) = state else {
+        return Value::error("reflection user state must remain a dictionary");
+    };
+    Value::Dict(state.insert(continuation_state.clone(), reset_frames_value(frames)))
 }
 
 fn with_reset_stack_value(
@@ -2151,6 +2734,130 @@ mod tests {
             panic!("finite effect should complete")
         };
         (assembler, value)
+    }
+
+    #[test]
+    fn effect_task_poll_yields_and_resumes_with_bounded_fuel() {
+        let (assembler, effect) =
+            compile_effect(".r \"A\" >>= (\\a -> .r \"B\" >>= (\\b -> .r (a ++ b)))");
+        let host = Arc::new(TestHost::default());
+        let mut task = EffectTask::new(effect.as_core().clone(), TestEffects, host).unwrap();
+
+        assert!(matches!(task.poll(1), EffectTaskPoll::Yielded));
+        let value = loop {
+            match task.poll(1) {
+                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::Complete(value) => break value,
+                EffectTaskPoll::Blocked(_) => panic!("finite task unexpectedly blocked"),
+                EffectTaskPoll::Failed(error) => panic!("finite task failed: {error}"),
+                EffectTaskPoll::Cancelled => panic!("finite task was cancelled"),
+            }
+        };
+        assert_eq!(assembler.to_binary(&value).unwrap(), b"AB".as_slice());
+    }
+
+    #[test]
+    fn polling_reports_state_block_without_waiting_in_the_machine() {
+        let (_, effect) = compile_effect(".read_log");
+        let host = Arc::new(TestHost::default());
+        let mut task =
+            EffectTask::new(effect.as_core().clone(), TestEffects, host.clone()).unwrap();
+
+        let EffectTaskPoll::Blocked(blocked) = task.poll(256) else {
+            panic!("empty queue should suspend the task")
+        };
+        assert!(blocked.lazy.is_none());
+        assert!(blocked.observed_generation.is_some());
+        assert_eq!(host.wait_count(), 0);
+
+        host.emit_diagnostic(Diagnostic::new(
+            crate::diagnostic::Severity::Info,
+            "available now",
+        ));
+        assert!(matches!(task.poll(256), EffectTaskPoll::Complete(_)));
+        assert_eq!(host.wait_count(), 0);
+    }
+
+    #[test]
+    fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
+        let (assembler, build_effect) = compile_effect(
+            "\\x -> (.write_stderr \"once\") =>> .cut (.alt (.r x >>= (\\value -> (value == \"done\") =>> .r value)) ((.write_stderr \"wrong\") =>> .r \"wrong\"))",
+        );
+        let gate = PublicValue::from_core(Value::Lazy(LazyValue::from_reflection_gate(
+            Value::Number(Number::from_u64(0)),
+            Value::binary_from_text("done"),
+        )));
+        let effect = assembler.apply(&build_effect, [gate]).unwrap();
+        let host = Arc::new(TestHost::default());
+        let mut task =
+            EffectTask::new(effect.as_core().clone(), TestEffects, host.clone()).unwrap();
+
+        let blocked = match task.poll(512) {
+            EffectTaskPoll::Blocked(blocked) => blocked,
+            EffectTaskPoll::Yielded => panic!("task exhausted an unexpectedly large poll budget"),
+            EffectTaskPoll::Complete(value) => panic!(
+                "annotation dependency completed early with {:?}",
+                assembler.to_binary(&value)
+            ),
+            EffectTaskPoll::Failed(error) => panic!("annotation dependency failed: {error}"),
+            EffectTaskPoll::Cancelled => panic!("annotation dependency was cancelled"),
+        };
+        let wait = blocked
+            .lazy
+            .expect("lazy suspension should retain its wait token");
+        assert_eq!(host.stderr(), [Bytes::from_static(b"once")]);
+
+        task.eval_context.complete_wait(&wait);
+        let value = loop {
+            match task.poll(512) {
+                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::Complete(value) => break value,
+                EffectTaskPoll::Blocked(_) => panic!("completed dependency remained blocked"),
+                EffectTaskPoll::Failed(error) => panic!("resumed task failed: {error}"),
+                EffectTaskPoll::Cancelled => panic!("resumed task was cancelled"),
+            }
+        };
+        assert_eq!(assembler.to_binary(&value).unwrap(), b"done".as_slice());
+        assert_eq!(host.stderr(), [Bytes::from_static(b"once")]);
+    }
+
+    #[test]
+    fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
+        let (assembler, build_effect) = compile_effect(
+            "\\x -> .cut (.alt (.read_log >>= (\\message -> .r message.msg.text)) (.r x >>= (\\value -> (value == \"unused\") =>> .r value)))",
+        );
+        let gate = PublicValue::from_core(Value::Lazy(LazyValue::from_reflection_gate(
+            Value::Number(Number::from_u64(0)),
+            Value::binary_from_text("unused"),
+        )));
+        let effect = assembler.apply(&build_effect, [gate]).unwrap();
+        let host = Arc::new(TestHost::default());
+        let mut task =
+            EffectTask::new(effect.as_core().clone(), TestEffects, host.clone()).unwrap();
+
+        let EffectTaskPoll::Blocked(blocked) = task.poll(512) else {
+            panic!("right alternative should retain the failed queue observation")
+        };
+        assert!(blocked.lazy.is_some());
+        assert!(blocked.observed_generation.is_some());
+
+        host.emit_diagnostic(Diagnostic::new(
+            crate::diagnostic::Severity::Info,
+            "state won",
+        ));
+        let value = loop {
+            match task.poll(512) {
+                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::Complete(value) => break value,
+                EffectTaskPoll::Blocked(_) => panic!("changed observation did not restart cut"),
+                EffectTaskPoll::Failed(error) => panic!("restarted cut failed: {error}"),
+                EffectTaskPoll::Cancelled => panic!("restarted cut was cancelled"),
+            }
+        };
+        assert_eq!(
+            assembler.to_binary(&value).unwrap(),
+            b"state won".as_slice()
+        );
     }
 
     #[test]
