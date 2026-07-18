@@ -82,6 +82,7 @@ where
                     .push(diagnostic);
             } else {
                 context.host().emit_diagnostic(diagnostic);
+                context.committed();
             }
             Ok(RequestResult::ReturnUnit)
         }

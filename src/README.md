@@ -80,6 +80,10 @@ tags to a `TaskSpecialization`. Reusable request families map into a host
 specialization's request enum; the reflection family currently contributes
 `log`, while `main` adds `read_log`, `write_stderr`, and their shared atomic
 snapshot/journal data.
+Failure becomes retryable only after a request observes changeable host state;
+`cut` itself merely scopes alternatives and transactions. Consequently, plain
+`.fail` remains permanent, while an empty `read_log` can suspend and replay from
+the checkpoint immediately before its queue observation.
 Otherwise the Rust terminal logger drains the queue. Normal early termination
 or task failure also returns remaining messages to the fallback logger. Core
 operators only construct requests; reflection state and external I/O are never

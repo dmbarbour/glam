@@ -84,7 +84,9 @@ design in the design documents.
   `log Severity Message`; `main` adds provisional `read_log` and `write_stderr`
   effects. Logged diagnostics join the current transaction or go directly to
   the host outside `cut`. Queue reads inspect only their host snapshot, never
-  journaled writes, and fail immediately when no input is available. A
+  journaled writes, and yield failure when no input is available. That failure
+  retains the queue observation, so the task waits for a host change and retries
+  even outside `cut`. A
   top-level `alt` is rejected; alternatives belong to `cut`. This and
   task-local `.shift` continuations are the conservative
   standard-effect contract: general-purpose utilities must not assume broader
@@ -105,6 +107,12 @@ design in the design documents.
   nested cuts merge upward; an outer success validates and commits. The
   bootstrap is currently serial and uses a coarse generation, but the boundary
   is shaped for finer optimistic observations later.
+- `cut` supplies choice and transaction scope, not retryability. A failed branch
+  may retry only if it observed changeable host state: `.fail` and `.cut .fail`
+  are permanent failures, while an empty `read_log` is retryable. Outside a
+  transaction, the task checkpoints immediately before its first observation;
+  an immediate host commit clears that checkpoint so retry cannot duplicate the
+  committed effect.
 - Each `fix` alternative receives its own pending future. When a chosen result
   later fails, the handler restarts at the fixpoint boundary and replays its
   transactional `alt` choices rather than reusing an initialized future.

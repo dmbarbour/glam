@@ -65,6 +65,12 @@ pub enum RequestResult {
     Cancelled,
 }
 
+#[derive(Default)]
+struct RequestActivity {
+    observed_generation: Option<u64>,
+    committed: bool,
+}
+
 /// Extra effects and transactional resources available to one task kind.
 ///
 /// A specialization is immutable dispatch policy; mutable resources belong to
@@ -466,16 +472,30 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     fn run(&mut self, effect: Value) -> Result<TaskOutcome, TaskError> {
-        let branch = Branch::new(effect, self.visible_state(self.host.snapshot().heap()));
-        match self.drive(branch, 0)? {
-            Drive::Complete(value, completed) => {
-                self.local_state = split_user_state(completed.state).0;
-                Ok(TaskOutcome::Complete(PublicValue::from_core(value)))
+        let mut branch = Branch::new(effect, self.visible_state(self.host.snapshot().heap()));
+        loop {
+            match self.drive(branch, 0)? {
+                Drive::Complete(value, completed) => {
+                    self.local_state = split_user_state(completed.state).0;
+                    return Ok(TaskOutcome::Complete(PublicValue::from_core(value)));
+                }
+                Drive::Fail(_) => {
+                    return Err(TaskError::new("reflection task failed permanently"));
+                }
+                Drive::Fork(_, _) => {
+                    return Err(TaskError::new("`.alt` requires an enclosing `.cut`"));
+                }
+                Drive::Retry(mut failed) => {
+                    let checkpoint = failed.retry.take().ok_or_else(|| {
+                        TaskError::new("retryable reflection failure lost its observation")
+                    })?;
+                    if !self.host.wait_for_change(checkpoint.generation) {
+                        return Ok(TaskOutcome::Cancelled);
+                    }
+                    branch = *checkpoint.branch;
+                }
+                Drive::Cancelled => return Ok(TaskOutcome::Cancelled),
             }
-            Drive::Fail(_) => Err(TaskError::new("reflection task failed outside `.cut`")),
-            Drive::Fork(_, _) => Err(TaskError::new("`.alt` requires an enclosing `.cut`")),
-            Drive::Retry(_) => Err(TaskError::new("retry escaped an enclosing `.cut`")),
-            Drive::Cancelled => Ok(TaskOutcome::Cancelled),
         }
     }
 
@@ -554,7 +574,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         Box::new(branch.with_effect(right)),
                     ));
                 }
-                Request::Fail => return Ok(Drive::Fail(branch)),
+                Request::Fail => return Ok(branch.into_failure()),
                 Request::Cut(operation) => {
                     let outer_sequence = std::mem::take(&mut branch.control.sequence);
                     match self.run_cut(operation, branch, scope_depth + 1)? {
@@ -582,15 +602,24 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             }
                             return Ok(Drive::Retry(failed));
                         }
+                        CutResult::Fail(failed) => return Ok(failed.into_failure()),
                         CutResult::Cancelled => return Ok(Drive::Cancelled),
                     }
                 }
                 Request::Get(path) => {
+                    let path = eval::eval_key_path_list(&self.eval_context, &path)
+                        .map_err(task_eval_error)?;
+                    let checkpoint = branch.retry_candidate();
                     if branch.transaction.is_none() {
                         let snapshot = self.host.snapshot();
+                        if path_observes_heap(&path) {
+                            branch.observe(checkpoint, snapshot.generation());
+                        }
                         let (local, _) = split_user_state(branch.state);
                         self.local_state = local;
                         branch.state = self.visible_state(snapshot.heap());
+                    } else if path_observes_heap(&path) {
+                        branch.observe(checkpoint, 0);
                     }
                     let value = get_state_path(&self.eval_context, &branch.state, &path)?;
                     deliver_value!(value);
@@ -622,6 +651,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             CommitResult::Committed => {
                                 self.local_state = local;
                                 branch.state = self.visible_state(&PublicValue::from_core(heap));
+                                branch.retry = None;
                                 break;
                             }
                             CommitResult::Conflict => {}
@@ -725,6 +755,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     branch = self.start_fixpoint(root, Vec::new())?;
                 }
                 Request::Specialized(request, arguments) => {
+                    let checkpoint = branch.retry_candidate();
+                    let mut activity = RequestActivity::default();
                     let result = self.specialization.handle_request(
                         request,
                         arguments,
@@ -732,12 +764,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             eval_context: &self.eval_context,
                             host: self.host.as_ref(),
                             transaction: branch.transaction.as_mut(),
+                            activity: &mut activity,
                         },
                     )?;
+                    if let Some(generation) = activity.observed_generation {
+                        branch.observe(checkpoint, generation);
+                    }
+                    if activity.committed {
+                        branch.retry = None;
+                    }
                     match result {
                         RequestResult::Return(value) => deliver_value!(value.into_core()),
                         RequestResult::ReturnUnit => deliver_value!(unit_value()),
-                        RequestResult::Fail => return Ok(Drive::Fail(branch)),
+                        RequestResult::Fail => return Ok(branch.into_failure()),
                         RequestResult::Cancelled => return Ok(Drive::Cancelled),
                     }
                 }
@@ -763,6 +802,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             initial.control.sequence.clear();
             let mut alternatives = vec![initial];
             let mut retry = None;
+            let mut observed_failure = false;
 
             while let Some(branch) = alternatives.pop() {
                 match self.drive(branch, scope_depth)? {
@@ -791,6 +831,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 return Ok(CutResult::Success(value, completed));
                             }
                             CommitResult::Conflict => {
+                                observed_failure = true;
                                 retry = Some(completed);
                                 break;
                             }
@@ -807,6 +848,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         {
                             alternatives.push(restarted);
                         } else {
+                            observed_failure |= failed
+                                .transaction
+                                .as_ref()
+                                .is_some_and(|transaction| transaction.observed);
                             retry = Some(failed);
                         }
                     }
@@ -814,7 +859,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             }
 
-            let failed = retry.unwrap_or_else(|| outer.clone());
+            let mut failed = retry.unwrap_or_else(|| outer.clone());
+            if observed_failure && let Some(transaction) = failed.transaction.as_mut() {
+                transaction.observed = true;
+            }
             if failed
                 .fix_restarts
                 .last()
@@ -823,7 +871,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 return Ok(CutResult::Retry(failed));
             }
             if !owns_transaction {
-                return Ok(CutResult::Retry(failed));
+                return Ok(if failed.is_retryable() {
+                    CutResult::Retry(failed)
+                } else {
+                    CutResult::Fail(failed)
+                });
+            }
+            if !observed_failure {
+                failed.transaction = None;
+                return Ok(if failed.is_retryable() {
+                    CutResult::Retry(failed)
+                } else {
+                    CutResult::Fail(failed)
+                });
             }
             let generation = failed
                 .transaction
@@ -875,6 +935,7 @@ struct Branch<S: TaskSpecialization> {
     transaction: Option<Transaction<S>>,
     active_fixes: Vec<ActiveFix<S>>,
     fix_restarts: Vec<FixRestart<S>>,
+    retry: Option<RetryCheckpoint<S>>,
 }
 
 impl<S: TaskSpecialization> Branch<S> {
@@ -886,6 +947,7 @@ impl<S: TaskSpecialization> Branch<S> {
             transaction: None,
             active_fixes: Vec::new(),
             fix_restarts: Vec::new(),
+            retry: None,
         }
     }
 
@@ -894,6 +956,47 @@ impl<S: TaskSpecialization> Branch<S> {
         branch.effect = effect;
         branch
     }
+
+    fn retry_candidate(&self) -> Option<Box<Self>> {
+        if self.transaction.is_some() || self.retry.is_some() {
+            return None;
+        }
+        let mut checkpoint = self.clone();
+        checkpoint.retry = None;
+        Some(Box::new(checkpoint))
+    }
+
+    fn observe(&mut self, checkpoint: Option<Box<Self>>, generation: u64) {
+        if let Some(transaction) = self.transaction.as_mut() {
+            transaction.observed = true;
+        } else if self.retry.is_none()
+            && let Some(branch) = checkpoint
+        {
+            self.retry = Some(RetryCheckpoint { generation, branch });
+        }
+    }
+
+    fn is_retryable(&self) -> bool {
+        self.retry.is_some()
+            || self
+                .transaction
+                .as_ref()
+                .is_some_and(|transaction| transaction.observed)
+    }
+
+    fn into_failure(self) -> Drive<S> {
+        if self.is_retryable() {
+            Drive::Retry(self)
+        } else {
+            Drive::Fail(self)
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RetryCheckpoint<S: TaskSpecialization> {
+    generation: u64,
+    branch: Box<Branch<S>>,
 }
 
 #[derive(Clone)]
@@ -1019,6 +1122,7 @@ impl CapturedLayer {
 struct Transaction<S: TaskSpecialization> {
     snapshot: HostSnapshot<S>,
     journal: S::Journal,
+    observed: bool,
 }
 
 impl<S: TaskSpecialization> Transaction<S> {
@@ -1026,6 +1130,7 @@ impl<S: TaskSpecialization> Transaction<S> {
         Self {
             snapshot,
             journal: S::Journal::default(),
+            observed: false,
         }
     }
 }
@@ -1035,6 +1140,7 @@ pub struct RequestContext<'a, S: TaskSpecialization> {
     eval_context: &'a EvalContext,
     host: &'a S::Host,
     transaction: Option<&'a mut Transaction<S>>,
+    activity: &'a mut RequestActivity,
 }
 
 impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
@@ -1050,6 +1156,31 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
         self.transaction
             .as_deref_mut()
             .map(|transaction| TransactionContext { transaction })
+    }
+
+    /// Records that this request consulted host state at `generation`.
+    /// Failed computations may be retried only when such an observation exists.
+    pub fn observe_host_generation(&mut self, generation: u64) {
+        if let Some(transaction) = self.transaction.as_deref_mut() {
+            transaction.observed = true;
+        } else if self.activity.observed_generation.is_none() {
+            self.activity.observed_generation = Some(generation);
+        }
+    }
+
+    /// Marks a successful immediate host mutation as a retry barrier.
+    pub fn committed(&mut self) {
+        assert!(
+            self.transaction.is_none(),
+            "journaled transaction effects do not commit immediately"
+        );
+        self.activity.committed = true;
+    }
+
+    pub fn transaction_generation(&self) -> Option<u64> {
+        self.transaction
+            .as_deref()
+            .map(|transaction| transaction.snapshot.generation())
     }
 }
 
@@ -1078,6 +1209,7 @@ enum Drive<S: TaskSpecialization> {
 enum CutResult<S: TaskSpecialization> {
     Success(Value, Branch<S>),
     Retry(Branch<S>),
+    Fail(Branch<S>),
     Cancelled,
 }
 
@@ -1398,8 +1530,7 @@ fn value_key(context: &EvalContext, value: Value) -> Result<Key, TaskError> {
         .ok_or_else(|| TaskError::new("effect index is not keyable"))
 }
 
-fn get_state_path(context: &EvalContext, state: &Value, path: &Value) -> Result<Value, TaskError> {
-    let path = eval::eval_key_path_list(context, path).map_err(task_eval_error)?;
+fn get_state_path(context: &EvalContext, state: &Value, path: &[Key]) -> Result<Value, TaskError> {
     let mut current = state.clone();
     for key in path {
         let Value::Dict(dict) = evaluate(context, current)? else {
@@ -1408,7 +1539,7 @@ fn get_state_path(context: &EvalContext, state: &Value, path: &Value) -> Result<
             ));
         };
         current = dict
-            .get(&key)
+            .get(key)
             .cloned()
             .unwrap_or_else(|| Value::Dict(Dict::new_sync()));
     }
@@ -1575,6 +1706,10 @@ fn split_user_state(state: Value) -> (Value, Value) {
     (Value::Dict(state.remove(&*keys::HEAP)), heap)
 }
 
+fn path_observes_heap(path: &[Key]) -> bool {
+    path.first().is_none_or(|key| key == &*keys::HEAP)
+}
+
 fn key_value(key: Key) -> Value {
     match key {
         Key::Atom(atom) => Value::Atom(atom),
@@ -1708,6 +1843,7 @@ mod tests {
                         transaction.parts().1.stderr.push(bytes);
                     } else {
                         context.host().write_stderr(bytes);
+                        context.committed();
                     }
                     Ok(RequestResult::ReturnUnit)
                 }
@@ -1718,7 +1854,11 @@ mod tests {
     fn read_test_log(
         context: &mut RequestContext<'_, TestEffects>,
     ) -> Result<RequestResult, TaskError> {
-        if let Some(mut transaction) = context.transaction() {
+        if let Some(generation) = context.transaction_generation() {
+            context.observe_host_generation(generation);
+            let mut transaction = context
+                .transaction()
+                .expect("checked active reflection transaction");
             let (snapshot, journal) = transaction.parts();
             let Some(diagnostic) = snapshot.diagnostics.get(journal.consumed_diagnostics) else {
                 return Ok(RequestResult::Fail);
@@ -1731,8 +1871,8 @@ mod tests {
         }
 
         loop {
-            let host = context.host();
-            let snapshot = <TestHost as TaskHost<TestEffects>>::snapshot(host);
+            let snapshot = <TestHost as TaskHost<TestEffects>>::snapshot(context.host());
+            context.observe_host_generation(snapshot.generation());
             let Some(diagnostic) = snapshot.extra().diagnostics.first() else {
                 return Ok(RequestResult::Fail);
             };
@@ -1748,8 +1888,11 @@ mod tests {
                     stderr: Vec::new(),
                 },
             );
-            match <TestHost as TaskHost<TestEffects>>::commit(host, commit) {
-                CommitResult::Committed => return Ok(RequestResult::Return(value)),
+            match <TestHost as TaskHost<TestEffects>>::commit(context.host(), commit) {
+                CommitResult::Committed => {
+                    context.committed();
+                    return Ok(RequestResult::Return(value));
+                }
                 CommitResult::Conflict => {}
                 CommitResult::Closed => return Ok(RequestResult::Cancelled),
             }
@@ -1766,6 +1909,8 @@ mod tests {
         heap: PublicValue,
         diagnostics: Vec<Diagnostic>,
         stderr: Vec<Bytes>,
+        wake_diagnostic: Option<Diagnostic>,
+        wait_count: usize,
         closed: bool,
     }
 
@@ -1776,6 +1921,8 @@ mod tests {
                 heap: PublicValue::empty_record(),
                 diagnostics: Vec::new(),
                 stderr: Vec::new(),
+                wake_diagnostic: None,
+                wait_count: 0,
                 closed: false,
             }
         }
@@ -1786,6 +1933,15 @@ mod tests {
             Self {
                 state: Mutex::new(TestHostState {
                     diagnostics,
+                    ..TestHostState::default()
+                }),
+            }
+        }
+
+        fn with_wake_diagnostic(diagnostic: Diagnostic) -> Self {
+            Self {
+                state: Mutex::new(TestHostState {
+                    wake_diagnostic: Some(diagnostic),
                     ..TestHostState::default()
                 }),
             }
@@ -1803,6 +1959,10 @@ mod tests {
             self.state.lock().unwrap().diagnostics.clone()
         }
 
+        fn wait_count(&self) -> usize {
+            self.state.lock().unwrap().wait_count
+        }
+
         fn emit_diagnostic(&self, diagnostic: Diagnostic) {
             let mut state = self.state.lock().unwrap();
             state.diagnostics.push(diagnostic);
@@ -1811,6 +1971,20 @@ mod tests {
 
         fn write_stderr(&self, bytes: Bytes) {
             self.state.lock().unwrap().stderr.push(bytes);
+        }
+
+        fn wait_for_change(&self, observed_generation: u64) -> bool {
+            let mut state = self.state.lock().unwrap();
+            state.wait_count += 1;
+            if state.generation != observed_generation {
+                return true;
+            }
+            let Some(diagnostic) = state.wake_diagnostic.take() else {
+                return false;
+            };
+            state.diagnostics.push(diagnostic);
+            state.generation += 1;
+            true
         }
     }
 
@@ -1860,8 +2034,8 @@ mod tests {
             CommitResult::Committed
         }
 
-        fn wait_for_change(&self, _observed_generation: u64) -> bool {
-            false
+        fn wait_for_change(&self, observed_generation: u64) -> bool {
+            TestHost::wait_for_change(self, observed_generation)
         }
     }
 
@@ -1884,8 +2058,8 @@ mod tests {
             CommitResult::Committed
         }
 
-        fn wait_for_change(&self, _observed_generation: u64) -> bool {
-            false
+        fn wait_for_change(&self, observed_generation: u64) -> bool {
+            TestHost::wait_for_change(self, observed_generation)
         }
     }
 
@@ -1911,8 +2085,8 @@ mod tests {
             CommitResult::Committed
         }
 
-        fn wait_for_change(&self, _observed_generation: u64) -> bool {
-            false
+        fn wait_for_change(&self, observed_generation: u64) -> bool {
+            TestHost::wait_for_change(self, observed_generation)
         }
     }
 
@@ -1975,6 +2149,75 @@ mod tests {
         let (assembler, value) =
             completed(".fix (\\self -> .r \"A\") >>= (\\x -> .r (x ++ \"B\"))");
         assert_eq!(assembler.to_binary(&value).unwrap(), b"AB".as_slice());
+    }
+
+    #[test]
+    fn unobserved_failure_is_permanent_with_or_without_cut() {
+        for source in [".fail", ".cut .fail"] {
+            let (_, effect) = compile_effect(source);
+            let host = Arc::new(TestHost::default());
+            assert!(
+                run_log_test(&effect, host.clone())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("failed permanently")
+            );
+            assert_eq!(host.wait_count(), 0, "`{source}` must not wait");
+        }
+    }
+
+    #[test]
+    fn empty_log_read_outside_cut_retries_after_its_observation_changes() {
+        let (assembler, effect) =
+            compile_effect(".read_log >>= (\\message -> .r message.msg.text)");
+        let host = Arc::new(TestHost::with_wake_diagnostic(Diagnostic::new(
+            crate::diagnostic::Severity::Warning,
+            "arrived later",
+        )));
+        let TaskOutcome::Complete(value) = run_log_test(&effect, host.clone()).unwrap() else {
+            panic!("observed queue change should resume the log read")
+        };
+        assert_eq!(
+            assembler.to_binary(&value).unwrap(),
+            b"arrived later".as_slice()
+        );
+        assert_eq!(host.wait_count(), 1);
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn committed_log_read_clears_its_retry_checkpoint() {
+        let (_, effect) = compile_effect(".read_log >>= (\\_message -> .fail)");
+        let host = Arc::new(TestHost::with_diagnostics(vec![Diagnostic::new(
+            crate::diagnostic::Severity::Warning,
+            "consumed once",
+        )]));
+        assert!(
+            run_log_test(&effect, host.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("failed permanently")
+        );
+        assert_eq!(host.wait_count(), 0);
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn cut_retries_only_after_a_failed_alternative_observes_changeable_state() {
+        let (assembler, effect) =
+            compile_effect(".cut (.alt (.read_log >>= (\\message -> .r message.msg.text)) .fail)");
+        let host = Arc::new(TestHost::with_wake_diagnostic(Diagnostic::new(
+            crate::diagnostic::Severity::Warning,
+            "cut resumed",
+        )));
+        let TaskOutcome::Complete(value) = run_log_test(&effect, host.clone()).unwrap() else {
+            panic!("observed queue change should restart the exhausted cut")
+        };
+        assert_eq!(
+            assembler.to_binary(&value).unwrap(),
+            b"cut resumed".as_slice()
+        );
+        assert_eq!(host.wait_count(), 1);
     }
 
     #[test]

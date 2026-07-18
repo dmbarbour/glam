@@ -487,7 +487,7 @@ Reflection is expressed effectfully, i.e. `eff:(\api -> ...)`. To keep implement
 
 Reflection may be triggered by compilers (`refl.*`), configurations (`conf.log` and `conf.ide`), or anonymous term annotations (`anno refl:(.log Msg) Term`). In the general case, reflection tasks run concurrently and interact through shared state. An annotation runs its reflection task to completion before exposing `Expr`, and may observe `Expr` (triggering evaluation) or further annotate `Expr`, but does not alter the observable value of `Expr`. 
 
-To control concurrency, the reflection API shall support software-transactional memory (STM), with transaction per scoped 'cut'. A failed transaction is implicitly retried when observed conditions change.
+To control concurrency, the reflection API shall support software-transactional memory (STM), with transaction per scoped 'cut'. A failed computation is retried when it observed state that may have changed; failure without observations is permanent. The `cut` establishes choice and transaction scope, but is not itself an observation or a source of retryability.
 
 Reflection is not reproducible. Between resource and scheduling variability, caching, timestamps, user interactions, etc. it's infeasible to reproduce the exact same log messages. It's left to users to ensure a reflection-based typechecker is confluent and doesn't depend on timestamps. A critical constraint on the reflection API is that it shall not observably influence pure computations. Thus, assembly 'result' remains robustly reproducible.
 

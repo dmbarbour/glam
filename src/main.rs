@@ -323,6 +323,7 @@ impl TaskSpecialization for MainEffects {
                     transaction.parts().1.stderr.push(bytes);
                 } else {
                     context.host().write_stderr(bytes);
+                    context.committed();
                 }
                 Ok(RequestResult::ReturnUnit)
             }
@@ -333,7 +334,11 @@ impl TaskSpecialization for MainEffects {
 fn read_log(
     context: &mut RequestContext<'_, MainEffects>,
 ) -> Result<RequestResult, glam::reflection::TaskError> {
-    if let Some(mut transaction) = context.transaction() {
+    if let Some(generation) = context.transaction_generation() {
+        context.observe_host_generation(generation);
+        let mut transaction = context
+            .transaction()
+            .expect("checked active reflection transaction");
         let (snapshot, journal) = transaction.parts();
         if let Some(diagnostic) = snapshot.diagnostics.get(journal.consumed_diagnostics) {
             journal.consumed_diagnostics += 1;
@@ -348,8 +353,8 @@ fn read_log(
     }
 
     loop {
-        let host = context.host();
-        let snapshot = host.snapshot();
+        let snapshot = context.host().snapshot();
+        context.observe_host_generation(snapshot.generation());
         let Some(diagnostic) = snapshot.extra().diagnostics.first() else {
             return Ok(RequestResult::Fail);
         };
@@ -365,8 +370,11 @@ fn read_log(
                 stderr: Vec::new(),
             },
         );
-        match host.commit(commit) {
-            CommitResult::Committed => return Ok(RequestResult::Return(value)),
+        match context.host().commit(commit) {
+            CommitResult::Committed => {
+                context.committed();
+                return Ok(RequestResult::Return(value));
+            }
             CommitResult::Conflict => {}
             CommitResult::Closed => return Ok(RequestResult::Cancelled),
         }
