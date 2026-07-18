@@ -59,6 +59,10 @@ pub(crate) static UNIT: LazyLock<Key> =
     LazyLock::new(|| Key::abstract_global_path(["builtin", "unit"]));
 protocol_value!(UNIT_VALUE, UNIT);
 
+pub(crate) static OBJECT_REFLECTION_GUARD: LazyLock<Key> =
+    LazyLock::new(|| Key::abstract_global_path(["builtin", "reflection", "object_guard"]));
+protocol_value!(OBJECT_REFLECTION_GUARD_VALUE, OBJECT_REFLECTION_GUARD);
+
 protocol_key!(INFO, "info");
 protocol_key!(WARN, "warn");
 protocol_key!(ERROR, "error");

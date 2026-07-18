@@ -340,7 +340,7 @@ pub(in crate::g_syntax) struct NameScope<V = Value> {
 #[derive(Debug, Clone)]
 pub(in crate::g_syntax) struct ReflectionBoundary<V> {
     pub(in crate::g_syntax) final_defs: V,
-    pub(in crate::g_syntax) guard: Value,
+    pub(in crate::g_syntax) guard: V,
 }
 
 /// A name root is deliberately atomic. Reusing it creates another local
@@ -420,7 +420,7 @@ impl NameScope<Value> {
             object_prior_defs: self.object_prior_defs.clone().map(ResolvedRoot::Provided),
             reflection: self.reflection.as_ref().map(|boundary| ReflectionBoundary {
                 final_defs: ResolvedRoot::Provided(boundary.final_defs.clone()),
-                guard: boundary.guard.clone(),
+                guard: ResolvedRoot::Provided(boundary.guard.clone()),
             }),
             parent: self
                 .parent

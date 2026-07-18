@@ -224,7 +224,7 @@ fn apply_reflection_boundary(
     let guard_path = || {
         ResolvedExpr::List(vec![
             ResolvedExpr::Embedded(context.value_atom(atom_from_str("heap"))),
-            ResolvedExpr::Embedded(boundary.guard.clone()),
+            boundary.guard.expr(),
         ])
     };
 

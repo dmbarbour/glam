@@ -44,6 +44,7 @@ Contingent:
   - what you did
   - semantic decisions made
     - emphasize if not confident
+  - ideas for improvements
   - next steps
 
 ## Routine Checks

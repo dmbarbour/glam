@@ -165,6 +165,10 @@ fn reflection_enabled_module(
             .abstract_global_path(path);
         dict.insert(Key::atom_from_text(name), value)
     });
+    let prior = prior.insert(
+        Key::atom_from_text("object_refl_marker"),
+        (*keys::OBJECT_REFLECTION_GUARD_VALUE).clone(),
+    );
     let context = CompileContext::from_module_path(module_path.iter().copied())
         .with_prior_defs(Value::Dict(prior))
         .with_automatic_reflection_boundaries(true);
@@ -2884,14 +2888,14 @@ fn named_top_level_object_uses_object_refl_without_triggering_module_refl() {
     let source = r#"language g0
 import 'std
 refl.module_notice = .log 'info { msg:{ text:"module reflection task" } }
-meta.probe = anno { refl:(.get ['heap,foo_guard] >>= (\scanner -> .join_task scanner >>= (\tasks -> .join_task tasks.notice >>= (\_ -> .r ())))) } "probe"
+meta.probe = anno { refl:(.get ['heap,[object_refl_marker,foo.spec.name]] >>= (\scanner -> .join_task scanner >>= (\tasks -> .join_task tasks.notice >>= (\_ -> .r ())))) } "probe"
 object foo with
   refl.notice = .log 'info { msg:{ text:"object reflection task" } }
   meta.hidden = "metadata"
   value = "value"
 "#;
     let (assembler, context, module) =
-        reflection_enabled_module(source, &["object_refl_test"], &[("foo_guard", "foo.refl")]);
+        reflection_enabled_module(source, &["object_refl_test"], &[]);
 
     assert_eq!(
         resolved_value_at_path_with_context(&context, &module, &["foo", "meta", "hidden"]),
@@ -2911,6 +2915,111 @@ object foo with
     let diagnostics = assembler.read_diagnostics().unwrap();
     assert_eq!(diagnostics.entries().len(), 1);
     assert_eq!(diagnostics.entries()[0].message(), "object reflection task");
+}
+
+#[test]
+fn nested_declared_object_uses_final_extended_refl() {
+    let source = r#"language g0
+import 'std
+meta.probe = anno { refl:(.get ['heap,[object_refl_marker,parent.child.spec.name]] >>= (\scanner -> .join_task scanner >>= (\tasks -> .join_task tasks.notice >>= (\_ -> .r ())))) } "probe"
+object parent with
+  refl.parent_notice = .log 'info { msg:{ text:"parent reflection task" } }
+  object child with
+    refl.notice = .log 'info { msg:{ text:"original child reflection task" } }
+    value = "nested value"
+extend parent.child with
+  refl.notice := .log 'info { msg:{ text:"extended child reflection task" } }
+"#;
+    let (assembler, context, module) =
+        reflection_enabled_module(source, &["nested_object_refl_test"], &[]);
+
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["parent", "child", "value"]),
+        Value::binary_from_text("nested value")
+    );
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
+        Value::binary_from_text("probe")
+    );
+
+    let diagnostics = assembler.read_diagnostics().unwrap();
+    assert_eq!(diagnostics.entries().len(), 1);
+    assert_eq!(
+        diagnostics.entries()[0].message(),
+        "extended child reflection task"
+    );
+}
+
+#[test]
+fn inherited_member_uses_derived_object_refl_and_guard() {
+    let source = r#"language g0
+import 'std
+meta.derived_probe = anno { refl:(.get ['heap,[object_refl_marker,derived.spec.name]] >>= (\scanner -> .join_task scanner >>= (\tasks -> .join_task tasks.notice >>= (\_ -> .r ())))) } "derived probe"
+meta.base_probe = anno { refl:(.get ['heap,[object_refl_marker,base.spec.name]] >>= (\scanner -> .join_task scanner >>= (\tasks -> .join_task tasks.notice >>= (\_ -> .r ())))) } "base probe"
+object base with
+  refl.notice = .log 'info { msg:{ text:"base reflection task" } }
+  inherited = "inherited value"
+object derived extends base with
+  refl.notice := .log 'info { msg:{ text:"derived reflection task" } }
+"#;
+    let (assembler, context, module) =
+        reflection_enabled_module(source, &["inherited_object_refl_test"], &[]);
+
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["derived", "inherited"]),
+        Value::binary_from_text("inherited value")
+    );
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["meta", "derived_probe"]),
+        Value::binary_from_text("derived probe")
+    );
+    let derived_diagnostics = assembler.read_diagnostics().unwrap();
+    assert_eq!(derived_diagnostics.entries().len(), 1);
+    assert_eq!(
+        derived_diagnostics.entries()[0].message(),
+        "derived reflection task"
+    );
+
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["base", "inherited"]),
+        Value::binary_from_text("inherited value")
+    );
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["meta", "base_probe"]),
+        Value::binary_from_text("base probe")
+    );
+    let base_diagnostics = assembler.read_diagnostics().unwrap();
+    assert_eq!(base_diagnostics.entries().len(), 1);
+    assert_eq!(
+        base_diagnostics.entries()[0].message(),
+        "base reflection task"
+    );
+}
+
+#[test]
+fn object_expressions_and_excluded_nested_objects_remain_inert() {
+    let source = r#"language g0
+import 'std
+value = object "expression object" with
+  refl.notice = .log 'info { msg:{ text:"object expression reflection task" } }
+  ordinary = "ordinary"
+object declared with
+  object meta with
+    refl.notice = .log 'info { msg:{ text:"excluded nested reflection task" } }
+    ordinary = "excluded ordinary"
+"#;
+    let (assembler, context, module) =
+        reflection_enabled_module(source, &["object_expression_refl_test"], &[]);
+
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["value", "ordinary"]),
+        Value::binary_from_text("ordinary")
+    );
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["declared", "meta", "ordinary"]),
+        Value::binary_from_text("excluded ordinary")
+    );
+    assert!(assembler.read_diagnostics().unwrap().entries().is_empty());
 }
 
 #[test]

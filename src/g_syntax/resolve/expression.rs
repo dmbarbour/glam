@@ -173,7 +173,7 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
         context,
         scope.clone(),
         locals,
-        None,
+        false,
     )?;
     Ok(object_instance_from_parts_resolved(
         name,

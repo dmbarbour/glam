@@ -2,8 +2,8 @@
 use chumsky::Parser;
 
 use crate::compiler::CompileContext;
-use crate::core::Builtin;
 use crate::core::{Atom, Dict, Key, Value};
+use crate::core::{Builtin, keys};
 use crate::diagnostic::Severity;
 
 mod analysis;

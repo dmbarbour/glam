@@ -138,13 +138,15 @@ design in the design documents.
   immediate retry barrier when it changes task state.
 - The built-in g front end decorates ordinary module definitions with a shared
   demand trigger for the final module `refl.*`. Members of named top-level
-  objects similarly trigger their final object-local `refl.*`; the object value
-  itself does not trigger its host module. The `refl`, `meta`, and `spec`
-  subtrees, computed-root definitions, object expressions, and nested object
-  declarations are inert. One scanner handle is stored in shared heap state at
-  the scope's `abstract_global_path(...refl)`; the scanner result is the child
-  handle dictionary. Raw `lower_to_core_with_context` leaves this mode disabled
-  for structural inspection, while normal `compile_source` enables it.
+  objects and their nested declared objects similarly trigger their final
+  object-local `refl.*`; an object value itself does not trigger reflection in
+  its host scope. Object scanner guards derive from final `spec.name`, so
+  inherited definitions use the derived object's final reflection namespace
+  and direct extensions share that object's one-shot guard. The `refl`, `meta`,
+  and `spec` subtrees, computed-root definitions, and object expressions remain
+  inert. The scanner result is the child handle dictionary. Raw
+  `lower_to_core_with_context` leaves this mode disabled for structural
+  inspection, while normal `compile_source` enables it.
 - `cut` supplies choice and transaction scope, not retryability. A failed branch
   may retry only if it observed changeable host state: `.fail` and `.cut .fail`
   are permanent failures, while an empty `read_log` is retryable. Outside a

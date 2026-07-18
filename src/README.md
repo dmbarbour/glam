@@ -161,11 +161,14 @@ ordinary expressions through resolution/net lowering, imports through compiler
 loaders, and object declarations through the object lowering helpers. The
 front-end facade returns only lowered definitions plus source diagnostics.
 Normal g compilation also wraps ordinary module definitions in one-shot demand
-boundaries that scan the final `refl.*`; named top-level object members use the
-same convention against final self. `refl`, `meta`, and `spec` remain inert,
-top-level object values do not trigger module reflection, and expression-local
-objects receive no automatic boundary. This is g-syntax lowering policy, not an
-assembler or evaluator interpretation of the name `refl`.
+boundaries that scan the final `refl.*`; members of named top-level objects and
+their nested declared objects use the same convention against final self.
+Object guards derive from final `spec.name`, so inherited mixins scan the
+derived object's overridable reflection namespace and extensions retain the
+same one-shot identity. `refl`, `meta`, and `spec` remain inert, object values
+do not trigger their host scope, and expression-local objects receive no
+automatic boundary. This is g-syntax lowering policy, not an assembler or
+evaluator interpretation of the name `refl`.
 
 ## Evaluation and Application Flow
 

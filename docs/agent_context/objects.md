@@ -64,6 +64,13 @@ empty dictionary name.
 composes the new definition mixin after the prior one before re-instantiating
 the object.
 
+Named declarations also establish automatic reflection boundaries on their
+ordinary members, recursively including nested declarations. A boundary scans
+the final object's `refl.*` and keys its one-shot scanner from final
+`spec.name`. Consequently, inherited member definitions use the derived
+object's overridable reflection namespace, while direct extensions retain the
+same object identity. Object expressions do not establish these boundaries.
+
 ## Object Scope
 
 An object body is never resolved as ordinary module scope. Lowering introduces
