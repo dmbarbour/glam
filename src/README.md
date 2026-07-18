@@ -106,14 +106,18 @@ polls this machine and performs the legacy host wait.
 interface. Its serial pump removes one machine under the session lock, polls it
 without that lock, then records its new state. It first follows the producer
 chain for the demanded wait token, then uses a bounded FIFO ready queue, and
-coarsely rechecks blocked tasks once per pump. Promise records retain their
+coarsely rechecks blocked tasks once per pump. Public assembler observation
+also supplies a small bounded background budget after its foreground result.
+Promise records retain their
 producer task IDs for this shallow dependency prioritization. Fine-grained
 observation indexes, persistent waiter graphs, worker threads, and evaluator
 reduction fuel are intentionally deferred.
 
 The reusable reflection API exposes `.glam_ver`, `.os_env`, and `.cli_args` as
-basic host information, and can reserve `.refl_task Effect` children behind
-opaque handles. `.join_task` returns success or propagates the child's error;
+basic host information. `.dict_items` returns immediate key-ordered dictionary
+entries. Tasks can reserve `.refl_task Effect` children behind opaque handles;
+`.refl_tasks Dict` transactionally performs the keyed batch form and returns a
+dictionary of handles. `.join_task` returns success or propagates the child's error;
 `.task_result` and `.task_error` are symmetric state-specific extractors, and
 `.task_status` provides a nonblocking status atom. Pending extractors are failed
 effect choices carrying the child's exact wait token. Transaction journals
@@ -156,6 +160,12 @@ Module lowering owns declaration order and the open module fixpoint. It routes
 ordinary expressions through resolution/net lowering, imports through compiler
 loaders, and object declarations through the object lowering helpers. The
 front-end facade returns only lowered definitions plus source diagnostics.
+Normal g compilation also wraps ordinary module definitions in one-shot demand
+boundaries that scan the final `refl.*`; named top-level object members use the
+same convention against final self. `refl`, `meta`, and `spec` remain inert,
+top-level object values do not trigger module reflection, and expression-local
+objects receive no automatic boundary. This is g-syntax lowering policy, not an
+assembler or evaluator interpretation of the name `refl`.
 
 ## Evaluation and Application Flow
 

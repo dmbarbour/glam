@@ -2970,11 +2970,11 @@ mod tests {
         let assembler = Assembler::default();
         let module = assembler
             .module(["reflection_test"])
-            .script("g", format!("language g0\neffect = {source}\n"))
+            .script("g", format!("language g0\nrefl.effect = {source}\n"))
             .build()
             .expect("effect fixture should compile");
         let effect = assembler
-            .get(module.value(), "effect")
+            .get(module.value(), "refl.effect")
             .expect("effect fixture should define effect");
         (assembler, effect)
     }
@@ -3087,6 +3087,54 @@ mod tests {
         assert_eq!(
             assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
             b"child".as_slice()
+        );
+    }
+
+    #[test]
+    fn dictionary_items_are_available_to_reflection_in_key_order() {
+        let (assembler, effect) = compile_effect(".dict_items { b:2, a:1 }");
+        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+            panic!("dict_items task should complete");
+        };
+        let Value::List(items) = value else {
+            panic!("dict_items should return a list");
+        };
+        let items = eval::list_to_value_items(&assembler.eval_context(), &items).unwrap();
+        assert_eq!(items.len(), 2);
+        let keys = items
+            .into_iter()
+            .map(|item| {
+                let Value::Dict(item) = item else {
+                    panic!("dict_items entries should be tuples");
+                };
+                let Value::List(tuple) = item.get(&*keys::TUPLE).unwrap() else {
+                    panic!("dict_items entries should use tuple payloads");
+                };
+                eval::list_to_value_items(&assembler.eval_context(), tuple).unwrap()[0].clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                Value::Atom(Atom::from_key(&Key::binary_from_text("a"))),
+                Value::Atom(Atom::from_key(&Key::binary_from_text("b"))),
+            ]
+        );
+    }
+
+    #[test]
+    fn reflection_task_batches_return_handles_by_original_key() {
+        let (assembler, effect) = compile_effect(
+            ".cut (.refl_tasks { b:(.r \"B\"), a:(.r \"A\") }) >>= (\\tasks -> .join_task tasks.a >>= (\\a -> .join_task tasks.b >>= (\\b -> .r (a ++ b))))",
+        );
+        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+            panic!("refl_tasks task should complete");
+        };
+        assert_eq!(
+            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            b"AB".as_slice()
         );
     }
 

@@ -11,8 +11,17 @@ pub(in crate::g_syntax) fn lower_object(
     let scope = NameScope::module(context, definitions.clone()).resolved();
     let definitions_root = ResolvedRoot::Provided(definitions.clone());
     let name = ResolvedExpr::Embedded(context.abstract_global_path(&object.target));
-    let object_value =
-        object_decl_resolved_in_scope(object, line, context, scope.clone(), &mut locals, name)?;
+    let object_value = object_decl_resolved_in_scope(
+        object,
+        line,
+        context,
+        scope.clone(),
+        &mut locals,
+        name,
+        context
+            .automatic_reflection_boundaries()
+            .then(|| context.abstract_global_path(&format!("{}.refl", object.target))),
+    )?;
     let target_context = DefinitionTargetContext::new(&definitions_root, line, context, &scope);
     let object_value = target_context.annotate(
         BuiltinAssertion::Undefined,
@@ -81,6 +90,7 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
     parent_scope: NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
     name: ResolvedExpr<Value>,
+    reflection_guard: Option<Value>,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let defs = object_body_defs_resolved_in_scope(
         &object.body,
@@ -89,6 +99,7 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
         context,
         parent_scope.clone(),
         locals,
+        reflection_guard,
     )?;
     let deps = object
         .deps
@@ -115,6 +126,7 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
     context: &CompileContext,
     parent_scope: NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
+    reflection_guard: Option<Value>,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let base_len = locals.len();
     let prior_self = locals.push_binding("<object-prior-self>");
@@ -133,6 +145,7 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
             object_final_defs.clone(),
             definitions.clone(),
             parent_scope.clone(),
+            reflection_guard.clone(),
         );
         let updated = lower_object_body_item_resolved(
             body_definition,
@@ -186,7 +199,7 @@ pub(in crate::g_syntax) fn lower_nested_object_resolved(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let name = hierarchical_object_name_resolved(&object.target, line, context, scope)?;
     let object_value =
-        object_decl_resolved_in_scope(object, line, context, scope.clone(), locals, name)?;
+        object_decl_resolved_in_scope(object, line, context, scope.clone(), locals, name, None)?;
     let target_context = DefinitionTargetContext::new(definitions, line, context, scope);
     let object_value = target_context.annotate(
         BuiltinAssertion::Undefined,
@@ -247,6 +260,7 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
     object_final_defs: ResolvedRoot,
     object_prior_defs: ResolvedRoot,
     parent: NameScope<ResolvedRoot>,
+    reflection_guard: Option<Value>,
 ) -> NameScope<ResolvedRoot> {
     let object_alias = alias
         .map(local_name_metadata)
@@ -263,8 +277,12 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
         module_final_defs: parent.module_final_defs.clone(),
         module_prior_defs: parent.module_prior_defs.clone(),
         object_alias,
-        object_final_defs: Some(object_final_defs),
+        object_final_defs: Some(object_final_defs.clone()),
         object_prior_defs: Some(object_prior_defs),
+        reflection: reflection_guard.map(|guard| ReflectionBoundary {
+            final_defs: object_final_defs,
+            guard,
+        }),
         parent: Some(Box::new(parent)),
     }
 }
@@ -285,6 +303,9 @@ pub(in crate::g_syntax) fn lower_extend(
         context,
         scope.clone(),
         &mut locals,
+        context
+            .automatic_reflection_boundaries()
+            .then(|| context.abstract_global_path(&format!("{}.refl", extend.target))),
     )?;
     let prior_object = path_resolved_in_definitions(&extend.target, definitions_root.expr());
     let prior_spec = object_spec_resolved(prior_object, context);

@@ -40,6 +40,11 @@ Contingent:
   - Chumsky for parsing
   - internment for interning
 - keep implementation slices narrow and testable
+- always summarize:
+  - what you did
+  - semantic decisions made
+    - emphasize if not confident
+  - next steps
 
 ## Routine Checks
 

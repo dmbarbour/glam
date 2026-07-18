@@ -21,8 +21,10 @@ pub enum ReflectionRequest {
     GlamVersion,
     OsEnvironment,
     CommandLineArguments,
+    DictItems,
     Log,
     ReflTask,
+    ReflTasks,
     JoinTask,
     TaskResult,
     TaskError,
@@ -107,6 +109,12 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
             ReflectionRequest::CommandLineArguments,
         ),
         EffectRequestSpec::new(
+            "dict_items",
+            ["reflection_runtime", "v0", "request", "dict_items"],
+            1,
+            ReflectionRequest::DictItems,
+        ),
+        EffectRequestSpec::new(
             "log",
             ["reflection_runtime", "v0", "request", "log"],
             2,
@@ -117,6 +125,12 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
             ["reflection_runtime", "v0", "request", "refl_task"],
             1,
             ReflectionRequest::ReflTask,
+        ),
+        EffectRequestSpec::new(
+            "refl_tasks",
+            ["reflection_runtime", "v0", "request", "refl_tasks"],
+            1,
+            ReflectionRequest::ReflTasks,
         ),
         EffectRequestSpec::new(
             "join_task",
@@ -187,6 +201,29 @@ where
                     .map(os_value),
             )))
         }
+        ReflectionRequest::DictItems => {
+            let [dict]: [Value; 1] = arguments.try_into().map_err(|_| {
+                TaskError::new("`.dict_items` received the wrong number of arguments")
+            })?;
+            let CoreValue::Dict(dict) = evaluate(context.eval_context(), dict.into_core())? else {
+                return Err(TaskError::new("`.dict_items` requires a dictionary"));
+            };
+            Ok(RequestResult::Return(Value::from_core(CoreValue::List(
+                crate::core::List::from_values(
+                    dict.iter()
+                        .map(|(key, value)| {
+                            CoreValue::Dict(Dict::new_sync().insert(
+                                (*keys::TUPLE).clone(),
+                                CoreValue::List(crate::core::List::from_values(vec![
+                                    key_value(key),
+                                    value.clone(),
+                                ])),
+                            ))
+                        })
+                        .collect(),
+                ),
+            ))))
+        }
         ReflectionRequest::Log => {
             let [severity, message]: [Value; 2] = arguments
                 .try_into()
@@ -234,6 +271,51 @@ where
                 handle
             };
             Ok(RequestResult::Return(task_handle_value(&handle)))
+        }
+        ReflectionRequest::ReflTasks => {
+            let [effects]: [Value; 1] = arguments.try_into().map_err(|_| {
+                TaskError::new("`.refl_tasks` received the wrong number of arguments")
+            })?;
+            let CoreValue::Dict(effects) = evaluate(context.eval_context(), effects.into_core())?
+            else {
+                return Err(TaskError::new("`.refl_tasks` requires a dictionary"));
+            };
+            let eval_context = context.eval_context().clone();
+            let handles = if let Some(mut transaction) = context.transaction() {
+                let mut handles = Dict::new_sync();
+                for (key, effect) in effects.iter() {
+                    if matches!(effect, CoreValue::Dict(dict) if dict.is_empty()) {
+                        continue;
+                    }
+                    let pending = eval_context
+                        .reserve_reflection_task(effect.clone())
+                        .map_err(|error| TaskError::new(error.as_ref()))?;
+                    handles = handles.insert(key.clone(), task_handle_core_value(pending.handle()));
+                    transaction
+                        .parts()
+                        .1
+                        .reflection_journal()
+                        .task_updates
+                        .push(ReflectionTaskUpdate::Launch(pending));
+                }
+                handles
+            } else {
+                let mut handles = Dict::new_sync();
+                for (key, effect) in effects.iter() {
+                    if matches!(effect, CoreValue::Dict(dict) if dict.is_empty()) {
+                        continue;
+                    }
+                    let handle = eval_context
+                        .start_joinable_reflection_task(effect.clone())
+                        .map_err(|error| TaskError::new(error.as_ref()))?;
+                    handles = handles.insert(key.clone(), task_handle_core_value(&handle));
+                }
+                context.committed();
+                handles
+            };
+            Ok(RequestResult::Return(Value::from_core(CoreValue::Dict(
+                handles,
+            ))))
         }
         ReflectionRequest::JoinTask => {
             let handle = task_handle_argument(context.eval_context(), arguments, "join_task")?;
@@ -385,10 +467,33 @@ static TASK_HANDLE_TAG: LazyLock<Key> = LazyLock::new(|| {
 });
 
 fn task_handle_value(handle: &EvaluationTaskHandle) -> Value {
-    Value::from_core(CoreValue::Dict(Dict::new_sync().insert(
+    Value::from_core(task_handle_core_value(handle))
+}
+
+fn task_handle_core_value(handle: &EvaluationTaskHandle) -> CoreValue {
+    CoreValue::Dict(Dict::new_sync().insert(
         TASK_HANDLE_TAG.clone(),
         CoreValue::Number(Number::from_u64(handle.id().get())),
-    )))
+    ))
+}
+
+fn key_value(key: &Key) -> CoreValue {
+    match key {
+        Key::Atom(atom) => CoreValue::Atom(*atom),
+        Key::Number(number) => CoreValue::Number(number.clone()),
+        Key::Binary(bytes) => CoreValue::Binary(bytes.clone()),
+        Key::AbstractGlobalPath(parts) => {
+            CoreValue::Atom(Atom::from_key(&Key::AbstractGlobalPath(parts.clone())))
+        }
+        Key::List(items) => CoreValue::List(crate::core::List::from_values(
+            items.iter().map(key_value).collect(),
+        )),
+        Key::Dict(entries) => {
+            CoreValue::Dict(entries.iter().fold(Dict::new_sync(), |dict, (key, value)| {
+                dict.insert(key.clone(), key_value(value))
+            }))
+        }
+    }
 }
 
 fn task_handle_argument(

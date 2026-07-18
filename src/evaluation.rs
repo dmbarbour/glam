@@ -684,6 +684,12 @@ impl EvalContext {
         self.session.pump(self, wait, step_budget)
     }
 
+    /// Gives queued and coarsely blocked reflection tasks a bounded amount of
+    /// cooperative execution without waiting for any particular result.
+    pub(crate) fn pump_background(&self, step_budget: usize) {
+        self.session.pump_background(step_budget);
+    }
+
     #[cfg(test)]
     pub(crate) fn complete_wait(&self, wait: &EvaluationWaitToken) {
         let mut tasks = self
@@ -738,6 +744,38 @@ struct ClaimedTask {
 }
 
 impl EvaluationSession {
+    fn pump_background(&self, mut step_budget: usize) {
+        let mut attempted_blocked = HashSet::new();
+        while step_budget > 0 {
+            let claimed = {
+                let mut tasks = self
+                    .tasks
+                    .lock()
+                    .expect("evaluation task registry was poisoned");
+                claim_ready_task(&mut tasks)
+                    .or_else(|| claim_blocked_task(&mut tasks, &attempted_blocked))
+            };
+            let Some(mut claimed) = claimed else {
+                break;
+            };
+
+            let quantum = step_budget.min(TASK_POLL_QUANTUM);
+            step_budget -= quantum;
+            let poll = claimed.machine.poll(quantum);
+            let claimed_id = claimed.id;
+            let (made_progress, remains_blocked, cancelled) = self.release_task(claimed, poll);
+            if let Some(mut machine) = cancelled {
+                machine.cancel();
+            }
+            if remains_blocked {
+                attempted_blocked.insert(claimed_id);
+            }
+            if made_progress {
+                attempted_blocked.clear();
+            }
+        }
+    }
+
     fn pump(
         &self,
         context: &EvalContext,

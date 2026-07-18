@@ -75,6 +75,7 @@ pub struct CompileContext {
     local_module_loader: Option<ModuleLoader>,
     local_binary_loader: Option<BinaryFileLoader>,
     diagnostic_emitter: Option<CompileDiagnosticEmitter>,
+    automatic_reflection_boundaries: bool,
 }
 
 impl Default for CompileContext {
@@ -88,6 +89,7 @@ impl Default for CompileContext {
             local_module_loader: None,
             local_binary_loader: None,
             diagnostic_emitter: None,
+            automatic_reflection_boundaries: false,
         }
     }
 }
@@ -149,6 +151,20 @@ impl CompileContext {
     pub(crate) fn with_diagnostic_emitter(mut self, emitter: CompileDiagnosticEmitter) -> Self {
         self.diagnostic_emitter = Some(emitter);
         self
+    }
+
+    /// Enables the built-in g front end's `refl.*` demand convention.
+    ///
+    /// Raw lowering keeps this disabled so syntax/net inspection does not
+    /// require an executable reflection session. Normal g compilation enables
+    /// it before lowering.
+    pub fn with_automatic_reflection_boundaries(mut self, enabled: bool) -> Self {
+        self.automatic_reflection_boundaries = enabled;
+        self
+    }
+
+    pub fn automatic_reflection_boundaries(&self) -> bool {
+        self.automatic_reflection_boundaries
     }
 
     pub fn prior_defs(&self) -> &Value {

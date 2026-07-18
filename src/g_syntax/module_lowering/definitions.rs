@@ -151,7 +151,7 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
 
     let target_scope = definition_target_scope_resolved(scope, definitions.clone());
     let target_context = DefinitionTargetContext::new(definitions, line, context, &target_scope);
-    let value = match definition.kind {
+    let (assertion, value) = match definition.kind {
         DefinitionKind::Introduce | DefinitionKind::Override => {
             let assertion = match definition.kind {
                 DefinitionKind::Introduce => BuiltinAssertion::Undefined,
@@ -160,14 +160,23 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
             };
             let value =
                 syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?;
-            target_context.annotate(assertion, &definition.target, value, locals)?
+            (Some(assertion), value)
         }
-        DefinitionKind::Update => target_context.lower_update(
-            &definition.target,
-            expr,
-            definition_param_count(definition, declaration_text, line)?,
-            locals,
-        )?,
+        DefinitionKind::Update => (
+            None,
+            target_context.lower_update(
+                &definition.target,
+                expr,
+                definition_param_count(definition, declaration_text, line)?,
+                locals,
+            )?,
+        ),
+    };
+    let value =
+        decorate_reflection_boundary(&definition.target, line, value, context, scope, locals)?;
+    let value = match assertion {
+        Some(assertion) => target_context.annotate(assertion, &definition.target, value, locals)?,
+        None => value,
     };
     update_definition_target_resolved(
         definitions,
@@ -178,6 +187,108 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
         &target_scope,
         locals,
     )
+}
+
+fn decorate_reflection_boundary(
+    target: &str,
+    line: usize,
+    value: ResolvedExpr<Value>,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let Some(boundary) = &scope.reflection else {
+        return Ok(value);
+    };
+    let parts = definition_target_parts(target, line)?;
+    let Some(SyntaxKeyExpr::Atom(root)) = parts.first() else {
+        // Reflection namespaces are intentionally statically recognizable.
+        // A computed root might evaluate to `refl`, `meta`, or `spec`, so it
+        // cannot safely receive an automatic demand boundary.
+        return Ok(value);
+    };
+    if matches!(root.as_str(), "refl" | "meta" | "spec") {
+        return Ok(value);
+    }
+
+    Ok(apply_reflection_boundary(value, boundary, context, locals))
+}
+
+fn apply_reflection_boundary(
+    value: ResolvedExpr<Value>,
+    boundary: &ReflectionBoundary<ResolvedRoot>,
+    context: &CompileContext,
+    locals: &mut ResolverContext,
+) -> ResolvedExpr<Value> {
+    let base_len = locals.len();
+    let guard_path = || {
+        ResolvedExpr::List(vec![
+            ResolvedExpr::Embedded(context.value_atom(atom_from_str("heap"))),
+            ResolvedExpr::Embedded(boundary.guard.clone()),
+        ])
+    };
+
+    let final_refl = ResolvedExpr::Access {
+        base: Box::new(boundary.final_defs.expr()),
+        path: vec![ResolvedPathPart::Key(name_as_key("refl"))],
+    };
+    let launch_all = effect_call_resolved("refl_tasks", [final_refl], context, locals);
+    let scanner = effect_call_resolved("cut", [launch_all], context, locals);
+
+    let scanner_handle = locals.push_binding("<reflection-scanner-handle>");
+    let remember_scanner = effect_call_resolved(
+        "set",
+        [guard_path(), ResolvedExpr::Local(scanner_handle)],
+        context,
+        locals,
+    );
+    let launch_scanner = effect_call_resolved("refl_task", [scanner], context, locals);
+    let launch_and_remember = effect_call_resolved(
+        "seq",
+        [
+            launch_scanner,
+            ResolvedExpr::lambda(vec![scanner_handle], remember_scanner),
+        ],
+        context,
+        locals,
+    );
+
+    let existing = locals.push_binding("<reflection-scanner>");
+    let guard_is_empty = ResolvedExpr::apply(
+        ResolvedExpr::Embedded(context.value_builtin(Builtin::Equal)),
+        [
+            ResolvedExpr::Local(existing),
+            ResolvedExpr::Embedded(context.empty_dict_value()),
+        ],
+    );
+    let start_if_missing =
+        effect_then_resolved(guard_is_empty, launch_and_remember, context, locals);
+    let already_started = effect_call_resolved(
+        "r",
+        [ResolvedExpr::Embedded(context.unit_value())],
+        context,
+        locals,
+    );
+    let choose = effect_call_resolved("alt", [start_if_missing, already_started], context, locals);
+    let check_guard = effect_call_resolved("get", [guard_path()], context, locals);
+    let ensure_scanner = effect_call_resolved(
+        "seq",
+        [check_guard, ResolvedExpr::lambda(vec![existing], choose)],
+        context,
+        locals,
+    );
+    let ensure_scanner = effect_call_resolved("cut", [ensure_scanner], context, locals);
+    locals.truncate(base_len);
+
+    let annotation = apply_builtin_resolved(
+        Builtin::DictSingleton,
+        [
+            ResolvedExpr::Embedded(context.value_atom(atom_from_str("refl"))),
+            ensure_scanner,
+        ],
+        context,
+    );
+    apply_builtin_resolved(Builtin::Anno, [annotation, value], context)
 }
 
 pub(in crate::g_syntax) fn definition_target_scope_resolved(

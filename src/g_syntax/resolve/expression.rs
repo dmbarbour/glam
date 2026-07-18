@@ -173,6 +173,7 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
         context,
         scope.clone(),
         locals,
+        None,
     )?;
     Ok(object_instance_from_parts_resolved(
         name,
@@ -253,6 +254,7 @@ pub(in crate::g_syntax) fn dict_with_body_scope(
         object_alias,
         object_final_defs,
         object_prior_defs,
+        reflection: None,
         parent: Some(Box::new(parent)),
     }
 }

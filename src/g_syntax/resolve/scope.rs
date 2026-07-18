@@ -330,7 +330,17 @@ pub(in crate::g_syntax) struct NameScope<V = Value> {
     pub(in crate::g_syntax) object_alias: Option<String>,
     pub(in crate::g_syntax) object_final_defs: Option<V>,
     pub(in crate::g_syntax) object_prior_defs: Option<V>,
+    /// Final namespace and private heap key used by compiler-generated
+    /// reflection demand boundaries. Expression-local objects deliberately
+    /// leave this unset.
+    pub(in crate::g_syntax) reflection: Option<ReflectionBoundary<V>>,
     pub(in crate::g_syntax) parent: Option<Box<NameScope<V>>>,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::g_syntax) struct ReflectionBoundary<V> {
+    pub(in crate::g_syntax) final_defs: V,
+    pub(in crate::g_syntax) guard: Value,
 }
 
 /// A name root is deliberately atomic. Reusing it creates another local
@@ -389,6 +399,12 @@ impl NameScope<Value> {
             object_alias: None,
             object_final_defs: None,
             object_prior_defs: None,
+            reflection: context
+                .automatic_reflection_boundaries()
+                .then(|| ReflectionBoundary {
+                    final_defs: context.final_defs().clone(),
+                    guard: context.abstract_global_path("refl"),
+                }),
             parent: None,
         }
     }
@@ -402,6 +418,10 @@ impl NameScope<Value> {
             object_alias: self.object_alias.clone(),
             object_final_defs: self.object_final_defs.clone().map(ResolvedRoot::Provided),
             object_prior_defs: self.object_prior_defs.clone().map(ResolvedRoot::Provided),
+            reflection: self.reflection.as_ref().map(|boundary| ReflectionBoundary {
+                final_defs: ResolvedRoot::Provided(boundary.final_defs.clone()),
+                guard: boundary.guard.clone(),
+            }),
             parent: self
                 .parent
                 .as_deref()

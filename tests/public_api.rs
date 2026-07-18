@@ -38,6 +38,34 @@ fn public_api_builds_a_script_module_and_extracts_binary_data() {
 }
 
 #[test]
+fn public_evaluation_cooperatively_pumps_automatic_refl_tasks() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["automatic_refl"])
+        .script(
+            "g",
+            "language g0\nrefl.notice = .log 'info { msg:{ text:\"automatic reflection\" } }\nvalue = \"value\"\n",
+        )
+        .build()
+        .expect("reflection module should build");
+    let _ = assembler
+        .read_diagnostics()
+        .expect("default assembler should retain diagnostics");
+
+    assert_eq!(
+        assembler
+            .binary_at(module.value(), "value")
+            .expect("ordinary value should evaluate"),
+        b"value".as_slice()
+    );
+    let diagnostics = assembler
+        .read_diagnostics()
+        .expect("automatic reflection diagnostics should be retained");
+    assert_eq!(diagnostics.entries().len(), 1);
+    assert_eq!(diagnostics.entries()[0].message(), "automatic reflection");
+}
+
+#[test]
 fn public_api_can_load_sources_and_binaries_from_a_custom_host() {
     let host = MemoryHost::new([
         (

@@ -81,8 +81,9 @@ design in the design documents.
   fragment, private request tags, and specialization-owned transaction data.
   Reusable request families compose by mapping their requests into the host
   specialization's request enum. The reusable reflection family contributes
-  `glam_ver`, `os_env`, `cli_args`, `log`, and the task operations `refl_task`,
-  `join_task`, `task_result`, `task_error`, `task_status`, and `cancel_task`;
+  `glam_ver`, `os_env`, `cli_args`, `dict_items`, `log`, and the task operations
+  `refl_task`, `refl_tasks`, `join_task`, `task_result`, `task_error`,
+  `task_status`, and `cancel_task`;
   `main` adds provisional `read_log` and `write_stderr` effects. OS environment
   values and command-line arguments preserve Rust's platform encoding as binary
   values rather than forcing UTF-8. Spawned tasks receive only
@@ -101,6 +102,10 @@ design in the design documents.
   task-local `.shift` continuations are the conservative
   standard-effect contract: general-purpose utilities must not assume broader
   behavior, although a specialized handler may explicitly provide it.
+- `dict_items` exposes immediate dictionary entries as key-ordered tuple
+  values. `refl_tasks` is the transactional batch form of `refl_task`: it
+  launches each nonempty immediate dictionary value and returns a dictionary
+  of handles under the original keys.
 - `ReflectionEffects` is the reusable annotation specialization: standard
   effects plus `.log`, with no logger-consumer operations such as `read_log` or
   `write_stderr`. Every ordinary `Assembler` session installs a type-erased
@@ -131,6 +136,15 @@ design in the design documents.
   cancellation requests. A cancellation that reaches a terminal task is a
   no-op. Outside a transaction, scheduling or requesting cancellation is an
   immediate retry barrier when it changes task state.
+- The built-in g front end decorates ordinary module definitions with a shared
+  demand trigger for the final module `refl.*`. Members of named top-level
+  objects similarly trigger their final object-local `refl.*`; the object value
+  itself does not trigger its host module. The `refl`, `meta`, and `spec`
+  subtrees, computed-root definitions, object expressions, and nested object
+  declarations are inert. One scanner handle is stored in shared heap state at
+  the scope's `abstract_global_path(...refl)`; the scanner result is the child
+  handle dictionary. Raw `lower_to_core_with_context` leaves this mode disabled
+  for structural inspection, while normal `compile_source` enables it.
 - `cut` supplies choice and transaction scope, not retryability. A failed branch
   may retry only if it observed changeable host state: `.fail` and `.cut .fail`
   are permanent failures, while an empty `read_log` is retryable. Outside a
@@ -156,8 +170,11 @@ design in the design documents.
   producer of a demanded wait token, follows a blocked task's one lazy
   dependency when that producer is known, and otherwise polls ready tasks in
   bounded round-robin order. A per-pump visited set stops dependency cycles and
-  repeated polling of unchanged blocked tasks. Fine-grained wake indexes,
-  worker threads, and evaluator reduction fuel remain deferred.
+  repeated polling of unchanged blocked tasks. Public assembler evaluation and
+  extraction operations also grant a small bounded background budget after
+  their foreground result, so scanners and short tasks progress without making
+  long-lived tasks synchronous. Fine-grained wake indexes, worker threads, and
+  evaluator reduction fuel remain deferred.
 - `reflection::run` is the synchronous compatibility driver for that machine.
   It polls with bounded effect-step fuel and calls `TaskHost::wait_for_change`
   only after polling reports a state block. `run_with_reflection_host` also

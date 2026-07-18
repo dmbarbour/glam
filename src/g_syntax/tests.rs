@@ -45,6 +45,36 @@ fn resolved_value_at_path(definitions: &Value, path: &[&str]) -> Value {
         .expect("binding should resolve")
 }
 
+fn resolved_value_at_path_with_context(
+    context: &crate::evaluation::EvalContext,
+    definitions: &Value,
+    path: &[&str],
+) -> Value {
+    let mut current = definitions.clone();
+    for part in path {
+        let current_value = fully_evaluated_value_with_context(context, current);
+        let Value::Dict(dict) = current_value else {
+            panic!("reflection-enabled path should traverse dictionaries");
+        };
+        current = dict
+            .get(&Key::atom_from_text(part))
+            .cloned()
+            .expect("reflection-enabled binding should exist");
+    }
+    fully_evaluated_value_with_context(context, current)
+}
+
+fn fully_evaluated_value_with_context(
+    context: &crate::evaluation::EvalContext,
+    mut value: Value,
+) -> Value {
+    while matches!(value, Value::Lazy(_)) {
+        value = crate::eval::eval_value(context, &value)
+            .expect("reflection-enabled value should fully evaluate");
+    }
+    value
+}
+
 fn fully_evaluated_value(mut value: Value) -> Value {
     while matches!(value, Value::Lazy(_)) {
         value = crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), &value)
@@ -123,6 +153,35 @@ fn abstract_path_atom(parts: &[&str]) -> Value {
 
 fn n(value: i64) -> Number {
     value.into()
+}
+
+fn reflection_enabled_module(
+    source: &str,
+    module_path: &[&str],
+    guards: &[(&str, &str)],
+) -> (crate::api::Assembler, crate::evaluation::EvalContext, Value) {
+    let prior = guards.iter().fold(Dict::new_sync(), |dict, (name, path)| {
+        let value = CompileContext::from_module_path(module_path.iter().copied())
+            .abstract_global_path(path);
+        dict.insert(Key::atom_from_text(name), value)
+    });
+    let context = CompileContext::from_module_path(module_path.iter().copied())
+        .with_prior_defs(Value::Dict(prior))
+        .with_automatic_reflection_boundaries(true);
+    let lowered = lower_to_core_with_context(parse(source), &context);
+    assert_eq!(lowered.diagnostics, []);
+    let Value::Lazy(final_defs) = context.final_defs() else {
+        panic!("final module binding should be promised");
+    };
+    final_defs
+        .set(lowered.definitions.clone())
+        .expect("final module binding should be unset");
+
+    let assembler = crate::api::Assembler::default();
+    let eval_context = assembler.eval_context();
+    let definitions = crate::eval::eval_value(&eval_context, &lowered.definitions)
+        .expect("reflection-enabled module should expose its dictionary");
+    (assembler, eval_context, definitions)
 }
 
 #[test]
@@ -2775,6 +2834,106 @@ fn update_definitions_observe_prior_module_state() {
         fully_evaluated_value(resolved_value_at_path(&value, &["foo"])),
         Value::Number(2.into())
     );
+}
+
+#[test]
+fn ordinary_module_demand_launches_final_refl_tasks_once() {
+    let source = r#"language g0
+import 'std
+refl.notice = .log 'info { msg:{ text:"new reflection task" } }
+refl.notice := .log 'info { msg:{ text:"final reflection task" } }
+meta.hidden = "metadata"
+spec.hidden = "specification"
+ordinary = "ordinary"
+ordinary_two = "ordinary two"
+probe = anno { refl:(.get ['heap,guard] >>= (\scanner -> .join_task scanner >>= (\tasks -> .join_task tasks.notice >>= (\_ -> .r ())))) } "probe"
+"#;
+    let (assembler, context, module) =
+        reflection_enabled_module(source, &["module_refl_test"], &[("guard", "refl")]);
+
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["meta", "hidden"]),
+        Value::binary_from_text("metadata")
+    );
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["spec", "hidden"]),
+        Value::binary_from_text("specification")
+    );
+    assert!(assembler.read_diagnostics().unwrap().entries().is_empty());
+
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
+        Value::binary_from_text("ordinary")
+    );
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["probe"]),
+        Value::binary_from_text("probe")
+    );
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["ordinary_two"]),
+        Value::binary_from_text("ordinary two")
+    );
+
+    let diagnostics = assembler.read_diagnostics().unwrap();
+    assert_eq!(diagnostics.entries().len(), 1);
+    assert_eq!(diagnostics.entries()[0].message(), "final reflection task");
+}
+
+#[test]
+fn named_top_level_object_uses_object_refl_without_triggering_module_refl() {
+    let source = r#"language g0
+import 'std
+refl.module_notice = .log 'info { msg:{ text:"module reflection task" } }
+meta.probe = anno { refl:(.get ['heap,foo_guard] >>= (\scanner -> .join_task scanner >>= (\tasks -> .join_task tasks.notice >>= (\_ -> .r ())))) } "probe"
+object foo with
+  refl.notice = .log 'info { msg:{ text:"object reflection task" } }
+  meta.hidden = "metadata"
+  value = "value"
+"#;
+    let (assembler, context, module) =
+        reflection_enabled_module(source, &["object_refl_test"], &[("foo_guard", "foo.refl")]);
+
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["foo", "meta", "hidden"]),
+        Value::binary_from_text("metadata")
+    );
+    assert!(assembler.read_diagnostics().unwrap().entries().is_empty());
+
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["foo", "value"]),
+        Value::binary_from_text("value")
+    );
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
+        Value::binary_from_text("probe")
+    );
+
+    let diagnostics = assembler.read_diagnostics().unwrap();
+    assert_eq!(diagnostics.entries().len(), 1);
+    assert_eq!(diagnostics.entries()[0].message(), "object reflection task");
+}
+
+#[test]
+fn overriding_refl_with_undefined_disables_automatic_tasks() {
+    let source = r#"language g0
+import 'std
+refl.notice = .log 'info { msg:{ text:"disabled reflection task" } }
+refl := {}
+meta.probe = anno { refl:(.get ['heap,guard] >>= (\scanner -> .join_task scanner >>= (\_tasks -> .r ()))) } "probe"
+ordinary = "ordinary"
+"#;
+    let (assembler, context, module) =
+        reflection_enabled_module(source, &["disabled_refl_test"], &[("guard", "refl")]);
+
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
+        Value::binary_from_text("ordinary")
+    );
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
+        Value::binary_from_text("probe")
+    );
+    assert!(assembler.read_diagnostics().unwrap().entries().is_empty());
 }
 
 #[test]
