@@ -113,6 +113,11 @@ design in the design documents.
   transaction, the task checkpoints immediately before its first observation;
   an immediate host commit clears that checkpoint so retry cannot duplicate the
   committed effect.
+- Reflection choice and lazy demand are deterministic. `.alt` explores its next
+  branch only after failure; blocking on a lazy value suspends the current branch
+  and therefore leaves a task waiting on at most one lazy value. The same task
+  may also retain multiple prior state observations. Any future racing or
+  nondeterministic choice must be an explicit effect distinct from `.alt`.
 - Each `fix` alternative receives its own pending future. When a chosen result
   later fails, the handler restarts at the fixpoint boundary and replays its
   transactional `alt` choices rather than reusing an initialized future.

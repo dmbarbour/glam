@@ -300,6 +300,8 @@ It is very convenient to assume a standard effects API for generic extensions. P
 - `.seq op k` - equivalent to `op >>= k`
 - `.alt A B` - run `A`; on fail, backtrack then run `B`
   - invalid outside `.cut` scope in general usage
+  - ordered and deterministic: if `A` blocks on a lazy value, suspend rather
+    than allowing readiness to select `B`
 - `.fail` - failure for `.alt`, does not continue
 - `.cut op` - scope for `.alt`, selects first success
 - `.fix fn` - `fn` receives result as input but hides `.reset` scope
