@@ -9,9 +9,43 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::core::Value;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct EvaluationTaskId(NonZeroU64);
+
+impl EvaluationTaskId {
+    pub(crate) fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    pub(crate) fn from_u64(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(Self)
+    }
+}
+
+static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_WAIT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_task_id() -> Result<EvaluationTaskId, Arc<str>> {
+    allocate_id(&NEXT_TASK_ID, "evaluation task IDs exhausted").map(EvaluationTaskId)
+}
+
+fn allocate_wait_token(session: &Arc<EvaluationSession>) -> Result<EvaluationWaitToken, Arc<str>> {
+    Ok(EvaluationWaitToken {
+        id: allocate_id(&NEXT_WAIT_ID, "evaluation wait-token IDs exhausted")?,
+        owner: Arc::downgrade(session),
+    })
+}
+
+fn allocate_id(source: &AtomicU64, exhausted: &'static str) -> Result<NonZeroU64, Arc<str>> {
+    source
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .map(|id| NonZeroU64::new(id).expect("evaluation IDs start at one"))
+        .map_err(|_| Arc::from(exhausted))
+}
 
 #[derive(Clone)]
 pub(crate) struct EvaluationWaitToken {
@@ -50,6 +84,7 @@ impl Hash for EvaluationWaitToken {
 
 #[derive(Clone)]
 pub(crate) struct EvaluationTaskHandle {
+    id: EvaluationTaskId,
     wait: EvaluationWaitToken,
 }
 
@@ -57,7 +92,7 @@ impl fmt::Debug for EvaluationTaskHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("EvaluationTaskHandle")
-            .field("task", &self.wait.get())
+            .field("task", &self.id.get())
             .finish_non_exhaustive()
     }
 }
@@ -84,14 +119,23 @@ enum EvaluationTaskState {
 
 #[derive(Debug)]
 struct ReflectionTaskRecord {
+    #[allow(dead_code)] // Used when the cooperative executor enters the task.
+    id: EvaluationTaskId,
     #[allow(dead_code)] // Retained for the upcoming reflection executor.
     effect: Value,
     state: EvaluationTaskState,
 }
 
+#[derive(Debug)]
+struct PromiseRecord {
+    result: Weak<OnceLock<Result<Value, Arc<str>>>>,
+}
+
 #[derive(Debug, Default)]
 struct EvaluationTasks {
     reflection: HashMap<EvaluationWaitToken, ReflectionTaskRecord>,
+    promises: HashMap<EvaluationWaitToken, PromiseRecord>,
+    owned_promises: HashMap<EvaluationTaskId, Vec<EvaluationWaitToken>>,
 }
 
 #[derive(Debug, Default)]
@@ -112,11 +156,15 @@ impl EvaluationSession {
 #[derive(Debug, Clone)]
 pub(crate) struct EvalContext {
     session: Arc<EvaluationSession>,
+    task: Option<EvaluationTaskId>,
 }
 
 impl EvalContext {
     pub(crate) fn new(session: Arc<EvaluationSession>) -> Self {
-        Self { session }
+        Self {
+            session,
+            task: None,
+        }
     }
 
     /// Creates a session for internal clients that do not yet run under an
@@ -125,19 +173,72 @@ impl EvalContext {
         Self::new(Arc::new(EvaluationSession::new()))
     }
 
+    pub(crate) fn with_new_task(&self) -> Result<Self, Arc<str>> {
+        Ok(Self {
+            session: self.session.clone(),
+            task: Some(allocate_task_id()?),
+        })
+    }
+
+    pub(crate) fn task_id(&self) -> Option<EvaluationTaskId> {
+        self.task
+    }
+
+    pub(crate) fn register_promise(
+        &self,
+        result: &Arc<OnceLock<Result<Value, Arc<str>>>>,
+    ) -> Result<(EvaluationTaskId, EvaluationWaitToken), Arc<str>> {
+        let owner = self
+            .task
+            .ok_or_else(|| Arc::<str>::from("fixpoint promise requires an evaluation task"))?;
+        let wait = allocate_wait_token(&self.session)?;
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let replaced = tasks.promises.insert(
+            wait.clone(),
+            PromiseRecord {
+                result: Arc::downgrade(result),
+            },
+        );
+        assert!(replaced.is_none(), "evaluation wait tokens must be unique");
+        tasks
+            .owned_promises
+            .entry(owner)
+            .or_default()
+            .push(wait.clone());
+        Ok((owner, wait))
+    }
+
+    pub(crate) fn fail_unresolved_promises(&self, reason: impl Into<Arc<str>>) {
+        let Some(owner) = self.task else {
+            return;
+        };
+        let reason = reason.into();
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let waits = tasks.owned_promises.remove(&owner).unwrap_or_default();
+        for wait in waits {
+            let Some(promise) = tasks.promises.get(&wait) else {
+                continue;
+            };
+            if let Some(result) = promise.result.upgrade() {
+                let _ = result.set(Err(reason.clone()));
+            }
+        }
+    }
+
     pub(crate) fn start_reflection_task(
         &self,
         effect: Value,
     ) -> Result<EvaluationTaskHandle, Arc<str>> {
-        static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
-
-        let id = NEXT_TASK_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .map_err(|_| Arc::<str>::from("evaluation task IDs exhausted"))?;
-        let wait = EvaluationWaitToken {
-            id: NonZeroU64::new(id).expect("evaluation task IDs start at one"),
-            owner: Arc::downgrade(&self.session),
-        };
+        let id = allocate_task_id()?;
+        let wait = allocate_wait_token(&self.session)?;
         let replaced = self
             .session
             .tasks
@@ -147,12 +248,13 @@ impl EvalContext {
             .insert(
                 wait.clone(),
                 ReflectionTaskRecord {
+                    id,
                     effect,
                     state: EvaluationTaskState::Queued,
                 },
             );
         assert!(replaced.is_none(), "evaluation task IDs must be unique");
-        Ok(EvaluationTaskHandle { wait })
+        Ok(EvaluationTaskHandle { id, wait })
     }
 
     pub(crate) fn poll_reflection_task(&self, task: &EvaluationTaskHandle) -> EvaluationTaskPoll {
@@ -170,9 +272,22 @@ impl EvalContext {
             .lock()
             .expect("evaluation task registry was poisoned");
         let Some(record) = tasks.reflection.get(wait) else {
-            return EvaluationTaskPoll::Failed(Arc::from(
-                "reflection task is no longer registered",
-            ));
+            let Some(promise) = tasks.promises.get(wait) else {
+                return EvaluationTaskPoll::Failed(Arc::from(
+                    "evaluation wait token is no longer registered",
+                ));
+            };
+            let Some(result) = promise.result.upgrade() else {
+                return EvaluationTaskPoll::Failed(Arc::from("promised value no longer exists"));
+            };
+            return match result.get() {
+                Some(Ok(_)) => EvaluationTaskPoll::Complete,
+                Some(Err(error)) => EvaluationTaskPoll::Failed(error.clone()),
+                None if Arc::ptr_eq(&self.session, &owner) => {
+                    EvaluationTaskPoll::Pending(wait.clone())
+                }
+                None => EvaluationTaskPoll::ForeignSession,
+            };
         };
         match &record.state {
             EvaluationTaskState::Complete => EvaluationTaskPoll::Complete,

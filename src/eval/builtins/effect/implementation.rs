@@ -9,7 +9,7 @@ pub(super) fn eval_fixpoint_builtin(
         return Err(EvalError::new("fixpoint builtin requires a function value"));
     }
 
-    let handle = LazyValue::pending("fixpoint");
+    let handle = LazyValue::promised("fixpoint");
     let marker = Value::Lazy(handle.clone());
     let value = apply_value(context, function, marker.clone())?;
     handle

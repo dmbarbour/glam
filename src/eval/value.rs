@@ -48,11 +48,7 @@ impl fmt::Display for EvalError {
         match &self.kind {
             EvalErrorKind::Message(message) => f.write_str(message),
             EvalErrorKind::Blocked(wait) => {
-                write!(
-                    f,
-                    "evaluation is blocked on reflection task {}",
-                    wait.task_id()
-                )
+                write!(f, "evaluation is blocked on wait token {}", wait.wait_id())
             }
         }
     }
@@ -99,6 +95,30 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
                 ));
             }
         }
+    } else if let Some(fixpoint) = lazy.fixpoint_cell() {
+        if context.task_id() == Some(fixpoint.owner()) {
+            return Err(EvalError::new(format!(
+                "reflection fixpoint {} recursively observed itself in task {}",
+                fixpoint.id(),
+                fixpoint.owner().get()
+            )));
+        }
+        match context.poll_wait(fixpoint.wait()) {
+            EvaluationTaskPoll::Pending(wait) => {
+                return Err(EvalError::blocked(CoreWaitToken(wait)));
+            }
+            EvaluationTaskPoll::Complete => lazy
+                .cached()
+                .expect("completed fixpoint promise must contain a result")
+                .map_err(|message| EvalError::new(message.as_ref())),
+            EvaluationTaskPoll::Failed(error) => Err(EvalError::new(error.as_ref())),
+            EvaluationTaskPoll::Cancelled => {
+                Err(EvalError::new("reflection fixpoint producer was cancelled"))
+            }
+            EvaluationTaskPoll::ForeignSession => Err(EvalError::new(
+                "reflection fixpoint belongs to another evaluation session",
+            )),
+        }
     } else if let Some(result) = lazy.force_deferred(context) {
         result.map_err(|message| EvalError::new(message.as_ref()))
     } else if let Some((path, arguments)) = lazy.access() {
@@ -115,13 +135,13 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
         let runtime = net.runtime().clone();
         let exposed = runtime.with(|runtime| runtime.exposed());
         extract_net_data(context, runtime, exposed, "lazy net computation")
-    } else if lazy.is_pending() {
+    } else if lazy.is_promised() {
         // TODO(parallel evaluation): an unfulfilled lazy value currently
         // fails fast. Parallel evaluation needs a thunk-level scheduler,
         // including explicit sparks and suspended continuations, rather
         // than a blocking IVar join that can deadlock on cyclic demand.
         return Err(EvalError::new(
-            "lazy value was observed before initialization",
+            "promised value was observed before initialization",
         ));
     } else {
         return Err(EvalError::new("lazy value has no producer"));

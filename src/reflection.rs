@@ -15,13 +15,12 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::api::Value as PublicValue;
 use crate::core::{Atom, Dict, FunctionValue, Key, LazyValue, List, NetValue, Value, keys};
 use crate::core_net::CoreSpecialization;
 use crate::eval;
-use crate::evaluation::EvalContext;
+use crate::evaluation::{EvalContext, EvaluationTaskId};
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
 
@@ -223,18 +222,6 @@ impl fmt::Display for TaskError {
 
 impl std::error::Error for TaskError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TaskId(u64);
-
-static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
-
-fn allocate_task_id() -> Result<TaskId, TaskError> {
-    NEXT_TASK_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .map(TaskId)
-        .map_err(|_| TaskError::new("reflection task IDs exhausted"))
-}
-
 /// Runs one reflection effect with a statically selected set of extra effects.
 pub fn run<S: TaskSpecialization>(
     effect: &PublicValue,
@@ -304,7 +291,7 @@ impl Tags {
 
 struct EffectTask<S: TaskSpecialization> {
     eval_context: EvalContext,
-    id: TaskId,
+    id: EvaluationTaskId,
     specialization: S,
     host: Arc<S::Host>,
     tags: Tags,
@@ -320,9 +307,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
     fn new(specialization: S, host: Arc<S::Host>) -> Result<Self, TaskError> {
         let tags = Tags::new();
         let (api, specialized_requests) = effect_api(&tags, specialization.requests())?;
+        let eval_context = EvalContext::standalone()
+            .with_new_task()
+            .map_err(|error| TaskError::new(error.as_ref()))?;
+        let id = eval_context
+            .task_id()
+            .expect("new reflection evaluation context must own a task ID");
         Ok(Self {
-            eval_context: EvalContext::standalone(),
-            id: allocate_task_id()?,
+            eval_context,
+            id,
             specialization,
             host,
             tags,
@@ -358,7 +351,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             self.tags.resume.clone(),
             3,
             vec![
-                Value::Number(Number::from_u64(self.id.0)),
+                Value::Number(Number::from_u64(self.id.get())),
                 Value::Number(Number::from_u64(id)),
             ],
             true,
@@ -371,7 +364,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
         choices: Vec<FixChoice>,
     ) -> Result<Branch<S>, TaskError> {
         let mut branch = root.entry.clone();
-        let handle = LazyValue::pending("reflection effect fixpoint");
+        let handle = LazyValue::fixpoint(&self.eval_context, "reflection effect fixpoint")
+            .map_err(|error| TaskError::new(error.as_ref()))?;
         let marker = Value::Lazy(handle.clone());
         let operation = apply(&self.eval_context, root.function.clone(), vec![marker])?;
         let outer_control = std::mem::take(&mut branch.control);
@@ -472,6 +466,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     fn run(&mut self, effect: Value) -> Result<TaskOutcome, TaskError> {
+        let result = self.run_inner(effect);
+        let unfinished_reason: Arc<str> = match &result {
+            Ok(TaskOutcome::Complete(_)) => {
+                Arc::from("reflection task completed without fulfilling its fixpoint")
+            }
+            Ok(TaskOutcome::Cancelled) => Arc::from("reflection fixpoint producer was cancelled"),
+            Err(error) => Arc::from(format!("reflection fixpoint producer failed: {error}")),
+        };
+        self.eval_context
+            .fail_unresolved_promises(unfinished_reason);
+        result
+    }
+
+    fn run_inner(&mut self, effect: Value) -> Result<TaskOutcome, TaskError> {
         let mut branch = Branch::new(effect, self.visible_state(self.host.snapshot().heap()));
         loop {
             match self.drive(branch, 0)? {
@@ -1305,7 +1313,7 @@ enum Request<R> {
     Set(Value, Value),
     Reset(Value, Value),
     Shift(Value, Value),
-    Resume(TaskId, u64, Value),
+    Resume(EvaluationTaskId, u64, Value),
     Specialized(R, Vec<PublicValue>),
 }
 
@@ -1374,8 +1382,11 @@ fn parse_request<R: Clone>(
         let [task_id, continuation_id, value]: [Value; 3] = arguments.try_into().map_err(|_| {
             TaskError::new("resume request contained the wrong number of arguments")
         })?;
+        let task_id = request_id(context, task_id, "task")?;
+        let task_id = EvaluationTaskId::from_u64(task_id)
+            .ok_or_else(|| TaskError::new("reflection task ID must be nonzero"))?;
         return Ok(Request::Resume(
-            TaskId(request_id(context, task_id, "task")?),
+            task_id,
             request_id(context, continuation_id, "continuation")?,
             value,
         ));
@@ -2280,6 +2291,16 @@ mod tests {
         assert_eq!(
             assembler.to_binary(&value).unwrap(),
             b"nested right".as_slice()
+        );
+    }
+
+    #[test]
+    fn reflection_fixpoint_reports_recursive_self_observation() {
+        let (_, effect) = compile_effect(".fix (\\recur -> recur)");
+        let error = run_standard_test(&effect).unwrap_err();
+        assert!(
+            error.to_string().contains("recursively observed itself"),
+            "{error}"
         );
     }
 

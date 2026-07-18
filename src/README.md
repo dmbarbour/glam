@@ -145,6 +145,12 @@ apply(function, arguments)
   -> dictionary applicability compatibility
 ```
 
+Reflection fixpoints are task-owned lazy cells. Their producer task receives a
+recursive-observation error if it demands an unresolved cell; another task in
+the session receives the cell's precise wait token. Anonymous assignment holes
+used by module and object construction remain `Promised` values and retain the
+bootstrap's fail-fast observation rule.
+
 An undersaturated source function produces another `FunctionValue` sharing a
 curried runtime stage. Saturation produces a memoized computation. Explicit
 `Value::Net` is different: application attaches a logical copy of its exposed

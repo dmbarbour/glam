@@ -64,7 +64,7 @@ pub struct CoreSpecialization;
 pub struct CoreWaitToken(pub(crate) EvaluationWaitToken);
 
 impl CoreWaitToken {
-    pub(crate) fn task_id(&self) -> u64 {
+    pub(crate) fn wait_id(&self) -> u64 {
         self.0.get()
     }
 }

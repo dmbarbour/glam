@@ -118,9 +118,12 @@ design in the design documents.
   and therefore leaves a task waiting on at most one lazy value. The same task
   may also retain multiple prior state observations. Any future racing or
   nondeterministic choice must be an explicit effect distinct from `.alt`.
-- Each `fix` alternative receives its own pending future. When a chosen result
-  later fails, the handler restarts at the fixpoint boundary and replays its
-  transactional `alt` choices rather than reusing an initialized future.
+- Each reflection `fix` alternative receives its own task-owned fixpoint cell.
+  Recursive observation by its producer is an error; another task observes its
+  precise wait token. When a chosen result later fails, the handler restarts at
+  the fixpoint boundary and replays its transactional `alt` choices rather than
+  reusing an initialized cell. Task termination fails any unfulfilled cells it
+  still owns.
 - `main` owns the diagnostic queue, logging request dispatcher, and logging
   transaction snapshot/journal. Defined `conf.log` consumes enriched messages
   effectfully; undefined, completed, or failed custom logging falls back to the
@@ -149,9 +152,9 @@ design in the design documents.
   operations.
 - The current dictionary/access evaluator is compatibility code. Preserve its
   behavior until a first-class persistent lazy dictionary design replaces it.
-- Pending lazy cells currently fail if observed before assignment. Parallel
-  evaluation will need thunk scheduling and continuations; do not turn this
-  temporary fail-fast rule into a blocking join without that design.
+- Anonymous `Promised` lazy cells currently fail if observed before assignment.
+  Parallel evaluation will need thunk scheduling and continuations; do not turn
+  this temporary fail-fast rule into a blocking join without that design.
 - A reflection annotation is a boxed lazy gate, not reflection performed by an
   interaction-net operator. Its task handle and result are monotonic cells;
   mutable queued/running/blocked state belongs to `EvaluationSession`. Task

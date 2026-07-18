@@ -84,7 +84,7 @@ impl Default for CompileContext {
             compilation_trace: None,
             module_path: Arc::from([]),
             prior_defs: Value::Dict(Dict::new_sync()), // empty prior dictionary
-            final_defs: Value::Lazy(LazyValue::pending("final definitions")),
+            final_defs: Value::Lazy(LazyValue::promised("final definitions")),
             local_module_loader: None,
             local_binary_loader: None,
             diagnostic_emitter: None,

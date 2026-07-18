@@ -7,7 +7,7 @@ pub(super) fn eval_object_instance_builtin(
     let spec_dict = object_spec_dict(context, spec)?;
     let specs = object_application_order(context, &spec_dict)?;
 
-    let handle = LazyValue::pending("object self");
+    let handle = LazyValue::promised("object self");
     let self_marker = Value::Lazy(handle.clone());
     let mut base = Value::Dict(crate::core::Dict::new_sync());
     for spec in specs {

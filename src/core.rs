@@ -1,4 +1,5 @@
 use std::fmt;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -7,7 +8,7 @@ use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
-use crate::evaluation::{EvalContext, EvaluationTaskHandle};
+use crate::evaluation::{EvalContext, EvaluationTaskHandle, EvaluationTaskId, EvaluationWaitToken};
 use crate::number::Number;
 
 pub(crate) mod keys;
@@ -20,20 +21,39 @@ pub struct LazyValue {
     result: Arc<OnceLock<Result<Value, Arc<str>>>>,
 }
 
+static NEXT_LAZY_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_FIXPOINT_ID: AtomicU64 = AtomicU64::new(1);
+
 impl LazyValue {
     fn with_source(label: impl Into<Arc<str>>, source: LazySource) -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
         Self {
-            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            id: NEXT_LAZY_ID.fetch_add(1, Ordering::Relaxed),
             label: label.into(),
             source,
             result: Arc::new(OnceLock::new()),
         }
     }
 
-    pub fn pending(label: impl Into<Arc<str>>) -> Self {
-        Self::with_source(label, LazySource::Pending)
+    pub fn promised(label: impl Into<Arc<str>>) -> Self {
+        Self::with_source(label, LazySource::Promised)
+    }
+
+    pub(crate) fn fixpoint(
+        context: &EvalContext,
+        label: impl Into<Arc<str>>,
+    ) -> Result<Self, Arc<str>> {
+        let result = Arc::new(OnceLock::new());
+        let (owner, wait) = context.register_promise(&result)?;
+        let id = NEXT_FIXPOINT_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map(|id| FixpointId(NonZeroU64::new(id).expect("fixpoint IDs start at one")))
+            .map_err(|_| Arc::<str>::from("fixpoint IDs exhausted"))?;
+        Ok(Self {
+            id: NEXT_LAZY_ID.fetch_add(1, Ordering::Relaxed),
+            label: label.into(),
+            source: LazySource::Fixpoint(Arc::new(FixpointCell { id, owner, wait })),
+            result,
+        })
     }
 
     pub(crate) fn deferred(
@@ -44,7 +64,7 @@ impl LazyValue {
     }
 
     pub fn error(message: impl Into<Arc<str>>) -> Self {
-        let value = Self::with_source("error", LazySource::Pending);
+        let value = Self::with_source("error", LazySource::Promised);
         value
             .result
             .set(Err(message.into()))
@@ -74,8 +94,8 @@ impl LazyValue {
             .clone()
     }
 
-    pub(crate) fn is_pending(&self) -> bool {
-        matches!(self.source, LazySource::Pending) && self.result.get().is_none()
+    pub(crate) fn is_promised(&self) -> bool {
+        matches!(self.source, LazySource::Promised) && self.result.get().is_none()
     }
 
     pub(crate) fn force_deferred(&self, context: &EvalContext) -> Option<Result<Value, Arc<str>>> {
@@ -222,7 +242,7 @@ pub enum Value {
     Function(FunctionValue),
     /// A closed interaction net with one designated exposed port.
     Net(NetValue),
-    /// A closed suspended computation, pending value, or memoized failure.
+    /// A closed suspended computation, promised value, or memoized failure.
     Lazy(LazyValue),
 }
 
@@ -318,7 +338,8 @@ impl BuiltinCall {
 
 #[derive(Clone)]
 enum LazySource {
-    Pending,
+    Promised,
+    Fixpoint(Arc<FixpointCell>),
     Deferred(Arc<DeferredComputation>),
     ReflectionGate(Arc<ReflectionGate>),
     Access {
@@ -331,6 +352,29 @@ enum LazySource {
         function: FunctionValue,
         arguments: Arc<[Value]>,
     },
+}
+
+pub(crate) struct FixpointCell {
+    id: FixpointId,
+    owner: EvaluationTaskId,
+    wait: EvaluationWaitToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FixpointId(NonZeroU64);
+
+impl FixpointCell {
+    pub(crate) fn id(&self) -> u64 {
+        self.id.0.get()
+    }
+
+    pub(crate) fn owner(&self) -> EvaluationTaskId {
+        self.owner
+    }
+
+    pub(crate) fn wait(&self) -> &EvaluationWaitToken {
+        &self.wait
+    }
 }
 
 type DeferredComputation = dyn Fn(&EvalContext) -> Result<Value, String> + Send + Sync;
@@ -426,6 +470,13 @@ impl LazyValue {
     pub(crate) fn reflection_gate(&self) -> Option<&ReflectionGate> {
         match &self.source {
             LazySource::ReflectionGate(gate) => Some(gate),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn fixpoint_cell(&self) -> Option<&FixpointCell> {
+        match &self.source {
+            LazySource::Fixpoint(cell) => Some(cell),
             _ => None,
         }
     }

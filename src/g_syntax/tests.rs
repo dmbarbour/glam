@@ -11,7 +11,7 @@ fn core_global_access(context: &CompileContext, path: Vec<Key>) -> Value {
 
 fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> Value {
     let Value::Lazy(final_defs) = context.final_defs() else {
-        panic!("final module binding should be a pending lazy value");
+        panic!("final module binding should be a promised lazy value");
     };
     final_defs
         .set(lowered.definitions.clone())

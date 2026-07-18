@@ -41,7 +41,7 @@ pub(super) fn eval_list_effect_fix_builtin(
     function: &Value,
 ) -> Result<Value, EvalError> {
     let function = eval_value(context, function)?;
-    let handle = LazyValue::pending("list effect fixpoint");
+    let handle = LazyValue::promised("list effect fixpoint");
     let marker = Value::Lazy(handle.clone());
     let operation = apply_value(context, function, marker.clone())?;
     Ok(Value::List(fix_list_effect_results(operation, handle)))

@@ -1054,7 +1054,7 @@ impl Assembler {
 
     fn seal_module(&self, context: &CompileContext, definitions: &CoreValue) -> CoreValue {
         let CoreValue::Lazy(final_defs) = context.final_defs() else {
-            panic!("CompileContext.final_defs must be a pending lazy value");
+            panic!("CompileContext.final_defs must be a promised lazy value");
         };
         final_defs
             .set(definitions.clone())

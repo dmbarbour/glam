@@ -238,16 +238,59 @@ fn n(value: i64) -> Value {
 }
 
 #[test]
-fn pending_lazy_values_fail_fast_until_initialized() {
-    let pending = LazyValue::pending("test pending value");
-    let value = Value::Lazy(pending.clone());
+fn promised_lazy_values_fail_fast_until_initialized() {
+    let promised = LazyValue::promised("test promised value");
+    let value = Value::Lazy(promised.clone());
 
     assert_eq!(
         eval_value(&test_context(), &value).unwrap_err().to_string(),
-        "lazy value was observed before initialization"
+        "promised value was observed before initialization"
     );
-    pending.set(n(42)).unwrap();
+    promised.set(n(42)).unwrap();
     assert_eq!(eval_value(&test_context(), &value).unwrap(), n(42));
+}
+
+#[test]
+fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
+    let session = test_context();
+    let owner = session.with_new_task().unwrap();
+    let observer = session.with_new_task().unwrap();
+    let fixpoint = LazyValue::fixpoint(&owner, "test fixpoint").unwrap();
+    let value = Value::Lazy(fixpoint.clone());
+
+    let recursive = eval_value(&owner, &value).unwrap_err();
+    assert!(
+        recursive
+            .to_string()
+            .contains("recursively observed itself")
+    );
+
+    let blocked = eval_value(&observer, &value).unwrap_err();
+    assert!(blocked.blocked_on().is_some());
+
+    fixpoint.set(n(42)).unwrap();
+    assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
+}
+
+#[test]
+fn failed_task_fails_its_unresolved_fixpoint_promises() {
+    let session = test_context();
+    let owner = session.with_new_task().unwrap();
+    let observer = session.with_new_task().unwrap();
+    let fixpoint = LazyValue::fixpoint(&owner, "test fixpoint").unwrap();
+    let value = Value::Lazy(fixpoint);
+
+    assert!(
+        eval_value(&observer, &value)
+            .unwrap_err()
+            .blocked_on()
+            .is_some()
+    );
+    owner.fail_unresolved_promises("producer failed deliberately");
+    assert_eq!(
+        eval_value(&observer, &value).unwrap_err().to_string(),
+        "producer failed deliberately"
+    );
 }
 
 #[test]
