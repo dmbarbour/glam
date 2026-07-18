@@ -417,6 +417,26 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    /// Recovers the structural call represented by a principal `Bind >< Data`
+    /// pair. Pair state is deliberately irrelevant so a blocked call can be
+    /// reclaimed after its exact wait completes.
+    pub fn call(&self, pair: ActivePairKey) -> Option<Call> {
+        let (left, right) = self.active_pair_nodes(pair)?;
+        match (self.node(left), self.node(right)) {
+            (Some(RuntimeNode::Bind), Some(RuntimeNode::Data(_))) => Some(Call {
+                pair,
+                bind: left,
+                data: right,
+            }),
+            (Some(RuntimeNode::Data(_)), Some(RuntimeNode::Bind)) => Some(Call {
+                pair,
+                bind: right,
+                data: left,
+            }),
+            _ => None,
+        }
+    }
+
     pub fn cursor_dependency(&self, cursor: NodeId) -> Option<CursorDependency<S>> {
         self.cursor_dependencies.get(&cursor).cloned()
     }
@@ -477,8 +497,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     /// Suspends an exact claimed call on specialization-owned external work.
-    /// No evaluator currently produces this state; this transition is the
-    /// runtime contract for the later blocking-callable spike.
     pub fn block_claimed_call(&mut self, call: Call, wait: S::WaitToken) {
         let previous = self
             .active

@@ -37,6 +37,9 @@ pub(super) fn eval_anno_builtin(
         RecognizedAnnotation::Deque => eval_deque_annotation(context, target),
         RecognizedAnnotation::Binary => eval_binary_annotation(context, target),
         RecognizedAnnotation::Array => eval_array_annotation(context, target),
+        RecognizedAnnotation::Reflection { effect } => {
+            Ok(Value::reflection_gate(effect, target.clone()))
+        }
         RecognizedAnnotation::Invalid(message) => Ok(annotation_error_value(message)),
         RecognizedAnnotation::Unknown(rendered) => {
             eprintln!("warning: unrecognized annotation encountered: {rendered}");
@@ -52,6 +55,7 @@ enum RecognizedAnnotation {
     Deque,
     Binary,
     Array,
+    Reflection { effect: Value },
     Invalid(String),
     Unknown(String),
 }
@@ -78,6 +82,11 @@ fn recognize_annotation(
     }
 
     match tag {
+        Key::Atom(atom) if atom_name(atom) == Some("refl") => {
+            Ok(RecognizedAnnotation::Reflection {
+                effect: payload.clone(),
+            })
+        }
         Key::Atom(atom) if atom_name(atom) == Some("assert_defined") => Ok(
             match parse_assertion_annotation(context, payload, "assert_defined")? {
                 ParsedAssertion::Valid { name, defined } => {

@@ -7,7 +7,7 @@ use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
-use crate::evaluation::EvalContext;
+use crate::evaluation::{EvalContext, EvaluationTaskHandle};
 use crate::number::Number;
 
 pub(crate) mod keys;
@@ -320,6 +320,7 @@ impl BuiltinCall {
 enum LazySource {
     Pending,
     Deferred(Arc<DeferredComputation>),
+    ReflectionGate(Arc<ReflectionGate>),
     Access {
         path: Arc<[CoreDataKey]>,
         arguments: Arc<[Value]>,
@@ -333,6 +334,29 @@ enum LazySource {
 }
 
 type DeferredComputation = dyn Fn(&EvalContext) -> Result<Value, String> + Send + Sync;
+
+/// A lazy sequencing boundary for `anno refl:Effect Target`.
+///
+/// The payload is boxed so adding reflection does not enlarge every
+/// `LazySource`. Task execution state remains in `EvaluationSession`; this
+/// cell only remembers which task the first observer started.
+pub(crate) struct ReflectionGate {
+    effect: Value,
+    target: Value,
+    task: OnceLock<Result<EvaluationTaskHandle, Arc<str>>>,
+}
+
+impl ReflectionGate {
+    pub(crate) fn task(&self, context: &EvalContext) -> Result<&EvaluationTaskHandle, &Arc<str>> {
+        self.task
+            .get_or_init(|| context.start_reflection_task(self.effect.clone()))
+            .as_ref()
+    }
+
+    pub(crate) fn target(&self) -> &Value {
+        &self.target
+    }
+}
 
 impl LazyValue {
     pub(crate) fn from_access(path: Arc<[CoreDataKey]>, arguments: Arc<[Value]>) -> Self {
@@ -355,6 +379,17 @@ impl LazyValue {
 
     pub(crate) fn from_net_computation(net: NetValue) -> Self {
         Self::with_source("net computation", LazySource::NetComputation(net))
+    }
+
+    pub(crate) fn from_reflection_gate(effect: Value, target: Value) -> Self {
+        Self::with_source(
+            "reflection annotation",
+            LazySource::ReflectionGate(Arc::new(ReflectionGate {
+                effect,
+                target,
+                task: OnceLock::new(),
+            })),
+        )
     }
 
     pub(crate) fn access(&self) -> Option<(&[CoreDataKey], &[Value])> {
@@ -384,6 +419,13 @@ impl LazyValue {
     pub(crate) fn net_computation(&self) -> Option<&NetValue> {
         match &self.source {
             LazySource::NetComputation(net) => Some(net),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn reflection_gate(&self) -> Option<&ReflectionGate> {
+        match &self.source {
+            LazySource::ReflectionGate(gate) => Some(gate),
             _ => None,
         }
     }
@@ -528,6 +570,10 @@ impl Value {
         Self::Lazy(LazyValue::error(message))
     }
 
+    pub(crate) fn reflection_gate(effect: Value, target: Value) -> Self {
+        Self::Lazy(LazyValue::from_reflection_gate(effect, target))
+    }
+
     /// Constructs a builtin value at a specific curried stage without
     /// evaluating a saturated call.
     pub fn builtin_call(builtin: Builtin, arguments: Vec<Value>) -> Self {
@@ -582,6 +628,34 @@ impl Value {
 mod tests {
     use super::*;
     use bytes::Bytes;
+
+    #[test]
+    fn boxed_reflection_gate_does_not_enlarge_lazy_source() {
+        #[allow(dead_code)]
+        enum LazySourceWithoutReflection {
+            Pending,
+            Deferred(Arc<DeferredComputation>),
+            Access {
+                path: Arc<[CoreDataKey]>,
+                arguments: Arc<[Value]>,
+            },
+            Builtin(BuiltinCall),
+            NetComputation(NetValue),
+            FunctionCall {
+                function: FunctionValue,
+                arguments: Arc<[Value]>,
+            },
+        }
+
+        assert_eq!(
+            std::mem::size_of::<LazySource>(),
+            std::mem::size_of::<LazySourceWithoutReflection>()
+        );
+        assert_eq!(
+            std::mem::size_of::<Arc<ReflectionGate>>(),
+            std::mem::size_of::<usize>()
+        );
+    }
 
     #[test]
     fn atoms_and_binary_keys_are_distinct() {

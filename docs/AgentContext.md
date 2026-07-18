@@ -139,6 +139,14 @@ design in the design documents.
 - Pending lazy cells currently fail if observed before assignment. Parallel
   evaluation will need thunk scheduling and continuations; do not turn this
   temporary fail-fast rule into a blocking join without that design.
+- A reflection annotation is a boxed lazy gate, not reflection performed by an
+  interaction-net operator. Its task handle and result are monotonic cells;
+  mutable queued/running/blocked state belongs to `EvaluationSession`. Task
+  waits must not be cached as lazy failures, and successful gates return their
+  original target without forcing it.
+- The first observer owns a reflection gate's running task. A different session
+  must not drive it, though either session may consume the completed result.
+  Wait tokens retain only a weak reference to the owner.
 
 ### Interaction nets
 

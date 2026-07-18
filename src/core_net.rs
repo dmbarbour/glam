@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use crate::core::{BuiltinCall, FunctionCode, Key, Value};
+use crate::evaluation::EvaluationWaitToken;
 use crate::interaction_net::{InteractionNet, SharedRuntimeNet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,11 +57,17 @@ pub enum CoreOperator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreSpecialization;
 
-/// Opaque identity for future evaluator work that suspends a core net call.
-/// The evaluator will allocate these when blocking callable semantics are
-/// introduced; the generic runtime only compares them for exact wakeups.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CoreWaitToken(pub(crate) u64);
+/// Opaque identity for evaluator work that suspends a core net call. The weak
+/// session provenance remains hidden from the generic runtime, which only
+/// clones and compares tokens for exact wakeups.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CoreWaitToken(pub(crate) EvaluationWaitToken);
+
+impl CoreWaitToken {
+    pub(crate) fn task_id(&self) -> u64 {
+        self.0.get()
+    }
+}
 
 pub type CoreInteractionNet = InteractionNet<CoreSpecialization>;
 pub type CoreRuntimeNet = SharedRuntimeNet<CoreSpecialization>;

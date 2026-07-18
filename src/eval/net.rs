@@ -171,11 +171,13 @@ fn drive_net_interface(
             }
         }
 
-        if let Some(pair) = runtime.with(|net| net.interface_dependency(interface))
-            && let Some(reduction) = runtime.with_mut(|net| net.reduce_pair(pair))
-        {
-            handle_core_reduction(context, runtime, reduction)?;
-            continue;
+        if let Some(pair) = runtime.with(|net| net.interface_dependency(interface)) {
+            if progress_exact_core_pair(context, runtime, pair, 0)? {
+                continue;
+            }
+            if let Some(blocked) = runtime.with(|net| net.blocked_call(pair)) {
+                return Err(EvalError::blocked(blocked.wait));
+            }
         }
 
         let reduction = runtime.with_mut(|net| net.reduce_next());
@@ -299,6 +301,24 @@ pub(super) fn progress_exact_core_pair(
         }
         return Ok(progressed);
     }
+    if let Some(blocked) = runtime.with(|net| net.blocked_call(pair)) {
+        return match context.poll_wait(&blocked.wait.0) {
+            crate::evaluation::EvaluationTaskPoll::Pending(_) => Ok(false),
+            crate::evaluation::EvaluationTaskPoll::ForeignSession => Err(EvalError::new(
+                "blocked interaction-net call belongs to another evaluation session",
+            )),
+            crate::evaluation::EvaluationTaskPoll::Complete
+            | crate::evaluation::EvaluationTaskPoll::Failed(_)
+            | crate::evaluation::EvaluationTaskPoll::Cancelled => {
+                let call = runtime
+                    .with(|net| net.call(pair))
+                    .expect("blocked core call must remain a Bind >< Data pair");
+                let reclaimed = runtime.with_mut(|net| net.retry_blocked_call(call, &blocked.wait));
+                assert!(reclaimed, "matching blocked core call must be reclaimable");
+                progress_exact_core_call(context, runtime, call)
+            }
+        };
+    }
     if runtime.with(|net| net.stuck_reason(pair).is_some()) {
         return Err(stuck_pair_error(runtime, pair));
     }
@@ -371,6 +391,10 @@ pub(super) fn progress_exact_core_call(
             Ok(true)
         }
         Err(error) => {
+            if let Some(wait) = error.blocked_on() {
+                runtime.with_mut(|runtime| runtime.block_claimed_call(call, wait));
+                return Ok(true);
+            }
             runtime.with_mut(|runtime| runtime.fail_claimed_call(call, error.clone()));
             Err(error)
         }

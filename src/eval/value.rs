@@ -2,7 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::core::{Key, LazyValue, List, Value, keys};
-use crate::evaluation::EvalContext;
+use crate::core_net::CoreWaitToken;
+use crate::evaluation::{EvalContext, EvaluationTaskPoll};
 use crate::list::ListItem;
 use crate::number::Number;
 
@@ -12,20 +13,48 @@ use super::sequence::list_to_key_items;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalError {
-    message: String,
+    kind: EvalErrorKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EvalErrorKind {
+    Message(String),
+    Blocked(CoreWaitToken),
 }
 
 impl EvalError {
     pub(super) fn new(message: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
+            kind: EvalErrorKind::Message(message.into()),
+        }
+    }
+
+    pub(super) fn blocked(wait: CoreWaitToken) -> Self {
+        Self {
+            kind: EvalErrorKind::Blocked(wait),
+        }
+    }
+
+    pub(super) fn blocked_on(&self) -> Option<CoreWaitToken> {
+        match &self.kind {
+            EvalErrorKind::Blocked(wait) => Some(wait.clone()),
+            EvalErrorKind::Message(_) => None,
         }
     }
 }
 
 impl fmt::Display for EvalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
+        match &self.kind {
+            EvalErrorKind::Message(message) => f.write_str(message),
+            EvalErrorKind::Blocked(wait) => {
+                write!(
+                    f,
+                    "evaluation is blocked on reflection task {}",
+                    wait.task_id()
+                )
+            }
+        }
     }
 }
 
@@ -51,7 +80,26 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
             Ok(result)
         };
     }
-    let result = if let Some(result) = lazy.force_deferred(context) {
+    let result = if let Some(gate) = lazy.reflection_gate() {
+        let task = gate
+            .task(context)
+            .map_err(|error| EvalError::new(error.as_ref()))?;
+        match context.poll_reflection_task(task) {
+            EvaluationTaskPoll::Pending(wait) => {
+                return Err(EvalError::blocked(CoreWaitToken(wait)));
+            }
+            EvaluationTaskPoll::Complete => Ok(gate.target().clone()),
+            EvaluationTaskPoll::Failed(error) => Err(EvalError::new(error.as_ref())),
+            EvaluationTaskPoll::Cancelled => {
+                Err(EvalError::new("reflection annotation task was cancelled"))
+            }
+            EvaluationTaskPoll::ForeignSession => {
+                return Err(EvalError::new(
+                    "reflection annotation task belongs to another evaluation session",
+                ));
+            }
+        }
+    } else if let Some(result) = lazy.force_deferred(context) {
         result.map_err(|message| EvalError::new(message.as_ref()))
     } else if let Some((path, arguments)) = lazy.access() {
         resolve_core_access(context, arguments, path)
@@ -77,8 +125,13 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
         ));
     } else {
         return Err(EvalError::new("lazy value has no producer"));
+    };
+    if let Err(error) = &result
+        && error.blocked_on().is_some()
+    {
+        return Err(error.clone());
     }
-    .map_err(|error| Arc::<str>::from(error.to_string()));
+    let result = result.map_err(|error| Arc::<str>::from(error.to_string()));
     let result = lazy
         .cache(result)
         .map_err(|message| EvalError::new(message.as_ref()))?;

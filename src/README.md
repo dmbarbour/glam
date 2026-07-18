@@ -121,9 +121,9 @@ front-end facade returns only lowered definitions plus source diagnostics.
 
 An `Assembler` owns one `EvaluationSession`; its clones share that session.
 Each evaluator entry borrows an `EvalContext` pointing to it, including work
-performed later by a lazy value. The session currently carries no facilities,
-but establishes the ownership boundary for later reflection scheduling, heap,
-diagnostics, cancellation, and blocked-work tracking.
+performed later by a lazy value. The session owns reflection task identity and
+queued/completion state; later slices will add the cooperative executor, heap,
+diagnostics, and cancellation facilities at the same boundary.
 
 The evaluator exposes outer semantic values on demand:
 
@@ -146,6 +146,13 @@ curried runtime stage. Saturation produces a memoized computation. Explicit
 `Value::Net` is different: application attaches a logical copy of its exposed
 port and may leave a residual non-data net. A net-backed lazy computation, by
 contrast, must expose `Data` when forced.
+
+The singleton annotation `refl:Effect` constructs a boxed lazy gate. Its first
+observer registers one task in that observer's session and receives a precise
+wait until the task completes; it then yields the original target without
+forcing it. A `Data >< Bind` demand records the same wait in the exact active
+pair rather than turning suspension into a stuck error. The executor is not yet
+connected, so reflection tasks remain queued in this slice.
 
 Builtins are identified in `core`, dispatched once in `eval/builtins.rs`, and
 implemented by semantic family below `eval/builtins/`. Net-lowered application

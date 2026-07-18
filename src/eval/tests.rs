@@ -1648,6 +1648,109 @@ fn unknown_annotations_pass_through_targets() {
     assert_eq!(value, n(42));
 }
 
+fn reflection_annotation(context: &EvalContext, effect: Value, target: Value) -> Value {
+    let annotation = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("refl"), effect));
+    apply_builtin(context, Builtin::Anno, vec![annotation], target)
+        .expect("reflection annotation should construct a lazy gate")
+}
+
+#[test]
+fn reflection_gate_starts_once_and_leaves_its_target_unforced() {
+    let context = test_context();
+    let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let forced_by_target = forced.clone();
+    let target = Value::deferred("reflection target", move |_| {
+        forced_by_target.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(n(42))
+    });
+    let gate = reflection_annotation(&context, n(0), target.clone());
+
+    let first = eval_value(&context, &gate).expect_err("new reflection task should block");
+    let wait = first
+        .blocked_on()
+        .expect("gate should report its task wait");
+    let second = eval_value(&context, &gate).expect_err("queued reflection task should block");
+
+    assert_eq!(second.blocked_on(), Some(wait.clone()));
+    assert_eq!(context.reflection_task_count(), 1);
+    assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    context.complete_wait(&wait.0);
+    assert_eq!(eval_value(&context, &gate).unwrap(), target);
+    assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn running_reflection_gate_rejects_a_foreign_session() {
+    let owner = test_context();
+    let observer = test_context();
+    let gate = reflection_annotation(&owner, n(0), n(42));
+    let blocked = eval_value(&owner, &gate).expect_err("new reflection task should block");
+
+    assert_eq!(
+        eval_value(&observer, &gate).unwrap_err().to_string(),
+        "reflection annotation task belongs to another evaluation session"
+    );
+
+    owner.complete_wait(&blocked.blocked_on().unwrap().0);
+    assert_eq!(eval_value(&observer, &gate).unwrap(), n(42));
+}
+
+#[test]
+fn reflection_gate_memoizes_task_failure() {
+    let context = test_context();
+    let gate = reflection_annotation(&context, n(0), n(42));
+    let blocked = eval_value(&context, &gate).expect_err("new reflection task should block");
+    let wait = blocked
+        .blocked_on()
+        .expect("gate should report its task wait");
+
+    context.fail_wait(&wait.0, "reflection task failed deliberately");
+
+    assert_eq!(
+        eval_value(&context, &gate).unwrap_err().to_string(),
+        "reflection task failed deliberately"
+    );
+    assert_eq!(
+        eval_value(&context, &gate).unwrap_err().to_string(),
+        "reflection task failed deliberately"
+    );
+}
+
+#[test]
+fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
+    let context = test_context();
+    let identity = closed_net(|builder| {
+        let [application, argument, result] = builder.bind();
+        builder.wire(argument, result);
+        application
+    });
+    let gate = reflection_annotation(&context, n(0), Value::Net(identity));
+    let applied = closed_net(|builder| {
+        let [application, argument, result] = builder.bind();
+        let function = builder.data(gate);
+        let value = builder.data(n(42));
+        builder.wire(application, function);
+        builder.wire(argument, value);
+        result
+    });
+    let runtime = applied.runtime().clone();
+
+    let blocked = eval_value(&context, &Value::Net(applied))
+        .expect_err("call should wait for its reflection gate");
+    let wait = blocked
+        .blocked_on()
+        .expect("call should report a task wait");
+    assert_eq!(runtime.with(|net| net.blocked_calls().count()), 1);
+
+    context.complete_wait(&wait.0);
+    let observer = test_context();
+    assert_eq!(
+        eval_value(&observer, &Value::Net(NetValue::new(runtime))).unwrap(),
+        n(42)
+    );
+}
+
 #[test]
 fn builtins_are_curried_and_do_not_force_arguments_early() {
     let unforced = Value::deferred("unforced builtin argument", |_| {
