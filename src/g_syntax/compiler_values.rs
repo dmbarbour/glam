@@ -6,7 +6,7 @@
 //! lowered once, then cloned through its shared backing value.
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use super::*;
 
@@ -129,13 +129,18 @@ pub(in crate::g_syntax) fn reflection_annotator_value(guard: Value, final_defs: 
 }
 
 pub(in crate::g_syntax) fn effect_value(name: &str) -> Value {
-    let key = Key::atom_from_text(name);
+    effect_path_value(&[name])
+}
+
+pub(in crate::g_syntax) fn effect_path_value(path: &[&str]) -> Value {
+    let path: Arc<[Key]> = path.iter().map(Key::atom_from_text).collect();
+    let cache_key = Key::List(path.clone());
     let mut values = EFFECT_VALUES
         .lock()
         .expect("g compiler effect-value cache must not be poisoned");
     values
-        .entry(key.clone())
-        .or_insert_with(|| build_effect_value(key))
+        .entry(cache_key)
+        .or_insert_with(|| build_effect_path_value(path))
         .clone()
 }
 
@@ -174,6 +179,13 @@ fn effect_call(
     ResolvedExpr::apply(ResolvedExpr::Embedded(effect_value(name)), arguments)
 }
 
+fn effect_path_call(
+    path: &[&str],
+    arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
+) -> ResolvedExpr<Value> {
+    ResolvedExpr::apply(ResolvedExpr::Embedded(effect_path_value(path)), arguments)
+}
+
 fn assert_unit(value: ResolvedExpr<Value>, target: ResolvedExpr<Value>) -> ResolvedExpr<Value> {
     let payload = apply_builtin(
         Builtin::DictSingleton,
@@ -205,12 +217,12 @@ fn effect_then(
     effect_call("seq", [operation, continuation])
 }
 
-fn build_effect_value(name: Key) -> Value {
+fn build_effect_path_value(path: Arc<[Key]>) -> Value {
     let mut locals = ResolverContext::default();
     let api = locals.push_binding("<effect-api>");
     let body = ResolvedExpr::Access {
         base: Box::new(ResolvedExpr::Local(api)),
-        path: vec![ResolvedPathPart::Key(name)],
+        path: path.iter().cloned().map(ResolvedPathPart::Key).collect(),
     };
     let effect = apply_builtin(
         Builtin::DictSingleton,
@@ -298,7 +310,6 @@ fn build_reflection_annotator() -> Value {
 
     let state_path = |field: &str| {
         ResolvedExpr::List(vec![
-            ResolvedExpr::Embedded(Value::Atom(atom_from_str("heap"))),
             ResolvedExpr::Local(guard),
             ResolvedExpr::Embedded(Value::Atom(atom_from_str(field))),
         ])
@@ -353,7 +364,10 @@ fn build_reflection_annotator() -> Value {
         [launcher, ResolvedExpr::Local(items)],
     );
     let records = locals.push_binding("<reflection-task-records>");
-    let store_records = effect_call("set", [state_path("tasks"), ResolvedExpr::Local(records)]);
+    let store_records = effect_path_call(
+        &["heap", "set"],
+        [state_path("tasks"), ResolvedExpr::Local(records)],
+    );
     let map_and_store = effect_call(
         "cut",
         [effect_call(
@@ -376,8 +390,8 @@ fn build_reflection_annotator() -> Value {
             effect_call("refl_task", [scanner]),
             ResolvedExpr::lambda(
                 vec![scanner_handle],
-                effect_call(
-                    "set",
+                effect_path_call(
+                    &["heap", "set"],
                     [state_path("claim"), ResolvedExpr::Local(scanner_handle)],
                 ),
             ),
@@ -399,7 +413,7 @@ fn build_reflection_annotator() -> Value {
         [effect_call(
             "seq",
             [
-                effect_call("get", [state_path("claim")]),
+                effect_path_call(&["heap", "get"], [state_path("claim")]),
                 ResolvedExpr::lambda(vec![existing], choose),
             ],
         )],

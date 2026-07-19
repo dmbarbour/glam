@@ -500,6 +500,8 @@ struct Tags {
     fix: Key,
     get: Key,
     set: Key,
+    heap_get: Key,
+    heap_set: Key,
     reset: Key,
     shift: Key,
     resume: Key,
@@ -525,6 +527,8 @@ impl Tags {
             fix: tag("fix"),
             get: tag("get"),
             set: tag("set"),
+            heap_get: tag("heap_get"),
+            heap_set: tag("heap_set"),
             reset: tag("reset"),
             shift: tag("shift"),
             resume: tag("resume"),
@@ -548,7 +552,6 @@ struct EffectTask<S: TaskSpecialization> {
     tags: Tags,
     specialized_requests: Vec<SpecializedRequest<S::Request>>,
     api: Value,
-    local_state: Value,
     next_continuation: u64,
     next_control_order: usize,
     continuations: HashMap<u64, CapturedContinuation>,
@@ -574,10 +577,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let id = eval_context
             .task_id()
             .map_err(|error| TaskError::new(error.as_ref()))?;
-        let initial_state = Value::Dict(Dict::new_sync().insert(
-            (*keys::HEAP).clone(),
-            host.snapshot().heap().as_core().clone(),
-        ));
+        let initial_state = Value::Dict(Dict::new_sync());
         Ok(Self {
             eval_context,
             id,
@@ -586,7 +586,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             tags,
             specialized_requests,
             api,
-            local_state: Value::Dict(Dict::new_sync()),
             next_continuation: 1,
             next_control_order: 1,
             continuations: HashMap::new(),
@@ -944,26 +943,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             Request::Get(path) => {
                 let path =
                     eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
-                let checkpoint = branch.retry_candidate();
-                let local_update;
-                if branch.transaction.is_none() {
-                    let snapshot = self.host.snapshot();
-                    if path_observes_heap(&path) {
-                        branch.observe(checkpoint, snapshot.generation());
-                    }
-                    let local = split_user_state(branch.state.clone()).0;
-                    branch.state = visible_state_from(&local, snapshot.heap());
-                    local_update = Some(local);
-                } else {
-                    local_update = None;
-                    if path_observes_heap(&path) {
-                        branch.observe(checkpoint, 0);
-                    }
-                }
                 let value = get_value_path(&self.eval_context, &branch.state, &path)?;
-                if let Some(local) = local_update {
-                    self.local_state = local;
-                }
                 MachineWork::Deliver {
                     value,
                     branch,
@@ -971,8 +951,47 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             }
             Request::Set(path, value) => {
-                if branch.transaction.is_some() {
-                    branch.state = set_state_path(&self.eval_context, branch.state, &path, value)?;
+                branch.state = set_state_path(&self.eval_context, branch.state, &path, value)?;
+                MachineWork::Deliver {
+                    value: unit_value(),
+                    branch,
+                    scope_depth,
+                }
+            }
+            Request::HeapGet(path) => {
+                let path =
+                    eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
+                let checkpoint = branch.retry_candidate();
+                let heap = if branch.transaction.is_some() {
+                    branch.observe(checkpoint, 0);
+                    branch
+                        .transaction
+                        .as_ref()
+                        .expect("transaction checked above")
+                        .heap
+                        .as_core()
+                        .clone()
+                } else {
+                    let snapshot = self.host.snapshot();
+                    branch.observe(checkpoint, snapshot.generation());
+                    snapshot.heap().as_core().clone()
+                };
+                let value = get_value_path(&self.eval_context, &heap, &path)?;
+                MachineWork::Deliver {
+                    value,
+                    branch,
+                    scope_depth,
+                }
+            }
+            Request::HeapSet(path, value) => {
+                if let Some(transaction) = branch.transaction.as_mut() {
+                    let heap = set_state_path(
+                        &self.eval_context,
+                        transaction.heap.as_core().clone(),
+                        &path,
+                        value,
+                    )?;
+                    transaction.heap = PublicValue::from_core(heap);
                     MachineWork::Deliver {
                         value: unit_value(),
                         branch,
@@ -980,23 +999,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                 } else {
                     let snapshot = self.host.snapshot();
-                    let (prior_local, _) = split_user_state(branch.state.clone());
-                    let state = set_state_path(
+                    let heap = set_state_path(
                         &self.eval_context,
-                        visible_state_from(&prior_local, snapshot.heap()),
+                        snapshot.heap().as_core().clone(),
                         &path,
                         value,
                     )?;
-                    let (local, heap) = split_user_state(state);
                     let commit = TaskCommit::new(
                         snapshot.generation(),
-                        PublicValue::from_core(heap.clone()),
+                        PublicValue::from_core(heap),
                         S::Journal::default(),
                     );
                     match self.host.commit(commit) {
                         CommitResult::Committed => {
-                            self.local_state = local;
-                            branch.state = self.visible_state(&PublicValue::from_core(heap));
                             branch.retry = None;
                             MachineWork::Deliver {
                                 value: unit_value(),
@@ -1315,8 +1330,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         frame.lazy_failure = None;
         if frame.owns_transaction {
             let snapshot = self.host.snapshot();
-            self.local_state = split_user_state(frame.outer.state.clone()).0;
-            frame.outer.state = self.visible_state(snapshot.heap());
             frame.outer.transaction = Some(Transaction::new(snapshot));
         }
         let mut initial = frame.outer.clone().with_effect(frame.operation.clone());
@@ -1353,21 +1366,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .expect("checked nonempty cut stack")
                     .owns_transaction;
                 if owns_transaction {
-                    let (local_state, heap) = split_user_state(completed.state.clone());
                     let transaction = completed
                         .transaction
                         .as_ref()
                         .expect("outer cut must own a transaction");
                     let commit = TaskCommit::new(
                         transaction.snapshot.generation(),
-                        PublicValue::from_core(heap.clone()),
+                        transaction.heap.clone(),
                         transaction.journal.clone(),
                     );
                     match self.host.commit(commit) {
                         CommitResult::Committed => {
-                            self.local_state = local_state;
                             completed.transaction = None;
-                            completed.state = self.visible_state(&PublicValue::from_core(heap));
                         }
                         CommitResult::Conflict => {
                             let frame = self
@@ -1523,12 +1533,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
         scope_depth: usize,
     ) -> Result<MachineStep<S>, TaskError> {
         match outcome {
-            BranchOutcome::Complete(value, completed) => {
-                self.local_state = split_user_state(completed.state).0;
-                Ok(MachineStep::Terminal(TaskTerminal::Complete(
-                    PublicValue::from_core(value),
-                )))
-            }
+            BranchOutcome::Complete(value, _) => Ok(MachineStep::Terminal(TaskTerminal::Complete(
+                PublicValue::from_core(value),
+            ))),
             BranchOutcome::Fail(_) => Ok(MachineStep::Terminal(TaskTerminal::Failed(
                 TaskError::new("reflection task failed permanently"),
             ))),
@@ -1717,10 +1724,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.terminal = Some(terminal);
     }
 
-    fn visible_state(&self, heap: &PublicValue) -> Value {
-        visible_state_from(&self.local_state, heap)
-    }
-
     fn effect_request(&self, effect: Value) -> Result<Request<S::Request>, TaskError> {
         let effect = evaluate(&self.eval_context, effect)?;
         let Value::Dict(effect) = effect else {
@@ -1811,13 +1814,6 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for AnnotationEffectTask<S> {
     fn cancel(&mut self) {
         self.0.finish(TaskTerminal::Cancelled);
     }
-}
-
-fn visible_state_from(local: &Value, heap: &PublicValue) -> Value {
-    let Value::Dict(local) = local else {
-        return Value::error("reflection user state must remain a dictionary");
-    };
-    Value::Dict(local.insert((*keys::HEAP).clone(), heap.as_core().clone()))
 }
 
 #[derive(Clone)]
@@ -2197,6 +2193,7 @@ impl CapturedLayer {
 #[derive(Clone)]
 struct Transaction<S: TaskSpecialization> {
     snapshot: HostSnapshot<S>,
+    heap: PublicValue,
     journal: S::Journal,
     observed: bool,
     wait: Option<EvaluationWaitToken>,
@@ -2204,8 +2201,10 @@ struct Transaction<S: TaskSpecialization> {
 
 impl<S: TaskSpecialization> Transaction<S> {
     fn new(snapshot: HostSnapshot<S>) -> Self {
+        let heap = snapshot.heap().clone();
         Self {
             snapshot,
+            heap,
             journal: S::Journal::default(),
             observed: false,
             wait: None,
@@ -2295,6 +2294,8 @@ enum Request<R> {
     Fix(Value),
     Get(Value),
     Set(Value, Value),
+    HeapGet(Value),
+    HeapSet(Value, Value),
     Reset(Value, Value),
     Shift(Value, Value),
     Resume(EvaluationTaskId, u64, Value),
@@ -2354,6 +2355,12 @@ fn parse_request<R: Clone>(
     args!(&tags.set, 2, |[path, value]: [Value; 2]| Request::Set(
         path, value
     ));
+    args!(&tags.heap_get, 1, |[path]: [Value; 1]| {
+        Request::HeapGet(path)
+    });
+    args!(&tags.heap_set, 2, |[path, value]: [Value; 2]| {
+        Request::HeapSet(path, value)
+    });
     args!(&tags.reset, 2, |[key, operation]: [Value; 2]| {
         Request::Reset(key, operation)
     });
@@ -2407,6 +2414,22 @@ fn effect_api<R: Clone>(
     specs: Vec<EffectRequestSpec<R>>,
 ) -> Result<(Value, Vec<SpecializedRequest<R>>), TaskError> {
     let entry = |name: &str, value| (Key::atom_from_text(name), value);
+    let heap_api = Value::Dict(
+        [
+            entry(
+                "get",
+                request_function(tags.heap_get.clone(), 1, Vec::new(), false),
+            ),
+            entry(
+                "set",
+                request_function(tags.heap_set.clone(), 2, Vec::new(), false),
+            ),
+        ]
+        .into_iter()
+        .fold(Dict::new_sync(), |dict, (key, value)| {
+            dict.insert(key, value)
+        }),
+    );
     let mut api = [
         entry("r", request_function(tags.r.clone(), 1, Vec::new(), false)),
         entry(
@@ -2434,6 +2457,7 @@ fn effect_api<R: Clone>(
             "set",
             request_function(tags.set.clone(), 2, Vec::new(), false),
         ),
+        entry("heap", heap_api),
         entry(
             "reset",
             request_function(tags.reset.clone(), 2, Vec::new(), false),
@@ -2697,24 +2721,6 @@ fn with_reset_stack_value(
     Ok(Value::Dict(state.insert(continuation_state.clone(), stack)))
 }
 
-fn split_user_state(state: Value) -> (Value, Value) {
-    let Value::Dict(state) = state else {
-        return (
-            Value::error("reflection user state must be a dictionary"),
-            Value::Dict(Dict::new_sync()),
-        );
-    };
-    let heap = state
-        .get(&*keys::HEAP)
-        .cloned()
-        .unwrap_or_else(|| Value::Dict(Dict::new_sync()));
-    (Value::Dict(state.remove(&*keys::HEAP)), heap)
-}
-
-fn path_observes_heap(path: &[Key]) -> bool {
-    path.first().is_none_or(|key| key == &*keys::HEAP)
-}
-
 fn key_value(key: Key) -> Value {
     match key {
         Key::Atom(atom) => Value::Atom(atom),
@@ -2893,6 +2899,7 @@ mod tests {
         diagnostics: Vec<Diagnostic>,
         stderr: Vec<Bytes>,
         wake_diagnostic: Option<Diagnostic>,
+        wake_heap: Option<PublicValue>,
         wait_count: usize,
         closed: bool,
     }
@@ -2905,6 +2912,7 @@ mod tests {
                 diagnostics: Vec::new(),
                 stderr: Vec::new(),
                 wake_diagnostic: None,
+                wake_heap: None,
                 wait_count: 0,
                 closed: false,
             }
@@ -2925,6 +2933,15 @@ mod tests {
             Self {
                 state: Mutex::new(TestHostState {
                     wake_diagnostic: Some(diagnostic),
+                    ..TestHostState::default()
+                }),
+            }
+        }
+
+        fn with_wake_heap(heap: PublicValue) -> Self {
+            Self {
+                state: Mutex::new(TestHostState {
+                    wake_heap: Some(heap),
                     ..TestHostState::default()
                 }),
             }
@@ -2960,6 +2977,11 @@ mod tests {
             let mut state = self.state.lock().unwrap();
             state.wait_count += 1;
             if state.generation != observed_generation {
+                return true;
+            }
+            if let Some(heap) = state.wake_heap.take() {
+                state.heap = heap;
+                state.generation += 1;
                 return true;
             }
             let Some(diagnostic) = state.wake_diagnostic.take() else {
@@ -4115,6 +4137,18 @@ mod tests {
     }
 
     #[test]
+    fn reading_all_local_state_does_not_observe_shared_heap() {
+        let (_, effect) = compile_effect(".get [] >>= (\\_state -> .fail)");
+        let host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
+            "changed",
+            PublicValue::text("later"),
+        )])));
+        let error = run_standard_on(&effect, host.clone()).unwrap_err();
+        assert!(error.to_string().contains("failed permanently"));
+        assert_eq!(host.wait_count(), 0);
+    }
+
+    #[test]
     fn cut_rolls_back_log_reads_and_stderr_writes_before_trying_an_alternative() {
         let (_, effect) = compile_effect(
             ".cut (.alt (.read_log >>= (\\message -> (.write_stderr \"bad\") =>> .fail)) (.read_log >>= (\\message -> (.write_stderr message.msg.text) =>> .r ())))",
@@ -4160,19 +4194,119 @@ mod tests {
     }
 
     #[test]
-    fn root_user_state_replacement_can_replace_the_shared_heap_subtree() {
+    fn root_local_state_replacement_does_not_replace_shared_heap() {
         let (assembler, effect) = compile_effect(
-            ".cut ((.set [] { heap:{ answer:\"shared\" }, local:\"owned\" }) =>> .get ['heap,'answer])",
+            "(.set [] { heap:{ answer:\"local\" }, local:\"owned\" }) =>> .heap.get []",
         );
         let host = Arc::new(TestHost::default());
         let TaskOutcome::Complete(value) = run_standard_on(&effect, host.clone()).unwrap() else {
             panic!("state effect should complete")
         };
-        assert_eq!(assembler.to_binary(&value).unwrap(), b"shared".as_slice());
-        assert_eq!(
-            assembler.get(&host.heap(), "answer").unwrap().as_binary(),
-            Some(b"shared".as_slice())
+        assert_eq!(value, PublicValue::empty_record());
+        assert_eq!(host.heap(), PublicValue::empty_record());
+        assert!(assembler.get(&value, "answer").is_err());
+    }
+
+    #[test]
+    fn child_tasks_start_with_fresh_local_state_and_share_heap() {
+        let (assembler, effect) = compile_effect(
+            ".heap.set ['shared] \"visible\" =>> .set ['local] \"private\" =>> .refl_task (.get ['local] >>= (\\local -> .heap.get ['shared] >>= (\\shared -> .r { local:local, shared:shared }))) >>= (\\task -> .join_task task)",
         );
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host);
+        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+            panic!("child task should complete")
+        };
+        let value = PublicValue::from_core(value);
+        assert_eq!(
+            assembler
+                .evaluate(&assembler.get(&value, "local").unwrap())
+                .unwrap(),
+            PublicValue::empty_record()
+        );
+        assert_eq!(
+            assembler
+                .to_binary(&assembler.get(&value, "shared").unwrap())
+                .unwrap(),
+            b"visible".as_slice()
+        );
+    }
+
+    #[test]
+    fn failed_alternative_rolls_back_local_and_heap_changes() {
+        let (assembler, effect) = compile_effect(
+            ".cut (.alt ((.set ['local] \"bad\") =>> .heap.set ['shared] \"bad\" =>> .fail) (.get ['local] >>= (\\local -> .heap.get ['shared] >>= (\\shared -> .r { local:local, shared:shared }))))",
+        );
+        let host = Arc::new(TestHost::default());
+        let TaskOutcome::Complete(value) = run_standard_on(&effect, host.clone()).unwrap() else {
+            panic!("clean alternative should complete")
+        };
+        assert_eq!(
+            assembler
+                .evaluate(&assembler.get(&value, "local").unwrap())
+                .unwrap(),
+            PublicValue::empty_record()
+        );
+        assert_eq!(
+            assembler
+                .evaluate(&assembler.get(&value, "shared").unwrap())
+                .unwrap(),
+            PublicValue::empty_record()
+        );
+        assert_eq!(host.heap(), PublicValue::empty_record());
+    }
+
+    #[test]
+    fn blind_heap_write_does_not_make_failure_retryable() {
+        let (_, effect) = compile_effect(".cut ((.heap.set ['discarded] \"value\") =>> .fail)");
+        let host = Arc::new(TestHost::default());
+        let error = run_standard_on(&effect, host.clone()).unwrap_err();
+        assert!(error.to_string().contains("failed permanently"));
+        assert_eq!(host.wait_count(), 0);
+        assert_eq!(host.heap(), PublicValue::empty_record());
+    }
+
+    #[test]
+    fn heap_root_get_and_set_are_explicit_whole_heap_operations() {
+        let (assembler, effect) =
+            compile_effect(".heap.set [] { answer:\"shared\" } =>> .heap.get []");
+        let host = Arc::new(TestHost::default());
+        let TaskOutcome::Complete(value) = run_standard_on(&effect, host.clone()).unwrap() else {
+            panic!("whole-heap operations should complete")
+        };
+        assert_eq!(
+            assembler
+                .to_binary(&assembler.get(&value, "answer").unwrap())
+                .unwrap(),
+            b"shared".as_slice()
+        );
+        assert_eq!(value, host.heap());
+    }
+
+    #[test]
+    fn only_heap_reads_make_later_failure_retryable() {
+        let ready_heap = PublicValue::record([("answer", PublicValue::text("ready"))]);
+        let (assembler, heap_effect) = compile_effect(
+            ".heap.get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)",
+        );
+        let heap_host = Arc::new(TestHost::with_wake_heap(ready_heap));
+        let TaskOutcome::Complete(value) =
+            run_standard_on(&heap_effect, heap_host.clone()).unwrap()
+        else {
+            panic!("heap observation should retry after the heap changes")
+        };
+        assert_eq!(assembler.to_binary(&value).unwrap(), b"ready".as_slice());
+        assert_eq!(heap_host.wait_count(), 1);
+
+        let (_, local_effect) =
+            compile_effect(".get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)");
+        let local_host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
+            "answer",
+            PublicValue::text("ready"),
+        )])));
+        let error = run_standard_on(&local_effect, local_host.clone()).unwrap_err();
+        assert!(error.to_string().contains("failed permanently"));
+        assert_eq!(local_host.wait_count(), 0);
     }
 
     #[test]

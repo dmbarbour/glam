@@ -195,6 +195,7 @@ f x                 # application; ad hoc polymorphism:
 
 ```
 .op                 # sugar for eff:(\api -> api.op)
+.heap.get Path      # dotted effect path: eff:(\api -> api.heap.get Path)
 .movl 'eax 42       # applied effect: eff:(\api -> api.movl 'eax 42)
 
 my_proc = do

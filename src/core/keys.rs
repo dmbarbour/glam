@@ -60,7 +60,6 @@ protocol_key!(ALT, "alt");
 protocol_key!(FAIL, "fail");
 protocol_key!(CUT, "cut");
 protocol_key!(FIX, "fix");
-protocol_key!(HEAP, "heap");
 
 pub(crate) static UNIT: LazyLock<Key> =
     LazyLock::new(|| Key::abstract_global_path(["builtin", "unit"]));

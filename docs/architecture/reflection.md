@@ -35,9 +35,11 @@ effect value
 ```
 
 Standard effects include `r`, `seq`, `alt`, `fail`, `cut`, `fix`, indexed
-`get`/`set`, and indexed `reset`/`shift`. User state, including the reset stack,
-is ordinary task state. Choice frames, journals, and host queues remain machine
-or host bookkeeping.
+task-local `get`/`set`, shared `heap.get`/`heap.set`, and indexed `reset`/`shift`.
+Local user state, including the reset stack, is ordinary task state. Shared
+heap state is staged separately in the host transaction; it is never projected
+into local state. Choice frames, journals, and host queues remain machine or
+host bookkeeping.
 
 An outer `cut` provides an optimistic transaction boundary. Alternatives start
 from snapshots; losing branches discard changes; a winning outer branch
@@ -90,8 +92,8 @@ success reveals `Target` without forcing it.
 The built-in g front end also decorates ordinary module definitions and named
 declared-object members with one-shot boundaries. Demand launches one scanner,
 which waits for final `refl.*`, then launches each named task in deterministic
-order. Guards are stored in reflection heap state under identities derived from
-module paths or final object `spec.name`.
+order. Guards are stored with explicit shared-heap effects under identities
+derived from module paths or final object `spec.name`.
 
 ## CLI Logger Session
 

@@ -381,7 +381,12 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             .map(|(name, suffixes)| access_if_path(SyntaxExpr::Name(name), suffixes))
             .boxed();
         let effect_expr = just('.')
-            .ignore_then(name.clone())
+            .ignore_then(
+                name.clone()
+                    .separated_by(just('.'))
+                    .at_least(1)
+                    .collect::<Vec<_>>(),
+            )
             .map(SyntaxExpr::Effect)
             .boxed();
 

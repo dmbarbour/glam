@@ -44,7 +44,9 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::Number(number) => ResolvedExpr::Embedded(context.value_number(number.clone())),
         SyntaxExpr::Text(text) => ResolvedExpr::Embedded(context.value_binary(text)),
         SyntaxExpr::Atom(name) => ResolvedExpr::Embedded(context.value_atom(atom_from_str(name))),
-        SyntaxExpr::Effect(name) => lower_effect_expr_resolved(name),
+        SyntaxExpr::Effect(path) => ResolvedExpr::Embedded(compiler_values::effect_path_value(
+            &path.iter().map(String::as_str).collect::<Vec<_>>(),
+        )),
         SyntaxExpr::SingletonDict(key, value) => ResolvedExpr::apply(
             ResolvedExpr::Embedded(context.value_builtin(Builtin::DictSingleton)),
             [

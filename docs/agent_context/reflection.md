@@ -25,14 +25,17 @@ and control flow.
 
 ## State, Choice, and Control
 
-- Every `.get`/`.set` path is implicitly under user-owned `user_state`. The
-  active reset stack is stored under a private key in that state, so replacing
-  all user state also replaces or corrupts the continuation environment. That
-  consequence belongs to the user.
+- `.get`/`.set` access only task-local user state. The active reset stack is
+  stored under a private key in that state, so replacing all local state also
+  replaces or corrupts the continuation environment. That consequence belongs
+  to the user. `.heap.get`/`.heap.set` are the distinct shared-state effects;
+  `[]` explicitly means the whole local state or whole shared heap according to
+  the selected effect.
 - Choice frames, journals, immediate sequence state, and host queues remain
-  task-owned. An outer `.cut` snapshots shared heap and specialization data;
-  failed alternatives discard them, nested success merges upward, and outer
-  success validates and commits.
+  task-owned. An outer `.cut` snapshots shared heap and specialization data
+  without inserting either into local state; failed alternatives discard
+  changes, nested success merges upward, and outer success validates and
+  commits.
 - `.cut` supplies choice and transaction scope, not retryability. Plain `.fail`
   and `.cut .fail` are permanent. A failed operation retries only when it
   observed changeable host state, such as an empty log queue.
@@ -93,7 +96,8 @@ and control flow.
   objects stay inert.
 - Object scanner identity derives from final `spec.name`; inherited definitions
   therefore use the derived object's overridable reflection namespace.
-- A boundary transaction first records one scanner handle. The scanner waits
+- A boundary transaction first records one scanner handle in the shared heap.
+  The scanner waits
   for final `refl.*`, launches named tasks in order, requires unit from each,
   and stores ordered `{key,task}` records.
 - The CLI logger's assembler-bus input subscription and its session-local

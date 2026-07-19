@@ -44,13 +44,20 @@ fn parses_effect_shorthand_expressions() {
     assert_eq!(parse_expr("()"), Some(SyntaxExpr::Unit));
     assert_eq!(
         parse_expr(".emit"),
-        Some(SyntaxExpr::Effect("emit".to_owned()))
+        Some(SyntaxExpr::Effect(vec!["emit".to_owned()]))
+    );
+    assert_eq!(
+        parse_expr(".heap.get"),
+        Some(SyntaxExpr::Effect(vec![
+            "heap".to_owned(),
+            "get".to_owned()
+        ]))
     );
     assert_eq!(
         parse_expr(".emit 'eax 42"),
         Some(SyntaxExpr::Apply(
             Box::new(SyntaxExpr::Apply(
-                Box::new(SyntaxExpr::Effect("emit".to_owned())),
+                Box::new(SyntaxExpr::Effect(vec!["emit".to_owned()])),
                 Box::new(SyntaxExpr::Atom("eax".to_owned())),
             )),
             Box::new(SyntaxExpr::Number(n(42))),
@@ -302,7 +309,7 @@ fn dotted_paths_require_tight_dots() {
         parse_expr("foo .bar"),
         Some(SyntaxExpr::Apply(
             Box::new(SyntaxExpr::Name("foo".to_owned())),
-            Box::new(SyntaxExpr::Effect("bar".to_owned())),
+            Box::new(SyntaxExpr::Effect(vec!["bar".to_owned()])),
         )),
         "whitespace before `.` should parse `.bar` as a separate effect expression"
     );

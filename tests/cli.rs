@@ -557,12 +557,12 @@ fn assembler_and_logger_reasoning_heaps_are_isolated() {
     let assembly = dir.join("assembly.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .read_log >>= (\\_message -> .get ['heap,'marker] >>= (\\marker -> (marker == {}) =>> .write_stderr (\"ISOLATED\" ++ [10])))\n",
+        "language g0\nobject conf.env\nconf.log = .read_log >>= (\\_message -> .heap.get ['marker] >>= (\\marker -> (marker == {}) =>> .write_stderr (\"ISOLATED\" ++ [10])))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(
         &assembly,
-        "language g0\nrefl.mark = (.set ['heap,'marker] \"assembler\") =>> .log 'info { msg:{ text:\"ready\" } }\nasm.result = \"ok\"\n",
+        "language g0\nrefl.mark = (.heap.set ['marker] \"assembler\") =>> .log 'info { msg:{ text:\"ready\" } }\nasm.result = \"ok\"\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", assembly.display()));
 
@@ -865,7 +865,7 @@ fn quiescent_reflection_tasks_report_a_scheduler_deadlock() {
     let output = glam_command()
         .arg("--script.g")
         .arg(
-            "language g0\nrefl.deadlock = .get ['heap,'never] >>= (\\_ -> .fail)\nasm.result = \"ok\"\n",
+            "language g0\nrefl.deadlock = .heap.get ['never] >>= (\\_ -> .fail)\nasm.result = \"ok\"\n",
         )
         .output()
         .expect("failed to run glam");

@@ -127,7 +127,7 @@ pub enum SyntaxExpr {
     Number(Number),
     Text(String),
     Atom(String),
-    Effect(String),
+    Effect(Vec<String>),
     Name(String),
     PriorName(String),
     Escape(usize, Box<SyntaxExpr>),
