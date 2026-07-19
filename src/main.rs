@@ -15,8 +15,9 @@ use glam::reflection::{
     TaskSpecialization, handle_reflection_request, reflection_request_specs,
 };
 use glam::{
-    Assembler, Builtin, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticSink, Error,
-    ModuleInput, ReasoningReport, ReasoningStatus, ReasoningTaskState, Severity, Value,
+    Assembler, Builtin, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticBus, DiagnosticEvent,
+    DiagnosticSubscriber, Error, ModuleInput, ReasoningReport, ReasoningStatus, ReasoningTaskState,
+    Severity, Value,
 };
 
 mod local_files;
@@ -277,17 +278,17 @@ fn process_reflection_environment(reflection_arguments: Vec<String>) -> Value {
 fn finish_local_files(
     files: &LocalFileHost,
     manifest: Option<&Path>,
-    diagnostics: &LogHost,
+    diagnostics: &DiagnosticBus,
 ) -> bool {
     let mut failed = false;
     if let Err(warning) = files.verify_unchanged() {
-        diagnostics.emit(Diagnostic::new(Severity::Warning, warning));
+        diagnostics.publish(Diagnostic::new(Severity::Warning, warning));
     }
     if let Some(path) = manifest
         && let Err(error) = files.write_manifest(path)
     {
         failed = true;
-        diagnostics.emit(Diagnostic::new(Severity::Error, error));
+        diagnostics.publish(Diagnostic::new(Severity::Error, error));
     }
     failed
 }
@@ -316,12 +317,13 @@ fn assemble_inputs(command: AssemblyCommand) -> ExitCode {
     .with_host(local_files.clone())
     .with_reflection_environment(process_reflection_environment(reflection_arguments))
     .expect("main's reflection environment must be a dictionary")
-    .with_diagnostic_sink(log_host.clone());
+    .with_diagnostic_subscriber(log_host.clone());
+    let assembler_diagnostics = assembler.diagnostic_bus();
     let configuration = match load_configuration(&assembler) {
         Ok(configuration) => configuration,
         Err(error) => {
-            log_host.emit(Diagnostic::new(Severity::Error, error.to_string()));
-            finish_local_files(&local_files, manifest.as_deref(), log_host.as_ref());
+            assembler_diagnostics.publish(Diagnostic::new(Severity::Error, error.to_string()));
+            finish_local_files(&local_files, manifest.as_deref(), &assembler_diagnostics);
             log_host.close_input();
             log_host.drain_default(&DefaultLogger::new(assembler.clone()));
             return ExitCode::from(1);
@@ -334,7 +336,7 @@ fn assemble_inputs(command: AssemblyCommand) -> ExitCode {
         Ok(bytes) => {
             if let Err(error) = io::stdout().write_all(&bytes) {
                 operation_failed = true;
-                log_host.emit(Diagnostic::new(
+                assembler_diagnostics.publish(Diagnostic::new(
                     Severity::Error,
                     format!("could not write stdout: {error}"),
                 ));
@@ -342,26 +344,34 @@ fn assemble_inputs(command: AssemblyCommand) -> ExitCode {
         }
         Err(error) => {
             operation_failed = true;
-            log_host.emit(Diagnostic::new(Severity::Error, error.to_string()));
+            assembler_diagnostics.publish(Diagnostic::new(Severity::Error, error.to_string()));
         }
     }
 
-    report_reasoning(&log_host, &assembler.drain_reasoning());
-    operation_failed |= finish_local_files(&local_files, manifest.as_deref(), log_host.as_ref());
+    report_reasoning(&assembler_diagnostics, &assembler.drain_reasoning());
+    operation_failed |=
+        finish_local_files(&local_files, manifest.as_deref(), &assembler_diagnostics);
     log_host.close_input();
-    logger.join().expect("logger task should not panic");
+    let LoggerRun {
+        thread: logger_thread,
+        diagnostics: logger_diagnostics,
+    } = logger;
+    logger_thread.join().expect("logger task should not panic");
     log_host.cancel();
 
-    if operation_failed || log_host.error_count() > 0 {
+    if operation_failed
+        || assembler_diagnostics.counts().errors() > 0
+        || logger_diagnostics.counts().errors() > 0
+    {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     }
 }
 
-fn report_reasoning(host: &LogHost, report: &ReasoningReport) {
+fn report_reasoning(diagnostics: &DiagnosticBus, report: &ReasoningReport) {
     for failure in report.failures() {
-        host.emit(Diagnostic::new(
+        diagnostics.publish(Diagnostic::new(
             Severity::Error,
             format!(
                 "reflection task {} failed: {}",
@@ -407,7 +417,7 @@ fn report_reasoning(host: &LogHost, report: &ReasoningReport) {
         };
         message.push_str(&format!("\ntask {} {detail}", task.task_id()));
     }
-    host.emit(Diagnostic::new(Severity::Error, message));
+    diagnostics.publish(Diagnostic::new(Severity::Error, message));
 }
 
 fn assemble(
@@ -453,16 +463,13 @@ fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Erro
     })
 }
 
-fn start_logger(
-    assembler: &Assembler,
-    configuration: &Value,
-    input: Arc<LogHost>,
-) -> thread::JoinHandle<()> {
+fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost>) -> LoggerRun {
     let logger = Arc::new(DefaultLogger::new(assembler.clone()));
-    let output: Arc<dyn DiagnosticSink> = logger.clone();
+    let diagnostics = DiagnosticBus::new();
+    let subscription = diagnostics.subscribe(logger.clone());
     let host = Arc::new(LoggerTaskHost::new(
         input.clone(),
-        output,
+        diagnostics.clone(),
         assembler.reflection_environment_for_role("logger"),
     ));
     let effect_assembler = assembler.clone();
@@ -471,7 +478,9 @@ fn start_logger(
         .get(configuration, "conf.log")
         .ok()
         .filter(|logger| !logger.is_undefined());
-    thread::spawn(move || {
+    let task_diagnostics = diagnostics.clone();
+    let thread = thread::spawn(move || {
+        let _subscription = subscription;
         if let Some(custom) = custom {
             let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
             match EffectRun::new(&custom, MainEffects::new(effect_assembler), host.clone())
@@ -482,27 +491,30 @@ fn start_logger(
             {
                 Ok(TaskOutcome::Complete(_)) => {}
                 Ok(TaskOutcome::Cancelled) => {
-                    input.emit_default(
-                        logger.as_ref(),
-                        Diagnostic::new(
-                            Severity::Error,
-                            "configured logger remained blocked after the log stream closed",
-                        ),
-                    );
+                    task_diagnostics.publish(Diagnostic::new(
+                        Severity::Error,
+                        "configured logger remained blocked after the log stream closed",
+                    ));
                 }
                 Err(error) => {
-                    input.emit_default(
-                        logger.as_ref(),
-                        Diagnostic::new(
-                            Severity::Error,
-                            format!("configured logger failed: {error}"),
-                        ),
-                    );
+                    task_diagnostics.publish(Diagnostic::new(
+                        Severity::Error,
+                        format!("configured logger failed: {error}"),
+                    ));
                 }
             }
         }
         input.drain_default(logger.as_ref());
-    })
+    });
+    LoggerRun {
+        thread,
+        diagnostics,
+    }
+}
+
+struct LoggerRun {
+    thread: thread::JoinHandle<()>,
+    diagnostics: DiagnosticBus,
 }
 
 #[derive(Clone)]
@@ -526,7 +538,7 @@ enum MainRequest {
 
 #[derive(Clone)]
 struct MainSnapshot {
-    diagnostics: Arc<[Diagnostic]>,
+    diagnostics: Arc<[DiagnosticEvent]>,
     input_closed: bool,
 }
 
@@ -692,40 +704,34 @@ struct LogHost {
 
 /// Capabilities and mutable state belonging to the logger's evaluation
 /// session. Incoming assembler diagnostics remain in `input`; diagnostics
-/// emitted by this session go only to `output`.
+/// emitted by this session go only to its diagnostic bus.
 struct LoggerTaskHost {
     input: Arc<LogHost>,
-    output: Arc<dyn DiagnosticSink>,
+    diagnostics: DiagnosticBus,
     reflection_environment: Value,
 }
 
 impl LoggerTaskHost {
-    fn new(
-        input: Arc<LogHost>,
-        output: Arc<dyn DiagnosticSink>,
-        reflection_environment: Value,
-    ) -> Self {
+    fn new(input: Arc<LogHost>, diagnostics: DiagnosticBus, reflection_environment: Value) -> Self {
         Self {
             input,
-            output,
+            diagnostics,
             reflection_environment,
         }
     }
 
     fn emit_output(&self, diagnostic: Diagnostic) {
-        self.input.record_error(&diagnostic);
-        self.output.emit(diagnostic);
+        self.diagnostics.publish(diagnostic);
     }
 }
 
 struct LogHostState {
     generation: u64,
     heap: Value,
-    diagnostics: VecDeque<Diagnostic>,
+    diagnostics: VecDeque<DiagnosticEvent>,
     stderr: VecDeque<Bytes>,
     input_closed: bool,
     cancelled: bool,
-    error_count: u64,
 }
 
 impl LogHost {
@@ -739,7 +745,6 @@ impl LogHost {
                 stderr: VecDeque::new(),
                 input_closed: false,
                 cancelled: false,
-                error_count: 0,
             }),
             changed: Condvar::new(),
         }
@@ -765,28 +770,6 @@ impl LogHost {
         self.changed.notify_all();
     }
 
-    fn error_count(&self) -> u64 {
-        self.state
-            .lock()
-            .expect("log host mutex should not be poisoned")
-            .error_count
-    }
-
-    fn record_error(&self, diagnostic: &Diagnostic) {
-        if diagnostic.severity() == Severity::Error {
-            let mut state = self
-                .state
-                .lock()
-                .expect("log host mutex should not be poisoned");
-            state.error_count = state.error_count.saturating_add(1);
-        }
-    }
-
-    fn emit_default(&self, logger: &DefaultLogger, diagnostic: Diagnostic) {
-        self.record_error(&diagnostic);
-        logger.emit(&diagnostic);
-    }
-
     fn drain_default(&self, logger: &DefaultLogger) {
         while let Some(diagnostic) = self.take_diagnostic() {
             logger.emit(&diagnostic);
@@ -794,7 +777,7 @@ impl LogHost {
         self.flush_stderr();
     }
 
-    fn take_diagnostic(&self) -> Option<Diagnostic> {
+    fn take_diagnostic(&self) -> Option<DiagnosticEvent> {
         let mut state = self
             .state
             .lock()
@@ -838,27 +821,24 @@ impl LogHost {
         self.flush_stderr();
     }
 
-    fn push_diagnostic(&self, state: &mut LogHostState, diagnostic: Diagnostic) {
-        if diagnostic.severity() == Severity::Error {
-            state.error_count = state.error_count.saturating_add(1);
-        }
+    fn push_diagnostic(&self, state: &mut LogHostState, event: DiagnosticEvent) {
         if self.capacity == 0 {
             return;
         }
         if state.diagnostics.len() == self.capacity {
             state.diagnostics.pop_front();
         }
-        state.diagnostics.push_back(diagnostic);
+        state.diagnostics.push_back(event);
     }
 }
 
-impl DiagnosticSink for LogHost {
-    fn emit(&self, diagnostic: Diagnostic) {
+impl DiagnosticSubscriber for LogHost {
+    fn receive(&self, event: DiagnosticEvent) {
         let mut state = self
             .state
             .lock()
             .expect("log host mutex should not be poisoned");
-        self.push_diagnostic(&mut state, diagnostic);
+        self.push_diagnostic(&mut state, event);
         state.generation = state.generation.wrapping_add(1);
         self.changed.notify_all();
     }
@@ -1148,9 +1128,9 @@ impl DefaultLogger {
     }
 }
 
-impl DiagnosticSink for DefaultLogger {
-    fn emit(&self, diagnostic: Diagnostic) {
-        DefaultLogger::emit(self, &diagnostic);
+impl DiagnosticSubscriber for DefaultLogger {
+    fn receive(&self, event: DiagnosticEvent) {
+        DefaultLogger::emit(self, &event);
     }
 }
 
@@ -1332,14 +1312,17 @@ mod tests {
         let files = LocalFileHost::default();
         files.read(&path).expect("assembly read should succeed");
         fs::write(&path, "later edit").expect("test input should be changed");
-        let diagnostics = LogHost::new(1);
+        let diagnostics = DiagnosticBus::new();
+        let queue = Arc::new(LogHost::new(1));
+        let _subscription = diagnostics.subscribe(queue.clone());
 
         assert!(!finish_local_files(&files, None, &diagnostics));
-        let warning = diagnostics
+        let warning = queue
             .take_diagnostic()
             .expect("final file change should emit a diagnostic");
         assert_eq!(warning.severity(), Severity::Warning);
-        assert_eq!(diagnostics.error_count(), 0);
+        assert_eq!(diagnostics.counts().warnings(), 1);
+        assert_eq!(diagnostics.counts().errors(), 0);
     }
 
     #[test]
@@ -1449,25 +1432,30 @@ mod tests {
     }
 
     #[test]
-    fn log_error_count_survives_queue_drops_and_reads() {
-        let dropped = LogHost::new(0);
-        dropped.emit(Diagnostic::new(Severity::Error, "dropped"));
-        assert_eq!(dropped.error_count(), 1);
+    fn bus_error_count_survives_queue_drops_and_reads() {
+        let diagnostics = DiagnosticBus::new();
+        let dropped = Arc::new(LogHost::new(0));
+        let _dropped_subscription = diagnostics.subscribe(dropped);
+        diagnostics.publish(Diagnostic::new(Severity::Error, "dropped"));
+        assert_eq!(diagnostics.counts().errors(), 1);
 
-        let retained = LogHost::new(1);
-        retained.emit(Diagnostic::new(Severity::Error, "retained"));
+        let retained = Arc::new(LogHost::new(1));
+        let _retained_subscription = diagnostics.subscribe(retained.clone());
+        diagnostics.publish(Diagnostic::new(Severity::Error, "retained"));
         assert!(retained.take_diagnostic().is_some());
-        assert_eq!(retained.error_count(), 1);
+        assert_eq!(diagnostics.counts().errors(), 2);
         retained.close_input();
     }
 
     #[test]
     fn logger_session_output_is_separate_from_assembler_input() {
         let input = Arc::new(LogHost::new(4));
+        let diagnostics = DiagnosticBus::new();
         let output = Arc::new(glam::DiagnosticBuffer::new(4));
+        let _subscription = diagnostics.subscribe(output.clone());
         let host = LoggerTaskHost::new(
             input.clone(),
-            output.clone(),
+            diagnostics.clone(),
             Assembler::default().reflection_environment_for_role("logger"),
         );
 
@@ -1487,6 +1475,6 @@ mod tests {
         let output = output.as_ref().read();
         assert_eq!(output.entries().len(), 1);
         assert_eq!(output.entries()[0].message(), "session output");
-        assert_eq!(input.error_count(), 1);
+        assert_eq!(diagnostics.counts().errors(), 1);
     }
 }

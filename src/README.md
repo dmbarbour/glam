@@ -15,7 +15,7 @@ not define future language semantics or collect subsystem invariants.
 
 | Path | Responsibility |
 | --- | --- |
-| `main.rs` | CLI policy, configuration/assembly roots, diagnostic logger host, and process output |
+| `main.rs` | CLI policy, configuration/assembly roots, diagnostic-bus subscriptions, logger host, and process output |
 | `local_files.rs` | CLI local-file consistency and optional SHA-256 manifest |
 | `lib.rs`, `api.rs` | Embedding facade: opaque values, source hosts, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
 | `compiler.rs` | Per-source capabilities, hidden provenance, loaders, namespace qualification, and diagnostic emission |
@@ -35,7 +35,7 @@ not define future language semantics or collect subsystem invariants.
 | `eval/builtins/` | Builtin implementations split by semantic family |
 | `eval/sequence.rs` | Lazy list-to-binary observation and ranged extraction |
 | `list.rs`, `number.rs` | Compact persistent list ropes and exact-number boundary |
-| `diagnostic.rs` | Diagnostic values, severity, and assembler metadata |
+| `diagnostic.rs`, `api.rs` diagnostic facade | Diagnostic values, enrichment metadata, session buses, subscriptions, and buffers |
 | `reflection.rs`, `reflection/requests.rs` | Persistent freer-effect machine, task API, transactions, and request helpers |
 
 `interaction_net.rs`, `eval.rs`, and `g_syntax.rs` are facades over their

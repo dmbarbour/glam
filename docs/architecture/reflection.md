@@ -47,8 +47,8 @@ point. `cut` alone does not: unobservant failure is terminal.
 ## Reusable Reflection Requests
 
 - `.env Path` reads the active task host's immutable reasoning environment.
-- `.log Severity Message` emits through the session's reflection services and
-  participates in the current transaction.
+- `.log Severity Message` stages a diagnostic in the current transaction and
+  publishes it through the session's diagnostic bus only after commit.
 - `.dict_items Dict` returns ordered `{key,value}` records.
 - `.eval Value` reduces lazy outer shells and returns `ok:WHNF` or `err:Text`.
 - `.refl_task Effect` reserves a child handle; launch is commit-ordered inside
@@ -98,7 +98,8 @@ module paths or final object `spec.name`.
 Configured `conf.log` is a reflection task in a separate session sharing the
 same executor. Main-only effects expose the incoming diagnostic stream and its
 open/closed state. Committed `.log` from the logger or its children goes to a
-separate default-formatting output rather than back into that stream.
+separate logger-session bus with a default-formatting subscriber rather than
+back into that stream.
 
 After assembly reasoning drains, `main` seals the input and lets the logger
 finish its own task tree. A logger may use `.log_status` to stop once the queue

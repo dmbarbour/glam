@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use glam::{Assembler, Host, HostError, ModuleInput, ReasoningStatus, Severity, Value};
@@ -210,12 +211,50 @@ fn replacing_source_host_preserves_scheduled_reasoning() {
 
     let diagnostics = assembler
         .read_diagnostics()
-        .expect("scheduled reasoning should keep its diagnostic destination");
+        .expect("scheduled reasoning should keep its diagnostic subscription");
     assert_eq!(diagnostics.entries().len(), 1);
     assert_eq!(
         diagnostics.entries()[0].message(),
         "survived host replacement"
     );
+}
+
+#[test]
+fn replacing_default_diagnostic_subscriber_preserves_scheduled_reasoning() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["subscriber_replacement"])
+        .script(
+            "g",
+            "language g0\nrefl.notice = .log 'info { msg:{ text:\"survived subscriber replacement\" } }\nvalue = \"value\"\n",
+        )
+        .build()
+        .expect("reflection module should build");
+    assert_eq!(
+        assembler
+            .binary_at(module.value(), "value")
+            .expect("ordinary value should schedule automatic reflection"),
+        b"value".as_slice()
+    );
+
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let callback_values = received.clone();
+    let assembler = assembler.with_diagnostic_callback(move |event| {
+        callback_values
+            .lock()
+            .expect("callback collection mutex should not be poisoned")
+            .push(event);
+    });
+    assert_eq!(
+        assembler.drain_reasoning().status(),
+        ReasoningStatus::Complete
+    );
+
+    let received = received
+        .lock()
+        .expect("callback collection mutex should not be poisoned");
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].message(), "survived subscriber replacement");
 }
 
 #[test]

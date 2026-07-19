@@ -4,13 +4,13 @@
 //! core values, evaluator topology, and interaction-net scheduling remain
 //! implementation details behind the facade.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::marker::PhantomData;
-use std::ops::Range;
+use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use bytes::Bytes;
 
@@ -436,14 +436,77 @@ impl Diagnostic {
     }
 }
 
+/// One committed diagnostic publication within a reasoning session.
+///
+/// Sequence numbers are local to a [`DiagnosticBus`] and increase in commit
+/// order. The diagnostic itself is shared across subscribers without copying
+/// its value graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticEvent {
+    sequence: u64,
+    diagnostic: Arc<Diagnostic>,
+}
+
+impl DiagnosticEvent {
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn diagnostic(&self) -> &Diagnostic {
+        &self.diagnostic
+    }
+}
+
+impl Deref for DiagnosticEvent {
+    type Target = Diagnostic;
+
+    fn deref(&self) -> &Self::Target {
+        self.diagnostic()
+    }
+}
+
+/// A coherent snapshot of all committed emissions on one diagnostic bus.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiagnosticCounts {
+    latest_sequence: Option<u64>,
+    info: u64,
+    warnings: u64,
+    errors: u64,
+}
+
+impl DiagnosticCounts {
+    pub fn latest_sequence(&self) -> Option<u64> {
+        self.latest_sequence
+    }
+
+    pub fn info(&self) -> u64 {
+        self.info
+    }
+
+    pub fn warnings(&self) -> u64 {
+        self.warnings
+    }
+
+    pub fn errors(&self) -> u64 {
+        self.errors
+    }
+
+    pub fn total(&self) -> u64 {
+        self.info
+            .checked_add(self.warnings)
+            .and_then(|total| total.checked_add(self.errors))
+            .expect("diagnostic count overflow")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticSnapshot {
-    entries: Vec<Diagnostic>,
+    entries: Vec<DiagnosticEvent>,
     dropped: u64,
 }
 
 impl DiagnosticSnapshot {
-    pub fn entries(&self) -> &[Diagnostic] {
+    pub fn entries(&self) -> &[DiagnosticEvent] {
         &self.entries
     }
 
@@ -455,28 +518,156 @@ impl DiagnosticSnapshot {
 #[derive(Debug)]
 struct DiagnosticHistory {
     capacity: usize,
-    entries: VecDeque<Diagnostic>,
+    entries: VecDeque<DiagnosticEvent>,
     dropped: u64,
 }
 
-/// Destination for diagnostics emitted by assembly and future reflection work.
-/// Implementations may be called concurrently.
-pub trait DiagnosticSink: Send + Sync {
-    fn emit(&self, diagnostic: Diagnostic);
+/// Receiver for committed diagnostic events. Implementations may be called
+/// concurrently and own any retention or rendering policy they need.
+pub trait DiagnosticSubscriber: Send + Sync {
+    fn receive(&self, event: DiagnosticEvent);
+}
 
-    /// Atomically reads and consumes any retained diagnostics.
-    fn read(&self) -> Option<DiagnosticSnapshot> {
-        None
+impl<T: DiagnosticSubscriber + ?Sized> DiagnosticSubscriber for Arc<T> {
+    fn receive(&self, event: DiagnosticEvent) {
+        (**self).receive(event);
     }
 }
 
-impl<T: DiagnosticSink + ?Sized> DiagnosticSink for Arc<T> {
-    fn emit(&self, diagnostic: Diagnostic) {
-        (**self).emit(diagnostic);
+struct DiagnosticBusState {
+    next_sequence: u64,
+    next_subscriber: u64,
+    counts: DiagnosticCounts,
+    subscribers: BTreeMap<u64, Arc<dyn DiagnosticSubscriber>>,
+}
+
+struct DiagnosticBusInner {
+    state: Mutex<DiagnosticBusState>,
+}
+
+/// Non-buffering publication boundary for one reasoning session.
+#[derive(Clone)]
+pub struct DiagnosticBus {
+    inner: Arc<DiagnosticBusInner>,
+}
+
+impl Default for DiagnosticBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DiagnosticBus {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(DiagnosticBusInner {
+                state: Mutex::new(DiagnosticBusState {
+                    next_sequence: 1,
+                    next_subscriber: 1,
+                    counts: DiagnosticCounts::default(),
+                    subscribers: BTreeMap::new(),
+                }),
+            }),
+        }
     }
 
-    fn read(&self) -> Option<DiagnosticSnapshot> {
-        (**self).read()
+    /// Publishes one event, updating authoritative counts before notifying the
+    /// subscribers present at publication time. Subscriber calls occur outside
+    /// the bus lock; sequence numbers, rather than callback completion order,
+    /// define the order of concurrent publications.
+    pub fn publish(&self, diagnostic: Diagnostic) -> DiagnosticEvent {
+        let (event, subscribers) = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .expect("diagnostic bus mutex should not be poisoned");
+            let sequence = state.next_sequence;
+            state.next_sequence = sequence
+                .checked_add(1)
+                .expect("diagnostic sequence numbers exhausted");
+            state.counts.latest_sequence = Some(sequence);
+            let count = match diagnostic.severity() {
+                Severity::Info => &mut state.counts.info,
+                Severity::Warning => &mut state.counts.warnings,
+                Severity::Error => &mut state.counts.errors,
+            };
+            *count = count.checked_add(1).expect("diagnostic count overflow");
+            let event = DiagnosticEvent {
+                sequence,
+                diagnostic: Arc::new(diagnostic),
+            };
+            let subscribers = state.subscribers.values().cloned().collect::<Vec<_>>();
+            (event, subscribers)
+        };
+        for subscriber in subscribers {
+            subscriber.receive(event.clone());
+        }
+        event
+    }
+
+    pub fn counts(&self) -> DiagnosticCounts {
+        self.inner
+            .state
+            .lock()
+            .expect("diagnostic bus mutex should not be poisoned")
+            .counts
+    }
+
+    pub fn subscribe(
+        &self,
+        subscriber: impl DiagnosticSubscriber + 'static,
+    ) -> DiagnosticSubscription {
+        self.subscribe_shared(Arc::new(subscriber))
+    }
+
+    pub fn subscribe_shared(
+        &self,
+        subscriber: Arc<dyn DiagnosticSubscriber>,
+    ) -> DiagnosticSubscription {
+        let id = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .expect("diagnostic bus mutex should not be poisoned");
+            let id = state.next_subscriber;
+            state.next_subscriber = id
+                .checked_add(1)
+                .expect("diagnostic subscriber IDs exhausted");
+            state.subscribers.insert(id, subscriber);
+            id
+        };
+        DiagnosticSubscription {
+            _inner: Arc::new(DiagnosticSubscriptionInner {
+                bus: Arc::downgrade(&self.inner),
+                id,
+            }),
+        }
+    }
+}
+
+/// Keeps one diagnostic subscription registered until its last clone drops.
+#[derive(Clone)]
+pub struct DiagnosticSubscription {
+    _inner: Arc<DiagnosticSubscriptionInner>,
+}
+
+struct DiagnosticSubscriptionInner {
+    bus: Weak<DiagnosticBusInner>,
+    id: u64,
+}
+
+impl Drop for DiagnosticSubscriptionInner {
+    fn drop(&mut self) {
+        let Some(bus) = self.bus.upgrade() else {
+            return;
+        };
+        bus.state
+            .lock()
+            .expect("diagnostic bus mutex should not be poisoned")
+            .subscribers
+            .remove(&self.id);
     }
 }
 
@@ -503,27 +694,23 @@ impl DiagnosticBuffer {
     }
 }
 
-impl DiagnosticSink for DiagnosticBuffer {
-    fn emit(&self, diagnostic: Diagnostic) {
+impl DiagnosticSubscriber for DiagnosticBuffer {
+    fn receive(&self, event: DiagnosticEvent) {
         self.history
             .lock()
             .expect("diagnostic history mutex should not be poisoned")
-            .push(diagnostic);
-    }
-
-    fn read(&self) -> Option<DiagnosticSnapshot> {
-        Some(DiagnosticBuffer::read(self))
+            .push(event);
     }
 }
 
 struct DiagnosticCallback<F>(F);
 
-impl<F> DiagnosticSink for DiagnosticCallback<F>
+impl<F> DiagnosticSubscriber for DiagnosticCallback<F>
 where
-    F: Fn(Diagnostic) + Send + Sync,
+    F: Fn(DiagnosticEvent) + Send + Sync,
 {
-    fn emit(&self, diagnostic: Diagnostic) {
-        (self.0)(diagnostic);
+    fn receive(&self, event: DiagnosticEvent) {
+        (self.0)(event);
     }
 }
 
@@ -536,7 +723,7 @@ impl DiagnosticHistory {
         }
     }
 
-    fn push(&mut self, diagnostic: Diagnostic) {
+    fn push(&mut self, event: DiagnosticEvent) {
         if self.capacity == 0 {
             self.dropped = self.dropped.saturating_add(1);
             return;
@@ -545,7 +732,7 @@ impl DiagnosticHistory {
             self.entries.pop_front();
             self.dropped = self.dropped.saturating_add(1);
         }
-        self.entries.push_back(diagnostic);
+        self.entries.push_back(event);
     }
 
     fn read(&mut self) -> DiagnosticSnapshot {
@@ -558,7 +745,7 @@ impl DiagnosticHistory {
 
 struct AssemblerReflectionHost {
     reflection_environment: Value,
-    diagnostic_sink: Arc<dyn DiagnosticSink>,
+    diagnostics: DiagnosticBus,
     state: Mutex<AssemblerReflectionState>,
     changed: Condvar,
 }
@@ -569,10 +756,10 @@ struct AssemblerReflectionState {
 }
 
 impl AssemblerReflectionHost {
-    fn new(reflection_environment: Value, diagnostic_sink: Arc<dyn DiagnosticSink>) -> Self {
+    fn new(reflection_environment: Value, diagnostics: DiagnosticBus) -> Self {
         Self {
             reflection_environment,
-            diagnostic_sink,
+            diagnostics,
             state: Mutex::new(AssemblerReflectionState {
                 generation: 1,
                 heap: Value::empty_record(),
@@ -590,7 +777,7 @@ impl TaskEnvironment for AssemblerReflectionHost {
 
 impl ReflectionServices for AssemblerReflectionHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
-        self.diagnostic_sink.emit(diagnostic);
+        self.diagnostics.publish(diagnostic);
     }
 }
 
@@ -618,7 +805,7 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
             commit.extra().diagnostics().to_vec()
         };
         for diagnostic in diagnostics {
-            self.diagnostic_sink.emit(diagnostic);
+            self.diagnostics.publish(diagnostic);
         }
         commit.extra().commit_updates();
         CommitResult::Committed
@@ -659,23 +846,24 @@ impl EvaluationRuntime {
 #[derive(Clone)]
 struct ReasoningSession {
     host: Arc<AssemblerReflectionHost>,
+    diagnostics: DiagnosticBus,
     runtime: EvaluationRuntime,
     evaluation: Arc<EvaluationSession>,
 }
 
 impl ReasoningSession {
-    fn new(
-        environment: Value,
-        diagnostic_sink: Arc<dyn DiagnosticSink>,
-        runtime: EvaluationRuntime,
-    ) -> Self {
-        let host = Arc::new(AssemblerReflectionHost::new(environment, diagnostic_sink));
+    fn new(environment: Value, diagnostics: DiagnosticBus, runtime: EvaluationRuntime) -> Self {
+        let host = Arc::new(AssemblerReflectionHost::new(
+            environment,
+            diagnostics.clone(),
+        ));
         let evaluation = EvaluationSession::shared(runtime.executor());
         evaluation
             .install_reflection_launcher(task_launcher(ReflectionEffects, host.clone()))
             .expect("fresh evaluation session must accept its reflection launcher");
         Self {
             host,
+            diagnostics,
             runtime,
             evaluation,
         }
@@ -685,8 +873,8 @@ impl ReasoningSession {
         self.host.reflection_environment()
     }
 
-    fn diagnostic_sink(&self) -> Arc<dyn DiagnosticSink> {
-        self.host.diagnostic_sink.clone()
+    fn diagnostics(&self) -> DiagnosticBus {
+        self.diagnostics.clone()
     }
 
     fn runtime(&self) -> EvaluationRuntime {
@@ -987,12 +1175,17 @@ pub struct Assembler {
     host: Arc<dyn Host>,
     next_compilation_invocation: Arc<AtomicU64>,
     reasoning: ReasoningSession,
+    diagnostic_subscriber: Arc<dyn DiagnosticSubscriber>,
+    diagnostic_buffer: Option<Arc<DiagnosticBuffer>>,
+    diagnostic_subscription: DiagnosticSubscription,
 }
 
 impl Default for Assembler {
     fn default() -> Self {
-        let diagnostic_sink: Arc<dyn DiagnosticSink> =
-            Arc::new(DiagnosticBuffer::new(DEFAULT_DIAGNOSTIC_CAPACITY));
+        let diagnostic_buffer = Arc::new(DiagnosticBuffer::new(DEFAULT_DIAGNOSTIC_CAPACITY));
+        let diagnostic_subscriber: Arc<dyn DiagnosticSubscriber> = diagnostic_buffer.clone();
+        let diagnostics = DiagnosticBus::new();
+        let diagnostic_subscription = diagnostics.subscribe_shared(diagnostic_subscriber.clone());
         let host: Arc<dyn Host> = Arc::new(SystemHost);
         let (reflection_environment, replaced_glam) =
             authoritative_reflection_environment(Value::empty_record(), "assembler")
@@ -1006,11 +1199,14 @@ impl Default for Assembler {
                 .expect("zero-worker evaluation executor must not start threads"),
         };
         let reasoning =
-            ReasoningSession::new(reflection_environment, diagnostic_sink, evaluation_runtime);
+            ReasoningSession::new(reflection_environment, diagnostics, evaluation_runtime);
         Self {
             host,
             next_compilation_invocation: Arc::new(AtomicU64::new(1)),
             reasoning,
+            diagnostic_subscriber,
+            diagnostic_buffer: Some(diagnostic_buffer),
+            diagnostic_subscription,
         }
     }
 }
@@ -1044,6 +1240,11 @@ impl Assembler {
     /// service evaluation sessions explicitly attached to it.
     pub fn evaluation_runtime(&self) -> EvaluationRuntime {
         self.reasoning.runtime()
+    }
+
+    /// Returns this reasoning session's non-buffering diagnostic bus.
+    pub fn diagnostic_bus(&self) -> DiagnosticBus {
+        self.reasoning.diagnostics()
     }
 
     pub(crate) fn eval_context(&self) -> EvalContext {
@@ -1096,15 +1297,20 @@ impl Assembler {
         self
     }
 
-    /// Replaces the diagnostic destination and starts a fresh evaluation
-    /// session. Scheduled reasoning from the prior session is not transferred.
-    pub fn with_diagnostic_sink(mut self, sink: impl DiagnosticSink + 'static) -> Self {
-        let diagnostic_sink: Arc<dyn DiagnosticSink> = Arc::new(sink);
-        self.reasoning = ReasoningSession::new(
-            self.reasoning.environment(),
-            diagnostic_sink,
-            self.reasoning.runtime(),
-        );
+    /// Replaces this facade's default diagnostic subscription without
+    /// rebuilding or otherwise disturbing its reasoning session.
+    pub fn with_diagnostic_subscriber(
+        mut self,
+        subscriber: impl DiagnosticSubscriber + 'static,
+    ) -> Self {
+        let subscriber: Arc<dyn DiagnosticSubscriber> = Arc::new(subscriber);
+        let subscription = self
+            .reasoning
+            .diagnostics()
+            .subscribe_shared(subscriber.clone());
+        self.diagnostic_subscriber = subscriber;
+        self.diagnostic_buffer = None;
+        self.diagnostic_subscription = subscription;
         self
     }
 
@@ -1115,18 +1321,14 @@ impl Assembler {
     pub fn with_reflection_environment(mut self, environment: Value) -> Result<Self, Error> {
         let (reflection_environment, replaced_glam) =
             authoritative_reflection_environment(environment, "assembler")?;
-        let diagnostic_sink = self.reasoning.diagnostic_sink();
+        let runtime = self.reasoning.runtime();
+        self.replace_reasoning(reflection_environment, runtime);
         if replaced_glam {
-            diagnostic_sink.emit(Diagnostic::new(
+            self.reasoning.diagnostics().publish(Diagnostic::new(
                 Severity::Warning,
                 "reflection environment namespace `glam` is reserved; supplied value was ignored",
             ));
         }
-        self.reasoning = ReasoningSession::new(
-            reflection_environment,
-            diagnostic_sink,
-            self.reasoning.runtime(),
-        );
         Ok(self)
     }
 
@@ -1138,23 +1340,28 @@ impl Assembler {
             executor: EvaluationExecutor::new(worker_threads)
                 .map_err(|error| Error::new(error.as_ref()))?,
         };
-        self.reasoning = ReasoningSession::new(
-            self.reasoning.environment(),
-            self.reasoning.diagnostic_sink(),
-            evaluation_runtime,
-        );
+        self.replace_reasoning(self.reasoning.environment(), evaluation_runtime);
         Ok(self)
     }
 
-    pub fn with_diagnostic_buffer(self, capacity: usize) -> Self {
-        self.with_diagnostic_sink(DiagnosticBuffer::new(capacity))
+    pub fn with_diagnostic_buffer(mut self, capacity: usize) -> Self {
+        let buffer = Arc::new(DiagnosticBuffer::new(capacity));
+        let subscriber: Arc<dyn DiagnosticSubscriber> = buffer.clone();
+        let subscription = self
+            .reasoning
+            .diagnostics()
+            .subscribe_shared(subscriber.clone());
+        self.diagnostic_subscriber = subscriber;
+        self.diagnostic_buffer = Some(buffer);
+        self.diagnostic_subscription = subscription;
+        self
     }
 
     pub fn with_diagnostic_callback<F>(self, callback: F) -> Self
     where
-        F: Fn(Diagnostic) + Send + Sync + 'static,
+        F: Fn(DiagnosticEvent) + Send + Sync + 'static,
     {
-        self.with_diagnostic_sink(DiagnosticCallback(callback))
+        self.with_diagnostic_subscriber(DiagnosticCallback(callback))
     }
 
     pub fn module<I, S>(&self, module_path: I) -> ModuleBuilder<'_>
@@ -1176,14 +1383,21 @@ impl Assembler {
         }
     }
 
-    /// Atomically reads and consumes retained diagnostics when supported by
-    /// the configured sink.
+    /// Atomically reads and consumes retained diagnostics when this facade's
+    /// default subscription is a diagnostic buffer.
     pub fn read_diagnostics(&self) -> Option<DiagnosticSnapshot> {
-        self.reasoning.diagnostic_sink().read()
+        self.diagnostic_buffer.as_ref().map(|buffer| buffer.read())
     }
 
     pub(crate) fn record_diagnostic(&self, diagnostic: Diagnostic) {
-        self.reasoning.diagnostic_sink().emit(diagnostic);
+        self.reasoning.diagnostics().publish(diagnostic);
+    }
+
+    fn replace_reasoning(&mut self, environment: Value, runtime: EvaluationRuntime) {
+        let diagnostics = DiagnosticBus::new();
+        let subscription = diagnostics.subscribe_shared(self.diagnostic_subscriber.clone());
+        self.reasoning = ReasoningSession::new(environment, diagnostics, runtime);
+        self.diagnostic_subscription = subscription;
     }
 
     fn next_compilation_invocation(&self) -> CompilationInvocationId {
@@ -1752,7 +1966,7 @@ mod tests {
     }
 
     #[test]
-    fn reflection_annotation_logs_use_the_assembler_diagnostic_sink() {
+    fn reflection_annotation_logs_use_the_assembler_diagnostic_bus() {
         let diagnostics = Arc::new(Mutex::new(Vec::new()));
         let received = diagnostics.clone();
         let assembler = Assembler::new().with_diagnostic_callback(move |diagnostic| {
@@ -1788,6 +2002,73 @@ mod tests {
     }
 
     #[test]
+    fn failed_reflection_branch_does_not_publish_its_diagnostic() {
+        let assembler = Assembler::new();
+        let module = assembler
+            .module(["annotation_test"])
+            .script(
+                "g",
+                "language g0\nimport 'std\neffect = .cut (.alt ((.log 'error { msg:{ text:\"discarded\" } }) =>> .fail) (.r ()))\nresult = anno { refl:effect } \"ready\"\n",
+            )
+            .build()
+            .expect("reflection annotation fixture should compile");
+
+        assert_eq!(
+            assembler
+                .binary_at(module.value(), "result")
+                .expect("winning reflection branch should complete"),
+            b"ready".as_slice()
+        );
+        assert_eq!(assembler.diagnostic_bus().counts().total(), 0);
+        assert!(
+            assembler
+                .read_diagnostics()
+                .expect("default diagnostic buffer should remain available")
+                .entries()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn diagnostic_bus_sequences_counts_and_delivers_only_to_current_subscribers() {
+        let bus = DiagnosticBus::new();
+        let early = Arc::new(DiagnosticBuffer::new(1));
+        let early_subscription = bus.subscribe(early.clone());
+
+        let first = bus.publish(Diagnostic::new(Severity::Info, "first"));
+        let late = Arc::new(DiagnosticBuffer::new(2));
+        let _late_subscription = bus.subscribe(late.clone());
+        let second = bus.publish(Diagnostic::new(Severity::Warning, "second"));
+        drop(early_subscription);
+        let third = bus.publish(Diagnostic::new(Severity::Error, "third"));
+
+        assert_eq!(first.sequence(), 1);
+        assert_eq!(second.sequence(), 2);
+        assert_eq!(third.sequence(), 3);
+        assert_eq!(
+            bus.counts(),
+            DiagnosticCounts {
+                latest_sequence: Some(3),
+                info: 1,
+                warnings: 1,
+                errors: 1,
+            }
+        );
+
+        let early = early.read();
+        assert_eq!(early.dropped(), 1);
+        assert_eq!(early.entries()[0].message(), "second");
+        let late = late.read();
+        assert_eq!(
+            late.entries()
+                .iter()
+                .map(|event| (event.sequence(), event.message()))
+                .collect::<Vec<_>>(),
+            [(2, "second"), (3, "third")]
+        );
+    }
+
+    #[test]
     fn diagnostic_history_is_bounded_and_counts_dropped_entries() {
         let assembler = Assembler::default().with_diagnostic_buffer(2);
         for line in 1..=3 {
@@ -1805,7 +2086,7 @@ mod tests {
             snapshot
                 .entries()
                 .iter()
-                .filter_map(Diagnostic::line)
+                .filter_map(|event| event.line())
                 .collect::<Vec<_>>(),
             [2, 3]
         );

@@ -96,9 +96,10 @@ and control flow.
 - A boundary transaction first records one scanner handle. The scanner waits
   for final `refl.*`, launches named tasks in order, requires unit from each,
   and stores ordered `{key,task}` records.
-- The CLI logger's input queue and its session-local `.log` output are separate.
-  Logger output cannot reopen a sealed input stream. Its children inherit
-  `.log`, but not `read_log`, `log_status`, or `write_stderr`.
+- The CLI logger's assembler-bus input subscription and its session-local
+  diagnostic bus are separate. Logger output cannot reopen or feed a sealed
+  input stream. Its children inherit `.log`, but not `read_log`, `log_status`,
+  or `write_stderr`.
 - Batch execution seals diagnostics only after assembler reasoning drains. A
   logger waiting on an empty input must observe `.log_status` and finish after
   closure. Logger failure falls back to the default formatter and makes the

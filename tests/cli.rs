@@ -738,6 +738,30 @@ fn configured_logger_does_not_read_its_own_log_output() {
 }
 
 #[test]
+fn configured_logger_error_diagnostic_fails_the_batch() {
+    let dir = unique_temp_dir("glam-conf-log-error-exit");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = (.log 'error { msg:{ text:\"LOGGER ERROR\" } }) =>> .r ()\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--script.g")
+        .arg("language g0\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"ok");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("error: LOGGER ERROR"));
+}
+
+#[test]
 fn configured_logger_drains_unjoined_child_tasks_to_its_output() {
     let dir = unique_temp_dir("glam-conf-log-child-drain");
     fs::create_dir_all(&dir)

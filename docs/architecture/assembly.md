@@ -7,14 +7,14 @@ map, not the eventual assembler contract.
 
 `api::Assembler` is the primary embedding facade. It owns a source host and one
 internal `ReasoningSession`. That session groups the immutable reflection
-environment, current diagnostic destination, assembler reflection host/heap,
-task scheduler, and its attachment to the shared evaluation runtime. Clients
+environment, reflection host/heap, diagnostic bus, task scheduler, and its
+attachment to the shared evaluation runtime. Clients
 choose module paths and inputs; the library does not assign special meaning to
 `configuration` or `assembly`.
 
 `main` is one client. It chooses those two roots, supplies CLI-derived values,
-installs the local-files host and diagnostic queue, requests `asm.result`, and
-decides process output and exit status.
+installs the local-files host and subscribes a diagnostic queue, requests
+`asm.result`, and decides process output and exit status.
 
 ## Module Construction
 
@@ -41,17 +41,26 @@ when to enrich that provenance into `msg.origin`.
 
 ## Diagnostics and Logging
 
-`Assembler` emits structured diagnostic envelopes to its configured sink. It
-does not render them. The CLI installs a bounded queue and monotonic error
-counter before compiling configuration so bootstrap messages are observable by
-`conf.log`.
+Each reasoning session owns a non-buffering `DiagnosticBus`. Publishing a
+committed envelope assigns a session-local sequence number, increments a
+coherent severity counter, and sends the immutable event to the subscribers
+present at that point. Subscribers own all buffering, dropping, rendering,
+forwarding, and indexing policy. Changing an assembler's default subscription
+does not rebuild its reasoning session.
 
-If configured, `conf.log` runs in its own evaluation session but shares the
-assembler's executor. It reads the sealed-or-open diagnostic input through
-main-only effects. Its own `.log` writes use a distinct session-local output:
-main enriches them with terminal `viewer` context, applies the cached closed
-Glam formatter, and writes stderr. This avoids feeding logger output back into
-its input queue. Formatter failure falls back to a minimal Rust renderer.
+`Assembler` does not render diagnostics. Before compiling configuration, the
+CLI subscribes a bounded queue to the assembler bus so bootstrap messages are
+observable by `conf.log`. Queue overflow or consumption does not change the
+bus's authoritative counters.
+
+If configured, `conf.log` runs in its own evaluation session and owns a
+separate diagnostic bus, while sharing the assembler's executor. It reads the
+sealed-or-open assembler-bus subscription through main-only effects. Its own
+`.log` writes and synthetic logger failures publish to the logger bus, whose
+default subscriber enriches them with terminal `viewer` context, applies the
+cached closed Glam formatter, and writes stderr. Logger output therefore cannot
+feed back into assembler input. Formatter failure falls back to a minimal Rust
+renderer.
 
 The logger is wrapped with the native equivalent of `(=>> .r ())`; returning a
 non-unit result is an error. A logger failure produces a synthetic diagnostic,
@@ -82,8 +91,9 @@ compile configuration and assembly
 ```
 
 Valid stdout may therefore accompany a failing exit status when reasoning or
-diagnostics report an error. The monotonic error count is independent of queue
-retention, reads, and rendering.
+diagnostics report an error. Main checks the assembler and logger bus error
+counts independently; both are independent of queue retention, reads, and
+rendering.
 
 The current CLI also exposes temporary `--parse` inspection. `--workers`
 overrides `GLAM_WORKERS`; zero workers is the default. Raw process arguments
