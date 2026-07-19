@@ -41,7 +41,7 @@
 
 ## Assembler Executable
 
-CLI: `-f file` / `-s.ext script` / `-- args` build an anonymous assembly module (earlier files override later). Output: `asm.result` as `--binary` (default, to `--stdout`) or `--folder` (`-o dest`); `asm.file_meta` for permissions; atomic file replacement. Modes: `--batch` (default) or `-i` (runs `conf.ide`: TTY, TCP/socket, light GUI, limited file editing).
+CLI: `-f file` / `-s.ext script` / `-- args` build an anonymous assembly module (earlier files override later); `--manifest file` records secure hashes of local inputs. Output: `asm.result` as `--binary` (default, to `--stdout`) or `--folder` (`-o dest`); `asm.file_meta` for permissions; atomic file replacement. Modes: `--batch` (default) or `-i` (runs `conf.ide`: TTY, TCP/socket, light GUI, limited file editing).
 
 **Reflection**: version-specific effects API; runs `refl.*` definitions, `conf.log`/`conf.ide`, and effectful annotations as concurrent tasks with STM-shared state. Reflection can inspect everything (bypasses abstraction), suggest edits, drive SMT solvers (Z3/cvc5), but *cannot* observably influence pure computation — `asm.result` stays reproducible. Reflection itself is not reproducible.
 
@@ -53,4 +53,3 @@ CLI: `-f file` / `-s.ext script` / `-- args` build an anonymous assembly module 
 - **Structured assembly** (aspirational): coroutines, Kahn networks, state charts, transaction loops (atomic isolated transactions, replaceable at runtime — basis for live systems). Concurrency modeled deterministically via shift-reset heap transfer; design for confluence (CALM, CRDTs, promises).
 - **Multi-level DSLs**: model each language as an assembly target; domain knowledge as objects with DSL definitions (extensible, substrate-independent); loops as plain recursive functions or "loop objects" wired via continuation overrides; open continuations via extension of abstract method objects.
 - **Proof-carrying code**: possible but unproven at scale (cf. VALE); assisted proving via reflection + SMT + IDE edit suggestions.
-

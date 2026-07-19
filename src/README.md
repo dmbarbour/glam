@@ -11,6 +11,7 @@ implementation constraints.
 | Path | Current responsibility |
 | --- | --- |
 | `main.rs` | CLI parsing, configuration/assembly policy, terminal viewer context, applying the default Glam diagnostic formatter, and writing output |
+| `local_files.rs` | CLI system-host wrapper, in-run file consistency checks, and optional SHA-256 manifest output |
 | `lib.rs`, `api.rs` | Embedding facade: opaque values, host capabilities, module assembly, diagnostics, evaluation, binary extraction, and checked net construction |
 | `compiler.rs` | Per-source compiler capabilities: hidden source provenance, module identity, prior/final definitions, import loaders, and diagnostic emission |
 | `g_syntax.rs` | `.g` front-end facade and source diagnostics |
@@ -55,13 +56,19 @@ main
        -> the final-definition lazy cell closes the module fixpoint
        -> eval exposes the assembled module value
   -> Assembler::binary_at(module, "asm.result")
-  -> main writes valid result bytes, drains assembler reasoning, then closes and joins logging
+  -> main writes valid result bytes and drains assembler reasoning
+  -> main rechecks observed local files and optionally writes their SHA-256 manifest
+  -> main closes and joins logging
 ```
 
 Inputs are processed from last to first so earlier command-line inputs override
 later ones. Local source and binary imports re-enter the same `Assembler`
 session through loaders installed in `CompileContext`; their diagnostics join
-the originating build session.
+the originating build session. The executable wraps the system host to retain
+the SHA-256 digest from every successful local read. A changed repeat read is
+rejected immediately, and a final recheck diagnoses edits that occurred after
+the file's last use. `--manifest` writes the retained digest set, including
+configuration files and transitive local imports.
 
 Each source compilation receives an assembler-local invocation ID. A hidden
 immutable trace links imported compilations to their parent invocation and

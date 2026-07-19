@@ -350,8 +350,13 @@ bootstrap compatibility behavior.
   roots. The library API does not assign those names or roles.
 - The current CLI accepts repeated `--file`/`-f` and
   `--script.<ext>`/`-s.<ext>` assembly inputs, then optional arguments after
-  `--`. It also has a temporary `--parse` inspection path. Bare arguments and
-  configured `conf.cli` rewriting are not implemented.
+  `--`, plus one optional `--manifest` output. Its local-file host hashes every
+  successful read with SHA-256, rejects different contents on a repeated read,
+  and rechecks all observed files before shutdown. The manifest contains the
+  observed digests rather than hashes taken in a later filesystem scan; paths
+  under the invocation directory are recorded relatively. It also has a
+  temporary `--parse` inspection path. Bare arguments and configured
+  `conf.cli` rewriting are not implemented.
 - Configuration paths come from `GLAM_CONF` path list, or an OS-specific default
 
 ## Source-Surface Regressions

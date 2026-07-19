@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 #[test]
 fn hello_assembly_samples_write_hello_world_to_stdout() {
     for path in hello_sample_files() {
@@ -40,6 +42,54 @@ fn short_file_option_writes_asm_result_to_stdout() {
 
     assert!(output.status.success());
     assert_eq!(output.stdout, b"Hello, World!");
+}
+
+#[test]
+fn manifest_records_local_sources_and_binary_imports() {
+    let dir = unique_temp_dir("glam-manifest");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let source = dir.join("main.g");
+    let payload = dir.join("payload.bin");
+    let config = dir.join("conf.g");
+    let manifest = dir.join("inputs.manifest");
+    let source_bytes =
+        b"language g0\nimport \"payload.bin\" binary as payload\nasm.result = payload\n";
+    let payload_bytes = b"manifest bytes";
+    let config_bytes = b"language g0\nobject conf.env\n";
+    fs::write(&source, source_bytes)
+        .unwrap_or_else(|err| panic!("failed to write {}: {err}", source.display()));
+    fs::write(&payload, payload_bytes)
+        .unwrap_or_else(|err| panic!("failed to write {}: {err}", payload.display()));
+    fs::write(&config, config_bytes)
+        .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--manifest")
+        .arg(&manifest)
+        .arg("--file")
+        .arg(&source)
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, payload_bytes);
+    let manifest_text = fs::read_to_string(&manifest)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", manifest.display()));
+    let entries = manifest_text.lines().skip(2).collect::<Vec<_>>();
+    assert_eq!(entries.len(), 3, "{manifest_text}");
+    let source_entry = manifest_entry(source_bytes, &source);
+    let payload_entry = manifest_entry(payload_bytes, &payload);
+    let config_entry = manifest_entry(config_bytes, &config);
+    assert!(entries.contains(&source_entry.as_str()));
+    assert!(entries.contains(&payload_entry.as_str()));
+    assert!(entries.contains(&config_entry.as_str()));
 }
 
 #[test]
@@ -730,6 +780,31 @@ fn glam_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_glam"));
     command.env("GLAM_CONF", "samples/config/unit_tests.g");
     command
+}
+
+fn manifest_entry(bytes: &[u8], path: &Path) -> String {
+    let digest = Sha256::digest(bytes);
+    let hash = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let absolute = std::path::absolute(path).expect("manifest test path should become absolute");
+    let working_directory =
+        env::current_dir().expect("manifest test should have a working directory");
+    let path = absolute
+        .strip_prefix(working_directory)
+        .ok()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(&absolute);
+    let mut encoded = String::new();
+    for byte in path.as_os_str().as_encoded_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b':') {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02x}"));
+        }
+    }
+    format!("{hash}\t{encoded}")
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {

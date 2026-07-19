@@ -20,6 +20,9 @@ use glam::{
     ModuleInput, ReasoningReport, ReasoningStatus, ReasoningTaskState, Severity, Value,
 };
 
+mod local_files;
+use local_files::LocalFileHost;
+
 // Parse inspection intentionally remains on the front-end API while ordinary
 // assembly uses only the embedding facade.
 use glam::g_syntax::{DeclarationKind, ParsedSource, parse_source};
@@ -55,8 +58,9 @@ fn main() -> ExitCode {
 
             let mut inputs = vec![ModuleInput::file(path)];
             let mut cli_args = Vec::new();
-            match collect_assembly_inputs(args, &mut inputs, &mut cli_args) {
-                Ok(()) => assemble_inputs(inputs, cli_args),
+            let mut manifest = None;
+            match collect_assembly_inputs(args, &mut inputs, &mut cli_args, &mut manifest) {
+                Ok(()) => assemble_inputs(inputs, cli_args, manifest),
                 Err(exit_code) => exit_code,
             }
         }
@@ -69,8 +73,26 @@ fn main() -> ExitCode {
 
             let mut inputs = vec![ModuleInput::script(extension, body)];
             let mut cli_args = Vec::new();
-            match collect_assembly_inputs(args, &mut inputs, &mut cli_args) {
-                Ok(()) => assemble_inputs(inputs, cli_args),
+            let mut manifest = None;
+            match collect_assembly_inputs(args, &mut inputs, &mut cli_args, &mut manifest) {
+                Ok(()) => assemble_inputs(inputs, cli_args, manifest),
+                Err(exit_code) => exit_code,
+            }
+        }
+        "--manifest" => {
+            let Some(path) = args.next() else {
+                eprintln!("error: `--manifest` needs an output path");
+                return ExitCode::from(2);
+            };
+            let mut inputs = Vec::new();
+            let mut cli_args = Vec::new();
+            let mut manifest = Some(PathBuf::from(path));
+            match collect_assembly_inputs(args, &mut inputs, &mut cli_args, &mut manifest) {
+                Ok(()) if inputs.is_empty() => {
+                    eprintln!("error: `--manifest` must accompany an assembly input");
+                    ExitCode::from(2)
+                }
+                Ok(()) => assemble_inputs(inputs, cli_args, manifest),
                 Err(exit_code) => exit_code,
             }
         }
@@ -91,6 +113,7 @@ fn collect_assembly_inputs(
     mut args: impl Iterator<Item = String>,
     inputs: &mut Vec<ModuleInput>,
     cli_args: &mut Vec<String>,
+    manifest: &mut Option<PathBuf>,
 ) -> Result<(), ExitCode> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -104,6 +127,16 @@ fn collect_assembly_inputs(
                     return Err(ExitCode::from(2));
                 };
                 inputs.push(ModuleInput::file(path));
+            }
+            "--manifest" => {
+                let Some(path) = args.next() else {
+                    eprintln!("error: `--manifest` needs an output path");
+                    return Err(ExitCode::from(2));
+                };
+                if manifest.replace(PathBuf::from(path)).is_some() {
+                    eprintln!("error: `--manifest` may be specified only once");
+                    return Err(ExitCode::from(2));
+                }
             }
             option if script_extension(option).is_some() => {
                 let extension = script_extension(option).expect("checked above").to_owned();
@@ -155,9 +188,34 @@ fn process_reflection_environment() -> Value {
     )])
 }
 
-fn assemble_inputs(inputs: Vec<ModuleInput>, cli_args: Vec<String>) -> ExitCode {
+fn finish_local_files(
+    files: &LocalFileHost,
+    manifest: Option<&Path>,
+    diagnostics: &LogHost,
+) -> bool {
+    let mut failed = false;
+    if let Err(error) = files.verify_unchanged() {
+        failed = true;
+        diagnostics.emit(Diagnostic::new(Severity::Error, error));
+    }
+    if let Some(path) = manifest
+        && let Err(error) = files.write_manifest(path)
+    {
+        failed = true;
+        diagnostics.emit(Diagnostic::new(Severity::Error, error));
+    }
+    failed
+}
+
+fn assemble_inputs(
+    inputs: Vec<ModuleInput>,
+    cli_args: Vec<String>,
+    manifest: Option<PathBuf>,
+) -> ExitCode {
     let log_host = Arc::new(LogHost::new(DEFAULT_DIAGNOSTIC_CAPACITY));
+    let local_files = LocalFileHost::default();
     let assembler = Assembler::default()
+        .with_host(local_files.clone())
         .with_reflection_environment(process_reflection_environment())
         .expect("main's reflection environment must be a dictionary")
         .with_diagnostic_sink(log_host.clone());
@@ -165,6 +223,7 @@ fn assemble_inputs(inputs: Vec<ModuleInput>, cli_args: Vec<String>) -> ExitCode 
         Ok(configuration) => configuration,
         Err(error) => {
             log_host.emit(Diagnostic::new(Severity::Error, error.to_string()));
+            finish_local_files(&local_files, manifest.as_deref(), log_host.as_ref());
             log_host.close_input();
             log_host.drain_default(&DefaultLogger::new(assembler.clone()));
             return ExitCode::from(1);
@@ -190,6 +249,7 @@ fn assemble_inputs(inputs: Vec<ModuleInput>, cli_args: Vec<String>) -> ExitCode 
     }
 
     report_reasoning(&log_host, &assembler.drain_reasoning());
+    operation_failed |= finish_local_files(&local_files, manifest.as_deref(), log_host.as_ref());
     log_host.close_input();
     logger.join().expect("logger task should not panic");
     log_host.cancel();
@@ -1139,11 +1199,13 @@ fn declaration_label(kind: &DeclarationKind) -> &'static str {
 fn print_help() {
     const HELP: &str = "\
 Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...
+            [--manifest <PATH>]
        glam --parse <PATH>
        glam --help
        glam --version
 
 Assembly inputs are applied as mixins; earlier inputs override later inputs.
+--manifest records every local input path and its SHA-256 digest.
 Configuration is loaded from GLAM_CONF as an OS path-list, or from the user config/default fixture.
 Bare arguments are reserved for configured `conf.cli` rewriting.
 ";
