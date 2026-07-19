@@ -48,11 +48,17 @@ and control flow.
 ## Child Tasks and Evaluation
 
 - `.refl_task` reserves a handle immediately but journals launch inside a
-  transaction. `.cancel_task` is also commit-ordered. Losing branches discard
-  launches and cancellation requests.
+  transaction. `.cancel_task` is an unconditional best-effort, commit-ordered
+  request; late and foreign cancellation are harmless no-ops. Losing branches
+  discard launches and cancellation requests.
 - `.join_task` propagates terminal errors. `.task_result` and `.task_error` are
-  read-only state-specific extractors; `.task_status` is nonblocking. Pending
-  extractors fail with the child's exact wait token.
+  read-only terminal-state extractors. Pending extractors fail with the child's
+  exact wait token.
+- Mutable task state is not read directly. `.query_task` journals an immutable
+  tagged snapshot request and returns a distinct query handle; `.query_result`
+  fails until that request commits, then always returns the same
+  `pending`, `complete`, `error`, `canceled`, or `foreign` snapshot. An
+  uncommitted query result does not install a wake dependency on itself.
 - `.eval` forces only successive lazy outer shells and returns `ok:WHNF` or
   provisional `err:Text`. A pending evaluator dependency suspends it. It does
   not isolate or roll back reflection tasks activated by evaluation.

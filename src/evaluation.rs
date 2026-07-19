@@ -29,12 +29,30 @@ impl EvaluationTaskId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct EvaluationQueryId(NonZeroU64);
+
+impl EvaluationQueryId {
+    pub(crate) fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    pub(crate) fn from_u64(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(Self)
+    }
+}
+
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_WAIT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 fn allocate_task_id() -> Result<EvaluationTaskId, Arc<str>> {
     allocate_id(&NEXT_TASK_ID, "evaluation task IDs exhausted").map(EvaluationTaskId)
+}
+
+fn allocate_query_id() -> Result<EvaluationQueryId, Arc<str>> {
+    allocate_id(&NEXT_QUERY_ID, "evaluation query IDs exhausted").map(EvaluationQueryId)
 }
 
 fn allocate_wait_token(session: &Arc<EvaluationSession>) -> Result<EvaluationWaitToken, Arc<str>> {
@@ -96,6 +114,24 @@ impl Hash for EvaluationWaitToken {
 pub(crate) struct EvaluationTaskHandle {
     id: EvaluationTaskId,
     wait: EvaluationWaitToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EvaluationQueryHandle {
+    id: EvaluationQueryId,
+}
+
+impl EvaluationQueryHandle {
+    pub(crate) fn id(&self) -> EvaluationQueryId {
+        self.id
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EvaluationQueryPoll {
+    Pending,
+    Complete(Value),
+    ForeignSession,
 }
 
 impl EvaluationTaskHandle {
@@ -237,6 +273,40 @@ pub(crate) struct PendingReflectionTask {
     inner: Arc<PendingReflectionTaskInner>,
 }
 
+#[derive(Clone)]
+pub(crate) struct PendingEvaluationQuery {
+    inner: Arc<PendingEvaluationQueryInner>,
+}
+
+struct PendingEvaluationQueryInner {
+    context: EvalContext,
+    handle: EvaluationQueryHandle,
+    completed: AtomicBool,
+}
+
+impl PendingEvaluationQuery {
+    pub(crate) fn handle(&self) -> &EvaluationQueryHandle {
+        &self.inner.handle
+    }
+
+    pub(crate) fn complete(&self, result: Value) {
+        if self.inner.completed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.inner
+            .context
+            .complete_query(&self.inner.handle, result);
+    }
+}
+
+impl Drop for PendingEvaluationQueryInner {
+    fn drop(&mut self) {
+        if !self.completed.load(Ordering::Acquire) {
+            self.context.cancel_reserved_query(&self.handle);
+        }
+    }
+}
+
 struct PendingReflectionTaskInner {
     context: EvalContext,
     handle: EvaluationTaskHandle,
@@ -275,6 +345,10 @@ struct PromiseRecord {
     result: Weak<OnceLock<Result<Value, Arc<str>>>>,
 }
 
+struct EvaluationQueryRecord {
+    result: Option<Value>,
+}
+
 #[derive(Default)]
 struct EvaluationTasks {
     reflection: HashMap<EvaluationWaitToken, ReflectionTaskRecord>,
@@ -282,6 +356,7 @@ struct EvaluationTasks {
     ready: VecDeque<EvaluationTaskId>,
     promises: HashMap<EvaluationWaitToken, PromiseRecord>,
     owned_promises: HashMap<EvaluationTaskId, Vec<EvaluationWaitToken>>,
+    queries: BTreeMap<EvaluationQueryId, EvaluationQueryRecord>,
 }
 
 pub(crate) struct EvaluationSession {
@@ -761,6 +836,75 @@ impl EvalContext {
         Ok(EvaluationTaskHandle { id, wait })
     }
 
+    pub(crate) fn reserve_query(&self) -> Result<PendingEvaluationQuery, Arc<str>> {
+        let handle = EvaluationQueryHandle {
+            id: allocate_query_id()?,
+        };
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let replaced = tasks
+            .queries
+            .insert(handle.id, EvaluationQueryRecord { result: None });
+        assert!(replaced.is_none(), "evaluation query IDs must be unique");
+        drop(tasks);
+        Ok(PendingEvaluationQuery {
+            inner: Arc::new(PendingEvaluationQueryInner {
+                context: self.clone(),
+                handle,
+                completed: AtomicBool::new(false),
+            }),
+        })
+    }
+
+    fn complete_query(&self, handle: &EvaluationQueryHandle, result: Value) {
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let Some(query) = tasks.queries.get_mut(&handle.id) else {
+            return;
+        };
+        if query.result.is_none() {
+            query.result = Some(result);
+            self.session.task_changed.notify_all();
+        }
+    }
+
+    fn cancel_reserved_query(&self, handle: &EvaluationQueryHandle) {
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        if tasks
+            .queries
+            .get(&handle.id)
+            .is_some_and(|query| query.result.is_none())
+        {
+            tasks.queries.remove(&handle.id);
+            self.session.task_changed.notify_all();
+        }
+    }
+
+    pub(crate) fn poll_query(&self, id: EvaluationQueryId) -> EvaluationQueryPoll {
+        let tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        match tasks.queries.get(&id) {
+            Some(EvaluationQueryRecord {
+                result: Some(result),
+            }) => EvaluationQueryPoll::Complete(result.clone()),
+            Some(EvaluationQueryRecord { result: None }) => EvaluationQueryPoll::Pending,
+            None => EvaluationQueryPoll::ForeignSession,
+        }
+    }
+
     pub(crate) fn poll_reflection_task(&self, task: &EvaluationTaskHandle) -> EvaluationTaskPoll {
         self.poll_wait(&task.wait)
     }
@@ -915,6 +1059,16 @@ impl EvalContext {
             .lock()
             .expect("evaluation task registry was poisoned")
             .reflection
+            .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn evaluation_query_count(&self) -> usize {
+        self.session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned")
+            .queries
             .len()
     }
 

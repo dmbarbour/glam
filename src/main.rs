@@ -919,7 +919,7 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
         for diagnostic in diagnostics {
             self.emit_output(diagnostic);
         }
-        commit.extra().reflection.commit_task_updates();
+        commit.extra().reflection.commit_updates();
         self.input.flush_stderr();
         CommitResult::Committed
     }
@@ -975,7 +975,7 @@ impl TaskHost<ReflectionEffects> for LoggerTaskHost {
         for diagnostic in diagnostics {
             self.emit_output(diagnostic);
         }
-        commit.extra().commit_task_updates();
+        commit.extra().commit_updates();
         CommitResult::Committed
     }
 

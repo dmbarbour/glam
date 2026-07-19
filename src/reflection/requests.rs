@@ -5,8 +5,9 @@ use crate::core::{Atom, Dict, Key, Value as CoreValue, keys};
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{
-    EvalContext, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId,
-    EvaluationTaskPoll, PendingReflectionTask,
+    EvalContext, EvaluationQueryHandle, EvaluationQueryId, EvaluationQueryPoll,
+    EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskPoll,
+    PendingEvaluationQuery, PendingReflectionTask,
 };
 use crate::number::Number;
 
@@ -26,21 +27,27 @@ pub enum ReflectionRequest {
     JoinTask,
     TaskResult,
     TaskError,
-    TaskStatus,
+    QueryTask,
+    QueryResult,
     CancelTask,
 }
 
 #[derive(Clone)]
-enum ReflectionTaskUpdate {
+enum ReflectionUpdate {
     Launch(PendingReflectionTask),
     Cancel(EvalContext, EvaluationTaskId),
+    Query {
+        context: EvalContext,
+        task: EvaluationTaskId,
+        query: PendingEvaluationQuery,
+    },
 }
 
-/// Diagnostics produced transactionally by reflection requests.
+/// Transactional writes and deferred observations for reflection requests.
 #[derive(Clone, Default)]
 pub struct ReflectionJournal {
     diagnostics: Vec<Diagnostic>,
-    task_updates: Vec<ReflectionTaskUpdate>,
+    updates: Vec<ReflectionUpdate>,
 }
 
 impl ReflectionJournal {
@@ -49,13 +56,18 @@ impl ReflectionJournal {
     }
 
     #[doc(hidden)]
-    pub fn commit_task_updates(&self) {
-        for update in &self.task_updates {
+    pub fn commit_updates(&self) {
+        for update in &self.updates {
             match update {
-                ReflectionTaskUpdate::Launch(task) => task.activate(),
-                ReflectionTaskUpdate::Cancel(context, task) => {
+                ReflectionUpdate::Launch(task) => task.activate(),
+                ReflectionUpdate::Cancel(context, task) => {
                     context.cancel_reflection_task_id(*task);
                 }
+                ReflectionUpdate::Query {
+                    context,
+                    task,
+                    query,
+                } => query.complete(task_query_snapshot(context.poll_reflection_task_id(*task))),
             }
         }
     }
@@ -141,10 +153,16 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
             ReflectionRequest::TaskError,
         ),
         EffectRequestSpec::new(
-            "task_status",
-            ["reflection_runtime", "v0", "request", "task_status"],
+            "query_task",
+            ["reflection_runtime", "v0", "request", "query_task"],
             1,
-            ReflectionRequest::TaskStatus,
+            ReflectionRequest::QueryTask,
+        ),
+        EffectRequestSpec::new(
+            "query_result",
+            ["reflection_runtime", "v0", "request", "query_result"],
+            1,
+            ReflectionRequest::QueryResult,
         ),
         EffectRequestSpec::new(
             "cancel_task",
@@ -235,8 +253,8 @@ where
                     .parts()
                     .1
                     .reflection_journal()
-                    .task_updates
-                    .push(ReflectionTaskUpdate::Launch(pending));
+                    .updates
+                    .push(ReflectionUpdate::Launch(pending));
                 handle
             } else {
                 let handle = eval_context
@@ -302,50 +320,59 @@ where
                 )),
             }
         }
-        ReflectionRequest::TaskStatus => {
-            let handle = task_handle_argument(context.eval_context(), arguments, "task_status")?;
-            let status = match context.eval_context().poll_reflection_task_id(handle) {
-                EvaluationTaskPoll::Pending(wait) => {
-                    context.observe_task_wait(wait);
-                    "pending"
-                }
-                EvaluationTaskPoll::Complete(_) => "complete",
-                EvaluationTaskPoll::Failed(_) => "error",
-                EvaluationTaskPoll::Cancelled => "canceled",
-                EvaluationTaskPoll::ForeignSession => "foreign",
-            };
-            Ok(RequestResult::Return(atom(status)))
-        }
-        ReflectionRequest::CancelTask => {
-            let handle = task_handle_argument(context.eval_context(), arguments, "cancel_task")?;
+        ReflectionRequest::QueryTask => {
+            let task = task_handle_argument(context.eval_context(), arguments, "query_task")?;
             let eval_context = context.eval_context().clone();
-            match eval_context.poll_reflection_task_id(handle) {
-                EvaluationTaskPoll::ForeignSession => {
-                    return Err(TaskError::new(
-                        "task handle does not belong to this evaluation session",
-                    ));
-                }
-                EvaluationTaskPoll::Complete(_)
-                | EvaluationTaskPoll::Failed(_)
-                | EvaluationTaskPoll::Cancelled => return Ok(RequestResult::ReturnUnit),
-                EvaluationTaskPoll::Pending(_) => {}
-            }
+            let query = eval_context
+                .reserve_query()
+                .map_err(|error| TaskError::new(error.as_ref()))?;
+            let handle = *query.handle();
             if let Some(mut transaction) = context.transaction() {
                 transaction
                     .parts()
                     .1
                     .reflection_journal()
-                    .task_updates
-                    .push(ReflectionTaskUpdate::Cancel(eval_context, handle));
+                    .updates
+                    .push(ReflectionUpdate::Query {
+                        context: eval_context,
+                        task,
+                        query,
+                    });
+            } else {
+                query.complete(task_query_snapshot(
+                    eval_context.poll_reflection_task_id(task),
+                ));
+                context.committed();
+            }
+            Ok(RequestResult::Return(query_handle_value(&handle)))
+        }
+        ReflectionRequest::QueryResult => {
+            let query = query_handle_argument(context.eval_context(), arguments, "query_result")?;
+            match context.eval_context().poll_query(query) {
+                EvaluationQueryPoll::Pending => Ok(RequestResult::Fail),
+                EvaluationQueryPoll::Complete(result) => {
+                    Ok(RequestResult::Return(Value::from_core(result)))
+                }
+                EvaluationQueryPoll::ForeignSession => Err(TaskError::new(
+                    "query handle does not belong to this evaluation session",
+                )),
+            }
+        }
+        ReflectionRequest::CancelTask => {
+            let handle = task_handle_argument(context.eval_context(), arguments, "cancel_task")?;
+            let eval_context = context.eval_context().clone();
+            if let Some(mut transaction) = context.transaction() {
+                transaction
+                    .parts()
+                    .1
+                    .reflection_journal()
+                    .updates
+                    .push(ReflectionUpdate::Cancel(eval_context, handle));
             } else {
                 match eval_context.cancel_reflection_task_id(handle) {
                     EvaluationTaskCancellation::Requested => context.committed(),
-                    EvaluationTaskCancellation::Late => {}
-                    EvaluationTaskCancellation::ForeignSession => {
-                        return Err(TaskError::new(
-                            "task handle does not belong to this evaluation session",
-                        ));
-                    }
+                    EvaluationTaskCancellation::Late
+                    | EvaluationTaskCancellation::ForeignSession => {}
                 }
             }
             Ok(RequestResult::ReturnUnit)
@@ -387,14 +414,12 @@ fn tagged_result(tag: &Key, value: Value) -> Value {
     ))
 }
 
-fn atom(name: &str) -> Value {
-    Value::from_core(CoreValue::Atom(Atom::from_key(&Key::binary_from_text(
-        name,
-    ))))
-}
-
 static TASK_HANDLE_TAG: LazyLock<Key> = LazyLock::new(|| {
     Key::abstract_global_path(["reflection_runtime", "v0", "value", "task_handle"])
+});
+
+static QUERY_HANDLE_TAG: LazyLock<Key> = LazyLock::new(|| {
+    Key::abstract_global_path(["reflection_runtime", "v0", "value", "query_handle"])
 });
 
 fn task_handle_value(handle: &EvaluationTaskHandle) -> Value {
@@ -406,6 +431,26 @@ fn task_handle_core_value(handle: &EvaluationTaskHandle) -> CoreValue {
         TASK_HANDLE_TAG.clone(),
         CoreValue::Number(Number::from_u64(handle.id().get())),
     ))
+}
+
+fn query_handle_value(handle: &EvaluationQueryHandle) -> Value {
+    Value::from_core(CoreValue::Dict(Dict::new_sync().insert(
+        QUERY_HANDLE_TAG.clone(),
+        CoreValue::Number(Number::from_u64(handle.id().get())),
+    )))
+}
+
+fn task_query_snapshot(task: EvaluationTaskPoll) -> CoreValue {
+    let (tag, value) = match task {
+        EvaluationTaskPoll::Pending(_) => (&*keys::PENDING, (*keys::UNIT_VALUE).clone()),
+        EvaluationTaskPoll::Complete(value) => (&*keys::COMPLETE, value),
+        EvaluationTaskPoll::Failed(error) => {
+            (&*keys::ERROR, CoreValue::binary_from_text(error.as_ref()))
+        }
+        EvaluationTaskPoll::Cancelled => (&*keys::CANCELED, (*keys::UNIT_VALUE).clone()),
+        EvaluationTaskPoll::ForeignSession => (&*keys::FOREIGN, (*keys::UNIT_VALUE).clone()),
+    };
+    CoreValue::Dict(Dict::new_sync().insert(tag.clone(), value))
 }
 
 fn key_value(key: &Key) -> CoreValue {
@@ -455,6 +500,36 @@ fn task_handle_argument(
     id.to_u64_if_integer()
         .and_then(EvaluationTaskId::from_u64)
         .ok_or_else(|| TaskError::new(format!("`.{request}` received an invalid task handle")))
+}
+
+fn query_handle_argument(
+    context: &EvalContext,
+    arguments: Vec<Value>,
+    request: &str,
+) -> Result<EvaluationQueryId, TaskError> {
+    let [handle]: [Value; 1] = arguments.try_into().map_err(|_| {
+        TaskError::new(format!(
+            "`.{request}` received the wrong number of arguments"
+        ))
+    })?;
+    let CoreValue::Dict(handle) = evaluate(context, handle.into_core())? else {
+        return Err(TaskError::new(format!(
+            "`.{request}` requires a reflection query handle"
+        )));
+    };
+    if handle.iter().count() != 1 {
+        return Err(TaskError::new(format!(
+            "`.{request}` requires a reflection query handle"
+        )));
+    }
+    let Some(CoreValue::Number(id)) = handle.get(&QUERY_HANDLE_TAG) else {
+        return Err(TaskError::new(format!(
+            "`.{request}` requires a reflection query handle"
+        )));
+    };
+    id.to_u64_if_integer()
+        .and_then(EvaluationQueryId::from_u64)
+        .ok_or_else(|| TaskError::new(format!("`.{request}` received an invalid query handle")))
 }
 
 fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskError> {

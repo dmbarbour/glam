@@ -53,8 +53,13 @@ point. `cut` alone does not: unobservant failure is terminal.
 - `.eval Value` reduces lazy outer shells and returns `ok:WHNF` or `err:Text`.
 - `.refl_task Effect` reserves a child handle; launch is commit-ordered inside
   a transaction.
-- `.join_task`, `.task_result`, `.task_error`, and `.task_status` observe child
-  completion; `.cancel_task` journals a cancellation request.
+- `.join_task`, `.task_result`, and `.task_error` observe immutable terminal
+  task state. `.cancel_task` journals a best-effort cancellation request.
+- `.query_task Task` journals one snapshot of mutable task state and returns a
+  distinct query handle. After commit, `.query_result Query` returns tagged
+  `pending`, `complete`, `error`, `canceled`, or `foreign` data. It fails while
+  the query remains uncommitted, preventing a transaction from waiting on the
+  request that only its own commit can submit.
 
 The immutable environment conventionally contains assembler-owned `glam`
 identity plus client context. `main` adds process arguments, reflection-only

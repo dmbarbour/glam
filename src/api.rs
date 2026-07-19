@@ -620,7 +620,7 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
         for diagnostic in diagnostics {
             self.diagnostic_sink.emit(diagnostic);
         }
-        commit.extra().commit_task_updates();
+        commit.extra().commit_updates();
         CommitResult::Committed
     }
 

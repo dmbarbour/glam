@@ -3047,7 +3047,7 @@ mod tests {
                 state.stderr.extend_from_slice(&commit.extra().stderr);
                 state.generation += 1;
             }
-            commit.extra().reflection.commit_task_updates();
+            commit.extra().reflection.commit_updates();
             CommitResult::Committed
         }
 
@@ -3101,7 +3101,7 @@ mod tests {
                     .extend(commit.extra().diagnostics().iter().cloned());
                 state.generation += 1;
             }
-            commit.extra().commit_task_updates();
+            commit.extra().commit_updates();
             CommitResult::Committed
         }
 
@@ -3532,42 +3532,28 @@ mod tests {
     }
 
     #[test]
-    fn task_status_reports_pending_complete_error_and_canceled() {
+    fn task_queries_snapshot_pending_complete_error_and_canceled() {
         let host = Arc::new(TestHost::default());
-        for (source, expected) in [
-            (
-                ".refl_task (.r ()) >>= (\\task -> .task_status task)",
-                "pending",
-            ),
-            (
-                ".refl_task (.r ()) >>= (\\task -> .join_task task >>= (\\_value -> .task_status task))",
-                "complete",
-            ),
-            (
-                ".refl_task .fail >>= (\\task -> .task_error task >>= (\\_error -> .task_status task))",
-                "error",
-            ),
-            (
-                ".refl_task (.r ()) >>= (\\task -> (.cancel_task task) =>> .task_status task)",
-                "canceled",
-            ),
+        for source in [
+            ".refl_task (.r ()) >>= (\\task -> .cut (.query_task task) >>= (\\query -> .query_result query >>= (\\snapshot -> .r snapshot.pending)))",
+            ".refl_task (.r \"done\") >>= (\\task -> .join_task task >>= (\\_value -> .cut (.query_task task) >>= (\\query -> .query_result query >>= (\\snapshot -> .r snapshot.complete))))",
+            ".refl_task .fail >>= (\\task -> .task_error task >>= (\\_error -> .cut (.query_task task) >>= (\\query -> .query_result query >>= (\\snapshot -> .r snapshot.error))))",
+            ".refl_task (.r ()) >>= (\\task -> (.cancel_task task) =>> .cut (.query_task task) >>= (\\query -> .query_result query >>= (\\snapshot -> .r snapshot.canceled)))",
         ] {
-            let (_, effect) = compile_effect(&format!(
-                "{source} >>= (\\status -> (status == '{expected}) =>> .r ())"
-            ));
+            let (_, effect) = compile_effect(source);
             let (context, task) = schedule_composed_test_task(&effect, host.clone());
             assert!(
                 matches!(
                     pump_composed_test_task(&context, &task),
                     EvaluationTaskPoll::Complete(_)
                 ),
-                "task status should be '{expected}"
+                "task query should return its tagged snapshot for {source}"
             );
         }
     }
 
     #[test]
-    fn task_status_reports_a_handle_from_another_session_as_foreign() {
+    fn task_query_reports_a_handle_from_another_session_as_foreign() {
         let (assembler, spawn) = compile_effect(".refl_task (.r ())");
         let host = Arc::new(TestHost::default());
         let (first_context, first_task) = schedule_composed_test_task(&spawn, host.clone());
@@ -3578,7 +3564,7 @@ mod tests {
         };
 
         let (_, inspect) = compile_effect(
-            "\\task -> .task_status task >>= (\\status -> (status == 'foreign) =>> .r ())",
+            "\\task -> .cut (.query_task task) >>= (\\query -> .query_result query >>= (\\snapshot -> .r snapshot.foreign))",
         );
         let inspect = assembler
             .apply(&inspect, [PublicValue::from_core(handle)])
@@ -3588,6 +3574,40 @@ mod tests {
             pump_composed_test_task(&second_context, &second_task),
             EvaluationTaskPoll::Complete(_)
         ));
+    }
+
+    #[test]
+    fn query_result_fails_without_observing_an_uncommitted_query() {
+        let (assembler, effect) = compile_effect(
+            ".refl_task (.r ()) >>= (\\task -> .cut (.alt (.query_task task >>= (\\query -> .query_result query)) (.r \"fallback\")))",
+        );
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host);
+        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+            panic!("an uncommitted query result should fall through without blocking")
+        };
+        assert_eq!(
+            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            b"fallback".as_slice()
+        );
+        assert_eq!(context.evaluation_query_count(), 0);
+    }
+
+    #[test]
+    fn task_query_snapshot_remains_immutable_after_task_completion() {
+        let (_, effect) = compile_effect(
+            ".refl_task (.r \"done\") >>= (\\task -> .cut (.query_task task) >>= (\\query -> .query_result query >>= (\\_first -> .join_task task >>= (\\_value -> .query_result query >>= (\\second -> .r second.pending)))))",
+        );
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host);
+        let EvaluationTaskPoll::Complete(mut value) = pump_composed_test_task(&context, &task)
+        else {
+            panic!("querying a completed source task should not change an earlier snapshot")
+        };
+        while matches!(value, Value::Lazy(_)) {
+            value = eval::eval_value(&context, &value).unwrap();
+        }
+        assert_eq!(value, (*keys::UNIT_VALUE).clone());
     }
 
     #[test]
@@ -3606,11 +3626,30 @@ mod tests {
         );
 
         let (_, committed) = compile_effect(
-            ".cut (.refl_task (.r ()) >>= (\\task -> (.cancel_task task) =>> .r task)) >>= (\\task -> .task_status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
+            ".cut (.refl_task (.r ()) >>= (\\task -> (.cancel_task task) =>> .r task)) >>= (\\task -> .cut (.query_task task) >>= (\\query -> .query_result query >>= (\\snapshot -> .r snapshot.canceled)))",
         );
         let (context, task) = schedule_composed_test_task(&committed, host.clone());
         assert!(matches!(
             pump_composed_test_task(&context, &task),
+            EvaluationTaskPoll::Complete(_)
+        ));
+
+        let (_, spawn_foreign) = compile_effect(".refl_task (.r ())");
+        let (source_context, source_task) =
+            schedule_composed_test_task(&spawn_foreign, host.clone());
+        let EvaluationTaskPoll::Complete(foreign_handle) =
+            pump_composed_test_task(&source_context, &source_task)
+        else {
+            panic!("source session should produce a foreign task handle")
+        };
+        let (_, cancel_foreign) = compile_effect("\\task -> .cancel_task task");
+        let cancel_foreign = assembler
+            .apply(&cancel_foreign, [PublicValue::from_core(foreign_handle)])
+            .expect("foreign cancellation should apply");
+        let (foreign_context, foreign_task) =
+            schedule_composed_test_task(&cancel_foreign, host.clone());
+        assert!(matches!(
+            pump_composed_test_task(&foreign_context, &foreign_task),
             EvaluationTaskPoll::Complete(_)
         ));
 
