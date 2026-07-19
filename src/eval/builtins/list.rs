@@ -43,6 +43,10 @@ pub(super) fn apply(
             let [value] = super::exact(arguments, "list tail")?;
             eval_list_tail_builtin(context, &value)
         }
+        Builtin::TextLines => {
+            let [value] = super::exact(arguments, "text lines")?;
+            eval_text_lines_builtin(context, &value)
+        }
         _ => unreachable!("list dispatcher received a non-list builtin"),
     }
 }

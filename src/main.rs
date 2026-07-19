@@ -875,6 +875,7 @@ fn home_dir() -> Option<PathBuf> {
 
 struct DefaultLogger {
     evaluator: Assembler,
+    formatter: Value,
     working_directory: PathBuf,
 }
 
@@ -882,8 +883,10 @@ impl DefaultLogger {
     const AUTO_INDENT: usize = 2;
 
     fn new(evaluator: Assembler) -> Self {
+        let formatter = evaluator.default_diagnostic_formatter();
         Self {
             evaluator,
+            formatter,
             working_directory: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
     }
@@ -891,15 +894,15 @@ impl DefaultLogger {
     fn emit(&self, diagnostic: &Diagnostic) {
         let terminal = TerminalContext::snapshot();
         let updates = self.viewer_updates(diagnostic, &terminal);
-        let text = diagnostic
+        let rendered = diagnostic
             .enrich_with(updates)
-            .and_then(|message| self.evaluator.get(&message, "msg.text"))
-            .and_then(|text| self.evaluator.to_binary(&text))
-            .map(|text| String::from_utf8_lossy(&text).into_owned())
-            .unwrap_or_else(|_| diagnostic.message().to_owned());
-        let rendered = self.render(diagnostic, &text, terminal.color);
+            .and_then(|message| self.evaluator.apply(&self.formatter, [message]))
+            .and_then(|rendered| self.evaluator.to_binary(&rendered))
+            .unwrap_or_else(|_| {
+                Bytes::from(self.render(diagnostic, diagnostic.message(), terminal.color))
+            });
 
-        let _ = io::stderr().lock().write_all(rendered.as_bytes());
+        let _ = io::stderr().lock().write_all(&rendered);
     }
 
     fn viewer_updates(&self, diagnostic: &Diagnostic, terminal: &TerminalContext) -> Value {
@@ -911,6 +914,8 @@ impl DefaultLogger {
             ),
             ("color", Value::text(terminal.color.name())),
             ("auto_indent", Value::integer(Self::AUTO_INDENT as i64)),
+            ("indent", Value::text(" ".repeat(Self::AUTO_INDENT))),
+            ("location", Value::text(self.location(diagnostic))),
         ];
         if let Some(term) = &terminal.term {
             viewer.push(("term", Value::text(term)));
@@ -930,15 +935,7 @@ impl DefaultLogger {
     fn render(&self, diagnostic: &Diagnostic, text: &str, color: TerminalColor) -> String {
         let severity = diagnostic.severity().to_string();
         let severity = color.paint(diagnostic.severity(), &severity);
-        let location = match (diagnostic.source(), diagnostic.line()) {
-            (Some(source), Some(line)) => {
-                format!("{}:{line}: ", self.display_source(Path::new(source)))
-            }
-            (Some(source), None) => format!("{}: ", self.display_source(Path::new(source))),
-            (None, Some(line)) => format!("line {line}: "),
-            (None, None) => String::new(),
-        };
-        let mut rendered = format!("{location}{severity}: ");
+        let mut rendered = format!("{}{severity}: ", self.location(diagnostic));
         let mut lines = text.split('\n');
         rendered.push_str(lines.next().unwrap_or_default());
         for line in lines {
@@ -950,6 +947,17 @@ impl DefaultLogger {
         }
         rendered.push('\n');
         rendered
+    }
+
+    fn location(&self, diagnostic: &Diagnostic) -> String {
+        match (diagnostic.source(), diagnostic.line()) {
+            (Some(source), Some(line)) => {
+                format!("{}:{line}: ", self.display_source(Path::new(source)))
+            }
+            (Some(source), None) => format!("{}: ", self.display_source(Path::new(source))),
+            (None, Some(line)) => format!("line {line}: "),
+            (None, None) => String::new(),
+        }
     }
 
     fn display_source(&self, source: &Path) -> String {
@@ -1128,17 +1136,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_logger_indents_nonempty_continuation_lines_by_two_spaces() {
+    fn glam_default_formatter_renders_location_severity_and_continuation_lines() {
+        let evaluator = Assembler::default();
         let logger = DefaultLogger {
-            evaluator: Assembler::default(),
+            formatter: evaluator.default_diagnostic_formatter(),
+            evaluator,
             working_directory: PathBuf::from("/work"),
         };
         let diagnostic = Diagnostic::new(Severity::Warning, "first\nsecond\n\nfourth")
             .with_source_location("/work/src/test.g", 4);
+        let terminal = TerminalContext {
+            columns: 80,
+            color: TerminalColor::None,
+            term: None,
+            language: None,
+        };
+        let enriched = diagnostic
+            .enrich_with(logger.viewer_updates(&diagnostic, &terminal))
+            .expect("terminal viewer metadata should mix into a diagnostic");
+        let rendered_value = logger
+            .evaluator
+            .apply(&logger.formatter, [enriched])
+            .expect("the closed Glam formatter should apply");
+        let rendered_value = logger
+            .evaluator
+            .evaluate(&rendered_value)
+            .expect("the formatter result should evaluate");
+        let rendered = logger
+            .evaluator
+            .to_binary(&rendered_value)
+            .expect("the closed Glam formatter should return bytes");
 
         assert_eq!(
-            logger.render(&diagnostic, diagnostic.message(), TerminalColor::None),
-            "src/test.g:4: warning: first\n  second\n\n  fourth\n"
+            rendered,
+            Bytes::from_static(b"src/test.g:4: warning: first\n  second\n  \n  fourth\n")
+        );
+    }
+
+    #[test]
+    fn glam_default_formatter_applies_terminal_color_policy() {
+        let evaluator = Assembler::default();
+        let logger = DefaultLogger {
+            formatter: evaluator.default_diagnostic_formatter(),
+            evaluator,
+            working_directory: PathBuf::from("/work"),
+        };
+        let diagnostic = Diagnostic::new(Severity::Error, "broken");
+        let terminal = TerminalContext {
+            columns: 80,
+            color: TerminalColor::Ansi256,
+            term: None,
+            language: None,
+        };
+        let enriched = diagnostic
+            .enrich_with(logger.viewer_updates(&diagnostic, &terminal))
+            .expect("terminal viewer metadata should mix into a diagnostic");
+        let rendered = logger
+            .evaluator
+            .apply(&logger.formatter, [enriched])
+            .and_then(|value| logger.evaluator.to_binary(&value))
+            .expect("the closed Glam formatter should return colored bytes");
+
+        assert_eq!(
+            rendered,
+            Bytes::from_static(b"\x1b[31merror\x1b[0m: broken\n")
         );
     }
 

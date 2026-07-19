@@ -10,13 +10,14 @@ implementation constraints.
 
 | Path | Current responsibility |
 | --- | --- |
-| `main.rs` | CLI parsing, configuration/assembly policy, diagnostic rendering, and writing `asm.result` |
+| `main.rs` | CLI parsing, configuration/assembly policy, terminal viewer context, applying the default Glam diagnostic formatter, and writing output |
 | `lib.rs`, `api.rs` | Embedding facade: opaque values, host capabilities, module assembly, diagnostics, evaluation, binary extraction, and checked net construction |
 | `compiler.rs` | Per-source compiler capabilities: hidden source provenance, module identity, prior/final definitions, import loaders, and diagnostic emission |
 | `g_syntax.rs` | `.g` front-end facade and source diagnostics |
 | `g_syntax/parser/` | Layout, declarations, expressions, and compound syntax parsing |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs` | Lexical resolution, affine semantic IR, capture discovery, and front-end warnings |
 | `g_syntax/compiler_values.rs` | Closed functions, effect selectors, and built-in modules owned and shared by the built-in g compiler |
+| `g_syntax/diagnostic_formatter.rs` | Cached closed Glam function implementing the executable's default `Diagnostic -> Bytes` terminal view |
 | `g_syntax/module_lowering/` | Declaration, import, definition, and object orchestration into a module value |
 | `g_syntax/net_lowering.rs` | One-pass lowering of resolved expressions, functions, and applications into closed interaction nets |
 | `core.rs` | Syntax-independent assembly values, lazy cells, function stages, keys, dictionaries, and builtin identifiers |
@@ -70,8 +71,9 @@ front ends never receive the trace. An observer calls `Diagnostic::enrich` to
 project it into `msg.origin`, and may call `enrich_with` to add an independent
 viewer context. Sources and requests are tagged values, `namespace` is globally
 qualified, and `import_chain` contains ordered root-to-parent
-`{importer,request,extends}` edges. Rendering is client policy; the executable's
-default terminal logger is not part of `Assembler`.
+`{importer,request,extends}` edges. Rendering is client policy. `Assembler`
+exposes the cached default closed Glam formatter as a convenience, but neither
+applies it nor writes output.
 
 `main` installs a queue-backed diagnostic sink before compiling configuration,
 so bootstrap diagnostics are available to the configured logger. If `conf.log`
@@ -94,9 +96,12 @@ or task failure also returns remaining messages to the fallback logger. A
 configured-logger failure is itself rendered as the next default diagnostic
 before that queue is drained and makes the process fail. The logger's task host
 separates this incoming queue from a session-local diagnostic output target.
-Logger `.log` writes remain transactional, but committed output is rendered by
-the Rust default logger rather than being fed back to `.read_log`; output cannot
-reopen the sealed input stream. Core operators only construct requests;
+Logger `.log` writes remain transactional, but committed output is enriched
+with terminal `viewer` context, passed through the cached closed Glam formatter,
+and written to stderr rather than being fed back to `.read_log`; output cannot
+reopen the sealed input stream. A small Rust renderer remains only as an
+emergency fallback if applying that Glam function fails. Core operators only
+construct requests;
 reflection state and external I/O are never performed by interaction-net
 reduction. The standard handler stores its active reset stack as a private
 entry in ordinary user state. Whole-state replacement therefore also switches

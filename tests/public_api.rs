@@ -47,6 +47,14 @@ fn public_api_reports_an_empty_reasoning_session_as_complete() {
 }
 
 #[test]
+fn public_api_exposes_the_default_diagnostic_formatter_as_a_function() {
+    assert_eq!(
+        Assembler::default().default_diagnostic_formatter().kind(),
+        glam::ValueKind::Function
+    );
+}
+
+#[test]
 fn public_evaluation_cooperatively_pumps_automatic_reflection_tasks() {
     let assembler = Assembler::default();
     let module = assembler

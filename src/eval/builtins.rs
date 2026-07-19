@@ -47,7 +47,8 @@ pub(super) fn apply_builtin(
         | Builtin::ListSplit
         | Builtin::ListSplitEnd
         | Builtin::ListHead
-        | Builtin::ListTail => list::apply(context, builtin, arguments),
+        | Builtin::ListTail
+        | Builtin::TextLines => list::apply(context, builtin, arguments),
         Builtin::ListEffect
         | Builtin::ListEffectReturn
         | Builtin::ListEffectSeq

@@ -257,6 +257,7 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             SyntaxOperator::Builtin(crate::core::Builtin::ListSplitEnd) => "list.split_end",
             SyntaxOperator::Builtin(crate::core::Builtin::ListHead) => "list.head",
             SyntaxOperator::Builtin(crate::core::Builtin::ListTail) => "list.tail",
+            SyntaxOperator::Builtin(crate::core::Builtin::TextLines) => "text.lines",
             SyntaxOperator::Builtin(crate::core::Builtin::ListEffect) => "list.pure",
             SyntaxOperator::Builtin(crate::core::Builtin::ListEffectReturn) => "list.pure.r",
             SyntaxOperator::Builtin(crate::core::Builtin::ListEffectSeq) => "list.pure.seq",

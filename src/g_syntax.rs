@@ -9,6 +9,7 @@ use crate::diagnostic::Severity;
 mod analysis;
 mod ast;
 mod compiler_values;
+mod diagnostic_formatter;
 mod module_lowering;
 mod net_lowering;
 mod parser;
@@ -55,6 +56,10 @@ pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
         context.emit_diagnostic(diagnostic.severity, message);
     }
     definitions
+}
+
+pub(crate) fn default_diagnostic_formatter() -> Value {
+    diagnostic_formatter::value()
 }
 
 impl Diagnostic {

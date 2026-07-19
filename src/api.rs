@@ -923,6 +923,13 @@ impl Assembler {
         Self::default()
     }
 
+    /// Returns the cached closed Glam function used by the executable's
+    /// default terminal logger. It expects an enriched diagnostic containing
+    /// the conventional `msg` and `viewer` fields and returns bytes.
+    pub fn default_diagnostic_formatter(&self) -> Value {
+        Value::from_core(crate::g_syntax::default_diagnostic_formatter())
+    }
+
     pub(crate) fn eval_context(&self) -> EvalContext {
         EvalContext::new(self.evaluation_session.clone())
     }

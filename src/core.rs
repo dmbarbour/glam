@@ -657,6 +657,9 @@ pub enum Builtin {
     ListSplitEnd,
     ListHead,
     ListTail,
+    /// Splits binary-compatible text into shared line segments without their
+    /// newline delimiters. Internal support for closed formatting functions.
+    TextLines,
     ListEffect,
     ListEffectReturn,
     ListEffectSeq,
@@ -710,6 +713,7 @@ impl Builtin {
             Self::ListSplitEnd => 2,
             Self::ListHead => 1,
             Self::ListTail => 1,
+            Self::TextLines => 1,
             Self::ListEffect => 1,
             Self::ListEffectReturn => 1,
             Self::ListEffectSeq => 2,

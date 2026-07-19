@@ -201,3 +201,31 @@ pub(super) fn eval_list_tail_builtin(
         )),
     }
 }
+
+pub(super) fn eval_text_lines_builtin(
+    context: &EvalContext,
+    value: &Value,
+) -> Result<Value, EvalError> {
+    let bytes = match force_value_shell(context, value)? {
+        Value::Binary(bytes) => bytes,
+        Value::List(list) => Bytes::from(
+            list_to_binary_bytes(context, &list)
+                .map_err(|error| EvalError::new(format!("text lines builtin {error}")))?,
+        ),
+        _ => {
+            return Err(EvalError::new(
+                "text lines builtin requires a binary-compatible list or binary value",
+            ));
+        }
+    };
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            lines.push(Value::Binary(bytes.slice(start..index)));
+            start = index + 1;
+        }
+    }
+    lines.push(Value::Binary(bytes.slice(start..bytes.len())));
+    Ok(Value::List(List::from_values(lines)))
+}

@@ -821,6 +821,28 @@ fn evaluates_slice_and_map_builtins() {
 }
 
 #[test]
+fn text_lines_preserves_empty_and_trailing_lines() {
+    let lines = eval_closed_expr(&builtin1_expr(
+        Builtin::TextLines,
+        TestExpr::Value(Value::binary_from_text("first\n\nthird\n")),
+    ))
+    .expect("text lines should split compact binary text");
+    let Value::List(lines) = lines else {
+        panic!("text lines should produce a list");
+    };
+
+    assert_eq!(
+        list_to_value_items(&test_context(), &lines).expect("line list should be readable"),
+        vec![
+            Value::binary_from_text("first"),
+            Value::binary_from_text(""),
+            Value::binary_from_text("third"),
+            Value::binary_from_text(""),
+        ]
+    );
+}
+
+#[test]
 fn evaluates_split_and_split_end_builtins() {
     let split = eval_closed_expr(&builtin2_expr(
         Builtin::ListSplit,

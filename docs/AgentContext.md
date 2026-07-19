@@ -67,9 +67,11 @@ design in the design documents.
   tagged `file:RelativePath`, and `extends` is relative to the importer namespace.
   Provenance must not retain module values or compilation environments.
 - The executable's default logger is one diagnostic observer. It applies
-  assembler enrichment, adds terminal context under `viewer`, and renders a
-  compact text view. More elaborate logging and IDE policy belongs to glam
-  configuration, not to the assembler library.
+  assembler enrichment, adds terminal context under `viewer`, and applies a
+  cached closed Glam `Diagnostic -> Bytes` formatter before writing stderr.
+  The Rust renderer is only an emergency fallback if that formatter fails.
+  More elaborate logging and IDE policy belongs to glam configuration, not to
+  the assembler library.
 
 ### Reflection effects
 
@@ -106,10 +108,11 @@ design in the design documents.
   journaled writes, and yield failure when no input is available. That failure
   retains the queue observation, so the task waits for a host change and retries
   even outside `cut`. The CLI logger task host has a distinct session-local
-  diagnostic output target: committed `.log` output is rendered by the Rust
-  default logger and never enters the `.read_log` input queue. This separation
-  makes `'closed` stable even when the logger or its children continue logging. A
-  top-level `alt` is rejected; alternatives belong to `cut`. This and
+  diagnostic output target: committed `.log` output is passed through the
+  default closed Glam formatter and never enters the `.read_log` input queue.
+  This separation makes `'closed` stable even when the logger or its children
+  continue logging. A top-level `alt` is rejected; alternatives belong to
+  `cut`. This and
   task-local `.shift` continuations are the conservative
   standard-effect contract: general-purpose utilities must not assume broader
   behavior, although a specialized handler may explicitly provide it.
