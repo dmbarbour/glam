@@ -12,7 +12,7 @@ use glam::reflection::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReflectionEffects, ReflectionHost,
     ReflectionJournal, ReflectionRequest, ReflectionTransaction, RequestContext, RequestResult,
     TaskCommit, TaskHost, TaskOutcome, TaskSpecialization, handle_reflection_request,
-    reflection_request_specs, run_with_reflection_host,
+    reflection_request_specs, run_unit_with_reflection_host,
 };
 use glam::{
     Assembler, Builtin, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticSink, Error,
@@ -225,7 +225,7 @@ fn start_logger(
     thread::spawn(move || {
         if let Some(custom) = custom {
             let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
-            match run_with_reflection_host(
+            match run_unit_with_reflection_host(
                 &custom,
                 MainEffects::new(effect_assembler),
                 host.clone(),

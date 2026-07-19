@@ -84,7 +84,9 @@ snapshot/journal data.
 Failure becomes retryable only after a request observes changeable host state;
 `cut` itself merely scopes alternatives and transactions. Consequently, plain
 `.fail` remains permanent, while an empty `read_log` can suspend and replay from
-the checkpoint immediately before its queue observation.
+the checkpoint immediately before its queue observation. `main` runs the
+configured logger with an outer `(=>> .r ())` continuation, so `conf.log` must
+return unit when it completes.
 Otherwise the Rust terminal logger drains the queue. Normal early termination
 or task failure also returns remaining messages to the fallback logger. A
 configured-logger failure is itself rendered as the next default diagnostic

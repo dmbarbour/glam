@@ -294,6 +294,30 @@ pub fn run_with_reflection_host<S: TaskSpecialization>(
     host: Arc<S::Host>,
     reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
 ) -> Result<TaskOutcome, TaskError> {
+    composed_effect_task(effect, specialization, host, reflection_host)?.run()
+}
+
+/// Runs one composed task and requires its discarded result to be unit.
+///
+/// This installs the same outer continuation as `(effect =>> .r ())`, while
+/// keeping child `.refl_task` capabilities restricted to reusable reflection.
+pub fn run_unit_with_reflection_host<S: TaskSpecialization>(
+    effect: &PublicValue,
+    specialization: S,
+    host: Arc<S::Host>,
+    reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
+) -> Result<TaskOutcome, TaskError> {
+    composed_effect_task(effect, specialization, host, reflection_host)?
+        .requiring_unit_result()
+        .run()
+}
+
+fn composed_effect_task<S: TaskSpecialization>(
+    effect: &PublicValue,
+    specialization: S,
+    host: Arc<S::Host>,
+    reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
+) -> Result<EffectTask<S>, TaskError> {
     let session = Arc::new(EvaluationSession::new());
     session
         .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
@@ -303,8 +327,7 @@ pub fn run_with_reflection_host<S: TaskSpecialization>(
         specialization,
         host,
         EvalContext::new(session),
-    )?
-    .run()
+    )
 }
 
 /// Builds a type-erased launcher for annotation and joinable reflection tasks.
@@ -461,6 +484,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
             blocked: None,
             terminal: None,
         })
+    }
+
+    fn requiring_unit_result(mut self) -> Self {
+        self.execution
+            .work
+            .branch_mut()
+            .expect("a fresh effect task must contain its initial branch")
+            .control
+            .sequence
+            .push(Continuation::RequireUnit);
+        self
     }
 
     fn allocate_control_order(&mut self) -> Result<usize, TaskError> {
@@ -1024,6 +1058,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     Ok(MachineStep::Continue(MachineWork::Apply {
                         function,
                         arguments: vec![value],
+                        branch,
+                        scope_depth,
+                    }))
+                }
+                Continuation::RequireUnit => {
+                    let value = evaluate(&self.eval_context, value)?;
+                    if value != unit_value() {
+                        return Err(TaskError::new(format!(
+                            "`=>>` requires discarded effect results to be unit, got {value:?}"
+                        )));
+                    }
+                    branch.control.sequence.pop();
+                    Ok(MachineStep::Continue(MachineWork::Deliver {
+                        value: unit_value(),
                         branch,
                         scope_depth,
                     }))
@@ -1943,6 +1991,7 @@ struct Control {
 #[derive(Clone)]
 enum Continuation {
     Glam(Value),
+    RequireUnit,
     Fix(LazyValue),
 }
 

@@ -507,6 +507,40 @@ fn configured_logger_failure_is_reported_before_default_fallback_messages() {
     );
 }
 
+#[test]
+fn configured_logger_requires_a_unit_result() {
+    let dir = unique_temp_dir("glam-conf-log-unit-result");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = .r \"not unit\"\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--script.g")
+        .arg("language g0\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ok");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("configured logger failed")
+            && stderr.contains("requires discarded effect results to be unit"),
+        "non-unit logger result was not reported:\n{stderr}"
+    );
+}
+
 fn hello_sample_files() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/assembly");
     let mut files = fs::read_dir(&root)

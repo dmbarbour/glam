@@ -198,7 +198,9 @@ design in the design documents.
   It polls with bounded effect-step fuel and calls `TaskHost::wait_for_change`
   only after polling reports a state block. `run_with_reflection_host` also
   installs the restricted child-task launcher and cooperatively pumps scheduled
-  lazy dependencies; a dependency with no runnable producer remains an error.
+  lazy dependencies; `run_unit_with_reflection_host` additionally installs the
+  native equivalent of an outer `(=>> .r ())` continuation. A dependency with
+  no runnable producer remains an error.
 - Each reflection `fix` alternative receives its own task-owned fixpoint cell.
   Recursive observation by its producer is an error; another task observes its
   precise wait token. When a chosen result later fails, the handler restarts at
@@ -208,9 +210,10 @@ design in the design documents.
 - `main` owns the diagnostic queue, logging request dispatcher, and logging
   transaction snapshot/journal. Defined `conf.log` consumes enriched messages
   effectfully; undefined, completed, or failed custom logging falls back to the
-  Rust terminal logger. If configured logging fails, the terminal logger first
-  renders one synthetic error diagnostic, then drains the remaining queue in
-  FIFO order. Stderr effects commit to a host buffer before bytes are written
+  Rust terminal logger. `main` requires `conf.log` to return unit through the
+  outer discard continuation. If configured logging fails, the terminal logger
+  first renders one synthetic error diagnostic, then drains the remaining queue
+  in FIFO order. Stderr effects commit to a host buffer before bytes are written
   to the OS.
 
 ### Values and evaluation
