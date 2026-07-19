@@ -8,15 +8,15 @@ mod builder;
 mod model;
 mod runtime;
 
-#[allow(unused_imports)]
-pub use builder::{BindSpine, CopyPorts, NetBuildError, NetBuilder};
-#[allow(unused_imports)]
-pub use model::{
-    ActivePairKey, Callable, CopyId, DuplicationStep, FanIdentity, FanSite, InteractionNet,
-    NetSpecialization, Node, NodeId, OperatorYield, Port, RuntimeNode, Wire,
+pub(crate) use builder::{NetBuildError, NetBuilder};
+pub(crate) use model::{
+    ActivePairKey, Callable, InteractionNet, NetSpecialization, NodeId, OperatorYield, Port,
+    RuntimeNode,
 };
-#[allow(unused_imports)]
-pub use runtime::{
-    BlockedCall, BlockedCursor, Call, CursorDependency, CursorProgress, OperatorCall, Reduction,
-    ReductionKind, RuntimeNet, SharedRuntimeNet, StuckPair, StuckReason,
+pub(crate) use runtime::{
+    Call, CursorDependency, CursorProgress, OperatorCall, Reduction, ReductionKind,
+    SharedRuntimeNet, StuckReason,
 };
+
+#[cfg(test)]
+pub(crate) use model::Node;

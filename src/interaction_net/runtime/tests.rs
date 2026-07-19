@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use super::*;
-use crate::interaction_net::*;
+use crate::interaction_net::builder::{NetBuildError, NetBuilder};
 
 pub trait TestData: Clone + fmt::Debug + PartialEq + Eq + 'static {}
 
