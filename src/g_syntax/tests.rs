@@ -1244,6 +1244,24 @@ fn lowers_list_expressions_to_core_terms() {
 }
 
 #[test]
+fn quoted_paths_lower_to_ordinary_path_lists() {
+    let parsed =
+        parse("language g0\nasm.result = { foo:{ [42]:{ bar:\"quoted\" } } }.('.foo.([42]).bar)\n");
+    let context = CompileContext::default();
+    let lowered = lower_to_core_with_context(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"quoted"
+    );
+}
+
+#[test]
 fn lowers_name_expressions_to_core_terms() {
     let parsed = parse(
         "language g0\nasm.result = hello ++ \", \" ++ world ++ \"!\"\nhello = \"Hello\"\nworld = \"World\"\n",

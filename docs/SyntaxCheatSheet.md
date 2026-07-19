@@ -53,6 +53,7 @@ _42                 # NEGATIVE 42 — prefix '_' is part of the literal
 ```
 ()                  # unit, the built-in atom
 'eax                # atom: sugar for ["eax"]:()  (NB: 'tag ≠ tag:() )
+'.foo.[42]          # quoted path ≡ ['foo, 42]  (any Path)
 
 tag:Data            # tagged data: sugar for { tag:Data }
 :tag                # constructor: \ Data -> tag:Data

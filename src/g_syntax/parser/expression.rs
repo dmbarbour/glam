@@ -303,6 +303,33 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
         }
     }
 
+    fn quoted_path(suffixes: Vec<PathSuffix>) -> SyntaxExpr {
+        let mut chunks = Vec::new();
+        let mut literal = Vec::new();
+        let flush_literal = |chunks: &mut Vec<SyntaxExpr>, literal: &mut Vec<SyntaxExpr>| {
+            if !literal.is_empty() {
+                chunks.push(SyntaxExpr::List(std::mem::take(literal)));
+            }
+        };
+
+        for part in flatten_path_suffixes(suffixes) {
+            match part {
+                SyntaxKeyExpr::Atom(name) => literal.push(SyntaxExpr::Atom(name)),
+                SyntaxKeyExpr::Index(expr) => literal.push(*expr),
+                SyntaxKeyExpr::PathIndex(expr) => {
+                    flush_literal(&mut chunks, &mut literal);
+                    chunks.push(*expr);
+                }
+            }
+        }
+        flush_literal(&mut chunks, &mut literal);
+
+        chunks
+            .into_iter()
+            .reduce(|left, right| SyntaxExpr::Append(Box::new(left), Box::new(right)))
+            .unwrap_or_else(|| SyntaxExpr::List(Vec::new()))
+    }
+
     recursive(|expr| {
         let name = glam_name().boxed();
         let expr_name = glam_name()
@@ -339,7 +366,7 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
 
         // Dotted paths stay lexically tight because `.` has other roles in the
         // language surface, such as future effect sugar like `.bar`.
-        let path_suffix = just('.')
+        let path_suffix_item = just('.')
             .ignore_then(choice((
                 path_list_shorthand,
                 path_list_expr,
@@ -348,8 +375,8 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
                     .map(SyntaxKeyExpr::Atom)
                     .map(PathSuffix::Single),
             )))
-            .repeated()
-            .collect::<Vec<_>>();
+            .boxed();
+        let path_suffix = path_suffix_item.clone().repeated().collect::<Vec<_>>();
 
         let prior_name = just('_')
             .ignore_then(expr_name.clone())
@@ -402,7 +429,14 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             })
         });
         let text = quoted_text().map(SyntaxExpr::Text);
-        let atom_literal = just('\'').ignore_then(name.clone()).map(SyntaxExpr::Atom);
+        let quoted_literal = just('\'').ignore_then(choice((
+            path_suffix_item
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>()
+                .map(quoted_path),
+            name.clone().map(SyntaxExpr::Atom),
+        )));
         let unit = just("()").map(|_| SyntaxExpr::Unit);
 
         let list = expr
@@ -509,7 +543,7 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
         let literal_atom = choice((
             unit,
             text,
-            atom_literal,
+            quoted_literal,
             list,
             dict,
             number,

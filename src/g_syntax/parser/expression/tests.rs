@@ -66,6 +66,32 @@ fn parses_effect_shorthand_expressions() {
 }
 
 #[test]
+fn parses_quoted_paths_as_list_expressions() {
+    assert_eq!(
+        parse_expr("'.foo.[42]"),
+        Some(SyntaxExpr::List(vec![
+            SyntaxExpr::Atom("foo".to_owned()),
+            SyntaxExpr::Number(n(42)),
+        ]))
+    );
+    assert_eq!(
+        parse_expr("'.foo.([1, 2]).bar"),
+        Some(SyntaxExpr::Append(
+            Box::new(SyntaxExpr::Append(
+                Box::new(SyntaxExpr::List(vec![SyntaxExpr::Atom("foo".to_owned())])),
+                Box::new(SyntaxExpr::List(vec![
+                    SyntaxExpr::Number(n(1)),
+                    SyntaxExpr::Number(n(2)),
+                ])),
+            )),
+            Box::new(SyntaxExpr::List(vec![SyntaxExpr::Atom("bar".to_owned())])),
+        ))
+    );
+    assert_eq!(parse_expr("'.[]"), Some(SyntaxExpr::List(Vec::new())));
+    assert_eq!(parse_expr("'foo"), Some(SyntaxExpr::Atom("foo".to_owned())));
+}
+
+#[test]
 fn parses_operator_sections() {
     assert_eq!(
         parse_expr("(+ 42)"),
