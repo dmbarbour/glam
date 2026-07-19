@@ -2943,7 +2943,7 @@ mod tests {
     impl TaskEnvironment for TestHost {
         fn reflection_environment(&self) -> PublicValue {
             let process_environment = PublicValue::dictionary([(
-                PublicValue::atom_from_text("GLAM_TEST_ENV"),
+                PublicValue::text("GLAM_TEST_ENV"),
                 PublicValue::text("present"),
             )])
             .expect("test process environment must be keyable");
@@ -3409,7 +3409,7 @@ mod tests {
         );
 
         let (_, environment) = compile_effect(
-            ".env ['process,'env,'GLAM_TEST_ENV] >>= (\\value -> (value == \"present\") =>> .r \"environment\")",
+            ".env ['process,'env] >>= (\\environment -> (environment.[\"GLAM_TEST_ENV\"] == \"present\") =>> .r \"environment\")",
         );
         let (context, task) = schedule_composed_test_task(&environment, host.clone());
         let environment_poll = pump_composed_test_task(&context, &task);
@@ -3449,7 +3449,7 @@ mod tests {
         );
 
         let (_, missing) = compile_effect(
-            ".env ['process,'env,'GLAM_TEST_MISSING] >>= (\\value -> (value == {}) =>> .r \"missing\")",
+            ".env ['process,'env] >>= (\\environment -> (environment.[\"GLAM_TEST_MISSING\"] == {}) =>> .r \"missing\")",
         );
         let (context, task) = schedule_composed_test_task(&missing, host);
         assert!(matches!(

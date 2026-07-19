@@ -92,9 +92,11 @@ design in the design documents.
   takes a path and reads the immutable dictionary installed on the task's
   `EvaluationSession`, follows the same key-path and missing-as-`{}` convention
   as `.get`, and has no corresponding reflection write operation. The
-  assembler authoritatively injects `glam.version`; the executable adds
-  `process.args` and `process.env`. Process values and environment-variable
-  atom payloads preserve Rust's platform encoding rather than forcing UTF-8.
+  assembler authoritatively injects the implementation-independent
+  `glam.version` compatibility version plus
+  `glam.implementation.{name,version}`. The executable adds `process.args` and
+  `process.env`. Environment-variable names remain text keys, and both names
+  and values preserve Rust's platform encoding rather than forcing UTF-8.
   Spawned tasks receive only `ReflectionEffects`, even when their parent has
   broader host capabilities.
   `eval` reduces only successive lazy outer shells and returns a singleton

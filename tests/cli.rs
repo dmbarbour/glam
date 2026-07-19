@@ -446,7 +446,7 @@ fn configured_logger_can_read_the_process_reflection_environment() {
     let invalid = dir.join("invalid.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .env ['process,'env,'GLAM_TEST_REFLECTION_ENV] >>= (\\value -> .write_stderr (value ++ [10]))\n",
+        "language g0\nobject conf.env\nconf.log = .env ['process,'env] >>= (\\environment -> .write_stderr (environment.[\"GLAM_TEST_REFLECTION_ENV\"] ++ [10]))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(&invalid, b"language g0\nvalue = \xff\n")

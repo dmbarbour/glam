@@ -143,7 +143,7 @@ fn process_reflection_environment() -> Value {
 
     let variables = Value::dictionary(env::vars_os().map(|(name, value)| {
         (
-            Value::atom_from_binary(name.as_encoded_bytes().to_vec()),
+            Value::binary(name.as_encoded_bytes().to_vec()),
             os_value(value),
         )
     }))

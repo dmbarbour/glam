@@ -36,6 +36,8 @@ use crate::reflection::{
 
 pub const DEFAULT_DIAGNOSTIC_CAPACITY: usize = 1_000;
 const BACKGROUND_TASK_STEP_BUDGET: usize = 256;
+const GLAM_COMPATIBILITY_VERSION: &str = "0.1.0";
+const IMPLEMENTATION_NAME: &str = "rust-bootstrap";
 
 /// An assembly-time value whose concrete evaluator representation is private.
 #[derive(Clone, PartialEq, Eq)]
@@ -52,12 +54,6 @@ impl Value {
 
     pub fn atom_from_text(text: impl AsRef<str>) -> Self {
         let key = Key::binary_from_text(text.as_ref());
-        Self(CoreValue::Atom(crate::core::Atom::from_key(&key)))
-    }
-
-    /// Constructs an atom whose payload is arbitrary binary data.
-    pub fn atom_from_binary(bytes: impl Into<Bytes>) -> Self {
-        let key = Key::Binary(bytes.into());
         Self(CoreValue::Atom(crate::core::Atom::from_key(&key)))
     }
 
@@ -899,8 +895,23 @@ fn authoritative_reflection_environment(environment: Value) -> Result<Value, Err
     };
     glam = glam.insert(
         Key::atom_from_text("version"),
-        CoreValue::binary_from_text(env!("CARGO_PKG_VERSION")),
+        CoreValue::binary_from_text(GLAM_COMPATIBILITY_VERSION),
     );
+    let implementation_key = Key::atom_from_text("implementation");
+    let mut implementation = match glam.get(&implementation_key) {
+        Some(CoreValue::Dict(implementation)) => implementation.clone(),
+        _ => Dict::new_sync(),
+    };
+    implementation = implementation
+        .insert(
+            Key::atom_from_text("name"),
+            CoreValue::binary_from_text(IMPLEMENTATION_NAME),
+        )
+        .insert(
+            Key::atom_from_text("version"),
+            CoreValue::binary_from_text(env!("CARGO_PKG_VERSION")),
+        );
+    glam = glam.insert(implementation_key, CoreValue::Dict(implementation));
     Ok(Value(CoreValue::Dict(
         root.insert(glam_key, CoreValue::Dict(glam)),
     )))
@@ -1018,7 +1029,8 @@ impl Assembler {
 
     /// Replaces the client-owned portion of the read-only reflection
     /// environment and starts a fresh evaluation session. The assembler
-    /// always overwrites `glam.version` with its actual package version.
+    /// always overwrites `glam.version` with its compatibility version and
+    /// `glam.implementation` with the running implementation's identity.
     pub fn with_reflection_environment(mut self, environment: Value) -> Result<Self, Error> {
         self.reflection_environment = authoritative_reflection_environment(environment)?;
         self.evaluation_session = evaluation_session(

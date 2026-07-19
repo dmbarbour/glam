@@ -67,6 +67,18 @@ fn assembler_owns_an_authoritative_reflection_environment() {
         assembler
             .binary_at(&environment, "glam.version")
             .expect("assembler should inject its real version"),
+        b"0.1.0".as_slice()
+    );
+    assert_eq!(
+        assembler
+            .binary_at(&environment, "glam.implementation.name")
+            .expect("assembler should identify its implementation"),
+        b"rust-bootstrap".as_slice()
+    );
+    assert_eq!(
+        assembler
+            .binary_at(&environment, "glam.implementation.version")
+            .expect("assembler should expose its implementation version"),
         env!("CARGO_PKG_VERSION").as_bytes()
     );
     assert_eq!(
@@ -138,7 +150,7 @@ fn public_api_can_load_sources_and_binaries_from_a_custom_host() {
 #[test]
 fn client_reflection_environment_is_visible_to_reflection_annotations() {
     let process_environment = Value::dictionary([(
-        Value::atom_from_text("GLAM_PUBLIC_API_TEST"),
+        Value::text("GLAM_PUBLIC_API_TEST"),
         Value::text("HOST VALUE"),
     )])
     .expect("test environment key should be keyable");
@@ -160,7 +172,7 @@ fn client_reflection_environment_is_visible_to_reflection_annotations() {
         .module(["reflection_host"])
         .script(
             "g",
-            "language g0\nimport 'std\nvalue = anno {refl:(.env ['process,'env,'GLAM_PUBLIC_API_TEST] >>= (\\value -> (value == \"HOST VALUE\") =>> .log 'info { msg:{ text:\"HOST VALUE\" } }))} \"done\"\n",
+            "language g0\nimport 'std\nvalue = anno {refl:(.env ['process,'env] >>= (\\environment -> (environment.[\"GLAM_PUBLIC_API_TEST\"] == \"HOST VALUE\") =>> .log 'info { msg:{ text:\"HOST VALUE\" } }))} \"done\"\n",
         )
         .build()
         .expect("reflection host fixture should build");
