@@ -883,25 +883,13 @@ pub enum ReasoningTaskState {
     Blocked,
 }
 
-fn authoritative_reflection_environment(environment: Value) -> Result<Value, Error> {
+fn authoritative_reflection_environment(environment: Value) -> Result<(Value, bool), Error> {
     let CoreValue::Dict(root) = environment.into_core() else {
         return Err(Error::new("reflection environment must be a dictionary"));
     };
     let glam_key = Key::atom_from_text("glam");
-    let mut glam = match root.get(&glam_key) {
-        Some(CoreValue::Dict(glam)) => glam.clone(),
-        _ => Dict::new_sync(),
-    };
-    glam = glam.insert(
-        Key::atom_from_text("version"),
-        CoreValue::binary_from_text(GLAM_COMPATIBILITY_VERSION),
-    );
-    let implementation_key = Key::atom_from_text("implementation");
-    let mut implementation = match glam.get(&implementation_key) {
-        Some(CoreValue::Dict(implementation)) => implementation.clone(),
-        _ => Dict::new_sync(),
-    };
-    implementation = implementation
+    let replaced_glam = root.get(&glam_key).is_some();
+    let implementation = Dict::new_sync()
         .insert(
             Key::atom_from_text("name"),
             CoreValue::binary_from_text(IMPLEMENTATION_NAME),
@@ -910,10 +898,21 @@ fn authoritative_reflection_environment(environment: Value) -> Result<Value, Err
             Key::atom_from_text("version"),
             CoreValue::binary_from_text(env!("CARGO_PKG_VERSION")),
         );
-    glam = glam.insert(implementation_key, CoreValue::Dict(implementation));
-    Ok(Value(CoreValue::Dict(
-        root.insert(glam_key, CoreValue::Dict(glam)),
-    )))
+    let glam = Dict::new_sync()
+        .insert(
+            Key::atom_from_text("version"),
+            CoreValue::binary_from_text(GLAM_COMPATIBILITY_VERSION),
+        )
+        .insert(
+            Key::atom_from_text("implementation"),
+            CoreValue::Dict(implementation),
+        );
+    Ok((
+        Value(CoreValue::Dict(
+            root.insert(glam_key, CoreValue::Dict(glam)),
+        )),
+        replaced_glam,
+    ))
 }
 
 #[derive(Clone)]
@@ -930,8 +929,13 @@ impl Default for Assembler {
         let diagnostic_sink: Arc<dyn DiagnosticSink> =
             Arc::new(DiagnosticBuffer::new(DEFAULT_DIAGNOSTIC_CAPACITY));
         let host: Arc<dyn Host> = Arc::new(SystemHost);
-        let reflection_environment = authoritative_reflection_environment(Value::empty_record())
-            .expect("the default reflection environment must be a dictionary");
+        let (reflection_environment, replaced_glam) =
+            authoritative_reflection_environment(Value::empty_record())
+                .expect("the default reflection environment must be a dictionary");
+        debug_assert!(
+            !replaced_glam,
+            "the default environment must not define `glam`"
+        );
         let evaluation_session =
             evaluation_session(reflection_environment.clone(), diagnostic_sink.clone());
         Self {
@@ -1022,11 +1026,19 @@ impl Assembler {
     }
 
     /// Replaces the client-owned portion of the read-only reflection
-    /// environment and starts a fresh evaluation session. The assembler
-    /// always overwrites `glam.version` with its compatibility version and
-    /// `glam.implementation` with the running implementation's identity.
+    /// environment and starts a fresh evaluation session. The complete `glam`
+    /// namespace is reserved for authoritative assembler metadata. A supplied
+    /// `glam` value is discarded and produces a warning diagnostic.
     pub fn with_reflection_environment(mut self, environment: Value) -> Result<Self, Error> {
-        self.reflection_environment = authoritative_reflection_environment(environment)?;
+        let (reflection_environment, replaced_glam) =
+            authoritative_reflection_environment(environment)?;
+        self.reflection_environment = reflection_environment;
+        if replaced_glam {
+            self.diagnostic_sink.emit(Diagnostic::new(
+                Severity::Warning,
+                "reflection environment namespace `glam` is reserved; supplied value was ignored",
+            ));
+        }
         self.evaluation_session = evaluation_session(
             self.reflection_environment.clone(),
             self.diagnostic_sink.clone(),

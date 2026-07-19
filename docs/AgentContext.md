@@ -92,7 +92,8 @@ design in the design documents.
   takes a path and reads the immutable dictionary installed on the task's
   `EvaluationSession`, follows the same key-path and missing-as-`{}` convention
   as `.get`, and has no corresponding reflection write operation. The
-  assembler authoritatively injects the implementation-independent
+  assembler reserves and replaces the complete `glam` namespace, warning when
+  a client supplied anything there. It contains the implementation-independent
   `glam.version` compatibility version plus
   `glam.implementation.{name,version}`. The executable adds `process.args` and
   `process.env`. Environment-variable names remain text keys, and both names

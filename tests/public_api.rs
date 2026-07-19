@@ -57,7 +57,13 @@ fn public_api_exposes_the_default_diagnostic_formatter_as_a_function() {
 fn assembler_owns_an_authoritative_reflection_environment() {
     let assembler = Assembler::default()
         .with_reflection_environment(Value::record([
-            ("glam", Value::record([("version", Value::text("spoofed"))])),
+            (
+                "glam",
+                Value::record([
+                    ("version", Value::text("spoofed")),
+                    ("client_field", Value::text("must disappear")),
+                ]),
+            ),
             ("client", Value::record([("name", Value::text("embedded"))])),
         ]))
         .expect("reflection environment should accept a dictionary");
@@ -87,6 +93,13 @@ fn assembler_owns_an_authoritative_reflection_environment() {
             .expect("client environment fields should remain visible"),
         b"embedded".as_slice()
     );
+    assert!(assembler.get(&environment, "glam.client_field").is_err());
+    let diagnostics = assembler
+        .read_diagnostics()
+        .expect("default assembler should retain the reserved-namespace warning");
+    assert_eq!(diagnostics.entries().len(), 1);
+    assert_eq!(diagnostics.entries()[0].severity(), Severity::Warning);
+    assert!(diagnostics.entries()[0].message().contains("reserved"));
     assert!(
         Assembler::default()
             .with_reflection_environment(Value::integer(1))

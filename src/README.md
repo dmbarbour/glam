@@ -144,8 +144,9 @@ reduction fuel are intentionally deferred.
 The reusable reflection API exposes `.env Path` as its single read-only context
 operation. It reads an immutable dictionary owned by `EvaluationSession`, uses
 the same path and missing-as-`{}` convention as `.get`, and has no reflection
-write counterpart. `Assembler` authoritatively injects the compatibility value
-`glam.version` and the implementation identity
+write counterpart. `Assembler` reserves and replaces the complete `glam`
+namespace, warning if a client supplied a value there. It contains the
+compatibility value `glam.version` and the implementation identity
 `glam.implementation.{name,version}`. `main` adds binary-preserving
 `process.args` and `process.env` fields, with environment-variable names kept
 as text keys. Library clients may install different context without inventing
