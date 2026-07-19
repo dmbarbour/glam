@@ -240,7 +240,10 @@ pub struct TaskError(TaskErrorKind);
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TaskErrorKind {
     Message(Arc<str>),
-    Blocked(EvaluationWaitToken),
+    Blocked {
+        wait: EvaluationWaitToken,
+        retry_on_terminal: bool,
+    },
 }
 
 impl TaskError {
@@ -249,12 +252,25 @@ impl TaskError {
     }
 
     fn blocked(wait: EvaluationWaitToken) -> Self {
-        Self(TaskErrorKind::Blocked(wait))
+        Self(TaskErrorKind::Blocked {
+            wait,
+            retry_on_terminal: false,
+        })
     }
 
-    fn blocked_on(&self) -> Option<&EvaluationWaitToken> {
+    fn retry_after(wait: EvaluationWaitToken) -> Self {
+        Self(TaskErrorKind::Blocked {
+            wait,
+            retry_on_terminal: true,
+        })
+    }
+
+    fn blocked_on(&self) -> Option<(&EvaluationWaitToken, bool)> {
         match &self.0 {
-            TaskErrorKind::Blocked(wait) => Some(wait),
+            TaskErrorKind::Blocked {
+                wait,
+                retry_on_terminal,
+            } => Some((wait, *retry_on_terminal)),
             TaskErrorKind::Message(_) => None,
         }
     }
@@ -264,7 +280,7 @@ impl fmt::Display for TaskError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
             TaskErrorKind::Message(message) => formatter.write_str(message),
-            TaskErrorKind::Blocked(wait) => {
+            TaskErrorKind::Blocked { wait, .. } => {
                 write!(
                     formatter,
                     "reflection task blocked on wait token {}",
@@ -709,8 +725,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     return self.terminal.as_ref().expect("terminal set above").poll();
                 }
                 Err(error) => {
-                    if let Some(wait) = error.blocked_on().cloned() {
-                        self.blocked = Some(self.lazy_block(wait));
+                    if let Some((wait, retry_on_terminal)) = error.blocked_on() {
+                        self.blocked = Some(self.lazy_block(wait.clone(), retry_on_terminal));
                         return self.blocked_poll();
                     }
                     self.finish(TaskTerminal::Failed(error));
@@ -1440,13 +1456,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
-    fn lazy_block(&self, wait: EvaluationWaitToken) -> BlockedExecution<S> {
+    fn lazy_block(
+        &self,
+        wait: EvaluationWaitToken,
+        retry_on_terminal: bool,
+    ) -> BlockedExecution<S> {
         let (observed_generation, wake) = self.observation_wake();
         BlockedExecution {
             lazy: Some(wait),
             observed_generation,
             wake,
-            wake_on_terminal: false,
+            wake_on_terminal: retry_on_terminal,
         }
     }
 
@@ -3172,6 +3192,119 @@ mod tests {
                 Value::Atom(Atom::from_key(&Key::binary_from_text("b"))),
             ]
         );
+    }
+
+    #[test]
+    fn reflection_eval_returns_a_tagged_whnf_result() {
+        let (_, effect) = compile_effect(".eval (1 + 2)");
+        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let EvaluationTaskPoll::Complete(Value::Dict(result)) =
+            pump_composed_test_task(&context, &task)
+        else {
+            panic!("eval should return an ok result");
+        };
+        assert_eq!(
+            result.get(&*keys::OK),
+            Some(&Value::Number(Number::integer(3)))
+        );
+
+        let (_, nested) = compile_effect(".eval { bad:1 / 0 }");
+        let (context, task) = schedule_composed_test_task(&nested, Arc::new(TestHost::default()));
+        let EvaluationTaskPoll::Complete(Value::Dict(result)) =
+            pump_composed_test_task(&context, &task)
+        else {
+            panic!("eval should return a tagged dictionary");
+        };
+        let Some(Value::Dict(payload)) = result.get(&*keys::OK) else {
+            panic!("eval should not recursively force a dictionary payload");
+        };
+        assert!(matches!(
+            payload.get(&Key::atom_from_text("bad")),
+            Some(Value::Lazy(_))
+        ));
+    }
+
+    #[test]
+    fn reflection_eval_returns_evaluator_errors_as_data() {
+        let (assembler, effect) = compile_effect(".eval (1 / 0) >>= (\\result -> .r result.err)");
+        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
+            panic!("eval should contain an evaluator error instead of failing its task");
+        };
+        let error = assembler
+            .to_binary(&PublicValue::from_core(error))
+            .expect("the provisional eval error value should be text");
+        assert!(String::from_utf8_lossy(&error).contains("zero"));
+    }
+
+    #[test]
+    fn reflection_eval_retries_terminal_lazy_dependencies() {
+        let (assembler, success) = compile_effect(
+            ".eval (anno { refl:(.r ()) } \"ready\") >>= (\\result -> .r result.ok)",
+        );
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&success, host.clone());
+        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+            panic!("eval should resume after a successful lazy dependency");
+        };
+        assert_eq!(
+            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            b"ready".as_slice()
+        );
+
+        let (_, failure) = compile_effect(
+            ".eval (anno { refl:.fail } \"unreachable\") >>= (\\result -> .r result.err)",
+        );
+        let (context, task) = schedule_composed_test_task(&failure, host);
+        let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
+            panic!("eval should convert a failed lazy dependency to err");
+        };
+        let error = assembler
+            .to_binary(&PublicValue::from_core(error))
+            .expect("the eval error should remain observable after its producer fails");
+        assert!(String::from_utf8_lossy(&error).contains("failed permanently"));
+    }
+
+    #[test]
+    fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
+        let (_, function) = compile_effect("\\value -> .eval value");
+        let session = EvalContext::standalone();
+        let owner = session.with_new_task().unwrap();
+        let observer = session.with_new_task().unwrap();
+        let promised = LazyValue::fixpoint(&owner, "eval test dependency").unwrap();
+        let effect = eval::apply_values(
+            &observer,
+            function.as_core().clone(),
+            vec![Value::Lazy(promised.clone())],
+        )
+        .unwrap();
+        let mut task = EffectTask::new_in_context(
+            effect,
+            TestEffects,
+            Arc::new(TestHost::default()),
+            observer,
+        )
+        .unwrap();
+
+        let EffectTaskPoll::Blocked(blocked) = task.poll(256) else {
+            panic!("eval should suspend on its value's pending dependency");
+        };
+        assert!(blocked.lazy.is_some());
+
+        promised
+            .cache(Err(Arc::from("dependency failed")))
+            .unwrap_err();
+        let poll = task.poll(256);
+        let EffectTaskPoll::Complete(value) = poll else {
+            panic!("eval should retry a terminal dependency and return err");
+        };
+        let Value::Dict(result) = value.into_core() else {
+            panic!("eval should return a tagged result");
+        };
+        let Some(Value::Binary(error)) = result.get(&*keys::ERR) else {
+            panic!("eval should return the dependency failure under err");
+        };
+        assert_eq!(error.as_ref(), b"dependency failed");
     }
 
     #[test]

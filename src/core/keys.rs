@@ -44,6 +44,8 @@ protocol_key!(EXTENDS, "extends");
 
 protocol_key!(VALUE, "value");
 protocol_key!(KEY, "key");
+protocol_key!(OK, "ok");
+protocol_key!(ERR, "err");
 protocol_key!(LEFT, "left");
 protocol_key!(RIGHT, "right");
 protocol_key!(TUPLE, "tuple");

@@ -118,17 +118,20 @@ reduction fuel are intentionally deferred.
 
 The reusable reflection API exposes `.glam_ver`, `.os_env`, and `.cli_args` as
 basic host information. `.dict_items` returns immediate key-ordered dictionary
-entries as `{key,value}` records. Tasks can reserve `.refl_task Effect` children
-behind opaque handles. The compiler-provided `eff.map` combinator sequences
-mapped effects left-to-right and preserves result order; the g front end uses
-it to schedule named reflection tasks without a dictionary-aware batch request.
+entries as `{key,value}` records. `.eval Value` forces only the value's lazy
+outer shell and returns the singleton result `ok:WHNF` or `err:Text`; pending
+dependencies suspend the task rather than becoming errors. Tasks can reserve
+`.refl_task Effect` children behind opaque handles. The compiler-provided
+`eff.map` combinator sequences mapped effects left-to-right and preserves result
+order; the g front end uses it to schedule named reflection tasks without a
+dictionary-aware batch request.
 `.join_task` returns success or propagates the child's error;
-`.task_result` and `.task_error` are symmetric state-specific extractors, and
-`.task_status` provides a nonblocking status atom. Pending extractors are failed
-effect choices carrying the child's exact wait token. Transaction journals
-apply task launches and `.cancel_task` requests in effect order only after the
-winning outer commit; abandoned journals cancel unused reservations and discard
-cancellations.
+`.task_result` and `.task_error` are read-only, symmetric state-specific
+extractors, and `.task_status` provides a nonblocking status atom. Pending
+extractors are failed effect choices carrying the child's exact wait token.
+Transaction journals apply task launches and `.cancel_task` requests in effect
+order only after the winning outer commit; abandoned journals cancel unused
+reservations and discard cancellations.
 
 An ordinary `Assembler` installs a reflection-task launcher when it creates its
 session. The launcher wraps annotation effects in the reusable

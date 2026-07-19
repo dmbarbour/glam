@@ -81,15 +81,21 @@ design in the design documents.
   fragment, private request tags, and specialization-owned transaction data.
   Reusable request families compose by mapping their requests into the host
   specialization's request enum. The reusable reflection family contributes
-  `glam_ver`, `os_env`, `cli_args`, `dict_items`, `log`, and the task operations
-  `refl_task`, `join_task`, `task_result`, `task_error`, `task_status`, and
-  `cancel_task`;
+  `glam_ver`, `os_env`, `cli_args`, `dict_items`, `eval`, `log`, and the task
+  operations `refl_task`, `join_task`, `task_result`, `task_error`,
+  `task_status`, and `cancel_task`;
   `main` adds provisional `read_log` and `write_stderr` effects. OS environment
   values and command-line arguments preserve Rust's platform encoding as binary
   values rather than forcing UTF-8. Spawned tasks receive only
   `ReflectionEffects`, even when their parent has broader host capabilities.
+  `eval` reduces only successive lazy outer shells and returns a singleton
+  `ok:WHNF` or provisional `err:Text`. A pending evaluator dependency suspends
+  the operation and is retried even if that dependency terminates in error, so
+  the terminal evaluator error can become `err` data. It does not isolate or
+  roll back reflection tasks activated while evaluating its value.
   `join_task` propagates terminal task errors; `task_result` and `task_error`
-  symmetrically extract only their terminal state and otherwise fail.
+  read without acknowledging or clearing their matching terminal state and
+  otherwise fail.
   `task_status` returns `'pending`, `'complete`, `'error`, `'foreign`, or
   `'canceled`. Pending extractors fail observably, so an exhausted choice
   suspends on that task's exact wait token and retries on any terminal transition. Logged

@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 use crate::api::{Diagnostic, Value};
 use crate::core::{Atom, Dict, Key, Value as CoreValue, keys};
 use crate::diagnostic::Severity;
+use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId,
     EvaluationTaskPoll, PendingReflectionTask,
@@ -22,6 +23,7 @@ pub enum ReflectionRequest {
     OsEnvironment,
     CommandLineArguments,
     DictItems,
+    Eval,
     Log,
     ReflTask,
     JoinTask,
@@ -112,6 +114,12 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
             ["reflection_runtime", "v0", "request", "dict_items"],
             1,
             ReflectionRequest::DictItems,
+        ),
+        EffectRequestSpec::new(
+            "eval",
+            ["reflection_runtime", "v0", "request", "eval"],
+            1,
+            ReflectionRequest::Eval,
         ),
         EffectRequestSpec::new(
             "log",
@@ -215,6 +223,7 @@ where
                 ),
             ))))
         }
+        ReflectionRequest::Eval => evaluate_request(arguments, context.eval_context()),
         ReflectionRequest::Log => {
             let [severity, message]: [Value; 2] = arguments
                 .try_into()
@@ -367,6 +376,40 @@ where
             Ok(RequestResult::ReturnUnit)
         }
     }
+}
+
+fn evaluate_request(
+    arguments: Vec<Value>,
+    context: &EvalContext,
+) -> Result<RequestResult, TaskError> {
+    let [value]: [Value; 1] = arguments
+        .try_into()
+        .map_err(|_| TaskError::new("`.eval` received the wrong number of arguments"))?;
+    let mut value = value.into_core();
+    while matches!(value, CoreValue::Lazy(_)) {
+        value = match eval::eval_value(context, &value) {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(wait) = error.blocked_on() {
+                    return Err(TaskError::retry_after(wait.0));
+                }
+                return Ok(RequestResult::Return(tagged_result(
+                    &keys::ERR,
+                    Value::text(error.to_string()),
+                )));
+            }
+        };
+    }
+    Ok(RequestResult::Return(tagged_result(
+        &keys::OK,
+        Value::from_core(value),
+    )))
+}
+
+fn tagged_result(tag: &Key, value: Value) -> Value {
+    Value::from_core(CoreValue::Dict(
+        Dict::new_sync().insert(tag.clone(), value.into_core()),
+    ))
 }
 
 fn require_no_arguments(arguments: Vec<Value>, request: &str) -> Result<(), TaskError> {
