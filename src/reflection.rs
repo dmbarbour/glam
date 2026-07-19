@@ -300,62 +300,104 @@ impl fmt::Display for TaskError {
 
 impl std::error::Error for TaskError {}
 
+/// Configures and synchronously runs one effect task.
+///
+/// Runtime attachment and child reflection capabilities are independent. If
+/// child reflection is enabled, all scheduled children are drained before the
+/// run returns; a child failure or stable deadlock fails the composed run.
+pub struct EffectRun<S: TaskSpecialization> {
+    effect: PublicValue,
+    specialization: S,
+    host: Arc<S::Host>,
+    runtime: Option<EvaluationRuntime>,
+    reflection_children: Option<Arc<dyn ReflectionHost<ReflectionEffects>>>,
+    result_policy: EffectResultPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectResultPolicy {
+    Return,
+    RequireUnit,
+}
+
+impl<S: TaskSpecialization> EffectRun<S> {
+    pub fn new(effect: &PublicValue, specialization: S, host: Arc<S::Host>) -> Self {
+        Self {
+            effect: effect.clone(),
+            specialization,
+            host,
+            runtime: None,
+            reflection_children: None,
+            result_policy: EffectResultPolicy::Return,
+        }
+    }
+
+    /// Runs the task in a service session using the runtime's shared executor.
+    pub fn with_runtime(mut self, runtime: &EvaluationRuntime) -> Self {
+        self.runtime = Some(runtime.clone());
+        self
+    }
+
+    /// Gives `.refl_task` children only the reusable reflection capabilities.
+    pub fn with_reflection_children(
+        mut self,
+        host: Arc<dyn ReflectionHost<ReflectionEffects>>,
+    ) -> Self {
+        self.reflection_children = Some(host);
+        self
+    }
+
+    /// Requires the task's discarded result to be unit, as with
+    /// `(effect =>> .r ())`.
+    pub fn requiring_unit_result(mut self) -> Self {
+        self.result_policy = EffectResultPolicy::RequireUnit;
+        self
+    }
+
+    pub fn run(self) -> Result<TaskOutcome, TaskError> {
+        let Self {
+            effect,
+            specialization,
+            host,
+            runtime,
+            reflection_children,
+            result_policy,
+        } = self;
+        let environment = host.reflection_environment().into_core();
+        let session = match runtime {
+            Some(runtime) => EvaluationSession::shared(environment, runtime.executor()),
+            None => Arc::new(EvaluationSession::with_environment(environment)),
+        };
+        let drain_children = reflection_children.is_some();
+        if let Some(reflection_host) = reflection_children {
+            session
+                .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
+                .map_err(|error| TaskError::new(error.as_ref()))?;
+        }
+        let mut task = EffectTask::new_in_context(
+            effect.into_core(),
+            specialization,
+            host,
+            EvalContext::new(session),
+        )?;
+        if result_policy == EffectResultPolicy::RequireUnit {
+            task = task.requiring_unit_result();
+        }
+        if drain_children {
+            run_composed_effect_task(task)
+        } else {
+            task.run()
+        }
+    }
+}
+
 /// Runs one reflection effect with a statically selected set of extra effects.
 pub fn run<S: TaskSpecialization>(
     effect: &PublicValue,
     specialization: S,
     host: Arc<S::Host>,
 ) -> Result<TaskOutcome, TaskError> {
-    EffectTask::new(effect.as_core().clone(), specialization, host)?.run()
-}
-
-/// Runs one composed task while giving `.refl_task` children only the reusable
-/// reflection capabilities, independent of the parent's specialization. After
-/// the parent terminates, all scheduled children are drained; a child failure
-/// or stable deadlock fails the composed run.
-pub fn run_with_reflection_host<S: TaskSpecialization>(
-    effect: &PublicValue,
-    specialization: S,
-    host: Arc<S::Host>,
-    reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
-) -> Result<TaskOutcome, TaskError> {
-    run_composed_effect_task(composed_effect_task(
-        effect,
-        specialization,
-        host,
-        reflection_host,
-    )?)
-}
-
-/// Runs one composed task and requires its discarded result to be unit.
-///
-/// This installs the same outer continuation as `(effect =>> .r ())`, while
-/// keeping child `.refl_task` capabilities restricted to reusable reflection.
-pub fn run_unit_with_reflection_host<S: TaskSpecialization>(
-    effect: &PublicValue,
-    specialization: S,
-    host: Arc<S::Host>,
-    reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
-) -> Result<TaskOutcome, TaskError> {
-    run_composed_effect_task(
-        composed_effect_task(effect, specialization, host, reflection_host)?
-            .requiring_unit_result(),
-    )
-}
-
-/// Runs one composed unit task in a service session attached to an
-/// assembler's shared background executor.
-pub fn run_unit_with_reflection_host_in_runtime<S: TaskSpecialization>(
-    effect: &PublicValue,
-    specialization: S,
-    host: Arc<S::Host>,
-    reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
-    runtime: &EvaluationRuntime,
-) -> Result<TaskOutcome, TaskError> {
-    run_composed_effect_task(
-        composed_effect_task_in_runtime(effect, specialization, host, reflection_host, runtime)?
-            .requiring_unit_result(),
-    )
+    EffectRun::new(effect, specialization, host).run()
 }
 
 fn run_composed_effect_task<S: TaskSpecialization>(
@@ -404,48 +446,6 @@ fn composed_child_error(run: EvaluationSessionRun) -> Option<TaskError> {
     Some(TaskError::new(details.join("; ")))
 }
 
-fn composed_effect_task<S: TaskSpecialization>(
-    effect: &PublicValue,
-    specialization: S,
-    host: Arc<S::Host>,
-    reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
-) -> Result<EffectTask<S>, TaskError> {
-    let session = Arc::new(EvaluationSession::with_environment(
-        host.reflection_environment().into_core(),
-    ));
-    session
-        .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
-        .map_err(|error| TaskError::new(error.as_ref()))?;
-    EffectTask::new_in_context(
-        effect.as_core().clone(),
-        specialization,
-        host,
-        EvalContext::new(session),
-    )
-}
-
-fn composed_effect_task_in_runtime<S: TaskSpecialization>(
-    effect: &PublicValue,
-    specialization: S,
-    host: Arc<S::Host>,
-    reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
-    runtime: &EvaluationRuntime,
-) -> Result<EffectTask<S>, TaskError> {
-    let session = EvaluationSession::shared(
-        host.reflection_environment().into_core(),
-        runtime.executor(),
-    );
-    session
-        .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
-        .map_err(|error| TaskError::new(error.as_ref()))?;
-    EffectTask::new_in_context(
-        effect.as_core().clone(),
-        specialization,
-        host,
-        EvalContext::new(session),
-    )
-}
-
 /// Builds a type-erased launcher for annotation and joinable reflection tasks.
 pub(crate) fn task_launcher<S: TaskSpecialization>(
     specialization: S,
@@ -488,7 +488,7 @@ pub fn run_standard(
     effect: &PublicValue,
     host: Arc<dyn TaskHost<StandardEffects>>,
 ) -> Result<TaskOutcome, TaskError> {
-    run(effect, StandardEffects, host)
+    EffectRun::new(effect, StandardEffects, host).run()
 }
 
 #[derive(Clone)]
@@ -559,6 +559,7 @@ struct EffectTask<S: TaskSpecialization> {
 }
 
 impl<S: TaskSpecialization> EffectTask<S> {
+    #[cfg(test)]
     fn new(effect: Value, specialization: S, host: Arc<S::Host>) -> Result<Self, TaskError> {
         let environment = host.reflection_environment().into_core();
         Self::new_in_context(
@@ -3255,6 +3256,26 @@ mod tests {
             crate::evaluation::EvaluationPumpOutcome::TargetReady
         );
         context.poll_reflection_task(task)
+    }
+
+    #[test]
+    fn effect_run_composes_runtime_children_and_unit_policy() {
+        let (assembler, effect) = compile_effect(
+            ".refl_task (.log 'warn { msg:{ text:\"child\" } }) >>= (\\_task -> .r ())",
+        );
+        let host = Arc::new(TestHost::default());
+        let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
+
+        assert!(matches!(
+            EffectRun::new(&effect, TestEffects, host.clone())
+                .with_runtime(&assembler.evaluation_runtime())
+                .with_reflection_children(reflection_host)
+                .requiring_unit_result()
+                .run()
+                .unwrap(),
+            TaskOutcome::Complete(_)
+        ));
+        assert_eq!(host.diagnostics().len(), 1);
     }
 
     #[test]

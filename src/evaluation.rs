@@ -498,6 +498,7 @@ impl EvalContext {
         Self::new(Arc::new(EvaluationSession::new()))
     }
 
+    #[cfg(test)]
     pub(crate) fn standalone_with_environment(environment: Value) -> Self {
         Self::new(Arc::new(EvaluationSession::with_environment(environment)))
     }

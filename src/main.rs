@@ -9,11 +9,10 @@ use std::thread;
 
 use bytes::Bytes;
 use glam::reflection::{
-    CommitResult, EffectRequestSpec, HostSnapshot, ReflectionEffects, ReflectionHost,
+    CommitResult, EffectRequestSpec, EffectRun, HostSnapshot, ReflectionEffects, ReflectionHost,
     ReflectionJournal, ReflectionRequest, ReflectionServices, ReflectionTransaction,
     RequestContext, RequestResult, TaskCommit, TaskEnvironment, TaskHost, TaskOutcome,
     TaskSpecialization, handle_reflection_request, reflection_request_specs,
-    run_unit_with_reflection_host_in_runtime,
 };
 use glam::{
     Assembler, Builtin, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticSink, Error,
@@ -475,13 +474,12 @@ fn start_logger(
     thread::spawn(move || {
         if let Some(custom) = custom {
             let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
-            match run_unit_with_reflection_host_in_runtime(
-                &custom,
-                MainEffects::new(effect_assembler),
-                host.clone(),
-                reflection_host,
-                &evaluation_runtime,
-            ) {
+            match EffectRun::new(&custom, MainEffects::new(effect_assembler), host.clone())
+                .with_runtime(&evaluation_runtime)
+                .with_reflection_children(reflection_host)
+                .requiring_unit_result()
+                .run()
+            {
                 Ok(TaskOutcome::Complete(_)) => {}
                 Ok(TaskOutcome::Cancelled) => {
                     input.emit_default(
