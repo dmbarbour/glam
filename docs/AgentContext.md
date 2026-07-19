@@ -95,9 +95,11 @@ design in the design documents.
   assembler reserves and replaces the complete `glam` namespace, warning when
   a client supplied anything there. It contains the implementation-independent
   `glam.version` compatibility version plus
-  `glam.implementation.{name,version}`. The executable adds `process.args` and
-  `process.env`. Environment-variable names remain text keys, and both names
-  and values preserve Rust's platform encoding rather than forcing UTF-8.
+  `glam.implementation.{name,version}`. The executable adds `process.args`,
+  `process.refl_args`, and `process.env`. Repeated `--refl` options populate
+  only the ordered reflection-argument list; they do not enter `asm.args`.
+  Environment-variable names remain text keys, and both names and values
+  preserve Rust's platform encoding rather than forcing UTF-8.
   Spawned tasks receive only `ReflectionEffects`, even when their parent has
   broader host capabilities.
   `eval` reduces only successive lazy outer shells and returns a singleton
@@ -351,7 +353,8 @@ bootstrap compatibility behavior.
   roots. The library API does not assign those names or roles.
 - The current CLI accepts repeated `--file`/`-f` and
   `--script.<ext>`/`-s.<ext>` assembly inputs, then optional arguments after
-  `--`, plus one optional `--manifest` output. Its local-file host hashes every
+  `--`, repeated reflection-only `--refl` arguments, plus one optional
+  `--manifest` output. Its local-file host hashes every
   successful read with SHA-256, rejects different contents on a repeated read,
   and rechecks all observed files before shutdown. A difference encountered by
   another assembly read is an error; a post-assembly difference is only a

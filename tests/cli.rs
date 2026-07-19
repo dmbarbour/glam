@@ -519,6 +519,39 @@ fn configured_logger_can_read_the_process_reflection_environment() {
 }
 
 #[test]
+fn reflection_arguments_are_ordered_and_do_not_enter_assembly_arguments() {
+    let dir = unique_temp_dir("glam-reflection-args");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nimport 'list as list\nobject conf.env\nconf.log = .env ['process,'refl_args] >>= (\\arguments -> .write_stderr (list.head arguments ++ list.head (list.tail arguments)))\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--refl")
+        .arg("quick")
+        .arg("--script.g")
+        .arg("language g0\nasm.result = { [[]]:\"ok\" }.[asm.args]\n")
+        .arg("--refl")
+        .arg("thorough")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ok");
+    assert_eq!(output.stderr, b"quickthorough");
+}
+
+#[test]
 fn configured_logger_output_precedes_a_later_logger_failure() {
     let dir = unique_temp_dir("glam-conf-log-failure");
     fs::create_dir_all(&dir)

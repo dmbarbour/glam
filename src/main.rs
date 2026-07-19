@@ -27,6 +27,14 @@ use local_files::LocalFileHost;
 // assembly uses only the embedding facade.
 use glam::g_syntax::{DeclarationKind, ParsedSource, parse_source};
 
+#[derive(Default)]
+struct AssemblyCommand {
+    inputs: Vec<ModuleInput>,
+    arguments: Vec<String>,
+    reflection_arguments: Vec<String>,
+    manifest: Option<PathBuf>,
+}
+
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(first) = args.next() else {
@@ -56,13 +64,13 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             };
 
-            let mut inputs = vec![ModuleInput::file(path)];
-            let mut cli_args = Vec::new();
-            let mut manifest = None;
-            match collect_assembly_inputs(args, &mut inputs, &mut cli_args, &mut manifest) {
-                Ok(()) => assemble_inputs(inputs, cli_args, manifest),
-                Err(exit_code) => exit_code,
-            }
+            run_assembly(
+                args,
+                AssemblyCommand {
+                    inputs: vec![ModuleInput::file(path)],
+                    ..AssemblyCommand::default()
+                },
+            )
         }
         option if script_extension(option).is_some() => {
             let extension = script_extension(option).expect("checked above").to_owned();
@@ -71,30 +79,39 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             };
 
-            let mut inputs = vec![ModuleInput::script(extension, body)];
-            let mut cli_args = Vec::new();
-            let mut manifest = None;
-            match collect_assembly_inputs(args, &mut inputs, &mut cli_args, &mut manifest) {
-                Ok(()) => assemble_inputs(inputs, cli_args, manifest),
-                Err(exit_code) => exit_code,
-            }
+            run_assembly(
+                args,
+                AssemblyCommand {
+                    inputs: vec![ModuleInput::script(extension, body)],
+                    ..AssemblyCommand::default()
+                },
+            )
         }
         "--manifest" => {
             let Some(path) = args.next() else {
                 eprintln!("error: `--manifest` needs an output path");
                 return ExitCode::from(2);
             };
-            let mut inputs = Vec::new();
-            let mut cli_args = Vec::new();
-            let mut manifest = Some(PathBuf::from(path));
-            match collect_assembly_inputs(args, &mut inputs, &mut cli_args, &mut manifest) {
-                Ok(()) if inputs.is_empty() => {
-                    eprintln!("error: `--manifest` must accompany an assembly input");
-                    ExitCode::from(2)
-                }
-                Ok(()) => assemble_inputs(inputs, cli_args, manifest),
-                Err(exit_code) => exit_code,
-            }
+            run_assembly(
+                args,
+                AssemblyCommand {
+                    manifest: Some(PathBuf::from(path)),
+                    ..AssemblyCommand::default()
+                },
+            )
+        }
+        "--refl" => {
+            let Some(argument) = args.next() else {
+                eprintln!("error: `--refl` needs an argument");
+                return ExitCode::from(2);
+            };
+            run_assembly(
+                args,
+                AssemblyCommand {
+                    reflection_arguments: vec![argument],
+                    ..AssemblyCommand::default()
+                },
+            )
         }
         option if option.starts_with('-') => {
             eprintln!("error: unknown option `{option}`");
@@ -109,16 +126,25 @@ fn main() -> ExitCode {
     }
 }
 
+fn run_assembly(args: impl Iterator<Item = String>, mut command: AssemblyCommand) -> ExitCode {
+    if let Err(exit_code) = collect_assembly_inputs(args, &mut command) {
+        return exit_code;
+    }
+    if command.inputs.is_empty() {
+        eprintln!("error: assembly needs at least one `--file` or `--script.<ext>` input");
+        return ExitCode::from(2);
+    }
+    assemble_inputs(command)
+}
+
 fn collect_assembly_inputs(
     mut args: impl Iterator<Item = String>,
-    inputs: &mut Vec<ModuleInput>,
-    cli_args: &mut Vec<String>,
-    manifest: &mut Option<PathBuf>,
+    command: &mut AssemblyCommand,
 ) -> Result<(), ExitCode> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--" => {
-                cli_args.extend(args);
+                command.arguments.extend(args);
                 return Ok(());
             }
             "-f" | "--file" => {
@@ -126,17 +152,24 @@ fn collect_assembly_inputs(
                     eprintln!("error: `{arg}` needs a source path");
                     return Err(ExitCode::from(2));
                 };
-                inputs.push(ModuleInput::file(path));
+                command.inputs.push(ModuleInput::file(path));
             }
             "--manifest" => {
                 let Some(path) = args.next() else {
                     eprintln!("error: `--manifest` needs an output path");
                     return Err(ExitCode::from(2));
                 };
-                if manifest.replace(PathBuf::from(path)).is_some() {
+                if command.manifest.replace(PathBuf::from(path)).is_some() {
                     eprintln!("error: `--manifest` may be specified only once");
                     return Err(ExitCode::from(2));
                 }
+            }
+            "--refl" => {
+                let Some(argument) = args.next() else {
+                    eprintln!("error: `--refl` needs an argument");
+                    return Err(ExitCode::from(2));
+                };
+                command.reflection_arguments.push(argument);
             }
             option if script_extension(option).is_some() => {
                 let extension = script_extension(option).expect("checked above").to_owned();
@@ -144,7 +177,7 @@ fn collect_assembly_inputs(
                     eprintln!("error: `{option}` needs a script body");
                     return Err(ExitCode::from(2));
                 };
-                inputs.push(ModuleInput::script(extension, body));
+                command.inputs.push(ModuleInput::script(extension, body));
             }
             option if option.starts_with('-') => {
                 eprintln!("error: unknown option `{option}`");
@@ -169,7 +202,7 @@ fn script_extension(option: &str) -> Option<&str> {
         .filter(|extension| !extension.is_empty())
 }
 
-fn process_reflection_environment() -> Value {
+fn process_reflection_environment(reflection_arguments: Vec<String>) -> Value {
     fn os_value(value: std::ffi::OsString) -> Value {
         Value::binary(value.as_encoded_bytes().to_vec())
     }
@@ -182,9 +215,14 @@ fn process_reflection_environment() -> Value {
     }))
     .expect("OS environment names must be keyable binary values");
     let arguments = Value::list(env::args_os().map(os_value));
+    let reflection_arguments = Value::list(reflection_arguments.into_iter().map(Value::text));
     Value::record([(
         "process",
-        Value::record([("args", arguments), ("env", variables)]),
+        Value::record([
+            ("args", arguments),
+            ("env", variables),
+            ("refl_args", reflection_arguments),
+        ]),
     )])
 }
 
@@ -206,16 +244,18 @@ fn finish_local_files(
     failed
 }
 
-fn assemble_inputs(
-    inputs: Vec<ModuleInput>,
-    cli_args: Vec<String>,
-    manifest: Option<PathBuf>,
-) -> ExitCode {
+fn assemble_inputs(command: AssemblyCommand) -> ExitCode {
+    let AssemblyCommand {
+        inputs,
+        arguments,
+        reflection_arguments,
+        manifest,
+    } = command;
     let log_host = Arc::new(LogHost::new(DEFAULT_DIAGNOSTIC_CAPACITY));
     let local_files = LocalFileHost::default();
     let assembler = Assembler::default()
         .with_host(local_files.clone())
-        .with_reflection_environment(process_reflection_environment())
+        .with_reflection_environment(process_reflection_environment(reflection_arguments))
         .expect("main's reflection environment must be a dictionary")
         .with_diagnostic_sink(log_host.clone());
     let configuration = match load_configuration(&assembler) {
@@ -229,7 +269,7 @@ fn assemble_inputs(
         }
     };
     let logger = start_logger(&assembler, &configuration.value, log_host.clone());
-    let result = assemble(&assembler, inputs, cli_args, configuration.environment);
+    let result = assemble(&assembler, inputs, arguments, configuration.environment);
     let mut operation_failed = false;
     match result {
         Ok(bytes) => {
@@ -1199,12 +1239,14 @@ fn print_help() {
     const HELP: &str = "\
 Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...
             [--manifest <PATH>]
+            [--refl <ARG>]...
        glam --parse <PATH>
        glam --help
        glam --version
 
 Assembly inputs are applied as mixins; earlier inputs override later inputs.
 --manifest records every local input path and its SHA-256 digest.
+--refl appends an argument visible only as reflection environment process.refl_args.
 Configuration is loaded from GLAM_CONF as an OS path-list, or from the user config/default fixture.
 Bare arguments are reserved for configured `conf.cli` rewriting.
 ";

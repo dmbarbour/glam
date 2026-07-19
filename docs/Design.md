@@ -428,6 +428,7 @@ Command line options:
 - `(-f|--file) FileName` - list a file to include; files earlier in list override those later. 
 - `(-s|--script).FileExt Text` - as remote file with given extension and text. Scripts cannot import local files, hence are location-independent. 
 - `--manifest FileName` - record the secure content hash of every local file used by configuration or assembly.
+- `--refl Arg` - append an argument visible to reflection tasks but not to assembly as `asm.args`.
 - `-- List Of Args` - the assembler defines `asm.args` as a list of strings prior to including files.
 
 Inputs are `asm.args` from the command line and `env` from the user configuration. Depending on the configured environment, i.e. presence of `env.lang.[FileExt].compile`, assembly isn't limited to ".g" files (see *User-Defined Syntax*). The primary output is `asm.result`, which should represent a binary or filesystem folder. See *Assembler* below. 
