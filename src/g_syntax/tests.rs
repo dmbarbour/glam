@@ -167,7 +167,12 @@ fn reflection_test_module(
     source: &str,
     module_path: &[&str],
     guards: &[(&str, &str)],
-) -> (crate::api::Assembler, crate::evaluation::EvalContext, Value) {
+) -> (
+    crate::api::Assembler,
+    crate::evaluation::EvalContext,
+    Value,
+    Arc<Mutex<Vec<crate::api::DiagnosticEvent>>>,
+) {
     let prior = guards.iter().fold(Dict::new_sync(), |dict, (name, path)| {
         let value = CompileContext::from_module_path(module_path.iter().copied())
             .abstract_global_path(path);
@@ -188,11 +193,28 @@ fn reflection_test_module(
         .set(lowered.definitions.clone())
         .expect("final module binding should be unset");
 
-    let assembler = crate::api::Assembler::default();
+    let diagnostics = Arc::new(Mutex::new(Vec::new()));
+    let received = diagnostics.clone();
+    let assembler = crate::api::Assembler::default().with_diagnostic_callback(move |event| {
+        received
+            .lock()
+            .expect("diagnostic collector should not be poisoned")
+            .push(event);
+    });
     let eval_context = assembler.eval_context();
     let definitions = crate::eval::eval_value(&eval_context, &lowered.definitions)
         .expect("reflection-enabled module should expose its dictionary");
-    (assembler, eval_context, definitions)
+    (assembler, eval_context, definitions, diagnostics)
+}
+
+fn take_reflection_diagnostics(
+    diagnostics: &Arc<Mutex<Vec<crate::api::DiagnosticEvent>>>,
+) -> Vec<crate::api::DiagnosticEvent> {
+    std::mem::take(
+        &mut *diagnostics
+            .lock()
+            .expect("diagnostic collector should not be poisoned"),
+    )
 }
 
 #[test]
@@ -2840,7 +2862,7 @@ ordinary = "ordinary"
 ordinary_two = "ordinary two"
 probe = anno { refl:(.get ['heap,guard,'claim] >>= (\scanner -> .join_task scanner >>= (\_ -> .get ['heap,guard,'tasks] >>= (\tasks -> .join_task (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
 "#;
-    let (assembler, context, module) =
+    let (_assembler, context, module, diagnostics) =
         reflection_test_module(source, &["module_refl_test"], &[("guard", "refl")]);
 
     assert_eq!(
@@ -2851,7 +2873,7 @@ probe = anno { refl:(.get ['heap,guard,'claim] >>= (\scanner -> .join_task scann
         resolved_value_at_path_with_context(&context, &module, &["spec", "hidden"]),
         Value::binary_from_text("specification")
     );
-    assert!(assembler.read_diagnostics().unwrap().entries().is_empty());
+    assert!(take_reflection_diagnostics(&diagnostics).is_empty());
 
     assert_eq!(
         resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
@@ -2866,9 +2888,9 @@ probe = anno { refl:(.get ['heap,guard,'claim] >>= (\scanner -> .join_task scann
         Value::binary_from_text("ordinary two")
     );
 
-    let diagnostics = assembler.read_diagnostics().unwrap();
-    assert_eq!(diagnostics.entries().len(), 1);
-    assert_eq!(diagnostics.entries()[0].message(), "final reflection task");
+    let diagnostics = take_reflection_diagnostics(&diagnostics);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].message(), "final reflection task");
 }
 
 #[test]
@@ -2882,13 +2904,14 @@ object foo with
   meta.hidden = "metadata"
   value = "value"
 "#;
-    let (assembler, context, module) = reflection_test_module(source, &["object_refl_test"], &[]);
+    let (_assembler, context, module, diagnostics) =
+        reflection_test_module(source, &["object_refl_test"], &[]);
 
     assert_eq!(
         resolved_value_at_path_with_context(&context, &module, &["foo", "meta", "hidden"]),
         Value::binary_from_text("metadata")
     );
-    assert!(assembler.read_diagnostics().unwrap().entries().is_empty());
+    assert!(take_reflection_diagnostics(&diagnostics).is_empty());
 
     assert_eq!(
         resolved_value_at_path_with_context(&context, &module, &["foo", "value"]),
@@ -2899,9 +2922,9 @@ object foo with
         Value::binary_from_text("probe")
     );
 
-    let diagnostics = assembler.read_diagnostics().unwrap();
-    assert_eq!(diagnostics.entries().len(), 1);
-    assert_eq!(diagnostics.entries()[0].message(), "object reflection task");
+    let diagnostics = take_reflection_diagnostics(&diagnostics);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].message(), "object reflection task");
 }
 
 #[test]
@@ -2917,7 +2940,7 @@ object parent with
 extend parent.child with
   refl.notice := .log 'info { msg:{ text:"extended child reflection task" } }
 "#;
-    let (assembler, context, module) =
+    let (_assembler, context, module, diagnostics) =
         reflection_test_module(source, &["nested_object_refl_test"], &[]);
 
     assert_eq!(
@@ -2929,12 +2952,9 @@ extend parent.child with
         Value::binary_from_text("probe")
     );
 
-    let diagnostics = assembler.read_diagnostics().unwrap();
-    assert_eq!(diagnostics.entries().len(), 1);
-    assert_eq!(
-        diagnostics.entries()[0].message(),
-        "extended child reflection task"
-    );
+    let diagnostics = take_reflection_diagnostics(&diagnostics);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].message(), "extended child reflection task");
 }
 
 #[test]
@@ -2949,7 +2969,7 @@ object base with
 object derived extends base with
   refl.notice := .log 'info { msg:{ text:"derived reflection task" } }
 "#;
-    let (assembler, context, module) =
+    let (_assembler, context, module, diagnostics) =
         reflection_test_module(source, &["inherited_object_refl_test"], &[]);
 
     assert_eq!(
@@ -2960,12 +2980,9 @@ object derived extends base with
         resolved_value_at_path_with_context(&context, &module, &["meta", "derived_probe"]),
         Value::binary_from_text("derived probe")
     );
-    let derived_diagnostics = assembler.read_diagnostics().unwrap();
-    assert_eq!(derived_diagnostics.entries().len(), 1);
-    assert_eq!(
-        derived_diagnostics.entries()[0].message(),
-        "derived reflection task"
-    );
+    let derived_diagnostics = take_reflection_diagnostics(&diagnostics);
+    assert_eq!(derived_diagnostics.len(), 1);
+    assert_eq!(derived_diagnostics[0].message(), "derived reflection task");
 
     assert_eq!(
         resolved_value_at_path_with_context(&context, &module, &["base", "inherited"]),
@@ -2975,12 +2992,9 @@ object derived extends base with
         resolved_value_at_path_with_context(&context, &module, &["meta", "base_probe"]),
         Value::binary_from_text("base probe")
     );
-    let base_diagnostics = assembler.read_diagnostics().unwrap();
-    assert_eq!(base_diagnostics.entries().len(), 1);
-    assert_eq!(
-        base_diagnostics.entries()[0].message(),
-        "base reflection task"
-    );
+    let base_diagnostics = take_reflection_diagnostics(&diagnostics);
+    assert_eq!(base_diagnostics.len(), 1);
+    assert_eq!(base_diagnostics[0].message(), "base reflection task");
 }
 
 #[test]
@@ -2995,7 +3009,7 @@ object declared with
     refl.notice = .log 'info { msg:{ text:"excluded nested reflection task" } }
     ordinary = "excluded ordinary"
 "#;
-    let (assembler, context, module) =
+    let (_assembler, context, module, diagnostics) =
         reflection_test_module(source, &["object_expression_refl_test"], &[]);
 
     assert_eq!(
@@ -3006,7 +3020,7 @@ object declared with
         resolved_value_at_path_with_context(&context, &module, &["declared", "meta", "ordinary"]),
         Value::binary_from_text("excluded ordinary")
     );
-    assert!(assembler.read_diagnostics().unwrap().entries().is_empty());
+    assert!(take_reflection_diagnostics(&diagnostics).is_empty());
 }
 
 #[test]
@@ -3018,7 +3032,7 @@ refl := {}
 meta.probe = anno { refl:(.get ['heap,guard,'claim] >>= (\scanner -> .join_task scanner >>= (\_ -> .get ['heap,guard,'tasks] >>= (\_tasks -> .r ())))) } "probe"
 ordinary = "ordinary"
 "#;
-    let (assembler, context, module) =
+    let (_assembler, context, module, diagnostics) =
         reflection_test_module(source, &["disabled_refl_test"], &[("guard", "refl")]);
 
     assert_eq!(
@@ -3029,7 +3043,7 @@ ordinary = "ordinary"
         resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
         Value::binary_from_text("probe")
     );
-    assert!(assembler.read_diagnostics().unwrap().entries().is_empty());
+    assert!(take_reflection_diagnostics(&diagnostics).is_empty());
 }
 
 #[test]
@@ -3040,7 +3054,7 @@ refl.bad = .r "not unit"
 meta.probe = anno { refl:(.get ['heap,guard,'claim] >>= (\scanner -> .join_task scanner >>= (\_ -> .get ['heap,guard,'tasks] >>= (\tasks -> .task_error (list.head tasks).task >>= (\_error -> .r ()))))) } "probe"
 ordinary = "ordinary"
 "#;
-    let (assembler, context, module) =
+    let (_assembler, context, module, diagnostics) =
         reflection_test_module(source, &["unit_refl_test"], &[("guard", "refl")]);
 
     assert_eq!(
@@ -3051,7 +3065,7 @@ ordinary = "ordinary"
         resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
         Value::binary_from_text("probe")
     );
-    assert!(assembler.read_diagnostics().unwrap().entries().is_empty());
+    assert!(take_reflection_diagnostics(&diagnostics).is_empty());
 }
 
 #[test]

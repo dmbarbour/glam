@@ -3,7 +3,31 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use glam::{Assembler, Host, HostError, ModuleInput, ReasoningStatus, Severity, Value};
+use glam::{
+    Assembler, DiagnosticEvent, Host, HostError, ModuleInput, ReasoningStatus, Severity, Value,
+};
+
+type DiagnosticEvents = Arc<Mutex<Vec<DiagnosticEvent>>>;
+
+fn collecting_assembler() -> (Assembler, DiagnosticEvents) {
+    let diagnostics = Arc::new(Mutex::new(Vec::new()));
+    let received = diagnostics.clone();
+    let assembler = Assembler::default().with_diagnostic_callback(move |event| {
+        received
+            .lock()
+            .expect("diagnostic collector should not be poisoned")
+            .push(event);
+    });
+    (assembler, diagnostics)
+}
+
+fn take_diagnostics(diagnostics: &DiagnosticEvents) -> Vec<DiagnosticEvent> {
+    std::mem::take(
+        &mut *diagnostics
+            .lock()
+            .expect("diagnostic collector should not be poisoned"),
+    )
+}
 
 fn absolute_path_text(path: impl AsRef<Path>) -> String {
     std::path::absolute(path)
@@ -27,13 +51,6 @@ fn public_api_builds_a_script_module_and_extracts_binary_data() {
             .binary_at(module.value(), "asm.result")
             .expect("asm.result should be binary"),
         b"Hello, library!".as_slice()
-    );
-    assert_eq!(
-        assembler
-            .read_diagnostics()
-            .expect("default assembler should retain diagnostics")
-            .dropped(),
-        0
     );
 }
 
@@ -67,7 +84,8 @@ fn public_api_exposes_the_default_diagnostic_formatter_as_a_function() {
 
 #[test]
 fn assembler_owns_an_authoritative_reflection_environment() {
-    let assembler = Assembler::default()
+    let (assembler, diagnostics) = collecting_assembler();
+    let assembler = assembler
         .with_reflection_environment(Value::record([
             (
                 "glam",
@@ -112,12 +130,10 @@ fn assembler_owns_an_authoritative_reflection_environment() {
         b"embedded".as_slice()
     );
     assert!(assembler.get(&environment, "glam.client_field").is_err());
-    let diagnostics = assembler
-        .read_diagnostics()
-        .expect("default assembler should retain the reserved-namespace warning");
-    assert_eq!(diagnostics.entries().len(), 1);
-    assert_eq!(diagnostics.entries()[0].severity(), Severity::Warning);
-    assert!(diagnostics.entries()[0].message().contains("reserved"));
+    let diagnostics = take_diagnostics(&diagnostics);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].severity(), Severity::Warning);
+    assert!(diagnostics[0].message().contains("reserved"));
     assert!(
         Assembler::default()
             .with_reflection_environment(Value::integer(1))
@@ -146,7 +162,7 @@ fn service_reflection_environments_have_independent_roles() {
 
 #[test]
 fn public_evaluation_leaves_automatic_reflection_tasks_for_explicit_drain() {
-    let assembler = Assembler::default();
+    let (assembler, diagnostics) = collecting_assembler();
     let module = assembler
         .module(["automatic_refl"])
         .script(
@@ -155,37 +171,25 @@ fn public_evaluation_leaves_automatic_reflection_tasks_for_explicit_drain() {
         )
         .build()
         .expect("reflection module should build");
-    let _ = assembler
-        .read_diagnostics()
-        .expect("default assembler should retain diagnostics");
-
     assert_eq!(
         assembler
             .binary_at(module.value(), "value")
             .expect("ordinary value should evaluate"),
         b"value".as_slice()
     );
-    assert!(
-        assembler
-            .read_diagnostics()
-            .expect("automatic reflection diagnostics should be retained")
-            .entries()
-            .is_empty()
-    );
+    assert!(take_diagnostics(&diagnostics).is_empty());
 
     let report = assembler.drain_reasoning();
     assert_eq!(report.status(), ReasoningStatus::Complete);
 
-    let diagnostics = assembler
-        .read_diagnostics()
-        .expect("drained automatic reflection diagnostics should be retained");
-    assert_eq!(diagnostics.entries().len(), 1);
-    assert_eq!(diagnostics.entries()[0].message(), "automatic reflection");
+    let diagnostics = take_diagnostics(&diagnostics);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].message(), "automatic reflection");
 }
 
 #[test]
 fn replacing_source_host_preserves_scheduled_reasoning() {
-    let assembler = Assembler::default();
+    let (assembler, diagnostics) = collecting_assembler();
     let module = assembler
         .module(["host_replacement"])
         .script(
@@ -194,10 +198,6 @@ fn replacing_source_host_preserves_scheduled_reasoning() {
         )
         .build()
         .expect("reflection module should build");
-    let _ = assembler
-        .read_diagnostics()
-        .expect("default assembler should retain diagnostics");
-
     assert_eq!(
         assembler
             .binary_at(module.value(), "value")
@@ -209,18 +209,13 @@ fn replacing_source_host_preserves_scheduled_reasoning() {
     let report = assembler.drain_reasoning();
     assert_eq!(report.status(), ReasoningStatus::Complete);
 
-    let diagnostics = assembler
-        .read_diagnostics()
-        .expect("scheduled reasoning should keep its diagnostic subscription");
-    assert_eq!(diagnostics.entries().len(), 1);
-    assert_eq!(
-        diagnostics.entries()[0].message(),
-        "survived host replacement"
-    );
+    let diagnostics = take_diagnostics(&diagnostics);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].message(), "survived host replacement");
 }
 
 #[test]
-fn replacing_default_diagnostic_subscriber_preserves_scheduled_reasoning() {
+fn replacing_retained_diagnostic_subscriber_preserves_scheduled_reasoning() {
     let assembler = Assembler::default();
     let module = assembler
         .module(["subscriber_replacement"])
@@ -299,7 +294,8 @@ fn client_reflection_environment_is_visible_to_reflection_annotations() {
             ("env", process_environment),
         ]),
     )]);
-    let assembler = Assembler::default()
+    let (assembler, diagnostics) = collecting_assembler();
+    let assembler = assembler
         .with_host(MemoryHost::new([]))
         .with_reflection_environment(reflection_environment)
         .expect("test reflection environment should be a dictionary");
@@ -323,12 +319,9 @@ fn client_reflection_environment_is_visible_to_reflection_annotations() {
             .expect("annotation target should remain observable"),
         b"done".as_slice()
     );
-    let diagnostics = assembler
-        .read_diagnostics()
-        .expect("default diagnostic buffer should exist");
+    let diagnostics = take_diagnostics(&diagnostics);
     assert!(
         diagnostics
-            .entries()
             .iter()
             .any(|diagnostic| diagnostic.message() == "HOST VALUE")
     );
@@ -441,7 +434,8 @@ fn repeated_source_compilations_have_distinct_invocations() {
 
 #[test]
 fn imported_source_diagnostics_include_the_import_chain() {
-    let assembler = Assembler::default().with_host(MemoryHost::new([
+    let (assembler, diagnostics) = collecting_assembler();
+    let assembler = assembler.with_host(MemoryHost::new([
         (
             "main.g",
             b"language g0\nimport \"child.g\" as child\nasm.result = child.value\n".as_slice(),
@@ -457,11 +451,9 @@ fn imported_source_diagnostics_include_the_import_chain() {
     assembler
         .binary_at(module.value(), "asm.result")
         .expect_err("observing the imported definition should compile and reject child.g");
-    let diagnostics = assembler
-        .read_diagnostics()
-        .expect("default assembler should retain diagnostics");
-    assert_eq!(diagnostics.entries().len(), 1);
-    let diagnostic = &diagnostics.entries()[0];
+    let diagnostics = take_diagnostics(&diagnostics);
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
     let source_path = absolute_path_text("child.g");
     assert_eq!(diagnostic.source(), Some(source_path.as_str()));
     let enriched = diagnostic

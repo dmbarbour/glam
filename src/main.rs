@@ -15,9 +15,8 @@ use glam::reflection::{
     TaskSpecialization, handle_reflection_request, reflection_request_specs,
 };
 use glam::{
-    Assembler, Builtin, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticBus, DiagnosticEvent,
-    DiagnosticSubscriber, Error, ModuleInput, ReasoningReport, ReasoningStatus, ReasoningTaskState,
-    Severity, Value,
+    Assembler, Builtin, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, Error,
+    ModuleInput, ReasoningReport, ReasoningStatus, ReasoningTaskState, Severity, Value,
 };
 
 mod local_files;
@@ -305,7 +304,7 @@ fn assemble_inputs(command: AssemblyCommand) -> ExitCode {
         Ok(worker_threads) => worker_threads,
         Err(exit_code) => return exit_code,
     };
-    let log_host = Arc::new(LogHost::new(DEFAULT_DIAGNOSTIC_CAPACITY));
+    let log_host = Arc::new(LogHost::new());
     let local_files = LocalFileHost::default();
     let assembler = match Assembler::default().with_worker_threads(worker_threads) {
         Ok(assembler) => assembler,
@@ -697,7 +696,6 @@ fn read_log(
 }
 
 struct LogHost {
-    capacity: usize,
     state: Mutex<LogHostState>,
     changed: Condvar,
 }
@@ -735,9 +733,8 @@ struct LogHostState {
 }
 
 impl LogHost {
-    fn new(capacity: usize) -> Self {
+    fn new() -> Self {
         Self {
-            capacity,
             state: Mutex::new(LogHostState {
                 generation: 1,
                 heap: Value::empty_record(),
@@ -822,12 +819,6 @@ impl LogHost {
     }
 
     fn push_diagnostic(&self, state: &mut LogHostState, event: DiagnosticEvent) {
-        if self.capacity == 0 {
-            return;
-        }
-        if state.diagnostics.len() == self.capacity {
-            state.diagnostics.pop_front();
-        }
         state.diagnostics.push_back(event);
     }
 }
@@ -1313,7 +1304,7 @@ mod tests {
         files.read(&path).expect("assembly read should succeed");
         fs::write(&path, "later edit").expect("test input should be changed");
         let diagnostics = DiagnosticBus::new();
-        let queue = Arc::new(LogHost::new(1));
+        let queue = Arc::new(LogHost::new());
         let _subscription = diagnostics.subscribe(queue.clone());
 
         assert!(!finish_local_files(&files, None, &diagnostics));
@@ -1432,14 +1423,12 @@ mod tests {
     }
 
     #[test]
-    fn bus_error_count_survives_queue_drops_and_reads() {
+    fn bus_error_count_survives_absent_subscribers_and_queue_reads() {
         let diagnostics = DiagnosticBus::new();
-        let dropped = Arc::new(LogHost::new(0));
-        let _dropped_subscription = diagnostics.subscribe(dropped);
         diagnostics.publish(Diagnostic::new(Severity::Error, "dropped"));
         assert_eq!(diagnostics.counts().errors(), 1);
 
-        let retained = Arc::new(LogHost::new(1));
+        let retained = Arc::new(LogHost::new());
         let _retained_subscription = diagnostics.subscribe(retained.clone());
         diagnostics.publish(Diagnostic::new(Severity::Error, "retained"));
         assert!(retained.take_diagnostic().is_some());
@@ -1449,9 +1438,9 @@ mod tests {
 
     #[test]
     fn logger_session_output_is_separate_from_assembler_input() {
-        let input = Arc::new(LogHost::new(4));
+        let input = Arc::new(LogHost::new());
         let diagnostics = DiagnosticBus::new();
-        let output = Arc::new(glam::DiagnosticBuffer::new(4));
+        let output = Arc::new(LogHost::new());
         let _subscription = diagnostics.subscribe(output.clone());
         let host = LoggerTaskHost::new(
             input.clone(),
@@ -1472,9 +1461,10 @@ mod tests {
                 .diagnostics
                 .is_empty()
         );
-        let output = output.as_ref().read();
-        assert_eq!(output.entries().len(), 1);
-        assert_eq!(output.entries()[0].message(), "session output");
+        let output = output
+            .take_diagnostic()
+            .expect("logger output bus should publish the diagnostic");
+        assert_eq!(output.message(), "session output");
         assert_eq!(diagnostics.counts().errors(), 1);
     }
 }

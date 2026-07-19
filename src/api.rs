@@ -4,7 +4,7 @@
 //! core values, evaluator topology, and interaction-net scheduling remain
 //! implementation details behind the facade.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, Range};
@@ -35,7 +35,6 @@ use crate::reflection::{
     TaskHost, task_launcher,
 };
 
-pub const DEFAULT_DIAGNOSTIC_CAPACITY: usize = 1_000;
 const GLAM_COMPATIBILITY_VERSION: &str = "0.1.0";
 const IMPLEMENTATION_NAME: &str = "rust-bootstrap";
 
@@ -466,17 +465,18 @@ impl Deref for DiagnosticEvent {
 }
 
 /// A coherent snapshot of all committed emissions on one diagnostic bus.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiagnosticCounts {
-    latest_sequence: Option<u64>,
+    next_sequence: u64,
     info: u64,
     warnings: u64,
     errors: u64,
 }
 
 impl DiagnosticCounts {
-    pub fn latest_sequence(&self) -> Option<u64> {
-        self.latest_sequence
+    /// Returns zero before the first publication.
+    pub fn latest_sequence(&self) -> u64 {
+        self.next_sequence - 1
     }
 
     pub fn info(&self) -> u64 {
@@ -499,27 +499,15 @@ impl DiagnosticCounts {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiagnosticSnapshot {
-    entries: Vec<DiagnosticEvent>,
-    dropped: u64,
-}
-
-impl DiagnosticSnapshot {
-    pub fn entries(&self) -> &[DiagnosticEvent] {
-        &self.entries
+impl Default for DiagnosticCounts {
+    fn default() -> Self {
+        Self {
+            next_sequence: 1,
+            info: 0,
+            warnings: 0,
+            errors: 0,
+        }
     }
-
-    pub fn dropped(&self) -> u64 {
-        self.dropped
-    }
-}
-
-#[derive(Debug)]
-struct DiagnosticHistory {
-    capacity: usize,
-    entries: VecDeque<DiagnosticEvent>,
-    dropped: u64,
 }
 
 /// Receiver for committed diagnostic events. Implementations may be called
@@ -535,7 +523,6 @@ impl<T: DiagnosticSubscriber + ?Sized> DiagnosticSubscriber for Arc<T> {
 }
 
 struct DiagnosticBusState {
-    next_sequence: u64,
     next_subscriber: u64,
     counts: DiagnosticCounts,
     subscribers: BTreeMap<u64, Arc<dyn DiagnosticSubscriber>>,
@@ -562,7 +549,6 @@ impl DiagnosticBus {
         Self {
             inner: Arc::new(DiagnosticBusInner {
                 state: Mutex::new(DiagnosticBusState {
-                    next_sequence: 1,
                     next_subscriber: 1,
                     counts: DiagnosticCounts::default(),
                     subscribers: BTreeMap::new(),
@@ -582,11 +568,10 @@ impl DiagnosticBus {
                 .state
                 .lock()
                 .expect("diagnostic bus mutex should not be poisoned");
-            let sequence = state.next_sequence;
-            state.next_sequence = sequence
+            let sequence = state.counts.next_sequence;
+            state.counts.next_sequence = sequence
                 .checked_add(1)
                 .expect("diagnostic sequence numbers exhausted");
-            state.counts.latest_sequence = Some(sequence);
             let count = match diagnostic.severity() {
                 Severity::Info => &mut state.counts.info,
                 Severity::Warning => &mut state.counts.warnings,
@@ -671,38 +656,6 @@ impl Drop for DiagnosticSubscriptionInner {
     }
 }
 
-/// Bounded, oldest-first diagnostic history used by [`Assembler::default`].
-#[derive(Debug)]
-pub struct DiagnosticBuffer {
-    history: Mutex<DiagnosticHistory>,
-}
-
-impl DiagnosticBuffer {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            history: Mutex::new(DiagnosticHistory::new(capacity)),
-        }
-    }
-
-    /// Atomically reads and removes all retained diagnostics and resets the
-    /// dropped-entry count.
-    pub fn read(&self) -> DiagnosticSnapshot {
-        self.history
-            .lock()
-            .expect("diagnostic history mutex should not be poisoned")
-            .read()
-    }
-}
-
-impl DiagnosticSubscriber for DiagnosticBuffer {
-    fn receive(&self, event: DiagnosticEvent) {
-        self.history
-            .lock()
-            .expect("diagnostic history mutex should not be poisoned")
-            .push(event);
-    }
-}
-
 struct DiagnosticCallback<F>(F);
 
 impl<F> DiagnosticSubscriber for DiagnosticCallback<F>
@@ -711,35 +664,6 @@ where
 {
     fn receive(&self, event: DiagnosticEvent) {
         (self.0)(event);
-    }
-}
-
-impl DiagnosticHistory {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            entries: VecDeque::with_capacity(capacity),
-            dropped: 0,
-        }
-    }
-
-    fn push(&mut self, event: DiagnosticEvent) {
-        if self.capacity == 0 {
-            self.dropped = self.dropped.saturating_add(1);
-            return;
-        }
-        if self.entries.len() == self.capacity {
-            self.entries.pop_front();
-            self.dropped = self.dropped.saturating_add(1);
-        }
-        self.entries.push_back(event);
-    }
-
-    fn read(&mut self) -> DiagnosticSnapshot {
-        DiagnosticSnapshot {
-            entries: self.entries.drain(..).collect(),
-            dropped: std::mem::take(&mut self.dropped),
-        }
     }
 }
 
@@ -1175,17 +1099,18 @@ pub struct Assembler {
     host: Arc<dyn Host>,
     next_compilation_invocation: Arc<AtomicU64>,
     reasoning: ReasoningSession,
-    diagnostic_subscriber: Arc<dyn DiagnosticSubscriber>,
-    diagnostic_buffer: Option<Arc<DiagnosticBuffer>>,
-    diagnostic_subscription: DiagnosticSubscription,
+    diagnostic_attachment: Option<DiagnosticAttachment>,
+}
+
+#[derive(Clone)]
+struct DiagnosticAttachment {
+    subscriber: Arc<dyn DiagnosticSubscriber>,
+    _subscription: DiagnosticSubscription,
 }
 
 impl Default for Assembler {
     fn default() -> Self {
-        let diagnostic_buffer = Arc::new(DiagnosticBuffer::new(DEFAULT_DIAGNOSTIC_CAPACITY));
-        let diagnostic_subscriber: Arc<dyn DiagnosticSubscriber> = diagnostic_buffer.clone();
         let diagnostics = DiagnosticBus::new();
-        let diagnostic_subscription = diagnostics.subscribe_shared(diagnostic_subscriber.clone());
         let host: Arc<dyn Host> = Arc::new(SystemHost);
         let (reflection_environment, replaced_glam) =
             authoritative_reflection_environment(Value::empty_record(), "assembler")
@@ -1204,9 +1129,7 @@ impl Default for Assembler {
             host,
             next_compilation_invocation: Arc::new(AtomicU64::new(1)),
             reasoning,
-            diagnostic_subscriber,
-            diagnostic_buffer: Some(diagnostic_buffer),
-            diagnostic_subscription,
+            diagnostic_attachment: None,
         }
     }
 }
@@ -1297,8 +1220,8 @@ impl Assembler {
         self
     }
 
-    /// Replaces this facade's default diagnostic subscription without
-    /// rebuilding or otherwise disturbing its reasoning session.
+    /// Installs or replaces this facade's retained diagnostic subscription
+    /// without rebuilding or otherwise disturbing its reasoning session.
     pub fn with_diagnostic_subscriber(
         mut self,
         subscriber: impl DiagnosticSubscriber + 'static,
@@ -1308,9 +1231,10 @@ impl Assembler {
             .reasoning
             .diagnostics()
             .subscribe_shared(subscriber.clone());
-        self.diagnostic_subscriber = subscriber;
-        self.diagnostic_buffer = None;
-        self.diagnostic_subscription = subscription;
+        self.diagnostic_attachment = Some(DiagnosticAttachment {
+            subscriber,
+            _subscription: subscription,
+        });
         self
     }
 
@@ -1344,19 +1268,6 @@ impl Assembler {
         Ok(self)
     }
 
-    pub fn with_diagnostic_buffer(mut self, capacity: usize) -> Self {
-        let buffer = Arc::new(DiagnosticBuffer::new(capacity));
-        let subscriber: Arc<dyn DiagnosticSubscriber> = buffer.clone();
-        let subscription = self
-            .reasoning
-            .diagnostics()
-            .subscribe_shared(subscriber.clone());
-        self.diagnostic_subscriber = subscriber;
-        self.diagnostic_buffer = Some(buffer);
-        self.diagnostic_subscription = subscription;
-        self
-    }
-
     pub fn with_diagnostic_callback<F>(self, callback: F) -> Self
     where
         F: Fn(DiagnosticEvent) + Send + Sync + 'static,
@@ -1383,21 +1294,22 @@ impl Assembler {
         }
     }
 
-    /// Atomically reads and consumes retained diagnostics when this facade's
-    /// default subscription is a diagnostic buffer.
-    pub fn read_diagnostics(&self) -> Option<DiagnosticSnapshot> {
-        self.diagnostic_buffer.as_ref().map(|buffer| buffer.read())
-    }
-
     pub(crate) fn record_diagnostic(&self, diagnostic: Diagnostic) {
         self.reasoning.diagnostics().publish(diagnostic);
     }
 
     fn replace_reasoning(&mut self, environment: Value, runtime: EvaluationRuntime) {
         let diagnostics = DiagnosticBus::new();
-        let subscription = diagnostics.subscribe_shared(self.diagnostic_subscriber.clone());
+        let diagnostic_attachment = self.diagnostic_attachment.as_ref().map(|attachment| {
+            let subscriber = attachment.subscriber.clone();
+            let subscription = diagnostics.subscribe_shared(subscriber.clone());
+            DiagnosticAttachment {
+                subscriber,
+                _subscription: subscription,
+            }
+        });
         self.reasoning = ReasoningSession::new(environment, diagnostics, runtime);
-        self.diagnostic_subscription = subscription;
+        self.diagnostic_attachment = diagnostic_attachment;
     }
 
     fn next_compilation_invocation(&self) -> CompilationInvocationId {
@@ -2020,24 +1932,30 @@ mod tests {
             b"ready".as_slice()
         );
         assert_eq!(assembler.diagnostic_bus().counts().total(), 0);
-        assert!(
-            assembler
-                .read_diagnostics()
-                .expect("default diagnostic buffer should remain available")
-                .entries()
-                .is_empty()
-        );
     }
 
     #[test]
     fn diagnostic_bus_sequences_counts_and_delivers_only_to_current_subscribers() {
         let bus = DiagnosticBus::new();
-        let early = Arc::new(DiagnosticBuffer::new(1));
-        let early_subscription = bus.subscribe(early.clone());
+        assert_eq!(bus.counts().latest_sequence(), 0);
+        let early = Arc::new(Mutex::new(Vec::new()));
+        let early_events = early.clone();
+        let early_subscription = bus.subscribe(DiagnosticCallback(move |event| {
+            early_events
+                .lock()
+                .expect("early diagnostic collector should not be poisoned")
+                .push(event);
+        }));
 
         let first = bus.publish(Diagnostic::new(Severity::Info, "first"));
-        let late = Arc::new(DiagnosticBuffer::new(2));
-        let _late_subscription = bus.subscribe(late.clone());
+        let late = Arc::new(Mutex::new(Vec::new()));
+        let late_events = late.clone();
+        let _late_subscription = bus.subscribe(DiagnosticCallback(move |event| {
+            late_events
+                .lock()
+                .expect("late diagnostic collector should not be poisoned")
+                .push(event);
+        }));
         let second = bus.publish(Diagnostic::new(Severity::Warning, "second"));
         drop(early_subscription);
         let third = bus.publish(Diagnostic::new(Severity::Error, "third"));
@@ -2048,20 +1966,24 @@ mod tests {
         assert_eq!(
             bus.counts(),
             DiagnosticCounts {
-                latest_sequence: Some(3),
+                next_sequence: 4,
                 info: 1,
                 warnings: 1,
                 errors: 1,
             }
         );
 
-        let early = early.read();
-        assert_eq!(early.dropped(), 1);
-        assert_eq!(early.entries()[0].message(), "second");
-        let late = late.read();
+        let early = early
+            .lock()
+            .expect("early diagnostic collector should not be poisoned");
+        assert_eq!(early.len(), 2);
+        assert_eq!(early[0].message(), "first");
+        assert_eq!(early[1].message(), "second");
+        let late = late
+            .lock()
+            .expect("late diagnostic collector should not be poisoned");
         assert_eq!(
-            late.entries()
-                .iter()
+            late.iter()
                 .map(|event| (event.sequence(), event.message()))
                 .collect::<Vec<_>>(),
             [(2, "second"), (3, "third")]
@@ -2069,40 +1991,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_history_is_bounded_and_counts_dropped_entries() {
-        let assembler = Assembler::default().with_diagnostic_buffer(2);
-        for line in 1..=3 {
-            assembler.record_diagnostic(
-                Diagnostic::new(Severity::Warning, format!("warning {line}"))
-                    .with_source_location("test.g", line),
-            );
-        }
-
-        let snapshot = assembler
-            .read_diagnostics()
-            .expect("diagnostic buffer should support reads");
-        assert_eq!(snapshot.dropped(), 1);
-        assert_eq!(
-            snapshot
-                .entries()
-                .iter()
-                .filter_map(|event| event.line())
-                .collect::<Vec<_>>(),
-            [2, 3]
-        );
-        assert_eq!(
-            assembler
-                .read_diagnostics()
-                .expect("diagnostic buffer should support reads"),
-            DiagnosticSnapshot {
-                entries: Vec::new(),
-                dropped: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn diagnostic_callback_replaces_the_default_buffer() {
+    fn diagnostic_callback_subscribes_to_the_existing_session() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let callback_values = received.clone();
         let assembler = Assembler::default().with_diagnostic_callback(move |diagnostic| {
@@ -2114,7 +2003,6 @@ mod tests {
 
         assembler.record_diagnostic(Diagnostic::new(Severity::Info, "hello"));
 
-        assert!(assembler.read_diagnostics().is_none());
         assert_eq!(
             received
                 .lock()

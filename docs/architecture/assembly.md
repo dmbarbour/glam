@@ -49,8 +49,9 @@ forwarding, and indexing policy. Changing an assembler's default subscription
 does not rebuild its reasoning session.
 
 `Assembler` does not render diagnostics. Before compiling configuration, the
-CLI subscribes a bounded queue to the assembler bus so bootstrap messages are
-observable by `conf.log`. Queue overflow or consumption does not change the
+CLI subscribes its own unbounded queue to the assembler bus so bootstrap
+messages are observable by `conf.log`. The embedding facade itself is silent
+by default and owns no retention policy. Queue consumption does not change the
 bus's authoritative counters.
 
 If configured, `conf.log` runs in its own evaluation session and owns a

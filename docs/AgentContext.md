@@ -64,8 +64,9 @@ notes instead of appending history; put subsystem details in
   evaluating the message. A session bus publishes the original value plus
   hidden assembler provenance only after its transaction commits.
 - The bus owns sequence numbers and coherent severity counts, never retention.
-  Buffers, callbacks, `conf.log` input, and terminal rendering are independent
-  subscriptions. Assembler and logger sessions have separate buses.
+  External buffers, callbacks, `conf.log` input, and terminal rendering are
+  independent subscriptions. `Assembler` drops events by default. Assembler
+  and logger sessions have separate buses.
 - An observer explicitly enriches that envelope with authoritative
   `msg.severity` and `msg.origin`; enrichment returns an independent object
   view. The assembler library neither renders nor prints diagnostics.

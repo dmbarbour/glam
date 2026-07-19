@@ -16,11 +16,11 @@ mod number;
 pub mod reflection;
 
 pub use api::{
-    Assembler, BuiltModule, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticBuffer,
-    DiagnosticBus, DiagnosticCounts, DiagnosticEvent, DiagnosticSnapshot, DiagnosticSubscriber,
-    DiagnosticSubscription, Error, EvaluationRuntime, Host, HostError, ModuleBuilder, ModuleInput,
-    NetBind, NetBuilder, NetCopy, NetPort, ReasoningFailure, ReasoningReport, ReasoningStatus,
-    ReasoningTask, ReasoningTaskState, SystemHost, Value, ValueKind,
+    Assembler, BuiltModule, Diagnostic, DiagnosticBus, DiagnosticCounts, DiagnosticEvent,
+    DiagnosticSubscriber, DiagnosticSubscription, Error, EvaluationRuntime, Host, HostError,
+    ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort, ReasoningFailure,
+    ReasoningReport, ReasoningStatus, ReasoningTask, ReasoningTaskState, SystemHost, Value,
+    ValueKind,
 };
 pub use core::Builtin;
 pub use diagnostic::Severity;
