@@ -12,8 +12,8 @@ use crate::evaluation::{
 use crate::number::Number;
 
 use super::{
-    EffectRequestSpec, RequestContext, RequestResult, TaskError, TaskHost, TaskSpecialization,
-    evaluate, get_value_path,
+    EffectRequestSpec, RequestContext, RequestResult, TaskEnvironment, TaskError, TaskHost,
+    TaskSpecialization, evaluate, get_value_path,
 };
 
 /// Requests shared by every full reflection task.
@@ -191,7 +191,7 @@ where
                 .map_err(|_| TaskError::new("`.env` received the wrong number of arguments"))?;
             let path = eval::eval_key_path_list(context.eval_context(), path.as_core())
                 .map_err(|error| TaskError::new(error.to_string()))?;
-            let environment = context.eval_context().reflection_environment();
+            let environment = context.host().reflection_environment().into_core();
             let value = get_value_path(context.eval_context(), &environment, &path)?;
             Ok(RequestResult::Return(Value::from_core(value)))
         }

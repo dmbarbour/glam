@@ -8,9 +8,12 @@ interaction nets, and background workers. Detailed hazards live in
 ## Context and Session
 
 Every production evaluator entry receives an `EvalContext` borrowed from an
-`EvaluationSession`. An `Assembler` and its clones share one session. The
-session owns task records, the reflection environment, lazy single-flight
-claims, wait lookup, and its connection to a shared `EvaluationExecutor`.
+`EvaluationSession`. An `Assembler` and its clones share one internal
+`ReasoningSession`, which owns that evaluation session and the assembler's
+reflection host. `EvaluationSession` owns task records, lazy single-flight
+claims, wait lookup, the reflection launcher, and its connection to a shared
+`EvaluationExecutor`. The immutable reflection environment belongs to the
+active task host rather than the scheduler.
 
 Lazy values retain computation and a stable identity, not a captured evaluator
 session. The observing `EvalContext` supplies host and scheduling behavior when

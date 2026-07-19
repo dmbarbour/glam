@@ -46,7 +46,7 @@ point. `cut` alone does not: unobservant failure is terminal.
 
 ## Reusable Reflection Requests
 
-- `.env Path` reads immutable session context.
+- `.env Path` reads the active task host's immutable reasoning environment.
 - `.log Severity Message` emits through the session's reflection services and
   participates in the current transaction.
 - `.dict_items Dict` returns ordered `{key,value}` records.
@@ -62,9 +62,11 @@ point. `cut` alone does not: unobservant failure is terminal.
   request that only its own commit can submit.
 
 The immutable environment conventionally contains assembler-owned `glam`
-identity plus client context. `main` adds process arguments, reflection-only
-arguments, and binary-preserving OS environment data. This is data installed by
-the client, not command-line policy embedded in the reflection API.
+identity plus client context. `glam.reasoning.role` distinguishes assembler,
+logger, and future service sessions. `main` adds process arguments,
+reflection-only arguments, and binary-preserving OS environment data. This is
+data installed by the client, not command-line policy embedded in the
+reflection API.
 
 ## Session Scheduling
 

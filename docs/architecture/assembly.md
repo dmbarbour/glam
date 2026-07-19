@@ -5,9 +5,11 @@ map, not the eventual assembler contract.
 
 ## Library Boundary
 
-`api::Assembler` is the primary embedding facade. It owns a host, diagnostic
-sink, reflection environment, and evaluation runtime. Clients choose module
-paths and inputs; the library does not assign special meaning to
+`api::Assembler` is the primary embedding facade. It owns a source host and one
+internal `ReasoningSession`. That session groups the immutable reflection
+environment, current diagnostic destination, assembler reflection host/heap,
+task scheduler, and its attachment to the shared evaluation runtime. Clients
+choose module paths and inputs; the library does not assign special meaning to
 `configuration` or `assembly`.
 
 `main` is one client. It chooses those two roots, supplies CLI-derived values,

@@ -463,7 +463,7 @@ fn start_logger(
     let host = Arc::new(LoggerTaskHost::new(
         input.clone(),
         output,
-        assembler.reflection_environment(),
+        assembler.reflection_environment_for_role("logger"),
     ));
     let effect_assembler = assembler.clone();
     let evaluation_runtime = assembler.evaluation_runtime();
@@ -1468,7 +1468,7 @@ mod tests {
         let host = LoggerTaskHost::new(
             input.clone(),
             output.clone(),
-            Assembler::default().reflection_environment(),
+            Assembler::default().reflection_environment_for_role("logger"),
         );
 
         <LoggerTaskHost as ReflectionServices>::emit_diagnostic(

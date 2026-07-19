@@ -100,6 +100,12 @@ fn assembler_owns_an_authoritative_reflection_environment() {
     );
     assert_eq!(
         assembler
+            .get(&environment, "glam.reasoning.role")
+            .expect("assembler should identify its reasoning role"),
+        Value::atom_from_text("assembler")
+    );
+    assert_eq!(
+        assembler
             .binary_at(&environment, "client.name")
             .expect("client environment fields should remain visible"),
         b"embedded".as_slice()
@@ -115,6 +121,25 @@ fn assembler_owns_an_authoritative_reflection_environment() {
         Assembler::default()
             .with_reflection_environment(Value::integer(1))
             .is_err()
+    );
+}
+
+#[test]
+fn service_reflection_environments_have_independent_roles() {
+    let assembler = Assembler::default();
+    let logger = assembler.reflection_environment_for_role("logger");
+
+    assert_eq!(
+        assembler
+            .get(&logger, "glam.reasoning.role")
+            .expect("service environment should contain its role"),
+        Value::atom_from_text("logger")
+    );
+    assert_eq!(
+        assembler
+            .get(&assembler.reflection_environment(), "glam.reasoning.role")
+            .expect("deriving a service environment must not change the assembler role"),
+        Value::atom_from_text("assembler")
     );
 }
 

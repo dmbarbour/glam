@@ -218,7 +218,7 @@ pub enum CommitResult {
     Closed,
 }
 
-/// Supplies the immutable environment copied into a task's evaluation session.
+/// Supplies the immutable environment owned by a task's reasoning host.
 /// Reflection code can read it through `.env`, but cannot replace it.
 pub trait TaskEnvironment: Send + Sync {
     fn reflection_environment(&self) -> PublicValue {
@@ -363,10 +363,9 @@ impl<S: TaskSpecialization> EffectRun<S> {
             reflection_children,
             result_policy,
         } = self;
-        let environment = host.reflection_environment().into_core();
         let session = match runtime {
-            Some(runtime) => EvaluationSession::shared(environment, runtime.executor()),
-            None => Arc::new(EvaluationSession::with_environment(environment)),
+            Some(runtime) => EvaluationSession::shared(runtime.executor()),
+            None => Arc::new(EvaluationSession::new()),
         };
         let drain_children = reflection_children.is_some();
         if let Some(reflection_host) = reflection_children {
@@ -561,13 +560,7 @@ struct EffectTask<S: TaskSpecialization> {
 impl<S: TaskSpecialization> EffectTask<S> {
     #[cfg(test)]
     fn new(effect: Value, specialization: S, host: Arc<S::Host>) -> Result<Self, TaskError> {
-        let environment = host.reflection_environment().into_core();
-        Self::new_in_context(
-            effect,
-            specialization,
-            host,
-            EvalContext::standalone_with_environment(environment),
-        )
+        Self::new_in_context(effect, specialization, host, EvalContext::standalone())
     }
 
     fn new_in_context(
@@ -3228,8 +3221,7 @@ mod tests {
         effect: &PublicValue,
         host: Arc<TestHost>,
     ) -> (EvalContext, EvaluationTaskHandle) {
-        let context =
-            EvalContext::standalone_with_environment(host.reflection_environment().into_core());
+        let context = EvalContext::standalone();
         let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
         context
             .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))

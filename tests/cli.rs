@@ -519,6 +519,69 @@ fn configured_logger_can_read_the_process_reflection_environment() {
 }
 
 #[test]
+fn configured_logger_observes_its_own_reasoning_role() {
+    let dir = unique_temp_dir("glam-conf-log-role");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    let assembly = dir.join("assembly.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = .env ['glam,'reasoning,'role] >>= (\\role -> (role == 'logger) =>> .write_stderr (\"LOGGER ROLE\" ++ [10]))\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+    fs::write(&assembly, "language g0\nasm.result = \"\"\n")
+        .unwrap_or_else(|err| panic!("failed to write {}: {err}", assembly.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--file")
+        .arg(&assembly)
+        .output()
+        .expect("failed to run glam");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("LOGGER ROLE\n"),
+        "configured logger did not observe its logger role:\n{stderr}"
+    );
+}
+
+#[test]
+fn assembler_and_logger_reasoning_heaps_are_isolated() {
+    let dir = unique_temp_dir("glam-conf-log-heap-isolation");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    let assembly = dir.join("assembly.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = .read_log >>= (\\_message -> .get ['heap,'marker] >>= (\\marker -> (marker == {}) =>> .write_stderr (\"ISOLATED\" ++ [10])))\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+    fs::write(
+        &assembly,
+        "language g0\nrefl.mark = (.set ['heap,'marker] \"assembler\") =>> .log 'info { msg:{ text:\"ready\" } }\nasm.result = \"ok\"\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", assembly.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--file")
+        .arg(&assembly)
+        .output()
+        .expect("failed to run glam");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ISOLATED\n"),
+        "configured logger observed assembler heap state:\n{stderr}"
+    );
+}
+
+#[test]
 fn reflection_arguments_are_ordered_and_do_not_enter_assembly_arguments() {
     let dir = unique_temp_dir("glam-reflection-args");
     fs::create_dir_all(&dir)

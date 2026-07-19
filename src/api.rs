@@ -639,22 +639,6 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
     }
 }
 
-fn evaluation_session(
-    reflection_environment: Value,
-    diagnostic_sink: Arc<dyn DiagnosticSink>,
-    executor: &Arc<EvaluationExecutor>,
-) -> Arc<EvaluationSession> {
-    let session = EvaluationSession::shared(reflection_environment.as_core().clone(), executor);
-    let host = Arc::new(AssemblerReflectionHost::new(
-        reflection_environment,
-        diagnostic_sink,
-    ));
-    session
-        .install_reflection_launcher(task_launcher(ReflectionEffects, host))
-        .expect("fresh evaluation session must accept its reflection launcher");
-    session
-}
-
 /// Opaque background execution resources shared by related evaluation
 /// sessions, including the assembler, logger, and future IDE services.
 #[derive(Clone)]
@@ -669,6 +653,48 @@ impl EvaluationRuntime {
 
     pub(crate) fn executor(&self) -> &Arc<EvaluationExecutor> {
         &self.executor
+    }
+}
+
+#[derive(Clone)]
+struct ReasoningSession {
+    host: Arc<AssemblerReflectionHost>,
+    runtime: EvaluationRuntime,
+    evaluation: Arc<EvaluationSession>,
+}
+
+impl ReasoningSession {
+    fn new(
+        environment: Value,
+        diagnostic_sink: Arc<dyn DiagnosticSink>,
+        runtime: EvaluationRuntime,
+    ) -> Self {
+        let host = Arc::new(AssemblerReflectionHost::new(environment, diagnostic_sink));
+        let evaluation = EvaluationSession::shared(runtime.executor());
+        evaluation
+            .install_reflection_launcher(task_launcher(ReflectionEffects, host.clone()))
+            .expect("fresh evaluation session must accept its reflection launcher");
+        Self {
+            host,
+            runtime,
+            evaluation,
+        }
+    }
+
+    fn environment(&self) -> Value {
+        self.host.reflection_environment()
+    }
+
+    fn diagnostic_sink(&self) -> Arc<dyn DiagnosticSink> {
+        self.host.diagnostic_sink.clone()
+    }
+
+    fn runtime(&self) -> EvaluationRuntime {
+        self.runtime.clone()
+    }
+
+    fn eval_context(&self) -> EvalContext {
+        EvalContext::new(self.evaluation.clone())
     }
 }
 
@@ -900,12 +926,24 @@ pub enum ReasoningTaskState {
     Blocked,
 }
 
-fn authoritative_reflection_environment(environment: Value) -> Result<(Value, bool), Error> {
+fn authoritative_reflection_environment(
+    environment: Value,
+    role: &str,
+) -> Result<(Value, bool), Error> {
     let CoreValue::Dict(root) = environment.into_core() else {
         return Err(Error::new("reflection environment must be a dictionary"));
     };
     let glam_key = Key::atom_from_text("glam");
     let replaced_glam = root.get(&glam_key).is_some();
+    Ok((
+        Value(CoreValue::Dict(
+            root.insert(glam_key, authoritative_glam_environment(role)),
+        )),
+        replaced_glam,
+    ))
+}
+
+fn authoritative_glam_environment(role: &str) -> CoreValue {
     let implementation = Dict::new_sync()
         .insert(
             Key::atom_from_text("name"),
@@ -923,23 +961,32 @@ fn authoritative_reflection_environment(environment: Value) -> Result<(Value, bo
         .insert(
             Key::atom_from_text("implementation"),
             CoreValue::Dict(implementation),
+        )
+        .insert(
+            Key::atom_from_text("reasoning"),
+            CoreValue::Dict(Dict::new_sync().insert(
+                Key::atom_from_text("role"),
+                Value::atom_from_text(role).into_core(),
+            )),
         );
-    Ok((
-        Value(CoreValue::Dict(
-            root.insert(glam_key, CoreValue::Dict(glam)),
-        )),
-        replaced_glam,
-    ))
+    CoreValue::Dict(glam)
+}
+
+fn reflection_environment_for_role(environment: &Value, role: &str) -> Value {
+    let CoreValue::Dict(root) = environment.as_core() else {
+        unreachable!("authoritative reflection environment must be a dictionary")
+    };
+    Value(CoreValue::Dict(root.insert(
+        Key::atom_from_text("glam"),
+        authoritative_glam_environment(role),
+    )))
 }
 
 #[derive(Clone)]
 pub struct Assembler {
     host: Arc<dyn Host>,
-    diagnostic_sink: Arc<dyn DiagnosticSink>,
-    reflection_environment: Value,
     next_compilation_invocation: Arc<AtomicU64>,
-    evaluation_runtime: EvaluationRuntime,
-    evaluation_session: Arc<EvaluationSession>,
+    reasoning: ReasoningSession,
 }
 
 impl Default for Assembler {
@@ -948,7 +995,7 @@ impl Default for Assembler {
             Arc::new(DiagnosticBuffer::new(DEFAULT_DIAGNOSTIC_CAPACITY));
         let host: Arc<dyn Host> = Arc::new(SystemHost);
         let (reflection_environment, replaced_glam) =
-            authoritative_reflection_environment(Value::empty_record())
+            authoritative_reflection_environment(Value::empty_record(), "assembler")
                 .expect("the default reflection environment must be a dictionary");
         debug_assert!(
             !replaced_glam,
@@ -958,18 +1005,12 @@ impl Default for Assembler {
             executor: EvaluationExecutor::new(0)
                 .expect("zero-worker evaluation executor must not start threads"),
         };
-        let evaluation_session = evaluation_session(
-            reflection_environment.clone(),
-            diagnostic_sink.clone(),
-            evaluation_runtime.executor(),
-        );
+        let reasoning =
+            ReasoningSession::new(reflection_environment, diagnostic_sink, evaluation_runtime);
         Self {
             host,
-            diagnostic_sink,
-            reflection_environment,
             next_compilation_invocation: Arc::new(AtomicU64::new(1)),
-            evaluation_runtime,
-            evaluation_session,
+            reasoning,
         }
     }
 }
@@ -989,17 +1030,24 @@ impl Assembler {
     /// Returns the read-only environment shared by reflection tasks in this
     /// assembler's evaluation session.
     pub fn reflection_environment(&self) -> Value {
-        self.reflection_environment.clone()
+        self.reasoning.environment()
+    }
+
+    /// Returns this session environment with another authoritative reasoning
+    /// role. Service sessions retain the client-provided environment while
+    /// identifying themselves independently from the assembler session.
+    pub fn reflection_environment_for_role(&self, role: impl AsRef<str>) -> Value {
+        reflection_environment_for_role(&self.reasoning.environment(), role.as_ref())
     }
 
     /// Returns the shared execution resources used by this assembler and any
     /// service evaluation sessions explicitly attached to it.
     pub fn evaluation_runtime(&self) -> EvaluationRuntime {
-        self.evaluation_runtime.clone()
+        self.reasoning.runtime()
     }
 
     pub(crate) fn eval_context(&self) -> EvalContext {
-        EvalContext::new(self.evaluation_session.clone())
+        self.reasoning.eval_context()
     }
 
     /// Runs scheduled reflection reasoning without imposing a step or time
@@ -1052,12 +1100,11 @@ impl Assembler {
     /// session. Scheduled reasoning from the prior session is not transferred.
     pub fn with_diagnostic_sink(mut self, sink: impl DiagnosticSink + 'static) -> Self {
         let diagnostic_sink: Arc<dyn DiagnosticSink> = Arc::new(sink);
-        self.evaluation_session = evaluation_session(
-            self.reflection_environment.clone(),
-            diagnostic_sink.clone(),
-            self.evaluation_runtime.executor(),
+        self.reasoning = ReasoningSession::new(
+            self.reasoning.environment(),
+            diagnostic_sink,
+            self.reasoning.runtime(),
         );
-        self.diagnostic_sink = diagnostic_sink;
         self
     }
 
@@ -1067,18 +1114,18 @@ impl Assembler {
     /// `glam` value is discarded and produces a warning diagnostic.
     pub fn with_reflection_environment(mut self, environment: Value) -> Result<Self, Error> {
         let (reflection_environment, replaced_glam) =
-            authoritative_reflection_environment(environment)?;
-        self.reflection_environment = reflection_environment;
+            authoritative_reflection_environment(environment, "assembler")?;
+        let diagnostic_sink = self.reasoning.diagnostic_sink();
         if replaced_glam {
-            self.diagnostic_sink.emit(Diagnostic::new(
+            diagnostic_sink.emit(Diagnostic::new(
                 Severity::Warning,
                 "reflection environment namespace `glam` is reserved; supplied value was ignored",
             ));
         }
-        self.evaluation_session = evaluation_session(
-            self.reflection_environment.clone(),
-            self.diagnostic_sink.clone(),
-            self.evaluation_runtime.executor(),
+        self.reasoning = ReasoningSession::new(
+            reflection_environment,
+            diagnostic_sink,
+            self.reasoning.runtime(),
         );
         Ok(self)
     }
@@ -1087,14 +1134,14 @@ impl Assembler {
     /// session. The count applies to this assembler and attached logger/IDE
     /// sessions together; zero disables background workers and drops sparks.
     pub fn with_worker_threads(mut self, worker_threads: usize) -> Result<Self, Error> {
-        self.evaluation_runtime = EvaluationRuntime {
+        let evaluation_runtime = EvaluationRuntime {
             executor: EvaluationExecutor::new(worker_threads)
                 .map_err(|error| Error::new(error.as_ref()))?,
         };
-        self.evaluation_session = evaluation_session(
-            self.reflection_environment.clone(),
-            self.diagnostic_sink.clone(),
-            self.evaluation_runtime.executor(),
+        self.reasoning = ReasoningSession::new(
+            self.reasoning.environment(),
+            self.reasoning.diagnostic_sink(),
+            evaluation_runtime,
         );
         Ok(self)
     }
@@ -1132,11 +1179,11 @@ impl Assembler {
     /// Atomically reads and consumes retained diagnostics when supported by
     /// the configured sink.
     pub fn read_diagnostics(&self) -> Option<DiagnosticSnapshot> {
-        self.diagnostic_sink.read()
+        self.reasoning.diagnostic_sink().read()
     }
 
     pub(crate) fn record_diagnostic(&self, diagnostic: Diagnostic) {
-        self.diagnostic_sink.emit(diagnostic);
+        self.reasoning.diagnostic_sink().emit(diagnostic);
     }
 
     fn next_compilation_invocation(&self) -> CompilationInvocationId {
@@ -1633,6 +1680,27 @@ mod tests {
             !assembler
                 .eval_context()
                 .shares_session_with(&Assembler::new().eval_context())
+        );
+    }
+
+    #[test]
+    fn replacing_the_environment_starts_a_fresh_reasoning_session() {
+        let assembler = Assembler::new();
+        let original = assembler.eval_context();
+        let replaced = assembler
+            .with_reflection_environment(Value::record([(
+                "client",
+                Value::text("new environment"),
+            )]))
+            .expect("replacement environment should be valid");
+
+        assert!(!original.shares_session_with(&replaced.eval_context()));
+        assert_eq!(
+            replaced
+                .get(&replaced.reflection_environment(), "client")
+                .expect("replacement environment should be installed")
+                .as_binary(),
+            Some(b"new environment".as_slice())
         );
     }
 

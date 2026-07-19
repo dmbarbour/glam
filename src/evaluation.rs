@@ -11,7 +11,7 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
-use crate::core::{Dict, Value};
+use crate::core::Value;
 
 mod executor;
 pub(crate) use executor::EvaluationExecutor;
@@ -361,7 +361,6 @@ struct EvaluationTasks {
 
 pub(crate) struct EvaluationSession {
     id: u64,
-    reflection_environment: Value,
     tasks: Mutex<EvaluationTasks>,
     task_changed: Condvar,
     reflection_launcher: OnceLock<Arc<dyn ReflectionTaskLauncher>>,
@@ -372,7 +371,7 @@ pub(crate) struct EvaluationSession {
 
 impl Default for EvaluationSession {
     fn default() -> Self {
-        Self::with_environment_and_executor(Value::Dict(Dict::new_sync()), Weak::new())
+        Self::with_executor(Weak::new())
     }
 }
 
@@ -389,17 +388,9 @@ impl EvaluationSession {
         Self::default()
     }
 
-    pub(crate) fn with_environment(reflection_environment: Value) -> Self {
-        Self::with_environment_and_executor(reflection_environment, Weak::new())
-    }
-
-    fn with_environment_and_executor(
-        reflection_environment: Value,
-        executor: Weak<EvaluationExecutor>,
-    ) -> Self {
+    fn with_executor(executor: Weak<EvaluationExecutor>) -> Self {
         Self {
             id: allocate_session_id(),
-            reflection_environment,
             tasks: Mutex::new(EvaluationTasks::default()),
             task_changed: Condvar::new(),
             reflection_launcher: OnceLock::new(),
@@ -409,20 +400,10 @@ impl EvaluationSession {
         }
     }
 
-    pub(crate) fn shared(
-        reflection_environment: Value,
-        executor: &Arc<EvaluationExecutor>,
-    ) -> Arc<Self> {
-        let session = Arc::new(Self::with_environment_and_executor(
-            reflection_environment,
-            Arc::downgrade(executor),
-        ));
+    pub(crate) fn shared(executor: &Arc<EvaluationExecutor>) -> Arc<Self> {
+        let session = Arc::new(Self::with_executor(Arc::downgrade(executor)));
         executor.register_session(&session);
         session
-    }
-
-    fn reflection_environment(&self) -> Value {
-        self.reflection_environment.clone()
     }
 
     pub(crate) fn install_reflection_launcher(
@@ -496,15 +477,6 @@ impl EvalContext {
     /// assembler, notably standalone reflection tasks and focused tests.
     pub(crate) fn standalone() -> Self {
         Self::new(Arc::new(EvaluationSession::new()))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn standalone_with_environment(environment: Value) -> Self {
-        Self::new(Arc::new(EvaluationSession::with_environment(environment)))
-    }
-
-    pub(crate) fn reflection_environment(&self) -> Value {
-        self.session.reflection_environment()
     }
 
     pub(crate) fn spark(&self, value: Value) {
@@ -1744,7 +1716,7 @@ mod tests {
     #[test]
     fn zero_worker_executor_drops_sparks_without_forcing_them() {
         let executor = EvaluationExecutor::new(0).unwrap();
-        let session = EvaluationSession::shared(Value::Dict(Dict::new_sync()), &executor);
+        let session = EvaluationSession::shared(&executor);
         let context = EvalContext::new(session);
         let lazy = crate::core::LazyValue::deferred("unforced spark", |_| {
             panic!("zero-worker spark must never be evaluated")
@@ -1758,7 +1730,7 @@ mod tests {
     #[test]
     fn workers_force_sparks_and_poll_ready_reflection_tasks() {
         let executor = EvaluationExecutor::new(1).unwrap();
-        let session = EvaluationSession::shared(Value::Dict(Dict::new_sync()), &executor);
+        let session = EvaluationSession::shared(&executor);
         let context = EvalContext::new(session);
         let (spark_sender, spark_receiver) = mpsc::channel();
         let lazy = crate::core::LazyValue::deferred("worker spark", move |_| {

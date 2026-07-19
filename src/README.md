@@ -17,7 +17,7 @@ not define future language semantics or collect subsystem invariants.
 | --- | --- |
 | `main.rs` | CLI policy, configuration/assembly roots, diagnostic logger host, and process output |
 | `local_files.rs` | CLI local-file consistency and optional SHA-256 manifest |
-| `lib.rs`, `api.rs` | Embedding facade: opaque values, hosts, modules, evaluation, diagnostics, extraction, and checked nets |
+| `lib.rs`, `api.rs` | Embedding facade: opaque values, source hosts, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
 | `compiler.rs` | Per-source capabilities, hidden provenance, loaders, namespace qualification, and diagnostic emission |
 | `g_syntax.rs` | Built-in `.g` front-end facade |
 | `g_syntax/parser/` | Layout, declaration, expression, and compound parsing |
