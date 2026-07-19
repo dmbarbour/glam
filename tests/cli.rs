@@ -438,7 +438,7 @@ fn configured_logger_can_join_a_restricted_reflection_task() {
 }
 
 #[test]
-fn configured_logger_can_read_the_os_environment() {
+fn configured_logger_can_read_the_process_reflection_environment() {
     let dir = unique_temp_dir("glam-conf-log-env");
     fs::create_dir_all(&dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
@@ -446,7 +446,7 @@ fn configured_logger_can_read_the_os_environment() {
     let invalid = dir.join("invalid.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .os_env \"GLAM_TEST_REFLECTION_ENV\" >>= (\\value -> .write_stderr (value ++ [10]))\n",
+        "language g0\nobject conf.env\nconf.log = .env ['process,'env,'GLAM_TEST_REFLECTION_ENV] >>= (\\value -> .write_stderr (value ++ [10]))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(&invalid, b"language g0\nvalue = \xff\n")

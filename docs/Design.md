@@ -315,6 +315,7 @@ The `Path` type for `.get/.set` is a list of keys, assuming state is a hierarchi
 
 Tentative, deferred:
 
+- `.env Path` - like `.get` but controlled externally
 - `.scope Mixin Op` - apply mixin to `api` in scope of `Op`
 - `.score Value` - for soft searches of `.alt` paths, preferences
 - `.commit` - drop `.alt` paths except this one, scoped by `.cut`

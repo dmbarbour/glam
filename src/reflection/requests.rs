@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::sync::LazyLock;
 
 use crate::api::{Diagnostic, Value};
@@ -13,15 +12,13 @@ use crate::number::Number;
 
 use super::{
     EffectRequestSpec, RequestContext, RequestResult, TaskError, TaskHost, TaskSpecialization,
-    evaluate,
+    evaluate, get_value_path,
 };
 
 /// Requests shared by every full reflection task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReflectionRequest {
-    GlamVersion,
-    OsEnvironment,
-    CommandLineArguments,
+    Environment,
     DictItems,
     Eval,
     Log,
@@ -75,39 +72,31 @@ impl ReflectionTransaction for ReflectionJournal {
     }
 }
 
-/// Immediate host operations used by reflection requests outside `.cut`.
-pub trait ReflectionHost<S: TaskSpecialization>: TaskHost<S> {
+/// Specialization-independent services used by reusable reflection requests.
+pub trait ReflectionServices: Send + Sync {
     fn emit_diagnostic(&self, diagnostic: Diagnostic);
+}
 
-    fn os_environment_variable(&self, _name: &str) -> Option<OsString> {
-        None
-    }
+/// A task host that combines specialization transactions with reflection
+/// services. The blanket implementation avoids repeating those services for
+/// every specialization hosted by the same concrete type.
+pub trait ReflectionHost<S: TaskSpecialization>: TaskHost<S> + ReflectionServices {}
 
-    fn command_line_arguments(&self) -> Vec<OsString> {
-        Vec::new()
-    }
+impl<S, H> ReflectionHost<S> for H
+where
+    S: TaskSpecialization,
+    H: TaskHost<S> + ReflectionServices + ?Sized,
+{
 }
 
 /// API constructors contributed by the reusable reflection request family.
 pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
     vec![
         EffectRequestSpec::new(
-            "glam_ver",
-            ["reflection_runtime", "v0", "request", "glam_ver"],
-            0,
-            ReflectionRequest::GlamVersion,
-        ),
-        EffectRequestSpec::new(
-            "os_env",
-            ["reflection_runtime", "v0", "request", "os_env"],
+            "env",
+            ["reflection_runtime", "v0", "request", "env"],
             1,
-            ReflectionRequest::OsEnvironment,
-        ),
-        EffectRequestSpec::new(
-            "cli_args",
-            ["reflection_runtime", "v0", "request", "cli_args"],
-            0,
-            ReflectionRequest::CommandLineArguments,
+            ReflectionRequest::Environment,
         ),
         EffectRequestSpec::new(
             "dict_items",
@@ -178,29 +167,15 @@ where
     S::Journal: ReflectionTransaction,
 {
     match request {
-        ReflectionRequest::GlamVersion => {
-            require_no_arguments(arguments, "glam_ver")?;
-            Ok(RequestResult::Return(Value::text(env!(
-                "CARGO_PKG_VERSION"
-            ))))
-        }
-        ReflectionRequest::OsEnvironment => {
-            let name = text_argument(context.eval_context(), arguments, "os_env")?;
-            Ok(context
-                .host()
-                .os_environment_variable(&name)
-                .map(|value| RequestResult::Return(os_value(value)))
-                .unwrap_or(RequestResult::Fail))
-        }
-        ReflectionRequest::CommandLineArguments => {
-            require_no_arguments(arguments, "cli_args")?;
-            Ok(RequestResult::Return(Value::list(
-                context
-                    .host()
-                    .command_line_arguments()
-                    .into_iter()
-                    .map(os_value),
-            )))
+        ReflectionRequest::Environment => {
+            let [path]: [Value; 1] = arguments
+                .try_into()
+                .map_err(|_| TaskError::new("`.env` received the wrong number of arguments"))?;
+            let path = eval::eval_key_path_list(context.eval_context(), path.as_core())
+                .map_err(|error| TaskError::new(error.to_string()))?;
+            let environment = context.eval_context().reflection_environment();
+            let value = get_value_path(context.eval_context(), &environment, &path)?;
+            Ok(RequestResult::Return(Value::from_core(value)))
         }
         ReflectionRequest::DictItems => {
             let [dict]: [Value; 1] = arguments.try_into().map_err(|_| {
@@ -410,39 +385,6 @@ fn tagged_result(tag: &Key, value: Value) -> Value {
     Value::from_core(CoreValue::Dict(
         Dict::new_sync().insert(tag.clone(), value.into_core()),
     ))
-}
-
-fn require_no_arguments(arguments: Vec<Value>, request: &str) -> Result<(), TaskError> {
-    if arguments.is_empty() {
-        Ok(())
-    } else {
-        Err(TaskError::new(format!(
-            "`.{request}` received the wrong number of arguments"
-        )))
-    }
-}
-
-fn text_argument(
-    context: &EvalContext,
-    arguments: Vec<Value>,
-    request: &str,
-) -> Result<String, TaskError> {
-    let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
-        TaskError::new(format!(
-            "`.{request}` received the wrong number of arguments"
-        ))
-    })?;
-    let CoreValue::Binary(value) = evaluate(context, value.into_core())? else {
-        return Err(TaskError::new(format!(
-            "`.{request}` requires a text argument"
-        )));
-    };
-    String::from_utf8(value.to_vec())
-        .map_err(|_| TaskError::new(format!("`.{request}` requires UTF-8 text")))
-}
-
-fn os_value(value: OsString) -> Value {
-    Value::binary(value.as_encoded_bytes().to_vec())
 }
 
 fn atom(name: &str) -> Value {

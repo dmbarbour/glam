@@ -10,9 +10,10 @@ use std::thread;
 use bytes::Bytes;
 use glam::reflection::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReflectionEffects, ReflectionHost,
-    ReflectionJournal, ReflectionRequest, ReflectionTransaction, RequestContext, RequestResult,
-    TaskCommit, TaskHost, TaskOutcome, TaskSpecialization, handle_reflection_request,
-    reflection_request_specs, run_unit_with_reflection_host,
+    ReflectionJournal, ReflectionRequest, ReflectionServices, ReflectionTransaction,
+    RequestContext, RequestResult, TaskCommit, TaskEnvironment, TaskHost, TaskOutcome,
+    TaskSpecialization, handle_reflection_request, reflection_request_specs,
+    run_unit_with_reflection_host,
 };
 use glam::{
     Assembler, Builtin, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticSink, Error,
@@ -135,9 +136,31 @@ fn script_extension(option: &str) -> Option<&str> {
         .filter(|extension| !extension.is_empty())
 }
 
+fn process_reflection_environment() -> Value {
+    fn os_value(value: std::ffi::OsString) -> Value {
+        Value::binary(value.as_encoded_bytes().to_vec())
+    }
+
+    let variables = Value::dictionary(env::vars_os().map(|(name, value)| {
+        (
+            Value::atom_from_binary(name.as_encoded_bytes().to_vec()),
+            os_value(value),
+        )
+    }))
+    .expect("OS environment names must be keyable binary values");
+    let arguments = Value::list(env::args_os().map(os_value));
+    Value::record([(
+        "process",
+        Value::record([("args", arguments), ("env", variables)]),
+    )])
+}
+
 fn assemble_inputs(inputs: Vec<ModuleInput>, cli_args: Vec<String>) -> ExitCode {
     let log_host = Arc::new(LogHost::new(DEFAULT_DIAGNOSTIC_CAPACITY));
-    let assembler = Assembler::default().with_diagnostic_sink(log_host.clone());
+    let assembler = Assembler::default()
+        .with_reflection_environment(process_reflection_environment())
+        .expect("main's reflection environment must be a dictionary")
+        .with_diagnostic_sink(log_host.clone());
     let configuration = match load_configuration(&assembler) {
         Ok(configuration) => configuration,
         Err(error) => {
@@ -279,7 +302,11 @@ fn start_logger(
 ) -> thread::JoinHandle<()> {
     let logger = Arc::new(DefaultLogger::new(assembler.clone()));
     let output: Arc<dyn DiagnosticSink> = logger.clone();
-    let host = Arc::new(LoggerTaskHost::new(input.clone(), output));
+    let host = Arc::new(LoggerTaskHost::new(
+        input.clone(),
+        output,
+        assembler.reflection_environment(),
+    ));
     let effect_assembler = assembler.clone();
     let custom = assembler
         .get(configuration, "conf.log")
@@ -510,11 +537,20 @@ struct LogHost {
 struct LoggerTaskHost {
     input: Arc<LogHost>,
     output: Arc<dyn DiagnosticSink>,
+    reflection_environment: Value,
 }
 
 impl LoggerTaskHost {
-    fn new(input: Arc<LogHost>, output: Arc<dyn DiagnosticSink>) -> Self {
-        Self { input, output }
+    fn new(
+        input: Arc<LogHost>,
+        output: Arc<dyn DiagnosticSink>,
+        reflection_environment: Value,
+    ) -> Self {
+        Self {
+            input,
+            output,
+            reflection_environment,
+        }
     }
 
     fn emit_output(&self, diagnostic: Diagnostic) {
@@ -669,31 +705,15 @@ impl DiagnosticSink for LogHost {
     }
 }
 
-impl ReflectionHost<MainEffects> for LoggerTaskHost {
-    fn emit_diagnostic(&self, diagnostic: Diagnostic) {
-        self.emit_output(diagnostic);
-    }
-
-    fn os_environment_variable(&self, name: &str) -> Option<std::ffi::OsString> {
-        env::var_os(name)
-    }
-
-    fn command_line_arguments(&self) -> Vec<std::ffi::OsString> {
-        env::args_os().collect()
+impl TaskEnvironment for LoggerTaskHost {
+    fn reflection_environment(&self) -> Value {
+        self.reflection_environment.clone()
     }
 }
 
-impl ReflectionHost<ReflectionEffects> for LoggerTaskHost {
+impl ReflectionServices for LoggerTaskHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
         self.emit_output(diagnostic);
-    }
-
-    fn os_environment_variable(&self, name: &str) -> Option<std::ffi::OsString> {
-        env::var_os(name)
-    }
-
-    fn command_line_arguments(&self) -> Vec<std::ffi::OsString> {
-        env::args_os().collect()
     }
 }
 
@@ -1258,9 +1278,13 @@ mod tests {
     fn logger_session_output_is_separate_from_assembler_input() {
         let input = Arc::new(LogHost::new(4));
         let output = Arc::new(glam::DiagnosticBuffer::new(4));
-        let host = LoggerTaskHost::new(input.clone(), output.clone());
+        let host = LoggerTaskHost::new(
+            input.clone(),
+            output.clone(),
+            Assembler::default().reflection_environment(),
+        );
 
-        <LoggerTaskHost as ReflectionHost<MainEffects>>::emit_diagnostic(
+        <LoggerTaskHost as ReflectionServices>::emit_diagnostic(
             &host,
             Diagnostic::new(Severity::Error, "session output"),
         );

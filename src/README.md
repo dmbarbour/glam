@@ -133,9 +133,14 @@ tokens, and observed host generations. Fine-grained observation indexes,
 persistent waiter graphs, worker threads, timed quiescence, and evaluator
 reduction fuel are intentionally deferred.
 
-The reusable reflection API exposes `.glam_ver`, `.os_env`, and `.cli_args` as
-basic host information. `.dict_items` returns immediate key-ordered dictionary
-entries as `{key,value}` records. `.eval Value` forces only the value's lazy
+The reusable reflection API exposes `.env Path` as its single read-only context
+operation. It reads an immutable dictionary owned by `EvaluationSession`, uses
+the same path and missing-as-`{}` convention as `.get`, and has no reflection
+write counterpart. `Assembler` authoritatively injects `glam.version`; `main`
+adds binary-preserving `process.args` and `process.env` fields. Library clients
+may install different context without inventing command-line semantics.
+`.dict_items` returns immediate key-ordered dictionary entries as `{key,value}`
+records. `.eval Value` forces only the value's lazy
 outer shell and returns the singleton result `ok:WHNF` or `err:Text`; pending
 dependencies suspend the task rather than becoming errors. Tasks can reserve
 `.refl_task Effect` children behind opaque handles. The compiler-provided

@@ -7,8 +7,8 @@
 mod requests;
 
 pub use requests::{
-    ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionTransaction,
-    handle_reflection_request, reflection_request_specs,
+    ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionServices,
+    ReflectionTransaction, handle_reflection_request, reflection_request_specs,
 };
 
 use std::collections::HashMap;
@@ -218,8 +218,15 @@ pub enum CommitResult {
     Closed,
 }
 
-/// Host-owned transactional resources available to a reflection task.
-pub trait TaskHost<S: TaskSpecialization>: Send + Sync {
+/// Supplies the immutable environment copied into a task's evaluation session.
+/// Reflection code can read it through `.env`, but cannot replace it.
+pub trait TaskEnvironment: Send + Sync {
+    fn reflection_environment(&self) -> PublicValue {
+        PublicValue::empty_record()
+    }
+}
+
+pub trait TaskHost<S: TaskSpecialization>: TaskEnvironment + Send + Sync {
     fn snapshot(&self) -> HostSnapshot<S>;
     fn commit(&self, commit: TaskCommit<S>) -> CommitResult;
 
@@ -388,7 +395,9 @@ fn composed_effect_task<S: TaskSpecialization>(
     host: Arc<S::Host>,
     reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
 ) -> Result<EffectTask<S>, TaskError> {
-    let session = Arc::new(EvaluationSession::new());
+    let session = Arc::new(EvaluationSession::with_environment(
+        host.reflection_environment().into_core(),
+    ));
     session
         .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
         .map_err(|error| TaskError::new(error.as_ref()))?;
@@ -514,7 +523,13 @@ struct EffectTask<S: TaskSpecialization> {
 
 impl<S: TaskSpecialization> EffectTask<S> {
     fn new(effect: Value, specialization: S, host: Arc<S::Host>) -> Result<Self, TaskError> {
-        Self::new_in_context(effect, specialization, host, EvalContext::standalone())
+        let environment = host.reflection_environment().into_core();
+        Self::new_in_context(
+            effect,
+            specialization,
+            host,
+            EvalContext::standalone_with_environment(environment),
+        )
     }
 
     fn new_in_context(
@@ -914,7 +929,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         branch.observe(checkpoint, 0);
                     }
                 }
-                let value = get_state_path(&self.eval_context, &branch.state, &path)?;
+                let value = get_value_path(&self.eval_context, &branch.state, &path)?;
                 if let Some(local) = local_update {
                     self.local_state = local;
                 }
@@ -2482,8 +2497,8 @@ fn value_key(context: &EvalContext, value: Value) -> Result<Key, TaskError> {
         .ok_or_else(|| TaskError::new("effect index is not keyable"))
 }
 
-fn get_state_path(context: &EvalContext, state: &Value, path: &[Key]) -> Result<Value, TaskError> {
-    let mut current = state.clone();
+fn get_value_path(context: &EvalContext, value: &Value, path: &[Key]) -> Result<Value, TaskError> {
+    let mut current = value.clone();
     for key in path {
         let Value::Dict(dict) = evaluate(context, current)? else {
             return Err(TaskError::new(
@@ -2925,37 +2940,40 @@ mod tests {
         }
     }
 
-    impl ReflectionHost<TestEffects> for TestHost {
-        fn emit_diagnostic(&self, diagnostic: Diagnostic) {
-            TestHost::emit_diagnostic(self, diagnostic);
-        }
-
-        fn os_environment_variable(&self, name: &str) -> Option<std::ffi::OsString> {
-            (name == "GLAM_TEST_ENV").then(|| std::ffi::OsString::from("present"))
-        }
-
-        fn command_line_arguments(&self) -> Vec<std::ffi::OsString> {
-            ["glam", "--test"]
-                .into_iter()
-                .map(std::ffi::OsString::from)
-                .collect()
+    impl TaskEnvironment for TestHost {
+        fn reflection_environment(&self) -> PublicValue {
+            let process_environment = PublicValue::dictionary([(
+                PublicValue::atom_from_text("GLAM_TEST_ENV"),
+                PublicValue::text("present"),
+            )])
+            .expect("test process environment must be keyable");
+            PublicValue::record([
+                (
+                    "glam",
+                    PublicValue::record([(
+                        "version",
+                        PublicValue::text(env!("CARGO_PKG_VERSION")),
+                    )]),
+                ),
+                (
+                    "process",
+                    PublicValue::record([
+                        (
+                            "args",
+                            PublicValue::list(
+                                ["glam", "--test"].into_iter().map(PublicValue::text),
+                            ),
+                        ),
+                        ("env", process_environment),
+                    ]),
+                ),
+            ])
         }
     }
 
-    impl ReflectionHost<ReflectionEffects> for TestHost {
+    impl ReflectionServices for TestHost {
         fn emit_diagnostic(&self, diagnostic: Diagnostic) {
             TestHost::emit_diagnostic(self, diagnostic);
-        }
-
-        fn os_environment_variable(&self, name: &str) -> Option<std::ffi::OsString> {
-            (name == "GLAM_TEST_ENV").then(|| std::ffi::OsString::from("present"))
-        }
-
-        fn command_line_arguments(&self) -> Vec<std::ffi::OsString> {
-            ["glam", "--test"]
-                .into_iter()
-                .map(std::ffi::OsString::from)
-                .collect()
         }
     }
 
@@ -3172,7 +3190,8 @@ mod tests {
         effect: &PublicValue,
         host: Arc<TestHost>,
     ) -> (EvalContext, EvaluationTaskHandle) {
-        let context = EvalContext::standalone();
+        let context =
+            EvalContext::standalone_with_environment(host.reflection_environment().into_core());
         let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
         context
             .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
@@ -3375,12 +3394,12 @@ mod tests {
     }
 
     #[test]
-    fn reflection_host_information_is_available_as_plain_data() {
-        let (assembler, version) = compile_effect(".glam_ver");
+    fn reflection_environment_is_available_as_plain_data() {
+        let (assembler, version) = compile_effect(".env ['glam,'version]");
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&version, host.clone());
         let EvaluationTaskPoll::Complete(version) = pump_composed_test_task(&context, &task) else {
-            panic!("glam_ver should complete")
+            panic!("environment version should complete")
         };
         assert_eq!(
             assembler
@@ -3390,19 +3409,20 @@ mod tests {
         );
 
         let (_, environment) = compile_effect(
-            ".os_env \"GLAM_TEST_ENV\" >>= (\\value -> (value == \"present\") =>> .r \"environment\")",
+            ".env ['process,'env,'GLAM_TEST_ENV] >>= (\\value -> (value == \"present\") =>> .r \"environment\")",
         );
         let (context, task) = schedule_composed_test_task(&environment, host.clone());
-        assert!(matches!(
-            pump_composed_test_task(&context, &task),
-            EvaluationTaskPoll::Complete(_)
-        ));
+        let environment_poll = pump_composed_test_task(&context, &task);
+        assert!(
+            matches!(environment_poll, EvaluationTaskPoll::Complete(_)),
+            "process environment lookup should complete, got {environment_poll:?}"
+        );
 
-        let (_, arguments) = compile_effect(".cli_args");
+        let (_, arguments) = compile_effect(".env ['process,'args]");
         let (context, task) = schedule_composed_test_task(&arguments, host.clone());
         let poll = pump_composed_test_task(&context, &task);
         let EvaluationTaskPoll::Complete(Value::List(arguments)) = poll else {
-            panic!("cli_args should return a list, got {poll:?}")
+            panic!("process arguments should return a list, got {poll:?}")
         };
         assert_eq!(
             eval::list_to_value_items(&context, &arguments).unwrap(),
@@ -3412,8 +3432,25 @@ mod tests {
             ]
         );
 
-        let (_, missing) =
-            compile_effect(".cut (.alt (.os_env \"GLAM_TEST_MISSING\") (.r \"missing\"))");
+        let (_, child_environment) =
+            compile_effect(".refl_task (.env ['process,'args]) >>= (\\task -> .join_task task)");
+        let (context, task) = schedule_composed_test_task(&child_environment, host.clone());
+        let EvaluationTaskPoll::Complete(Value::List(arguments)) =
+            pump_composed_test_task(&context, &task)
+        else {
+            panic!("child reflection task should inherit its session environment")
+        };
+        assert_eq!(
+            eval::list_to_value_items(&context, &arguments).unwrap(),
+            [
+                Value::binary_from_text("glam"),
+                Value::binary_from_text("--test")
+            ]
+        );
+
+        let (_, missing) = compile_effect(
+            ".env ['process,'env,'GLAM_TEST_MISSING] >>= (\\value -> (value == {}) =>> .r \"missing\")",
+        );
         let (context, task) = schedule_composed_test_task(&missing, host);
         assert!(matches!(
             pump_composed_test_task(&context, &task),

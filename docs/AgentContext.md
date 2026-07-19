@@ -83,15 +83,20 @@ design in the design documents.
   fragment, private request tags, and specialization-owned transaction data.
   Reusable request families compose by mapping their requests into the host
   specialization's request enum. The reusable reflection family contributes
-  `glam_ver`, `os_env`, `cli_args`, `dict_items`, `eval`, `log`, and the task
+  `env`, `dict_items`, `eval`, `log`, and the task
   operations `refl_task`, `join_task`, `task_result`, `task_error`,
   `task_status`, and `cancel_task`;
   `main` adds provisional `log_status`, `read_log`, and `write_stderr` effects.
   `log_status` describes only the diagnostic input stream and returns `'open`
-  or `'closed`; it is not a summary of the source evaluation session. OS environment
-  values and command-line arguments preserve Rust's platform encoding as binary
-  values rather than forcing UTF-8. Spawned tasks receive only
-  `ReflectionEffects`, even when their parent has broader host capabilities.
+  or `'closed`; it is not a summary of the source evaluation session. `.env`
+  takes a path and reads the immutable dictionary installed on the task's
+  `EvaluationSession`, follows the same key-path and missing-as-`{}` convention
+  as `.get`, and has no corresponding reflection write operation. The
+  assembler authoritatively injects `glam.version`; the executable adds
+  `process.args` and `process.env`. Process values and environment-variable
+  atom payloads preserve Rust's platform encoding rather than forcing UTF-8.
+  Spawned tasks receive only `ReflectionEffects`, even when their parent has
+  broader host capabilities.
   `eval` reduces only successive lazy outer shells and returns a singleton
   `ok:WHNF` or provisional `err:Text`. A pending evaluator dependency suspends
   the operation and is retried even if that dependency terminates in error, so
@@ -133,8 +138,11 @@ design in the design documents.
   `write_stderr`. Every ordinary `Assembler` session installs a type-erased
   launcher for that specialization. Its host owns the session's current
   reflection heap and routes emitted diagnostics to the assembler's configured
-  sink. Replacing an assembler's diagnostic sink creates a fresh evaluation
-  session so the launcher cannot retain the prior sink.
+  sink. Specialization-independent diagnostic output is expressed once through
+  `ReflectionServices`; the generic `ReflectionHost<S>` is a marker combining
+  those services with `TaskHost<S>`. Replacing an assembler's diagnostic sink,
+  host, or reflection environment creates a fresh evaluation session so its
+  launcher and immutable environment cannot retain prior configuration.
 - Every `get`/`set` path is implicitly under user-owned `user_state`. The
   ordinary `heap` subtree is shared through the host transaction snapshot.
   The active reset stack lives under a private key in that same state, so a

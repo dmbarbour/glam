@@ -11,7 +11,7 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
-use crate::core::Value;
+use crate::core::{Dict, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct EvaluationTaskId(NonZeroU64);
@@ -274,11 +274,17 @@ struct EvaluationTasks {
     owned_promises: HashMap<EvaluationTaskId, Vec<EvaluationWaitToken>>,
 }
 
-#[derive(Default)]
 pub(crate) struct EvaluationSession {
+    reflection_environment: Value,
     tasks: Mutex<EvaluationTasks>,
     task_changed: Condvar,
     reflection_launcher: OnceLock<Arc<dyn ReflectionTaskLauncher>>,
+}
+
+impl Default for EvaluationSession {
+    fn default() -> Self {
+        Self::with_environment(Value::Dict(Dict::new_sync()))
+    }
 }
 
 impl fmt::Debug for EvaluationSession {
@@ -292,6 +298,19 @@ impl fmt::Debug for EvaluationSession {
 impl EvaluationSession {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn with_environment(reflection_environment: Value) -> Self {
+        Self {
+            reflection_environment,
+            tasks: Mutex::new(EvaluationTasks::default()),
+            task_changed: Condvar::new(),
+            reflection_launcher: OnceLock::new(),
+        }
+    }
+
+    fn reflection_environment(&self) -> Value {
+        self.reflection_environment.clone()
     }
 
     pub(crate) fn install_reflection_launcher(
@@ -333,6 +352,14 @@ impl EvalContext {
     /// assembler, notably standalone reflection tasks and focused tests.
     pub(crate) fn standalone() -> Self {
         Self::new(Arc::new(EvaluationSession::new()))
+    }
+
+    pub(crate) fn standalone_with_environment(environment: Value) -> Self {
+        Self::new(Arc::new(EvaluationSession::with_environment(environment)))
+    }
+
+    pub(crate) fn reflection_environment(&self) -> Value {
+        self.session.reflection_environment()
     }
 
     #[cfg(test)]

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
@@ -51,6 +50,35 @@ fn public_api_exposes_the_default_diagnostic_formatter_as_a_function() {
     assert_eq!(
         Assembler::default().default_diagnostic_formatter().kind(),
         glam::ValueKind::Function
+    );
+}
+
+#[test]
+fn assembler_owns_an_authoritative_reflection_environment() {
+    let assembler = Assembler::default()
+        .with_reflection_environment(Value::record([
+            ("glam", Value::record([("version", Value::text("spoofed"))])),
+            ("client", Value::record([("name", Value::text("embedded"))])),
+        ]))
+        .expect("reflection environment should accept a dictionary");
+    let environment = assembler.reflection_environment();
+
+    assert_eq!(
+        assembler
+            .binary_at(&environment, "glam.version")
+            .expect("assembler should inject its real version"),
+        env!("CARGO_PKG_VERSION").as_bytes()
+    );
+    assert_eq!(
+        assembler
+            .binary_at(&environment, "client.name")
+            .expect("client environment fields should remain visible"),
+        b"embedded".as_slice()
+    );
+    assert!(
+        Assembler::default()
+            .with_reflection_environment(Value::integer(1))
+            .is_err()
     );
 }
 
@@ -108,17 +136,31 @@ fn public_api_can_load_sources_and_binaries_from_a_custom_host() {
 }
 
 #[test]
-fn custom_host_process_info_is_visible_to_reflection_annotations() {
-    let host = MemoryHost::new([]).with_process_info(
-        [("GLAM_PUBLIC_API_TEST", "HOST VALUE")],
-        ["embedded-glam", "inspect"],
-    );
-    let assembler = Assembler::default().with_host(host);
+fn client_reflection_environment_is_visible_to_reflection_annotations() {
+    let process_environment = Value::dictionary([(
+        Value::atom_from_text("GLAM_PUBLIC_API_TEST"),
+        Value::text("HOST VALUE"),
+    )])
+    .expect("test environment key should be keyable");
+    let reflection_environment = Value::record([(
+        "process",
+        Value::record([
+            (
+                "args",
+                Value::list(["embedded-glam", "inspect"].map(Value::text)),
+            ),
+            ("env", process_environment),
+        ]),
+    )]);
+    let assembler = Assembler::default()
+        .with_host(MemoryHost::new([]))
+        .with_reflection_environment(reflection_environment)
+        .expect("test reflection environment should be a dictionary");
     let module = assembler
         .module(["reflection_host"])
         .script(
             "g",
-            "language g0\nimport 'std\nvalue = anno {refl:(.os_env \"GLAM_PUBLIC_API_TEST\" >>= (\\value -> (value == \"HOST VALUE\") =>> .log 'info { msg:{ text:\"HOST VALUE\" } }))} \"done\"\n",
+            "language g0\nimport 'std\nvalue = anno {refl:(.env ['process,'env,'GLAM_PUBLIC_API_TEST] >>= (\\value -> (value == \"HOST VALUE\") =>> .log 'info { msg:{ text:\"HOST VALUE\" } }))} \"done\"\n",
         )
         .build()
         .expect("reflection host fixture should build");
@@ -441,8 +483,6 @@ fn checked_net_builder_reports_wiring_and_finalization_errors() {
 
 struct MemoryHost {
     files: HashMap<PathBuf, Bytes>,
-    environment: HashMap<String, OsString>,
-    arguments: Vec<OsString>,
 }
 
 impl MemoryHost {
@@ -452,22 +492,7 @@ impl MemoryHost {
                 .into_iter()
                 .map(|(path, bytes)| (PathBuf::from(path), Bytes::copy_from_slice(bytes)))
                 .collect(),
-            environment: HashMap::new(),
-            arguments: Vec::new(),
         }
-    }
-
-    fn with_process_info<const N: usize>(
-        mut self,
-        environment: [(&str, &str); N],
-        arguments: impl IntoIterator<Item = &'static str>,
-    ) -> Self {
-        self.environment = environment
-            .into_iter()
-            .map(|(name, value)| (name.to_owned(), OsString::from(value)))
-            .collect();
-        self.arguments = arguments.into_iter().map(OsString::from).collect();
-        self
     }
 }
 
@@ -481,13 +506,5 @@ impl Host for MemoryHost {
 
     fn path_exists(&self, path: &Path) -> bool {
         self.files.contains_key(path)
-    }
-
-    fn environment_variable(&self, name: &str) -> Option<OsString> {
-        self.environment.get(name).cloned()
-    }
-
-    fn command_line_arguments(&self) -> Vec<OsString> {
-        self.arguments.clone()
     }
 }

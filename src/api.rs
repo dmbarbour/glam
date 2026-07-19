@@ -5,8 +5,6 @@
 //! implementation details behind the facade.
 
 use std::collections::VecDeque;
-use std::env;
-use std::ffi::OsString;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -32,8 +30,8 @@ use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
 use crate::number::Number;
 use crate::reflection::{
-    CommitResult, HostSnapshot, ReflectionEffects, ReflectionHost, TaskCommit, TaskHost,
-    task_launcher,
+    CommitResult, HostSnapshot, ReflectionEffects, ReflectionServices, TaskCommit, TaskEnvironment,
+    TaskHost, task_launcher,
 };
 
 pub const DEFAULT_DIAGNOSTIC_CAPACITY: usize = 1_000;
@@ -54,6 +52,12 @@ impl Value {
 
     pub fn atom_from_text(text: impl AsRef<str>) -> Self {
         let key = Key::binary_from_text(text.as_ref());
+        Self(CoreValue::Atom(crate::core::Atom::from_key(&key)))
+    }
+
+    /// Constructs an atom whose payload is arbitrary binary data.
+    pub fn atom_from_binary(bytes: impl Into<Bytes>) -> Self {
+        let key = Key::Binary(bytes.into());
         Self(CoreValue::Atom(crate::core::Atom::from_key(&key)))
     }
 
@@ -98,6 +102,17 @@ impl Value {
                 dict.insert(Key::atom_from_text(name), value.into_core())
             });
         Self(CoreValue::Dict(dict))
+    }
+
+    /// Constructs a dictionary from arbitrary keyable values.
+    pub fn dictionary(entries: impl IntoIterator<Item = (Value, Value)>) -> Result<Self, Error> {
+        let mut dict = Dict::new_sync();
+        for (key, value) in entries {
+            let key = Key::from_value(key.as_core())
+                .ok_or_else(|| Error::new("dictionary key is not immediately keyable"))?;
+            dict = dict.insert(key, value.into_core());
+        }
+        Ok(Self(CoreValue::Dict(dict)))
     }
 
     pub fn empty_record() -> Self {
@@ -546,7 +561,7 @@ impl DiagnosticHistory {
 }
 
 struct AssemblerReflectionHost {
-    host: Arc<dyn Host>,
+    reflection_environment: Value,
     diagnostic_sink: Arc<dyn DiagnosticSink>,
     state: Mutex<AssemblerReflectionState>,
     changed: Condvar,
@@ -558,9 +573,9 @@ struct AssemblerReflectionState {
 }
 
 impl AssemblerReflectionHost {
-    fn new(host: Arc<dyn Host>, diagnostic_sink: Arc<dyn DiagnosticSink>) -> Self {
+    fn new(reflection_environment: Value, diagnostic_sink: Arc<dyn DiagnosticSink>) -> Self {
         Self {
-            host,
+            reflection_environment,
             diagnostic_sink,
             state: Mutex::new(AssemblerReflectionState {
                 generation: 1,
@@ -571,17 +586,15 @@ impl AssemblerReflectionHost {
     }
 }
 
-impl ReflectionHost<ReflectionEffects> for AssemblerReflectionHost {
+impl TaskEnvironment for AssemblerReflectionHost {
+    fn reflection_environment(&self) -> Value {
+        self.reflection_environment.clone()
+    }
+}
+
+impl ReflectionServices for AssemblerReflectionHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
         self.diagnostic_sink.emit(diagnostic);
-    }
-
-    fn os_environment_variable(&self, name: &str) -> Option<OsString> {
-        self.host.environment_variable(name)
-    }
-
-    fn command_line_arguments(&self) -> Vec<OsString> {
-        self.host.command_line_arguments()
     }
 }
 
@@ -631,12 +644,16 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
 }
 
 fn evaluation_session(
-    host: Arc<dyn Host>,
+    reflection_environment: Value,
     diagnostic_sink: Arc<dyn DiagnosticSink>,
 ) -> Arc<EvaluationSession> {
-    let session = Arc::new(EvaluationSession::new());
-    let host: Arc<dyn ReflectionHost<ReflectionEffects>> =
-        Arc::new(AssemblerReflectionHost::new(host, diagnostic_sink));
+    let session = Arc::new(EvaluationSession::with_environment(
+        reflection_environment.as_core().clone(),
+    ));
+    let host = Arc::new(AssemblerReflectionHost::new(
+        reflection_environment,
+        diagnostic_sink,
+    ));
     session
         .install_reflection_launcher(task_launcher(ReflectionEffects, host))
         .expect("fresh evaluation session must accept its reflection launcher");
@@ -664,19 +681,11 @@ impl fmt::Display for HostError {
 
 impl std::error::Error for HostError {}
 
-/// External capabilities used by module loading and reflection host queries.
+/// External capabilities used to load module sources and binary inputs.
 pub trait Host: Send + Sync {
     fn read(&self, path: &Path) -> Result<Bytes, HostError>;
 
     fn path_exists(&self, path: &Path) -> bool;
-
-    fn environment_variable(&self, name: &str) -> Option<OsString>;
-
-    /// Process-style arguments exposed to reflection. Embedded hosts default
-    /// to no arguments unless they opt in.
-    fn command_line_arguments(&self) -> Vec<OsString> {
-        Vec::new()
-    }
 }
 
 impl<T: Host + ?Sized> Host for Arc<T> {
@@ -686,14 +695,6 @@ impl<T: Host + ?Sized> Host for Arc<T> {
 
     fn path_exists(&self, path: &Path) -> bool {
         (**self).path_exists(path)
-    }
-
-    fn environment_variable(&self, name: &str) -> Option<OsString> {
-        (**self).environment_variable(name)
-    }
-
-    fn command_line_arguments(&self) -> Vec<OsString> {
-        (**self).command_line_arguments()
     }
 }
 
@@ -709,14 +710,6 @@ impl Host for SystemHost {
 
     fn path_exists(&self, path: &Path) -> bool {
         path.exists()
-    }
-
-    fn environment_variable(&self, name: &str) -> Option<OsString> {
-        env::var_os(name)
-    }
-
-    fn command_line_arguments(&self) -> Vec<OsString> {
-        env::args_os().collect()
     }
 }
 
@@ -895,10 +888,29 @@ pub enum ReasoningTaskState {
     Blocked,
 }
 
+fn authoritative_reflection_environment(environment: Value) -> Result<Value, Error> {
+    let CoreValue::Dict(root) = environment.into_core() else {
+        return Err(Error::new("reflection environment must be a dictionary"));
+    };
+    let glam_key = Key::atom_from_text("glam");
+    let mut glam = match root.get(&glam_key) {
+        Some(CoreValue::Dict(glam)) => glam.clone(),
+        _ => Dict::new_sync(),
+    };
+    glam = glam.insert(
+        Key::atom_from_text("version"),
+        CoreValue::binary_from_text(env!("CARGO_PKG_VERSION")),
+    );
+    Ok(Value(CoreValue::Dict(
+        root.insert(glam_key, CoreValue::Dict(glam)),
+    )))
+}
+
 #[derive(Clone)]
 pub struct Assembler {
     host: Arc<dyn Host>,
     diagnostic_sink: Arc<dyn DiagnosticSink>,
+    reflection_environment: Value,
     next_compilation_invocation: Arc<AtomicU64>,
     evaluation_session: Arc<EvaluationSession>,
 }
@@ -908,10 +920,14 @@ impl Default for Assembler {
         let diagnostic_sink: Arc<dyn DiagnosticSink> =
             Arc::new(DiagnosticBuffer::new(DEFAULT_DIAGNOSTIC_CAPACITY));
         let host: Arc<dyn Host> = Arc::new(SystemHost);
-        let evaluation_session = evaluation_session(host.clone(), diagnostic_sink.clone());
+        let reflection_environment = authoritative_reflection_environment(Value::empty_record())
+            .expect("the default reflection environment must be a dictionary");
+        let evaluation_session =
+            evaluation_session(reflection_environment.clone(), diagnostic_sink.clone());
         Self {
             host,
             diagnostic_sink,
+            reflection_environment,
             next_compilation_invocation: Arc::new(AtomicU64::new(1)),
             evaluation_session,
         }
@@ -928,6 +944,12 @@ impl Assembler {
     /// the conventional `msg` and `viewer` fields and returns bytes.
     pub fn default_diagnostic_formatter(&self) -> Value {
         Value::from_core(crate::g_syntax::default_diagnostic_formatter())
+    }
+
+    /// Returns the read-only environment shared by reflection tasks in this
+    /// assembler's evaluation session.
+    pub fn reflection_environment(&self) -> Value {
+        self.reflection_environment.clone()
     }
 
     pub(crate) fn eval_context(&self) -> EvalContext {
@@ -979,16 +1001,31 @@ impl Assembler {
 
     pub fn with_host(mut self, host: impl Host + 'static) -> Self {
         self.host = Arc::new(host);
-        self.evaluation_session =
-            evaluation_session(self.host.clone(), self.diagnostic_sink.clone());
+        self.evaluation_session = evaluation_session(
+            self.reflection_environment.clone(),
+            self.diagnostic_sink.clone(),
+        );
         self
     }
 
     pub fn with_diagnostic_sink(mut self, sink: impl DiagnosticSink + 'static) -> Self {
         let diagnostic_sink: Arc<dyn DiagnosticSink> = Arc::new(sink);
-        self.evaluation_session = evaluation_session(self.host.clone(), diagnostic_sink.clone());
+        self.evaluation_session =
+            evaluation_session(self.reflection_environment.clone(), diagnostic_sink.clone());
         self.diagnostic_sink = diagnostic_sink;
         self
+    }
+
+    /// Replaces the client-owned portion of the read-only reflection
+    /// environment and starts a fresh evaluation session. The assembler
+    /// always overwrites `glam.version` with its actual package version.
+    pub fn with_reflection_environment(mut self, environment: Value) -> Result<Self, Error> {
+        self.reflection_environment = authoritative_reflection_environment(environment)?;
+        self.evaluation_session = evaluation_session(
+            self.reflection_environment.clone(),
+            self.diagnostic_sink.clone(),
+        );
+        Ok(self)
     }
 
     pub fn with_diagnostic_buffer(self, capacity: usize) -> Self {
