@@ -84,7 +84,9 @@ design in the design documents.
   `glam_ver`, `os_env`, `cli_args`, `dict_items`, `eval`, `log`, and the task
   operations `refl_task`, `join_task`, `task_result`, `task_error`,
   `task_status`, and `cancel_task`;
-  `main` adds provisional `read_log` and `write_stderr` effects. OS environment
+  `main` adds provisional `log_status`, `read_log`, and `write_stderr` effects.
+  `log_status` describes only the diagnostic input stream and returns `'open`
+  or `'closed`; it is not a summary of the source evaluation session. OS environment
   values and command-line arguments preserve Rust's platform encoding as binary
   values rather than forcing UTF-8. Spawned tasks receive only
   `ReflectionEffects`, even when their parent has broader host capabilities.
@@ -103,7 +105,10 @@ design in the design documents.
   to the host outside `cut`. Queue reads inspect only their host snapshot, never
   journaled writes, and yield failure when no input is available. That failure
   retains the queue observation, so the task waits for a host change and retries
-  even outside `cut`. A
+  even outside `cut`. In the CLI logger session, committed `.log` writes enter
+  that same queue and may be observed by a later `.read_log`; only uncommitted
+  writes are hidden. Do not assume `.log` delegates directly to the Rust default
+  renderer. A
   top-level `alt` is rejected; alternatives belong to `cut`. This and
   task-local `.shift` continuations are the conservative
   standard-effect contract: general-purpose utilities must not assume broader
@@ -198,8 +203,14 @@ design in the design documents.
   repeated polling of unchanged blocked tasks. Public assembler evaluation and
   extraction operations also grant a small bounded background budget after
   their foreground result, so scanners and short tasks progress without making
-  long-lived tasks synchronous. Fine-grained wake indexes, worker threads, and
-  evaluator reduction fuel remain deferred.
+  long-lived tasks synchronous. `Assembler::drain_reasoning` is the distinct
+  unbounded batch-completion driver: runnable work may run forever, newly
+  scheduled work joins the drain, and a stable pass over unchanged unfinished
+  tasks returns a structured deadlock report. Terminal failures are reported
+  without an acknowledge/handled state. Known lazy producers, wait tokens, and
+  observed host generations remain available in the report. Fine-grained wake
+  indexes, worker threads, timed quiescence, and evaluator reduction fuel remain
+  deferred.
 - `reflection::run` is the synchronous compatibility driver for that machine.
   It polls with bounded effect-step fuel and calls `TaskHost::wait_for_change`
   only after polling reports a state block. `run_with_reflection_host` also
@@ -219,8 +230,13 @@ design in the design documents.
   Rust terminal logger. `main` requires `conf.log` to return unit through the
   outer discard continuation. If configured logging fails, the terminal logger
   first renders one synthetic error diagnostic, then drains the remaining queue
-  in FIFO order. Stderr effects commit to a host buffer before bytes are written
-  to the OS.
+  in FIFO order. Batch mode writes valid result bytes, drains assembler
+  reasoning, emits task-failure or deadlock diagnostics, seals the diagnostic
+  input, then joins `conf.log`. A logger that can wait on an empty queue must
+  observe `.log_status` to choose graceful completion after closure. The
+  monotonic error count survives queue drops and reads and determines the final
+  nonzero status. Stderr effects commit to a host buffer before bytes are
+  written to the OS. Logger-owned child-task draining is not complete yet.
 
 ### Values and evaluation
 

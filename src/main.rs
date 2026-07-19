@@ -16,7 +16,7 @@ use glam::reflection::{
 };
 use glam::{
     Assembler, Builtin, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticSink, Error,
-    ModuleInput, Severity, Value,
+    ModuleInput, ReasoningReport, ReasoningStatus, ReasoningTaskState, Severity, Value,
 };
 
 // Parse inspection intentionally remains on the front-end API while ordinary
@@ -141,31 +141,92 @@ fn assemble_inputs(inputs: Vec<ModuleInput>, cli_args: Vec<String>) -> ExitCode 
     let configuration = match load_configuration(&assembler) {
         Ok(configuration) => configuration,
         Err(error) => {
-            log_host.close();
+            log_host.emit(Diagnostic::new(Severity::Error, error.to_string()));
+            log_host.close_input();
             log_host.drain_default(&DefaultLogger::new(assembler.clone()));
-            eprintln!("error: {error}");
             return ExitCode::from(1);
         }
     };
     let logger = start_logger(&assembler, &configuration.value, log_host.clone());
     let result = assemble(&assembler, inputs, cli_args, configuration.environment);
-    log_host.close();
-    logger.join().expect("logger task should not panic");
-
-    let bytes = match result {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return ExitCode::from(1);
+    let mut operation_failed = false;
+    match result {
+        Ok(bytes) => {
+            if let Err(error) = io::stdout().write_all(&bytes) {
+                operation_failed = true;
+                log_host.emit(Diagnostic::new(
+                    Severity::Error,
+                    format!("could not write stdout: {error}"),
+                ));
+            }
         }
-    };
-
-    if let Err(error) = io::stdout().write_all(&bytes) {
-        eprintln!("error: could not write stdout: {error}");
-        return ExitCode::from(1);
+        Err(error) => {
+            operation_failed = true;
+            log_host.emit(Diagnostic::new(Severity::Error, error.to_string()));
+        }
     }
 
-    ExitCode::SUCCESS
+    report_reasoning(&log_host, &assembler.drain_reasoning());
+    log_host.close_input();
+    logger.join().expect("logger task should not panic");
+    log_host.cancel();
+
+    if operation_failed || log_host.error_count() > 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn report_reasoning(host: &LogHost, report: &ReasoningReport) {
+    for failure in report.failures() {
+        host.emit(Diagnostic::new(
+            Severity::Error,
+            format!(
+                "reflection task {} failed: {}",
+                failure.task_id(),
+                failure.message()
+            ),
+        ));
+    }
+    if report.status() != ReasoningStatus::Deadlocked {
+        return;
+    }
+
+    let mut message = format!(
+        "reflection scheduler deadlocked with {} unfinished task{}",
+        report.unfinished().len(),
+        if report.unfinished().len() == 1 {
+            ""
+        } else {
+            "s"
+        }
+    );
+    for task in report.unfinished() {
+        let detail = match task.state() {
+            ReasoningTaskState::Blocked => match (
+                task.waiting_on_task(),
+                task.observed_generation(),
+                task.wait_id(),
+            ) {
+                (Some(dependency), Some(generation), _) => {
+                    format!("waits on task {dependency} and shared-state generation {generation}")
+                }
+                (Some(dependency), None, _) => format!("waits on task {dependency}"),
+                (None, Some(generation), Some(wait)) => {
+                    format!("waits on token {wait} and shared-state generation {generation}")
+                }
+                (None, Some(generation), None) => {
+                    format!("waits on shared-state generation {generation}")
+                }
+                (None, None, Some(wait)) => format!("waits on token {wait}"),
+                (None, None, None) => "is blocked without a wake condition".to_owned(),
+            },
+            state => format!("remains in anomalous {state:?} state"),
+        };
+        message.push_str(&format!("\ntask {} {detail}", task.task_id()));
+    }
+    host.emit(Diagnostic::new(Severity::Error, message));
 }
 
 fn assemble(
@@ -231,12 +292,24 @@ fn start_logger(
                 host.clone(),
                 reflection_host,
             ) {
-                Ok(TaskOutcome::Complete(_)) | Ok(TaskOutcome::Cancelled) => {}
+                Ok(TaskOutcome::Complete(_)) => {}
+                Ok(TaskOutcome::Cancelled) => {
+                    host.emit_default(
+                        &logger,
+                        Diagnostic::new(
+                            Severity::Error,
+                            "configured logger remained blocked after the log stream closed",
+                        ),
+                    );
+                }
                 Err(error) => {
-                    logger.emit(&Diagnostic::new(
-                        Severity::Error,
-                        format!("configured logger failed: {error}"),
-                    ));
+                    host.emit_default(
+                        &logger,
+                        Diagnostic::new(
+                            Severity::Error,
+                            format!("configured logger failed: {error}"),
+                        ),
+                    );
                 }
             }
         }
@@ -258,6 +331,7 @@ impl MainEffects {
 #[derive(Clone)]
 enum MainRequest {
     Reflection(ReflectionRequest),
+    LogStatus,
     ReadLog,
     WriteStderr,
 }
@@ -265,6 +339,7 @@ enum MainRequest {
 #[derive(Clone)]
 struct MainSnapshot {
     diagnostics: Arc<[Diagnostic]>,
+    input_closed: bool,
 }
 
 #[derive(Clone, Default)]
@@ -292,6 +367,12 @@ impl TaskSpecialization for MainEffects {
             .map(|request| request.map_request(MainRequest::Reflection))
             .chain([
                 EffectRequestSpec::new(
+                    "log_status",
+                    ["glam_cli", "v0", "request", "log_status"],
+                    0,
+                    MainRequest::LogStatus,
+                ),
+                EffectRequestSpec::new(
                     "read_log",
                     ["glam_cli", "v0", "request", "read_log"],
                     0,
@@ -317,6 +398,7 @@ impl TaskSpecialization for MainEffects {
             MainRequest::Reflection(request) => {
                 handle_reflection_request(request, arguments, context)
             }
+            MainRequest::LogStatus => log_status(arguments, context),
             MainRequest::ReadLog => read_log(context),
             MainRequest::WriteStderr => {
                 let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
@@ -338,6 +420,30 @@ impl TaskSpecialization for MainEffects {
             }
         }
     }
+}
+
+fn log_status(
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, MainEffects>,
+) -> Result<RequestResult, glam::reflection::TaskError> {
+    if !arguments.is_empty() {
+        return Err(glam::reflection::TaskError::new(
+            "`.log_status` received the wrong number of arguments",
+        ));
+    }
+    let (generation, input_closed) = if let Some(generation) = context.transaction_generation() {
+        let mut transaction = context
+            .transaction()
+            .expect("checked active reflection transaction");
+        (generation, transaction.parts().0.input_closed)
+    } else {
+        let snapshot = <LogHost as TaskHost<MainEffects>>::snapshot(context.host());
+        (snapshot.generation(), snapshot.extra().input_closed)
+    };
+    context.observe_host_generation(generation);
+    Ok(RequestResult::Return(Value::atom_from_text(
+        if input_closed { "closed" } else { "open" },
+    )))
 }
 
 fn read_log(
@@ -401,7 +507,9 @@ struct LogHostState {
     heap: Value,
     diagnostics: VecDeque<Diagnostic>,
     stderr: VecDeque<Bytes>,
-    closed: bool,
+    input_closed: bool,
+    cancelled: bool,
+    error_count: u64,
 }
 
 impl LogHost {
@@ -413,20 +521,50 @@ impl LogHost {
                 heap: Value::empty_record(),
                 diagnostics: VecDeque::new(),
                 stderr: VecDeque::new(),
-                closed: false,
+                input_closed: false,
+                cancelled: false,
+                error_count: 0,
             }),
             changed: Condvar::new(),
         }
     }
 
-    fn close(&self) {
+    fn close_input(&self) {
         let mut state = self
             .state
             .lock()
             .expect("log host mutex should not be poisoned");
-        state.closed = true;
+        state.input_closed = true;
         state.generation = state.generation.wrapping_add(1);
         self.changed.notify_all();
+    }
+
+    fn cancel(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("log host mutex should not be poisoned");
+        state.cancelled = true;
+        state.generation = state.generation.wrapping_add(1);
+        self.changed.notify_all();
+    }
+
+    fn error_count(&self) -> u64 {
+        self.state
+            .lock()
+            .expect("log host mutex should not be poisoned")
+            .error_count
+    }
+
+    fn emit_default(&self, logger: &DefaultLogger, diagnostic: Diagnostic) {
+        if diagnostic.severity() == Severity::Error {
+            let mut state = self
+                .state
+                .lock()
+                .expect("log host mutex should not be poisoned");
+            state.error_count = state.error_count.saturating_add(1);
+        }
+        logger.emit(&diagnostic);
     }
 
     fn drain_default(&self, logger: &DefaultLogger) {
@@ -447,7 +585,7 @@ impl LogHost {
                 self.changed.notify_all();
                 return Some(diagnostic);
             }
-            if state.closed {
+            if state.input_closed || state.cancelled {
                 return None;
             }
             state = self
@@ -481,6 +619,9 @@ impl LogHost {
     }
 
     fn push_diagnostic(&self, state: &mut LogHostState, diagnostic: Diagnostic) {
+        if diagnostic.severity() == Severity::Error {
+            state.error_count = state.error_count.saturating_add(1);
+        }
         if self.capacity == 0 {
             return;
         }
@@ -542,6 +683,7 @@ impl TaskHost<MainEffects> for LogHost {
             state.heap.clone(),
             MainSnapshot {
                 diagnostics: Arc::from(state.diagnostics.iter().cloned().collect::<Vec<_>>()),
+                input_closed: state.input_closed,
             },
         )
     }
@@ -578,13 +720,19 @@ impl TaskHost<MainEffects> for LogHost {
             .state
             .lock()
             .expect("log host mutex should not be poisoned");
-        while state.generation == observed_generation && !state.closed {
+        if state.generation != observed_generation {
+            return true;
+        }
+        while state.generation == observed_generation
+            && !state.cancelled
+            && !(state.input_closed && state.diagnostics.is_empty())
+        {
             state = self
                 .changed
                 .wait(state)
                 .expect("log host mutex should not be poisoned");
         }
-        !(state.closed && state.diagnostics.is_empty())
+        state.generation != observed_generation
     }
 }
 
@@ -991,5 +1139,18 @@ mod tests {
                 .get(diagnostic.emission(), "viewer")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn log_error_count_survives_queue_drops_and_reads() {
+        let dropped = LogHost::new(0);
+        dropped.emit(Diagnostic::new(Severity::Error, "dropped"));
+        assert_eq!(dropped.error_count(), 1);
+
+        let retained = LogHost::new(1);
+        retained.emit(Diagnostic::new(Severity::Error, "retained"));
+        assert!(retained.take_diagnostic().is_some());
+        assert_eq!(retained.error_count(), 1);
+        retained.close_input();
     }
 }

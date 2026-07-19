@@ -487,12 +487,7 @@ fn configured_logger_failure_is_reported_before_default_fallback_messages() {
         .output()
         .expect("failed to run glam");
 
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(!output.status.success());
     assert_eq!(output.stdout, b"ok");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let failure = stderr
@@ -526,12 +521,7 @@ fn configured_logger_requires_a_unit_result() {
         .output()
         .expect("failed to run glam");
 
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(!output.status.success());
     assert_eq!(output.stdout, b"ok");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -539,6 +529,91 @@ fn configured_logger_requires_a_unit_result() {
             && stderr.contains("requires discarded effect results to be unit"),
         "non-unit logger result was not reported:\n{stderr}"
     );
+}
+
+#[test]
+fn configured_logger_can_finish_when_the_log_stream_closes() {
+    let dir = unique_temp_dir("glam-conf-log-status");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = .log_status >>= (\\status -> (status == 'closed) =>> .r ())\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--script.g")
+        .arg("language g0\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ok");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn configured_logger_must_observe_stream_closure_when_waiting_for_input() {
+    let dir = unique_temp_dir("glam-conf-log-close-deadlock");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = .read_log =>> .r ()\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--script.g")
+        .arg("language g0\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"ok");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("configured logger remained blocked after the log stream closed")
+    );
+}
+
+#[test]
+fn failed_reflection_tasks_fail_the_batch_after_writing_the_result() {
+    let output = glam_command()
+        .arg("--script.g")
+        .arg("language g0\nrefl.failure = .fail\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"ok");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("reflection task"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("failed"));
+}
+
+#[test]
+fn quiescent_reflection_tasks_report_a_scheduler_deadlock() {
+    let output = glam_command()
+        .arg("--script.g")
+        .arg(
+            "language g0\nrefl.deadlock = .get ['heap,'never] >>= (\\_ -> .fail)\nasm.result = \"ok\"\n",
+        )
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"ok");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("reflection scheduler deadlocked"));
 }
 
 fn hello_sample_files() -> Vec<PathBuf> {

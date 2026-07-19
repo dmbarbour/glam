@@ -9,7 +9,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use crate::core::Value;
 
@@ -167,6 +167,42 @@ pub(crate) enum EvaluationPumpOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EvaluationSessionRun {
+    Complete(EvaluationSessionReport),
+    Quiescent(EvaluationSessionReport),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvaluationSessionReport {
+    pub(crate) failures: Vec<EvaluationTaskFailure>,
+    pub(crate) unfinished: Vec<EvaluationUnfinishedTask>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvaluationTaskFailure {
+    pub(crate) task: EvaluationTaskId,
+    pub(crate) error: Arc<str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvaluationUnfinishedState {
+    Dormant,
+    Reserved,
+    Queued,
+    Running,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvaluationUnfinishedTask {
+    pub(crate) task: EvaluationTaskId,
+    pub(crate) state: EvaluationUnfinishedState,
+    pub(crate) dependency: Option<EvaluationTaskId>,
+    pub(crate) wait: Option<u64>,
+    pub(crate) observed_generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum EvaluationTaskState {
     /// A task registered in an intentionally bare standalone session.
     Dormant,
@@ -241,6 +277,7 @@ struct EvaluationTasks {
 #[derive(Default)]
 pub(crate) struct EvaluationSession {
     tasks: Mutex<EvaluationTasks>,
+    task_changed: Condvar,
     reflection_launcher: OnceLock<Arc<dyn ReflectionTaskLauncher>>,
 }
 
@@ -423,6 +460,7 @@ impl EvalContext {
             "evaluation task identities must be unique"
         );
         tasks.ready.push_back(id);
+        self.session.task_changed.notify_all();
         Ok(EvaluationTaskHandle { id, wait })
     }
 
@@ -448,6 +486,7 @@ impl EvalContext {
             replaced.is_none() && replaced_id.is_none(),
             "evaluation task identities must be unique"
         );
+        self.session.task_changed.notify_all();
         Ok(EvaluationTaskHandle { id, wait })
     }
 
@@ -488,6 +527,7 @@ impl EvalContext {
             }
             Err(error) => record.state = EvaluationTaskState::Failed(error),
         }
+        self.session.task_changed.notify_all();
     }
 
     fn cancel_reserved_task(&self, handle: &EvaluationTaskHandle) {
@@ -503,6 +543,7 @@ impl EvalContext {
         {
             tasks.reflection.remove(&handle.wait);
             tasks.reflection_by_id.remove(&handle.id);
+            self.session.task_changed.notify_all();
         }
     }
 
@@ -620,6 +661,7 @@ impl EvalContext {
                 | EvaluationTaskState::Queued
                 | EvaluationTaskState::Blocked(_) => {
                     record.state = EvaluationTaskState::Cancelled;
+                    self.session.task_changed.notify_all();
                     record.machine.take()
                 }
             }
@@ -690,6 +732,12 @@ impl EvalContext {
         self.session.pump_background(step_budget);
     }
 
+    /// Runs every executable task until all are terminal or one complete pass
+    /// leaves every unfinished task unchanged.
+    pub(crate) fn run_until_quiescent(&self) -> EvaluationSessionRun {
+        self.session.run_until_quiescent()
+    }
+
     #[cfg(test)]
     pub(crate) fn complete_wait(&self, wait: &EvaluationWaitToken) {
         let mut tasks = self
@@ -744,6 +792,113 @@ struct ClaimedTask {
 }
 
 impl EvaluationSession {
+    fn run_until_quiescent(&self) -> EvaluationSessionRun {
+        let mut attempted_blocked = HashSet::new();
+        loop {
+            let mut claimed = loop {
+                let mut tasks = self
+                    .tasks
+                    .lock()
+                    .expect("evaluation task registry was poisoned");
+                if let Some(claimed) = claim_ready_task(&mut tasks)
+                    .or_else(|| claim_blocked_task(&mut tasks, &attempted_blocked))
+                {
+                    break claimed;
+                }
+                if tasks
+                    .reflection
+                    .values()
+                    .any(|record| matches!(record.state, EvaluationTaskState::Running))
+                {
+                    drop(
+                        self.task_changed
+                            .wait(tasks)
+                            .expect("evaluation task registry was poisoned"),
+                    );
+                    continue;
+                }
+                return Self::session_run_report(&tasks);
+            };
+
+            let poll = claimed.machine.poll(TASK_POLL_QUANTUM);
+            let claimed_id = claimed.id;
+            let (made_progress, remains_blocked, cancelled) = self.release_task(claimed, poll);
+            if let Some(mut machine) = cancelled {
+                machine.cancel();
+            }
+            if remains_blocked {
+                attempted_blocked.insert(claimed_id);
+            }
+            if made_progress {
+                attempted_blocked.clear();
+            }
+        }
+    }
+
+    fn session_run_report(tasks: &EvaluationTasks) -> EvaluationSessionRun {
+        let mut failures = Vec::new();
+        let mut unfinished = Vec::new();
+        for (task, wait) in &tasks.reflection_by_id {
+            let record = tasks
+                .reflection
+                .get(wait)
+                .expect("task ID index must refer to a task record");
+            match &record.state {
+                EvaluationTaskState::Complete(_) | EvaluationTaskState::Cancelled => {}
+                EvaluationTaskState::Failed(error) => failures.push(EvaluationTaskFailure {
+                    task: *task,
+                    error: error.clone(),
+                }),
+                state => {
+                    let (state, dependency, dependency_wait, observed_generation) = match state {
+                        EvaluationTaskState::Dormant => {
+                            (EvaluationUnfinishedState::Dormant, None, None, None)
+                        }
+                        EvaluationTaskState::Reserved => {
+                            (EvaluationUnfinishedState::Reserved, None, None, None)
+                        }
+                        EvaluationTaskState::Queued => {
+                            (EvaluationUnfinishedState::Queued, None, None, None)
+                        }
+                        EvaluationTaskState::Running => {
+                            (EvaluationUnfinishedState::Running, None, None, None)
+                        }
+                        EvaluationTaskState::Blocked(block) => (
+                            EvaluationUnfinishedState::Blocked,
+                            block
+                                .lazy
+                                .as_ref()
+                                .and_then(|wait| producer_for_wait(tasks, wait)),
+                            block.lazy.as_ref().map(EvaluationWaitToken::get),
+                            block.observed_generation,
+                        ),
+                        EvaluationTaskState::Complete(_)
+                        | EvaluationTaskState::Failed(_)
+                        | EvaluationTaskState::Cancelled => {
+                            unreachable!("terminal task states were handled above")
+                        }
+                    };
+                    unfinished.push(EvaluationUnfinishedTask {
+                        task: *task,
+                        state,
+                        dependency,
+                        wait: dependency_wait,
+                        observed_generation,
+                    });
+                }
+            }
+        }
+        let report = EvaluationSessionReport {
+            failures,
+            unfinished,
+        };
+        if report.unfinished.is_empty() {
+            EvaluationSessionRun::Complete(report)
+        } else {
+            EvaluationSessionRun::Quiescent(report)
+        }
+    }
+
     fn pump_background(&self, mut step_budget: usize) {
         let mut attempted_blocked = HashSet::new();
         while step_budget > 0 {
@@ -854,6 +1009,7 @@ impl EvaluationSession {
         if record.cancel_requested {
             record.cancel_requested = false;
             record.state = EvaluationTaskState::Cancelled;
+            self.task_changed.notify_all();
             return (true, false, Some(claimed.machine));
         }
         record.machine = Some(claimed.machine);
@@ -879,6 +1035,7 @@ impl EvaluationSession {
         if matches!(record.state, EvaluationTaskState::Queued) {
             tasks.ready.push_back(claimed.id);
         }
+        self.task_changed.notify_all();
         (made_progress, remains_blocked, None)
     }
 }
@@ -1035,6 +1192,31 @@ mod tests {
         }
     }
 
+    struct Fail;
+
+    impl EvaluationTaskMachine for Fail {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            EvaluationMachinePoll::Failed(Arc::from("reasoning failed"))
+        }
+    }
+
+    struct SpawnOnce {
+        context: EvalContext,
+        spawned: bool,
+    }
+
+    impl EvaluationTaskMachine for SpawnOnce {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            if !self.spawned {
+                self.spawned = true;
+                self.context
+                    .schedule_task(|_| Ok(Box::new(Complete)))
+                    .expect("child should schedule while its parent is polled");
+            }
+            EvaluationMachinePoll::Complete((*crate::core::keys::UNIT_VALUE).clone())
+        }
+    }
+
     struct Cancellable {
         cancelled: Arc<AtomicBool>,
     }
@@ -1140,5 +1322,59 @@ mod tests {
             foreign.cancel_reflection_task_id(task.id()),
             EvaluationTaskCancellation::ForeignSession
         );
+    }
+
+    #[test]
+    fn run_until_quiescent_drains_tasks_spawned_during_the_run() {
+        let context = EvalContext::standalone();
+        context
+            .schedule_task(|task_context| {
+                Ok(Box::new(SpawnOnce {
+                    context: task_context,
+                    spawned: false,
+                }))
+            })
+            .unwrap();
+
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("finite parent and child tasks should drain");
+        };
+        assert!(report.failures.is_empty());
+        assert!(report.unfinished.is_empty());
+        assert_eq!(context.reflection_task_count(), 2);
+    }
+
+    #[test]
+    fn run_until_quiescent_collects_failures_without_short_circuiting() {
+        let context = EvalContext::standalone();
+        context.schedule_task(|_| Ok(Box::new(Fail))).unwrap();
+        context.schedule_task(|_| Ok(Box::new(Complete))).unwrap();
+
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("terminal failures do not leave unfinished work");
+        };
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].error.as_ref(), "reasoning failed");
+        assert!(report.unfinished.is_empty());
+    }
+
+    #[test]
+    fn run_until_quiescent_reports_stable_blocked_tasks() {
+        let context = EvalContext::standalone();
+        let task = context
+            .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+            .unwrap();
+
+        let EvaluationSessionRun::Quiescent(report) = context.run_until_quiescent() else {
+            panic!("an unchanged blocked task should leave the session quiescent");
+        };
+        assert!(report.failures.is_empty());
+        assert_eq!(report.unfinished.len(), 1);
+        assert_eq!(report.unfinished[0].task, task.id());
+        assert_eq!(
+            report.unfinished[0].state,
+            EvaluationUnfinishedState::Blocked
+        );
+        assert_eq!(report.unfinished[0].observed_generation, Some(7));
     }
 }

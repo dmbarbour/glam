@@ -50,11 +50,11 @@ main
        -> Host reads each source
        -> CompileContext qualifies relative names/imports using hidden provenance
        -> g_syntax explicitly interprets raw source bytes into ParsedSource
-       -> g_syntax resolves and lowers declarations into a core Value
+  -> g_syntax resolves and lowers declarations into a core Value
        -> the final-definition lazy cell closes the module fixpoint
        -> eval exposes the assembled module value
   -> Assembler::binary_at(module, "asm.result")
-  -> main closes the log queue, joins `conf.log` or the fallback logger, and writes bytes
+  -> main writes valid result bytes, drains assembler reasoning, then closes and joins logging
 ```
 
 Inputs are processed from last to first so earlier command-line inputs override
@@ -79,8 +79,10 @@ is defined, it runs through the generic external freer-effect task machine.
 That machine owns the standard effects and delegates additional private request
 tags to a `TaskSpecialization`. Reusable request families map into a host
 specialization's request enum; the reflection family currently contributes
-`log`, while `main` adds `read_log`, `write_stderr`, and their shared atomic
-snapshot/journal data.
+`log`, while `main` adds `log_status`, `read_log`, `write_stderr`, and their
+shared atomic snapshot/journal data. `log_status` is the status of the reified
+diagnostic stream only: it returns `'open` until `main` seals the input and
+`'closed` afterward.
 Failure becomes retryable only after a request observes changeable host state;
 `cut` itself merely scopes alternatives and transactions. Consequently, plain
 `.fail` remains permanent, while an empty `read_log` can suspend and replay from
@@ -90,7 +92,12 @@ return unit when it completes.
 Otherwise the Rust terminal logger drains the queue. Normal early termination
 or task failure also returns remaining messages to the fallback logger. A
 configured-logger failure is itself rendered as the next default diagnostic
-before that queue is drained. Core operators only construct requests;
+before that queue is drained and makes the process fail. Within the logger
+session, `.log` still writes to the same diagnostic queue consumed by
+`.read_log`: transactional writes are invisible until commit, but committed
+messages can subsequently be read by the logger or one of its child reflection
+tasks. This recursive behavior is provisional rather than a default-renderer
+shortcut. Core operators only construct requests;
 reflection state and external I/O are never performed by interaction-net
 reduction. The standard handler stores its active reset stack as a private
 entry in ordinary user state. Whole-state replacement therefore also switches
@@ -111,9 +118,15 @@ without that lock, then records its new state. It first follows the producer
 chain for the demanded wait token, then uses a bounded FIFO ready queue, and
 coarsely rechecks blocked tasks once per pump. Public assembler observation
 also supplies a small bounded background budget after its foreground result.
-Promise records retain their
-producer task IDs for this shallow dependency prioritization. Fine-grained
-observation indexes, persistent waiter graphs, worker threads, and evaluator
+For batch completion, `Assembler::drain_reasoning` instead runs without a step
+or time limit. It keeps polling runnable work, including newly spawned tasks,
+and stops only when every task is terminal or a complete pass leaves all
+unfinished tasks unchanged. The latter returns a structured deadlock report;
+terminal task failures are always included and are not acknowledged or cleared
+by observation. Promise records retain their producer task IDs for shallow
+dependency prioritization, and the report includes known dependencies, wait
+tokens, and observed host generations. Fine-grained observation indexes,
+persistent waiter graphs, worker threads, timed quiescence, and evaluator
 reduction fuel are intentionally deferred.
 
 The reusable reflection API exposes `.glam_ver`, `.os_env`, and `.cli_args` as
@@ -140,6 +153,14 @@ stores the session's reflection heap and sends diagnostics to the assembler's
 configured sink. CLI-only logger-consumer requests remain in `main`'s separate
 `MainEffects` specialization. Children spawned by that logger still receive
 only `ReflectionEffects`; the synchronous parent cooperatively pumps them.
+Full independent draining of logger-owned child tasks remains deferred.
+
+In batch mode, `main` writes a valid `asm.result` before draining the assembler
+session. It turns every task failure and a stable quiescent session into error
+diagnostics, seals the log input, and waits for `conf.log`. The logger can use
+`.log_status` alongside `.read_log` to define its shutdown policy. A monotonic
+error count is independent of queue retention and consumption, so dropped or
+rendered error diagnostics still produce a nonzero exit status.
 
 `main` chooses the `configuration` and `assembly` module paths and constructs
 their initial definitions. Those names and roles are CLI policy, not library

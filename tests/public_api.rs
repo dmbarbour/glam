@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
-use glam::{Assembler, Host, HostError, ModuleInput, Severity, Value};
+use glam::{Assembler, Host, HostError, ModuleInput, ReasoningStatus, Severity, Value};
 
 fn absolute_path_text(path: impl AsRef<Path>) -> String {
     std::path::absolute(path)
@@ -35,6 +35,15 @@ fn public_api_builds_a_script_module_and_extracts_binary_data() {
             .dropped(),
         0
     );
+}
+
+#[test]
+fn public_api_reports_an_empty_reasoning_session_as_complete() {
+    let report = Assembler::default().drain_reasoning();
+
+    assert_eq!(report.status(), ReasoningStatus::Complete);
+    assert!(report.failures().is_empty());
+    assert!(report.unfinished().is_empty());
 }
 
 #[test]

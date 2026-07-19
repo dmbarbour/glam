@@ -25,7 +25,9 @@ use crate::core::{Builtin, Dict, Key, List, NetValue};
 use crate::core_net::CoreSpecialization;
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity, SourceIdentity};
 use crate::eval;
-use crate::evaluation::{EvalContext, EvaluationSession};
+use crate::evaluation::{
+    EvalContext, EvaluationSession, EvaluationSessionRun, EvaluationUnfinishedState,
+};
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
 use crate::number::Number;
@@ -48,6 +50,11 @@ impl Value {
 
     pub fn text(text: impl AsRef<str>) -> Self {
         Self(CoreValue::binary_from_text(text.as_ref()))
+    }
+
+    pub fn atom_from_text(text: impl AsRef<str>) -> Self {
+        let key = Key::binary_from_text(text.as_ref());
+        Self(CoreValue::Atom(crate::core::Atom::from_key(&key)))
     }
 
     pub fn integer(value: i64) -> Self {
@@ -803,6 +810,91 @@ fn net_build_error(error: NetBuildError) -> Error {
     Error::new(format!("invalid interaction net: {error}"))
 }
 
+/// Result of running every currently scheduled reflection task to a terminal
+/// state or to a stable quiescent pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasoningReport {
+    status: ReasoningStatus,
+    failures: Vec<ReasoningFailure>,
+    unfinished: Vec<ReasoningTask>,
+}
+
+impl ReasoningReport {
+    pub fn status(&self) -> ReasoningStatus {
+        self.status
+    }
+
+    pub fn failures(&self) -> &[ReasoningFailure] {
+        &self.failures
+    }
+
+    pub fn unfinished(&self) -> &[ReasoningTask] {
+        &self.unfinished
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningStatus {
+    Complete,
+    Deadlocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasoningFailure {
+    task_id: u64,
+    message: Arc<str>,
+}
+
+impl ReasoningFailure {
+    pub fn task_id(&self) -> u64 {
+        self.task_id
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasoningTask {
+    task_id: u64,
+    state: ReasoningTaskState,
+    waiting_on_task: Option<u64>,
+    wait_id: Option<u64>,
+    observed_generation: Option<u64>,
+}
+
+impl ReasoningTask {
+    pub fn task_id(&self) -> u64 {
+        self.task_id
+    }
+
+    pub fn state(&self) -> ReasoningTaskState {
+        self.state
+    }
+
+    pub fn waiting_on_task(&self) -> Option<u64> {
+        self.waiting_on_task
+    }
+
+    pub fn wait_id(&self) -> Option<u64> {
+        self.wait_id
+    }
+
+    pub fn observed_generation(&self) -> Option<u64> {
+        self.observed_generation
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningTaskState {
+    Dormant,
+    Reserved,
+    Queued,
+    Running,
+    Blocked,
+}
+
 #[derive(Clone)]
 pub struct Assembler {
     host: Arc<dyn Host>,
@@ -838,6 +930,44 @@ impl Assembler {
     fn pump_background_tasks(&self) {
         self.eval_context()
             .pump_background(BACKGROUND_TASK_STEP_BUDGET);
+    }
+
+    /// Runs scheduled reflection reasoning without imposing a step or time
+    /// limit. A runnable infinite task therefore keeps this call running.
+    pub fn drain_reasoning(&self) -> ReasoningReport {
+        let run = self.eval_context().run_until_quiescent();
+        let (status, report) = match run {
+            EvaluationSessionRun::Complete(report) => (ReasoningStatus::Complete, report),
+            EvaluationSessionRun::Quiescent(report) => (ReasoningStatus::Deadlocked, report),
+        };
+        ReasoningReport {
+            status,
+            failures: report
+                .failures
+                .into_iter()
+                .map(|failure| ReasoningFailure {
+                    task_id: failure.task.get(),
+                    message: failure.error,
+                })
+                .collect(),
+            unfinished: report
+                .unfinished
+                .into_iter()
+                .map(|task| ReasoningTask {
+                    task_id: task.task.get(),
+                    state: match task.state {
+                        EvaluationUnfinishedState::Dormant => ReasoningTaskState::Dormant,
+                        EvaluationUnfinishedState::Reserved => ReasoningTaskState::Reserved,
+                        EvaluationUnfinishedState::Queued => ReasoningTaskState::Queued,
+                        EvaluationUnfinishedState::Running => ReasoningTaskState::Running,
+                        EvaluationUnfinishedState::Blocked => ReasoningTaskState::Blocked,
+                    },
+                    waiting_on_task: task.dependency.map(|task| task.get()),
+                    wait_id: task.wait,
+                    observed_generation: task.observed_generation,
+                })
+                .collect(),
+        }
     }
 
     pub fn with_host(mut self, host: impl Host + 'static) -> Self {
