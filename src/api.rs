@@ -35,7 +35,6 @@ use crate::reflection::{
 };
 
 pub const DEFAULT_DIAGNOSTIC_CAPACITY: usize = 1_000;
-const BACKGROUND_TASK_STEP_BUDGET: usize = 256;
 const GLAM_COMPATIBILITY_VERSION: &str = "0.1.0";
 const IMPLEMENTATION_NAME: &str = "rust-bootstrap";
 
@@ -967,11 +966,6 @@ impl Assembler {
         EvalContext::new(self.evaluation_session.clone())
     }
 
-    fn pump_background_tasks(&self) {
-        self.eval_context()
-            .pump_background(BACKGROUND_TASK_STEP_BUDGET);
-    }
-
     /// Runs scheduled reflection reasoning without imposing a step or time
     /// limit. A runnable infinite task therefore keeps this call running.
     pub fn drain_reasoning(&self) -> ReasoningReport {
@@ -1090,11 +1084,9 @@ impl Assembler {
 
     /// Evaluates a value far enough to expose its outer semantic value.
     pub fn evaluate(&self, value: &Value) -> Result<Value, Error> {
-        let result = eval::eval_value(&self.eval_context(), value.as_core())
+        eval::eval_value(&self.eval_context(), value.as_core())
             .map(Value::from_core)
-            .map_err(|error| Error::new(error.to_string()));
-        self.pump_background_tasks();
-        result
+            .map_err(|error| Error::new(error.to_string()))
     }
 
     /// Applies all supplied arguments while preserving evaluator laziness.
@@ -1104,15 +1096,13 @@ impl Assembler {
         function: &Value,
         arguments: impl IntoIterator<Item = Value>,
     ) -> Result<Value, Error> {
-        let result = eval::apply_values(
+        eval::apply_values(
             &self.eval_context(),
             function.as_core().clone(),
             arguments.into_iter().map(Value::into_core).collect(),
         )
         .map(Value::from_core)
-        .map_err(|error| Error::new(error.to_string()));
-        self.pump_background_tasks();
-        result
+        .map_err(|error| Error::new(error.to_string()))
     }
 
     /// Builds one closed interaction-net value through a checked, effect-style
@@ -1136,33 +1126,23 @@ impl Assembler {
     // producers should feed the same bounded history rather than print.
 
     pub fn get(&self, root: &Value, path: &str) -> Result<Value, Error> {
-        let result = self
-            .core_value_at_path(root.as_core(), path)
-            .map(Value::from_core);
-        self.pump_background_tasks();
-        result
+        self.core_value_at_path(root.as_core(), path)
+            .map(Value::from_core)
     }
 
     pub fn to_binary(&self, value: &Value) -> Result<Bytes, Error> {
-        let result = self.core_value_bytes(value.as_core(), "value");
-        self.pump_background_tasks();
-        result
+        self.core_value_bytes(value.as_core(), "value")
     }
 
     /// Extracts a byte range from compact binary data or a byte-valued list.
     /// Lazy list chunks are evaluated as required to locate the range.
     pub fn binary_slice(&self, value: &Value, range: Range<usize>) -> Result<Bytes, Error> {
-        let result = self.core_value_binary_slice(value.as_core(), range, "value");
-        self.pump_background_tasks();
-        result
+        self.core_value_binary_slice(value.as_core(), range, "value")
     }
 
     pub fn binary_at(&self, root: &Value, path: &str) -> Result<Bytes, Error> {
-        let result = self
-            .core_value_at_path(root.as_core(), path)
-            .and_then(|value| self.core_value_bytes(&value, path));
-        self.pump_background_tasks();
-        result
+        self.core_value_at_path(root.as_core(), path)
+            .and_then(|value| self.core_value_bytes(&value, path))
     }
 
     fn build_module(

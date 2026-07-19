@@ -213,11 +213,11 @@ design in the design documents.
   producer of a demanded wait token, follows a blocked task's one lazy
   dependency when that producer is known, and otherwise polls ready tasks in
   bounded round-robin order. A per-pump visited set stops dependency cycles and
-  repeated polling of unchanged blocked tasks. Public assembler evaluation and
-  extraction operations also grant a small bounded background budget after
-  their foreground result, so scanners and short tasks progress without making
-  long-lived tasks synchronous. `Assembler::drain_reasoning` is the distinct
-  unbounded batch-completion driver: runnable work may run forever, newly
+  repeated polling of unchanged blocked tasks. Foreground evaluation pumps a
+  task only when its demanded lazy value depends on that task; unrelated
+  reasoning does not run as a side effect of public observation or extraction.
+  `Assembler::drain_reasoning` is the explicit unbounded batch-completion
+  driver: runnable work may run forever, newly
   scheduled work joins the drain, and a stable pass over unchanged unfinished
   tasks returns a structured deadlock report. Terminal failures are reported
   without an acknowledge/handled state. Known lazy producers, wait tokens, and

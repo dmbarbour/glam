@@ -120,11 +120,11 @@ polls this machine and performs the legacy host wait.
 interface. Its serial pump removes one machine under the session lock, polls it
 without that lock, then records its new state. It first follows the producer
 chain for the demanded wait token, then uses a bounded FIFO ready queue, and
-coarsely rechecks blocked tasks once per pump. Public assembler observation
-also supplies a small bounded background budget after its foreground result.
-For batch completion, `Assembler::drain_reasoning` instead runs without a step
-or time limit. It keeps polling runnable work, including newly spawned tasks,
-and stops only when every task is terminal or a complete pass leaves all
+coarsely rechecks blocked tasks once per targeted pump. Public assembler
+observation runs unrelated reasoning only through an explicit
+`Assembler::drain_reasoning` call. That batch-completion driver runs without a
+step or time limit. It keeps polling runnable work, including newly spawned
+tasks, and stops only when every task is terminal or a complete pass leaves all
 unfinished tasks unchanged. The latter returns a structured deadlock report;
 terminal task failures are always included and are not acknowledged or cleared
 by observation. Promise records retain their producer task IDs for shallow

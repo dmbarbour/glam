@@ -95,7 +95,7 @@ fn assembler_owns_an_authoritative_reflection_environment() {
 }
 
 #[test]
-fn public_evaluation_cooperatively_pumps_automatic_reflection_tasks() {
+fn public_evaluation_leaves_automatic_reflection_tasks_for_explicit_drain() {
     let assembler = Assembler::default();
     let module = assembler
         .module(["automatic_refl"])
@@ -115,9 +115,20 @@ fn public_evaluation_cooperatively_pumps_automatic_reflection_tasks() {
             .expect("ordinary value should evaluate"),
         b"value".as_slice()
     );
+    assert!(
+        assembler
+            .read_diagnostics()
+            .expect("automatic reflection diagnostics should be retained")
+            .entries()
+            .is_empty()
+    );
+
+    let report = assembler.drain_reasoning();
+    assert_eq!(report.status(), ReasoningStatus::Complete);
+
     let diagnostics = assembler
         .read_diagnostics()
-        .expect("automatic reflection diagnostics should be retained");
+        .expect("drained automatic reflection diagnostics should be retained");
     assert_eq!(diagnostics.entries().len(), 1);
     assert_eq!(diagnostics.entries()[0].message(), "automatic reflection");
 }
