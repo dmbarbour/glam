@@ -247,6 +247,8 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             SyntaxOperator::EffectThen => "=>>",
             SyntaxOperator::Builtin(crate::core::Builtin::Fixpoint) => "fixpoint",
             SyntaxOperator::Builtin(crate::core::Builtin::Anno) => "anno",
+            SyntaxOperator::Builtin(crate::core::Builtin::Seq) => "seq",
+            SyntaxOperator::Builtin(crate::core::Builtin::Spark) => "spark",
             SyntaxOperator::Builtin(crate::core::Builtin::MergeDuplicate) => "merge_duplicate",
             SyntaxOperator::Builtin(crate::core::Builtin::Floor) => "floor",
             SyntaxOperator::Builtin(crate::core::Builtin::Mod) => "mod",

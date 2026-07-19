@@ -788,6 +788,38 @@ fn quiescent_reflection_tasks_report_a_scheduler_deadlock() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("reflection scheduler deadlocked"));
 }
 
+#[test]
+fn invalid_glam_workers_is_a_command_line_error() {
+    let output = glam_command()
+        .env("GLAM_WORKERS", "many")
+        .arg("--script.g")
+        .arg("language g0\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("GLAM_WORKERS"));
+}
+
+#[test]
+fn command_line_workers_override_glam_workers() {
+    let output = glam_command()
+        .env("GLAM_WORKERS", "invalid but overridden")
+        .arg("--workers")
+        .arg("2")
+        .arg("--script.g")
+        .arg("language g0\nimport 'std\nasm.result = seq 1 (spark 2 \"ok\")\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ok");
+}
+
 fn hello_sample_files() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/assembly");
     let mut files = fs::read_dir(&root)
@@ -812,6 +844,7 @@ fn hello_sample_files() -> Vec<PathBuf> {
 fn glam_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_glam"));
     command.env("GLAM_CONF", "samples/config/unit_tests.g");
+    command.env_remove("GLAM_WORKERS");
     command
 }
 

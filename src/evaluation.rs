@@ -13,6 +13,9 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use crate::core::{Dict, Value};
 
+mod executor;
+pub(crate) use executor::EvaluationExecutor;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct EvaluationTaskId(NonZeroU64);
 
@@ -28,6 +31,7 @@ impl EvaluationTaskId {
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_WAIT_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 fn allocate_task_id() -> Result<EvaluationTaskId, Arc<str>> {
     allocate_id(&NEXT_TASK_ID, "evaluation task IDs exhausted").map(EvaluationTaskId)
@@ -38,6 +42,12 @@ fn allocate_wait_token(session: &Arc<EvaluationSession>) -> Result<EvaluationWai
         id: allocate_id(&NEXT_WAIT_ID, "evaluation wait-token IDs exhausted")?,
         owner: Arc::downgrade(session),
     })
+}
+
+fn allocate_session_id() -> u64 {
+    NEXT_SESSION_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("evaluation session IDs exhausted")
 }
 
 fn allocate_id(source: &AtomicU64, exhausted: &'static str) -> Result<NonZeroU64, Arc<str>> {
@@ -275,15 +285,19 @@ struct EvaluationTasks {
 }
 
 pub(crate) struct EvaluationSession {
+    id: u64,
     reflection_environment: Value,
     tasks: Mutex<EvaluationTasks>,
     task_changed: Condvar,
     reflection_launcher: OnceLock<Arc<dyn ReflectionTaskLauncher>>,
+    executor: Weak<EvaluationExecutor>,
+    lazy_claims: Mutex<HashMap<u64, EvaluationTaskId>>,
+    lazy_changed: Condvar,
 }
 
 impl Default for EvaluationSession {
     fn default() -> Self {
-        Self::with_environment(Value::Dict(Dict::new_sync()))
+        Self::with_environment_and_executor(Value::Dict(Dict::new_sync()), Weak::new())
     }
 }
 
@@ -301,12 +315,35 @@ impl EvaluationSession {
     }
 
     pub(crate) fn with_environment(reflection_environment: Value) -> Self {
+        Self::with_environment_and_executor(reflection_environment, Weak::new())
+    }
+
+    fn with_environment_and_executor(
+        reflection_environment: Value,
+        executor: Weak<EvaluationExecutor>,
+    ) -> Self {
         Self {
+            id: allocate_session_id(),
             reflection_environment,
             tasks: Mutex::new(EvaluationTasks::default()),
             task_changed: Condvar::new(),
             reflection_launcher: OnceLock::new(),
+            executor,
+            lazy_claims: Mutex::new(HashMap::new()),
+            lazy_changed: Condvar::new(),
         }
+    }
+
+    pub(crate) fn shared(
+        reflection_environment: Value,
+        executor: &Arc<EvaluationExecutor>,
+    ) -> Arc<Self> {
+        let session = Arc::new(Self::with_environment_and_executor(
+            reflection_environment,
+            Arc::downgrade(executor),
+        ));
+        executor.register_session(&session);
+        session
     }
 
     fn reflection_environment(&self) -> Value {
@@ -320,6 +357,38 @@ impl EvaluationSession {
         self.reflection_launcher
             .set(launcher)
             .map_err(|_| Arc::from("evaluation session already has a reflection task launcher"))
+    }
+
+    fn notify_executor_ready(&self) {
+        if let Some(executor) = self.executor.upgrade() {
+            executor.notify_session_ready(self.id);
+        }
+    }
+
+    pub(crate) fn submit_spark(self: &Arc<Self>, value: Value) {
+        if let Some(executor) = self.executor.upgrade() {
+            executor.submit_spark(self, value);
+        }
+    }
+}
+
+pub(crate) struct LazyEvaluationClaim {
+    session: Arc<EvaluationSession>,
+    lazy: u64,
+    owner: EvaluationTaskId,
+}
+
+impl Drop for LazyEvaluationClaim {
+    fn drop(&mut self) {
+        let mut claims = self
+            .session
+            .lazy_claims
+            .lock()
+            .expect("lazy evaluation claim table was poisoned");
+        if claims.get(&self.lazy) == Some(&self.owner) {
+            claims.remove(&self.lazy);
+            self.session.lazy_changed.notify_all();
+        }
     }
 }
 
@@ -360,6 +429,45 @@ impl EvalContext {
 
     pub(crate) fn reflection_environment(&self) -> Value {
         self.session.reflection_environment()
+    }
+
+    pub(crate) fn spark(&self, value: Value) {
+        if matches!(value, Value::Lazy(_) | Value::Net(_)) {
+            self.session.submit_spark(value);
+        }
+    }
+
+    pub(crate) fn claim_lazy(&self, lazy: u64) -> Result<LazyEvaluationClaim, Arc<str>> {
+        let owner = self.task_id()?;
+        let mut claims = self
+            .session
+            .lazy_claims
+            .lock()
+            .expect("lazy evaluation claim table was poisoned");
+        loop {
+            match claims.get(&lazy).copied() {
+                None => {
+                    claims.insert(lazy, owner);
+                    return Ok(LazyEvaluationClaim {
+                        session: self.session.clone(),
+                        lazy,
+                        owner,
+                    });
+                }
+                Some(active) if active == owner => {
+                    return Err(Arc::from(format!(
+                        "lazy value {lazy} recursively observed itself"
+                    )));
+                }
+                Some(_) => {
+                    claims = self
+                        .session
+                        .lazy_changed
+                        .wait(claims)
+                        .expect("lazy evaluation claim table was poisoned");
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -488,6 +596,8 @@ impl EvalContext {
         );
         tasks.ready.push_back(id);
         self.session.task_changed.notify_all();
+        drop(tasks);
+        self.session.notify_executor_ready();
         Ok(EvaluationTaskHandle { id, wait })
     }
 
@@ -555,6 +665,17 @@ impl EvalContext {
             Err(error) => record.state = EvaluationTaskState::Failed(error),
         }
         self.session.task_changed.notify_all();
+        let queued = matches!(
+            tasks
+                .reflection
+                .get(&handle.wait)
+                .map(|record| &record.state),
+            Some(EvaluationTaskState::Queued)
+        );
+        drop(tasks);
+        if queued {
+            self.session.notify_executor_ready();
+        }
     }
 
     fn cancel_reserved_task(&self, handle: &EvaluationTaskHandle) {
@@ -844,6 +965,7 @@ impl EvaluationSession {
             let poll = claimed.machine.poll(TASK_POLL_QUANTUM);
             let claimed_id = claimed.id;
             let (made_progress, remains_blocked, cancelled) = self.release_task(claimed, poll);
+            self.notify_executor_if_ready();
             if let Some(mut machine) = cancelled {
                 machine.cancel();
             }
@@ -955,6 +1077,22 @@ impl EvaluationSession {
                     .or_else(|| claim_blocked_task(&mut tasks, &attempted_blocked))
             };
             let Some(mut claimed) = claimed else {
+                let mut tasks = self
+                    .tasks
+                    .lock()
+                    .expect("evaluation task registry was poisoned");
+                if target_has_running_producer(&tasks, target) {
+                    tasks = self
+                        .task_changed
+                        .wait(tasks)
+                        .expect("evaluation task registry was poisoned");
+                    drop(tasks);
+                    continue;
+                }
+                drop(tasks);
+                if !matches!(context.poll_wait(target), EvaluationTaskPoll::Pending(_)) {
+                    return EvaluationPumpOutcome::TargetReady;
+                }
                 return EvaluationPumpOutcome::NoProgress;
             };
 
@@ -963,6 +1101,7 @@ impl EvaluationSession {
             let poll = claimed.machine.poll(quantum);
             let claimed_id = claimed.id;
             let (made_progress, remains_blocked, cancelled) = self.release_task(claimed, poll);
+            self.notify_executor_if_ready();
             if let Some(mut machine) = cancelled {
                 machine.cancel();
             }
@@ -1027,6 +1166,46 @@ impl EvaluationSession {
         self.task_changed.notify_all();
         (made_progress, remains_blocked, None)
     }
+
+    fn notify_executor_if_ready(&self) {
+        let tasks = self
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let ready = tasks.ready.iter().any(|id| {
+            tasks
+                .reflection_by_id
+                .get(id)
+                .and_then(|wait| tasks.reflection.get(wait))
+                .is_some_and(|record| matches!(record.state, EvaluationTaskState::Queued))
+        });
+        drop(tasks);
+        if ready {
+            self.notify_executor_ready();
+        }
+    }
+
+    fn poll_one_ready_task(&self) {
+        let claimed = {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .expect("evaluation task registry was poisoned");
+            claim_ready_task(&mut tasks)
+        };
+        let Some(mut claimed) = claimed else {
+            return;
+        };
+        // Re-advertise remaining ready work before polling so other workers
+        // may claim independent tasks from this same session concurrently.
+        self.notify_executor_if_ready();
+        let poll = claimed.machine.poll(TASK_POLL_QUANTUM);
+        let (_, _, cancelled) = self.release_task(claimed, poll);
+        if let Some(mut machine) = cancelled {
+            machine.cancel();
+        }
+        self.notify_executor_if_ready();
+    }
 }
 
 fn producer_for_wait(
@@ -1081,6 +1260,33 @@ fn prioritized_task(
     })
 }
 
+fn target_has_running_producer(tasks: &EvaluationTasks, target: &EvaluationWaitToken) -> bool {
+    let mut seen = HashSet::new();
+    let mut wait = target.clone();
+    while let Some(id) = producer_for_wait(tasks, &wait) {
+        if !seen.insert(id) {
+            return false;
+        }
+        let Some(task_wait) = tasks.reflection_by_id.get(&id) else {
+            return false;
+        };
+        let Some(record) = tasks.reflection.get(task_wait) else {
+            return false;
+        };
+        match &record.state {
+            EvaluationTaskState::Running => return true,
+            EvaluationTaskState::Blocked(block) => {
+                let Some(dependency) = &block.lazy else {
+                    return false;
+                };
+                wait = dependency.clone();
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn claim_task(tasks: &mut EvaluationTasks, id: EvaluationTaskId) -> Option<ClaimedTask> {
     let wait = tasks.reflection_by_id.get(&id)?.clone();
     let record = tasks.reflection.get_mut(&wait)?;
@@ -1129,6 +1335,8 @@ fn claim_blocked_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     struct Complete;
 
@@ -1186,6 +1394,17 @@ mod tests {
     impl EvaluationTaskMachine for Fail {
         fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
             EvaluationMachinePoll::Failed(Arc::from("reasoning failed"))
+        }
+    }
+
+    struct Signal(Option<mpsc::Sender<()>>);
+
+    impl EvaluationTaskMachine for Signal {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            if let Some(signal) = self.0.take() {
+                signal.send(()).expect("test receiver should remain open");
+            }
+            EvaluationMachinePoll::Complete((*crate::core::keys::UNIT_VALUE).clone())
         }
     }
 
@@ -1365,5 +1584,45 @@ mod tests {
             EvaluationUnfinishedState::Blocked
         );
         assert_eq!(report.unfinished[0].observed_generation, Some(7));
+    }
+
+    #[test]
+    fn zero_worker_executor_drops_sparks_without_forcing_them() {
+        let executor = EvaluationExecutor::new(0).unwrap();
+        let session = EvaluationSession::shared(Value::Dict(Dict::new_sync()), &executor);
+        let context = EvalContext::new(session);
+        let lazy = crate::core::LazyValue::deferred("unforced spark", |_| {
+            panic!("zero-worker spark must never be evaluated")
+        });
+
+        context.spark(Value::Lazy(lazy.clone()));
+
+        assert!(lazy.cached().is_none());
+    }
+
+    #[test]
+    fn workers_force_sparks_and_poll_ready_reflection_tasks() {
+        let executor = EvaluationExecutor::new(1).unwrap();
+        let session = EvaluationSession::shared(Value::Dict(Dict::new_sync()), &executor);
+        let context = EvalContext::new(session);
+        let (spark_sender, spark_receiver) = mpsc::channel();
+        let lazy = crate::core::LazyValue::deferred("worker spark", move |_| {
+            spark_sender
+                .send(())
+                .expect("spark receiver should remain open");
+            Ok((*crate::core::keys::UNIT_VALUE).clone())
+        });
+        context.spark(Value::Lazy(lazy));
+        spark_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should force queued spark");
+
+        let (task_sender, task_receiver) = mpsc::channel();
+        context
+            .schedule_task(move |_| Ok(Box::new(Signal(Some(task_sender)))))
+            .expect("worker task should schedule");
+        task_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should poll ready reflection task");
     }
 }

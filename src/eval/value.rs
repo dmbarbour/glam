@@ -93,6 +93,19 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
             Ok(result)
         };
     }
+    let _claim = context
+        .claim_lazy(lazy.id())
+        .map_err(|error| EvalError::new(error.as_ref()))?;
+    if let Some(result) = lazy.cached() {
+        let result = result.map_err(|message| EvalError::new(message.as_ref()))?;
+        return if reflection_annotation {
+            eval_reflection_annotation_result(context, result)
+        } else if continue_through_result {
+            eval_value(context, &result)
+        } else {
+            Ok(result)
+        };
+    }
     let result = if let Some(gate) = lazy.reflection_gate() {
         let task = gate
             .task(context)

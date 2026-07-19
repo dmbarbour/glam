@@ -24,7 +24,8 @@ use crate::core_net::CoreSpecialization;
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity, SourceIdentity};
 use crate::eval;
 use crate::evaluation::{
-    EvalContext, EvaluationSession, EvaluationSessionRun, EvaluationUnfinishedState,
+    EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionRun,
+    EvaluationUnfinishedState,
 };
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -641,10 +642,9 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
 fn evaluation_session(
     reflection_environment: Value,
     diagnostic_sink: Arc<dyn DiagnosticSink>,
+    executor: &Arc<EvaluationExecutor>,
 ) -> Arc<EvaluationSession> {
-    let session = Arc::new(EvaluationSession::with_environment(
-        reflection_environment.as_core().clone(),
-    ));
+    let session = EvaluationSession::shared(reflection_environment.as_core().clone(), executor);
     let host = Arc::new(AssemblerReflectionHost::new(
         reflection_environment,
         diagnostic_sink,
@@ -653,6 +653,23 @@ fn evaluation_session(
         .install_reflection_launcher(task_launcher(ReflectionEffects, host))
         .expect("fresh evaluation session must accept its reflection launcher");
     session
+}
+
+/// Opaque background execution resources shared by related evaluation
+/// sessions, including the assembler, logger, and future IDE services.
+#[derive(Clone)]
+pub struct EvaluationRuntime {
+    executor: Arc<EvaluationExecutor>,
+}
+
+impl EvaluationRuntime {
+    pub fn worker_threads(&self) -> usize {
+        self.executor.worker_count()
+    }
+
+    pub(crate) fn executor(&self) -> &Arc<EvaluationExecutor> {
+        &self.executor
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -921,6 +938,7 @@ pub struct Assembler {
     diagnostic_sink: Arc<dyn DiagnosticSink>,
     reflection_environment: Value,
     next_compilation_invocation: Arc<AtomicU64>,
+    evaluation_runtime: EvaluationRuntime,
     evaluation_session: Arc<EvaluationSession>,
 }
 
@@ -936,13 +954,21 @@ impl Default for Assembler {
             !replaced_glam,
             "the default environment must not define `glam`"
         );
-        let evaluation_session =
-            evaluation_session(reflection_environment.clone(), diagnostic_sink.clone());
+        let evaluation_runtime = EvaluationRuntime {
+            executor: EvaluationExecutor::new(0)
+                .expect("zero-worker evaluation executor must not start threads"),
+        };
+        let evaluation_session = evaluation_session(
+            reflection_environment.clone(),
+            diagnostic_sink.clone(),
+            evaluation_runtime.executor(),
+        );
         Self {
             host,
             diagnostic_sink,
             reflection_environment,
             next_compilation_invocation: Arc::new(AtomicU64::new(1)),
+            evaluation_runtime,
             evaluation_session,
         }
     }
@@ -964,6 +990,12 @@ impl Assembler {
     /// assembler's evaluation session.
     pub fn reflection_environment(&self) -> Value {
         self.reflection_environment.clone()
+    }
+
+    /// Returns the shared execution resources used by this assembler and any
+    /// service evaluation sessions explicitly attached to it.
+    pub fn evaluation_runtime(&self) -> EvaluationRuntime {
+        self.evaluation_runtime.clone()
     }
 
     pub(crate) fn eval_context(&self) -> EvalContext {
@@ -1013,14 +1045,18 @@ impl Assembler {
         self.evaluation_session = evaluation_session(
             self.reflection_environment.clone(),
             self.diagnostic_sink.clone(),
+            self.evaluation_runtime.executor(),
         );
         self
     }
 
     pub fn with_diagnostic_sink(mut self, sink: impl DiagnosticSink + 'static) -> Self {
         let diagnostic_sink: Arc<dyn DiagnosticSink> = Arc::new(sink);
-        self.evaluation_session =
-            evaluation_session(self.reflection_environment.clone(), diagnostic_sink.clone());
+        self.evaluation_session = evaluation_session(
+            self.reflection_environment.clone(),
+            diagnostic_sink.clone(),
+            self.evaluation_runtime.executor(),
+        );
         self.diagnostic_sink = diagnostic_sink;
         self
     }
@@ -1042,6 +1078,23 @@ impl Assembler {
         self.evaluation_session = evaluation_session(
             self.reflection_environment.clone(),
             self.diagnostic_sink.clone(),
+            self.evaluation_runtime.executor(),
+        );
+        Ok(self)
+    }
+
+    /// Replaces the shared background executor and starts a fresh evaluation
+    /// session. The count applies to this assembler and attached logger/IDE
+    /// sessions together; zero disables background workers and drops sparks.
+    pub fn with_worker_threads(mut self, worker_threads: usize) -> Result<Self, Error> {
+        self.evaluation_runtime = EvaluationRuntime {
+            executor: EvaluationExecutor::new(worker_threads)
+                .map_err(|error| Error::new(error.as_ref()))?,
+        };
+        self.evaluation_session = evaluation_session(
+            self.reflection_environment.clone(),
+            self.diagnostic_sink.clone(),
+            self.evaluation_runtime.executor(),
         );
         Ok(self)
     }

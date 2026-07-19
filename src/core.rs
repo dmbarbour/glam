@@ -90,6 +90,10 @@ impl LazyValue {
         &self.label
     }
 
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
     pub fn set(&self, value: Value) -> Result<(), Value> {
         self.result.set(Ok(value)).map_err(|result| {
             result.expect("setting a lazy value always supplies a successful value")
@@ -647,6 +651,8 @@ pub enum Builtin {
     Less,
     Fixpoint,
     Anno,
+    Seq,
+    Spark,
     MergeDuplicate,
     Floor,
     Mod,
@@ -704,6 +710,8 @@ impl Builtin {
             Self::Less => 2,
             Self::Fixpoint => 1,
             Self::Anno => 2,
+            Self::Seq => 2,
+            Self::Spark => 2,
             Self::MergeDuplicate => 3,
             Self::Floor => 1,
             Self::Mod => 2,

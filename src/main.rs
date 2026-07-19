@@ -13,7 +13,7 @@ use glam::reflection::{
     ReflectionJournal, ReflectionRequest, ReflectionServices, ReflectionTransaction,
     RequestContext, RequestResult, TaskCommit, TaskEnvironment, TaskHost, TaskOutcome,
     TaskSpecialization, handle_reflection_request, reflection_request_specs,
-    run_unit_with_reflection_host,
+    run_unit_with_reflection_host_in_runtime,
 };
 use glam::{
     Assembler, Builtin, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticSink, Error,
@@ -33,6 +33,7 @@ struct AssemblyCommand {
     arguments: Vec<String>,
     reflection_arguments: Vec<String>,
     manifest: Option<PathBuf>,
+    worker_threads: Option<usize>,
 }
 
 fn main() -> ExitCode {
@@ -113,6 +114,22 @@ fn main() -> ExitCode {
                 },
             )
         }
+        "--workers" => {
+            let Some(count) = args.next() else {
+                eprintln!("error: `--workers` needs a non-negative integer");
+                return ExitCode::from(2);
+            };
+            let Ok(worker_threads) = parse_worker_count(&count, "--workers") else {
+                return ExitCode::from(2);
+            };
+            run_assembly(
+                args,
+                AssemblyCommand {
+                    worker_threads: Some(worker_threads),
+                    ..AssemblyCommand::default()
+                },
+            )
+        }
         option if option.starts_with('-') => {
             eprintln!("error: unknown option `{option}`");
             ExitCode::from(2)
@@ -171,6 +188,17 @@ fn collect_assembly_inputs(
                 };
                 command.reflection_arguments.push(argument);
             }
+            "--workers" => {
+                let Some(count) = args.next() else {
+                    eprintln!("error: `--workers` needs a non-negative integer");
+                    return Err(ExitCode::from(2));
+                };
+                let worker_threads = parse_worker_count(&count, "--workers")?;
+                if command.worker_threads.replace(worker_threads).is_some() {
+                    eprintln!("error: `--workers` may be specified only once");
+                    return Err(ExitCode::from(2));
+                }
+            }
             option if script_extension(option).is_some() => {
                 let extension = script_extension(option).expect("checked above").to_owned();
                 let Some(body) = args.next() else {
@@ -193,6 +221,27 @@ fn collect_assembly_inputs(
     }
 
     Ok(())
+}
+
+fn parse_worker_count(value: &str, source: &str) -> Result<usize, ExitCode> {
+    value.parse::<usize>().map_err(|_| {
+        eprintln!("error: `{source}` requires a non-negative integer, got `{value}`");
+        ExitCode::from(2)
+    })
+}
+
+fn configured_worker_count(command_line: Option<usize>) -> Result<usize, ExitCode> {
+    if let Some(worker_threads) = command_line {
+        return Ok(worker_threads);
+    }
+    let Some(value) = env::var_os("GLAM_WORKERS") else {
+        return Ok(0);
+    };
+    let Some(value) = value.to_str() else {
+        eprintln!("error: `GLAM_WORKERS` must be a non-negative integer");
+        return Err(ExitCode::from(2));
+    };
+    parse_worker_count(value, "GLAM_WORKERS")
 }
 
 fn script_extension(option: &str) -> Option<&str> {
@@ -250,14 +299,25 @@ fn assemble_inputs(command: AssemblyCommand) -> ExitCode {
         arguments,
         reflection_arguments,
         manifest,
+        worker_threads,
     } = command;
+    let worker_threads = match configured_worker_count(worker_threads) {
+        Ok(worker_threads) => worker_threads,
+        Err(exit_code) => return exit_code,
+    };
     let log_host = Arc::new(LogHost::new(DEFAULT_DIAGNOSTIC_CAPACITY));
     let local_files = LocalFileHost::default();
-    let assembler = Assembler::default()
-        .with_host(local_files.clone())
-        .with_reflection_environment(process_reflection_environment(reflection_arguments))
-        .expect("main's reflection environment must be a dictionary")
-        .with_diagnostic_sink(log_host.clone());
+    let assembler = match Assembler::default().with_worker_threads(worker_threads) {
+        Ok(assembler) => assembler,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(2);
+        }
+    }
+    .with_host(local_files.clone())
+    .with_reflection_environment(process_reflection_environment(reflection_arguments))
+    .expect("main's reflection environment must be a dictionary")
+    .with_diagnostic_sink(log_host.clone());
     let configuration = match load_configuration(&assembler) {
         Ok(configuration) => configuration,
         Err(error) => {
@@ -407,6 +467,7 @@ fn start_logger(
         assembler.reflection_environment(),
     ));
     let effect_assembler = assembler.clone();
+    let evaluation_runtime = assembler.evaluation_runtime();
     let custom = assembler
         .get(configuration, "conf.log")
         .ok()
@@ -414,11 +475,12 @@ fn start_logger(
     thread::spawn(move || {
         if let Some(custom) = custom {
             let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
-            match run_unit_with_reflection_host(
+            match run_unit_with_reflection_host_in_runtime(
                 &custom,
                 MainEffects::new(effect_assembler),
                 host.clone(),
                 reflection_host,
+                &evaluation_runtime,
             ) {
                 Ok(TaskOutcome::Complete(_)) => {}
                 Ok(TaskOutcome::Cancelled) => {
@@ -1240,6 +1302,7 @@ fn print_help() {
 Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...
             [--manifest <PATH>]
             [--refl <ARG>]...
+            [--workers <N>]
        glam --parse <PATH>
        glam --help
        glam --version
@@ -1247,6 +1310,8 @@ Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...
 Assembly inputs are applied as mixins; earlier inputs override later inputs.
 --manifest records every local input path and its SHA-256 digest.
 --refl appends an argument visible only as reflection environment process.refl_args.
+--workers sets the shared background evaluator thread count; zero disables sparks.
+GLAM_WORKERS provides the default worker count when --workers is absent.
 Configuration is loaded from GLAM_CONF as an OS path-list, or from the user config/default fixture.
 Bare arguments are reserved for configured `conf.cli` rewriting.
 ";

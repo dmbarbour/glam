@@ -41,7 +41,7 @@
 
 ## Assembler Executable
 
-CLI: `-f file` / `-s.ext script` / `-- args` build an anonymous assembly module (earlier files override later); `--refl arg` supplies reflection-only arguments, and `--manifest file` records secure hashes of local inputs. Output: `asm.result` as `--binary` (default, to `--stdout`) or `--folder` (`-o dest`); `asm.file_meta` for permissions; atomic file replacement. Modes: `--batch` (default) or `-i` (runs `conf.ide`: TTY, TCP/socket, light GUI, limited file editing).
+CLI: `-f file` / `-s.ext script` / `-- args` build an anonymous assembly module (earlier files override later); `--refl arg` supplies reflection-only arguments, `--manifest file` records secure hashes of local inputs, and `--workers N` selects the shared background evaluator pool (`GLAM_WORKERS` supplies the default). Output: `asm.result` as `--binary` (default, to `--stdout`) or `--folder` (`-o dest`); `asm.file_meta` for permissions; atomic file replacement. Modes: `--batch` (default) or `-i` (runs `conf.ide`: TTY, TCP/socket, light GUI, limited file editing).
 
 **Reflection**: version-specific effects API; runs `refl.*` definitions, `conf.log`/`conf.ide`, and effectful annotations as concurrent tasks with STM-shared state. Reflection can inspect everything (bypasses abstraction), suggest edits, drive SMT solvers (Z3/cvc5), but *cannot* observably influence pure computation — `asm.result` stays reproducible. Reflection itself is not reproducible.
 

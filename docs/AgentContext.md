@@ -210,23 +210,33 @@ design in the design documents.
   retry boundary before the lazy continuation is resumed. One poll step must
   not leave the machine positioned to repeat an already committed host effect.
 - `EvaluationSession` stores executable tasks behind a type-erased machine
-  interface, plus a FIFO ready queue and stable task/wait lookup. The serial
-  pump claims a machine under the session mutex, polls it outside the mutex,
-  and then restores its queued, blocked, or terminal state. It prioritizes the
-  producer of a demanded wait token, follows a blocked task's one lazy
-  dependency when that producer is known, and otherwise polls ready tasks in
-  bounded round-robin order. A per-pump visited set stops dependency cycles and
-  repeated polling of unchanged blocked tasks. Foreground evaluation pumps a
-  task only when its demanded lazy value depends on that task; unrelated
+  interface, plus a FIFO ready queue and stable task/wait lookup. A pump or
+  shared background worker claims a machine under the session mutex, polls it
+  outside the mutex, and then restores its queued, blocked, or terminal state.
+  It prioritizes the producer of a demanded wait token, follows a blocked
+  task's one lazy dependency when that producer is known, and otherwise polls
+  ready tasks in bounded round-robin order. A per-pump visited set stops
+  dependency cycles and repeated polling of unchanged blocked tasks.
+  Foreground evaluation pumps a task only when its demanded lazy value depends
+  on that task; unrelated
   reasoning does not run as a side effect of public observation or extraction.
   `Assembler::drain_reasoning` is the explicit unbounded batch-completion
   driver: runnable work may run forever, newly
   scheduled work joins the drain, and a stable pass over unchanged unfinished
   tasks returns a structured deadlock report. Terminal failures are reported
   without an acknowledge/handled state. Known lazy producers, wait tokens, and
-  observed host generations remain available in the report. Fine-grained wake
-  indexes, worker threads, timed quiescence, and evaluator reduction fuel remain
-  deferred.
+  observed host generations remain available in the report. Related assembler,
+  logger, and future IDE sessions share one `EvaluationExecutor`; its configured
+  workers opportunistically poll ready reflection tasks and are the only
+  consumers of optional sparks. Zero workers drops sparks without queueing.
+  Session-local lazy claims use `LazyValue` IDs without enlarging `Value` and
+  prevent concurrent foreground/background evaluation of one uncached lazy.
+  Sparks are immediate evaluation hints outside reflection transactions: a
+  later rollback neither cancels nor retracts them. Queued sparks do not keep a
+  session alive and their failures are not reported independently. A running
+  divergent spark may permanently occupy its bounded worker; cooperative
+  cancellation, fine-grained wake indexes, timed quiescence, and evaluator
+  reduction fuel remain deferred.
 - `reflection::run` is the synchronous compatibility driver for that machine.
   It polls with bounded effect-step fuel and calls `TaskHost::wait_for_change`
   only after polling reports a state block. `run_with_reflection_host` also

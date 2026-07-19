@@ -40,6 +40,10 @@ pub(super) fn eval_anno_builtin(
         RecognizedAnnotation::Reflection { effect } => {
             Ok(Value::reflection_gate(effect, target.clone()))
         }
+        RecognizedAnnotation::Seq { value } => super::super::strategy::seq(context, &value, target),
+        RecognizedAnnotation::Spark { value } => {
+            Ok(super::super::strategy::spark(context, value, target))
+        }
         RecognizedAnnotation::Invalid(message) => Ok(annotation_error_value(message)),
         RecognizedAnnotation::Unknown(rendered) => {
             eprintln!("warning: unrecognized annotation encountered: {rendered}");
@@ -56,6 +60,8 @@ enum RecognizedAnnotation {
     Binary,
     Array,
     Reflection { effect: Value },
+    Seq { value: Value },
+    Spark { value: Value },
     Invalid(String),
     Unknown(String),
 }
@@ -87,6 +93,12 @@ fn recognize_annotation(
                 effect: payload.clone(),
             })
         }
+        Key::Atom(atom) if atom_name(atom) == Some("seq") => Ok(RecognizedAnnotation::Seq {
+            value: payload.clone(),
+        }),
+        Key::Atom(atom) if atom_name(atom) == Some("spark") => Ok(RecognizedAnnotation::Spark {
+            value: payload.clone(),
+        }),
         Key::Atom(atom) if atom_name(atom) == Some("assert_defined") => Ok(
             match parse_assertion_annotation(context, payload, "assert_defined")? {
                 ParsedAssertion::Valid { name, defined } => {

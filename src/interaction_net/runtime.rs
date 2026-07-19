@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 use super::model::*;
 
@@ -161,13 +162,23 @@ impl<S: NetSpecialization> ActivePairState<S> {
 }
 
 pub struct SharedRuntimeNet<S: NetSpecialization> {
-    inner: Arc<Mutex<RuntimeNet<S>>>,
+    inner: Arc<SharedRuntimeNetInner<S>>,
+}
+
+struct SharedRuntimeNetInner<S: NetSpecialization> {
+    runtime: Mutex<RuntimeNet<S>>,
+    changed: Condvar,
+    version: AtomicU64,
 }
 
 impl<S: NetSpecialization> SharedRuntimeNet<S> {
     pub fn new(runtime: RuntimeNet<S>) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(runtime)),
+            inner: Arc::new(SharedRuntimeNetInner {
+                runtime: Mutex::new(runtime),
+                changed: Condvar::new(),
+                version: AtomicU64::new(0),
+            }),
         }
     }
 
@@ -176,13 +187,49 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
     }
 
     pub fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<S>) -> R) -> R {
-        let runtime = self.inner.lock().expect("shared runtime net was poisoned");
+        let runtime = self
+            .inner
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
         inspect(&runtime)
     }
 
+    pub fn with_version<R>(&self, inspect: impl FnOnce(&RuntimeNet<S>) -> R) -> (R, u64) {
+        let runtime = self
+            .inner
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        let version = self.inner.version.load(Ordering::Relaxed);
+        (inspect(&runtime), version)
+    }
+
     pub fn with_mut<R>(&self, update: impl FnOnce(&mut RuntimeNet<S>) -> R) -> R {
-        let mut runtime = self.inner.lock().expect("shared runtime net was poisoned");
-        update(&mut runtime)
+        let mut runtime = self
+            .inner
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        let result = update(&mut runtime);
+        self.inner.version.fetch_add(1, Ordering::Relaxed);
+        self.inner.changed.notify_all();
+        result
+    }
+
+    pub fn wait_for_change(&self, observed_version: u64) {
+        let mut runtime = self
+            .inner
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        while self.inner.version.load(Ordering::Relaxed) == observed_version {
+            runtime = self
+                .inner
+                .changed
+                .wait(runtime)
+                .expect("shared runtime net was poisoned");
+        }
     }
 }
 
@@ -350,6 +397,23 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 
     pub fn active_pairs(&self) -> impl ExactSizeIterator<Item = ActivePairKey> + '_ {
         self.active.keys().copied()
+    }
+
+    pub fn claimed_pair_count(&self) -> usize {
+        self.active
+            .values()
+            .filter(|state| matches!(state, ActivePairState::Claimed))
+            .count()
+    }
+
+    pub fn pair_is_claimed(&self, pair: ActivePairKey) -> bool {
+        self.active
+            .get(&pair)
+            .is_some_and(ActivePairState::is_claimed)
+    }
+
+    pub fn contains_active_pair(&self, pair: ActivePairKey) -> bool {
+        self.active.contains_key(&pair)
     }
 
     /// Recovers both endpoints of an active-pair key from the live graph.

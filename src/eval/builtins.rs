@@ -8,6 +8,7 @@ mod list;
 mod list_effect;
 mod numeric;
 mod object;
+mod strategy;
 
 use super::*;
 pub(super) use annotation::is_undefined_value;
@@ -75,6 +76,7 @@ pub(super) fn apply_builtin(
         | Builtin::EffectMap
         | Builtin::EffectMapRun
         | Builtin::EffectMapContinue => effect::apply(context, builtin, arguments),
+        Builtin::Seq | Builtin::Spark => strategy::apply(context, builtin, arguments),
         Builtin::Anno => annotation::apply(context, arguments),
     }
 }

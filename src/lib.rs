@@ -17,9 +17,9 @@ pub mod reflection;
 
 pub use api::{
     Assembler, BuiltModule, DEFAULT_DIAGNOSTIC_CAPACITY, Diagnostic, DiagnosticBuffer,
-    DiagnosticSink, DiagnosticSnapshot, Error, Host, HostError, ModuleBuilder, ModuleInput,
-    NetBind, NetBuilder, NetCopy, NetPort, ReasoningFailure, ReasoningReport, ReasoningStatus,
-    ReasoningTask, ReasoningTaskState, SystemHost, Value, ValueKind,
+    DiagnosticSink, DiagnosticSnapshot, Error, EvaluationRuntime, Host, HostError, ModuleBuilder,
+    ModuleInput, NetBind, NetBuilder, NetCopy, NetPort, ReasoningFailure, ReasoningReport,
+    ReasoningStatus, ReasoningTask, ReasoningTaskState, SystemHost, Value, ValueKind,
 };
 pub use core::Builtin;
 pub use diagnostic::Severity;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::core::{Dict, FixpointComputation, LazyValue, Value};
+use crate::core::{Dict, FixpointComputation, Key, LazyValue, Value};
 use crate::number::Number;
 
 use super::*;
@@ -1943,4 +1943,65 @@ fn builtins_are_curried_and_do_not_force_arguments_early() {
         }
         other => panic!("expected partial builtin, got {other:?}"),
     }
+}
+
+#[test]
+fn seq_forces_its_first_argument_and_preserves_the_target() {
+    let context = test_context();
+    let error = apply_values(
+        &context,
+        Value::Builtin(Builtin::Seq),
+        vec![Value::error("seq forced this error"), n(42)],
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "seq forced this error");
+
+    let result = apply_values(&context, Value::Builtin(Builtin::Seq), vec![n(0), n(42)]).unwrap();
+    assert_eq!(eval_value(&context, &result).unwrap(), n(42));
+}
+
+#[test]
+fn zero_worker_spark_returns_target_without_forcing_work() {
+    let context = test_context();
+    let unforced = Value::deferred("discarded spark", |_| {
+        panic!("zero-worker spark should be silently dropped")
+    });
+    let result = apply_values(
+        &context,
+        Value::Builtin(Builtin::Spark),
+        vec![unforced, n(42)],
+    )
+    .unwrap();
+
+    assert_eq!(eval_value(&context, &result).unwrap(), n(42));
+}
+
+#[test]
+fn strategy_annotations_share_builtin_semantics() {
+    let context = test_context();
+    let seq_annotation = Value::Dict(Dict::new_sync().insert(
+        Key::atom_from_text("seq"),
+        Value::error("annotation forced"),
+    ));
+    let error = apply_values(
+        &context,
+        Value::Builtin(Builtin::Anno),
+        vec![seq_annotation, n(42)],
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "annotation forced");
+
+    let spark_annotation = Value::Dict(Dict::new_sync().insert(
+        Key::atom_from_text("spark"),
+        Value::deferred("discarded annotated spark", |_| {
+            panic!("zero-worker annotated spark should be silently dropped")
+        }),
+    ));
+    let result = apply_values(
+        &context,
+        Value::Builtin(Builtin::Anno),
+        vec![spark_annotation, n(42)],
+    )
+    .unwrap();
+    assert_eq!(eval_value(&context, &result).unwrap(), n(42));
 }

@@ -16,7 +16,7 @@ use std::convert::Infallible;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::api::Value as PublicValue;
+use crate::api::{EvaluationRuntime, Value as PublicValue};
 use crate::core::{Atom, Dict, FunctionValue, Key, LazyValue, List, NetValue, Value, keys};
 use crate::core_net::CoreSpecialization;
 use crate::eval;
@@ -343,6 +343,21 @@ pub fn run_unit_with_reflection_host<S: TaskSpecialization>(
     )
 }
 
+/// Runs one composed unit task in a service session attached to an
+/// assembler's shared background executor.
+pub fn run_unit_with_reflection_host_in_runtime<S: TaskSpecialization>(
+    effect: &PublicValue,
+    specialization: S,
+    host: Arc<S::Host>,
+    reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
+    runtime: &EvaluationRuntime,
+) -> Result<TaskOutcome, TaskError> {
+    run_composed_effect_task(
+        composed_effect_task_in_runtime(effect, specialization, host, reflection_host, runtime)?
+            .requiring_unit_result(),
+    )
+}
+
 fn run_composed_effect_task<S: TaskSpecialization>(
     mut task: EffectTask<S>,
 ) -> Result<TaskOutcome, TaskError> {
@@ -398,6 +413,28 @@ fn composed_effect_task<S: TaskSpecialization>(
     let session = Arc::new(EvaluationSession::with_environment(
         host.reflection_environment().into_core(),
     ));
+    session
+        .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
+        .map_err(|error| TaskError::new(error.as_ref()))?;
+    EffectTask::new_in_context(
+        effect.as_core().clone(),
+        specialization,
+        host,
+        EvalContext::new(session),
+    )
+}
+
+fn composed_effect_task_in_runtime<S: TaskSpecialization>(
+    effect: &PublicValue,
+    specialization: S,
+    host: Arc<S::Host>,
+    reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
+    runtime: &EvaluationRuntime,
+) -> Result<EffectTask<S>, TaskError> {
+    let session = EvaluationSession::shared(
+        host.reflection_environment().into_core(),
+        runtime.executor(),
+    );
     session
         .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
         .map_err(|error| TaskError::new(error.as_ref()))?;

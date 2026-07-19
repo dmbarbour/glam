@@ -27,6 +27,7 @@ implementation constraints.
 | `interaction_net/model.rs`, `builder.rs` | Packed ports/node identity, net agents, specialization protocol, and checked construction |
 | `interaction_net/runtime/` | Runtime graph storage, active-pair rewrites, cursor materialization, and focused tests |
 | `evaluation.rs` | Shared evaluation-session ownership and the cheap context threaded through evaluator work |
+| `evaluation/executor.rs` | Worker ownership, cross-session ready selection, and optional spark scheduling |
 | `eval.rs` | Evaluation facade |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing, application, semantic operator staging, and interaction-net driving |
 | `eval/builtins/` | Small builtin dispatcher with implementations split by semantic family |
@@ -137,9 +138,19 @@ unfinished tasks unchanged. The latter returns a structured deadlock report;
 terminal task failures are always included and are not acknowledged or cleared
 by observation. Promise records retain their producer task IDs for shallow
 dependency prioritization, and the report includes known dependencies, wait
-tokens, and observed host generations. Fine-grained observation indexes,
-persistent waiter graphs, worker threads, timed quiescence, and evaluator
-reduction fuel are intentionally deferred.
+tokens, and observed host generations. One shared `EvaluationExecutor` supplies
+the configured background workers for an assembler's ordinary, logger, and
+future IDE sessions. Workers may claim ready reflection tasks and are the sole
+consumers of optional `spark` work; a zero-worker executor discards sparks
+without queueing. `seq A B` forces `A` to its outer semantic value before
+returning `B`, while `spark A B` immediately returns `B` after submitting `A`.
+The matching `anno seq:A B` and `anno spark:A B` forms share those evaluator
+paths. Lazy single-flight claims live in a session table keyed by `LazyValue`
+identity, keeping the 72-byte value layout unchanged. Sparks are independent
+of reflection transactions, do not participate in reasoning drain/deadlock
+accounting, and may occupy a worker forever if they diverge. Fine-grained
+observation indexes, persistent waiter graphs, timed quiescence, evaluator
+fuel, and cooperative spark cancellation are intentionally deferred.
 
 The reusable reflection API exposes `.env Path` as its single read-only context
 operation. It reads an immutable dictionary owned by `EvaluationSession`, uses

@@ -46,6 +46,17 @@ fn public_api_reports_an_empty_reasoning_session_as_complete() {
 }
 
 #[test]
+fn worker_configuration_is_shared_by_assembler_clones() {
+    let assembler = Assembler::default()
+        .with_worker_threads(3)
+        .expect("test worker threads should start");
+    let clone = assembler.clone();
+
+    assert_eq!(assembler.evaluation_runtime().worker_threads(), 3);
+    assert_eq!(clone.evaluation_runtime().worker_threads(), 3);
+}
+
+#[test]
 fn public_api_exposes_the_default_diagnostic_formatter_as_a_function() {
     assert_eq!(
         Assembler::default().default_diagnostic_formatter().kind(),

@@ -1,5 +1,7 @@
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier, mpsc};
+use std::thread;
+use std::time::Duration;
 
 use super::*;
 use crate::interaction_net::*;
@@ -436,6 +438,45 @@ fn claimed_and_stuck_pairs_remain_in_the_active_tree() {
         }]
     );
     assert_eq!(stuck.reduce_next(), None);
+}
+
+#[test]
+fn shared_runtime_waiters_resume_when_a_claimed_pair_is_released() {
+    let mut net = RuntimeNet::<()>::empty();
+    let bind = net.add_node(RuntimeNode::Bind);
+    let data = net.add_node(RuntimeNode::Data(()));
+    net.connect(Port::principal(bind), Port::principal(data));
+    let shared = SharedRuntimeNet::new(net);
+    let reduction = shared
+        .with_mut(RuntimeNet::reduce_next)
+        .expect("bind-data pair should be claimed");
+    let ReductionKind::Call { bind, data } = reduction.kind else {
+        panic!("expected a claimed call");
+    };
+    let call = Call {
+        pair: reduction.pair,
+        bind,
+        data,
+    };
+    let (claimed, version) = shared.with_version(|net| net.pair_is_claimed(call.pair));
+    assert!(claimed);
+
+    let barrier = Arc::new(Barrier::new(2));
+    let waiter_barrier = barrier.clone();
+    let waiter_net = shared.clone();
+    let (sender, receiver) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        waiter_barrier.wait();
+        waiter_net.wait_for_change(version);
+        sender.send(()).expect("test receiver should remain open");
+    });
+    barrier.wait();
+
+    shared.with_mut(|net| net.fail_claimed_call(call, Arc::from("released for test")));
+    receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("releasing a claimed pair should wake shared runtime waiters");
+    waiter.join().expect("runtime waiter should not panic");
 }
 
 #[test]

@@ -190,9 +190,14 @@ fn drive_net_interface(
             continue;
         }
 
-        let scheduler_is_empty = runtime.with(|net| net.active_pairs().len() == 0);
+        let ((scheduler_is_empty, claimed_pairs), version) =
+            runtime.with_version(|net| (net.active_pairs().len() == 0, net.claimed_pair_count()));
         if scheduler_is_empty {
             return Ok(NetInterfaceOutcome::NormalForm);
+        }
+        if claimed_pairs != 0 {
+            runtime.wait_for_change(version);
+            continue;
         }
 
         let detail = runtime.with(|net| {
@@ -292,6 +297,17 @@ pub(super) fn progress_exact_core_pair(
 ) -> Result<bool, EvalError> {
     if let Some(reduction) = runtime.with_mut(|net| net.reduce_pair(pair)) {
         handle_core_reduction(context, runtime, reduction)?;
+        return Ok(true);
+    }
+    let (claimed, version) = runtime.with_version(|net| net.pair_is_claimed(pair));
+    if claimed {
+        runtime.wait_for_change(version);
+        return Ok(true);
+    }
+    if !runtime.with(|net| net.contains_active_pair(pair)) {
+        // Another evaluator completed this exact source pair between cursor
+        // inspection and our claim attempt. Its disappearance is progress:
+        // retry the dependent cursor against the updated source frontier.
         return Ok(true);
     }
     if let Some(blocked) = runtime.with(|net| net.blocked_cursor(pair)) {

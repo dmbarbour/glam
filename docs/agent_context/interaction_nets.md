@@ -162,11 +162,19 @@ explicit callable-data path that attaches its exposed interface through a
 cursor. A net-backed `Value::Lazy` instead represents a computation and must
 produce `Data` when observed.
 
+Shared runtime mutation increments a condition-variable generation. If one
+observer encounters an active pair already claimed by another evaluator, it
+waits for that exact runtime to change and retries; a claimed pair must never
+be misreported as quiescence. Cursor dependencies similarly treat a source
+pair disappearing between inspection and claim as progress and refresh their
+frontier.
+
 ## Deliberate Limits
 
 - Node IDs and fan sites are not recycled.
-- The scheduler is correctness-oriented; parallel work stealing and sparks are
-  not implemented.
+- The scheduler is correctness-oriented. Configured background workers can
+  evaluate sparks and thereby reduce shared nets, but runtime work stealing and
+  finer-grained wake indexes are not implemented.
 - Direct fan histories remain potentially large.
 - Stuck pairs are retained for inspection but reflection does not yet expose
   them.
