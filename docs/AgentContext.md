@@ -352,9 +352,11 @@ bootstrap compatibility behavior.
   `--script.<ext>`/`-s.<ext>` assembly inputs, then optional arguments after
   `--`, plus one optional `--manifest` output. Its local-file host hashes every
   successful read with SHA-256, rejects different contents on a repeated read,
-  and rechecks all observed files before shutdown. The manifest contains the
-  observed digests rather than hashes taken in a later filesystem scan; paths
-  under the invocation directory are recorded relatively. It also has a
+  and rechecks all observed files before shutdown. A difference encountered by
+  another assembly read is an error; a post-assembly difference is only a
+  warning because it did not affect the result or reasoning. The manifest
+  contains the observed digests rather than hashes taken in a later filesystem
+  scan; paths under the invocation directory are recorded relatively. It has a
   temporary `--parse` inspection path. Bare arguments and configured
   `conf.cli` rewriting are not implemented.
 - Configuration paths come from `GLAM_CONF` path list, or an OS-specific default

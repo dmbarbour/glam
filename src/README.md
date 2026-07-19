@@ -66,9 +66,10 @@ later ones. Local source and binary imports re-enter the same `Assembler`
 session through loaders installed in `CompileContext`; their diagnostics join
 the originating build session. The executable wraps the system host to retain
 the SHA-256 digest from every successful local read. A changed repeat read is
-rejected immediately, and a final recheck diagnoses edits that occurred after
-the file's last use. `--manifest` writes the retained digest set, including
-configuration files and transitive local imports.
+rejected immediately, while a final recheck warns about edits that occurred
+after the file's last use without failing an otherwise valid assembly.
+`--manifest` writes the retained digest set, including configuration files and
+transitive local imports.
 
 Each source compilation receives an assembler-local invocation ID. A hidden
 immutable trace links imported compilations to their parent invocation and

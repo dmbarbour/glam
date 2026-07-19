@@ -194,9 +194,8 @@ fn finish_local_files(
     diagnostics: &LogHost,
 ) -> bool {
     let mut failed = false;
-    if let Err(error) = files.verify_unchanged() {
-        failed = true;
-        diagnostics.emit(Diagnostic::new(Severity::Error, error));
+    if let Err(warning) = files.verify_unchanged() {
+        diagnostics.emit(Diagnostic::new(Severity::Warning, warning));
     }
     if let Some(path) = manifest
         && let Err(error) = files.write_manifest(path)
@@ -1216,6 +1215,27 @@ Bare arguments are reserved for configured `conf.cli` rewriting.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Host;
+
+    #[test]
+    fn final_local_file_change_is_only_a_warning() {
+        let directory =
+            env::temp_dir().join(format!("glam-final-file-warning-{}", std::process::id()));
+        fs::create_dir_all(&directory).expect("test directory should be created");
+        let path = directory.join("input.g");
+        fs::write(&path, "used").expect("test input should be written");
+        let files = LocalFileHost::default();
+        files.read(&path).expect("assembly read should succeed");
+        fs::write(&path, "later edit").expect("test input should be changed");
+        let diagnostics = LogHost::new(1);
+
+        assert!(!finish_local_files(&files, None, &diagnostics));
+        let warning = diagnostics
+            .take_diagnostic()
+            .expect("final file change should emit a diagnostic");
+        assert_eq!(warning.severity(), Severity::Warning);
+        assert_eq!(diagnostics.error_count(), 0);
+    }
 
     #[test]
     fn glam_default_formatter_renders_location_severity_and_continuation_lines() {
