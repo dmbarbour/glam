@@ -78,7 +78,11 @@ pub(crate) fn list_to_value_items(
     Ok(items.into_inner())
 }
 
-pub(super) fn list_to_binary_bytes(context: &EvalContext, list: &List) -> Result<Vec<u8>, String> {
+pub(super) fn list_to_binary_bytes(
+    context: &EvalContext,
+    list: &List,
+    subject: &str,
+) -> Result<Vec<u8>, String> {
     let bytes = std::cell::RefCell::new(Vec::new());
     list.try_for_each_segment(
         &mut |segment| {
@@ -90,19 +94,13 @@ pub(super) fn list_to_binary_bytes(context: &EvalContext, list: &List) -> Result
                 match force_value_shell(context, value).map_err(|err| err.to_string())? {
                     Value::Number(number) => {
                         let byte = number.to_u8_if_integer().ok_or_else(|| {
-                            format!("`binary` annotation cannot encode number `{number}` as a byte")
+                            format!("{subject} cannot encode number `{number}` as a byte")
                         })?;
                         bytes.borrow_mut().push(byte);
                     }
-                    Value::Binary(segment) => bytes.borrow_mut().extend_from_slice(&segment),
-                    Value::List(list) => {
-                        bytes
-                            .borrow_mut()
-                            .extend(list_to_binary_bytes(context, &list)?);
-                    }
                     other => {
                         return Err(format!(
-                            "`binary` annotation requires list items to be bytes or binaries, got {other:?}"
+                            "{subject} requires list items to be byte integers, got {other:?}"
                         ));
                     }
                 }
@@ -115,35 +113,7 @@ pub(super) fn list_to_binary_bytes(context: &EvalContext, list: &List) -> Result
 }
 
 pub fn list_output_bytes(context: &EvalContext, list: &List) -> Result<Vec<u8>, String> {
-    let bytes = std::cell::RefCell::new(Vec::new());
-    list.try_for_each_segment(
-        &mut |segment| {
-            bytes.borrow_mut().extend_from_slice(segment);
-            Ok::<_, String>(())
-        },
-        &mut |segment| {
-            for item in segment.iter() {
-                let item = force_value_shell(context, item).map_err(|err| err.to_string())?;
-                match item {
-                    Value::Number(number) => {
-                        let byte = number.to_u8_if_integer().ok_or_else(|| {
-                            format!(
-                                "contains number `{number}` that is not an in-range byte integer"
-                            )
-                        })?;
-                        bytes.borrow_mut().push(byte);
-                    }
-                    Value::Binary(segment) => bytes.borrow_mut().extend_from_slice(&segment),
-                    _ => {
-                        return Err("must contain only integers and binary segments".to_owned());
-                    }
-                }
-            }
-            Ok(())
-        },
-        &mut |thunk| force_list_thunk(context, thunk).map_err(|err| err.to_string()),
-    )?;
-    Ok(bytes.into_inner())
+    list_to_binary_bytes(context, list, "`value`")
 }
 
 pub(crate) fn list_output_bytes_range(

@@ -652,6 +652,37 @@ fn append_preserves_lazy_list_chunks_until_observed() {
 }
 
 #[test]
+fn binary_output_does_not_flatten_nested_binary_values() {
+    let list = List::from_values(vec![
+        Value::binary_from_text("A"),
+        n(10),
+        Value::binary_from_text("B"),
+    ]);
+
+    let error = list_output_bytes(&test_context(), &list)
+        .expect_err("nested binary values must not be flattened during extraction");
+    assert!(error.contains("byte integers"));
+}
+
+#[test]
+fn list_concat_explicitly_flattens_one_level() {
+    let outer = Value::List(List::from_values(vec![
+        Value::binary_from_text("A"),
+        Value::List(List::from_bytes(Bytes::from_static(b"B"))),
+    ]));
+    let flattened = eval_closed_expr(&builtin1_expr(Builtin::ListConcat, TestExpr::Value(outer)))
+        .expect("list concat should evaluate");
+    let Value::List(flattened) = flattened else {
+        panic!("list concat should return a list");
+    };
+
+    assert_eq!(
+        list_output_bytes(&test_context(), &flattened).unwrap(),
+        b"AB"
+    );
+}
+
+#[test]
 fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
     let expr = builtin2_expr(
         Builtin::Append,

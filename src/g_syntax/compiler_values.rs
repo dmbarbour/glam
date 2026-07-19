@@ -49,6 +49,7 @@ impl GCompilerValues {
                     Value::Builtin(Builtin::ListSplitEnd),
                 )
                 .insert(name_as_key("map"), Value::Builtin(Builtin::Map))
+                .insert(name_as_key("concat"), Value::Builtin(Builtin::ListConcat))
                 .insert(name_as_key("len"), Value::Builtin(Builtin::ListLen))
                 .insert(name_as_key("head"), Value::Builtin(Builtin::ListHead))
                 .insert(name_as_key("tail"), Value::Builtin(Builtin::ListTail))

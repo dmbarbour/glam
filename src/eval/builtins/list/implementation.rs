@@ -80,6 +80,23 @@ pub(super) fn eval_map_builtin(
     Ok(Value::List(List::from_values(mapped)))
 }
 
+pub(super) fn eval_list_concat_builtin(
+    context: &EvalContext,
+    value: &Value,
+) -> Result<Value, EvalError> {
+    let Value::List(list) = force_value_shell(context, value)? else {
+        return Err(EvalError::new(
+            "list concat builtin requires a list of lists",
+        ));
+    };
+    let concatenated = list_to_value_items(context, &list)?
+        .into_iter()
+        .try_fold(List::empty(), |result, item| {
+            Ok::<_, EvalError>(List::concat(result, append_sequence(item)?))
+        })?;
+    Ok(Value::List(concatenated))
+}
+
 pub(super) fn eval_list_len_builtin(
     context: &EvalContext,
     value: &Value,
@@ -209,7 +226,7 @@ pub(super) fn eval_text_lines_builtin(
     let bytes = match force_value_shell(context, value)? {
         Value::Binary(bytes) => bytes,
         Value::List(list) => Bytes::from(
-            list_to_binary_bytes(context, &list)
+            list_to_binary_bytes(context, &list, "text lines builtin")
                 .map_err(|error| EvalError::new(format!("text lines builtin {error}")))?,
         ),
         _ => {

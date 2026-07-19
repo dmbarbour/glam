@@ -369,7 +369,11 @@ bootstrap compatibility behavior.
 
 - A `.g` source starts with a language declaration such as `language g0`.
 - List literals preserve each comma-separated expression as one element,
-  including binary and list values. Only explicit `++` flattens list structure.
+  including binary and list values. Only explicit `++` or `list.concat`
+  flattens list structure.
+- Binary extraction accepts compact byte segments belonging structurally to a
+  list and value elements that are integers from 0 through 255. It must not
+  flatten nested binary or list values such as `["A",10,"B"]`.
 - Comments begin with `#`. Top-level declarations are unindented; continuation
   lines are indented, except a closer-only line may dedent.
 - Introduction, override, and update remain distinct: `=`, `:=`, and `::=`.

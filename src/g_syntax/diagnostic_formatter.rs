@@ -59,6 +59,13 @@ fn build() -> Value {
         }
     }
 
+    fn append(items: impl IntoIterator<Item = ResolvedExpr<Value>>) -> ResolvedExpr<Value> {
+        items
+            .into_iter()
+            .reduce(|left, right| apply_builtin(Builtin::Append, [left, right]))
+            .unwrap_or_else(|| ResolvedExpr::Embedded(Value::List(crate::core::List::empty())))
+    }
+
     let severity_labels = severity_values("info", "warning", "error");
     let plain_colors = severity_values("", "", "");
     let ansi_colors = severity_values("\x1b[36m", "\x1b[33m", "\x1b[31m");
@@ -94,20 +101,23 @@ fn build() -> Value {
     let severity = || field(diagnostic, &["msg", "severity"]);
     let color = || field(diagnostic, &["viewer", "color"]);
     let indented_continuations = apply_builtin(
-        Builtin::Map,
-        [
-            ResolvedExpr::lambda(
-                vec![continuation_line],
-                ResolvedExpr::List(vec![
-                    ResolvedExpr::Embedded(Value::binary_from_text("\n")),
-                    field(diagnostic, &["viewer", "indent"]),
-                    ResolvedExpr::Local(continuation_line),
-                ]),
-            ),
-            apply_builtin(Builtin::ListTail, [ResolvedExpr::Local(lines)]),
-        ],
+        Builtin::ListConcat,
+        [apply_builtin(
+            Builtin::Map,
+            [
+                ResolvedExpr::lambda(
+                    vec![continuation_line],
+                    append([
+                        ResolvedExpr::Embedded(Value::binary_from_text("\n")),
+                        field(diagnostic, &["viewer", "indent"]),
+                        ResolvedExpr::Local(continuation_line),
+                    ]),
+                ),
+                apply_builtin(Builtin::ListTail, [ResolvedExpr::Local(lines)]),
+            ],
+        )],
     );
-    let formatted = ResolvedExpr::List(vec![
+    let formatted = append([
         field(diagnostic, &["viewer", "location"]),
         indexed(color_prefixes, [color(), severity()]),
         indexed(severity_labels, [severity()]),

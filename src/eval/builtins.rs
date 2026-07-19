@@ -43,6 +43,7 @@ pub(super) fn apply_builtin(
         Builtin::Append
         | Builtin::Slice
         | Builtin::Map
+        | Builtin::ListConcat
         | Builtin::ListLen
         | Builtin::ListSplit
         | Builtin::ListSplitEnd

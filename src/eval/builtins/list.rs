@@ -23,6 +23,10 @@ pub(super) fn apply(
             let [function, value] = super::exact(arguments, "map")?;
             eval_map_builtin(context, &function, &value)
         }
+        Builtin::ListConcat => {
+            let [value] = super::exact(arguments, "list concat")?;
+            eval_list_concat_builtin(context, &value)
+        }
         Builtin::ListLen => {
             let [value] = super::exact(arguments, "list len")?;
             eval_list_len_builtin(context, &value)

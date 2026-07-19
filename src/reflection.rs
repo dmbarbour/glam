@@ -3382,14 +3382,34 @@ mod tests {
 
     #[test]
     fn effect_map_runs_left_to_right_and_preserves_result_order() {
-        let (assembler, effect) = compile_effect("eff.map (\\item -> .r item) [\"A\",\"B\",\"C\"]");
+        let (_assembler, effect) =
+            compile_effect("eff.map (\\item -> .r item) [\"A\",\"B\",\"C\"]");
         let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("effect map task should complete");
         };
+        let Value::List(items) = value else {
+            panic!("effect map should return a list");
+        };
+        let items = eval::list_to_value_items(&context, &items)
+            .unwrap()
+            .into_iter()
+            .map(|mut item| {
+                loop {
+                    item = eval::eval_value(&context, &item).unwrap();
+                    if !matches!(item, Value::Lazy(_)) {
+                        break item;
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
-            b"ABC".as_slice()
+            items,
+            [
+                Value::binary_from_text("A"),
+                Value::binary_from_text("B"),
+                Value::binary_from_text("C")
+            ]
         );
     }
 
