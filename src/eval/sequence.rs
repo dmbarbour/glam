@@ -124,14 +124,20 @@ pub fn list_output_bytes(context: &EvalContext, list: &List) -> Result<Vec<u8>, 
         &mut |segment| {
             for item in segment.iter() {
                 let item = force_value_shell(context, item).map_err(|err| err.to_string())?;
-                let Value::Number(number) = item else {
-                    return Err("must contain only integers and binary segments".to_owned());
-                };
-
-                let byte = number.to_u8_if_integer().ok_or_else(|| {
-                    format!("contains number `{number}` that is not an in-range byte integer")
-                })?;
-                bytes.borrow_mut().push(byte);
+                match item {
+                    Value::Number(number) => {
+                        let byte = number.to_u8_if_integer().ok_or_else(|| {
+                            format!(
+                                "contains number `{number}` that is not an in-range byte integer"
+                            )
+                        })?;
+                        bytes.borrow_mut().push(byte);
+                    }
+                    Value::Binary(segment) => bytes.borrow_mut().extend_from_slice(&segment),
+                    _ => {
+                        return Err("must contain only integers and binary segments".to_owned());
+                    }
+                }
             }
             Ok(())
         },
@@ -170,13 +176,5 @@ pub(super) fn append_sequence(value: Value) -> Result<List, EvalError> {
         _ => Err(EvalError::new(
             "append requires list or binary values on both sides",
         )),
-    }
-}
-
-pub(super) fn list_literal_segment(value: Value) -> List {
-    match value {
-        Value::Binary(bytes) => List::from_bytes(bytes),
-        Value::List(list) => list,
-        other => Value::singleton_list(other),
     }
 }

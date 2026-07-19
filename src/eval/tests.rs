@@ -597,8 +597,16 @@ fn evaluates_mixed_list_segments() {
     )
     .expect("should walk list");
 
-    assert_eq!(saw_values, vec![vec![n(1)], vec![n(2)]]);
-    assert_eq!(saw_bytes, vec![b"Hi".to_vec(), b"!".to_vec()]);
+    assert_eq!(
+        saw_values,
+        vec![
+            vec![n(1)],
+            vec![Value::binary_from_text("Hi")],
+            vec![n(2)],
+            vec![Value::binary_from_text("!")]
+        ]
+    );
+    assert!(saw_bytes.is_empty());
 }
 
 #[test]

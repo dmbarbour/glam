@@ -368,6 +368,8 @@ bootstrap compatibility behavior.
 ## Source-Surface Regressions
 
 - A `.g` source starts with a language declaration such as `language g0`.
+- List literals preserve each comma-separated expression as one element,
+  including binary and list values. Only explicit `++` flattens list structure.
 - Comments begin with `#`. Top-level declarations are unindented; continuation
   lines are indented, except a closer-only line may dedent.
 - Introduction, override, and update remain distinct: `=`, `:=`, and `::=`.
