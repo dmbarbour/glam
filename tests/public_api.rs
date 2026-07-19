@@ -158,6 +158,42 @@ fn public_evaluation_leaves_automatic_reflection_tasks_for_explicit_drain() {
 }
 
 #[test]
+fn replacing_source_host_preserves_scheduled_reasoning() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["host_replacement"])
+        .script(
+            "g",
+            "language g0\nrefl.notice = .log 'info { msg:{ text:\"survived host replacement\" } }\nvalue = \"value\"\n",
+        )
+        .build()
+        .expect("reflection module should build");
+    let _ = assembler
+        .read_diagnostics()
+        .expect("default assembler should retain diagnostics");
+
+    assert_eq!(
+        assembler
+            .binary_at(module.value(), "value")
+            .expect("ordinary value should schedule automatic reflection"),
+        b"value".as_slice()
+    );
+
+    let assembler = assembler.with_host(MemoryHost::new([]));
+    let report = assembler.drain_reasoning();
+    assert_eq!(report.status(), ReasoningStatus::Complete);
+
+    let diagnostics = assembler
+        .read_diagnostics()
+        .expect("scheduled reasoning should keep its diagnostic destination");
+    assert_eq!(diagnostics.entries().len(), 1);
+    assert_eq!(
+        diagnostics.entries()[0].message(),
+        "survived host replacement"
+    );
+}
+
+#[test]
 fn public_api_can_load_sources_and_binaries_from_a_custom_host() {
     let host = MemoryHost::new([
         (

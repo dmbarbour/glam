@@ -1040,16 +1040,16 @@ impl Assembler {
         }
     }
 
+    /// Replaces the source-file capability used by future module and binary
+    /// loads. Existing evaluation and scheduled reasoning remain attached to
+    /// this assembler.
     pub fn with_host(mut self, host: impl Host + 'static) -> Self {
         self.host = Arc::new(host);
-        self.evaluation_session = evaluation_session(
-            self.reflection_environment.clone(),
-            self.diagnostic_sink.clone(),
-            self.evaluation_runtime.executor(),
-        );
         self
     }
 
+    /// Replaces the diagnostic destination and starts a fresh evaluation
+    /// session. Scheduled reasoning from the prior session is not transferred.
     pub fn with_diagnostic_sink(mut self, sink: impl DiagnosticSink + 'static) -> Self {
         let diagnostic_sink: Arc<dyn DiagnosticSink> = Arc::new(sink);
         self.evaluation_session = evaluation_session(
