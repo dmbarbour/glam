@@ -86,10 +86,6 @@ impl LazyValue {
         value
     }
 
-    pub fn label(&self) -> &str {
-        &self.label
-    }
-
     pub(crate) fn id(&self) -> u64 {
         self.id
     }
@@ -839,7 +835,8 @@ impl Value {
         }
     }
 
-    pub fn get_atom_path(&self, path: &[Atom]) -> Option<&Value> {
+    #[cfg(test)]
+    pub(crate) fn get_atom_path(&self, path: &[Atom]) -> Option<&Value> {
         let path = path.iter().cloned().map(Key::Atom).collect::<Vec<_>>();
         self.get_key_path(&path)
     }
@@ -854,7 +851,9 @@ mod tests {
     fn boxed_reflection_gate_does_not_enlarge_lazy_source() {
         #[allow(dead_code)]
         enum LazySourceWithoutReflection {
-            Pending,
+            Promised,
+            Fixpoint(Arc<FixpointCell>),
+            ComputedFixpoint(Arc<ComputedFixpointCell>),
             Deferred(Arc<DeferredComputation>),
             Access {
                 path: Arc<[CoreDataKey]>,

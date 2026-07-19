@@ -139,7 +139,7 @@ impl EvaluationTaskHandle {
         self.id
     }
 
-    #[allow(dead_code)] // Scheduler-facing inspection, currently used by focused tests.
+    #[cfg(test)]
     pub(crate) fn wait(&self) -> &EvaluationWaitToken {
         &self.wait
     }
@@ -553,7 +553,7 @@ impl EvalContext {
         self.session.install_reflection_launcher(launcher)
     }
 
-    #[allow(dead_code)] // Used once reflection exposes task spawning.
+    #[cfg(test)]
     pub(crate) fn with_new_task(&self) -> Result<Self, Arc<str>> {
         let context = Self {
             session: self.session.clone(),

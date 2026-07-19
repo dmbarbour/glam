@@ -20,7 +20,6 @@ pub(in crate::g_syntax) fn parse_expr(text: &str) -> Option<SyntaxExpr> {
 
 pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
 -> impl Parser<'src, &'src str, SyntaxExpr, extra::Err<Rich<'src, char>>> {
-    #[allow(dead_code)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Associativity {
         Left,

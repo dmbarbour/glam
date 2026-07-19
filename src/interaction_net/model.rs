@@ -228,12 +228,6 @@ impl<S: NetSpecialization> RuntimeNode<S> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CopyId(pub(super) u64);
 
-impl CopyId {
-    pub fn get(self) -> u64 {
-        self.0
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wire {
     pub left: Port,  // port including node ID and index
