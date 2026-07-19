@@ -18,7 +18,7 @@ and control flow.
 - `.env Path` reads the active task host's immutable reasoning environment
   using `.get` path and missing-as-`{}` conventions. There is no reflection
   write. The assembler reserves and replaces the complete `glam` subtree and
-  supplies authoritative `glam.reasoning.role` metadata.
+  supplies authoritative metadata (version, role, etc.).
 - `.dict_items` is the narrow privileged dictionary-iteration boundary. It
   returns immediate entries in key order. The compiler's `eff.map` sequences
   effects left-to-right and preserves list order.
