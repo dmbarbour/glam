@@ -469,7 +469,7 @@ fn configured_logger_can_read_the_os_environment() {
 }
 
 #[test]
-fn configured_logger_failure_is_reported_before_default_fallback_messages() {
+fn configured_logger_output_precedes_a_later_logger_failure() {
     let dir = unique_temp_dir("glam-conf-log-failure");
     fs::create_dir_all(&dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
@@ -493,12 +493,12 @@ fn configured_logger_failure_is_reported_before_default_fallback_messages() {
     let failure = stderr
         .find("configured logger failed")
         .unwrap_or_else(|| panic!("logger failure diagnostic was not rendered:\n{stderr}"));
-    let remaining = stderr
+    let emitted = stderr
         .find("REMAINING MESSAGE")
-        .unwrap_or_else(|| panic!("remaining diagnostic did not use fallback logger:\n{stderr}"));
+        .unwrap_or_else(|| panic!("logger diagnostic did not use its output target:\n{stderr}"));
     assert!(
-        failure < remaining,
-        "logger failure must be the next diagnostic before fallback draining:\n{stderr}"
+        emitted < failure,
+        "committed logger output must render before the later logger failure:\n{stderr}"
     );
 }
 
@@ -558,6 +558,95 @@ fn configured_logger_can_finish_when_the_log_stream_closes() {
     );
     assert_eq!(output.stdout, b"ok");
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn configured_logger_does_not_read_its_own_log_output() {
+    let dir = unique_temp_dir("glam-conf-log-separate-output");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = (.log 'warn { msg:{ text:\"LOGGER OUTPUT\" } }) =>> .cut (.alt (.read_log >>= (\\_message -> .log 'error { msg:{ text:\"READ OWN OUTPUT\" } })) (.log_status >>= (\\status -> (status == 'closed) =>> .r ())))\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--script.g")
+        .arg("language g0\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ok");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("warning: LOGGER OUTPUT"));
+    assert!(!stderr.contains("READ OWN OUTPUT"));
+}
+
+#[test]
+fn configured_logger_drains_unjoined_child_tasks_to_its_output() {
+    let dir = unique_temp_dir("glam-conf-log-child-drain");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = .refl_task ((.log 'warn { msg:{ text:\"DETACHED CHILD\" } }) =>> .r ()) >>= (\\_task -> .r ())\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--script.g")
+        .arg("language g0\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ok");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("warning: DETACHED CHILD"));
+}
+
+#[test]
+fn configured_logger_reports_an_unjoined_child_failure() {
+    let dir = unique_temp_dir("glam-conf-log-child-failure");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = .refl_task .fail >>= (\\_task -> .r ())\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--script.g")
+        .arg("language g0\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"ok");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("configured logger failed"));
+    assert!(
+        stderr.contains("task") && stderr.contains("failed"),
+        "child failure was not reported:\n{stderr}"
+    );
 }
 
 #[test]

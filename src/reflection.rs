@@ -22,8 +22,8 @@ use crate::core_net::CoreSpecialization;
 use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSession,
-    EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskPoll,
-    EvaluationWaitToken, ReflectionTaskKind, ReflectionTaskLauncher,
+    EvaluationSessionRun, EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine,
+    EvaluationTaskPoll, EvaluationWaitToken, ReflectionTaskKind, ReflectionTaskLauncher,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -303,14 +303,21 @@ pub fn run<S: TaskSpecialization>(
 }
 
 /// Runs one composed task while giving `.refl_task` children only the reusable
-/// reflection capabilities, independent of the parent's specialization.
+/// reflection capabilities, independent of the parent's specialization. After
+/// the parent terminates, all scheduled children are drained; a child failure
+/// or stable deadlock fails the composed run.
 pub fn run_with_reflection_host<S: TaskSpecialization>(
     effect: &PublicValue,
     specialization: S,
     host: Arc<S::Host>,
     reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
 ) -> Result<TaskOutcome, TaskError> {
-    composed_effect_task(effect, specialization, host, reflection_host)?.run()
+    run_composed_effect_task(composed_effect_task(
+        effect,
+        specialization,
+        host,
+        reflection_host,
+    )?)
 }
 
 /// Runs one composed task and requires its discarded result to be unit.
@@ -323,9 +330,56 @@ pub fn run_unit_with_reflection_host<S: TaskSpecialization>(
     host: Arc<S::Host>,
     reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>>,
 ) -> Result<TaskOutcome, TaskError> {
-    composed_effect_task(effect, specialization, host, reflection_host)?
-        .requiring_unit_result()
-        .run()
+    run_composed_effect_task(
+        composed_effect_task(effect, specialization, host, reflection_host)?
+            .requiring_unit_result(),
+    )
+}
+
+fn run_composed_effect_task<S: TaskSpecialization>(
+    mut task: EffectTask<S>,
+) -> Result<TaskOutcome, TaskError> {
+    let parent = task.run();
+    let children = task.eval_context.run_until_quiescent();
+    let child_error = composed_child_error(children);
+    match (parent, child_error) {
+        (Ok(outcome), None) => Ok(outcome),
+        (Ok(_), Some(error)) | (Err(error), None) => Err(error),
+        (Err(parent), Some(children)) => Err(TaskError::new(format!(
+            "{parent}; child task failure: {children}"
+        ))),
+    }
+}
+
+fn composed_child_error(run: EvaluationSessionRun) -> Option<TaskError> {
+    let (quiescent, report) = match run {
+        EvaluationSessionRun::Complete(report) => (false, report),
+        EvaluationSessionRun::Quiescent(report) => (true, report),
+    };
+    if report.failures.is_empty() && !quiescent {
+        return None;
+    }
+
+    let mut details = Vec::new();
+    for failure in report.failures {
+        details.push(format!(
+            "task {} failed: {}",
+            failure.task.get(),
+            failure.error
+        ));
+    }
+    if quiescent {
+        details.push(format!(
+            "scheduler deadlocked with {} unfinished task{}",
+            report.unfinished.len(),
+            if report.unfinished.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+    Some(TaskError::new(details.join("; ")))
 }
 
 fn composed_effect_task<S: TaskSpecialization>(

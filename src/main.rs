@@ -275,9 +275,11 @@ fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Erro
 fn start_logger(
     assembler: &Assembler,
     configuration: &Value,
-    host: Arc<LogHost>,
+    input: Arc<LogHost>,
 ) -> thread::JoinHandle<()> {
-    let logger = DefaultLogger::new(assembler.clone());
+    let logger = Arc::new(DefaultLogger::new(assembler.clone()));
+    let output: Arc<dyn DiagnosticSink> = logger.clone();
+    let host = Arc::new(LoggerTaskHost::new(input.clone(), output));
     let effect_assembler = assembler.clone();
     let custom = assembler
         .get(configuration, "conf.log")
@@ -294,8 +296,8 @@ fn start_logger(
             ) {
                 Ok(TaskOutcome::Complete(_)) => {}
                 Ok(TaskOutcome::Cancelled) => {
-                    host.emit_default(
-                        &logger,
+                    input.emit_default(
+                        logger.as_ref(),
                         Diagnostic::new(
                             Severity::Error,
                             "configured logger remained blocked after the log stream closed",
@@ -303,8 +305,8 @@ fn start_logger(
                     );
                 }
                 Err(error) => {
-                    host.emit_default(
-                        &logger,
+                    input.emit_default(
+                        logger.as_ref(),
                         Diagnostic::new(
                             Severity::Error,
                             format!("configured logger failed: {error}"),
@@ -313,7 +315,7 @@ fn start_logger(
                 }
             }
         }
-        host.drain_default(&logger);
+        input.drain_default(logger.as_ref());
     })
 }
 
@@ -356,7 +358,7 @@ impl ReflectionTransaction for MainJournal {
 }
 
 impl TaskSpecialization for MainEffects {
-    type Host = LogHost;
+    type Host = LoggerTaskHost;
     type Request = MainRequest;
     type Snapshot = MainSnapshot;
     type Journal = MainJournal;
@@ -413,7 +415,7 @@ impl TaskSpecialization for MainEffects {
                 if let Some(mut transaction) = context.transaction() {
                     transaction.parts().1.stderr.push(bytes);
                 } else {
-                    context.host().write_stderr(bytes);
+                    context.host().input.write_stderr(bytes);
                     context.committed();
                 }
                 Ok(RequestResult::ReturnUnit)
@@ -437,7 +439,7 @@ fn log_status(
             .expect("checked active reflection transaction");
         (generation, transaction.parts().0.input_closed)
     } else {
-        let snapshot = <LogHost as TaskHost<MainEffects>>::snapshot(context.host());
+        let snapshot = <LoggerTaskHost as TaskHost<MainEffects>>::snapshot(context.host());
         (snapshot.generation(), snapshot.extra().input_closed)
     };
     context.observe_host_generation(generation);
@@ -468,7 +470,7 @@ fn read_log(
     }
 
     loop {
-        let snapshot = <LogHost as TaskHost<MainEffects>>::snapshot(context.host());
+        let snapshot = <LoggerTaskHost as TaskHost<MainEffects>>::snapshot(context.host());
         context.observe_host_generation(snapshot.generation());
         let Some(diagnostic) = snapshot.extra().diagnostics.first() else {
             return Ok(RequestResult::Fail);
@@ -485,7 +487,7 @@ fn read_log(
                 stderr: Vec::new(),
             },
         );
-        match <LogHost as TaskHost<MainEffects>>::commit(context.host(), commit) {
+        match <LoggerTaskHost as TaskHost<MainEffects>>::commit(context.host(), commit) {
             CommitResult::Committed => {
                 context.committed();
                 return Ok(RequestResult::Return(value));
@@ -500,6 +502,25 @@ struct LogHost {
     capacity: usize,
     state: Mutex<LogHostState>,
     changed: Condvar,
+}
+
+/// Capabilities and mutable state belonging to the logger's evaluation
+/// session. Incoming assembler diagnostics remain in `input`; diagnostics
+/// emitted by this session go only to `output`.
+struct LoggerTaskHost {
+    input: Arc<LogHost>,
+    output: Arc<dyn DiagnosticSink>,
+}
+
+impl LoggerTaskHost {
+    fn new(input: Arc<LogHost>, output: Arc<dyn DiagnosticSink>) -> Self {
+        Self { input, output }
+    }
+
+    fn emit_output(&self, diagnostic: Diagnostic) {
+        self.input.record_error(&diagnostic);
+        self.output.emit(diagnostic);
+    }
 }
 
 struct LogHostState {
@@ -556,7 +577,7 @@ impl LogHost {
             .error_count
     }
 
-    fn emit_default(&self, logger: &DefaultLogger, diagnostic: Diagnostic) {
+    fn record_error(&self, diagnostic: &Diagnostic) {
         if diagnostic.severity() == Severity::Error {
             let mut state = self
                 .state
@@ -564,6 +585,10 @@ impl LogHost {
                 .expect("log host mutex should not be poisoned");
             state.error_count = state.error_count.saturating_add(1);
         }
+    }
+
+    fn emit_default(&self, logger: &DefaultLogger, diagnostic: Diagnostic) {
+        self.record_error(&diagnostic);
         logger.emit(&diagnostic);
     }
 
@@ -644,9 +669,9 @@ impl DiagnosticSink for LogHost {
     }
 }
 
-impl ReflectionHost<MainEffects> for LogHost {
+impl ReflectionHost<MainEffects> for LoggerTaskHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
-        self.emit(diagnostic);
+        self.emit_output(diagnostic);
     }
 
     fn os_environment_variable(&self, name: &str) -> Option<std::ffi::OsString> {
@@ -658,9 +683,9 @@ impl ReflectionHost<MainEffects> for LogHost {
     }
 }
 
-impl ReflectionHost<ReflectionEffects> for LogHost {
+impl ReflectionHost<ReflectionEffects> for LoggerTaskHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
-        self.emit(diagnostic);
+        self.emit_output(diagnostic);
     }
 
     fn os_environment_variable(&self, name: &str) -> Option<std::ffi::OsString> {
@@ -672,9 +697,10 @@ impl ReflectionHost<ReflectionEffects> for LogHost {
     }
 }
 
-impl TaskHost<MainEffects> for LogHost {
+impl TaskHost<MainEffects> for LoggerTaskHost {
     fn snapshot(&self) -> HostSnapshot<MainEffects> {
         let state = self
+            .input
             .state
             .lock()
             .expect("log host mutex should not be poisoned");
@@ -689,8 +715,9 @@ impl TaskHost<MainEffects> for LogHost {
     }
 
     fn commit(&self, commit: TaskCommit<MainEffects>) -> CommitResult {
-        {
+        let diagnostics = {
             let mut state = self
+                .input
                 .state
                 .lock()
                 .expect("log host mutex should not be poisoned");
@@ -703,20 +730,22 @@ impl TaskHost<MainEffects> for LogHost {
             state
                 .diagnostics
                 .drain(..commit.extra().consumed_diagnostics);
-            for diagnostic in commit.extra().reflection.diagnostics().iter().cloned() {
-                self.push_diagnostic(&mut state, diagnostic);
-            }
             state.stderr.extend(commit.extra().stderr.iter().cloned());
             state.generation = state.generation.wrapping_add(1);
-            self.changed.notify_all();
+            self.input.changed.notify_all();
+            commit.extra().reflection.diagnostics().to_vec()
+        };
+        for diagnostic in diagnostics {
+            self.emit_output(diagnostic);
         }
         commit.extra().reflection.commit_task_updates();
-        self.flush_stderr();
+        self.input.flush_stderr();
         CommitResult::Committed
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
         let mut state = self
+            .input
             .state
             .lock()
             .expect("log host mutex should not be poisoned");
@@ -728,6 +757,7 @@ impl TaskHost<MainEffects> for LogHost {
             && !(state.input_closed && state.diagnostics.is_empty())
         {
             state = self
+                .input
                 .changed
                 .wait(state)
                 .expect("log host mutex should not be poisoned");
@@ -736,9 +766,10 @@ impl TaskHost<MainEffects> for LogHost {
     }
 }
 
-impl TaskHost<ReflectionEffects> for LogHost {
+impl TaskHost<ReflectionEffects> for LoggerTaskHost {
     fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
         let state = self
+            .input
             .state
             .lock()
             .expect("log host mutex should not be poisoned");
@@ -746,8 +777,9 @@ impl TaskHost<ReflectionEffects> for LogHost {
     }
 
     fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
-        {
+        let diagnostics = {
             let mut state = self
+                .input
                 .state
                 .lock()
                 .expect("log host mutex should not be poisoned");
@@ -755,18 +787,19 @@ impl TaskHost<ReflectionEffects> for LogHost {
                 return CommitResult::Conflict;
             }
             state.heap = commit.heap().clone();
-            for diagnostic in commit.extra().diagnostics().iter().cloned() {
-                self.push_diagnostic(&mut state, diagnostic);
-            }
             state.generation = state.generation.wrapping_add(1);
-            self.changed.notify_all();
+            self.input.changed.notify_all();
+            commit.extra().diagnostics().to_vec()
+        };
+        for diagnostic in diagnostics {
+            self.emit_output(diagnostic);
         }
         commit.extra().commit_task_updates();
         CommitResult::Committed
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
-        <Self as TaskHost<MainEffects>>::wait_for_change(self, observed_generation)
+        <LoggerTaskHost as TaskHost<MainEffects>>::wait_for_change(self, observed_generation)
     }
 }
 
@@ -925,6 +958,12 @@ impl DefaultLogger {
             .unwrap_or(source)
             .display()
             .to_string()
+    }
+}
+
+impl DiagnosticSink for DefaultLogger {
+    fn emit(&self, diagnostic: Diagnostic) {
+        DefaultLogger::emit(self, &diagnostic);
     }
 }
 
@@ -1152,5 +1191,30 @@ mod tests {
         assert!(retained.take_diagnostic().is_some());
         assert_eq!(retained.error_count(), 1);
         retained.close_input();
+    }
+
+    #[test]
+    fn logger_session_output_is_separate_from_assembler_input() {
+        let input = Arc::new(LogHost::new(4));
+        let output = Arc::new(glam::DiagnosticBuffer::new(4));
+        let host = LoggerTaskHost::new(input.clone(), output.clone());
+
+        <LoggerTaskHost as ReflectionHost<MainEffects>>::emit_diagnostic(
+            &host,
+            Diagnostic::new(Severity::Error, "session output"),
+        );
+
+        assert!(
+            input
+                .state
+                .lock()
+                .expect("log host mutex should not be poisoned")
+                .diagnostics
+                .is_empty()
+        );
+        let output = output.as_ref().read();
+        assert_eq!(output.entries().len(), 1);
+        assert_eq!(output.entries()[0].message(), "session output");
+        assert_eq!(input.error_count(), 1);
     }
 }

@@ -92,12 +92,11 @@ return unit when it completes.
 Otherwise the Rust terminal logger drains the queue. Normal early termination
 or task failure also returns remaining messages to the fallback logger. A
 configured-logger failure is itself rendered as the next default diagnostic
-before that queue is drained and makes the process fail. Within the logger
-session, `.log` still writes to the same diagnostic queue consumed by
-`.read_log`: transactional writes are invisible until commit, but committed
-messages can subsequently be read by the logger or one of its child reflection
-tasks. This recursive behavior is provisional rather than a default-renderer
-shortcut. Core operators only construct requests;
+before that queue is drained and makes the process fail. The logger's task host
+separates this incoming queue from a session-local diagnostic output target.
+Logger `.log` writes remain transactional, but committed output is rendered by
+the Rust default logger rather than being fed back to `.read_log`; output cannot
+reopen the sealed input stream. Core operators only construct requests;
 reflection state and external I/O are never performed by interaction-net
 reduction. The standard handler stores its active reset stack as a private
 entry in ordinary user state. Whole-state replacement therefore also switches
@@ -152,8 +151,11 @@ session. The launcher wraps annotation effects in the reusable
 stores the session's reflection heap and sends diagnostics to the assembler's
 configured sink. CLI-only logger-consumer requests remain in `main`'s separate
 `MainEffects` specialization. Children spawned by that logger still receive
-only `ReflectionEffects`; the synchronous parent cooperatively pumps them.
-Full independent draining of logger-owned child tasks remains deferred.
+only `ReflectionEffects`, so they inherit session-local `.log` output without
+receiving `.read_log`, `.log_status`, or raw `.write_stderr`. After the parent
+terminates, the composed-task runner drains all of its scheduled children
+without a time limit. A child failure or stable child deadlock fails the
+configured logger.
 
 In batch mode, `main` writes a valid `asm.result` before draining the assembler
 session. It turns every task failure and a stable quiescent session into error

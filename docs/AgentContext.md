@@ -105,10 +105,10 @@ design in the design documents.
   to the host outside `cut`. Queue reads inspect only their host snapshot, never
   journaled writes, and yield failure when no input is available. That failure
   retains the queue observation, so the task waits for a host change and retries
-  even outside `cut`. In the CLI logger session, committed `.log` writes enter
-  that same queue and may be observed by a later `.read_log`; only uncommitted
-  writes are hidden. Do not assume `.log` delegates directly to the Rust default
-  renderer. A
+  even outside `cut`. The CLI logger task host has a distinct session-local
+  diagnostic output target: committed `.log` output is rendered by the Rust
+  default logger and never enters the `.read_log` input queue. This separation
+  makes `'closed` stable even when the logger or its children continue logging. A
   top-level `alt` is rejected; alternatives belong to `cut`. This and
   task-local `.shift` continuations are the conservative
   standard-effect contract: general-purpose utilities must not assume broader
@@ -236,7 +236,10 @@ design in the design documents.
   observe `.log_status` to choose graceful completion after closure. The
   monotonic error count survives queue drops and reads and determines the final
   nonzero status. Stderr effects commit to a host buffer before bytes are
-  written to the OS. Logger-owned child-task draining is not complete yet.
+  written to the OS. Logger `.refl_task` children inherit reusable reflection
+  and the session-local `.log` target, but not `read_log`, `log_status`, or
+  `write_stderr`. The composed-task runner drains those children after the
+  parent terminates; a child failure or stable deadlock fails configured logging.
 
 ### Values and evaluation
 
