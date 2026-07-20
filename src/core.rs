@@ -91,6 +91,10 @@ impl LazyValue {
         self.id
     }
 
+    pub(crate) fn source(&self) -> &LazySource {
+        &self.source
+    }
+
     pub fn set(&self, value: Value) -> Result<(), Value> {
         self.result.set(Ok(value)).map_err(|result| {
             result.expect("setting a lazy value always supplies a successful value")
@@ -107,21 +111,6 @@ impl LazyValue {
             .get()
             .expect("lazy cache should contain a value after set")
             .clone()
-    }
-
-    pub(crate) fn is_promised(&self) -> bool {
-        matches!(self.source, LazySource::Promised) && self.result.get().is_none()
-    }
-
-    pub(crate) fn force_deferred(&self, context: &EvalContext) -> Option<Result<Value, Arc<str>>> {
-        match &self.source {
-            LazySource::Deferred(thunk) => Some(
-                self.result
-                    .get_or_init(|| thunk(context).map_err(Arc::from))
-                    .clone(),
-            ),
-            _ => None,
-        }
     }
 }
 
@@ -395,7 +384,7 @@ impl BuiltinCall {
 }
 
 #[derive(Clone)]
-enum LazySource {
+pub(crate) enum LazySource {
     Promised,
     Fixpoint(Arc<FixpointCell>),
     ComputedFixpoint(Arc<ComputedFixpointCell>),
@@ -414,9 +403,19 @@ enum LazySource {
     },
 }
 
-struct LazyApplication {
+pub(crate) struct LazyApplication {
     function: Value,
     arguments: Arc<[Value]>,
+}
+
+impl LazyApplication {
+    pub(crate) fn function(&self) -> &Value {
+        &self.function
+    }
+
+    pub(crate) fn arguments(&self) -> &[Value] {
+        &self.arguments
+    }
 }
 
 pub(crate) struct FixpointCell {
@@ -559,7 +558,7 @@ impl ComputedFixpointCell {
     }
 }
 
-type DeferredComputation = dyn Fn(&EvalContext) -> Result<Value, String> + Send + Sync;
+pub(crate) type DeferredComputation = dyn Fn(&EvalContext) -> Result<Value, String> + Send + Sync;
 
 /// A lazy sequencing boundary for `anno refl:Effect Target`.
 ///
@@ -630,67 +629,6 @@ impl LazyValue {
                 task: OnceLock::new(),
             })),
         )
-    }
-
-    pub(crate) fn access(&self) -> Option<(&[CoreDataKey], &[Value])> {
-        match &self.source {
-            LazySource::Access { path, arguments } => Some((path, arguments)),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn application(&self) -> Option<(&Value, &[Value])> {
-        match &self.source {
-            LazySource::Application(application) => {
-                Some((&application.function, &application.arguments))
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn builtin(&self) -> Option<&BuiltinCall> {
-        match &self.source {
-            LazySource::Builtin(call) => Some(call),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn function_call(&self) -> Option<(&FunctionValue, &[Value])> {
-        match &self.source {
-            LazySource::FunctionCall {
-                function,
-                arguments,
-            } => Some((function, arguments)),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn net_computation(&self) -> Option<&NetValue> {
-        match &self.source {
-            LazySource::NetComputation(net) => Some(net),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn reflection_gate(&self) -> Option<&ReflectionGate> {
-        match &self.source {
-            LazySource::ReflectionGate(gate) => Some(gate),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn fixpoint_cell(&self) -> Option<&FixpointCell> {
-        match &self.source {
-            LazySource::Fixpoint(cell) => Some(cell),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn computed_fixpoint_cell(&self) -> Option<&ComputedFixpointCell> {
-        match &self.source {
-            LazySource::ComputedFixpoint(cell) => Some(cell),
-            _ => None,
-        }
     }
 
     pub(crate) fn result_cell(&self) -> &Arc<OnceLock<Result<Value, Arc<str>>>> {

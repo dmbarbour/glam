@@ -2,10 +2,13 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::core::{
-    Builtin, ComputedFixpointAction, FixpointComputation, Key, LazyValue, List, Value, keys,
+    Builtin, ComputedFixpointAction, FixpointComputation, Key, LazySource, LazyValue, List, Value,
+    keys,
 };
 use crate::core_net::CoreWaitToken;
-use crate::evaluation::{EvalContext, EvaluationPumpOutcome, EvaluationTaskPoll};
+use crate::evaluation::{
+    EvalContext, EvaluationPumpOutcome, EvaluationTaskPoll, LazyEvaluationClaim,
+};
 use crate::list::ListItem;
 use crate::number::Number;
 
@@ -67,137 +70,111 @@ pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvalErr
     }
 }
 
+#[derive(Clone, Copy)]
+enum PostForcePolicy {
+    Return,
+    ContinueEvaluation,
+    RunReflectionGate,
+}
+
+enum LazyEvaluationStart {
+    Finished(Value),
+    Claimed(LazyEvaluationClaim),
+}
+
 pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvalError> {
-    let net_computation = lazy.net_computation();
-    let function_call = lazy.function_call();
-    let application = lazy.application();
-    let builtin = lazy.builtin();
-    let reflection_annotation = builtin.is_some_and(|call| call.builtin == Builtin::Anno);
-    let continue_through_result = net_computation.is_some()
-        || function_call.is_some()
-        || application.is_some()
-        || builtin.is_some_and(|call| {
-            matches!(
-                call.builtin,
-                Builtin::Fixpoint
-                    | Builtin::ObjectInstance
-                    | Builtin::ObjectInstanceFromParts
-                    | Builtin::ObjectWithDefs
-            )
-        });
-    if let Some(result) = lazy.cached() {
-        let result = result.map_err(|message| EvalError::new(message.as_ref()))?;
-        return if reflection_annotation {
-            eval_reflection_annotation_result(context, result)
-        } else if continue_through_result {
-            eval_value(context, &result)
-        } else {
-            Ok(result)
-        };
-    }
-    let _claim = context
-        .claim_lazy(lazy.id())
-        .map_err(|error| EvalError::new(error.as_ref()))?;
-    if let Some(result) = lazy.cached() {
-        let result = result.map_err(|message| EvalError::new(message.as_ref()))?;
-        return if reflection_annotation {
-            eval_reflection_annotation_result(context, result)
-        } else if continue_through_result {
-            eval_value(context, &result)
-        } else {
-            Ok(result)
-        };
-    }
-    let result = if let Some(gate) = lazy.reflection_gate() {
-        let task = gate
-            .task(context)
-            .map_err(|error| EvalError::new(error.as_ref()))?;
-        let mut poll = context.poll_reflection_task(task);
-        if let EvaluationTaskPoll::Pending(wait) = &poll {
-            loop {
-                match context.pump_wait(wait, 256) {
-                    EvaluationPumpOutcome::TargetReady => {
-                        poll = context.poll_reflection_task(task);
-                        break;
-                    }
-                    EvaluationPumpOutcome::NoProgress => break,
-                    EvaluationPumpOutcome::BudgetExhausted => {}
+    match lazy.source() {
+        LazySource::Promised => eval_promised(context, lazy),
+        LazySource::Fixpoint(fixpoint) => eval_task_fixpoint(context, lazy, fixpoint),
+        LazySource::ComputedFixpoint(fixpoint) => {
+            match begin_lazy_evaluation(context, lazy, PostForcePolicy::Return)? {
+                LazyEvaluationStart::Finished(result) => Ok(result),
+                LazyEvaluationStart::Claimed(_claim) => {
+                    eval_computed_fixpoint(context, lazy, fixpoint)
                 }
             }
         }
-        match poll {
-            EvaluationTaskPoll::Pending(wait) => {
-                return Err(EvalError::blocked(CoreWaitToken(wait)));
-            }
-            EvaluationTaskPoll::Complete(_) => Ok(gate.target().clone()),
-            EvaluationTaskPoll::Failed(error) => Err(EvalError::new(error.as_ref())),
-            EvaluationTaskPoll::Cancelled => {
-                Err(EvalError::new("reflection annotation task was cancelled"))
-            }
-            EvaluationTaskPoll::ForeignSession => {
-                return Err(EvalError::new(
-                    "reflection annotation task belongs to another evaluation session",
-                ));
-            }
+        LazySource::Deferred(thunk) => {
+            eval_cacheable_source(context, lazy, PostForcePolicy::Return, || {
+                thunk(context).map_err(EvalError::new)
+            })
         }
-    } else if let Some(fixpoint) = lazy.computed_fixpoint_cell() {
-        return eval_computed_fixpoint(context, lazy, fixpoint);
-    } else if let Some(fixpoint) = lazy.fixpoint_cell() {
-        let observer = context
-            .task_id()
-            .map_err(|error| EvalError::new(error.as_ref()))?;
-        if observer == fixpoint.owner() {
-            return Err(EvalError::new(format!(
-                "reflection fixpoint {} recursively observed itself in task {}",
-                fixpoint.id(),
-                fixpoint.owner().get()
-            )));
+        LazySource::ReflectionGate(gate) => eval_reflection_gate(context, lazy, gate),
+        LazySource::Access { path, arguments } => {
+            eval_cacheable_source(context, lazy, PostForcePolicy::Return, || {
+                resolve_core_access(context, arguments, path)
+            })
         }
-        match context.poll_wait(fixpoint.wait()) {
-            EvaluationTaskPoll::Pending(wait) => {
-                return Err(EvalError::blocked(CoreWaitToken(wait)));
-            }
-            EvaluationTaskPoll::Complete(_) => lazy
-                .cached()
-                .expect("completed fixpoint promise must contain a result")
-                .map_err(|message| EvalError::new(message.as_ref())),
-            EvaluationTaskPoll::Failed(error) => Err(EvalError::new(error.as_ref())),
-            EvaluationTaskPoll::Cancelled => {
-                Err(EvalError::new("reflection fixpoint producer was cancelled"))
-            }
-            EvaluationTaskPoll::ForeignSession => Err(EvalError::new(
-                "reflection fixpoint belongs to another evaluation session",
-            )),
+        LazySource::Application(application) => {
+            eval_cacheable_source(context, lazy, PostForcePolicy::ContinueEvaluation, || {
+                apply_values(
+                    context,
+                    application.function().clone(),
+                    application.arguments().to_vec(),
+                )
+            })
         }
-    } else if let Some(result) = lazy.force_deferred(context) {
-        result.map_err(|message| EvalError::new(message.as_ref()))
-    } else if let Some((path, arguments)) = lazy.access() {
-        resolve_core_access(context, arguments, path)
-    } else if let Some((function, arguments)) = application {
-        apply_values(context, function.clone(), arguments.to_vec())
-    } else if let Some(call) = builtin {
-        let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
-        let argument = arguments
-            .pop()
-            .expect("saturated builtin thunk must contain an argument");
-        apply_builtin(context, call.builtin, arguments, argument)
-    } else if let Some((function, arguments)) = function_call.as_ref() {
-        evaluate_function_call(context, function, arguments)
-    } else if let Some(net) = net_computation.as_ref() {
-        let runtime = net.runtime().clone();
-        let exposed = runtime.with(|runtime| runtime.exposed());
-        extract_net_data(context, runtime, exposed, "lazy net computation")
-    } else if lazy.is_promised() {
-        // TODO(parallel evaluation): an unfulfilled lazy value currently
-        // fails fast. Parallel evaluation needs a thunk-level scheduler,
-        // including explicit sparks and suspended continuations, rather
-        // than a blocking IVar join that can deadlock on cyclic demand.
-        return Err(EvalError::new(
-            "promised value was observed before initialization",
-        ));
-    } else {
-        return Err(EvalError::new("lazy value has no producer"));
+        LazySource::Builtin(call) => {
+            eval_cacheable_source(context, lazy, builtin_post_force(call.builtin), || {
+                let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
+                let argument = arguments
+                    .pop()
+                    .expect("saturated builtin thunk must contain an argument");
+                apply_builtin(context, call.builtin, arguments, argument)
+            })
+        }
+        LazySource::NetComputation(net) => {
+            eval_cacheable_source(context, lazy, PostForcePolicy::ContinueEvaluation, || {
+                let runtime = net.runtime().clone();
+                let exposed = runtime.with(|runtime| runtime.exposed());
+                extract_net_data(context, runtime, exposed, "lazy net computation")
+            })
+        }
+        LazySource::FunctionCall {
+            function,
+            arguments,
+        } => eval_cacheable_source(context, lazy, PostForcePolicy::ContinueEvaluation, || {
+            evaluate_function_call(context, function, arguments)
+        }),
+    }
+}
+
+fn eval_cacheable_source(
+    context: &EvalContext,
+    lazy: &LazyValue,
+    policy: PostForcePolicy,
+    produce: impl FnOnce() -> Result<Value, EvalError>,
+) -> Result<Value, EvalError> {
+    let _claim = match begin_lazy_evaluation(context, lazy, policy)? {
+        LazyEvaluationStart::Finished(result) => return Ok(result),
+        LazyEvaluationStart::Claimed(claim) => claim,
     };
+    cache_lazy_result(context, lazy, policy, produce())
+}
+
+fn begin_lazy_evaluation(
+    context: &EvalContext,
+    lazy: &LazyValue,
+    policy: PostForcePolicy,
+) -> Result<LazyEvaluationStart, EvalError> {
+    if let Some(result) = lazy.cached() {
+        return finish_lazy_result(context, result, policy).map(LazyEvaluationStart::Finished);
+    }
+    let claim = context
+        .claim_lazy(lazy.id())
+        .map_err(|error| EvalError::new(error.as_ref()))?;
+    if let Some(result) = lazy.cached() {
+        return finish_lazy_result(context, result, policy).map(LazyEvaluationStart::Finished);
+    }
+    Ok(LazyEvaluationStart::Claimed(claim))
+}
+
+fn cache_lazy_result(
+    context: &EvalContext,
+    lazy: &LazyValue,
+    policy: PostForcePolicy,
+    result: Result<Value, EvalError>,
+) -> Result<Value, EvalError> {
     if let Err(error) = &result
         && error.blocked_on().is_some()
     {
@@ -207,28 +184,181 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
     let result = lazy
         .cache(result)
         .map_err(|message| EvalError::new(message.as_ref()))?;
-    if reflection_annotation {
-        eval_reflection_annotation_result(context, result)
-    } else if continue_through_result {
-        // A net computation itself has exactly one meaning: extract the
-        // exposed Data payload and cache it. Once that has happened, the
-        // surrounding computation (including an ordinary function-call
-        // stage) may perform the next lazy step without re-entering the
-        // source runtime.
-        eval_value(context, &result)
-    } else {
-        Ok(result)
+    finish_lazy_result(context, Ok(result), policy)
+}
+
+fn finish_lazy_result(
+    context: &EvalContext,
+    result: Result<Value, Arc<str>>,
+    policy: PostForcePolicy,
+) -> Result<Value, EvalError> {
+    let result = result.map_err(|message| EvalError::new(message.as_ref()))?;
+    match policy {
+        PostForcePolicy::Return => Ok(result),
+        PostForcePolicy::ContinueEvaluation => {
+            // Cache a net's exposed Data payload before continuing. If the
+            // payload blocks or re-enters evaluation, source-net work remains
+            // shared instead of being repeated.
+            eval_value(context, &result)
+        }
+        PostForcePolicy::RunReflectionGate => match &result {
+            Value::Lazy(lazy) if matches!(lazy.source(), LazySource::ReflectionGate(_)) => {
+                eval_lazy(context, lazy)
+            }
+            _ => Ok(result),
+        },
     }
 }
 
-fn eval_reflection_annotation_result(
-    context: &EvalContext,
-    result: Value,
-) -> Result<Value, EvalError> {
-    match &result {
-        Value::Lazy(lazy) if lazy.reflection_gate().is_some() => eval_lazy(context, lazy),
-        _ => Ok(result),
+fn builtin_post_force(builtin: Builtin) -> PostForcePolicy {
+    match builtin {
+        Builtin::Anno => PostForcePolicy::RunReflectionGate,
+        Builtin::Fixpoint
+        | Builtin::ObjectInstanceFromParts
+        | Builtin::ObjectInstance
+        | Builtin::ObjectWithDefs => PostForcePolicy::ContinueEvaluation,
+        Builtin::Append
+        | Builtin::Add
+        | Builtin::Subtract
+        | Builtin::Multiply
+        | Builtin::Divide
+        | Builtin::Greater
+        | Builtin::GreaterEqual
+        | Builtin::Equal
+        | Builtin::NotEqual
+        | Builtin::LessEqual
+        | Builtin::Less
+        | Builtin::Seq
+        | Builtin::Spark
+        | Builtin::MergeDuplicate
+        | Builtin::Floor
+        | Builtin::Mod
+        | Builtin::Slice
+        | Builtin::Map
+        | Builtin::ListConcat
+        | Builtin::ListLen
+        | Builtin::ListSplit
+        | Builtin::ListSplitEnd
+        | Builtin::ListHead
+        | Builtin::ListTail
+        | Builtin::TextLines
+        | Builtin::ListEffect
+        | Builtin::ListEffectReturn
+        | Builtin::ListEffectSeq
+        | Builtin::ListEffectAlt
+        | Builtin::ListEffectCut
+        | Builtin::ListEffectFix
+        | Builtin::DictSingleton
+        | Builtin::DictUnion
+        | Builtin::DictUpdate
+        | Builtin::ObjectSpec
+        | Builtin::ObjectLocalName
+        | Builtin::EffectApply
+        | Builtin::EffectCall
+        | Builtin::EffectMap
+        | Builtin::EffectMapRun
+        | Builtin::EffectMapContinue
+        | Builtin::ObjectDefaultDefs
+        | Builtin::ObjectDictDefs
+        | Builtin::ObjectComposedDefs
+        | Builtin::ObjectOverrideDefs => PostForcePolicy::Return,
     }
+}
+
+fn eval_promised(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvalError> {
+    match begin_lazy_evaluation(context, lazy, PostForcePolicy::Return)? {
+        LazyEvaluationStart::Finished(result) => Ok(result),
+        LazyEvaluationStart::Claimed(_claim) => {
+            // TODO(parallel evaluation): an unfulfilled lazy value currently
+            // fails fast. Parallel evaluation needs a thunk-level scheduler,
+            // including explicit sparks and suspended continuations, rather
+            // than a blocking IVar join that can deadlock on cyclic demand.
+            Err(EvalError::new(
+                "promised value was observed before initialization",
+            ))
+        }
+    }
+}
+
+fn eval_task_fixpoint(
+    context: &EvalContext,
+    lazy: &LazyValue,
+    fixpoint: &crate::core::FixpointCell,
+) -> Result<Value, EvalError> {
+    let _claim = match begin_lazy_evaluation(context, lazy, PostForcePolicy::Return)? {
+        LazyEvaluationStart::Finished(result) => return Ok(result),
+        LazyEvaluationStart::Claimed(claim) => claim,
+    };
+    let observer = context
+        .task_id()
+        .map_err(|error| EvalError::new(error.as_ref()))?;
+    if observer == fixpoint.owner() {
+        return Err(EvalError::new(format!(
+            "reflection fixpoint {} recursively observed itself in task {}",
+            fixpoint.id(),
+            fixpoint.owner().get()
+        )));
+    }
+    let result = match context.poll_wait(fixpoint.wait()) {
+        EvaluationTaskPoll::Pending(wait) => {
+            return Err(EvalError::blocked(CoreWaitToken(wait)));
+        }
+        EvaluationTaskPoll::Complete(_) => lazy
+            .cached()
+            .expect("completed fixpoint promise must contain a result")
+            .map_err(|message| EvalError::new(message.as_ref())),
+        EvaluationTaskPoll::Failed(error) => Err(EvalError::new(error.as_ref())),
+        EvaluationTaskPoll::Cancelled => {
+            Err(EvalError::new("reflection fixpoint producer was cancelled"))
+        }
+        EvaluationTaskPoll::ForeignSession => Err(EvalError::new(
+            "reflection fixpoint belongs to another evaluation session",
+        )),
+    };
+    cache_lazy_result(context, lazy, PostForcePolicy::Return, result)
+}
+
+fn eval_reflection_gate(
+    context: &EvalContext,
+    lazy: &LazyValue,
+    gate: &crate::core::ReflectionGate,
+) -> Result<Value, EvalError> {
+    let _claim = match begin_lazy_evaluation(context, lazy, PostForcePolicy::Return)? {
+        LazyEvaluationStart::Finished(result) => return Ok(result),
+        LazyEvaluationStart::Claimed(claim) => claim,
+    };
+    let task = gate
+        .task(context)
+        .map_err(|error| EvalError::new(error.as_ref()))?;
+    let mut poll = context.poll_reflection_task(task);
+    if let EvaluationTaskPoll::Pending(wait) = &poll {
+        loop {
+            match context.pump_wait(wait, 256) {
+                EvaluationPumpOutcome::TargetReady => {
+                    poll = context.poll_reflection_task(task);
+                    break;
+                }
+                EvaluationPumpOutcome::NoProgress => break,
+                EvaluationPumpOutcome::BudgetExhausted => {}
+            }
+        }
+    }
+    let result = match poll {
+        EvaluationTaskPoll::Pending(wait) => {
+            return Err(EvalError::blocked(CoreWaitToken(wait)));
+        }
+        EvaluationTaskPoll::Complete(_) => Ok(gate.target().clone()),
+        EvaluationTaskPoll::Failed(error) => Err(EvalError::new(error.as_ref())),
+        EvaluationTaskPoll::Cancelled => {
+            Err(EvalError::new("reflection annotation task was cancelled"))
+        }
+        EvaluationTaskPoll::ForeignSession => {
+            return Err(EvalError::new(
+                "reflection annotation task belongs to another evaluation session",
+            ));
+        }
+    };
+    cache_lazy_result(context, lazy, PostForcePolicy::Return, result)
 }
 
 fn eval_computed_fixpoint(
