@@ -201,6 +201,9 @@ impl ConflictObservationIndex for CoarseObservationIndex {
 /// Immutable heap state captured at the beginning of a transaction.
 #[derive(Clone)]
 pub struct StoreSnapshot {
+    // Revisions are store-local; identity prevents a coincidental revision
+    // match from enabling the cached-view commit path for another store.
+    identity: Arc<()>,
     revision: u64,
     root: PublicValue,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
@@ -223,6 +226,7 @@ struct StoreWrite {
 #[derive(Clone)]
 pub struct StoreJournal {
     snapshot: StoreSnapshot,
+    view: PublicValue,
     observations: Box<dyn ConflictObservationIndex>,
     writes: Vec<StoreWrite>,
 }
@@ -231,8 +235,10 @@ impl StoreJournal {
     #[doc(hidden)]
     pub fn new(snapshot: StoreSnapshot) -> Self {
         let observations = snapshot.strategy.begin();
+        let view = snapshot.root.clone();
         Self {
             snapshot,
+            view,
             observations,
             writes: Vec::new(),
         }
@@ -254,20 +260,23 @@ impl StoreJournal {
     }
 
     pub(crate) fn view(&self) -> PublicValue {
-        apply_writes(self.snapshot.root.clone(), &self.writes)
+        self.view.clone()
     }
 
     pub(crate) fn write(&mut self, path: Vec<Key>, value: PublicValue) {
-        self.writes.push(StoreWrite {
+        let write = StoreWrite {
             path: ConflictPath::from_keys(path),
             value,
-        });
+        };
+        self.view = apply_write(self.view.clone(), &write);
+        self.writes.push(write);
     }
 }
 
 /// Shared reflection heap state. Hosts place this inside their existing lock
 /// so heap and specialization commits remain atomic.
 pub struct ReflectionStore {
+    identity: Arc<()>,
     root: PublicValue,
     revision: u64,
     latest_changes: BTreeMap<ConflictPath, u64>,
@@ -277,6 +286,7 @@ pub struct ReflectionStore {
 impl ReflectionStore {
     pub fn new(strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
         Self {
+            identity: Arc::new(()),
             root: PublicValue::empty_record(),
             revision: 0,
             latest_changes: BTreeMap::new(),
@@ -287,6 +297,7 @@ impl ReflectionStore {
     #[doc(hidden)]
     pub fn snapshot(&self) -> StoreSnapshot {
         StoreSnapshot {
+            identity: self.identity.clone(),
             revision: self.revision,
             root: self.root.clone(),
             strategy: self.strategy.clone(),
@@ -323,7 +334,13 @@ impl ReflectionStore {
             return true;
         }
 
-        self.root = apply_writes(self.root.clone(), &journal.writes);
+        self.root = if Arc::ptr_eq(&self.identity, &journal.snapshot.identity)
+            && self.revision == journal.snapshot.revision
+        {
+            journal.view.clone()
+        } else {
+            apply_writes(self.root.clone(), &journal.writes)
+        };
         self.revision = self.revision.wrapping_add(1);
         for path in normalized_write_paths(&journal.writes) {
             self.latest_changes.insert(path, self.revision);
@@ -355,19 +372,22 @@ fn normalized_write_paths(writes: &[StoreWrite]) -> Vec<ConflictPath> {
 
 fn apply_writes(mut root: PublicValue, writes: &[StoreWrite]) -> PublicValue {
     for write in writes {
-        if write.path.depth() == 0 {
-            root = write.value.clone();
-            continue;
-        }
-        let path = Value::List(List::from_values(
-            write.path.keys().iter().cloned().map(key_value).collect(),
-        ));
-        root = PublicValue::from_core(Value::builtin_call(
-            Builtin::DictUpdate,
-            vec![path, write.value.as_core().clone(), root.as_core().clone()],
-        ));
+        root = apply_write(root, write);
     }
     root
+}
+
+fn apply_write(root: PublicValue, write: &StoreWrite) -> PublicValue {
+    if write.path.depth() == 0 {
+        return write.value.clone();
+    }
+    let path = Value::List(List::from_values(
+        write.path.keys().iter().cloned().map(key_value).collect(),
+    ));
+    PublicValue::from_core(Value::builtin_call(
+        Builtin::DictUpdate,
+        vec![path, write.value.as_core().clone(), root.into_core()],
+    ))
 }
 
 fn key_value(key: Key) -> Value {
@@ -421,6 +441,33 @@ mod tests {
         observations.observe(&ConflictPath::from_keys(path(&["a", "b"])));
         assert!(observations.may_conflict(&ConflictPath::from_keys(path(&["a"]))));
         assert!(observations.may_conflict(&ConflictPath::from_keys(path(&["a", "b", "c"]))));
+    }
+
+    #[test]
+    fn journal_caches_its_view_and_uncontended_commit_installs_it() {
+        let mut store = store();
+        let mut journal = StoreJournal::new(store.snapshot());
+        journal.write(path(&["value"]), PublicValue::integer(1));
+
+        let cached_view = journal.view();
+        assert_eq!(journal.view(), cached_view);
+        assert!(store.try_commit(&journal));
+        assert_eq!(store.root(), &cached_view);
+    }
+
+    #[test]
+    fn concurrent_commit_rebases_instead_of_installing_cached_view() {
+        let mut store = store();
+        let snapshot = store.snapshot();
+        let mut first = StoreJournal::new(snapshot.clone());
+        first.write(path(&["first"]), PublicValue::integer(1));
+        let mut second = StoreJournal::new(snapshot);
+        second.write(path(&["second"]), PublicValue::integer(2));
+        let stale_cached_view = second.view();
+
+        assert!(store.try_commit(&first));
+        assert!(store.try_commit(&second));
+        assert_ne!(store.root(), &stale_cached_view);
     }
 
     #[test]
