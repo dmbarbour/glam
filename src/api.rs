@@ -31,12 +31,21 @@ use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
 use crate::number::Number;
 use crate::reflection::{
-    CommitResult, ConflictAnalysisStrategy, ExactConflictAnalysis, HostSnapshot, ReflectionEffects,
-    ReflectionServices, ReflectionStore, TaskCommit, TaskEnvironment, TaskHost, task_launcher,
+    CommitResult, ConflictAnalysisStrategy, ExactConflictAnalysis, HostSnapshot,
+    ReasoningSessionId, ReflectionEffects, ReflectionServices, ReflectionStore, TaskCommit,
+    TaskEnvironment, TaskHost, VolumeId, task_launcher, volume_effects,
 };
 
 const GLAM_COMPATIBILITY_VERSION: &str = "0.1.0";
 const IMPLEMENTATION_NAME: &str = "rust-bootstrap";
+static NEXT_REASONING_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_reasoning_session_id() -> ReasoningSessionId {
+    let id = NEXT_REASONING_SESSION_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("reasoning session IDs exhausted");
+    ReasoningSessionId::from_u64(id).expect("reasoning session IDs start at one")
+}
 
 /// An assembly-time value whose concrete evaluator representation is private.
 #[derive(Clone, PartialEq, Eq)]
@@ -668,6 +677,7 @@ where
 }
 
 struct AssemblerReflectionHost {
+    reasoning_session: ReasoningSessionId,
     reflection_environment: Value,
     diagnostics: DiagnosticBus,
     state: Mutex<AssemblerReflectionState>,
@@ -681,11 +691,13 @@ struct AssemblerReflectionState {
 
 impl AssemblerReflectionHost {
     fn new(
+        reasoning_session: ReasoningSessionId,
         reflection_environment: Value,
         diagnostics: DiagnosticBus,
         conflict_analysis: Arc<dyn ConflictAnalysisStrategy>,
     ) -> Self {
         Self {
+            reasoning_session,
             reflection_environment,
             diagnostics,
             state: Mutex::new(AssemblerReflectionState {
@@ -694,6 +706,42 @@ impl AssemblerReflectionHost {
             }),
             changed: Condvar::new(),
         }
+    }
+
+    fn create_volume(&self, initial: Value) -> Result<(VolumeId, Value), Error> {
+        let volume = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("assembler reflection host mutex should not be poisoned");
+            let volume = state
+                .store
+                .create_volume(initial)
+                .map_err(|error| Error::new(error.as_ref()))?;
+            state.wake_generation = state.wake_generation.wrapping_add(1);
+            self.changed.notify_all();
+            volume
+        };
+        Ok((volume, volume_effects(self.reasoning_session, volume)))
+    }
+
+    fn revoke_volume(&self, volume: VolumeId) -> Result<Value, Error> {
+        let value = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("assembler reflection host mutex should not be poisoned");
+            let value = state.store.revoke_volume(volume).ok_or_else(|| {
+                Error::new(format!(
+                    "reflection volume {} has already been revoked",
+                    volume.get()
+                ))
+            })?;
+            state.wake_generation = state.wake_generation.wrapping_add(1);
+            self.changed.notify_all();
+            value
+        };
+        Ok(value)
     }
 }
 
@@ -725,8 +773,14 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
                 .state
                 .lock()
                 .expect("assembler reflection host mutex should not be poisoned");
-            if !state.store.try_commit(&store) {
-                return CommitResult::Conflict;
+            match state.store.try_commit(&store) {
+                crate::reflection::StoreCommitResult::Committed => {}
+                crate::reflection::StoreCommitResult::Conflict => {
+                    return CommitResult::Conflict;
+                }
+                crate::reflection::StoreCommitResult::MissingVolume(volume) => {
+                    return CommitResult::MissingVolume(volume);
+                }
             }
             state.wake_generation = state.wake_generation.wrapping_add(1);
             self.changed.notify_all();
@@ -737,6 +791,10 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
         }
         extra.commit_updates();
         CommitResult::Committed
+    }
+
+    fn reasoning_session_id(&self) -> Option<ReasoningSessionId> {
+        Some(self.reasoning_session)
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
@@ -786,7 +844,9 @@ impl ReasoningSession {
         runtime: EvaluationRuntime,
         conflict_analysis: Arc<dyn ConflictAnalysisStrategy>,
     ) -> Self {
+        let reasoning_session = allocate_reasoning_session_id();
         let host = Arc::new(AssemblerReflectionHost::new(
+            reasoning_session,
             environment,
             diagnostics.clone(),
             conflict_analysis,
@@ -1113,6 +1173,29 @@ fn reflection_environment_for_role(environment: &Value, role: &str) -> Value {
     )))
 }
 
+/// Owner handle for one protected volume in a reasoning session.
+///
+/// Capability values may be cloned freely, but only this handle can remove the
+/// volume and recover its final unforced value. Dropping the handle does not
+/// revoke the volume.
+pub struct ReasoningVolume {
+    host: Arc<AssemblerReflectionHost>,
+    volume: VolumeId,
+    effects: Value,
+}
+
+impl ReasoningVolume {
+    /// Returns the closed `{get, set, rewrite}` effect capability value.
+    pub fn effects(&self) -> Value {
+        self.effects.clone()
+    }
+
+    /// Removes the volume and returns its final value without forcing it.
+    pub fn revoke(self) -> Result<Value, Error> {
+        self.host.revoke_volume(self.volume)
+    }
+}
+
 #[derive(Clone)]
 pub struct Assembler {
     host: Arc<dyn Host>,
@@ -1160,6 +1243,18 @@ impl Default for Assembler {
 impl Assembler {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a protected reflection volume initialized with `initial`.
+    /// Possession of the returned Glam capability value is the authority to
+    /// access it; ordinary `.heap.*` requests cannot address the volume.
+    pub fn create_volume(&self, initial: Value) -> Result<ReasoningVolume, Error> {
+        let (volume, effects) = self.reasoning.host.create_volume(initial)?;
+        Ok(ReasoningVolume {
+            host: self.reasoning.host.clone(),
+            volume,
+            effects,
+        })
     }
 
     /// Returns the cached closed Glam function used by the executable's

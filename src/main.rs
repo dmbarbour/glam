@@ -699,6 +699,12 @@ fn read_log(
                 return Ok(RequestResult::Return(value));
             }
             CommitResult::Conflict => {}
+            CommitResult::MissingVolume(volume) => {
+                return Err(glam::reflection::TaskError::new(format!(
+                    "reflection volume {} was revoked before its edits committed",
+                    volume.get()
+                )));
+            }
             CommitResult::Closed => return Ok(RequestResult::Cancelled),
         }
     }
@@ -895,9 +901,17 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
                 .expect("log host mutex should not be poisoned");
             if (journal.observed_input && state.input_revision != snapshot.input_revision)
                 || state.diagnostics.len() < journal.consumed_diagnostics
-                || !state.store.try_commit(&store)
             {
                 return CommitResult::Conflict;
+            }
+            match state.store.try_commit(&store) {
+                glam::reflection::StoreCommitResult::Committed => {}
+                glam::reflection::StoreCommitResult::Conflict => {
+                    return CommitResult::Conflict;
+                }
+                glam::reflection::StoreCommitResult::MissingVolume(volume) => {
+                    return CommitResult::MissingVolume(volume);
+                }
             }
             state.diagnostics.drain(..journal.consumed_diagnostics);
             if journal.consumed_diagnostics != 0 {
@@ -957,8 +971,14 @@ impl TaskHost<ReflectionEffects> for LoggerTaskHost {
                 .state
                 .lock()
                 .expect("log host mutex should not be poisoned");
-            if !state.store.try_commit(&store) {
-                return CommitResult::Conflict;
+            match state.store.try_commit(&store) {
+                glam::reflection::StoreCommitResult::Committed => {}
+                glam::reflection::StoreCommitResult::Conflict => {
+                    return CommitResult::Conflict;
+                }
+                glam::reflection::StoreCommitResult::MissingVolume(volume) => {
+                    return CommitResult::MissingVolume(volume);
+                }
             }
             state.wake_generation = state.wake_generation.wrapping_add(1);
             self.input.changed.notify_all();

@@ -13,13 +13,14 @@ pub use requests::{
 };
 pub use store::{
     CoarseConflictAnalysis, ConflictAnalysisStrategy, ConflictObservationIndex, ConflictPath,
-    ExactConflictAnalysis, FingerprintConflictAnalysis, ReflectionStore, StoreJournal,
-    StoreSnapshot,
+    ExactConflictAnalysis, FingerprintConflictAnalysis, ReflectionStore, StoreCommitResult,
+    StoreJournal, StoreSnapshot, VolumeId,
 };
 
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use crate::api::{EvaluationRuntime, Value as PublicValue};
@@ -72,6 +73,21 @@ pub enum RequestResult {
     ReturnUnit,
     Fail,
     Cancelled,
+}
+
+/// Globally unique identity of one reasoning session. Volume IDs are local to
+/// this scope and capability requests carry both identities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReasoningSessionId(NonZeroU64);
+
+impl ReasoningSessionId {
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    pub(crate) fn from_u64(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(Self)
+    }
 }
 
 #[derive(Default)]
@@ -223,6 +239,7 @@ impl<S: TaskSpecialization> TaskCommit<S> {
 pub enum CommitResult {
     Committed,
     Conflict,
+    MissingVolume(VolumeId),
     Closed,
 }
 
@@ -237,6 +254,12 @@ pub trait TaskEnvironment: Send + Sync {
 pub trait TaskHost<S: TaskSpecialization>: TaskEnvironment + Send + Sync {
     fn snapshot(&self) -> HostSnapshot<S>;
     fn commit(&self, commit: TaskCommit<S>) -> CommitResult;
+
+    /// Identifies the reasoning scope accepted by private volume capability
+    /// requests. Hosts without protected volumes retain the default.
+    fn reasoning_session_id(&self) -> Option<ReasoningSessionId> {
+        None
+    }
 
     /// Waits until the observed generation changes. Returns false when the
     /// task should stop rather than retry.
@@ -1021,6 +1044,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             branch,
                             scope_depth,
                         },
+                        CommitResult::MissingVolume(volume) => {
+                            return Err(missing_volume_error(volume));
+                        }
                         CommitResult::Closed => MachineWork::Outcome {
                             outcome: BranchOutcome::Cancelled,
                             scope_depth,
@@ -1059,6 +1085,118 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             branch,
                             scope_depth,
                         },
+                        CommitResult::MissingVolume(volume) => {
+                            return Err(missing_volume_error(volume));
+                        }
+                        CommitResult::Closed => MachineWork::Outcome {
+                            outcome: BranchOutcome::Cancelled,
+                            scope_depth,
+                        },
+                    }
+                }
+            }
+            Request::VolumeGet(volume, path) => {
+                let path =
+                    eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
+                let checkpoint = branch.retry_candidate();
+                let root = if let Some(transaction) = branch.transaction.as_mut() {
+                    let generation = transaction.snapshot.generation();
+                    let observed = transaction.store.observe_volume_read(volume, &path);
+                    let root = transaction.store.volume_view(volume);
+                    if observed {
+                        branch.observe(checkpoint, generation);
+                    }
+                    root
+                } else {
+                    let snapshot = self.host.snapshot();
+                    branch.observe(checkpoint, snapshot.generation());
+                    snapshot.store().volume(volume).cloned()
+                };
+                let value = match root {
+                    Some(root) => lazy_value_path(root.into_core(), &path),
+                    None => missing_volume_value(volume),
+                };
+                MachineWork::Deliver {
+                    value,
+                    branch,
+                    scope_depth,
+                }
+            }
+            Request::VolumeSet(volume, path, value) => {
+                let path =
+                    eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
+                if let Some(transaction) = branch.transaction.as_mut() {
+                    transaction
+                        .store
+                        .write_volume(volume, path, PublicValue::from_core(value));
+                    MachineWork::Deliver {
+                        value: unit_value(),
+                        branch,
+                        scope_depth,
+                    }
+                } else {
+                    let snapshot = self.host.snapshot();
+                    let mut store = StoreJournal::new(snapshot.store().clone());
+                    store.write_volume(volume, path, PublicValue::from_core(value));
+                    let commit =
+                        TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
+                    match self.host.commit(commit) {
+                        CommitResult::Committed => {
+                            branch.retry = None;
+                            MachineWork::Deliver {
+                                value: unit_value(),
+                                branch,
+                                scope_depth,
+                            }
+                        }
+                        CommitResult::Conflict => MachineWork::Drive {
+                            branch,
+                            scope_depth,
+                        },
+                        CommitResult::MissingVolume(volume) => {
+                            return Err(missing_volume_error(volume));
+                        }
+                        CommitResult::Closed => MachineWork::Outcome {
+                            outcome: BranchOutcome::Cancelled,
+                            scope_depth,
+                        },
+                    }
+                }
+            }
+            Request::VolumeRewrite(volume, path, updater) => {
+                let path =
+                    eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
+                if let Some(transaction) = branch.transaction.as_mut() {
+                    transaction
+                        .store
+                        .rewrite_volume(volume, path, PublicValue::from_core(updater));
+                    MachineWork::Deliver {
+                        value: unit_value(),
+                        branch,
+                        scope_depth,
+                    }
+                } else {
+                    let snapshot = self.host.snapshot();
+                    let mut store = StoreJournal::new(snapshot.store().clone());
+                    store.rewrite_volume(volume, path, PublicValue::from_core(updater));
+                    let commit =
+                        TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
+                    match self.host.commit(commit) {
+                        CommitResult::Committed => {
+                            branch.retry = None;
+                            MachineWork::Deliver {
+                                value: unit_value(),
+                                branch,
+                                scope_depth,
+                            }
+                        }
+                        CommitResult::Conflict => MachineWork::Drive {
+                            branch,
+                            scope_depth,
+                        },
+                        CommitResult::MissingVolume(volume) => {
+                            return Err(missing_volume_error(volume));
+                        }
                         CommitResult::Closed => MachineWork::Outcome {
                             outcome: BranchOutcome::Cancelled,
                             scope_depth,
@@ -1424,6 +1562,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             frame.observed_failure = true;
                             frame.retry = Some(completed);
                             return self.finish_cut_attempt();
+                        }
+                        CommitResult::MissingVolume(volume) => {
+                            return Err(missing_volume_error(volume));
                         }
                         CommitResult::Closed => {
                             let parent_scope = self
@@ -1792,6 +1933,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             request,
             &self.tags,
             &self.specialized_requests,
+            self.host.reasoning_session_id(),
         )
     }
 }
@@ -2333,6 +2475,9 @@ enum Request<R> {
     HeapGet(Value),
     HeapSet(Value, Value),
     HeapRewrite(Value, Value),
+    VolumeGet(VolumeId, Value),
+    VolumeSet(VolumeId, Value, Value),
+    VolumeRewrite(VolumeId, Value, Value),
     Reset(Value, Value),
     Shift(Value, Value),
     Resume(EvaluationTaskId, u64, Value),
@@ -2345,11 +2490,44 @@ struct SpecializedRequest<R> {
     request: R,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VolumeOperation {
+    Get,
+    Set,
+    Rewrite,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VolumeRequestIdentity {
+    reasoning_session: ReasoningSessionId,
+    volume: VolumeId,
+    operation: VolumeOperation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VolumeRequestError {
+    ForeignVolume(ReasoningSessionId, VolumeId),
+}
+
+impl fmt::Display for VolumeRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ForeignVolume(reasoning_session, volume) => write!(
+                formatter,
+                "foreign reflection volume {} from reasoning session {}",
+                volume.get(),
+                reasoning_session.get()
+            ),
+        }
+    }
+}
+
 fn parse_request<R: Clone>(
     context: &EvalContext,
     value: Value,
     tags: &Tags,
     specialized: &[SpecializedRequest<R>],
+    reasoning_session: Option<ReasoningSessionId>,
 ) -> Result<Request<R>, TaskError> {
     let Value::Dict(dict) = value else {
         return Err(TaskError::new("effect API returned a non-request value"));
@@ -2435,7 +2613,125 @@ fn parse_request<R: Clone>(
             ));
         }
     }
+    for (tag, _) in dict.iter() {
+        let Some(identity) = parse_volume_request_tag(tag)? else {
+            continue;
+        };
+        if reasoning_session != Some(identity.reasoning_session) {
+            return Err(TaskError::new(
+                VolumeRequestError::ForeignVolume(identity.reasoning_session, identity.volume)
+                    .to_string(),
+            ));
+        }
+        let arguments = parse(tag)?.expect("the request tag came from this dictionary");
+        return match (identity.operation, arguments.as_slice()) {
+            (VolumeOperation::Get, [path]) => Ok(Request::VolumeGet(identity.volume, path.clone())),
+            (VolumeOperation::Set, [path, value]) => Ok(Request::VolumeSet(
+                identity.volume,
+                path.clone(),
+                value.clone(),
+            )),
+            (VolumeOperation::Rewrite, [path, updater]) => Ok(Request::VolumeRewrite(
+                identity.volume,
+                path.clone(),
+                updater.clone(),
+            )),
+            _ => Err(TaskError::new(
+                "volume capability request contained the wrong number of arguments",
+            )),
+        };
+    }
     Err(TaskError::new("effect API returned an unknown request"))
+}
+
+const VOLUME_REQUEST_PREFIX: [&str; 3] = ["reflection_runtime", "v0", "volume"];
+
+fn volume_request_tag(
+    reasoning_session: ReasoningSessionId,
+    volume: VolumeId,
+    operation: VolumeOperation,
+) -> Key {
+    let operation = match operation {
+        VolumeOperation::Get => "get",
+        VolumeOperation::Set => "set",
+        VolumeOperation::Rewrite => "rewrite",
+    };
+    Key::abstract_global_path([
+        VOLUME_REQUEST_PREFIX[0].to_owned(),
+        VOLUME_REQUEST_PREFIX[1].to_owned(),
+        VOLUME_REQUEST_PREFIX[2].to_owned(),
+        reasoning_session.get().to_string(),
+        volume.get().to_string(),
+        operation.to_owned(),
+    ])
+}
+
+fn parse_volume_request_tag(tag: &Key) -> Result<Option<VolumeRequestIdentity>, TaskError> {
+    let Key::AbstractGlobalPath(parts) = tag else {
+        return Ok(None);
+    };
+    if parts.len() < VOLUME_REQUEST_PREFIX.len()
+        || !parts
+            .iter()
+            .zip(VOLUME_REQUEST_PREFIX)
+            .all(|(actual, expected)| actual == expected)
+    {
+        return Ok(None);
+    }
+    let [_, _, _, reasoning_session, volume, operation] = parts.as_ref() else {
+        return Err(TaskError::new(
+            "malformed private volume capability request",
+        ));
+    };
+    let reasoning_session = reasoning_session
+        .parse::<u64>()
+        .ok()
+        .and_then(ReasoningSessionId::from_u64)
+        .ok_or_else(|| TaskError::new("volume capability has an invalid reasoning session"))?;
+    let volume = volume
+        .parse::<u64>()
+        .ok()
+        .and_then(VolumeId::from_u64)
+        .ok_or_else(|| TaskError::new("volume capability has an invalid volume ID"))?;
+    let operation = match operation.as_str() {
+        "get" => VolumeOperation::Get,
+        "set" => VolumeOperation::Set,
+        "rewrite" => VolumeOperation::Rewrite,
+        _ => return Err(TaskError::new("volume capability has an invalid operation")),
+    };
+    Ok(Some(VolumeRequestIdentity {
+        reasoning_session,
+        volume,
+        operation,
+    }))
+}
+
+pub(crate) fn volume_effects(
+    reasoning_session: ReasoningSessionId,
+    volume: VolumeId,
+) -> PublicValue {
+    let entry = |name: &str, operation, arity| {
+        (
+            Key::atom_from_text(name),
+            request_function(
+                volume_request_tag(reasoning_session, volume, operation),
+                arity,
+                Vec::new(),
+                true,
+            ),
+        )
+    };
+    PublicValue::from_core(Value::Dict(
+        [
+            entry("get", VolumeOperation::Get, 1),
+            entry("set", VolumeOperation::Set, 2),
+            entry("rewrite", VolumeOperation::Rewrite, 2),
+        ]
+        .into_iter()
+        .fold(Dict::new_sync(), |dict, (key, value)| {
+            dict.insert(key, value)
+        }),
+    ))
 }
 
 fn request_id(context: &EvalContext, value: Value, kind: &str) -> Result<u64, TaskError> {
@@ -2589,6 +2885,20 @@ fn task_eval_error(error: eval::EvalError) -> TaskError {
         Some(wait) => TaskError::blocked(wait.0),
         None => TaskError::new(error.to_string()),
     }
+}
+
+fn missing_volume_error(volume: VolumeId) -> TaskError {
+    TaskError::new(format!(
+        "reflection volume {} was revoked before its edits committed",
+        volume.get()
+    ))
+}
+
+fn missing_volume_value(volume: VolumeId) -> Value {
+    Value::error(format!(
+        "reflection volume {} has been revoked",
+        volume.get()
+    ))
 }
 
 fn value_key(context: &EvalContext, value: Value) -> Result<Key, TaskError> {
@@ -2943,6 +3253,9 @@ mod tests {
                     return Ok(RequestResult::Return(value));
                 }
                 CommitResult::Conflict => {}
+                CommitResult::MissingVolume(volume) => {
+                    return Err(missing_volume_error(volume));
+                }
                 CommitResult::Closed => return Ok(RequestResult::Cancelled),
             }
         }
@@ -2950,6 +3263,7 @@ mod tests {
 
     #[derive(Default)]
     struct TestHost {
+        reasoning_session: Option<ReasoningSessionId>,
         state: Mutex<TestHostState>,
     }
 
@@ -2984,6 +3298,7 @@ mod tests {
     impl TestHost {
         fn with_diagnostics(diagnostics: Vec<Diagnostic>) -> Self {
             Self {
+                reasoning_session: None,
                 state: Mutex::new(TestHostState {
                     diagnostics,
                     ..TestHostState::default()
@@ -2993,6 +3308,7 @@ mod tests {
 
         fn with_wake_diagnostic(diagnostic: Diagnostic) -> Self {
             Self {
+                reasoning_session: None,
                 state: Mutex::new(TestHostState {
                     wake_diagnostic: Some(diagnostic),
                     ..TestHostState::default()
@@ -3002,10 +3318,18 @@ mod tests {
 
         fn with_wake_heap(heap: PublicValue) -> Self {
             Self {
+                reasoning_session: None,
                 state: Mutex::new(TestHostState {
                     wake_heap: Some(heap),
                     ..TestHostState::default()
                 }),
+            }
+        }
+
+        fn with_reasoning_session(reasoning_session: ReasoningSessionId) -> Self {
+            Self {
+                reasoning_session: Some(reasoning_session),
+                state: Mutex::new(TestHostState::default()),
             }
         }
 
@@ -3116,9 +3440,15 @@ mod tests {
                 }
                 if (journal.consumed_diagnostics != 0 && state.extra_revision != snapshot.revision)
                     || state.diagnostics.len() < journal.consumed_diagnostics
-                    || !state.store.try_commit(&store)
                 {
                     return CommitResult::Conflict;
+                }
+                match state.store.try_commit(&store) {
+                    StoreCommitResult::Committed => {}
+                    StoreCommitResult::Conflict => return CommitResult::Conflict,
+                    StoreCommitResult::MissingVolume(volume) => {
+                        return CommitResult::MissingVolume(volume);
+                    }
                 }
                 let consumed = journal.consumed_diagnostics;
                 state.diagnostics.drain(..consumed);
@@ -3152,8 +3482,12 @@ mod tests {
             if state.closed {
                 return CommitResult::Closed;
             }
-            if !state.store.try_commit(&store) {
-                return CommitResult::Conflict;
+            match state.store.try_commit(&store) {
+                StoreCommitResult::Committed => {}
+                StoreCommitResult::Conflict => return CommitResult::Conflict,
+                StoreCommitResult::MissingVolume(volume) => {
+                    return CommitResult::MissingVolume(volume);
+                }
             }
             state.generation += 1;
             CommitResult::Committed
@@ -3177,8 +3511,12 @@ mod tests {
                 if state.closed {
                     return CommitResult::Closed;
                 }
-                if !state.store.try_commit(&store) {
-                    return CommitResult::Conflict;
+                match state.store.try_commit(&store) {
+                    StoreCommitResult::Committed => {}
+                    StoreCommitResult::Conflict => return CommitResult::Conflict,
+                    StoreCommitResult::MissingVolume(volume) => {
+                        return CommitResult::MissingVolume(volume);
+                    }
                 }
                 state
                     .diagnostics
@@ -3190,6 +3528,10 @@ mod tests {
             }
             journal.commit_updates();
             CommitResult::Committed
+        }
+
+        fn reasoning_session_id(&self) -> Option<ReasoningSessionId> {
+            self.reasoning_session
         }
 
         fn wait_for_change(&self, observed_generation: u64) -> bool {
@@ -4314,6 +4656,56 @@ mod tests {
                 .to_binary(&assembler.get(&value, "shared").unwrap())
                 .unwrap(),
             b"visible".as_slice()
+        );
+    }
+
+    #[test]
+    fn child_tasks_inherit_same_session_volume_capabilities() {
+        let reasoning_session = ReasoningSessionId::from_u64(41).unwrap();
+        let host = Arc::new(TestHost::with_reasoning_session(reasoning_session));
+        let volume = host
+            .state
+            .lock()
+            .unwrap()
+            .store
+            .create_volume(PublicValue::text("initial"))
+            .unwrap();
+        let assembler = Assembler::default();
+        let module = assembler
+            .module(["reflection_volume_child"])
+            .script(
+                "g",
+                "language g0\nimport 'std\nlaunch = \\cap -> .refl_task (cap.set [] \"child\") >>= (\\task -> .join_task task)\n",
+            )
+            .build()
+            .expect("volume child fixture should compile");
+        let launch = assembler
+            .get(module.value(), "launch")
+            .expect("volume child fixture should define launch");
+        let effect = assembler
+            .apply(&launch, [volume_effects(reasoning_session, volume)])
+            .expect("volume capability should apply to the child launcher");
+        let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
+
+        assert!(matches!(
+            EffectRun::new(&effect, ReflectionEffects, reflection_host.clone())
+                .with_reflection_children(reflection_host)
+                .run()
+                .unwrap(),
+            TaskOutcome::Complete(_)
+        ));
+        let final_value = host
+            .state
+            .lock()
+            .unwrap()
+            .store
+            .snapshot()
+            .volume(volume)
+            .cloned()
+            .expect("child write must not remove the volume");
+        assert_eq!(
+            assembler.to_binary(&final_value).unwrap(),
+            b"child".as_slice()
         );
     }
 

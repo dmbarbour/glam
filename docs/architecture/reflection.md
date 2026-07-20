@@ -38,20 +38,21 @@ Standard effects include `r`, `seq`, `alt`, `fail`, `cut`, `fix`, indexed
 task-local `get`/`set`, shared `heap.get`/`heap.set`/`heap.rewrite`, and indexed
 `reset`/`shift`.
 Local user state, including the reset stack, is ordinary task state. Shared
-heap state is staged separately in the host transaction; it is never projected
-into local state. Choice frames, journals, and host queues remain machine or
-host bookkeeping.
+store state is staged separately in the host transaction; it is never
+projected into local state. The ordinary heap is one host-private store volume.
+Choice frames, journals, and host queues remain machine or host bookkeeping.
 
 An outer `cut` provides an optimistic transaction boundary. Alternatives start
 from snapshots; losing branches discard changes; a winning outer branch
 validates and commits. A host observation can turn later failure into a retry
 point. `cut` alone does not: unobservant failure is terminal.
 
-`reflection/store.rs` owns the shared heap independently of host wake state.
-Transactions record hierarchical read paths and an ordered edit overlay;
-commits rebase edits onto the current persistent root. The store retains exact
-changed paths. Blind sets and rewrites, including overlapping parent and child
-paths, serialize in commit order without validation. A session-selected
+`reflection/store.rs` owns a persistent map of shared volumes independently of
+host wake state. Transactions record volume-qualified hierarchical read paths
+and one ordered edit overlay; commits rebase edits onto the current persistent
+roots. The store retains exact changed addresses. Blind sets and rewrites,
+including overlapping parent and child paths, serialize in commit order while
+their target volume exists. A session-selected
 `Arc<dyn ConflictAnalysisStrategy>` controls only how reads are summarized:
 the bootstrap supplies exact, conservative fingerprint, and fully coarse
 strategies. Changing strategy creates a fresh reasoning session.
@@ -71,6 +72,28 @@ Host locks still make store and specialization changes atomic. For example,
 the logger validates its input-stream revision, validates and applies its heap
 journal, then consumes input and publishes deferred output. A failed store
 validation therefore cannot duplicate a diagnostic or child-task launch.
+
+## Protected Client Volumes
+
+`Assembler::create_volume` installs an explicitly initialized volume and
+returns a Rust owner handle. The handle exposes one closed Glam
+`{get,set,rewrite}` capability value. Possession is authority: the functions
+are not members of the ordinary reflection API, while `.heap.*` remains rooted
+to the session's private heap volume.
+
+Each capability request embeds its globally unique `ReasoningSessionId`, its
+session-local `VolumeId`, and its operation. Ordinary child tasks share the
+host identity and may use capabilities passed to them. Logger, IDE, replacement,
+or otherwise foreign reasoning sessions reject the request before it enters a
+store journal.
+
+The owner explicitly revokes the complete volume and recovers its final
+unforced value. Volume IDs are never reused. A missing `get` returns a latent
+error value; blind sets and rewrites still enter the journal but fail
+permanently at commit, so they cannot recreate a revoked volume. Revocation is
+serialized with commits under the host lock and records a root change, causing
+transactions that read the old volume to retry. Dropping the Rust owner does
+not revoke it.
 
 ## Reusable Reflection Requests
 

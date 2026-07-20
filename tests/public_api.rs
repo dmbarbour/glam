@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use glam::{
-    Assembler, DiagnosticEvent, Host, HostError, ModuleInput, ReasoningStatus, Severity, Value,
+    Assembler, Builtin, DiagnosticEvent, Host, HostError, ModuleInput, ReasoningStatus, Severity,
+    Value,
 };
 
 type DiagnosticEvents = Arc<Mutex<Vec<DiagnosticEvent>>>;
@@ -61,6 +62,220 @@ fn public_api_reports_an_empty_reasoning_session_as_complete() {
     assert_eq!(report.status(), ReasoningStatus::Complete);
     assert!(report.failures().is_empty());
     assert!(report.unfinished().is_empty());
+}
+
+fn volume_write_annotation(assembler: &Assembler, effects: Value, value: Value) -> Value {
+    let set = assembler
+        .get(&effects, "set")
+        .expect("volume capability should expose set");
+    let effect = assembler
+        .apply(&set, [Value::list([]), value])
+        .expect("volume set should construct an effect");
+    reflection_annotation(assembler, effect)
+}
+
+fn reflection_annotation(assembler: &Assembler, effect: Value) -> Value {
+    assembler
+        .apply(
+            &Value::builtin(Builtin::Anno),
+            [Value::record([("refl", effect)]), Value::text("done")],
+        )
+        .expect("reflection annotation should be constructed")
+}
+
+#[test]
+fn protected_volume_capability_updates_and_returns_client_state() {
+    let assembler = Assembler::default();
+    let volume = assembler
+        .create_volume(Value::text("initial"))
+        .expect("protected volume should be created");
+    let annotated = volume_write_annotation(&assembler, volume.effects(), Value::text("updated"));
+    assert_eq!(
+        assembler
+            .to_binary(&annotated)
+            .expect("volume write annotation should complete"),
+        b"done".as_slice()
+    );
+
+    let final_value = volume
+        .revoke()
+        .expect("volume owner should recover its final value");
+    assert_eq!(
+        assembler
+            .to_binary(&final_value)
+            .expect("final volume value should remain binary"),
+        b"updated".as_slice()
+    );
+}
+
+#[test]
+fn assembler_clones_share_protected_volume_capabilities() {
+    let assembler = Assembler::default();
+    let clone = assembler.clone();
+    let volume = assembler
+        .create_volume(Value::text("initial"))
+        .expect("protected volume should be created");
+    let annotated =
+        volume_write_annotation(&clone, volume.effects(), Value::text("shared session"));
+    clone
+        .to_binary(&annotated)
+        .expect("assembler clone should accept the capability");
+
+    assert_eq!(
+        assembler.to_binary(&volume.revoke().unwrap()).unwrap(),
+        b"shared session".as_slice()
+    );
+}
+
+#[test]
+fn protected_volume_rewrite_uses_the_commit_time_value() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["volume_rewrite"])
+        .script("g", "language g0\nincrement = \\value -> value + 1\n")
+        .build()
+        .expect("volume updater should compile");
+    let increment = assembler
+        .get(module.value(), "increment")
+        .expect("volume updater should be defined");
+    let volume = assembler
+        .create_volume(Value::integer(1))
+        .expect("protected volume should be created");
+    let rewrite = assembler
+        .get(&volume.effects(), "rewrite")
+        .expect("volume capability should expose rewrite");
+    let effect = assembler
+        .apply(&rewrite, [Value::list([]), increment])
+        .expect("volume rewrite should construct an effect");
+    assembler
+        .to_binary(&reflection_annotation(&assembler, effect))
+        .expect("volume rewrite annotation should complete");
+
+    let final_value = volume.revoke().unwrap();
+    assert_eq!(assembler.evaluate(&final_value).unwrap().as_i64(), Some(2));
+}
+
+#[test]
+fn protected_volume_get_is_an_ordinary_effect_result() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["volume_get"])
+        .script(
+            "g",
+            "language g0\nimport 'std\ndiscard = \\operation -> operation >>= (\\_value -> .r ())\n",
+        )
+        .build()
+        .expect("effect result discarder should compile");
+    let discard = assembler
+        .get(module.value(), "discard")
+        .expect("effect result discarder should be defined");
+    let volume = assembler
+        .create_volume(Value::text("unforced"))
+        .expect("protected volume should be created");
+    let get = assembler
+        .get(&volume.effects(), "get")
+        .expect("volume capability should expose get");
+    let get_effect = assembler
+        .apply(&get, [Value::list([])])
+        .expect("volume get should construct an effect");
+    let discard_effect = assembler
+        .apply(&discard, [get_effect])
+        .expect("get result should compose as an ordinary effect value");
+
+    assert_eq!(
+        assembler
+            .to_binary(&reflection_annotation(&assembler, discard_effect))
+            .expect("volume get should complete"),
+        b"done".as_slice()
+    );
+    assert_eq!(
+        assembler.to_binary(&volume.revoke().unwrap()).unwrap(),
+        b"unforced".as_slice()
+    );
+}
+
+#[test]
+fn revoked_volume_get_exposes_a_lazy_error_through_reflection_eval() {
+    let (assembler, diagnostics) = collecting_assembler();
+    let module = assembler
+        .module(["missing_volume_get"])
+        .script(
+            "g",
+            "language g0\nimport 'std\ninspect = \\operation -> operation >>= (\\value -> .eval value >>= (\\result -> .log 'info { msg:{ text:result.err } }))\n",
+        )
+        .build()
+        .expect("missing-volume inspector should compile");
+    let inspect = assembler
+        .get(module.value(), "inspect")
+        .expect("missing-volume inspector should be defined");
+    let volume = assembler
+        .create_volume(Value::text("initial"))
+        .expect("protected volume should be created");
+    let effects = volume.effects();
+    volume.revoke().unwrap();
+    let get = assembler
+        .get(&effects, "get")
+        .expect("stale capability should still expose get");
+    let get_effect = assembler
+        .apply(&get, [Value::list([])])
+        .expect("stale get should remain a lazy effect request");
+    let inspect_effect = assembler
+        .apply(&inspect, [get_effect])
+        .expect("missing-volume inspector should accept the effect");
+    assembler
+        .to_binary(&reflection_annotation(&assembler, inspect_effect))
+        .expect("`.eval` should contain the missing-volume error");
+
+    let diagnostics = take_diagnostics(&diagnostics);
+    assert_eq!(diagnostics.len(), 1);
+    let message = assembler
+        .binary_at(diagnostics[0].emission(), "msg.text")
+        .expect("lazy diagnostic text should be observable");
+    assert!(String::from_utf8_lossy(&message).contains("has been revoked"));
+}
+
+#[test]
+fn protected_volume_capabilities_are_reasoning_session_local() {
+    let owner = Assembler::default();
+    let foreign = Assembler::default();
+    let volume = owner
+        .create_volume(Value::text("initial"))
+        .expect("protected volume should be created");
+    let annotated = volume_write_annotation(&foreign, volume.effects(), Value::text("forbidden"));
+
+    let error = foreign
+        .to_binary(&annotated)
+        .expect_err("foreign reasoning session must reject the capability");
+    assert!(error.to_string().contains("foreign reflection volume"));
+    assert_eq!(
+        owner
+            .to_binary(&volume.revoke().unwrap())
+            .expect("foreign use must not modify the volume"),
+        b"initial".as_slice()
+    );
+}
+
+#[test]
+fn revoked_volume_capability_cannot_recreate_its_volume() {
+    let assembler = Assembler::default();
+    let volume = assembler
+        .create_volume(Value::text("initial"))
+        .expect("protected volume should be created");
+    let effects = volume.effects();
+    assert_eq!(
+        assembler.to_binary(&volume.revoke().unwrap()).unwrap(),
+        b"initial".as_slice()
+    );
+    let annotated = volume_write_annotation(&assembler, effects, Value::text("resurrected"));
+
+    let error = assembler
+        .to_binary(&annotated)
+        .expect_err("stale blind write must fail at commit");
+    assert!(
+        error
+            .to_string()
+            .contains("revoked before its edits committed")
+    );
 }
 
 #[test]

@@ -5,7 +5,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, hash_map::RandomState};
 use std::hash::BuildHasher;
+use std::num::NonZeroU64;
 use std::sync::Arc;
+
+use rpds::RedBlackTreeMapSync;
 
 use crate::api::Value as PublicValue;
 use crate::core::{Atom, Builtin, Dict, Key, LazyValue, List, Value};
@@ -48,6 +51,54 @@ impl ConflictPath {
     }
 }
 
+/// One shared-state partition within a reasoning session.
+///
+/// IDs are allocated monotonically by the store and are never reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VolumeId(NonZeroU64);
+
+impl VolumeId {
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    pub(crate) fn from_u64(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(Self)
+    }
+}
+
+/// A conflict-analysis address. Hierarchical path relationships never cross
+/// volume boundaries.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StoreAddress {
+    volume: VolumeId,
+    path: ConflictPath,
+}
+
+impl StoreAddress {
+    fn new(volume: VolumeId, path: ConflictPath) -> Self {
+        Self { volume, path }
+    }
+
+    fn root(volume: VolumeId) -> Self {
+        Self::new(volume, ConflictPath::root())
+    }
+
+    fn is_prefix_of(&self, other: &Self) -> bool {
+        self.volume == other.volume && self.path.is_prefix_of(&other.path)
+    }
+
+    fn overlaps(&self, other: &Self) -> bool {
+        self.volume == other.volume && self.path.overlaps(&other.path)
+    }
+
+    fn prefixes(&self) -> impl Iterator<Item = Self> + '_ {
+        self.path
+            .prefixes()
+            .map(|path| Self::new(self.volume, path))
+    }
+}
+
 impl std::fmt::Debug for ConflictPath {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -68,8 +119,8 @@ pub trait ConflictAnalysisStrategy: Send + Sync {
 /// A cloneable summary of paths observed by one transaction branch.
 pub trait ConflictObservationIndex: Send + Sync {
     fn clone_box(&self) -> Box<dyn ConflictObservationIndex>;
-    fn observe(&mut self, path: &ConflictPath);
-    fn may_conflict(&self, changed: &ConflictPath) -> bool;
+    fn observe(&mut self, address: &StoreAddress);
+    fn may_conflict(&self, changed: &StoreAddress) -> bool;
 }
 
 impl Clone for Box<dyn ConflictObservationIndex> {
@@ -94,7 +145,7 @@ impl ConflictAnalysisStrategy for ExactConflictAnalysis {
 
 #[derive(Clone, Default)]
 struct ExactObservationIndex {
-    paths: BTreeSet<ConflictPath>,
+    addresses: BTreeSet<StoreAddress>,
 }
 
 impl ConflictObservationIndex for ExactObservationIndex {
@@ -102,16 +153,16 @@ impl ConflictObservationIndex for ExactObservationIndex {
         Box::new(self.clone())
     }
 
-    fn observe(&mut self, path: &ConflictPath) {
-        if self.paths.iter().any(|seen| seen.is_prefix_of(path)) {
+    fn observe(&mut self, address: &StoreAddress) {
+        if self.addresses.iter().any(|seen| seen.is_prefix_of(address)) {
             return;
         }
-        self.paths.retain(|seen| !path.is_prefix_of(seen));
-        self.paths.insert(path.clone());
+        self.addresses.retain(|seen| !address.is_prefix_of(seen));
+        self.addresses.insert(address.clone());
     }
 
-    fn may_conflict(&self, changed: &ConflictPath) -> bool {
-        self.paths.iter().any(|read| read.overlaps(changed))
+    fn may_conflict(&self, changed: &StoreAddress) -> bool {
+        self.addresses.iter().any(|read| read.overlaps(changed))
     }
 }
 
@@ -142,8 +193,8 @@ struct FingerprintObservationIndex {
 }
 
 impl FingerprintObservationIndex {
-    fn fingerprint(&self, path: &ConflictPath) -> u64 {
-        self.hash_builder.hash_one(path)
+    fn fingerprint(&self, address: &StoreAddress) -> u64 {
+        self.hash_builder.hash_one(address)
     }
 }
 
@@ -152,14 +203,14 @@ impl ConflictObservationIndex for FingerprintObservationIndex {
         Box::new(self.clone())
     }
 
-    fn observe(&mut self, path: &ConflictPath) {
-        self.complete_reads.insert(self.fingerprint(path));
-        for prefix in path.prefixes() {
+    fn observe(&mut self, address: &StoreAddress) {
+        self.complete_reads.insert(self.fingerprint(address));
+        for prefix in address.prefixes() {
             self.read_prefixes.insert(self.fingerprint(&prefix));
         }
     }
 
-    fn may_conflict(&self, changed: &ConflictPath) -> bool {
+    fn may_conflict(&self, changed: &StoreAddress) -> bool {
         self.read_prefixes.contains(&self.fingerprint(changed))
             || changed
                 .prefixes()
@@ -190,11 +241,11 @@ impl ConflictObservationIndex for CoarseObservationIndex {
         Box::new(self.clone())
     }
 
-    fn observe(&mut self, _path: &ConflictPath) {
+    fn observe(&mut self, _address: &StoreAddress) {
         self.0 = true;
     }
 
-    fn may_conflict(&self, _changed: &ConflictPath) -> bool {
+    fn may_conflict(&self, _changed: &StoreAddress) -> bool {
         self.0
     }
 }
@@ -206,33 +257,40 @@ pub struct StoreSnapshot {
     // match from enabling the cached-view commit path for another store.
     identity: Arc<()>,
     revision: u64,
-    root: PublicValue,
+    heap_volume: VolumeId,
+    roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
 }
 
 impl StoreSnapshot {
     #[doc(hidden)]
     pub fn root(&self) -> &PublicValue {
-        &self.root
+        self.roots
+            .get(&self.heap_volume)
+            .expect("the user heap volume must always exist")
+    }
+
+    pub(crate) fn volume(&self, volume: VolumeId) -> Option<&PublicValue> {
+        self.roots.get(&volume)
     }
 }
 
 #[derive(Clone)]
 enum StoreEdit {
     Set {
-        path: ConflictPath,
+        address: StoreAddress,
         value: PublicValue,
     },
     Rewrite {
-        path: ConflictPath,
+        address: StoreAddress,
         updater: PublicValue,
     },
 }
 
 impl StoreEdit {
-    fn path(&self) -> &ConflictPath {
+    fn address(&self) -> &StoreAddress {
         match self {
-            Self::Set { path, .. } | Self::Rewrite { path, .. } => path,
+            Self::Set { address, .. } | Self::Rewrite { address, .. } => address,
         }
     }
 }
@@ -241,7 +299,7 @@ impl StoreEdit {
 #[derive(Clone)]
 pub struct StoreJournal {
     snapshot: StoreSnapshot,
-    view: PublicValue,
+    views: RedBlackTreeMapSync<VolumeId, PublicValue>,
     observations: Box<dyn ConflictObservationIndex>,
     edits: Vec<StoreEdit>,
 }
@@ -250,10 +308,10 @@ impl StoreJournal {
     #[doc(hidden)]
     pub fn new(snapshot: StoreSnapshot) -> Self {
         let observations = snapshot.strategy.begin();
-        let view = snapshot.root.clone();
+        let views = snapshot.roots.clone();
         Self {
             snapshot,
-            view,
+            views,
             observations,
             edits: Vec::new(),
         }
@@ -263,60 +321,110 @@ impl StoreJournal {
     /// may widen that dependency; an earlier covering set makes it internal.
     /// Earlier observations remain intact.
     pub(crate) fn observe_read(&mut self, path: &[Key]) -> bool {
+        self.observe_volume_read(self.snapshot.heap_volume, path)
+    }
+
+    pub(crate) fn observe_volume_read(&mut self, volume: VolumeId, path: &[Key]) -> bool {
+        let address = StoreAddress::new(volume, ConflictPath::from_keys(path.to_vec()));
+        if self.snapshot.volume(volume).is_none() {
+            self.observations.observe(&address);
+            return true;
+        }
         let mut dependency = ConflictPath::from_keys(path.to_vec());
         for edit in self.edits.iter().rev() {
             match edit {
-                StoreEdit::Set { path, .. } if path.is_prefix_of(&dependency) => return false,
-                StoreEdit::Rewrite { path, .. } if path.overlaps(&dependency) => {
-                    if path.is_prefix_of(&dependency) {
-                        dependency = path.clone();
+                StoreEdit::Set { address, .. }
+                    if address.volume == volume && address.path.is_prefix_of(&dependency) =>
+                {
+                    return false;
+                }
+                StoreEdit::Rewrite { address, .. }
+                    if address.volume == volume && address.path.overlaps(&dependency) =>
+                {
+                    if address.path.is_prefix_of(&dependency) {
+                        dependency = address.path.clone();
                     }
                 }
                 StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } => {}
             }
         }
-        self.observations.observe(&dependency);
+        self.observations
+            .observe(&StoreAddress::new(volume, dependency));
         true
     }
 
     pub(crate) fn view(&self) -> PublicValue {
-        self.view.clone()
+        self.volume_view(self.snapshot.heap_volume)
+            .expect("the user heap volume must always exist")
+    }
+
+    pub(crate) fn volume_view(&self, volume: VolumeId) -> Option<PublicValue> {
+        self.views.get(&volume).cloned()
     }
 
     pub(crate) fn write(&mut self, path: Vec<Key>, value: PublicValue) {
+        self.write_volume(self.snapshot.heap_volume, path, value);
+    }
+
+    pub(crate) fn write_volume(&mut self, volume: VolumeId, path: Vec<Key>, value: PublicValue) {
         let edit = StoreEdit::Set {
-            path: ConflictPath::from_keys(path),
+            address: StoreAddress::new(volume, ConflictPath::from_keys(path)),
             value,
         };
-        self.view = apply_edit(self.view.clone(), &edit);
+        if let Some(view) = self.views.get(&volume).cloned() {
+            self.views.insert_mut(volume, apply_edit(view, &edit));
+        }
         self.edits.push(edit);
     }
 
     pub(crate) fn rewrite(&mut self, path: Vec<Key>, updater: PublicValue) {
+        self.rewrite_volume(self.snapshot.heap_volume, path, updater);
+    }
+
+    pub(crate) fn rewrite_volume(
+        &mut self,
+        volume: VolumeId,
+        path: Vec<Key>,
+        updater: PublicValue,
+    ) {
         let edit = StoreEdit::Rewrite {
-            path: ConflictPath::from_keys(path),
+            address: StoreAddress::new(volume, ConflictPath::from_keys(path)),
             updater,
         };
-        self.view = apply_edit(self.view.clone(), &edit);
+        if let Some(view) = self.views.get(&volume).cloned() {
+            self.views.insert_mut(volume, apply_edit(view, &edit));
+        }
         self.edits.push(edit);
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreCommitResult {
+    Committed,
+    Conflict,
+    MissingVolume(VolumeId),
 }
 
 /// Shared reflection heap state. Hosts place this inside their existing lock
 /// so heap and specialization commits remain atomic.
 pub struct ReflectionStore {
     identity: Arc<()>,
-    root: PublicValue,
+    heap_volume: VolumeId,
+    next_volume: u64,
+    roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     revision: u64,
-    latest_changes: BTreeMap<ConflictPath, u64>,
+    latest_changes: BTreeMap<StoreAddress, u64>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
 }
 
 impl ReflectionStore {
     pub fn new(strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
+        let heap_volume = VolumeId::from_u64(1).expect("one is a nonzero volume ID");
         Self {
             identity: Arc::new(()),
-            root: PublicValue::empty_record(),
+            heap_volume,
+            next_volume: 2,
+            roots: RedBlackTreeMapSync::new_sync().insert(heap_volume, PublicValue::empty_record()),
             revision: 0,
             latest_changes: BTreeMap::new(),
             strategy,
@@ -328,14 +436,22 @@ impl ReflectionStore {
         StoreSnapshot {
             identity: self.identity.clone(),
             revision: self.revision,
-            root: self.root.clone(),
+            heap_volume: self.heap_volume,
+            roots: self.roots.clone(),
             strategy: self.strategy.clone(),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn root(&self) -> &PublicValue {
-        &self.root
+        self.roots
+            .get(&self.heap_volume)
+            .expect("the user heap volume must always exist")
+    }
+
+    #[cfg(test)]
+    fn volume_root(&self, volume: VolumeId) -> Option<&PublicValue> {
+        self.roots.get(&volume)
     }
 
     #[doc(hidden)]
@@ -345,36 +461,69 @@ impl ReflectionStore {
 
     #[doc(hidden)]
     pub fn replace_root(&mut self, root: PublicValue) {
-        self.root = root;
+        self.roots.insert_mut(self.heap_volume, root);
         self.revision = self.revision.wrapping_add(1);
-        self.latest_changes.clear();
         self.latest_changes
-            .insert(ConflictPath::root(), self.revision);
+            .insert(StoreAddress::root(self.heap_volume), self.revision);
+    }
+
+    pub(crate) fn create_volume(&mut self, initial: PublicValue) -> Result<VolumeId, Arc<str>> {
+        let volume = VolumeId::from_u64(self.next_volume)
+            .ok_or_else(|| Arc::from("reflection volume IDs exhausted"))?;
+        self.next_volume = self
+            .next_volume
+            .checked_add(1)
+            .ok_or_else(|| Arc::from("reflection volume IDs exhausted"))?;
+        self.roots.insert_mut(volume, initial);
+        self.revision = self.revision.wrapping_add(1);
+        self.latest_changes
+            .insert(StoreAddress::root(volume), self.revision);
+        Ok(volume)
+    }
+
+    pub(crate) fn revoke_volume(&mut self, volume: VolumeId) -> Option<PublicValue> {
+        if volume == self.heap_volume {
+            return None;
+        }
+        let root = self.roots.get(&volume).cloned()?;
+        self.roots.remove_mut(&volume);
+        self.revision = self.revision.wrapping_add(1);
+        self.latest_changes
+            .insert(StoreAddress::root(volume), self.revision);
+        Some(root)
     }
 
     /// Validates and commits a journal. Exact edit paths and rebase policy
     /// remain independent of the selected read-analysis strategy.
     #[doc(hidden)]
-    pub fn try_commit(&mut self, journal: &StoreJournal) -> bool {
+    pub fn try_commit(&mut self, journal: &StoreJournal) -> StoreCommitResult {
+        if let Some(volume) = journal
+            .edits
+            .iter()
+            .map(|edit| edit.address().volume)
+            .find(|volume| self.roots.get(volume).is_none())
+        {
+            return StoreCommitResult::MissingVolume(volume);
+        }
         if self.conflicts(journal) {
-            return false;
+            return StoreCommitResult::Conflict;
         }
         if journal.edits.is_empty() {
-            return true;
+            return StoreCommitResult::Committed;
         }
 
-        self.root = if Arc::ptr_eq(&self.identity, &journal.snapshot.identity)
+        self.roots = if Arc::ptr_eq(&self.identity, &journal.snapshot.identity)
             && self.revision == journal.snapshot.revision
         {
-            journal.view.clone()
+            journal.views.clone()
         } else {
-            apply_edits(self.root.clone(), &journal.edits)
+            apply_edits(self.roots.clone(), &journal.edits)
         };
         self.revision = self.revision.wrapping_add(1);
         for path in normalized_edit_paths(&journal.edits) {
             self.latest_changes.insert(path, self.revision);
         }
-        true
+        StoreCommitResult::Committed
     }
 
     fn conflicts(&self, journal: &StoreJournal) -> bool {
@@ -384,39 +533,49 @@ impl ReflectionStore {
     }
 }
 
-fn normalized_edit_paths(edits: &[StoreEdit]) -> Vec<ConflictPath> {
-    let mut paths = BTreeSet::new();
+fn normalized_edit_paths(edits: &[StoreEdit]) -> Vec<StoreAddress> {
+    let mut addresses = BTreeSet::new();
     for edit in edits {
-        let edit_path = edit.path();
-        if paths
+        let edit_address = edit.address();
+        if addresses
             .iter()
-            .any(|path: &ConflictPath| path.is_prefix_of(edit_path))
+            .any(|address: &StoreAddress| address.is_prefix_of(edit_address))
         {
             continue;
         }
-        paths.retain(|path| !edit_path.is_prefix_of(path));
-        paths.insert(edit_path.clone());
+        addresses.retain(|address| !edit_address.is_prefix_of(address));
+        addresses.insert(edit_address.clone());
     }
-    paths.into_iter().collect()
+    addresses.into_iter().collect()
 }
 
-fn apply_edits(mut root: PublicValue, edits: &[StoreEdit]) -> PublicValue {
+fn apply_edits(
+    mut roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
+    edits: &[StoreEdit],
+) -> RedBlackTreeMapSync<VolumeId, PublicValue> {
     for edit in edits {
-        root = apply_edit(root, edit);
+        let volume = edit.address().volume;
+        let root = roots
+            .get(&volume)
+            .cloned()
+            .expect("commit validates every edited volume before replay");
+        roots.insert_mut(volume, apply_edit(root, edit));
     }
-    root
+    roots
 }
 
 fn apply_edit(root: PublicValue, edit: &StoreEdit) -> PublicValue {
     match edit {
-        StoreEdit::Set { path, value } => apply_value_at_path(root, path, value.as_core().clone()),
-        StoreEdit::Rewrite { path, updater } => {
-            let prior = lazy_core_value_path(root.as_core().clone(), path.keys());
+        StoreEdit::Set { address, value } => {
+            apply_value_at_path(root, &address.path, value.as_core().clone())
+        }
+        StoreEdit::Rewrite { address, updater } => {
+            let prior = lazy_core_value_path(root.as_core().clone(), address.path.keys());
             let updated = Value::Lazy(LazyValue::from_application(
                 updater.as_core().clone(),
                 Arc::from([prior]),
             ));
-            apply_value_at_path(root, path, updated)
+            apply_value_at_path(root, &address.path, updated)
         }
     }
 }
@@ -480,6 +639,10 @@ mod tests {
         parts.iter().map(Key::atom_from_text).collect()
     }
 
+    fn address(volume: VolumeId, parts: &[&str]) -> StoreAddress {
+        StoreAddress::new(volume, ConflictPath::from_keys(path(parts)))
+    }
+
     fn store() -> ReflectionStore {
         ReflectionStore::new(Arc::new(ExactConflictAnalysis))
     }
@@ -502,19 +665,43 @@ mod tests {
     fn exact_strategy_detects_both_overlap_directions() {
         let strategy = ExactConflictAnalysis;
         let mut observations = strategy.begin();
-        observations.observe(&ConflictPath::from_keys(path(&["a", "b"])));
-        assert!(observations.may_conflict(&ConflictPath::from_keys(path(&["a"]))));
-        assert!(observations.may_conflict(&ConflictPath::from_keys(path(&["a", "b", "c"]))));
-        assert!(!observations.may_conflict(&ConflictPath::from_keys(path(&["z"]))));
+        let volume = VolumeId::from_u64(1).unwrap();
+        observations.observe(&address(volume, &["a", "b"]));
+        assert!(observations.may_conflict(&address(volume, &["a"])));
+        assert!(observations.may_conflict(&address(volume, &["a", "b", "c"])));
+        assert!(!observations.may_conflict(&address(volume, &["z"])));
     }
 
     #[test]
     fn fingerprint_strategy_is_conservative_for_path_overlap() {
         let strategy = FingerprintConflictAnalysis;
         let mut observations = strategy.begin();
-        observations.observe(&ConflictPath::from_keys(path(&["a", "b"])));
-        assert!(observations.may_conflict(&ConflictPath::from_keys(path(&["a"]))));
-        assert!(observations.may_conflict(&ConflictPath::from_keys(path(&["a", "b", "c"]))));
+        let volume = VolumeId::from_u64(1).unwrap();
+        observations.observe(&address(volume, &["a", "b"]));
+        assert!(observations.may_conflict(&address(volume, &["a"])));
+        assert!(observations.may_conflict(&address(volume, &["a", "b", "c"])));
+    }
+
+    #[test]
+    fn exact_strategy_treats_distinct_volumes_as_disjoint() {
+        let strategy = ExactConflictAnalysis;
+        let mut observations = strategy.begin();
+        let first = VolumeId::from_u64(1).unwrap();
+        let second = VolumeId::from_u64(2).unwrap();
+        observations.observe(&address(first, &["same"]));
+
+        assert!(!observations.may_conflict(&address(second, &["same"])));
+    }
+
+    #[test]
+    fn fingerprint_strategy_treats_distinct_volumes_as_disjoint() {
+        let strategy = FingerprintConflictAnalysis;
+        let mut observations = strategy.begin();
+        let first = VolumeId::from_u64(1).unwrap();
+        let second = VolumeId::from_u64(2).unwrap();
+        observations.observe(&address(first, &["same"]));
+
+        assert!(!observations.may_conflict(&address(second, &["same"])));
     }
 
     #[test]
@@ -525,7 +712,7 @@ mod tests {
 
         let cached_view = journal.view();
         assert_eq!(journal.view(), cached_view);
-        assert!(store.try_commit(&journal));
+        assert_eq!(store.try_commit(&journal), StoreCommitResult::Committed);
         assert_eq!(store.root(), &cached_view);
     }
 
@@ -539,9 +726,85 @@ mod tests {
         second.write(path(&["second"]), PublicValue::integer(2));
         let stale_cached_view = second.view();
 
-        assert!(store.try_commit(&first));
-        assert!(store.try_commit(&second));
+        assert_eq!(store.try_commit(&first), StoreCommitResult::Committed);
+        assert_eq!(store.try_commit(&second), StoreCommitResult::Committed);
         assert_ne!(store.root(), &stale_cached_view);
+    }
+
+    #[test]
+    fn one_journal_updates_multiple_volumes_atomically() {
+        let mut store = store();
+        let first = store.create_volume(PublicValue::empty_record()).unwrap();
+        let second = store.create_volume(PublicValue::empty_record()).unwrap();
+        let mut journal = StoreJournal::new(store.snapshot());
+        journal.write_volume(first, path(&["value"]), PublicValue::integer(1));
+        journal.write_volume(second, path(&["value"]), PublicValue::integer(2));
+
+        assert_eq!(store.try_commit(&journal), StoreCommitResult::Committed);
+        assert_eq!(
+            store.volume_root(first),
+            journal.volume_view(first).as_ref()
+        );
+        assert_eq!(
+            store.volume_root(second),
+            journal.volume_view(second).as_ref()
+        );
+    }
+
+    #[test]
+    fn revoked_volume_rejects_staged_blind_edits_without_partial_commit() {
+        let mut store = store();
+        let revoked = store.create_volume(PublicValue::empty_record()).unwrap();
+        let surviving = store.create_volume(PublicValue::empty_record()).unwrap();
+        let original_surviving = store.volume_root(surviving).cloned().unwrap();
+        let mut journal = StoreJournal::new(store.snapshot());
+        journal.write_volume(revoked, Vec::new(), PublicValue::integer(1));
+        journal.write_volume(surviving, Vec::new(), PublicValue::integer(2));
+        assert!(store.revoke_volume(revoked).is_some());
+
+        assert_eq!(
+            store.try_commit(&journal),
+            StoreCommitResult::MissingVolume(revoked)
+        );
+        assert_eq!(store.volume_root(surviving), Some(&original_surviving));
+        assert!(store.volume_root(revoked).is_none());
+    }
+
+    #[test]
+    fn revoked_volume_conflicts_with_an_earlier_read() {
+        let mut store = store();
+        let volume = store.create_volume(PublicValue::empty_record()).unwrap();
+        let mut journal = StoreJournal::new(store.snapshot());
+        assert!(journal.observe_volume_read(volume, &[]));
+        assert!(store.revoke_volume(volume).is_some());
+
+        assert_eq!(store.try_commit(&journal), StoreCommitResult::Conflict);
+    }
+
+    #[test]
+    fn writes_never_materialize_a_missing_volume() {
+        let mut store = store();
+        let volume = store.create_volume(PublicValue::empty_record()).unwrap();
+        assert!(store.revoke_volume(volume).is_some());
+        let mut journal = StoreJournal::new(store.snapshot());
+        journal.write_volume(volume, Vec::new(), PublicValue::integer(1));
+
+        assert!(journal.volume_view(volume).is_none());
+        assert_eq!(
+            store.try_commit(&journal),
+            StoreCommitResult::MissingVolume(volume)
+        );
+        assert!(store.volume_root(volume).is_none());
+    }
+
+    #[test]
+    fn revoked_volume_ids_are_not_reused() {
+        let mut store = store();
+        let first = store.create_volume(PublicValue::empty_record()).unwrap();
+        assert!(store.revoke_volume(first).is_some());
+        let second = store.create_volume(PublicValue::empty_record()).unwrap();
+
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -555,8 +818,8 @@ mod tests {
 
         let mut concurrent = StoreJournal::new(snapshot);
         concurrent.write(path(&["x", "other"]), PublicValue::integer(1));
-        assert!(store.try_commit(&concurrent));
-        assert!(store.try_commit(&local));
+        assert_eq!(store.try_commit(&concurrent), StoreCommitResult::Committed);
+        assert_eq!(store.try_commit(&local), StoreCommitResult::Committed);
     }
 
     #[test]
@@ -569,8 +832,8 @@ mod tests {
 
         let mut concurrent = StoreJournal::new(snapshot);
         concurrent.write(path(&["x", "y", "sibling"]), PublicValue::integer(1));
-        assert!(store.try_commit(&concurrent));
-        assert!(!store.try_commit(&local));
+        assert_eq!(store.try_commit(&concurrent), StoreCommitResult::Committed);
+        assert_eq!(store.try_commit(&local), StoreCommitResult::Conflict);
     }
 
     #[test]
@@ -599,8 +862,8 @@ mod tests {
             first_edit.rewrite(Vec::new(), first);
             let mut second_edit = StoreJournal::new(snapshot);
             second_edit.rewrite(Vec::new(), second);
-            assert!(store.try_commit(&first_edit));
-            assert!(store.try_commit(&second_edit));
+            assert_eq!(store.try_commit(&first_edit), StoreCommitResult::Committed);
+            assert_eq!(store.try_commit(&second_edit), StoreCommitResult::Committed);
             assembler.evaluate(store.root()).unwrap()
         };
 
@@ -635,9 +898,9 @@ mod tests {
         let mut later_left = StoreJournal::new(snapshot);
         later_left.write(path(&["left"]), PublicValue::integer(3));
 
-        assert!(store.try_commit(&left));
-        assert!(store.try_commit(&right));
-        assert!(store.try_commit(&later_left));
+        assert_eq!(store.try_commit(&left), StoreCommitResult::Committed);
+        assert_eq!(store.try_commit(&right), StoreCommitResult::Committed);
+        assert_eq!(store.try_commit(&later_left), StoreCommitResult::Committed);
     }
 
     #[test]
@@ -645,7 +908,10 @@ mod tests {
         let mut store = store();
         let mut establish_parent = StoreJournal::new(store.snapshot());
         establish_parent.write(path(&["tree"]), PublicValue::empty_record());
-        assert!(store.try_commit(&establish_parent));
+        assert_eq!(
+            store.try_commit(&establish_parent),
+            StoreCommitResult::Committed
+        );
 
         let snapshot = store.snapshot();
         let mut left = StoreJournal::new(snapshot.clone());
@@ -653,8 +919,8 @@ mod tests {
         let mut right = StoreJournal::new(snapshot);
         right.write(path(&["tree", "right"]), PublicValue::integer(2));
 
-        assert!(store.try_commit(&left));
-        assert!(store.try_commit(&right));
+        assert_eq!(store.try_commit(&left), StoreCommitResult::Committed);
+        assert_eq!(store.try_commit(&right), StoreCommitResult::Committed);
     }
 
     #[test]
@@ -666,8 +932,8 @@ mod tests {
         let mut writer = StoreJournal::new(snapshot);
         writer.write(path(&["anywhere"]), PublicValue::integer(1));
 
-        assert!(store.try_commit(&writer));
-        assert!(!store.try_commit(&reader));
+        assert_eq!(store.try_commit(&writer), StoreCommitResult::Committed);
+        assert_eq!(store.try_commit(&reader), StoreCommitResult::Conflict);
     }
 
     #[test]
@@ -683,10 +949,19 @@ mod tests {
         let mut missing_writer = StoreJournal::new(snapshot);
         missing_writer.write(path(&["missing"]), PublicValue::empty_record());
 
-        assert!(store.try_commit(&nested_writer));
-        assert!(store.try_commit(&parent_writer));
-        assert!(store.try_commit(&missing_writer));
-        assert!(!store.try_commit(&reader));
+        assert_eq!(
+            store.try_commit(&nested_writer),
+            StoreCommitResult::Committed
+        );
+        assert_eq!(
+            store.try_commit(&parent_writer),
+            StoreCommitResult::Committed
+        );
+        assert_eq!(
+            store.try_commit(&missing_writer),
+            StoreCommitResult::Committed
+        );
+        assert_eq!(store.try_commit(&reader), StoreCommitResult::Conflict);
     }
 
     #[test]
@@ -698,8 +973,8 @@ mod tests {
         let mut parent = StoreJournal::new(snapshot);
         parent.write(path(&["tree"]), PublicValue::integer(2));
 
-        assert!(store.try_commit(&child));
-        assert!(store.try_commit(&parent));
+        assert_eq!(store.try_commit(&child), StoreCommitResult::Committed);
+        assert_eq!(store.try_commit(&parent), StoreCommitResult::Committed);
     }
 
     #[test]
@@ -712,8 +987,8 @@ mod tests {
 
         let mut concurrent = StoreJournal::new(snapshot);
         concurrent.write(path(&["value"]), PublicValue::integer(2));
-        assert!(store.try_commit(&concurrent));
-        assert!(store.try_commit(&local));
+        assert_eq!(store.try_commit(&concurrent), StoreCommitResult::Committed);
+        assert_eq!(store.try_commit(&local), StoreCommitResult::Committed);
     }
 
     #[test]
@@ -726,16 +1001,17 @@ mod tests {
 
         let mut concurrent = StoreJournal::new(snapshot);
         concurrent.write(path(&["value"]), PublicValue::integer(2));
-        assert!(store.try_commit(&concurrent));
-        assert!(!store.try_commit(&local));
+        assert_eq!(store.try_commit(&concurrent), StoreCommitResult::Committed);
+        assert_eq!(store.try_commit(&local), StoreCommitResult::Conflict);
     }
 
     #[test]
     fn coarse_strategy_conflicts_after_any_observation() {
         let strategy = CoarseConflictAnalysis;
         let mut observations = strategy.begin();
-        assert!(!observations.may_conflict(&ConflictPath::root()));
-        observations.observe(&ConflictPath::from_keys(path(&["a"])));
-        assert!(observations.may_conflict(&ConflictPath::from_keys(path(&["z"]))));
+        let volume = VolumeId::from_u64(1).unwrap();
+        assert!(!observations.may_conflict(&address(volume, &[])));
+        observations.observe(&address(volume, &["a"]));
+        assert!(observations.may_conflict(&address(volume, &["z"])));
     }
 }

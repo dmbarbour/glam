@@ -45,6 +45,20 @@ and control flow.
   widened dependency local. Earlier observations remain. The conflict-analysis
   strategy may only conservatively summarize reads and must never redefine
   edit semantics.
+- The heap is an ordinary store volume whose ID and owner are retained by the
+  reasoning host. Protected client volumes use the same journal and atomic
+  commit, but `.heap.*` can never address them. Exact and fingerprint conflict
+  analysis includes `VolumeId`; the coarse strategy may conflict across
+  volumes.
+- A protected capability request carries `ReasoningSessionId`, `VolumeId`, and
+  operation. Child tasks on the same host may use it; a foreign reasoning
+  session rejects it before journaling. Volume IDs are session-local and never
+  reused.
+- Only explicit creation installs a volume. A missing-volume read returns a
+  latent error value. Blind writes and rewrites remain blind but commit with a
+  terminal missing-volume error rather than recreating storage. Explicit
+  whole-volume revocation is serialized with commit and returns the final
+  unforced root; dropping its Rust owner has no effect.
 - Heap effects impose no dictionary schema. Root replacement accepts any
   value, and nested updates or accesses return ordinary lazy errors when their
   eventual structure is invalid. `.eval` is the explicit way to observe such

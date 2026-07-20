@@ -19,8 +19,8 @@ pub use api::{
     Assembler, BuiltModule, Diagnostic, DiagnosticBus, DiagnosticCounts, DiagnosticEvent,
     DiagnosticSubscriber, DiagnosticSubscription, Error, EvaluationRuntime, Host, HostError,
     ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort, ReasoningFailure,
-    ReasoningReport, ReasoningStatus, ReasoningTask, ReasoningTaskState, SystemHost, Value,
-    ValueKind,
+    ReasoningReport, ReasoningStatus, ReasoningTask, ReasoningTaskState, ReasoningVolume,
+    SystemHost, Value, ValueKind,
 };
 pub use core::Builtin;
 pub use diagnostic::Severity;
