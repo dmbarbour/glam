@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use crate::core::Builtin;
 use crate::core::{Atom, Dict, Key, LazyValue, Value, keys};
 use crate::diagnostic::{CompilationTrace, Severity};
-use crate::number::Number;
 use crate::source::{RelativeSourcePath, SourceArtifact};
 
 pub(crate) type ModuleLoader = Arc<dyn Fn(ModuleLoadArgs) -> Result<Value, String> + Send + Sync>;
@@ -38,14 +36,14 @@ pub(crate) struct ModuleLoadArgs {
 }
 
 #[derive(Clone)]
-pub struct CompileContext {
-    // The bootstrap still exposes core Values, but never a semantic expression
-    // language. Front ends own their IR and lower it before returning Values.
+pub(crate) struct CompileContext {
+    // Invocation-scoped inputs and capabilities for a front end. Ordinary
+    // values belong to the front end and are not constructed through here.
     importer_source: Option<Arc<SourceArtifact>>,
     compilation_trace: Option<Arc<CompilationTrace>>,
     module_path: Arc<[String]>,
-    prior_defs: Value, // prior dictionary, can be observed at compile-time
-    final_defs: Value, // future dictionary, cannot observe at compile-time
+    prior_defs: Value, // definitions visible before compiling this source
+    final_defs: Value, // promised final definitions for recursive access
     local_module_loader: Option<ModuleLoader>,
     local_binary_loader: Option<BinaryFileLoader>,
     diagnostic_emitter: Option<CompileDiagnosticEmitter>,
@@ -100,12 +98,12 @@ impl CompileContext {
         self
     }
 
-    pub fn with_prior_defs(mut self, prior: Value) -> Self {
+    pub(crate) fn with_prior_defs(mut self, prior: Value) -> Self {
         self.prior_defs = prior;
         self
     }
 
-    pub fn with_final_defs(mut self, final_defs: Value) -> Self {
+    pub(crate) fn with_final_defs(mut self, final_defs: Value) -> Self {
         self.final_defs = final_defs;
         self
     }
@@ -125,21 +123,21 @@ impl CompileContext {
         self
     }
 
-    pub fn prior_defs(&self) -> &Value {
+    pub(crate) fn prior_defs(&self) -> &Value {
         &self.prior_defs
     }
 
-    pub fn final_defs(&self) -> &Value {
+    pub(crate) fn final_defs(&self) -> &Value {
         &self.final_defs
     }
 
     /// Returns the abstract global-path value for a path relative to the
     /// current module without revealing its absolute namespace.
-    pub fn abstract_global_path(&self, target: &str) -> Value {
+    pub(crate) fn abstract_global_path(&self, target: &str) -> Value {
         // TODO: support expression-indexed paths, e.g. foo.bar.[42].baz
         let mut parts = self.module_path.iter().cloned().collect::<Vec<_>>();
         parts.extend(target.split('.').map(ToOwned::to_owned));
-        self.value_atom(Atom::from_key(&Key::AbstractGlobalPath(Arc::from(
+        Value::Atom(Atom::from_key(&Key::AbstractGlobalPath(Arc::from(
             parts.into_boxed_slice(),
         ))))
     }
@@ -150,40 +148,13 @@ impl CompileContext {
         }
     }
 
-    // TODO: eliminate direct use of Builtin in this API. The front-end
-    // knows about builtins, but will access them as atoms, not as the Builtin enum.
-
-    pub fn value_number(&self, number: Number) -> Value {
-        Value::Number(number)
-    }
-
-    pub fn value_binary(&self, text: &str) -> Value {
-        Value::binary_from_text(text)
-    }
-
-    pub fn value_atom(&self, atom: Atom) -> Value {
-        Value::Atom(atom)
-    }
-
-    pub fn value_dict(&self, dict: Dict) -> Value {
-        Value::Dict(dict)
-    }
-
-    pub fn value_builtin(&self, builtin: Builtin) -> Value {
-        Value::Builtin(builtin)
-    }
-
-    pub fn empty_dict_value(&self) -> Value {
-        self.value_dict(Dict::new_sync())
-    }
-
-    pub fn unit_value(&self) -> Value {
+    pub(crate) fn unit_value(&self) -> Value {
         (*keys::UNIT_VALUE).clone()
     }
 
     /// Requests a module import in the current or a relative child namespace.
     /// Source resolution and absolute namespace qualification remain hidden.
-    pub fn import_module(
+    pub(crate) fn import_module(
         &self,
         request: &str,
         relative_namespace: Option<&str>,
@@ -218,7 +189,7 @@ impl CompileContext {
         })
     }
 
-    pub fn import_binary(&self, request: &str) -> Value {
+    pub(crate) fn import_binary(&self, request: &str) -> Value {
         let request = match RelativeSourcePath::new(request) {
             Ok(request) => request,
             Err(error) => return Value::error(error.to_string()),
@@ -420,7 +391,7 @@ mod tests {
 
         assert_eq!(
             unit,
-            context.value_atom(Atom::from_key(&Key::abstract_global_path([
+            Value::Atom(Atom::from_key(&Key::abstract_global_path([
                 "builtin", "unit"
             ])))
         );

@@ -8,7 +8,10 @@ pub(in crate::g_syntax) use definitions::*;
 pub(in crate::g_syntax) use imports::*;
 pub(in crate::g_syntax) use objects::*;
 
-pub fn lower_to_core_with_context(parsed: ParsedSource, context: &CompileContext) -> LoweredSource {
+pub(in crate::g_syntax) fn lower_parsed_source(
+    parsed: ParsedSource,
+    context: &CompileContext,
+) -> LoweredSource {
     // note: we'll extend 'prior' within the 'body' of an implicit lambda
     let mut definitions = context.prior_defs().clone();
     let module_reflection = ReflectionBoundary {

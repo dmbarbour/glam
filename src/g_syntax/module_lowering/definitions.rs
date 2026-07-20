@@ -100,10 +100,9 @@ impl<'a> DefinitionTargetContext<'a> {
             apply_builtin_resolved(
                 Builtin::DictSingleton,
                 [
-                    ResolvedExpr::Embedded(self.compiler.value_atom(atom_from_str(key))),
+                    ResolvedExpr::Embedded(Value::Atom(atom_from_str(key))),
                     value,
                 ],
-                self.compiler,
             )
         };
         let payload = apply_builtin_resolved(
@@ -111,7 +110,7 @@ impl<'a> DefinitionTargetContext<'a> {
             [
                 singleton(
                     "name",
-                    ResolvedExpr::Embedded(self.compiler.value_binary(target)),
+                    ResolvedExpr::Embedded(Value::binary_from_text(target)),
                 ),
                 singleton(
                     "value",
@@ -125,14 +124,9 @@ impl<'a> DefinitionTargetContext<'a> {
                     )?,
                 ),
             ],
-            self.compiler,
         );
         let annotation = singleton(tag, payload);
-        Ok(apply_builtin_resolved(
-            Builtin::Anno,
-            [annotation, value],
-            self.compiler,
-        ))
+        Ok(apply_builtin_resolved(Builtin::Anno, [annotation, value]))
     }
 }
 
@@ -238,12 +232,10 @@ pub(in crate::g_syntax) fn update_module_resolved(
     definitions: ResolvedExpr<Value>,
     target: &str,
     value: ResolvedExpr<Value>,
-    context: &CompileContext,
 ) -> ResolvedExpr<Value> {
     apply_builtin_resolved(
         Builtin::DictUpdate,
-        [static_path_resolved(target, context), value, definitions],
-        context,
+        [static_path_resolved(target), value, definitions],
     )
 }
 
@@ -263,7 +255,6 @@ pub(in crate::g_syntax) fn update_definition_target_resolved(
             value,
             definitions.expr(),
         ],
-        context,
     ))
 }
 
@@ -316,22 +307,16 @@ pub(in crate::g_syntax) fn syntax_path_resolved(
             SyntaxKeyExpr::PathIndex(expr) => {
                 let prefix = ResolvedExpr::List(std::mem::take(&mut pending));
                 let combined = match result {
-                    Some(result) => {
-                        apply_builtin_resolved(Builtin::Append, [result, prefix], context)
-                    }
+                    Some(result) => apply_builtin_resolved(Builtin::Append, [result, prefix]),
                     None => prefix,
                 };
                 let splice =
                     syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?;
-                result = Some(apply_builtin_resolved(
-                    Builtin::Append,
-                    [combined, splice],
-                    context,
-                ));
+                result = Some(apply_builtin_resolved(Builtin::Append, [combined, splice]));
             }
-            SyntaxKeyExpr::Atom(name) => pending.push(ResolvedExpr::Embedded(
-                context.value_atom(atom_from_str(name)),
-            )),
+            SyntaxKeyExpr::Atom(name) => {
+                pending.push(ResolvedExpr::Embedded(Value::Atom(atom_from_str(name))))
+            }
             SyntaxKeyExpr::Index(expr) => pending.push(syntax_expr_to_resolved_in_semantic_scope(
                 expr, line, context, scope, locals,
             )?),
@@ -340,34 +325,30 @@ pub(in crate::g_syntax) fn syntax_path_resolved(
 
     let tail = ResolvedExpr::List(pending);
     Ok(match result {
-        Some(result) => apply_builtin_resolved(Builtin::Append, [result, tail], context),
+        Some(result) => apply_builtin_resolved(Builtin::Append, [result, tail]),
         None => tail,
     })
 }
 
-pub(in crate::g_syntax) fn static_path_resolved(
-    target: &str,
-    context: &CompileContext,
-) -> ResolvedExpr<Value> {
+pub(in crate::g_syntax) fn static_path_resolved(target: &str) -> ResolvedExpr<Value> {
     ResolvedExpr::List(
         target
             .split('.')
-            .map(|part| ResolvedExpr::Embedded(context.value_atom(atom_from_str(part))))
+            .map(|part| ResolvedExpr::Embedded(Value::Atom(atom_from_str(part))))
             .collect::<Vec<_>>(),
     )
 }
 
 pub(in crate::g_syntax) fn path_resolved_in_scope(
     target: &str,
-    context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &ResolverContext,
 ) -> ResolvedExpr<Value> {
     let mut parts = target.split('.');
     let Some(first) = parts.next() else {
-        return ResolvedExpr::Embedded(context.empty_dict_value());
+        return ResolvedExpr::Embedded(Value::Dict(Dict::new_sync()));
     };
-    let value = lower_name_expr_resolved(first, context, scope, locals);
+    let value = lower_name_expr_resolved(first, scope, locals);
     let path = parts
         .map(|part| ResolvedPathPart::Key(name_as_key(part)))
         .collect::<Vec<_>>();
@@ -398,28 +379,22 @@ pub(in crate::g_syntax) fn update_module_value(
     definitions: Value,
     target: &str,
     value: Value,
-    context: &CompileContext,
 ) -> Value {
     // Module definitions are ordered updates over the incoming namespace.
     // Ordinary dictionary literals still lower through DictUnion.
     lower_resolved_expr(apply_builtin_resolved(
         Builtin::DictUpdate,
         [
-            ResolvedExpr::Embedded(path_value(target, context)),
+            ResolvedExpr::Embedded(path_value(target)),
             ResolvedExpr::Provided(value),
             ResolvedExpr::Provided(definitions),
         ],
-        context,
     ))
 }
 
-pub(in crate::g_syntax) fn update_module_dict_value(
-    definitions: Value,
-    item: Value,
-    context: &CompileContext,
-) -> Value {
+pub(in crate::g_syntax) fn update_module_dict_value(definitions: Value, item: Value) -> Value {
     match item {
-        Value::Dict(dict) => update_module_dict_entries(definitions, Vec::new(), &dict, context),
+        Value::Dict(dict) => update_module_dict_entries(definitions, Vec::new(), &dict),
         _ => definitions,
     }
 }
@@ -428,14 +403,13 @@ pub(in crate::g_syntax) fn update_module_dict_entries(
     definitions: Value,
     prefix: Vec<Value>,
     dict: &Dict,
-    context: &CompileContext,
 ) -> Value {
     dict.iter().fold(definitions, |definitions, (key, value)| {
         let mut path = prefix.clone();
-        path.push(key_to_value(key, context));
+        path.push(key_to_value(key));
         match value {
             Value::Dict(nested) if !nested.is_empty() => {
-                update_module_dict_entries(definitions, path, nested, context)
+                update_module_dict_entries(definitions, path, nested)
             }
             _ => lower_resolved_expr(apply_builtin_resolved(
                 Builtin::DictUpdate,
@@ -444,38 +418,34 @@ pub(in crate::g_syntax) fn update_module_dict_entries(
                     ResolvedExpr::Provided(value.clone()),
                     ResolvedExpr::Provided(definitions),
                 ],
-                context,
             )),
         }
     })
 }
 
-pub(in crate::g_syntax) fn path_value(target: &str, context: &CompileContext) -> Value {
+pub(in crate::g_syntax) fn path_value(target: &str) -> Value {
     Value::List(crate::core::List::from_values(
         target
             .split('.')
-            .map(|part| context.value_atom(atom_from_str(part)))
+            .map(|part| Value::Atom(atom_from_str(part)))
             .collect(),
     ))
 }
 
-pub(in crate::g_syntax) fn key_to_value(key: &Key, context: &CompileContext) -> Value {
+pub(in crate::g_syntax) fn key_to_value(key: &Key) -> Value {
     match key {
-        Key::Atom(atom) => context.value_atom(*atom),
-        Key::Number(number) => context.value_number(number.clone()),
+        Key::Atom(atom) => Value::Atom(*atom),
+        Key::Number(number) => Value::Number(number.clone()),
         Key::Binary(bytes) => Value::Binary(bytes.clone()),
         Key::AbstractGlobalPath(parts) => {
-            context.value_atom(Atom::from_key(&Key::AbstractGlobalPath(parts.clone())))
+            Value::Atom(Atom::from_key(&Key::AbstractGlobalPath(parts.clone())))
         }
         Key::List(items) => Value::List(crate::core::List::from_values(
-            items
-                .iter()
-                .map(|item| key_to_value(item, context))
-                .collect(),
+            items.iter().map(key_to_value).collect(),
         )),
         Key::Dict(entries) => {
-            context.value_dict(entries.iter().fold(Dict::new_sync(), |dict, (key, value)| {
-                dict.insert(key.clone(), key_to_value(value, context))
+            Value::Dict(entries.iter().fold(Dict::new_sync(), |dict, (key, value)| {
+                dict.insert(key.clone(), key_to_value(value))
             }))
         }
     }

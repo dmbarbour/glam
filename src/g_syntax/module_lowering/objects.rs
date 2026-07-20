@@ -32,7 +32,6 @@ pub(in crate::g_syntax) fn lower_object(
         definitions_root.expr(),
         &object.target,
         object_value,
-        context,
     ));
     Ok(())
 }
@@ -41,45 +40,31 @@ pub(in crate::g_syntax) fn object_instance_from_parts_value(
     name: Value,
     deps: Value,
     defs: Value,
-    context: &CompileContext,
 ) -> Value {
     lower_resolved_expr(object_instance_from_parts_resolved(
         ResolvedExpr::Provided(name),
         ResolvedExpr::Provided(deps),
         ResolvedExpr::Provided(defs),
-        context,
     ))
 }
 
 pub(in crate::g_syntax) fn apply_builtin_resolved(
     builtin: Builtin,
     arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
-    context: &CompileContext,
 ) -> ResolvedExpr<Value> {
-    ResolvedExpr::apply(
-        ResolvedExpr::Embedded(context.value_builtin(builtin)),
-        arguments,
-    )
+    ResolvedExpr::apply(ResolvedExpr::Embedded(Value::Builtin(builtin)), arguments)
 }
 
-pub(in crate::g_syntax) fn object_spec_resolved(
-    value: ResolvedExpr<Value>,
-    context: &CompileContext,
-) -> ResolvedExpr<Value> {
-    apply_builtin_resolved(Builtin::ObjectSpec, [value], context)
+pub(in crate::g_syntax) fn object_spec_resolved(value: ResolvedExpr<Value>) -> ResolvedExpr<Value> {
+    apply_builtin_resolved(Builtin::ObjectSpec, [value])
 }
 
 pub(in crate::g_syntax) fn object_instance_from_parts_resolved(
     name: ResolvedExpr<Value>,
     deps: ResolvedExpr<Value>,
     defs: ResolvedExpr<Value>,
-    context: &CompileContext,
 ) -> ResolvedExpr<Value> {
-    apply_builtin_resolved(
-        Builtin::ObjectInstanceFromParts,
-        [name, deps, defs],
-        context,
-    )
+    apply_builtin_resolved(Builtin::ObjectInstanceFromParts, [name, deps, defs])
 }
 
 pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
@@ -103,18 +88,12 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
     let deps = object
         .deps
         .iter()
-        .map(|dep| {
-            object_spec_resolved(
-                path_resolved_in_scope(dep, context, &parent_scope, locals),
-                context,
-            )
-        })
+        .map(|dep| object_spec_resolved(path_resolved_in_scope(dep, &parent_scope, locals)))
         .collect::<Vec<_>>();
     Ok(object_instance_from_parts_resolved(
         name,
         ResolvedExpr::List(deps),
         defs,
-        context,
     ))
 }
 
@@ -136,7 +115,7 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
         bindings.bind(
             locals,
             "<object-reflection-guard>",
-            object_reflection_guard_resolved(object_final_defs.expr(), context),
+            object_reflection_guard_resolved(object_final_defs.expr()),
         )
     });
     let reflection_annotator = reflection_guard.map(|guard| {
@@ -149,7 +128,7 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
     let mut definitions = bindings.bind(
         locals,
         "<object-visible-defs>",
-        remove_object_spec_resolved(ResolvedExpr::Local(prior_self), context),
+        remove_object_spec_resolved(ResolvedExpr::Local(prior_self)),
     );
 
     for body_definition in body {
@@ -170,7 +149,7 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
         definitions = bindings.bind(
             locals,
             "<object-visible-defs>",
-            remove_object_spec_resolved(updated, context),
+            remove_object_spec_resolved(updated),
         );
     }
 
@@ -210,7 +189,7 @@ pub(in crate::g_syntax) fn lower_nested_object_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let name = hierarchical_object_name_resolved(&object.target, line, context, scope)?;
+    let name = hierarchical_object_name_resolved(&object.target, line, scope)?;
     let object_value = object_decl_resolved_in_scope(
         object,
         line,
@@ -231,14 +210,12 @@ pub(in crate::g_syntax) fn lower_nested_object_resolved(
         definitions.expr(),
         &object.target,
         object_value,
-        context,
     ))
 }
 
 pub(in crate::g_syntax) fn hierarchical_object_name_resolved(
     target: &str,
     line: usize,
-    context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let Some(host) = &scope.object_final_defs else {
@@ -250,37 +227,31 @@ pub(in crate::g_syntax) fn hierarchical_object_name_resolved(
     let parts = ResolvedExpr::List(
         target
             .split('.')
-            .map(|part| ResolvedExpr::Embedded(context.value_atom(atom_from_str(part))))
+            .map(|part| ResolvedExpr::Embedded(Value::Atom(atom_from_str(part))))
             .collect::<Vec<_>>(),
     );
     Ok(apply_builtin_resolved(
         Builtin::ObjectLocalName,
         [host.expr(), parts],
-        context,
     ))
 }
 
 pub(in crate::g_syntax) fn remove_object_spec_resolved(
     value: ResolvedExpr<Value>,
-    context: &CompileContext,
 ) -> ResolvedExpr<Value> {
     apply_builtin_resolved(
         Builtin::DictUpdate,
         [
-            static_path_resolved("spec", context),
-            ResolvedExpr::Embedded(context.empty_dict_value()),
+            static_path_resolved("spec"),
+            ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
             value,
         ],
-        context,
     )
 }
 
-fn object_reflection_guard_resolved(
-    object_final_defs: ResolvedExpr<Value>,
-    context: &CompileContext,
-) -> ResolvedExpr<Value> {
+fn object_reflection_guard_resolved(object_final_defs: ResolvedExpr<Value>) -> ResolvedExpr<Value> {
     let object_name = ResolvedExpr::Access {
-        base: Box::new(object_spec_resolved(object_final_defs, context)),
+        base: Box::new(object_spec_resolved(object_final_defs)),
         path: vec![ResolvedPathPart::Key(name_as_key("name"))],
     };
     ResolvedExpr::List(vec![
@@ -342,7 +313,7 @@ pub(in crate::g_syntax) fn lower_extend(
         declared_target_has_reflection(&extend.target),
     )?;
     let prior_object = path_resolved_in_definitions(&extend.target, definitions_root.expr());
-    let prior_spec = object_spec_resolved(prior_object, context);
+    let prior_spec = object_spec_resolved(prior_object);
     let mut bindings = ResolvedBindings::default();
     let prior_spec = bindings.bind(&mut locals, "<extended-object-spec>", prior_spec);
     let spec_member = |name| ResolvedExpr::Access {
@@ -367,7 +338,6 @@ pub(in crate::g_syntax) fn lower_extend(
         spec_member("name"),
         spec_member("deps"),
         composed_defs,
-        context,
     ));
     let target_context = DefinitionTargetContext::new(&definitions_root, line, context, &scope);
     let object_value = target_context.annotate(
@@ -380,7 +350,6 @@ pub(in crate::g_syntax) fn lower_extend(
         definitions_root.expr(),
         &extend.target,
         object_value,
-        context,
     ));
     Ok(())
 }
@@ -388,13 +357,12 @@ pub(in crate::g_syntax) fn lower_extend(
 pub(in crate::g_syntax) fn extend_object_with_defs(
     target: &str,
     extension_defs: Value,
-    context: &CompileContext,
     visible_definitions: Value,
 ) -> Result<Value, Diagnostic> {
     let mut locals = ResolverContext::default();
     let prior_object =
         path_resolved_in_definitions(target, ResolvedExpr::Provided(visible_definitions));
-    let prior_spec = object_spec_resolved(prior_object, context);
+    let prior_spec = object_spec_resolved(prior_object);
     let mut bindings = ResolvedBindings::default();
     let prior_spec = bindings.bind(&mut locals, "<extended-object-spec>", prior_spec);
     let spec_member = |name| ResolvedExpr::Access {
@@ -419,7 +387,6 @@ pub(in crate::g_syntax) fn extend_object_with_defs(
             spec_member("name"),
             spec_member("deps"),
             composed_defs,
-            context,
         ),
     )))
 }

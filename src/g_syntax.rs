@@ -18,7 +18,7 @@ mod resolved;
 
 use analysis::{warn_unused_locals, warn_unused_with_alias};
 pub use ast::*;
-pub use module_lowering::lower_to_core_with_context;
+use module_lowering::lower_parsed_source;
 use module_lowering::*;
 use resolve::*;
 
@@ -50,7 +50,7 @@ pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
     let LoweredSource {
         definitions,
         diagnostics,
-    } = lower_to_core_with_context(parse_source(source), context);
+    } = lower_parsed_source(parse_source(source), context);
     for diagnostic in diagnostics {
         let message = crate::diagnostic::text_message(Some(diagnostic.line), &diagnostic.message);
         context.emit_diagnostic(diagnostic.severity, message);

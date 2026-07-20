@@ -86,7 +86,7 @@ mod resolver_context_tests {
     #[test]
     fn lambda_locals_remain_stable_resolved_bindings() {
         let context = CompileContext::default();
-        let scope = NameScope::module(&context, context.empty_dict_value());
+        let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
         let mut resolver = ResolverContext::default();
         let syntax = SyntaxExpr::Lambda(
             vec!["x".to_owned()],
@@ -107,7 +107,7 @@ mod resolver_context_tests {
     #[test]
     fn direct_lambda_application_uses_the_fused_resolved_form() {
         let context = CompileContext::default();
-        let scope = NameScope::module(&context, context.empty_dict_value());
+        let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
         let mut resolver = ResolverContext::default();
         let syntax = SyntaxExpr::Apply(
             Box::new(SyntaxExpr::Lambda(
@@ -135,7 +135,7 @@ mod resolver_context_tests {
     #[test]
     fn lists_and_accesses_keep_local_binding_identity() {
         let context = CompileContext::default();
-        let scope = NameScope::module(&context, context.empty_dict_value());
+        let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
         let mut resolver = ResolverContext::default();
         let syntax = SyntaxExpr::Lambda(
             vec!["x".to_owned()],
@@ -166,7 +166,7 @@ mod resolver_context_tests {
     #[test]
     fn with_expression_keeps_its_fixpoint_local_in_resolved_ir() {
         let context = CompileContext::default();
-        let scope = NameScope::module(&context, context.empty_dict_value());
+        let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
         let mut resolver = ResolverContext::default();
         let syntax = SyntaxExpr::With {
             base: Box::new(SyntaxExpr::SingletonDict(
@@ -207,7 +207,7 @@ mod resolver_context_tests {
     #[test]
     fn object_expression_keeps_self_pair_in_resolved_ir() {
         let context = CompileContext::default();
-        let scope = NameScope::module(&context, context.empty_dict_value());
+        let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
         let mut resolver = ResolverContext::default();
         let syntax = SyntaxExpr::Object(ObjectExpr {
             name: None,

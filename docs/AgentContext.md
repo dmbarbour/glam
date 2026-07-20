@@ -49,8 +49,10 @@ notes instead of appending history; put subsystem details in
   `CompileContext`. The built-in `.g` compiler validates UTF-8 itself. Source
   identity, digest, relative resolver, and importer provenance remain
   assembler-owned.
-- `CompileContext` supplies capabilities, values, builtins, loaders, and
-  diagnostic emission. It must not become a lambda/application expression DSL.
+- `CompileContext` supplies source-scoped authority: relative loads,
+  `abstract_global_path`, prior/final definitions, canonical unit, and
+  diagnostic emission. Ordinary values and builtins are constructed directly
+  by the front end; the context must not become an expression DSL.
 - Front-end import requests and `abstract_global_path` components are relative.
   Reject absolute paths, backslashes, empty components, dot components, parent
   traversal, and other dot-prefixed components. Top-level paths supplied by

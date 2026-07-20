@@ -41,14 +41,14 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     Ok(match expr {
         SyntaxExpr::Unit => ResolvedExpr::Embedded(context.unit_value()),
-        SyntaxExpr::Number(number) => ResolvedExpr::Embedded(context.value_number(number.clone())),
-        SyntaxExpr::Text(text) => ResolvedExpr::Embedded(context.value_binary(text)),
-        SyntaxExpr::Atom(name) => ResolvedExpr::Embedded(context.value_atom(atom_from_str(name))),
+        SyntaxExpr::Number(number) => ResolvedExpr::Embedded(Value::Number(number.clone())),
+        SyntaxExpr::Text(text) => ResolvedExpr::Embedded(Value::binary_from_text(text)),
+        SyntaxExpr::Atom(name) => ResolvedExpr::Embedded(Value::Atom(atom_from_str(name))),
         SyntaxExpr::Effect(path) => ResolvedExpr::Embedded(compiler_values::effect_path_value(
             &path.iter().map(String::as_str).collect::<Vec<_>>(),
         )),
         SyntaxExpr::SingletonDict(key, value) => ResolvedExpr::apply(
-            ResolvedExpr::Embedded(context.value_builtin(Builtin::DictSingleton)),
+            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
             [
                 syntax_key_expr_to_resolved_value(key, line, context, scope, locals)?,
                 syntax_expr_to_resolved_in_semantic_scope(value, line, context, scope, locals)?,
@@ -57,8 +57,8 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::DictUnion(items) => {
             lower_dict_union_resolved(items, line, context, scope, locals)?
         }
-        SyntaxExpr::Name(name) => lower_name_expr_resolved(name, context, scope, locals),
-        SyntaxExpr::PriorName(name) => lower_prior_name_expr_resolved(name, line, context, scope)?,
+        SyntaxExpr::Name(name) => lower_name_expr_resolved(name, scope, locals),
+        SyntaxExpr::PriorName(name) => lower_prior_name_expr_resolved(name, line, scope)?,
         SyntaxExpr::Escape(depth, expr) => {
             let escaped_scope = escaped_name_scope(scope, *depth, line)?;
             syntax_expr_to_resolved_in_semantic_scope(expr, line, context, &escaped_scope, locals)?
@@ -157,7 +157,7 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
         Some(name) => {
             syntax_expr_to_resolved_in_semantic_scope(name, line, context, scope, locals)?
         }
-        None => ResolvedExpr::Embedded(context.empty_dict_value()),
+        None => ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
     };
     let deps = object
         .deps
@@ -165,7 +165,7 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
         .map(|dep| {
             let dep_object =
                 syntax_expr_to_resolved_in_semantic_scope(dep, line, context, scope, locals)?;
-            Ok(object_spec_resolved(dep_object, context))
+            Ok(object_spec_resolved(dep_object))
         })
         .collect::<Result<Vec<_>, Diagnostic>>()?;
     let defs = object_body_defs_resolved_in_scope(
@@ -181,7 +181,6 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
         name,
         ResolvedExpr::List(deps),
         defs,
-        context,
     ))
 }
 
@@ -223,7 +222,7 @@ pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
 
     let lambda_body = body_bindings.wrap(definitions.expr());
     let fixed = ResolvedExpr::apply(
-        ResolvedExpr::Embedded(context.value_builtin(Builtin::Fixpoint)),
+        ResolvedExpr::Embedded(Value::Builtin(Builtin::Fixpoint)),
         [ResolvedExpr::lambda(vec![final_binding], lambda_body)],
     );
     let result = outer_bindings.wrap(fixed);
@@ -271,7 +270,7 @@ pub(in crate::g_syntax) fn lower_builtin_expr_resolved(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     Ok(ResolvedExpr::apply(
-        ResolvedExpr::Embedded(context.value_builtin(builtin)),
+        ResolvedExpr::Embedded(Value::Builtin(builtin)),
         [
             syntax_expr_to_resolved_in_semantic_scope(left, line, context, scope, locals)?,
             syntax_expr_to_resolved_in_semantic_scope(right, line, context, scope, locals)?,
@@ -294,9 +293,7 @@ pub(in crate::g_syntax) fn lower_operator_section_resolved(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     match (left, right) {
         (None, None) => {
-            return Ok(lower_syntax_operator_function_resolved(
-                operator, context, locals,
-            ));
+            return Ok(lower_syntax_operator_function_resolved(operator, locals));
         }
         (Some(left), Some(right)) => {
             return lower_syntax_operator_expr_resolved(
@@ -319,10 +316,10 @@ pub(in crate::g_syntax) fn lower_operator_section_resolved(
     let argument = ResolvedExpr::Local(parameter);
     let body = match (left, right) {
         (None, Some(right)) => {
-            lower_syntax_operator_values_resolved(operator, argument, right, context, locals)
+            lower_syntax_operator_values_resolved(operator, argument, right, locals)
         }
         (Some(left), None) => {
-            lower_syntax_operator_values_resolved(operator, left, argument, context, locals)
+            lower_syntax_operator_values_resolved(operator, left, argument, locals)
         }
         _ => unreachable!("operator section arity was handled before lowering operands"),
     };
@@ -342,17 +339,16 @@ pub(in crate::g_syntax) fn lower_syntax_operator_expr_resolved(
     let left = syntax_expr_to_resolved_in_semantic_scope(left, line, context, scope, locals)?;
     let right = syntax_expr_to_resolved_in_semantic_scope(right, line, context, scope, locals)?;
     Ok(lower_syntax_operator_values_resolved(
-        operator, left, right, context, locals,
+        operator, left, right, locals,
     ))
 }
 
 pub(in crate::g_syntax) fn lower_syntax_operator_function_resolved(
     operator: SyntaxOperator,
-    context: &CompileContext,
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
     if let SyntaxOperator::Builtin(builtin) = operator {
-        return ResolvedExpr::Embedded(context.value_builtin(builtin));
+        return ResolvedExpr::Embedded(Value::Builtin(builtin));
     }
 
     let base_len = locals.len();
@@ -362,7 +358,6 @@ pub(in crate::g_syntax) fn lower_syntax_operator_function_resolved(
         operator,
         ResolvedExpr::Local(left),
         ResolvedExpr::Local(right),
-        context,
         locals,
     );
     locals.truncate(base_len);
@@ -373,12 +368,11 @@ pub(in crate::g_syntax) fn lower_syntax_operator_values_resolved(
     operator: SyntaxOperator,
     left: ResolvedExpr<Value>,
     right: ResolvedExpr<Value>,
-    context: &CompileContext,
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
     match operator {
         SyntaxOperator::Builtin(builtin) => ResolvedExpr::apply(
-            ResolvedExpr::Embedded(context.value_builtin(builtin)),
+            ResolvedExpr::Embedded(Value::Builtin(builtin)),
             [left, right],
         ),
         SyntaxOperator::BoolAnd => effect_then_resolved(left, right, locals),
@@ -493,7 +487,6 @@ pub(in crate::g_syntax) fn lower_comparison_chain_resolved(
     Ok(lower_comparison_chain_values_resolved(
         left,
         rest.into_iter(),
-        context,
         locals,
     ))
 }
@@ -501,14 +494,13 @@ pub(in crate::g_syntax) fn lower_comparison_chain_resolved(
 pub(in crate::g_syntax) fn lower_comparison_chain_values_resolved(
     left: ResolvedExpr<Value>,
     mut rest: std::vec::IntoIter<(SyntaxOperator, ResolvedExpr<Value>)>,
-    context: &CompileContext,
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
     let Some((operator, right)) = rest.next() else {
         return left;
     };
     if rest.len() == 0 {
-        return lower_syntax_operator_values_resolved(operator, left, right, context, locals);
+        return lower_syntax_operator_values_resolved(operator, left, right, locals);
     }
 
     let base_len = locals.len();
@@ -517,20 +509,14 @@ pub(in crate::g_syntax) fn lower_comparison_chain_values_resolved(
         operator,
         left,
         ResolvedExpr::Local(right_binding),
-        context,
         locals,
     );
-    let remaining_condition = lower_comparison_chain_values_resolved(
-        ResolvedExpr::Local(right_binding),
-        rest,
-        context,
-        locals,
-    );
+    let remaining_condition =
+        lower_comparison_chain_values_resolved(ResolvedExpr::Local(right_binding), rest, locals);
     let body = lower_syntax_operator_values_resolved(
         SyntaxOperator::BoolAnd,
         first_condition,
         remaining_condition,
-        context,
         locals,
     );
     locals.truncate(base_len);
@@ -545,9 +531,7 @@ pub(in crate::g_syntax) fn syntax_key_expr_to_resolved_value(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     match key {
-        SyntaxKeyExpr::Atom(name) => Ok(ResolvedExpr::Embedded(
-            context.value_atom(atom_from_str(name)),
-        )),
+        SyntaxKeyExpr::Atom(name) => Ok(ResolvedExpr::Embedded(Value::Atom(atom_from_str(name)))),
         SyntaxKeyExpr::Index(expr) => {
             syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)
         }
@@ -585,13 +569,13 @@ pub(in crate::g_syntax) fn lower_dict_union_resolved(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let mut items = items.iter();
     let Some(first) = items.next() else {
-        return Ok(ResolvedExpr::Embedded(context.empty_dict_value()));
+        return Ok(ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())));
     };
 
     let mut value = syntax_expr_to_resolved_in_semantic_scope(first, line, context, scope, locals)?;
     for item in items {
         value = ResolvedExpr::apply(
-            ResolvedExpr::Embedded(context.value_builtin(Builtin::DictUnion)),
+            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictUnion)),
             [
                 value,
                 syntax_expr_to_resolved_in_semantic_scope(item, line, context, scope, locals)?,
@@ -676,7 +660,6 @@ pub(in crate::g_syntax) fn lower_let_expr_resolved(
 
 pub(in crate::g_syntax) fn lower_name_expr_resolved(
     name: &str,
-    _context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &ResolverContext,
 ) -> ResolvedExpr<Value> {
@@ -719,7 +702,6 @@ pub(in crate::g_syntax) fn lower_name_expr_resolved(
 pub(in crate::g_syntax) fn lower_prior_name_expr_resolved(
     name: &str,
     line: usize,
-    _context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     if name.is_empty() {
