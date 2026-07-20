@@ -1079,6 +1079,7 @@ pub struct ReasoningTask {
     waiting_on_task: Option<u64>,
     wait_id: Option<u64>,
     observed_generation: Option<u64>,
+    blocked_error: Option<Arc<str>>,
 }
 
 impl ReasoningTask {
@@ -1100,6 +1101,12 @@ impl ReasoningTask {
 
     pub fn observed_generation(&self) -> Option<u64> {
         self.observed_generation
+    }
+
+    /// The evaluation error retained while this task waits for an observed
+    /// state change that can retry its current reasoning checkpoint.
+    pub fn blocked_error(&self) -> Option<&str> {
+        self.blocked_error.as_deref()
     }
 }
 
@@ -1451,6 +1458,7 @@ impl Assembler {
                     waiting_on_task: task.dependency.map(|task| task.get()),
                     wait_id: task.wait,
                     observed_generation: task.observed_generation,
+                    blocked_error: task.error,
                 })
                 .collect(),
         }

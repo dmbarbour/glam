@@ -456,7 +456,7 @@ fn report_reasoning(diagnostics: &DiagnosticBus, report: &ReasoningReport) {
         }
     );
     for task in report.unfinished() {
-        let detail = match task.state() {
+        let mut detail = match task.state() {
             ReasoningTaskState::Blocked => match (
                 task.waiting_on_task(),
                 task.observed_generation(),
@@ -477,6 +477,9 @@ fn report_reasoning(diagnostics: &DiagnosticBus, report: &ReasoningReport) {
             },
             state => format!("remains in anomalous {state:?} state"),
         };
+        if let Some(error) = task.blocked_error() {
+            detail.push_str(&format!("; retained error: {error}"));
+        }
         message.push_str(&format!("\ntask {} {detail}", task.task_id()));
     }
     diagnostics.publish(Diagnostic::new(Severity::Error, message));

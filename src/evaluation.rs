@@ -138,6 +138,7 @@ pub(crate) enum EvaluationTaskCancellation {
 pub(crate) struct EvaluationTaskBlock {
     pub(crate) lazy: Option<EvaluationWaitToken>,
     pub(crate) observed_generation: Option<u64>,
+    pub(crate) error: Option<Arc<str>>,
 }
 
 pub(crate) enum EvaluationMachinePoll {
@@ -223,6 +224,7 @@ pub(crate) struct EvaluationUnfinishedTask {
     pub(crate) dependency: Option<EvaluationTaskId>,
     pub(crate) wait: Option<u64>,
     pub(crate) observed_generation: Option<u64>,
+    pub(crate) error: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1042,40 +1044,43 @@ impl EvaluationSession {
                     error: error.clone(),
                 }),
                 state => {
-                    let (state, dependency, dependency_wait, observed_generation) = match state {
-                        EvaluationTaskState::Dormant => {
-                            (EvaluationUnfinishedState::Dormant, None, None, None)
-                        }
-                        EvaluationTaskState::Reserved => {
-                            (EvaluationUnfinishedState::Reserved, None, None, None)
-                        }
-                        EvaluationTaskState::Queued => {
-                            (EvaluationUnfinishedState::Queued, None, None, None)
-                        }
-                        EvaluationTaskState::Running => {
-                            (EvaluationUnfinishedState::Running, None, None, None)
-                        }
-                        EvaluationTaskState::Blocked(block) => (
-                            EvaluationUnfinishedState::Blocked,
-                            block
-                                .lazy
-                                .as_ref()
-                                .and_then(|wait| producer_for_wait(tasks, wait)),
-                            block.lazy.as_ref().map(EvaluationWaitToken::get),
-                            block.observed_generation,
-                        ),
-                        EvaluationTaskState::Complete(_)
-                        | EvaluationTaskState::Failed(_)
-                        | EvaluationTaskState::Cancelled => {
-                            unreachable!("terminal task states were handled above")
-                        }
-                    };
+                    let (state, dependency, dependency_wait, observed_generation, error) =
+                        match state {
+                            EvaluationTaskState::Dormant => {
+                                (EvaluationUnfinishedState::Dormant, None, None, None, None)
+                            }
+                            EvaluationTaskState::Reserved => {
+                                (EvaluationUnfinishedState::Reserved, None, None, None, None)
+                            }
+                            EvaluationTaskState::Queued => {
+                                (EvaluationUnfinishedState::Queued, None, None, None, None)
+                            }
+                            EvaluationTaskState::Running => {
+                                (EvaluationUnfinishedState::Running, None, None, None, None)
+                            }
+                            EvaluationTaskState::Blocked(block) => (
+                                EvaluationUnfinishedState::Blocked,
+                                block
+                                    .lazy
+                                    .as_ref()
+                                    .and_then(|wait| producer_for_wait(tasks, wait)),
+                                block.lazy.as_ref().map(EvaluationWaitToken::get),
+                                block.observed_generation,
+                                block.error.clone(),
+                            ),
+                            EvaluationTaskState::Complete(_)
+                            | EvaluationTaskState::Failed(_)
+                            | EvaluationTaskState::Cancelled => {
+                                unreachable!("terminal task states were handled above")
+                            }
+                        };
                     unfinished.push(EvaluationUnfinishedTask {
                         task: *task,
                         state,
                         dependency,
                         wait: dependency_wait,
                         observed_generation,
+                        error,
                     });
                 }
             }
@@ -1420,6 +1425,7 @@ mod tests {
                     EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                         lazy: Some(wait),
                         observed_generation: None,
+                        error: None,
                     })
                 }
                 EvaluationTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value),
@@ -1439,6 +1445,7 @@ mod tests {
             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 lazy: None,
                 observed_generation: Some(7),
+                error: Some(Arc::from("retryable evaluation error")),
             })
         }
     }
@@ -1646,6 +1653,10 @@ mod tests {
             EvaluationUnfinishedState::Blocked
         );
         assert_eq!(report.unfinished[0].observed_generation, Some(7));
+        assert_eq!(
+            report.unfinished[0].error.as_deref(),
+            Some("retryable evaluation error")
+        );
     }
 
     #[test]

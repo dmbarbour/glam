@@ -91,7 +91,10 @@ and control flow.
   both. The query stores atoms `'launched` or `'blocked`, terminal tagged values
   `ok:Value` or `err:Error`, or the atom `'canceled`; the handle keeps it alive.
 - `.join_task` waits directly on every nonterminal child state and propagates
-  terminal errors. `.task_status` returns the stored status value unchanged.
+  terminal errors. A joined dependency becoming terminal reruns the join
+  operation; it does not select another `.alt` branch. An error with prior
+  state observations remains blocked until those observations can retry its
+  checkpoint. `.task_status` returns the stored status value unchanged.
   `.task_result` and `.task_error` project its matching terminal payload, fail
   transactionally while it is nonterminal, and fail permanently for the other
   terminal outcome.
@@ -108,8 +111,11 @@ and control flow.
 - `EffectTask` is persistent. Drive, delivery, application, and nested-cut
   frames survive polls; one poll must not leave the machine able to repeat an
   already committed host effect.
-- A blocked task reports one lazy dependency plus observed host generation.
-  When both changed state and a lazy dependency could resume it, state change
+- A blocked task reports one current dependency, an optional retry generation,
+  and an optional retained evaluation error. Dependency completion reruns the
+  unchanged operation. A non-blocking error is terminal unless earlier state
+  observations provide a retry checkpoint; it never becomes effect `.fail`.
+  When both changed state and a dependency could resume a task, state change
   restarts the saved transaction/retry boundary first.
 - `EvaluationSession` claims a machine under its mutex, polls outside the
   mutex, then restores its state. It prioritizes known producers and otherwise
@@ -119,7 +125,8 @@ and control flow.
   reasoning runs through workers or explicit `Assembler::drain_reasoning`.
 - Reasoning drain has no timeout or step limit. It includes newly launched
   tasks and ends only when all tasks are terminal or one stable pass proves
-  deadlock. Failures and known wait dependencies remain in its report.
+  deadlock. Failures, known wait dependencies, and retryably blocked errors
+  remain in its report.
 
 ## Front-End and Logger Integration
 

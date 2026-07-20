@@ -435,7 +435,7 @@ fn evaluate_request(
             Ok(value) => value,
             Err(error) => {
                 if let Some(wait) = error.blocked_on() {
-                    return Err(TaskError::retry_after(wait.0));
+                    return Err(TaskError::blocked(wait.0));
                 }
                 return Ok(RequestResult::Return(tagged_result(
                     &keys::ERR,

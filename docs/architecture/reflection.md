@@ -47,6 +47,13 @@ from snapshots; losing branches discard changes; a winning outer branch
 validates and commits. A host observation can turn later failure into a retry
 point. `cut` alone does not: unobservant failure is terminal.
 
+The machine separates deterministic effect failure, current dependency waits,
+and evaluation errors. A dependency becoming terminal reruns the unchanged
+operation that observed it. A non-blocking evaluation error remains retryably
+blocked only when an existing state observation can rewind its checkpoint; it
+does not advance `.alt`. The scheduler receives only the dependency token,
+coarse retry generation, and retained diagnostic text.
+
 `reflection/store.rs` owns a persistent map of shared volumes independently of
 host wake state. Transactions record volume-qualified hierarchical read paths
 and one ordered edit overlay; commits rebase edits onto the current persistent
@@ -140,7 +147,8 @@ Foreground evaluation pumps only tasks needed by the lazy value it is trying
 to observe. Shared workers may opportunistically poll any ready task. Explicit
 reasoning drain continues without a time or step limit, includes newly spawned
 tasks, and returns either terminal results or a structured stable-deadlock
-report.
+report. Unfinished-task reports preserve retryably blocked evaluation errors
+for library clients and CLI diagnostics without treating them as wake sources.
 
 ## Sources of Tasks
 

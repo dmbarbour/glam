@@ -973,6 +973,24 @@ fn quiescent_reflection_tasks_report_a_scheduler_deadlock() {
 }
 
 #[test]
+fn retryable_reflection_errors_are_reported_with_deadlocks() {
+    let output = glam_command()
+        .arg("--script.g")
+        .arg(
+            "language g0\nrefl.error = .heap.get ['observed] >>= (\\_ -> 1 2)\nasm.result = \"ok\"\n",
+        )
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"ok");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("reflection scheduler deadlocked"));
+    assert!(stderr.contains("retained error"));
+    assert!(stderr.contains("requires a function value"));
+}
+
+#[test]
 fn invalid_glam_workers_is_a_command_line_error() {
     let output = glam_command()
         .env("GLAM_WORKERS", "many")

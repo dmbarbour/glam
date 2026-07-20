@@ -73,6 +73,33 @@ fn public_api_reports_an_empty_reasoning_session_as_complete() {
     assert!(report.unfinished().is_empty());
 }
 
+#[test]
+fn public_reasoning_report_exposes_retryable_blocked_errors() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["blocked_error"])
+        .script(
+            "g",
+            "language g0\nrefl.error = .heap.get ['observed] >>= (\\_ -> 1 2)\nvalue = \"value\"\n",
+        )
+        .build()
+        .expect("reflection fixture should compile");
+    assert_eq!(
+        assembler
+            .binary_at(module.value(), "value")
+            .expect("ordinary value should schedule reflection"),
+        b"value".as_slice()
+    );
+
+    let report = assembler.drain_reasoning();
+    assert_eq!(report.status(), ReasoningStatus::Deadlocked);
+    assert!(report.failures().is_empty());
+    assert!(report.unfinished().iter().any(|task| {
+        task.blocked_error()
+            .is_some_and(|error| error.contains("requires a function value"))
+    }));
+}
+
 fn volume_write_annotation(assembler: &Assembler, effects: Value, value: Value) -> Value {
     let set = assembler
         .get(&effects, "set")

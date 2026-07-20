@@ -278,10 +278,7 @@ pub struct TaskError(TaskErrorKind);
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TaskErrorKind {
     Message(Arc<str>),
-    Blocked {
-        wait: EvaluationWaitToken,
-        retry_on_terminal: bool,
-    },
+    Blocked(EvaluationWaitToken),
 }
 
 impl TaskError {
@@ -290,25 +287,12 @@ impl TaskError {
     }
 
     fn blocked(wait: EvaluationWaitToken) -> Self {
-        Self(TaskErrorKind::Blocked {
-            wait,
-            retry_on_terminal: false,
-        })
+        Self(TaskErrorKind::Blocked(wait))
     }
 
-    fn retry_after(wait: EvaluationWaitToken) -> Self {
-        Self(TaskErrorKind::Blocked {
-            wait,
-            retry_on_terminal: true,
-        })
-    }
-
-    fn blocked_on(&self) -> Option<(&EvaluationWaitToken, bool)> {
+    fn blocked_on(&self) -> Option<&EvaluationWaitToken> {
         match &self.0 {
-            TaskErrorKind::Blocked {
-                wait,
-                retry_on_terminal,
-            } => Some((wait, *retry_on_terminal)),
+            TaskErrorKind::Blocked(wait) => Some(wait),
             TaskErrorKind::Message(_) => None,
         }
     }
@@ -318,7 +302,7 @@ impl fmt::Display for TaskError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
             TaskErrorKind::Message(message) => formatter.write_str(message),
-            TaskErrorKind::Blocked { wait, .. } => {
+            TaskErrorKind::Blocked(wait) => {
                 write!(
                     formatter,
                     "reflection task blocked on wait token {}",
@@ -813,13 +797,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         match self.eval_context.pump_wait(&wait, 4_096) {
                             EvaluationPumpOutcome::TargetReady
                             | EvaluationPumpOutcome::BudgetExhausted => continue,
-                            EvaluationPumpOutcome::NoProgress => {
+                            EvaluationPumpOutcome::NoProgress
+                                if blocked.observed_generation.is_none() =>
+                            {
                                 let error = TaskError::new(
                                     "synchronous reflection task has no runnable producer for its dependency",
                                 );
                                 self.finish(TaskTerminal::Failed(error.clone()));
                                 return Err(error);
                             }
+                            EvaluationPumpOutcome::NoProgress => {}
                         }
                     }
                     let generation = blocked.observed_generation.ok_or_else(|| {
@@ -857,8 +844,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     return self.terminal.as_ref().expect("terminal set above").poll();
                 }
                 Err(error) => {
-                    if let Some((wait, retry_on_terminal)) = error.blocked_on() {
-                        self.blocked = Some(self.lazy_block(wait.clone(), retry_on_terminal));
+                    if let Some(wait) = error.blocked_on() {
+                        self.blocked = Some(self.waiting_block(wait.clone()));
+                        return self.blocked_poll();
+                    }
+                    if let Some(retry) = self.retry_wake() {
+                        self.blocked = Some(BlockedExecution::evaluation_error(error, retry));
                         return self.blocked_poll();
                     }
                     self.finish(TaskTerminal::Failed(error));
@@ -1672,16 +1663,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .as_ref()
             .map(|transaction| transaction.snapshot.generation())
             .unwrap_or_else(|| self.host.snapshot().generation());
-        let observed_generation = frame.observed_failure.then_some(generation);
         frame.retry = Some(failed);
         let index = self.execution.cuts.len();
         self.execution.cuts.push(frame);
-        Ok(MachineStep::Blocked(BlockedExecution {
-            lazy: None,
-            observed_generation,
-            wake: Some(WakeAction::RestartCut(index)),
-            wake_on_terminal: true,
-        }))
+        Ok(MachineStep::Blocked(BlockedExecution::exhausted(
+            RetryWake {
+                observed_generation: generation,
+                action: WakeAction::RestartCut(index),
+            },
+        )))
     }
 
     fn handle_top_level_outcome(
@@ -1706,35 +1696,28 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let checkpoint = failed.retry.take().ok_or_else(|| {
                     TaskError::new("retryable reflection failure lost its observation")
                 })?;
-                Ok(MachineStep::Blocked(BlockedExecution {
-                    lazy: None,
-                    observed_generation: checkpoint.generation,
-                    wake: Some(WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
-                        branch: *checkpoint.branch,
-                        scope_depth,
-                    }))),
-                    wake_on_terminal: true,
-                }))
+                let generation = checkpoint.generation.ok_or_else(|| {
+                    TaskError::new("retryable reflection failure lost its wake generation")
+                })?;
+                Ok(MachineStep::Blocked(BlockedExecution::exhausted(
+                    RetryWake {
+                        observed_generation: generation,
+                        action: WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
+                            branch: *checkpoint.branch,
+                            scope_depth,
+                        })),
+                    },
+                )))
             }
             BranchOutcome::Cancelled => Ok(MachineStep::Terminal(TaskTerminal::Cancelled)),
         }
     }
 
-    fn lazy_block(
-        &self,
-        wait: EvaluationWaitToken,
-        retry_on_terminal: bool,
-    ) -> BlockedExecution<S> {
-        let (observed_generation, wake) = self.observation_wake();
-        BlockedExecution {
-            lazy: Some(wait),
-            observed_generation,
-            wake,
-            wake_on_terminal: retry_on_terminal,
-        }
+    fn waiting_block(&self, wait: EvaluationWaitToken) -> BlockedExecution<S> {
+        BlockedExecution::waiting_on(wait, self.retry_wake())
     }
 
-    fn observation_wake(&self) -> (Option<u64>, Option<WakeAction<S>>) {
+    fn retry_wake(&self) -> Option<RetryWake<S>> {
         if let Some(index) = self
             .execution
             .cuts
@@ -1757,75 +1740,49 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .as_ref()
                     .map(|transaction| transaction.snapshot.generation());
                 if let Some(generation) = generation {
-                    return (Some(generation), Some(WakeAction::RestartCut(index)));
+                    return Some(RetryWake {
+                        observed_generation: generation,
+                        action: WakeAction::RestartCut(index),
+                    });
                 }
             }
         }
-        let Some(branch) = self.execution.work.branch() else {
-            return (None, None);
-        };
-        let Some(checkpoint) = &branch.retry else {
-            return (None, None);
-        };
-        (
-            checkpoint.generation,
-            Some(WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
+        let branch = self.execution.work.branch()?;
+        let checkpoint = branch.retry.as_ref()?;
+        let observed_generation = checkpoint.generation?;
+        Some(RetryWake {
+            observed_generation,
+            action: WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
                 branch: (*checkpoint.branch).clone(),
                 scope_depth: self.execution.work.scope_depth(),
-            }))),
-        )
+            })),
+        })
     }
 
     fn poll_blocked(&mut self) -> Option<EffectTaskPoll> {
         let blocked = self.blocked.as_ref()?;
-        if let Some(generation) = blocked.observed_generation
-            && self.host.snapshot().generation() != generation
+        if let Some(retry) = &blocked.retry
+            && self.host.snapshot().generation() != retry.observed_generation
         {
-            let wake = self.blocked.take().and_then(|blocked| blocked.wake);
-            if let Some(wake) = wake {
-                self.apply_wake(wake);
-            }
+            let retry = self
+                .blocked
+                .take()
+                .and_then(|blocked| blocked.retry)
+                .expect("changed retry generation must retain its wake action");
+            self.apply_wake(retry.action);
             return None;
         }
-        let Some(wait) = blocked.lazy.clone() else {
+        let BlockReason::WaitingOn(wait) = &blocked.reason else {
             return Some(self.blocked_poll());
         };
-        match self.eval_context.poll_wait(&wait) {
+        match self.eval_context.poll_wait(wait) {
             EvaluationTaskPoll::Pending(_) => Some(self.blocked_poll()),
-            EvaluationTaskPoll::Complete(_) => {
-                let wake = self.blocked.take().and_then(|blocked| blocked.wake);
-                if let Some(wake) = wake {
-                    self.apply_wake(wake);
-                }
+            EvaluationTaskPoll::Complete(_)
+            | EvaluationTaskPoll::Failed(_)
+            | EvaluationTaskPoll::Cancelled
+            | EvaluationTaskPoll::ForeignSession => {
+                self.blocked = None;
                 None
-            }
-            EvaluationTaskPoll::Failed(error) => {
-                if blocked.wake_on_terminal {
-                    let wake = self.blocked.take().and_then(|blocked| blocked.wake);
-                    if let Some(wake) = wake {
-                        self.apply_wake(wake);
-                    }
-                    return None;
-                }
-                self.finish(TaskTerminal::Failed(TaskError::new(error)));
-                Some(self.terminal.as_ref().expect("terminal set above").poll())
-            }
-            EvaluationTaskPoll::Cancelled => {
-                if blocked.wake_on_terminal {
-                    let wake = self.blocked.take().and_then(|blocked| blocked.wake);
-                    if let Some(wake) = wake {
-                        self.apply_wake(wake);
-                    }
-                    return None;
-                }
-                self.finish(TaskTerminal::Cancelled);
-                Some(self.terminal.as_ref().expect("terminal set above").poll())
-            }
-            EvaluationTaskPoll::ForeignSession => {
-                self.finish(TaskTerminal::Failed(TaskError::new(
-                    "lazy dependency belongs to another evaluation session",
-                )));
-                Some(self.terminal.as_ref().expect("terminal set above").poll())
             }
         }
     }
@@ -1836,8 +1793,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .as_ref()
             .expect("blocked poll requires blocked state");
         EffectTaskPoll::Blocked(TaskBlock {
-            lazy: blocked.lazy.clone(),
-            observed_generation: blocked.observed_generation,
+            lazy: blocked.lazy(),
+            observed_generation: blocked.observed_generation(),
+            error: blocked.error(),
         })
     }
 
@@ -1930,6 +1888,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for JoinableEffectTask<S> {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     lazy: blocked.lazy,
                     observed_generation: blocked.observed_generation,
+                    error: blocked.error,
                 })
             }
             EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value.into_core()),
@@ -1953,6 +1912,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for AnnotationEffectTask<S> {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     lazy: blocked.lazy,
                     observed_generation: blocked.observed_generation,
+                    error: blocked.error,
                 })
             }
             EffectTaskPoll::Complete(value) if value.as_core() == &*keys::UNIT_VALUE => {
@@ -2164,10 +2124,61 @@ enum MachineStep<S: TaskSpecialization> {
 }
 
 struct BlockedExecution<S: TaskSpecialization> {
-    lazy: Option<EvaluationWaitToken>,
-    observed_generation: Option<u64>,
-    wake: Option<WakeAction<S>>,
-    wake_on_terminal: bool,
+    reason: BlockReason,
+    retry: Option<RetryWake<S>>,
+}
+
+impl<S: TaskSpecialization> BlockedExecution<S> {
+    fn waiting_on(wait: EvaluationWaitToken, retry: Option<RetryWake<S>>) -> Self {
+        Self {
+            reason: BlockReason::WaitingOn(wait),
+            retry,
+        }
+    }
+
+    fn exhausted(retry: RetryWake<S>) -> Self {
+        Self {
+            reason: BlockReason::Exhausted,
+            retry: Some(retry),
+        }
+    }
+
+    fn evaluation_error(error: TaskError, retry: RetryWake<S>) -> Self {
+        debug_assert!(error.blocked_on().is_none());
+        Self {
+            reason: BlockReason::EvaluationError(error),
+            retry: Some(retry),
+        }
+    }
+
+    fn lazy(&self) -> Option<EvaluationWaitToken> {
+        match &self.reason {
+            BlockReason::WaitingOn(wait) => Some(wait.clone()),
+            BlockReason::Exhausted | BlockReason::EvaluationError(_) => None,
+        }
+    }
+
+    fn observed_generation(&self) -> Option<u64> {
+        self.retry.as_ref().map(|retry| retry.observed_generation)
+    }
+
+    fn error(&self) -> Option<Arc<str>> {
+        match &self.reason {
+            BlockReason::EvaluationError(error) => Some(Arc::from(error.to_string())),
+            BlockReason::WaitingOn(_) | BlockReason::Exhausted => None,
+        }
+    }
+}
+
+enum BlockReason {
+    WaitingOn(EvaluationWaitToken),
+    Exhausted,
+    EvaluationError(TaskError),
+}
+
+struct RetryWake<S: TaskSpecialization> {
+    observed_generation: u64,
+    action: WakeAction<S>,
 }
 
 enum WakeAction<S: TaskSpecialization> {
@@ -2178,6 +2189,7 @@ enum WakeAction<S: TaskSpecialization> {
 struct TaskBlock {
     lazy: Option<EvaluationWaitToken>,
     observed_generation: Option<u64>,
+    error: Option<Arc<str>>,
 }
 
 enum EffectTaskPoll {
@@ -4123,6 +4135,110 @@ mod tests {
             .to_binary(&PublicValue::from_core(value))
             .expect("task error should be text");
         assert!(String::from_utf8_lossy(&text).contains("failed permanently"));
+    }
+
+    #[test]
+    fn failed_and_cancelled_joins_retain_retryable_errors() {
+        let host = Arc::new(TestHost::default());
+        for (source, expected) in [
+            (
+                ".refl_task .fail >>= (\\task -> .cut (.heap.get ['observed] >>= (\\_ -> .join_task task)))",
+                "failed permanently",
+            ),
+            (
+                ".refl_task (.r ()) >>= (\\task -> (.cancel_task task) =>> .cut (.heap.get ['observed] >>= (\\_ -> .join_task task)))",
+                "was cancelled",
+            ),
+        ] {
+            let (_, effect) = compile_effect(source);
+            let (context, parent) = schedule_composed_test_task(&effect, host.clone());
+            let EvaluationSessionRun::Quiescent(report) = context.run_until_quiescent() else {
+                panic!("retryable joined task error should remain unfinished for {source}")
+            };
+            let blocked = report
+                .unfinished
+                .iter()
+                .find(|task| task.task == parent.id())
+                .expect("parent task should retain its joined error");
+            assert!(blocked.wait.is_none());
+            assert!(blocked.observed_generation.is_some());
+            assert!(
+                blocked
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(expected)),
+                "unexpected retained error for {source}: {:?}",
+                blocked.error
+            );
+        }
+    }
+
+    #[test]
+    fn observed_evaluation_error_restarts_without_advancing_alternatives() {
+        let (assembler, effect) = compile_effect(".cut (.alt .read_log (1 2))");
+        let host = Arc::new(TestHost::default());
+        let mut task =
+            EffectTask::new(effect.as_core().clone(), TestEffects, host.clone()).unwrap();
+
+        let EffectTaskPoll::Blocked(blocked) = task.poll(512) else {
+            panic!("error after an observed alternative should remain retryable")
+        };
+        assert!(blocked.lazy.is_none());
+        assert!(blocked.observed_generation.is_some());
+        assert!(
+            blocked
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("requires a function value")),
+            "unexpected retained error: {:?}",
+            blocked.error
+        );
+
+        host.emit_diagnostic(Diagnostic::new(
+            crate::diagnostic::Severity::Info,
+            "available after retry",
+        ));
+        let value = loop {
+            match task.poll(512) {
+                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::Complete(value) => break value,
+                EffectTaskPoll::Blocked(_) => panic!("changed observation did not retry the cut"),
+                EffectTaskPoll::Failed(error) => panic!("retryable task failed: {error}"),
+                EffectTaskPoll::Cancelled => panic!("retryable task was cancelled"),
+            }
+        };
+        assert_eq!(
+            assembler.get(&value, "msg.text").unwrap(),
+            PublicValue::text("available after retry")
+        );
+    }
+
+    #[test]
+    fn synchronous_error_recovery_waits_for_observed_state_change() {
+        let (assembler, effect) =
+            compile_effect(".cut (.heap.get ['handler] >>= (\\handler -> handler ()))");
+        let (_, handler) = compile_effect("\\_ -> .r \"recovered\"");
+        let host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
+            "handler", handler,
+        )])));
+        let mut task =
+            EffectTask::new(effect.as_core().clone(), TestEffects, host.clone()).unwrap();
+
+        let TaskOutcome::Complete(value) = task.run().unwrap() else {
+            panic!("state change should recover the evaluation error")
+        };
+        assert_eq!(
+            assembler.to_binary(&value).unwrap(),
+            b"recovered".as_slice()
+        );
+        assert_eq!(host.wait_count(), 1);
+    }
+
+    #[test]
+    fn unobserved_evaluation_error_remains_terminal_inside_cut() {
+        let (_, effect) = compile_effect(".cut (.alt (1 2) (.r \"fallback\"))");
+        let error = run_standard_test(&effect).expect_err("unobserved error should be terminal");
+        assert!(error.to_string().contains("requires a function value"));
     }
 
     #[test]
