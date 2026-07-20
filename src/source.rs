@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::api::Value;
 
+pub const CONTENT_DIGEST_ALGORITHM: &str = "sha256";
+
 /// A SHA-256 digest of the exact bytes supplied by a source system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentDigest([u8; 32]);
@@ -25,12 +27,19 @@ impl ContentDigest {
         &self.0
     }
 
+    pub fn algorithm(&self) -> &'static str {
+        CONTENT_DIGEST_ALGORITHM
+    }
+
     pub fn to_hex(self) -> String {
         hex(&self.0)
     }
 
     pub(crate) fn value(self) -> Value {
-        Value::record([("sha256", Value::binary(Bytes::copy_from_slice(&self.0)))])
+        Value::record([(
+            self.algorithm(),
+            Value::binary(Bytes::copy_from_slice(&self.0)),
+        )])
     }
 }
 
@@ -134,6 +143,10 @@ impl SourceArtifact {
 
     pub fn digest(&self) -> ContentDigest {
         self.digest
+    }
+
+    pub fn digest_algorithm(&self) -> &'static str {
+        self.digest.algorithm()
     }
 
     pub fn load_relative(&self, request: &RelativeSourcePath) -> Result<Self, SourceError> {
@@ -345,12 +358,14 @@ impl FileSourceSystem {
         }
 
         let mut manifest = String::from(
-            "# glam local-file manifest v1\n# sha256<TAB>percent-encoded platform path bytes\n",
+            "# glam local-file manifest v2\n# percent-encoded platform path bytes<TAB>digest algorithm<TAB>hex digest bytes\n",
         );
         for (source, digest) in observed.iter() {
-            manifest.push_str(&digest.to_hex());
-            manifest.push('\t');
             manifest.push_str(&percent_encoded_path(source));
+            manifest.push('\t');
+            manifest.push_str(digest.algorithm());
+            manifest.push('\t');
+            manifest.push_str(&digest.to_hex());
             manifest.push('\n');
         }
         fs::write(&output, manifest).map_err(|error| {
@@ -465,6 +480,7 @@ mod tests {
             artifact.digest().to_hex(),
             "4d4823794cbed3c4ee0bbc684c8f66e1dfd5afa6f078d494ce254ec5a4671753"
         );
+        assert_eq!(artifact.digest_algorithm(), "sha256");
     }
 
     #[test]
@@ -522,7 +538,19 @@ mod tests {
             .expect("manifest should be written from retained observations");
 
         let manifest = fs::read_to_string(manifest).expect("manifest should be readable");
-        assert!(manifest.contains(&ContentDigest::of(b"consumed").to_hex()));
+        let consumed_digest = ContentDigest::of(b"consumed").to_hex();
+        assert_eq!(
+            manifest.lines().collect::<Vec<_>>(),
+            [
+                "# glam local-file manifest v2",
+                "# percent-encoded platform path bytes<TAB>digest algorithm<TAB>hex digest bytes",
+                &format!(
+                    "{}\t{}\t{consumed_digest}",
+                    percent_encoded_path(&input),
+                    CONTENT_DIGEST_ALGORITHM
+                ),
+            ]
+        );
         assert!(!manifest.contains(&ContentDigest::of(b"later edit").to_hex()));
     }
 }

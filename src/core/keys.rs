@@ -20,6 +20,13 @@ macro_rules! protocol_value {
     };
 }
 
+fn atom_value(key: &Key) -> Value {
+    match key {
+        Key::Atom(atom) => Value::Atom(*atom),
+        _ => unreachable!("protocol atom key was not an atom"),
+    }
+}
+
 protocol_key!(APPLY, "apply");
 protocol_key!(EFF, "eff");
 
@@ -73,8 +80,27 @@ protocol_value!(OBJECT_REFLECTION_GUARD_VALUE, OBJECT_REFLECTION_GUARD);
 protocol_key!(INFO, "info");
 protocol_key!(WARN, "warn");
 protocol_key!(ERROR, "error");
-protocol_value!(INFO_VALUE, INFO);
-protocol_value!(WARN_VALUE, WARN);
-protocol_value!(ERROR_VALUE, ERROR);
+
+// These are the value forms of the atom keys above. Do not use
+// `protocol_value!`: that would wrap an already-atomic key in another atom.
+pub(crate) static INFO_VALUE: LazyLock<Value> = LazyLock::new(|| atom_value(&INFO));
+pub(crate) static WARN_VALUE: LazyLock<Value> = LazyLock::new(|| atom_value(&WARN));
+pub(crate) static ERROR_VALUE: LazyLock<Value> = LazyLock::new(|| atom_value(&ERROR));
 
 protocol_key!(FILE, "file");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn severity_values_convert_back_to_their_cached_keys() {
+        for (value, key) in [
+            (&*INFO_VALUE, &*INFO),
+            (&*WARN_VALUE, &*WARN),
+            (&*ERROR_VALUE, &*ERROR),
+        ] {
+            assert_eq!(Key::from_value(value).as_ref(), Some(key));
+        }
+    }
+}

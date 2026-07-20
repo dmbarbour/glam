@@ -955,7 +955,7 @@ fn manifest_entry(bytes: &[u8], path: &Path) -> String {
             encoded.push_str(&format!("%{byte:02x}"));
         }
     }
-    format!("{hash}\t{encoded}")
+    format!("{encoded}\tsha256\t{hash}")
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {

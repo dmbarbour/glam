@@ -81,7 +81,10 @@ warns, because an edit after the last read did not affect the produced result.
 
 `--manifest` writes the retained path/digest set, including configuration and
 transitive imports. Paths below the invocation directory are made relative;
-hashes never come from a later rescan.
+hashes never come from a later rescan. Each entry records the percent-encoded
+path, digest algorithm, and hexadecimal digest in tab-separated fields, so the
+algorithm remains explicit even if a manifest combines different source kinds
+or digest formats in the future.
 
 ## Batch Lifecycle
 

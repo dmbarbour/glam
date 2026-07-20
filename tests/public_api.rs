@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use glam::{
-    Assembler, AssemblerBuilder, Builtin, ContentDigest, DiagnosticEvent, EvaluationRuntime, Host,
-    HostError, ImportResolver, ModuleInput, ReasoningStatus, RelativeSourcePath, Severity,
-    SourceArtifact, SourceError, SourceIdentity, SourceSystem, Value,
+    Assembler, AssemblerBuilder, Builtin, CONTENT_DIGEST_ALGORITHM, ContentDigest, DiagnosticEvent,
+    EvaluationRuntime, Host, HostError, ImportResolver, ModuleInput, ReasoningStatus,
+    RelativeSourcePath, Severity, SourceArtifact, SourceError, SourceIdentity, SourceSystem, Value,
 };
 
 type DiagnosticEvents = Arc<Mutex<Vec<DiagnosticEvent>>>;
@@ -653,9 +653,10 @@ fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
         Some(source_path.as_bytes())
     );
     let expected_digest = ContentDigest::of(b"language g0\nvalue = \xff\n");
+    let digest_path = format!("msg.origin.digest.{CONTENT_DIGEST_ALGORITHM}");
     assert_eq!(
         assembler
-            .get(&enriched, "msg.origin.digest.sha256")
+            .get(&enriched, &digest_path)
             .expect("assembler provenance should include the consumed digest")
             .as_binary(),
         Some(expected_digest.as_bytes().as_slice())

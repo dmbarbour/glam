@@ -18,21 +18,9 @@ fn build() -> Value {
     fn severity_values(info: &str, warning: &str, error: &str) -> Value {
         Value::Dict(
             Dict::new_sync()
-                .insert(
-                    Key::from_value(&keys::INFO_VALUE)
-                        .expect("canonical info severity must be keyable"),
-                    Value::binary_from_text(info),
-                )
-                .insert(
-                    Key::from_value(&keys::WARN_VALUE)
-                        .expect("canonical warning severity must be keyable"),
-                    Value::binary_from_text(warning),
-                )
-                .insert(
-                    Key::from_value(&keys::ERROR_VALUE)
-                        .expect("canonical error severity must be keyable"),
-                    Value::binary_from_text(error),
-                ),
+                .insert((*keys::INFO).clone(), Value::binary_from_text(info))
+                .insert((*keys::WARN).clone(), Value::binary_from_text(warning))
+                .insert((*keys::ERROR).clone(), Value::binary_from_text(error)),
         )
     }
 
