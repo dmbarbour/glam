@@ -111,20 +111,14 @@ not revoke it.
 - `.eval Value` reduces lazy outer shells and returns `ok:WHNF` or `err:Text`.
 - `.refl_task Effect` reserves an opaque child handle plus a private status
   query; launch is commit-ordered inside a transaction. The status query is
-  updated only when the projected state changes between `launched`, `blocked`,
-  and terminal `ok`, `err`, or `canceled`.
+  updated only when the projected state changes between atoms `'launched` and
+  `'blocked`, terminal tagged values `ok:Value` and `err:Error`, and the atom
+  `'canceled`.
 - `.join_task` waits directly and propagates non-success terminal states.
-  `.task_status` reads the transactional status snapshot, while `.task_result`
-  and `.task_error` wait transactionally for their matching terminal payload.
-  `.cancel_task` journals a best-effort cancellation request.
-- `.query_task Task` journals one snapshot of mutable task state and returns a
-  distinct opaque query handle. Its `pending` state is published atomically
-  with the handle in a host-private store volume, then queued as scheduler
-  work. `.query_result Query` fails retryably while that committed state is
-  pending and returns the immutable tagged task snapshot after completion. A
-  same-transaction read of a newly staged query remains an internal read and
-  fails without waiting on the commit that would submit it. Query state stays
-  in the private volume until the final handle clone is retired.
+  `.task_status` returns that stored status value unchanged, while
+  `.task_result` and `.task_error` project and transactionally wait for their
+  matching terminal payload. `.cancel_task` journals a best-effort
+  cancellation request. Task inspection creates no secondary scheduler work.
 
 The immutable environment conventionally contains assembler-owned `glam`
 identity plus client context. `glam.reasoning.role` distinguishes assembler,

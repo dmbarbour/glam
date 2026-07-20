@@ -1,13 +1,12 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::api::{Diagnostic, Value};
 use crate::core::{Atom, Dict, Key, OpaqueValue, Value as CoreValue, keys};
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{
-    EvalContext, EvaluationQueryCompletion, EvaluationTaskCancellation, EvaluationTaskId,
-    EvaluationTaskPoll, EvaluationTaskStatus, EvaluationTaskStatusSink, PendingReflectionTask,
+    EvalContext, EvaluationTaskCancellation, EvaluationTaskId, EvaluationTaskPoll,
+    EvaluationTaskStatus, EvaluationTaskStatusSink, PendingReflectionTask,
 };
 
 use super::{
@@ -28,7 +27,6 @@ pub enum ReflectionRequest {
     TaskStatus,
     TaskResult,
     TaskError,
-    QueryTask,
     QueryResult,
     CancelTask,
 }
@@ -40,61 +38,6 @@ enum ReflectionUpdate {
         status: Arc<dyn EvaluationTaskStatusSink>,
     },
     Cancel(EvalContext, EvaluationTaskId),
-    Query {
-        context: EvalContext,
-        task: EvaluationTaskId,
-        query: PendingQuery,
-    },
-}
-
-#[derive(Clone)]
-struct PendingQuery {
-    inner: Arc<PendingQueryInner>,
-}
-
-struct PendingQueryInner {
-    completion: Arc<dyn EvaluationQueryCompletion>,
-    activated: AtomicBool,
-}
-
-impl PendingQuery {
-    fn new<H>(host: Arc<H>, handle: Arc<EvaluationQueryHandle>) -> Self
-    where
-        H: ReflectionServices + ?Sized + 'static,
-    {
-        let completion = Arc::new(QueryCompletion {
-            host,
-            handle: handle.clone(),
-        });
-        Self {
-            inner: Arc::new(PendingQueryInner {
-                completion,
-                activated: AtomicBool::new(false),
-            }),
-        }
-    }
-
-    fn activate(&self, context: &EvalContext, task: EvaluationTaskId) {
-        if self.inner.activated.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        context.schedule_query(task, self.inner.completion.clone());
-    }
-}
-
-struct QueryCompletion<H: ?Sized> {
-    host: Arc<H>,
-    handle: Arc<EvaluationQueryHandle>,
-}
-
-impl<H> EvaluationQueryCompletion for QueryCompletion<H>
-where
-    H: ReflectionServices + ?Sized,
-{
-    fn complete(&self, result: EvaluationTaskPoll) {
-        self.host
-            .update_query(&self.handle, Value::from_core(task_query_snapshot(result)));
-    }
 }
 
 struct TaskStatusQuery<H: ?Sized> {
@@ -134,11 +77,6 @@ impl ReflectionJournal {
                 ReflectionUpdate::Cancel(context, task) => {
                     context.cancel_reflection_task_id(*task);
                 }
-                ReflectionUpdate::Query {
-                    context,
-                    task,
-                    query,
-                } => query.activate(context, *task),
             }
         }
     }
@@ -231,12 +169,6 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
             ["reflection_runtime", "v0", "request", "task_error"],
             1,
             ReflectionRequest::TaskError,
-        ),
-        EffectRequestSpec::new(
-            "query_task",
-            ["reflection_runtime", "v0", "request", "query_task"],
-            1,
-            ReflectionRequest::QueryTask,
         ),
         EffectRequestSpec::new(
             "query_result",
@@ -417,19 +349,15 @@ where
             }
         }
         ReflectionRequest::TaskStatus => {
-            let handle = task_handle_argument(context.eval_context(), arguments, "task_status")?;
-            ensure_local_task(context.eval_context(), &handle)?;
-            let query = read_query(context, &handle.status)?;
+            let (handle, query) = read_task_status(context, arguments, "task_status")?;
             let Some(state) = query.value else {
                 observe_query_change(context, &handle.status, query.generation);
                 return Ok(RequestResult::Fail);
             };
-            Ok(RequestResult::Return(task_status_value(&state)?))
+            Ok(RequestResult::Return(state))
         }
         ReflectionRequest::TaskResult => {
-            let handle = task_handle_argument(context.eval_context(), arguments, "task_result")?;
-            ensure_local_task(context.eval_context(), &handle)?;
-            let query = read_query(context, &handle.status)?;
+            let (handle, query) = read_task_status(context, arguments, "task_result")?;
             let Some(state) = query.value else {
                 observe_query_change(context, &handle.status, query.generation);
                 return Ok(RequestResult::Fail);
@@ -444,9 +372,7 @@ where
             }
         }
         ReflectionRequest::TaskError => {
-            let handle = task_handle_argument(context.eval_context(), arguments, "task_error")?;
-            ensure_local_task(context.eval_context(), &handle)?;
-            let query = read_query(context, &handle.status)?;
+            let (handle, query) = read_task_status(context, arguments, "task_error")?;
             let Some(state) = query.value else {
                 observe_query_change(context, &handle.status, query.generation);
                 return Ok(RequestResult::Fail);
@@ -462,63 +388,6 @@ where
                 }
                 TaggedTaskState::Complete(_) => Ok(RequestResult::Fail),
             }
-        }
-        ReflectionRequest::QueryTask => {
-            let task = task_handle_argument(context.eval_context(), arguments, "query_task")?;
-            let eval_context = context.eval_context().clone();
-            let host = context.host_arc();
-            let handle;
-            if let Some(mut transaction) = context.transaction() {
-                handle = transaction
-                    .store()
-                    .reserve_query()
-                    .map_err(|error| TaskError::new(error.as_ref()))?;
-                let query = PendingQuery::new(host, handle.clone());
-                transaction
-                    .parts()
-                    .1
-                    .reflection_journal()
-                    .updates
-                    .push(ReflectionUpdate::Query {
-                        context: eval_context,
-                        task: task.task,
-                        query,
-                    });
-            } else {
-                let snapshot = context.host().snapshot();
-                let mut store = StoreJournal::new(snapshot.store().clone());
-                handle = store
-                    .reserve_query()
-                    .map_err(|error| TaskError::new(error.as_ref()))?;
-                let query = PendingQuery::new(host, handle.clone());
-                let mut journal = S::Journal::default();
-                journal
-                    .reflection_journal()
-                    .updates
-                    .push(ReflectionUpdate::Query {
-                        context: eval_context,
-                        task: task.task,
-                        query,
-                    });
-                match context.host().commit(TaskCommit::new(
-                    store,
-                    snapshot.extra().clone(),
-                    journal,
-                )) {
-                    CommitResult::Committed => context.committed(),
-                    CommitResult::Conflict => {
-                        return Err(TaskError::new("fresh query reservation conflicted"));
-                    }
-                    CommitResult::MissingVolume(volume) => {
-                        return Err(TaskError::new(format!(
-                            "private query volume {} is unavailable",
-                            volume.get()
-                        )));
-                    }
-                    CommitResult::Closed => return Ok(RequestResult::Cancelled),
-                }
-            }
-            Ok(RequestResult::Return(query_handle_value(&handle)))
         }
         ReflectionRequest::QueryResult => {
             let query = query_handle_argument(context.eval_context(), arguments, "query_result")?;
@@ -596,34 +465,19 @@ fn task_handle_value(handle: Arc<ReflectionTaskHandle>) -> Value {
     Value::from_core(CoreValue::Opaque(OpaqueValue::new(handle)))
 }
 
-fn query_handle_value(handle: &Arc<EvaluationQueryHandle>) -> Value {
-    Value::from_core(CoreValue::Opaque(OpaqueValue::new(handle.clone())))
-}
-
-fn task_query_snapshot(task: EvaluationTaskPoll) -> CoreValue {
-    let (tag, value) = match task {
-        EvaluationTaskPoll::Pending(_) => (&*keys::PENDING, (*keys::UNIT_VALUE).clone()),
-        EvaluationTaskPoll::Complete(value) => (&*keys::COMPLETE, value),
-        EvaluationTaskPoll::Failed(error) => {
-            (&*keys::ERROR, CoreValue::binary_from_text(error.as_ref()))
-        }
-        EvaluationTaskPoll::Cancelled => (&*keys::CANCELED, (*keys::UNIT_VALUE).clone()),
-        EvaluationTaskPoll::ForeignSession => (&*keys::FOREIGN, (*keys::UNIT_VALUE).clone()),
-    };
-    CoreValue::Dict(Dict::new_sync().insert(tag.clone(), value))
-}
-
 fn task_status_query_value(status: EvaluationTaskStatus) -> CoreValue {
-    let (tag, value) = match status {
-        EvaluationTaskStatus::Launched => (&*keys::LAUNCHED, (*keys::UNIT_VALUE).clone()),
-        EvaluationTaskStatus::Blocked => (&*keys::BLOCKED, (*keys::UNIT_VALUE).clone()),
-        EvaluationTaskStatus::Complete(value) => (&*keys::OK, value),
-        EvaluationTaskStatus::Failed(error) => {
-            (&*keys::ERR, CoreValue::binary_from_text(error.as_ref()))
+    match status {
+        EvaluationTaskStatus::Launched => key_value(&keys::LAUNCHED),
+        EvaluationTaskStatus::Blocked => key_value(&keys::BLOCKED),
+        EvaluationTaskStatus::Complete(value) => {
+            CoreValue::Dict(Dict::new_sync().insert((*keys::OK).clone(), value))
         }
-        EvaluationTaskStatus::Cancelled => (&*keys::CANCELED, (*keys::UNIT_VALUE).clone()),
-    };
-    CoreValue::Dict(Dict::new_sync().insert(tag.clone(), value))
+        EvaluationTaskStatus::Failed(error) => CoreValue::Dict(Dict::new_sync().insert(
+            (*keys::ERR).clone(),
+            CoreValue::binary_from_text(error.as_ref()),
+        )),
+        EvaluationTaskStatus::Cancelled => key_value(&keys::CANCELED),
+    }
 }
 
 enum TaggedTaskState {
@@ -635,17 +489,20 @@ enum TaggedTaskState {
 }
 
 fn tagged_task_state(value: &Value) -> Result<TaggedTaskState, TaskError> {
+    if value.as_core() == &key_value(&keys::LAUNCHED) {
+        return Ok(TaggedTaskState::Launched);
+    }
+    if value.as_core() == &key_value(&keys::BLOCKED) {
+        return Ok(TaggedTaskState::Blocked);
+    }
+    if value.as_core() == &key_value(&keys::CANCELED) {
+        return Ok(TaggedTaskState::Cancelled);
+    }
     let CoreValue::Dict(state) = value.as_core() else {
         return Err(TaskError::new("reflection task status is malformed"));
     };
     if state.iter().count() != 1 {
         return Err(TaskError::new("reflection task status is malformed"));
-    }
-    if state.get(&*keys::LAUNCHED).is_some() {
-        return Ok(TaggedTaskState::Launched);
-    }
-    if state.get(&*keys::BLOCKED).is_some() {
-        return Ok(TaggedTaskState::Blocked);
     }
     if let Some(value) = state.get(&*keys::OK) {
         return Ok(TaggedTaskState::Complete(Value::from_core(value.clone())));
@@ -653,21 +510,7 @@ fn tagged_task_state(value: &Value) -> Result<TaggedTaskState, TaskError> {
     if let Some(error) = state.get(&*keys::ERR) {
         return Ok(TaggedTaskState::Failed(Value::from_core(error.clone())));
     }
-    if state.get(&*keys::CANCELED).is_some() {
-        return Ok(TaggedTaskState::Cancelled);
-    }
     Err(TaskError::new("reflection task status is malformed"))
-}
-
-fn task_status_value(value: &Value) -> Result<Value, TaskError> {
-    let key = match tagged_task_state(value)? {
-        TaggedTaskState::Launched => &*keys::LAUNCHED,
-        TaggedTaskState::Blocked => &*keys::BLOCKED,
-        TaggedTaskState::Complete(_) => &*keys::COMPLETE,
-        TaggedTaskState::Failed(_) => &*keys::ERROR,
-        TaggedTaskState::Cancelled => &*keys::CANCELED,
-    };
-    Ok(Value::from_core(key_value(key)))
 }
 
 fn key_value(key: &Key) -> CoreValue {
@@ -728,6 +571,17 @@ fn ensure_local_task(
 struct QueryRead {
     value: Option<Value>,
     generation: u64,
+}
+
+fn read_task_status<S: TaskSpecialization>(
+    context: &mut RequestContext<'_, S>,
+    arguments: Vec<Value>,
+    request: &str,
+) -> Result<(Arc<ReflectionTaskHandle>, QueryRead), TaskError> {
+    let handle = task_handle_argument(context.eval_context(), arguments, request)?;
+    ensure_local_task(context.eval_context(), &handle)?;
+    let status = read_query(context, &handle.status)?;
+    Ok((handle, status))
 }
 
 fn read_query<S: TaskSpecialization>(

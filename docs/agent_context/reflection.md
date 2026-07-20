@@ -88,21 +88,16 @@ and control flow.
 
 - `.refl_task` reserves an opaque handle and a private transactional status
   query, but journals launch inside a transaction. Losing branches discard
-  both. The query moves through `launched` or `blocked` to terminal `ok`, `err`,
-  or `canceled`; the handle keeps it alive.
+  both. The query stores atoms `'launched` or `'blocked`, terminal tagged values
+  `ok:Value` or `err:Error`, or the atom `'canceled`; the handle keeps it alive.
 - `.join_task` waits directly on every nonterminal child state and propagates
-  terminal errors. `.task_status` snapshots the query as `launched`, `blocked`,
-  `complete`, `error`, or `canceled`. `.task_result` and `.task_error` fail
-  transactionally while the query is nonterminal, return only their matching
-  terminal payload, and fail permanently for the other terminal outcome.
+  terminal errors. `.task_status` returns the stored status value unchanged.
+  `.task_result` and `.task_error` project its matching terminal payload, fail
+  transactionally while it is nonterminal, and fail permanently for the other
+  terminal outcome.
 - `.cancel_task` is an unconditional best-effort, commit-ordered request; late
   and foreign cancellation are harmless no-ops. Losing branches discard
   cancellation requests.
-- Mutable task state is otherwise not read directly. `.query_task` journals an
-  immutable tagged snapshot request and returns a distinct query handle;
-  `.query_result` fails until that request commits, then always returns the same
-  `pending`, `complete`, `error`, `canceled`, or `foreign` snapshot. An
-  uncommitted query result does not install a wake dependency on itself.
 - `.eval` forces only successive lazy outer shells and returns `ok:WHNF` or
   provisional `err:Text`. A pending evaluator dependency suspends it. It does
   not isolate or roll back reflection tasks activated by evaluation.

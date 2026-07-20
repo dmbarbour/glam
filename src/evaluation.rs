@@ -163,10 +163,6 @@ pub(crate) trait ReflectionTaskLauncher: Send + Sync {
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>;
 }
 
-pub(crate) trait EvaluationQueryCompletion: Send + Sync {
-    fn complete(&self, result: EvaluationTaskPoll);
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EvaluationTaskStatus {
     Launched,
@@ -346,12 +342,6 @@ struct PromiseRecord {
     result: Weak<OnceLock<Result<Value, Arc<str>>>>,
 }
 
-struct EvaluationQueryJob {
-    context: EvalContext,
-    task: EvaluationTaskId,
-    completion: Arc<dyn EvaluationQueryCompletion>,
-}
-
 #[derive(Default)]
 struct EvaluationTasks {
     reflection: HashMap<EvaluationWaitToken, ReflectionTaskRecord>,
@@ -359,7 +349,6 @@ struct EvaluationTasks {
     ready: VecDeque<EvaluationTaskId>,
     promises: HashMap<EvaluationWaitToken, PromiseRecord>,
     owned_promises: HashMap<EvaluationTaskId, Vec<EvaluationWaitToken>>,
-    queries: VecDeque<EvaluationQueryJob>,
 }
 
 pub(crate) struct EvaluationSession {
@@ -815,26 +804,6 @@ impl EvalContext {
         Ok(EvaluationTaskHandle { id, wait })
     }
 
-    pub(crate) fn schedule_query(
-        &self,
-        task: EvaluationTaskId,
-        completion: Arc<dyn EvaluationQueryCompletion>,
-    ) {
-        let mut tasks = self
-            .session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        tasks.queries.push_back(EvaluationQueryJob {
-            context: self.clone(),
-            task,
-            completion,
-        });
-        self.session.task_changed.notify_all();
-        drop(tasks);
-        self.session.notify_executor_ready();
-    }
-
     pub(crate) fn poll_reflection_task(&self, task: &EvaluationTaskHandle) -> EvaluationTaskPoll {
         self.poll_wait(&task.wait)
     }
@@ -997,16 +966,6 @@ impl EvalContext {
     }
 
     #[cfg(test)]
-    pub(crate) fn evaluation_query_count(&self) -> usize {
-        self.session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned")
-            .queries
-            .len()
-    }
-
-    #[cfg(test)]
     pub(crate) fn shares_session_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.session, &other.session)
     }
@@ -1024,12 +983,7 @@ struct ClaimedTask {
 impl EvaluationSession {
     fn run_until_quiescent(&self) -> EvaluationSessionRun {
         let mut attempted_blocked = HashSet::new();
-        'run: loop {
-            if let Some(query) = self.take_query_job() {
-                Self::complete_query_job(query);
-                attempted_blocked.clear();
-                continue;
-            }
+        loop {
             let mut claimed = loop {
                 let mut tasks = self
                     .tasks
@@ -1039,10 +993,6 @@ impl EvaluationSession {
                     .or_else(|| claim_blocked_task(&mut tasks, &attempted_blocked))
                 {
                     break claimed;
-                }
-                if !tasks.queries.is_empty() {
-                    drop(tasks);
-                    continue 'run;
                 }
                 if tasks
                     .reflection
@@ -1164,13 +1114,6 @@ impl EvaluationSession {
                 return EvaluationPumpOutcome::BudgetExhausted;
             }
 
-            if let Some(query) = self.take_query_job() {
-                step_budget -= 1;
-                Self::complete_query_job(query);
-                attempted_blocked.clear();
-                continue;
-            }
-
             let claimed = {
                 let mut tasks = self
                     .tasks
@@ -1183,15 +1126,6 @@ impl EvaluationSession {
                     .or_else(|| claim_blocked_task(&mut tasks, &attempted_blocked))
             };
             let Some(mut claimed) = claimed else {
-                let query_pending = !self
-                    .tasks
-                    .lock()
-                    .expect("evaluation task registry was poisoned")
-                    .queries
-                    .is_empty();
-                if query_pending {
-                    continue;
-                }
                 let mut tasks = self
                     .tasks
                     .lock()
@@ -1299,14 +1233,13 @@ impl EvaluationSession {
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
-        let ready = !tasks.queries.is_empty()
-            || tasks.ready.iter().any(|id| {
-                tasks
-                    .reflection_by_id
-                    .get(id)
-                    .and_then(|wait| tasks.reflection.get(wait))
-                    .is_some_and(|record| matches!(record.state, EvaluationTaskState::Queued))
-            });
+        let ready = tasks.ready.iter().any(|id| {
+            tasks
+                .reflection_by_id
+                .get(id)
+                .and_then(|wait| tasks.reflection.get(wait))
+                .is_some_and(|record| matches!(record.state, EvaluationTaskState::Queued))
+        });
         drop(tasks);
         if ready {
             self.notify_executor_ready();
@@ -1314,11 +1247,6 @@ impl EvaluationSession {
     }
 
     fn poll_one_ready_task(&self) {
-        if let Some(query) = self.take_query_job() {
-            Self::complete_query_job(query);
-            self.notify_executor_if_ready();
-            return;
-        }
         let claimed = {
             let mut tasks = self
                 .tasks
@@ -1339,19 +1267,6 @@ impl EvaluationSession {
             machine.cancel();
         }
         self.notify_executor_if_ready();
-    }
-
-    fn take_query_job(&self) -> Option<EvaluationQueryJob> {
-        self.tasks
-            .lock()
-            .expect("evaluation task registry was poisoned")
-            .queries
-            .pop_front()
-    }
-
-    fn complete_query_job(query: EvaluationQueryJob) {
-        let result = query.context.poll_reflection_task_id(query.task);
-        query.completion.complete(result);
     }
 }
 

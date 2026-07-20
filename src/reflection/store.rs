@@ -464,6 +464,7 @@ impl StoreJournal {
         self.views.get(&volume).cloned()
     }
 
+    #[cfg(test)]
     pub(crate) fn reserve_query(&mut self) -> Result<Arc<EvaluationQueryHandle>, Arc<str>> {
         self.reserve_query_state(pending_query_value())
     }
@@ -816,6 +817,7 @@ fn query_path(id: EvaluationQueryId) -> Vec<Key> {
     vec![Key::Number(Number::from_u64(id.get()))]
 }
 
+#[cfg(test)]
 fn pending_query_value() -> PublicValue {
     PublicValue::from_core(Value::Dict(
         Dict::new_sync().insert(QUERY_PENDING.clone(), (*keys::UNIT_VALUE).clone()),
