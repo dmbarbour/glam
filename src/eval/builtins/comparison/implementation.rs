@@ -163,9 +163,8 @@ fn equal_values(
         | (_, Value::Net(_)) => Err(EvalError::new(format!(
             "{name} builtin cannot compare function values"
         ))),
-        (Value::Opaque(_), _) | (_, Value::Opaque(_)) => Err(EvalError::new(format!(
-            "{name} builtin cannot compare opaque values"
-        ))),
+        (Value::Opaque(left), Value::Opaque(right)) => Ok(left == right),
+        (Value::Opaque(_), _) | (_, Value::Opaque(_)) => Ok(false),
         (Value::Atom(_), _)
         | (Value::Number(_), _)
         | (Value::Binary(_), _)

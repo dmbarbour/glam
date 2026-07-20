@@ -465,24 +465,54 @@ impl StoreJournal {
     }
 
     pub(crate) fn reserve_query(&mut self) -> Result<Arc<EvaluationQueryHandle>, Arc<str>> {
+        self.reserve_query_state(pending_query_value())
+    }
+
+    pub(crate) fn reserve_query_with(
+        &mut self,
+        result: PublicValue,
+    ) -> Result<Arc<EvaluationQueryHandle>, Arc<str>> {
+        self.reserve_query_state(complete_query_value(result))
+    }
+
+    fn reserve_query_state(
+        &mut self,
+        state: PublicValue,
+    ) -> Result<Arc<EvaluationQueryHandle>, Arc<str>> {
         let handle = self.snapshot.query_domain.allocate()?;
-        self.write_volume(
-            self.snapshot.query_volume,
-            query_path(handle.id),
-            pending_query_value(),
-        );
+        self.write_volume(self.snapshot.query_volume, query_path(handle.id), state);
         Ok(handle)
     }
 
+    #[cfg(test)]
     pub(crate) fn poll_query(
         &mut self,
         handle: &Arc<EvaluationQueryHandle>,
     ) -> EvaluationQueryPoll {
+        let observed = self.observe_query(handle);
+        self.peek_query_with_observation(handle, observed)
+    }
+
+    pub(crate) fn peek_query(&self, handle: &Arc<EvaluationQueryHandle>) -> EvaluationQueryPoll {
+        self.peek_query_with_observation(handle, false)
+    }
+
+    pub(crate) fn observe_query(&mut self, handle: &Arc<EvaluationQueryHandle>) -> bool {
+        if !query_belongs_to(&self.snapshot.query_domain, handle) {
+            return false;
+        }
+        let path = query_path(handle.id);
+        self.observe_volume_read(self.snapshot.query_volume, &path)
+    }
+
+    fn peek_query_with_observation(
+        &self,
+        handle: &Arc<EvaluationQueryHandle>,
+        observed: bool,
+    ) -> EvaluationQueryPoll {
         if !query_belongs_to(&self.snapshot.query_domain, handle) {
             return EvaluationQueryPoll::ForeignSession;
         }
-        let path = query_path(handle.id);
-        let observed = self.observe_volume_read(self.snapshot.query_volume, &path);
         let Some(root) = self.volume_view(self.snapshot.query_volume) else {
             return EvaluationQueryPoll::State {
                 value: PublicValue::empty_record(),
@@ -646,7 +676,7 @@ impl ReflectionStore {
     }
 
     #[doc(hidden)]
-    pub fn complete_query(
+    pub fn update_query(
         &mut self,
         handle: &Arc<EvaluationQueryHandle>,
         result: PublicValue,
@@ -955,7 +985,7 @@ mod tests {
             Some(EvaluationQueryState::Pending)
         ));
 
-        assert!(store.complete_query(&handle, PublicValue::text("snapshot")));
+        assert!(store.update_query(&handle, PublicValue::text("snapshot")));
         let EvaluationQueryPoll::State { value, .. } = store.snapshot().poll_query(&handle) else {
             panic!("completed query should remain available")
         };
@@ -963,6 +993,16 @@ mod tests {
             evaluate_query_state(&assembler, value),
             Some(EvaluationQueryState::Complete(value))
                 if value.as_binary() == Some(b"snapshot".as_slice())
+        ));
+
+        assert!(store.update_query(&handle, PublicValue::text("updated")));
+        let EvaluationQueryPoll::State { value, .. } = store.snapshot().poll_query(&handle) else {
+            panic!("updated query should remain available")
+        };
+        assert!(matches!(
+            evaluate_query_state(&assembler, value),
+            Some(EvaluationQueryState::Complete(value))
+                if value.as_binary() == Some(b"updated".as_slice())
         ));
 
         let id = handle.id;

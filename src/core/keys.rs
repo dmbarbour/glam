@@ -55,6 +55,8 @@ protocol_key!(KEY, "key");
 protocol_key!(OK, "ok");
 protocol_key!(ERR, "err");
 protocol_key!(PENDING, "pending");
+protocol_key!(LAUNCHED, "launched");
+protocol_key!(BLOCKED, "blocked");
 protocol_key!(COMPLETE, "complete");
 protocol_key!(CANCELED, "canceled");
 protocol_key!(FOREIGN, "foreign");

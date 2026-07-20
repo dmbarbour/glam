@@ -167,6 +167,19 @@ pub(crate) trait EvaluationQueryCompletion: Send + Sync {
     fn complete(&self, result: EvaluationTaskPoll);
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EvaluationTaskStatus {
+    Launched,
+    Blocked,
+    Complete(Value),
+    Failed(Arc<str>),
+    Cancelled,
+}
+
+pub(crate) trait EvaluationTaskStatusSink: Send + Sync {
+    fn update(&self, status: EvaluationTaskStatus);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReflectionTaskKind {
     Annotation,
@@ -234,6 +247,59 @@ struct ReflectionTaskRecord {
     state: EvaluationTaskState,
     machine: Option<Box<dyn EvaluationTaskMachine>>,
     cancel_requested: bool,
+    status_sinks: Vec<Arc<dyn EvaluationTaskStatusSink>>,
+}
+
+struct TaskStatusUpdate {
+    status: EvaluationTaskStatus,
+    sinks: Vec<Arc<dyn EvaluationTaskStatusSink>>,
+}
+
+fn task_status(state: &EvaluationTaskState) -> EvaluationTaskStatus {
+    match state {
+        EvaluationTaskState::Dormant
+        | EvaluationTaskState::Reserved
+        | EvaluationTaskState::Queued
+        | EvaluationTaskState::Running => EvaluationTaskStatus::Launched,
+        EvaluationTaskState::Blocked(_) => EvaluationTaskStatus::Blocked,
+        EvaluationTaskState::Complete(value) => EvaluationTaskStatus::Complete(value.clone()),
+        EvaluationTaskState::Failed(error) => EvaluationTaskStatus::Failed(error.clone()),
+        EvaluationTaskState::Cancelled => EvaluationTaskStatus::Cancelled,
+    }
+}
+
+fn task_status_update(
+    record: &mut ReflectionTaskRecord,
+    prior: Option<&EvaluationTaskState>,
+) -> Option<TaskStatusUpdate> {
+    if record.status_sinks.is_empty() {
+        return None;
+    }
+    let status = task_status(&record.state);
+    if prior.is_some_and(|prior| task_status(prior) == status) {
+        return None;
+    }
+    let terminal = matches!(
+        status,
+        EvaluationTaskStatus::Complete(_)
+            | EvaluationTaskStatus::Failed(_)
+            | EvaluationTaskStatus::Cancelled
+    );
+    let sinks = if terminal {
+        std::mem::take(&mut record.status_sinks)
+    } else {
+        record.status_sinks.clone()
+    };
+    Some(TaskStatusUpdate { status, sinks })
+}
+
+fn publish_task_status(update: Option<TaskStatusUpdate>) {
+    let Some(update) = update else {
+        return;
+    };
+    for sink in update.sinks {
+        sink.update(update.status.clone());
+    }
 }
 
 #[derive(Clone)]
@@ -253,7 +319,7 @@ impl PendingReflectionTask {
         &self.inner.handle
     }
 
-    pub(crate) fn activate(&self) {
+    pub(crate) fn activate(&self, status: Arc<dyn EvaluationTaskStatusSink>) {
         if self.inner.activated.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -261,6 +327,7 @@ impl PendingReflectionTask {
             &self.inner.handle,
             self.inner.effect.clone(),
             ReflectionTaskKind::Joinable,
+            Some(status),
         );
     }
 }
@@ -571,6 +638,7 @@ impl EvalContext {
                 state: EvaluationTaskState::Queued,
                 machine: Some(machine),
                 cancel_requested: false,
+                status_sinks: Vec::new(),
             },
         );
         let replaced_id = tasks.reflection_by_id.insert(id, wait.clone());
@@ -600,6 +668,7 @@ impl EvalContext {
                 state: EvaluationTaskState::Reserved,
                 machine: None,
                 cancel_requested: false,
+                status_sinks: Vec::new(),
             },
         );
         let replaced_id = tasks.reflection_by_id.insert(id, wait.clone());
@@ -616,6 +685,7 @@ impl EvalContext {
         handle: &EvaluationTaskHandle,
         effect: Value,
         kind: ReflectionTaskKind,
+        status_sink: Option<Arc<dyn EvaluationTaskStatusSink>>,
     ) {
         let result = self
             .session
@@ -640,6 +710,10 @@ impl EvalContext {
         if !matches!(record.state, EvaluationTaskState::Reserved) {
             return;
         }
+        let prior = record.state.clone();
+        if let Some(status_sink) = status_sink {
+            record.status_sinks.push(status_sink);
+        }
         match result {
             Ok(machine) => {
                 record.machine = Some(machine);
@@ -656,7 +730,12 @@ impl EvalContext {
                 .map(|record| &record.state),
             Some(EvaluationTaskState::Queued)
         );
+        let status = tasks
+            .reflection
+            .get_mut(&handle.wait)
+            .and_then(|record| task_status_update(record, Some(&prior)));
         drop(tasks);
+        publish_task_status(status);
         if queued {
             self.session.notify_executor_ready();
         }
@@ -698,23 +777,13 @@ impl EvalContext {
         })
     }
 
-    pub(crate) fn start_joinable_reflection_task(
-        &self,
-        effect: Value,
-    ) -> Result<EvaluationTaskHandle, Arc<str>> {
-        let pending = self.reserve_reflection_task(effect)?;
-        let handle = pending.handle().clone();
-        pending.activate();
-        Ok(handle)
-    }
-
     pub(crate) fn start_reflection_task(
         &self,
         effect: Value,
     ) -> Result<EvaluationTaskHandle, Arc<str>> {
         if self.session.reflection_launcher.get().is_some() {
             let handle = self.reserve_task()?;
-            self.activate_reflection_task(&handle, effect, ReflectionTaskKind::Annotation);
+            self.activate_reflection_task(&handle, effect, ReflectionTaskKind::Annotation, None);
             return Ok(handle);
         }
 
@@ -735,6 +804,7 @@ impl EvalContext {
                 state: EvaluationTaskState::Dormant,
                 machine: None,
                 cancel_requested: false,
+                status_sinks: Vec::new(),
             },
         );
         let replaced_id = tasks.reflection_by_id.insert(id, wait.clone());
@@ -787,7 +857,7 @@ impl EvalContext {
         &self,
         id: EvaluationTaskId,
     ) -> EvaluationTaskCancellation {
-        let machine = {
+        let (machine, status) = {
             let mut tasks = self
                 .session
                 .tasks
@@ -812,12 +882,16 @@ impl EvalContext {
                 | EvaluationTaskState::Reserved
                 | EvaluationTaskState::Queued
                 | EvaluationTaskState::Blocked(_) => {
+                    let prior = record.state.clone();
                     record.state = EvaluationTaskState::Cancelled;
                     self.session.task_changed.notify_all();
-                    record.machine.take()
+                    let machine = record.machine.take();
+                    let status = task_status_update(record, Some(&prior));
+                    (machine, status)
                 }
             }
         };
+        publish_task_status(status);
         if let Some(mut machine) = machine {
             machine.cancel();
         }
@@ -987,7 +1061,9 @@ impl EvaluationSession {
 
             let poll = claimed.machine.poll(TASK_POLL_QUANTUM);
             let claimed_id = claimed.id;
-            let (made_progress, remains_blocked, cancelled) = self.release_task(claimed, poll);
+            let (made_progress, remains_blocked, cancelled, status) =
+                self.release_task(claimed, poll);
+            publish_task_status(status);
             self.notify_executor_if_ready();
             if let Some(mut machine) = cancelled {
                 machine.cancel();
@@ -1139,7 +1215,9 @@ impl EvaluationSession {
             step_budget -= quantum;
             let poll = claimed.machine.poll(quantum);
             let claimed_id = claimed.id;
-            let (made_progress, remains_blocked, cancelled) = self.release_task(claimed, poll);
+            let (made_progress, remains_blocked, cancelled, status) =
+                self.release_task(claimed, poll);
+            publish_task_status(status);
             self.notify_executor_if_ready();
             if let Some(mut machine) = cancelled {
                 machine.cancel();
@@ -1159,7 +1237,12 @@ impl EvaluationSession {
         &self,
         claimed: ClaimedTask,
         poll: EvaluationMachinePoll,
-    ) -> (bool, bool, Option<Box<dyn EvaluationTaskMachine>>) {
+    ) -> (
+        bool,
+        bool,
+        Option<Box<dyn EvaluationTaskMachine>>,
+        Option<TaskStatusUpdate>,
+    ) {
         let mut tasks = self
             .tasks
             .lock()
@@ -1177,7 +1260,8 @@ impl EvaluationSession {
             record.cancel_requested = false;
             record.state = EvaluationTaskState::Cancelled;
             self.task_changed.notify_all();
-            return (true, false, Some(claimed.machine));
+            let status = task_status_update(record, Some(&claimed.prior_state));
+            return (true, false, Some(claimed.machine), status);
         }
         record.machine = Some(claimed.machine);
 
@@ -1202,8 +1286,12 @@ impl EvaluationSession {
         if matches!(record.state, EvaluationTaskState::Queued) {
             tasks.ready.push_back(claimed.id);
         }
+        let status = tasks
+            .reflection
+            .get_mut(&claimed.wait)
+            .and_then(|record| task_status_update(record, Some(&claimed.prior_state)));
         self.task_changed.notify_all();
-        (made_progress, remains_blocked, None)
+        (made_progress, remains_blocked, None, status)
     }
 
     fn notify_executor_if_ready(&self) {
@@ -1245,7 +1333,8 @@ impl EvaluationSession {
         // may claim independent tasks from this same session concurrently.
         self.notify_executor_if_ready();
         let poll = claimed.machine.poll(TASK_POLL_QUANTUM);
-        let (_, _, cancelled) = self.release_task(claimed, poll);
+        let (_, _, cancelled, status) = self.release_task(claimed, poll);
+        publish_task_status(status);
         if let Some(mut machine) = cancelled {
             machine.cancel();
         }

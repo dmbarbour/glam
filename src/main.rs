@@ -932,13 +932,13 @@ impl ReflectionServices for LoggerTaskHost {
         self.emit_output(diagnostic);
     }
 
-    fn complete_query(&self, handle: &Arc<glam::reflection::EvaluationQueryHandle>, result: Value) {
+    fn update_query(&self, handle: &Arc<glam::reflection::EvaluationQueryHandle>, result: Value) {
         let mut state = self
             .input
             .state
             .lock()
             .expect("log host mutex should not be poisoned");
-        if state.store.complete_query(handle, result) {
+        if state.store.update_query(handle, result) {
             state.wake_generation = state.wake_generation.wrapping_add(1);
             self.input.changed.notify_all();
         }

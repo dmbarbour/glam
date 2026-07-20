@@ -1,15 +1,14 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
 
 use crate::api::{Diagnostic, Value};
 use crate::core::{Atom, Dict, Key, OpaqueValue, Value as CoreValue, keys};
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{
-    EvalContext, EvaluationQueryCompletion, EvaluationTaskCancellation, EvaluationTaskHandle,
-    EvaluationTaskId, EvaluationTaskPoll, PendingReflectionTask,
+    EvalContext, EvaluationQueryCompletion, EvaluationTaskCancellation, EvaluationTaskId,
+    EvaluationTaskPoll, EvaluationTaskStatus, EvaluationTaskStatusSink, PendingReflectionTask,
 };
-use crate::number::Number;
 
 use super::{
     CommitResult, EffectRequestSpec, EvaluationQueryHandle, EvaluationQueryPoll,
@@ -26,6 +25,7 @@ pub enum ReflectionRequest {
     Log,
     ReflTask,
     JoinTask,
+    TaskStatus,
     TaskResult,
     TaskError,
     QueryTask,
@@ -35,7 +35,10 @@ pub enum ReflectionRequest {
 
 #[derive(Clone)]
 enum ReflectionUpdate {
-    Launch(PendingReflectionTask),
+    Launch {
+        task: PendingReflectionTask,
+        status: Arc<dyn EvaluationTaskStatusSink>,
+    },
     Cancel(EvalContext, EvaluationTaskId),
     Query {
         context: EvalContext,
@@ -90,7 +93,24 @@ where
 {
     fn complete(&self, result: EvaluationTaskPoll) {
         self.host
-            .complete_query(&self.handle, Value::from_core(task_query_snapshot(result)));
+            .update_query(&self.handle, Value::from_core(task_query_snapshot(result)));
+    }
+}
+
+struct TaskStatusQuery<H: ?Sized> {
+    host: Arc<H>,
+    handle: Arc<EvaluationQueryHandle>,
+}
+
+impl<H> EvaluationTaskStatusSink for TaskStatusQuery<H>
+where
+    H: ReflectionServices + ?Sized,
+{
+    fn update(&self, status: EvaluationTaskStatus) {
+        self.host.update_query(
+            &self.handle,
+            Value::from_core(task_status_query_value(status)),
+        );
     }
 }
 
@@ -110,7 +130,7 @@ impl ReflectionJournal {
     pub fn commit_updates(&self) {
         for update in &self.updates {
             match update {
-                ReflectionUpdate::Launch(task) => task.activate(),
+                ReflectionUpdate::Launch { task, status } => task.activate(status.clone()),
                 ReflectionUpdate::Cancel(context, task) => {
                     context.cancel_reflection_task_id(*task);
                 }
@@ -140,7 +160,7 @@ pub trait ReflectionServices: Send + Sync {
     fn emit_diagnostic(&self, diagnostic: Diagnostic);
 
     #[doc(hidden)]
-    fn complete_query(&self, handle: &Arc<EvaluationQueryHandle>, result: Value);
+    fn update_query(&self, handle: &Arc<EvaluationQueryHandle>, result: Value);
 }
 
 /// A task host that combines specialization transactions with reflection
@@ -193,6 +213,12 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
             ["reflection_runtime", "v0", "request", "join_task"],
             1,
             ReflectionRequest::JoinTask,
+        ),
+        EffectRequestSpec::new(
+            "task_status",
+            ["reflection_runtime", "v0", "request", "task_status"],
+            1,
+            ReflectionRequest::TaskStatus,
         ),
         EffectRequestSpec::new(
             "task_result",
@@ -298,34 +324,86 @@ where
                 TaskError::new("`.refl_task` received the wrong number of arguments")
             })?;
             let eval_context = context.eval_context().clone();
-            let handle = if let Some(mut transaction) = context.transaction() {
-                let pending = eval_context
-                    .reserve_reflection_task(effect.into_core())
-                    .map_err(|error| TaskError::new(error.as_ref()))?;
-                let handle = pending.handle().clone();
-                transaction
-                    .parts()
-                    .1
-                    .reflection_journal()
-                    .updates
-                    .push(ReflectionUpdate::Launch(pending));
-                handle
-            } else {
-                let handle = eval_context
-                    .start_joinable_reflection_task(effect.into_core())
-                    .map_err(|error| TaskError::new(error.as_ref()))?;
-                context.committed();
-                handle
-            };
-            Ok(RequestResult::Return(task_handle_value(&handle)))
+            let host = context.host_arc();
+            let effect = effect.into_core();
+            let handle =
+                if let Some(mut transaction) = context.transaction() {
+                    let result = transaction
+                        .store()
+                        .reserve_query_with(Value::from_core(task_status_query_value(
+                            EvaluationTaskStatus::Launched,
+                        )))
+                        .map_err(|error| TaskError::new(error.as_ref()))?;
+                    let pending = eval_context
+                        .reserve_reflection_task(effect)
+                        .map_err(|error| TaskError::new(error.as_ref()))?;
+                    let handle = Arc::new(ReflectionTaskHandle {
+                        task: pending.handle().id(),
+                        status: result.clone(),
+                    });
+                    let status = Arc::new(TaskStatusQuery {
+                        host,
+                        handle: result,
+                    });
+                    transaction.parts().1.reflection_journal().updates.push(
+                        ReflectionUpdate::Launch {
+                            task: pending,
+                            status,
+                        },
+                    );
+                    handle
+                } else {
+                    let snapshot = context.host().snapshot();
+                    let mut store = StoreJournal::new(snapshot.store().clone());
+                    let result = store
+                        .reserve_query_with(Value::from_core(task_status_query_value(
+                            EvaluationTaskStatus::Launched,
+                        )))
+                        .map_err(|error| TaskError::new(error.as_ref()))?;
+                    let pending = eval_context
+                        .reserve_reflection_task(effect)
+                        .map_err(|error| TaskError::new(error.as_ref()))?;
+                    let handle = Arc::new(ReflectionTaskHandle {
+                        task: pending.handle().id(),
+                        status: result.clone(),
+                    });
+                    let status = Arc::new(TaskStatusQuery {
+                        host,
+                        handle: result,
+                    });
+                    let mut journal = S::Journal::default();
+                    journal
+                        .reflection_journal()
+                        .updates
+                        .push(ReflectionUpdate::Launch {
+                            task: pending,
+                            status,
+                        });
+                    match context.host().commit(TaskCommit::new(
+                        store,
+                        snapshot.extra().clone(),
+                        journal,
+                    )) {
+                        CommitResult::Committed => context.committed(),
+                        CommitResult::Conflict => {
+                            return Err(TaskError::new("fresh task reservation conflicted"));
+                        }
+                        CommitResult::MissingVolume(volume) => {
+                            return Err(TaskError::new(format!(
+                                "private query volume {} is unavailable",
+                                volume.get()
+                            )));
+                        }
+                        CommitResult::Closed => return Ok(RequestResult::Cancelled),
+                    }
+                    handle
+                };
+            Ok(RequestResult::Return(task_handle_value(handle)))
         }
         ReflectionRequest::JoinTask => {
             let handle = task_handle_argument(context.eval_context(), arguments, "join_task")?;
-            match context.eval_context().poll_reflection_task_id(handle) {
-                EvaluationTaskPoll::Pending(wait) => {
-                    context.observe_task_wait(wait);
-                    Ok(RequestResult::Fail)
-                }
+            match context.eval_context().poll_reflection_task_id(handle.task) {
+                EvaluationTaskPoll::Pending(wait) => Err(TaskError::blocked(wait)),
                 EvaluationTaskPoll::Complete(value) => {
                     Ok(RequestResult::Return(Value::from_core(value)))
                 }
@@ -338,40 +416,51 @@ where
                 )),
             }
         }
+        ReflectionRequest::TaskStatus => {
+            let handle = task_handle_argument(context.eval_context(), arguments, "task_status")?;
+            ensure_local_task(context.eval_context(), &handle)?;
+            let query = read_query(context, &handle.status)?;
+            let Some(state) = query.value else {
+                observe_query_change(context, &handle.status, query.generation);
+                return Ok(RequestResult::Fail);
+            };
+            Ok(RequestResult::Return(task_status_value(&state)?))
+        }
         ReflectionRequest::TaskResult => {
             let handle = task_handle_argument(context.eval_context(), arguments, "task_result")?;
-            match context.eval_context().poll_reflection_task_id(handle) {
-                EvaluationTaskPoll::Pending(wait) => {
-                    context.observe_task_wait(wait);
+            ensure_local_task(context.eval_context(), &handle)?;
+            let query = read_query(context, &handle.status)?;
+            let Some(state) = query.value else {
+                observe_query_change(context, &handle.status, query.generation);
+                return Ok(RequestResult::Fail);
+            };
+            match tagged_task_state(&state)? {
+                TaggedTaskState::Complete(value) => Ok(RequestResult::Return(value)),
+                TaggedTaskState::Launched | TaggedTaskState::Blocked => {
+                    observe_query_change(context, &handle.status, query.generation);
                     Ok(RequestResult::Fail)
                 }
-                EvaluationTaskPoll::Complete(value) => {
-                    Ok(RequestResult::Return(Value::from_core(value)))
-                }
-                EvaluationTaskPoll::Failed(_) | EvaluationTaskPoll::Cancelled => {
-                    Ok(RequestResult::Fail)
-                }
-                EvaluationTaskPoll::ForeignSession => Err(TaskError::new(
-                    "task handle does not belong to this evaluation session",
-                )),
+                TaggedTaskState::Failed(_) | TaggedTaskState::Cancelled => Ok(RequestResult::Fail),
             }
         }
         ReflectionRequest::TaskError => {
             let handle = task_handle_argument(context.eval_context(), arguments, "task_error")?;
-            match context.eval_context().poll_reflection_task_id(handle) {
-                EvaluationTaskPoll::Pending(wait) => {
-                    context.observe_task_wait(wait);
+            ensure_local_task(context.eval_context(), &handle)?;
+            let query = read_query(context, &handle.status)?;
+            let Some(state) = query.value else {
+                observe_query_change(context, &handle.status, query.generation);
+                return Ok(RequestResult::Fail);
+            };
+            match tagged_task_state(&state)? {
+                TaggedTaskState::Failed(error) => Ok(RequestResult::Return(error)),
+                TaggedTaskState::Cancelled => Ok(RequestResult::Return(Value::text(
+                    "reflection task was cancelled",
+                ))),
+                TaggedTaskState::Launched | TaggedTaskState::Blocked => {
+                    observe_query_change(context, &handle.status, query.generation);
                     Ok(RequestResult::Fail)
                 }
-                EvaluationTaskPoll::Failed(error) => {
-                    Ok(RequestResult::Return(Value::text(error.as_ref())))
-                }
-                EvaluationTaskPoll::Complete(_) | EvaluationTaskPoll::Cancelled => {
-                    Ok(RequestResult::Fail)
-                }
-                EvaluationTaskPoll::ForeignSession => Err(TaskError::new(
-                    "task handle does not belong to this evaluation session",
-                )),
+                TaggedTaskState::Complete(_) => Ok(RequestResult::Fail),
             }
         }
         ReflectionRequest::QueryTask => {
@@ -392,7 +481,7 @@ where
                     .updates
                     .push(ReflectionUpdate::Query {
                         context: eval_context,
-                        task,
+                        task: task.task,
                         query,
                     });
             } else {
@@ -408,7 +497,7 @@ where
                     .updates
                     .push(ReflectionUpdate::Query {
                         context: eval_context,
-                        task,
+                        task: task.task,
                         query,
                     });
                 match context.host().commit(TaskCommit::new(
@@ -433,34 +522,13 @@ where
         }
         ReflectionRequest::QueryResult => {
             let query = query_handle_argument(context.eval_context(), arguments, "query_result")?;
-            let transaction_generation = context.transaction_generation();
-            let (result, generation) = if let Some(mut transaction) = context.transaction() {
-                let generation = transaction_generation
-                    .expect("active transaction must have a snapshot generation");
-                (transaction.store().poll_query(&query), generation)
-            } else {
-                let snapshot = context.host().snapshot();
-                (snapshot.store().poll_query(&query), snapshot.generation())
-            };
-            match result {
-                EvaluationQueryPoll::State { value, observed } => {
-                    let state = evaluate(context.eval_context(), value.into_core())?;
-                    match decode_query_state(&state) {
-                        Some(EvaluationQueryState::Pending) => {
-                            if observed {
-                                context.observe_host_generation(generation);
-                            }
-                            Ok(RequestResult::Fail)
-                        }
-                        Some(EvaluationQueryState::Complete(result)) => {
-                            Ok(RequestResult::Return(result))
-                        }
-                        None => Err(TaskError::new("query handle has been retired")),
-                    }
+            let result = read_query(context, &query)?;
+            match result.value {
+                Some(value) => Ok(RequestResult::Return(value)),
+                None => {
+                    observe_query_change(context, &query, result.generation);
+                    Ok(RequestResult::Fail)
                 }
-                EvaluationQueryPoll::ForeignSession => Err(TaskError::new(
-                    "query handle does not belong to this reasoning session",
-                )),
             }
         }
         ReflectionRequest::CancelTask => {
@@ -472,9 +540,9 @@ where
                     .1
                     .reflection_journal()
                     .updates
-                    .push(ReflectionUpdate::Cancel(eval_context, handle));
+                    .push(ReflectionUpdate::Cancel(eval_context, handle.task));
             } else {
-                match eval_context.cancel_reflection_task_id(handle) {
+                match eval_context.cancel_reflection_task_id(handle.task) {
                     EvaluationTaskCancellation::Requested => context.committed(),
                     EvaluationTaskCancellation::Late
                     | EvaluationTaskCancellation::ForeignSession => {}
@@ -519,19 +587,13 @@ fn tagged_result(tag: &Key, value: Value) -> Value {
     ))
 }
 
-static TASK_HANDLE_TAG: LazyLock<Key> = LazyLock::new(|| {
-    Key::abstract_global_path(["reflection_runtime", "v0", "value", "task_handle"])
-});
-
-fn task_handle_value(handle: &EvaluationTaskHandle) -> Value {
-    Value::from_core(task_handle_core_value(handle))
+struct ReflectionTaskHandle {
+    task: EvaluationTaskId,
+    status: Arc<EvaluationQueryHandle>,
 }
 
-fn task_handle_core_value(handle: &EvaluationTaskHandle) -> CoreValue {
-    CoreValue::Dict(Dict::new_sync().insert(
-        TASK_HANDLE_TAG.clone(),
-        CoreValue::Number(Number::from_u64(handle.id().get())),
-    ))
+fn task_handle_value(handle: Arc<ReflectionTaskHandle>) -> Value {
+    Value::from_core(CoreValue::Opaque(OpaqueValue::new(handle)))
 }
 
 fn query_handle_value(handle: &Arc<EvaluationQueryHandle>) -> Value {
@@ -549,6 +611,63 @@ fn task_query_snapshot(task: EvaluationTaskPoll) -> CoreValue {
         EvaluationTaskPoll::ForeignSession => (&*keys::FOREIGN, (*keys::UNIT_VALUE).clone()),
     };
     CoreValue::Dict(Dict::new_sync().insert(tag.clone(), value))
+}
+
+fn task_status_query_value(status: EvaluationTaskStatus) -> CoreValue {
+    let (tag, value) = match status {
+        EvaluationTaskStatus::Launched => (&*keys::LAUNCHED, (*keys::UNIT_VALUE).clone()),
+        EvaluationTaskStatus::Blocked => (&*keys::BLOCKED, (*keys::UNIT_VALUE).clone()),
+        EvaluationTaskStatus::Complete(value) => (&*keys::OK, value),
+        EvaluationTaskStatus::Failed(error) => {
+            (&*keys::ERR, CoreValue::binary_from_text(error.as_ref()))
+        }
+        EvaluationTaskStatus::Cancelled => (&*keys::CANCELED, (*keys::UNIT_VALUE).clone()),
+    };
+    CoreValue::Dict(Dict::new_sync().insert(tag.clone(), value))
+}
+
+enum TaggedTaskState {
+    Launched,
+    Blocked,
+    Complete(Value),
+    Failed(Value),
+    Cancelled,
+}
+
+fn tagged_task_state(value: &Value) -> Result<TaggedTaskState, TaskError> {
+    let CoreValue::Dict(state) = value.as_core() else {
+        return Err(TaskError::new("reflection task status is malformed"));
+    };
+    if state.iter().count() != 1 {
+        return Err(TaskError::new("reflection task status is malformed"));
+    }
+    if state.get(&*keys::LAUNCHED).is_some() {
+        return Ok(TaggedTaskState::Launched);
+    }
+    if state.get(&*keys::BLOCKED).is_some() {
+        return Ok(TaggedTaskState::Blocked);
+    }
+    if let Some(value) = state.get(&*keys::OK) {
+        return Ok(TaggedTaskState::Complete(Value::from_core(value.clone())));
+    }
+    if let Some(error) = state.get(&*keys::ERR) {
+        return Ok(TaggedTaskState::Failed(Value::from_core(error.clone())));
+    }
+    if state.get(&*keys::CANCELED).is_some() {
+        return Ok(TaggedTaskState::Cancelled);
+    }
+    Err(TaskError::new("reflection task status is malformed"))
+}
+
+fn task_status_value(value: &Value) -> Result<Value, TaskError> {
+    let key = match tagged_task_state(value)? {
+        TaggedTaskState::Launched => &*keys::LAUNCHED,
+        TaggedTaskState::Blocked => &*keys::BLOCKED,
+        TaggedTaskState::Complete(_) => &*keys::COMPLETE,
+        TaggedTaskState::Failed(_) => &*keys::ERROR,
+        TaggedTaskState::Cancelled => &*keys::CANCELED,
+    };
+    Ok(Value::from_core(key_value(key)))
 }
 
 fn key_value(key: &Key) -> CoreValue {
@@ -574,30 +693,83 @@ fn task_handle_argument(
     context: &EvalContext,
     arguments: Vec<Value>,
     request: &str,
-) -> Result<EvaluationTaskId, TaskError> {
+) -> Result<Arc<ReflectionTaskHandle>, TaskError> {
     let [handle]: [Value; 1] = arguments.try_into().map_err(|_| {
         TaskError::new(format!(
             "`.{request}` received the wrong number of arguments"
         ))
     })?;
-    let CoreValue::Dict(handle) = evaluate(context, handle.into_core())? else {
+    let CoreValue::Opaque(handle) = evaluate(context, handle.into_core())? else {
         return Err(TaskError::new(format!(
             "`.{request}` requires a reflection task handle"
         )));
     };
-    if handle.iter().count() != 1 {
-        return Err(TaskError::new(format!(
-            "`.{request}` requires a reflection task handle"
-        )));
+    handle
+        .downcast::<ReflectionTaskHandle>()
+        .ok_or_else(|| TaskError::new(format!("`.{request}` requires a reflection task handle")))
+}
+
+fn ensure_local_task(
+    context: &EvalContext,
+    handle: &ReflectionTaskHandle,
+) -> Result<(), TaskError> {
+    if matches!(
+        context.poll_reflection_task_id(handle.task),
+        EvaluationTaskPoll::ForeignSession
+    ) {
+        Err(TaskError::new(
+            "task handle does not belong to this evaluation session",
+        ))
+    } else {
+        Ok(())
     }
-    let Some(CoreValue::Number(id)) = handle.get(&TASK_HANDLE_TAG) else {
-        return Err(TaskError::new(format!(
-            "`.{request}` requires a reflection task handle"
-        )));
+}
+
+struct QueryRead {
+    value: Option<Value>,
+    generation: u64,
+}
+
+fn read_query<S: TaskSpecialization>(
+    context: &mut RequestContext<'_, S>,
+    handle: &Arc<EvaluationQueryHandle>,
+) -> Result<QueryRead, TaskError> {
+    let transaction_generation = context.transaction_generation();
+    let (result, generation) = if let Some(mut transaction) = context.transaction() {
+        let generation =
+            transaction_generation.expect("active transaction must have a snapshot generation");
+        (transaction.store().peek_query(handle), generation)
+    } else {
+        let snapshot = context.host().snapshot();
+        (snapshot.store().poll_query(handle), snapshot.generation())
     };
-    id.to_u64_if_integer()
-        .and_then(EvaluationTaskId::from_u64)
-        .ok_or_else(|| TaskError::new(format!("`.{request}` received an invalid task handle")))
+    let EvaluationQueryPoll::State { value, .. } = result else {
+        return Err(TaskError::new(
+            "query handle does not belong to this reasoning session",
+        ));
+    };
+    let state = evaluate(context.eval_context(), value.into_core())?;
+    let value = match decode_query_state(&state) {
+        Some(EvaluationQueryState::Pending) => None,
+        Some(EvaluationQueryState::Complete(result)) => Some(result),
+        None => return Err(TaskError::new("query handle has been retired")),
+    };
+    Ok(QueryRead { value, generation })
+}
+
+fn observe_query_change<S: TaskSpecialization>(
+    context: &mut RequestContext<'_, S>,
+    handle: &Arc<EvaluationQueryHandle>,
+    generation: u64,
+) {
+    let observed = if let Some(mut transaction) = context.transaction() {
+        transaction.store().observe_query(handle)
+    } else {
+        true
+    };
+    if observed {
+        context.observe_host_generation(generation);
+    }
 }
 
 fn query_handle_argument(

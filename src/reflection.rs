@@ -94,7 +94,6 @@ impl ReasoningSessionId {
 #[derive(Default)]
 struct RequestActivity {
     observed_generation: Option<u64>,
-    observed_wait: Option<EvaluationWaitToken>,
     committed: bool,
 }
 
@@ -1319,9 +1318,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 if let Some(generation) = activity.observed_generation {
                     branch.observe(checkpoint.clone(), generation);
                 }
-                if let Some(wait) = activity.observed_wait {
-                    branch.observe_wait(checkpoint, wait);
-                }
                 if activity.committed {
                     branch.retry = None;
                 }
@@ -1489,7 +1485,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             alternatives: Vec::new(),
             retry: None,
             observed_failure: false,
-            lazy_failure: None,
         };
         frame.owns_transaction = frame.outer.transaction.is_none();
         self.begin_cut_attempt(&mut frame);
@@ -1502,7 +1497,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         frame.alternatives.clear();
         frame.retry = None;
         frame.observed_failure = false;
-        frame.lazy_failure = None;
         if frame.owns_transaction {
             let snapshot = self.host.snapshot();
             frame.outer.transaction = Some(Transaction::new(snapshot));
@@ -1616,13 +1610,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .transaction
                     .as_ref()
                     .is_some_and(|transaction| transaction.observed);
-                if frame.lazy_failure.is_none() {
-                    frame.lazy_failure = failed
-                        .transaction
-                        .as_ref()
-                        .and_then(|transaction| transaction.wait.clone())
-                        .or_else(|| failed.retry.as_ref().and_then(|retry| retry.wait.clone()));
-                }
                 frame.retry = Some(failed);
                 if !frame.alternatives.is_empty() {
                     return Ok(MachineStep::Continue(frame.next_alternative()));
@@ -1656,13 +1643,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         {
             transaction.observed = true;
         }
-        if let Some(wait) = frame.lazy_failure.clone() {
-            if let Some(transaction) = failed.transaction.as_mut() {
-                transaction.wait = Some(wait);
-            } else if let Some(retry) = failed.retry.as_mut() {
-                retry.wait = Some(wait);
-            }
-        }
         if failed
             .fix_restarts
             .last()
@@ -1679,7 +1659,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 scope_depth: frame.parent_scope_depth,
             }));
         }
-        if !frame.observed_failure && frame.lazy_failure.is_none() {
+        if !frame.observed_failure {
             failed.transaction = None;
             return Ok(MachineStep::Continue(MachineWork::Outcome {
                 outcome: failed.into_failure(),
@@ -1692,13 +1672,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .as_ref()
             .map(|transaction| transaction.snapshot.generation())
             .unwrap_or_else(|| self.host.snapshot().generation());
-        let lazy = frame.lazy_failure.clone();
         let observed_generation = frame.observed_failure.then_some(generation);
         frame.retry = Some(failed);
         let index = self.execution.cuts.len();
         self.execution.cuts.push(frame);
         Ok(MachineStep::Blocked(BlockedExecution {
-            lazy,
+            lazy: None,
             observed_generation,
             wake: Some(WakeAction::RestartCut(index)),
             wake_on_terminal: true,
@@ -1728,7 +1707,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     TaskError::new("retryable reflection failure lost its observation")
                 })?;
                 Ok(MachineStep::Blocked(BlockedExecution {
-                    lazy: checkpoint.wait,
+                    lazy: None,
                     observed_generation: checkpoint.generation,
                     wake: Some(WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
                         branch: *checkpoint.branch,
@@ -2042,21 +2021,6 @@ impl<S: TaskSpecialization> Branch<S> {
         {
             self.retry = Some(RetryCheckpoint {
                 generation: Some(generation),
-                wait: None,
-                branch,
-            });
-        }
-    }
-
-    fn observe_wait(&mut self, checkpoint: Option<Box<Self>>, wait: EvaluationWaitToken) {
-        if let Some(transaction) = self.transaction.as_mut() {
-            transaction.wait.get_or_insert(wait);
-        } else if let Some(retry) = self.retry.as_mut() {
-            retry.wait.get_or_insert(wait);
-        } else if let Some(branch) = checkpoint {
-            self.retry = Some(RetryCheckpoint {
-                generation: None,
-                wait: Some(wait),
                 branch,
             });
         }
@@ -2067,7 +2031,7 @@ impl<S: TaskSpecialization> Branch<S> {
             || self
                 .transaction
                 .as_ref()
-                .is_some_and(|transaction| transaction.observed || transaction.wait.is_some())
+                .is_some_and(|transaction| transaction.observed)
     }
 
     fn into_failure(self) -> BranchOutcome<S> {
@@ -2175,7 +2139,6 @@ struct CutFrame<S: TaskSpecialization> {
     alternatives: Vec<Branch<S>>,
     retry: Option<Branch<S>>,
     observed_failure: bool,
-    lazy_failure: Option<EvaluationWaitToken>,
 }
 
 impl<S: TaskSpecialization> CutFrame<S> {
@@ -2245,7 +2208,6 @@ impl TaskTerminal {
 #[derive(Clone)]
 struct RetryCheckpoint<S: TaskSpecialization> {
     generation: Option<u64>,
-    wait: Option<EvaluationWaitToken>,
     branch: Box<Branch<S>>,
 }
 
@@ -2375,7 +2337,6 @@ struct Transaction<S: TaskSpecialization> {
     store: StoreJournal,
     journal: S::Journal,
     observed: bool,
-    wait: Option<EvaluationWaitToken>,
 }
 
 impl<S: TaskSpecialization> Transaction<S> {
@@ -2386,7 +2347,6 @@ impl<S: TaskSpecialization> Transaction<S> {
             store,
             journal: S::Journal::default(),
             observed: false,
-            wait: None,
         }
     }
 }
@@ -2425,16 +2385,6 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
             transaction.observed = true;
         } else if self.activity.observed_generation.is_none() {
             self.activity.observed_generation = Some(generation);
-        }
-    }
-
-    /// Records a task whose terminal transition can make a failed request
-    /// worth retrying.
-    pub(crate) fn observe_task_wait(&mut self, wait: EvaluationWaitToken) {
-        if let Some(transaction) = self.transaction.as_deref_mut() {
-            transaction.wait.get_or_insert(wait);
-        } else if self.activity.observed_wait.is_none() {
-            self.activity.observed_wait = Some(wait);
         }
     }
 
@@ -3426,9 +3376,9 @@ mod tests {
             TestHost::emit_diagnostic(self, diagnostic);
         }
 
-        fn complete_query(&self, handle: &Arc<EvaluationQueryHandle>, result: PublicValue) {
+        fn update_query(&self, handle: &Arc<EvaluationQueryHandle>, result: PublicValue) {
             let mut state = self.state.lock().unwrap();
-            if state.store.complete_query(handle, result) {
+            if state.store.update_query(handle, result) {
                 state.generation += 1;
             }
         }
@@ -4007,6 +3957,42 @@ mod tests {
             assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
             b"result".as_slice()
         );
+    }
+
+    #[test]
+    fn task_status_reports_launched_and_terminal_states() {
+        let host = Arc::new(TestHost::default());
+        for source in [
+            ".refl_task (.r ()) >>= (\\task -> .task_status task >>= (\\status -> (status == 'launched) =>> .r ()))",
+            ".refl_task (.r ()) >>= (\\task -> .join_task task >>= (\\_ -> .task_status task >>= (\\status -> (status == 'complete) =>> .r ())))",
+            ".refl_task .fail >>= (\\task -> .task_error task >>= (\\_ -> .task_status task >>= (\\status -> (status == 'error) =>> .r ())))",
+            ".refl_task (.r ()) >>= (\\task -> .cancel_task task =>> .task_error task >>= (\\_ -> .task_status task >>= (\\status -> (status == 'canceled) =>> .r ())))",
+        ] {
+            let (_, effect) = compile_effect(source);
+            let (context, task) = schedule_composed_test_task(&effect, host.clone());
+            let poll = pump_composed_test_task(&context, &task);
+            assert!(
+                matches!(poll, EvaluationTaskPoll::Complete(_)),
+                "task status should match for {source}, got {poll:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn join_does_not_advance_an_alternative_while_the_child_is_nonterminal() {
+        let (_, effect) = compile_effect(
+            ".refl_task (.cut (.heap.get ['never] >>= (\\_ -> .fail))) >>= (\\task -> .cut (.alt (.join_task task) (.r \"fallback\")))",
+        );
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host);
+        assert_eq!(
+            context.pump_wait(task.wait(), 16_384),
+            crate::evaluation::EvaluationPumpOutcome::NoProgress
+        );
+        assert!(matches!(
+            context.poll_reflection_task(&task),
+            EvaluationTaskPoll::Pending(_)
+        ));
     }
 
     #[test]

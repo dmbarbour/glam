@@ -794,16 +794,12 @@ impl ReflectionServices for AssemblerReflectionHost {
         self.diagnostics.publish(diagnostic);
     }
 
-    fn complete_query(
-        &self,
-        handle: &Arc<crate::reflection::EvaluationQueryHandle>,
-        result: Value,
-    ) {
+    fn update_query(&self, handle: &Arc<crate::reflection::EvaluationQueryHandle>, result: Value) {
         let mut state = self
             .state
             .lock()
             .expect("assembler reflection host mutex should not be poisoned");
-        if state.store.complete_query(handle, result) {
+        if state.store.update_query(handle, result) {
             state.wake_generation = state.wake_generation.wrapping_add(1);
             self.changed.notify_all();
         }

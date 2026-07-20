@@ -109,10 +109,14 @@ not revoke it.
   publishes it through the session's diagnostic bus only after commit.
 - `.dict_items Dict` returns ordered `{key,value}` records.
 - `.eval Value` reduces lazy outer shells and returns `ok:WHNF` or `err:Text`.
-- `.refl_task Effect` reserves a child handle; launch is commit-ordered inside
-  a transaction.
-- `.join_task`, `.task_result`, and `.task_error` observe immutable terminal
-  task state. `.cancel_task` journals a best-effort cancellation request.
+- `.refl_task Effect` reserves an opaque child handle plus a private status
+  query; launch is commit-ordered inside a transaction. The status query is
+  updated only when the projected state changes between `launched`, `blocked`,
+  and terminal `ok`, `err`, or `canceled`.
+- `.join_task` waits directly and propagates non-success terminal states.
+  `.task_status` reads the transactional status snapshot, while `.task_result`
+  and `.task_error` wait transactionally for their matching terminal payload.
+  `.cancel_task` journals a best-effort cancellation request.
 - `.query_task Task` journals one snapshot of mutable task state and returns a
   distinct opaque query handle. Its `pending` state is published atomically
   with the handle in a host-private store volume, then queued as scheduler
