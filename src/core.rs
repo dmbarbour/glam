@@ -368,12 +368,18 @@ enum LazySource {
         path: Arc<[CoreDataKey]>,
         arguments: Arc<[Value]>,
     },
+    Application(Arc<LazyApplication>),
     Builtin(BuiltinCall),
     NetComputation(NetValue),
     FunctionCall {
         function: FunctionValue,
         arguments: Arc<[Value]>,
     },
+}
+
+struct LazyApplication {
+    function: Value,
+    arguments: Arc<[Value]>,
 }
 
 pub(crate) struct FixpointCell {
@@ -546,6 +552,20 @@ impl LazyValue {
         Self::with_source("access", LazySource::Access { path, arguments })
     }
 
+    pub(crate) fn from_application(function: Value, arguments: Arc<[Value]>) -> Self {
+        assert!(
+            !arguments.is_empty(),
+            "lazy application requires an argument"
+        );
+        Self::with_source(
+            "application",
+            LazySource::Application(Arc::new(LazyApplication {
+                function,
+                arguments,
+            })),
+        )
+    }
+
     pub(crate) fn from_builtin(call: BuiltinCall) -> Self {
         Self::with_source("builtin call", LazySource::Builtin(call))
     }
@@ -578,6 +598,15 @@ impl LazyValue {
     pub(crate) fn access(&self) -> Option<(&[CoreDataKey], &[Value])> {
         match &self.source {
             LazySource::Access { path, arguments } => Some((path, arguments)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn application(&self) -> Option<(&Value, &[Value])> {
+        match &self.source {
+            LazySource::Application(application) => {
+                Some((&application.function, &application.arguments))
+            }
             _ => None,
         }
     }
@@ -859,6 +888,7 @@ mod tests {
                 path: Arc<[CoreDataKey]>,
                 arguments: Arc<[Value]>,
             },
+            Application(Arc<LazyApplication>),
             Builtin(BuiltinCall),
             NetComputation(NetValue),
             FunctionCall {

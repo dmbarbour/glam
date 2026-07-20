@@ -510,6 +510,7 @@ struct Tags {
     set: Key,
     heap_get: Key,
     heap_set: Key,
+    heap_rewrite: Key,
     reset: Key,
     shift: Key,
     resume: Key,
@@ -537,6 +538,7 @@ impl Tags {
             set: tag("set"),
             heap_get: tag("heap_get"),
             heap_set: tag("heap_set"),
+            heap_rewrite: tag("heap_rewrite"),
             reset: tag("reset"),
             shift: tag("shift"),
             resume: tag("resume"),
@@ -1004,6 +1006,44 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
                     store.write(path, PublicValue::from_core(value));
+                    let commit =
+                        TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
+                    match self.host.commit(commit) {
+                        CommitResult::Committed => {
+                            branch.retry = None;
+                            MachineWork::Deliver {
+                                value: unit_value(),
+                                branch,
+                                scope_depth,
+                            }
+                        }
+                        CommitResult::Conflict => MachineWork::Drive {
+                            branch,
+                            scope_depth,
+                        },
+                        CommitResult::Closed => MachineWork::Outcome {
+                            outcome: BranchOutcome::Cancelled,
+                            scope_depth,
+                        },
+                    }
+                }
+            }
+            Request::HeapRewrite(path, updater) => {
+                let path =
+                    eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
+                if let Some(transaction) = branch.transaction.as_mut() {
+                    transaction
+                        .store
+                        .rewrite(path, PublicValue::from_core(updater));
+                    MachineWork::Deliver {
+                        value: unit_value(),
+                        branch,
+                        scope_depth,
+                    }
+                } else {
+                    let snapshot = self.host.snapshot();
+                    let mut store = StoreJournal::new(snapshot.store().clone());
+                    store.rewrite(path, PublicValue::from_core(updater));
                     let commit =
                         TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
                     match self.host.commit(commit) {
@@ -2292,6 +2332,7 @@ enum Request<R> {
     Set(Value, Value),
     HeapGet(Value),
     HeapSet(Value, Value),
+    HeapRewrite(Value, Value),
     Reset(Value, Value),
     Shift(Value, Value),
     Resume(EvaluationTaskId, u64, Value),
@@ -2357,6 +2398,9 @@ fn parse_request<R: Clone>(
     args!(&tags.heap_set, 2, |[path, value]: [Value; 2]| {
         Request::HeapSet(path, value)
     });
+    args!(&tags.heap_rewrite, 2, |[path, updater]: [Value; 2]| {
+        Request::HeapRewrite(path, updater)
+    });
     args!(&tags.reset, 2, |[key, operation]: [Value; 2]| {
         Request::Reset(key, operation)
     });
@@ -2419,6 +2463,10 @@ fn effect_api<R: Clone>(
             entry(
                 "set",
                 request_function(tags.heap_set.clone(), 2, Vec::new(), false),
+            ),
+            entry(
+                "rewrite",
+                request_function(tags.heap_rewrite.clone(), 2, Vec::new(), false),
             ),
         ]
         .into_iter()
@@ -3197,6 +3245,20 @@ mod tests {
             .get(module.value(), "refl.effect")
             .expect("effect fixture should define effect");
         (assembler, effect)
+    }
+
+    fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &PublicValue) {
+        let actual = assembler.evaluate(actual).unwrap();
+        let Value::List(actual) = actual.as_core() else {
+            panic!("actual value should be a list")
+        };
+        let Value::List(expected) = expected.as_core() else {
+            panic!("expected value should be a list")
+        };
+        assert_eq!(
+            eval::list_to_value_items(&assembler.eval_context(), actual).unwrap(),
+            eval::list_to_value_items(&assembler.eval_context(), expected).unwrap(),
+        );
     }
 
     fn completed(source: &str) -> (Assembler, PublicValue) {
@@ -4298,6 +4360,34 @@ mod tests {
             "changed",
             PublicValue::text("later"),
         )])));
+        let error = run_standard_on(&effect, host.clone()).unwrap_err();
+
+        assert!(error.to_string().contains("failed permanently"));
+        assert_eq!(host.wait_count(), 0);
+        assert_eq!(host.heap(), PublicValue::empty_record());
+    }
+
+    #[test]
+    fn heap_rewrite_lazily_updates_the_transactional_view() {
+        let (assembler, effect) = compile_effect(
+            ".heap.set ['items] [\"base\"] =>> .heap.rewrite ['items] (\\items -> items ++ [\"next\"]) =>> .heap.get ['items]",
+        );
+        let host = Arc::new(TestHost::default());
+        let TaskOutcome::Complete(value) = run_standard_on(&effect, host.clone()).unwrap() else {
+            panic!("heap rewrite should complete")
+        };
+        let expected = PublicValue::list([PublicValue::text("base"), PublicValue::text("next")]);
+
+        assert_list_values(&assembler, &value, &expected);
+        let heap_items = assembler.get(&host.heap(), "items").unwrap();
+        assert_list_values(&assembler, &heap_items, &expected);
+    }
+
+    #[test]
+    fn blind_heap_rewrite_does_not_make_failure_retryable() {
+        let (_, effect) =
+            compile_effect(".cut (.heap.rewrite ['counter] (\\value -> value + 1) =>> .fail)");
+        let host = Arc::new(TestHost::default());
         let error = run_standard_on(&effect, host.clone()).unwrap_err();
 
         assert!(error.to_string().contains("failed permanently"));

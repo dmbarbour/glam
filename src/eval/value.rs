@@ -9,7 +9,7 @@ use crate::evaluation::{EvalContext, EvaluationPumpOutcome, EvaluationTaskPoll};
 use crate::list::ListItem;
 use crate::number::Number;
 
-use super::application::apply_value;
+use super::application::{apply_value, apply_values};
 use super::builtins::{apply_builtin, construct_fixpoint_object, is_undefined_value};
 use super::net::*;
 use super::sequence::list_to_key_items;
@@ -70,10 +70,12 @@ pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvalErr
 pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvalError> {
     let net_computation = lazy.net_computation();
     let function_call = lazy.function_call();
+    let application = lazy.application();
     let builtin = lazy.builtin();
     let reflection_annotation = builtin.is_some_and(|call| call.builtin == Builtin::Anno);
     let continue_through_result = net_computation.is_some()
         || function_call.is_some()
+        || application.is_some()
         || builtin.is_some_and(|call| {
             matches!(
                 call.builtin,
@@ -171,6 +173,8 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
         result.map_err(|message| EvalError::new(message.as_ref()))
     } else if let Some((path, arguments)) = lazy.access() {
         resolve_core_access(context, arguments, path)
+    } else if let Some((function, arguments)) = application {
+        apply_values(context, function.clone(), arguments.to_vec())
     } else if let Some(call) = builtin {
         let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
         let argument = arguments

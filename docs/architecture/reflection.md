@@ -35,7 +35,8 @@ effect value
 ```
 
 Standard effects include `r`, `seq`, `alt`, `fail`, `cut`, `fix`, indexed
-task-local `get`/`set`, shared `heap.get`/`heap.set`, and indexed `reset`/`shift`.
+task-local `get`/`set`, shared `heap.get`/`heap.set`/`heap.rewrite`, and indexed
+`reset`/`shift`.
 Local user state, including the reset stack, is ordinary task state. Shared
 heap state is staged separately in the host transaction; it is never projected
 into local state. Choice frames, journals, and host queues remain machine or
@@ -47,19 +48,24 @@ validates and commits. A host observation can turn later failure into a retry
 point. `cut` alone does not: unobservant failure is terminal.
 
 `reflection/store.rs` owns the shared heap independently of host wake state.
-Transactions record hierarchical read paths and an ordered write overlay;
-commits rebase disjoint writes onto the current persistent root. The store
-retains exact changed paths. Blind writes, including overlapping parent and
-child paths, serialize in commit order without validation. A session-selected
+Transactions record hierarchical read paths and an ordered edit overlay;
+commits rebase edits onto the current persistent root. The store retains exact
+changed paths. Blind sets and rewrites, including overlapping parent and child
+paths, serialize in commit order without validation. A session-selected
 `Arc<dyn ConflictAnalysisStrategy>` controls only how reads are summarized:
 the bootstrap supplies exact, conservative fingerprint, and fully coarse
 strategies. Changing strategy creates a fresh reasoning session.
 
 Heap paths are ordinary lazy value operations rather than a store schema.
-`.heap.set` stages a patch without inspecting the old heap. `.heap.get`
-returns an unforced access value; malformed roots and nested updates therefore
-remain latent evaluator errors, which `.eval` can observe as data. Reads after
-a covering transaction-local write do not add a snapshot dependency.
+`.heap.set` stages a replacement without inspecting the old heap.
+`.heap.rewrite Path Updater` lazily applies `Updater` to the commit-time value
+at `Path`, allowing concurrent rewrites to serialize without retrying. A later
+local read remains snapshot-dependent through a rewrite; an ancestor rewrite
+widens a descendant read to the updater's complete input path. An earlier
+covering set can still make that widened dependency entirely local.
+`.heap.get` returns an unforced access value; malformed roots, updates, and
+updaters therefore remain latent evaluator errors, which `.eval` can observe
+as data.
 
 Host locks still make store and specialization changes atomic. For example,
 the logger validates its input-stream revision, validates and applies its heap

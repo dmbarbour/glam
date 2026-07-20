@@ -28,20 +28,23 @@ and control flow.
 - `.get`/`.set` access only task-local user state. The active reset stack is
   stored under a private key in that state, so replacing all local state also
   replaces or corrupts the continuation environment. That consequence belongs
-  to the user. `.heap.get`/`.heap.set` are the distinct shared-state effects;
-  `[]` explicitly means the whole local state or whole shared heap according to
-  the selected effect.
+  to the user. `.heap.get`/`.heap.set`/`.heap.rewrite` are the distinct
+  shared-state effects; `[]` explicitly means the whole local state or whole
+  shared heap according to the selected effect.
 - Choice frames, journals, immediate sequence state, and host queues remain
   task-owned. An outer `.cut` snapshots shared heap and specialization data
   without inserting either into local state; failed alternatives discard
   changes, nested success merges upward, and outer success validates and
   commits.
-- Shared-heap reads record their requested snapshot dependency, including
-  missing paths and `[]`. Writes are unvalidated lazy patches and observe
-  nothing: overlapping blind writes serialize in commit order. A prior local
-  write at or above a read path masks that snapshot read, while an earlier
-  observation remains. The conflict-analysis strategy may only conservatively
-  summarize reads and must never redefine write semantics.
+- Shared-heap reads record their required snapshot dependency, including
+  missing paths and `[]`. Sets and rewrites are unvalidated lazy edits and
+  observe nothing: overlapping blind edits serialize in commit order. A prior
+  local set at or above a read path masks that snapshot read. A rewrite does
+  not: an ancestor rewrite widens a later descendant read to the updater's
+  complete input path, though an earlier covering set can still make the
+  widened dependency local. Earlier observations remain. The conflict-analysis
+  strategy may only conservatively summarize reads and must never redefine
+  edit semantics.
 - Heap effects impose no dictionary schema. Root replacement accepts any
   value, and nested updates or accesses return ordinary lazy errors when their
   eventual structure is invalid. `.eval` is the explicit way to observe such

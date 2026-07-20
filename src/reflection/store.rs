@@ -1,14 +1,15 @@
 //! Journaled shared state for reflection tasks.
 //!
 //! Conflict-analysis strategies summarize reads only. The store retains exact
-//! write paths so strategy selection cannot change write or rebase semantics.
+//! edit paths so strategy selection cannot change edit or rebase semantics.
 
 use std::collections::{BTreeMap, BTreeSet, hash_map::RandomState};
 use std::hash::BuildHasher;
 use std::sync::Arc;
 
 use crate::api::Value as PublicValue;
-use crate::core::{Atom, Builtin, Dict, Key, List, Value};
+use crate::core::{Atom, Builtin, Dict, Key, LazyValue, List, Value};
+use crate::core_net::CoreDataKey;
 
 /// A hierarchical address in the shared reflection heap.
 ///
@@ -217,18 +218,32 @@ impl StoreSnapshot {
 }
 
 #[derive(Clone)]
-struct StoreWrite {
-    path: ConflictPath,
-    value: PublicValue,
+enum StoreEdit {
+    Set {
+        path: ConflictPath,
+        value: PublicValue,
+    },
+    Rewrite {
+        path: ConflictPath,
+        updater: PublicValue,
+    },
 }
 
-/// Reads and writes accumulated by one optimistic transaction.
+impl StoreEdit {
+    fn path(&self) -> &ConflictPath {
+        match self {
+            Self::Set { path, .. } | Self::Rewrite { path, .. } => path,
+        }
+    }
+}
+
+/// Reads and ordered edits accumulated by one optimistic transaction.
 #[derive(Clone)]
 pub struct StoreJournal {
     snapshot: StoreSnapshot,
     view: PublicValue,
     observations: Box<dyn ConflictObservationIndex>,
-    writes: Vec<StoreWrite>,
+    edits: Vec<StoreEdit>,
 }
 
 impl StoreJournal {
@@ -240,22 +255,27 @@ impl StoreJournal {
             snapshot,
             view,
             observations,
-            writes: Vec::new(),
+            edits: Vec::new(),
         }
     }
 
-    /// Records a read only when no earlier transaction-local write completely
-    /// supplies the requested path. Earlier observations remain intact.
+    /// Records the portion of the snapshot needed by this read. Local rewrites
+    /// may widen that dependency; an earlier covering set makes it internal.
+    /// Earlier observations remain intact.
     pub(crate) fn observe_read(&mut self, path: &[Key]) -> bool {
-        let path = ConflictPath::from_keys(path.to_vec());
-        if self
-            .writes
-            .iter()
-            .any(|write| write.path.is_prefix_of(&path))
-        {
-            return false;
+        let mut dependency = ConflictPath::from_keys(path.to_vec());
+        for edit in self.edits.iter().rev() {
+            match edit {
+                StoreEdit::Set { path, .. } if path.is_prefix_of(&dependency) => return false,
+                StoreEdit::Rewrite { path, .. } if path.overlaps(&dependency) => {
+                    if path.is_prefix_of(&dependency) {
+                        dependency = path.clone();
+                    }
+                }
+                StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } => {}
+            }
         }
-        self.observations.observe(&path);
+        self.observations.observe(&dependency);
         true
     }
 
@@ -264,12 +284,21 @@ impl StoreJournal {
     }
 
     pub(crate) fn write(&mut self, path: Vec<Key>, value: PublicValue) {
-        let write = StoreWrite {
+        let edit = StoreEdit::Set {
             path: ConflictPath::from_keys(path),
             value,
         };
-        self.view = apply_write(self.view.clone(), &write);
-        self.writes.push(write);
+        self.view = apply_edit(self.view.clone(), &edit);
+        self.edits.push(edit);
+    }
+
+    pub(crate) fn rewrite(&mut self, path: Vec<Key>, updater: PublicValue) {
+        let edit = StoreEdit::Rewrite {
+            path: ConflictPath::from_keys(path),
+            updater,
+        };
+        self.view = apply_edit(self.view.clone(), &edit);
+        self.edits.push(edit);
     }
 }
 
@@ -323,14 +352,14 @@ impl ReflectionStore {
             .insert(ConflictPath::root(), self.revision);
     }
 
-    /// Validates and commits a journal. Exact write paths and rebase policy
+    /// Validates and commits a journal. Exact edit paths and rebase policy
     /// remain independent of the selected read-analysis strategy.
     #[doc(hidden)]
     pub fn try_commit(&mut self, journal: &StoreJournal) -> bool {
         if self.conflicts(journal) {
             return false;
         }
-        if journal.writes.is_empty() {
+        if journal.edits.is_empty() {
             return true;
         }
 
@@ -339,10 +368,10 @@ impl ReflectionStore {
         {
             journal.view.clone()
         } else {
-            apply_writes(self.root.clone(), &journal.writes)
+            apply_edits(self.root.clone(), &journal.edits)
         };
         self.revision = self.revision.wrapping_add(1);
-        for path in normalized_write_paths(&journal.writes) {
+        for path in normalized_edit_paths(&journal.edits) {
             self.latest_changes.insert(path, self.revision);
         }
         true
@@ -355,38 +384,68 @@ impl ReflectionStore {
     }
 }
 
-fn normalized_write_paths(writes: &[StoreWrite]) -> Vec<ConflictPath> {
+fn normalized_edit_paths(edits: &[StoreEdit]) -> Vec<ConflictPath> {
     let mut paths = BTreeSet::new();
-    for write in writes {
+    for edit in edits {
+        let edit_path = edit.path();
         if paths
             .iter()
-            .any(|path: &ConflictPath| path.is_prefix_of(&write.path))
+            .any(|path: &ConflictPath| path.is_prefix_of(edit_path))
         {
             continue;
         }
-        paths.retain(|path| !write.path.is_prefix_of(path));
-        paths.insert(write.path.clone());
+        paths.retain(|path| !edit_path.is_prefix_of(path));
+        paths.insert(edit_path.clone());
     }
     paths.into_iter().collect()
 }
 
-fn apply_writes(mut root: PublicValue, writes: &[StoreWrite]) -> PublicValue {
-    for write in writes {
-        root = apply_write(root, write);
+fn apply_edits(mut root: PublicValue, edits: &[StoreEdit]) -> PublicValue {
+    for edit in edits {
+        root = apply_edit(root, edit);
     }
     root
 }
 
-fn apply_write(root: PublicValue, write: &StoreWrite) -> PublicValue {
-    if write.path.depth() == 0 {
-        return write.value.clone();
+fn apply_edit(root: PublicValue, edit: &StoreEdit) -> PublicValue {
+    match edit {
+        StoreEdit::Set { path, value } => apply_value_at_path(root, path, value.as_core().clone()),
+        StoreEdit::Rewrite { path, updater } => {
+            let prior = lazy_core_value_path(root.as_core().clone(), path.keys());
+            let updated = Value::Lazy(LazyValue::from_application(
+                updater.as_core().clone(),
+                Arc::from([prior]),
+            ));
+            apply_value_at_path(root, path, updated)
+        }
+    }
+}
+
+fn apply_value_at_path(root: PublicValue, path: &ConflictPath, value: Value) -> PublicValue {
+    if path.depth() == 0 {
+        return PublicValue::from_core(value);
     }
     let path = Value::List(List::from_values(
-        write.path.keys().iter().cloned().map(key_value).collect(),
+        path.keys().iter().cloned().map(key_value).collect(),
     ));
     PublicValue::from_core(Value::builtin_call(
         Builtin::DictUpdate,
-        vec![path, write.value.as_core().clone(), root.into_core()],
+        vec![path, value, root.into_core()],
+    ))
+}
+
+fn lazy_core_value_path(value: Value, path: &[Key]) -> Value {
+    if path.is_empty() {
+        return value;
+    }
+    Value::Lazy(LazyValue::from_access(
+        Arc::from(
+            path.iter()
+                .cloned()
+                .map(CoreDataKey::Key)
+                .collect::<Vec<_>>(),
+        ),
+        Arc::from([value]),
     ))
 }
 
@@ -415,6 +474,7 @@ fn key_value(key: Key) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Assembler;
 
     fn path(parts: &[&str]) -> Vec<Key> {
         parts.iter().map(Key::atom_from_text).collect()
@@ -422,6 +482,20 @@ mod tests {
 
     fn store() -> ReflectionStore {
         ReflectionStore::new(Arc::new(ExactConflictAnalysis))
+    }
+
+    fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &PublicValue) {
+        let actual = assembler.evaluate(actual).unwrap();
+        let Value::List(actual) = actual.as_core() else {
+            panic!("actual value should be a list")
+        };
+        let Value::List(expected) = expected.as_core() else {
+            panic!("expected value should be a list")
+        };
+        assert_eq!(
+            crate::eval::list_to_value_items(&assembler.eval_context(), actual).unwrap(),
+            crate::eval::list_to_value_items(&assembler.eval_context(), expected).unwrap(),
+        );
     }
 
     #[test]
@@ -468,6 +542,86 @@ mod tests {
         assert!(store.try_commit(&first));
         assert!(store.try_commit(&second));
         assert_ne!(store.root(), &stale_cached_view);
+    }
+
+    #[test]
+    fn covering_set_keeps_a_later_rewrite_read_internal() {
+        let mut store = store();
+        let snapshot = store.snapshot();
+        let mut local = StoreJournal::new(snapshot.clone());
+        local.write(path(&["x"]), PublicValue::empty_record());
+        local.rewrite(path(&["x", "y"]), PublicValue::builtin(Builtin::Seq));
+        assert!(!local.observe_read(&path(&["x", "y", "z"])));
+
+        let mut concurrent = StoreJournal::new(snapshot);
+        concurrent.write(path(&["x", "other"]), PublicValue::integer(1));
+        assert!(store.try_commit(&concurrent));
+        assert!(store.try_commit(&local));
+    }
+
+    #[test]
+    fn rewrite_widens_a_descendant_read_dependency() {
+        let mut store = store();
+        let snapshot = store.snapshot();
+        let mut local = StoreJournal::new(snapshot.clone());
+        local.rewrite(path(&["x", "y"]), PublicValue::builtin(Builtin::Seq));
+        assert!(local.observe_read(&path(&["x", "y", "z"])));
+
+        let mut concurrent = StoreJournal::new(snapshot);
+        concurrent.write(path(&["x", "y", "sibling"]), PublicValue::integer(1));
+        assert!(store.try_commit(&concurrent));
+        assert!(!store.try_commit(&local));
+    }
+
+    #[test]
+    fn rebased_rewrites_apply_in_commit_order() {
+        let assembler = Assembler::default();
+        let module = assembler
+            .module(["reflection_store_test"])
+            .script(
+                "g",
+                "language g0\nappend_a = \\items -> items ++ [\"A\"]\nappend_b = \\items -> items ++ [\"B\"]\n",
+            )
+            .build()
+            .expect("rewrite fixture should compile");
+        let append_a = assembler
+            .evaluate(&assembler.get(module.value(), "append_a").unwrap())
+            .unwrap();
+        let append_b = assembler
+            .evaluate(&assembler.get(module.value(), "append_b").unwrap())
+            .unwrap();
+
+        let apply_in_order = |first: PublicValue, second: PublicValue| {
+            let mut store = store();
+            store.replace_root(PublicValue::list([PublicValue::text("base")]));
+            let snapshot = store.snapshot();
+            let mut first_edit = StoreJournal::new(snapshot.clone());
+            first_edit.rewrite(Vec::new(), first);
+            let mut second_edit = StoreJournal::new(snapshot);
+            second_edit.rewrite(Vec::new(), second);
+            assert!(store.try_commit(&first_edit));
+            assert!(store.try_commit(&second_edit));
+            assembler.evaluate(store.root()).unwrap()
+        };
+
+        assert_list_values(
+            &assembler,
+            &apply_in_order(append_a.clone(), append_b.clone()),
+            &PublicValue::list([
+                PublicValue::text("base"),
+                PublicValue::text("A"),
+                PublicValue::text("B"),
+            ]),
+        );
+        assert_list_values(
+            &assembler,
+            &apply_in_order(append_b, append_a),
+            &PublicValue::list([
+                PublicValue::text("base"),
+                PublicValue::text("B"),
+                PublicValue::text("A"),
+            ]),
+        );
     }
 
     #[test]
