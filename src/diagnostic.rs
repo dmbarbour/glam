@@ -1,54 +1,16 @@
 use std::fmt;
 use std::sync::Arc;
 
-use bytes::Bytes;
-
 use crate::core::{Builtin, Dict, List, Value, keys};
 use crate::eval;
 use crate::number::Number;
+use crate::source::{ContentDigest, SourceArtifact, SourceIdentity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Info,
     Warning,
     Error,
-}
-
-/// Assembler-owned identity for source content. Reloadable files retain their
-/// path; inline scripts retain their bytes because no external source handle
-/// exists. Invocation identity remains separate in either case.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SourceIdentity {
-    File { path: Arc<str> },
-    Script { label: Arc<str>, text: Bytes },
-}
-
-impl SourceIdentity {
-    pub(crate) fn file(path: impl Into<Arc<str>>) -> Self {
-        Self::File { path: path.into() }
-    }
-
-    pub(crate) fn script(label: impl Into<Arc<str>>, text: Bytes) -> Self {
-        Self::Script {
-            label: label.into(),
-            text,
-        }
-    }
-
-    pub(crate) fn label(&self) -> &Arc<str> {
-        match self {
-            Self::File { path } => path,
-            Self::Script { label, .. } => label,
-        }
-    }
-
-    pub(crate) fn value(&self) -> Value {
-        let (tag, payload) = match self {
-            Self::File { path } => (&*keys::FILE, Value::binary_from_text(path)),
-            Self::Script { text, .. } => (&*keys::SCRIPT, Value::Binary(text.clone())),
-        };
-        Value::Dict(Dict::new_sync().insert(tag.clone(), payload))
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +41,7 @@ struct ImportOrigin {
 pub(crate) struct CompilationTrace {
     invocation: CompilationInvocationId,
     source: SourceIdentity,
+    digest: ContentDigest,
     namespace: Arc<[String]>,
     imported_from: Option<ImportOrigin>,
 }
@@ -86,12 +49,13 @@ pub(crate) struct CompilationTrace {
 impl CompilationTrace {
     pub(crate) fn root(
         invocation: CompilationInvocationId,
-        source: SourceIdentity,
+        source: &SourceArtifact,
         namespace: Arc<[String]>,
     ) -> Self {
         Self {
             invocation,
-            source,
+            source: source.identity().clone(),
+            digest: source.digest(),
             namespace,
             imported_from: None,
         }
@@ -99,7 +63,7 @@ impl CompilationTrace {
 
     pub(crate) fn imported(
         invocation: CompilationInvocationId,
-        source: SourceIdentity,
+        source: &SourceArtifact,
         namespace: Arc<[String]>,
         parent: Arc<Self>,
         request: Arc<str>,
@@ -107,7 +71,8 @@ impl CompilationTrace {
     ) -> Self {
         Self {
             invocation,
-            source,
+            source: source.identity().clone(),
+            digest: source.digest(),
             namespace,
             imported_from: Some(ImportOrigin {
                 parent,
@@ -117,7 +82,7 @@ impl CompilationTrace {
         }
     }
 
-    pub(crate) fn source_label(&self) -> &Arc<str> {
+    pub(crate) fn source_label(&self) -> &str {
         self.source.label()
     }
 
@@ -148,7 +113,11 @@ impl CompilationTrace {
         Value::Dict(
             Dict::new_sync()
                 .insert((*keys::INVOCATION).clone(), self.invocation.value())
-                .insert((*keys::SOURCE).clone(), self.source.value())
+                .insert(
+                    (*keys::SOURCE).clone(),
+                    self.source.value().as_core().clone(),
+                )
+                .insert((*keys::DIGEST).clone(), self.digest.value().into_core())
                 .insert((*keys::NAMESPACE).clone(), namespace_value(&self.namespace)),
         )
     }
@@ -276,6 +245,11 @@ pub(crate) fn conventional_summary(message: &Value) -> (Option<usize>, Option<Ar
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+
+    fn file_source(path: &str) -> SourceArtifact {
+        SourceArtifact::new(Bytes::from_static(b"source"), SourceIdentity::file(path))
+    }
 
     fn list_values(list: &List) -> Vec<Value> {
         let mut values = Vec::new();
@@ -292,22 +266,25 @@ mod tests {
 
     #[test]
     fn imported_trace_projects_a_root_to_parent_chain() {
+        let root_source = file_source("root.g");
         let root = Arc::new(CompilationTrace::root(
             CompilationInvocationId::new(1),
-            SourceIdentity::file("root.g"),
+            &root_source,
             Arc::from(["pkg".to_owned()]),
         ));
+        let child_source = file_source("lib/child.g");
         let child = Arc::new(CompilationTrace::imported(
             CompilationInvocationId::new(2),
-            SourceIdentity::file("lib/child.g"),
+            &child_source,
             Arc::from(["pkg".to_owned(), "child".to_owned()]),
             root,
             Arc::from("lib/child.g"),
             Arc::from(["child".to_owned()]),
         ));
+        let leaf_source = file_source("lib/leaf.g");
         let leaf = CompilationTrace::imported(
             CompilationInvocationId::new(3),
-            SourceIdentity::file("lib/leaf.g"),
+            &leaf_source,
             Arc::from(["pkg".to_owned(), "child".to_owned()]),
             child,
             Arc::from("leaf.g"),
@@ -327,6 +304,10 @@ mod tests {
                 (*keys::FILE).clone(),
                 Value::binary_from_text("lib/leaf.g")
             )))
+        );
+        assert_eq!(
+            origin.get(&*keys::DIGEST),
+            Some(ContentDigest::of(b"source").value().as_core())
         );
         let Some(Value::List(namespace)) = origin.get(&*keys::NAMESPACE) else {
             panic!("origin should contain its global namespace");
@@ -378,9 +359,12 @@ mod tests {
 
     #[test]
     fn inline_script_source_is_tagged_with_its_text() {
+        let bytes = Bytes::from_static(b"language g0\nbroken =\n");
+        let source =
+            SourceArtifact::new(bytes.clone(), SourceIdentity::script("<script.g>", bytes));
         let trace = CompilationTrace::root(
             CompilationInvocationId::new(1),
-            SourceIdentity::script("<script.g>", Bytes::from_static(b"language g0\nbroken =\n")),
+            &source,
             Arc::from(["assembly".to_owned()]),
         );
         let Value::Dict(origin) = trace.origin_value() else {
@@ -390,7 +374,7 @@ mod tests {
             panic!("source should be tagged");
         };
         assert_eq!(
-            source.get(&*keys::SCRIPT),
+            source.get(&crate::core::Key::atom_from_text("script")),
             Some(&Value::Binary(Bytes::from_static(
                 b"language g0\nbroken =\n"
             )))

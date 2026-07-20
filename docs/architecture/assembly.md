@@ -5,15 +5,17 @@ map, not the eventual assembler contract.
 
 ## Library Boundary
 
-`api::Assembler` is the primary embedding facade. It owns a source host and one
-internal `ReasoningSession`. That session groups the immutable reflection
+`api::Assembler` is the primary embedding facade. `AssemblerBuilder` selects
+one immutable `SourceSystem`, an evaluation runtime, diagnostic subscriptions,
+and reasoning configuration before creating exactly one internal
+`ReasoningSession`. That session groups the immutable reflection
 environment, reflection host/heap, diagnostic bus, task scheduler, and its
 attachment to the shared evaluation runtime. Clients
 choose module paths and inputs; the library does not assign special meaning to
 `configuration` or `assembly`.
 
 `main` is one client. It chooses those two roots, supplies CLI-derived values,
-installs the local-files host and subscribes a diagnostic queue, requests
+installs a `FileSourceSystem` and subscribes a diagnostic queue, requests
 `asm.result`, and decides process output and exit status.
 
 ## Module Construction
@@ -21,7 +23,8 @@ installs the local-files host and subscribes a diagnostic queue, requests
 ```text
 ModuleBuilder + ordered ModuleInput values
   -> Assembler::build_module_inner
-       -> Host reads source bytes
+       -> SourceSystem returns an immutable SourceArtifact
+       -> artifact supplies identity, SHA-256 digest, and relative resolver
        -> CompileContext hides source/import provenance
        -> selected front end parses and lowers one source
        -> imports re-enter the same Assembler session
@@ -31,13 +34,15 @@ ModuleBuilder + ordered ModuleInput values
 
 Inputs are applied from last to first so earlier CLI inputs override later
 ones. A front end sees raw bytes, a relative import request, and compiler
-capabilities. The assembler host retains absolute source identity, qualifies
-names, performs loads, and builds the import chain.
+capabilities. The assembler retains source identity and digest, qualifies
+names, performs loads through artifact-carried relative resolvers, and builds
+the import chain. Inline scripts have no resolver and therefore cannot import.
 
 Each source compilation receives a local invocation ID. Diagnostic envelopes
-retain a compact root-to-parent chain of relative requests and namespace
-extensions, without retaining module values or environments. Observers choose
-when to enrich that provenance into `msg.origin`.
+retain a compact root-to-parent chain of relative requests, namespace
+extensions, tagged source identities, and the digest of every artifact's exact
+bytes, without retaining module values or environments. Observers choose when
+to enrich that provenance into `msg.origin`.
 
 ## Diagnostics and Logging
 
@@ -69,7 +74,7 @@ then remaining messages use the default path.
 
 ## Local Files and Manifest
 
-`local_files` wraps the system host for CLI execution. It retains the SHA-256
+`FileSourceSystem` owns CLI local-file acquisition and consistency. It retains the SHA-256
 digest of the bytes returned by every successful local read. Reading the same
 path with different contents during assembly is an error. A final recheck only
 warns, because an edit after the last read did not affect the produced result.

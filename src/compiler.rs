@@ -4,6 +4,7 @@ use crate::core::Builtin;
 use crate::core::{Atom, Dict, Key, LazyValue, Value, keys};
 use crate::diagnostic::{CompilationTrace, Severity};
 use crate::number::Number;
+use crate::source::{RelativeSourcePath, SourceArtifact};
 
 pub(crate) type ModuleLoader = Arc<dyn Fn(ModuleLoadArgs) -> Result<Value, String> + Send + Sync>;
 pub(crate) type BinaryFileLoader =
@@ -14,48 +15,21 @@ pub(crate) type CompileDiagnosticEmitter = Arc<dyn Fn(Severity, Value) + Send + 
 /// lexical and platform-independent: source code uses `/`, while filesystem
 /// interpretation remains assembler-owned.
 pub(crate) fn validate_local_source_request(request: &str) -> Result<(), String> {
-    let invalid = |reason: &str| {
-        Err(format!(
-            "local source request `{request}` {reason}; only child-relative `/`-separated paths are permitted"
-        ))
-    };
-
-    if request.is_empty() {
-        return invalid("is empty");
-    }
-    if request.starts_with('/') || request.starts_with('\\') {
-        return invalid("must not be absolute");
-    }
-    if request.as_bytes().get(1) == Some(&b':') && request.as_bytes()[0].is_ascii_alphabetic() {
-        return invalid("must not use an absolute drive path");
-    }
-    if request.contains('\\') {
-        return invalid("must use `/` rather than platform-specific separators");
-    }
-    for component in request.split('/') {
-        if component.is_empty() {
-            return invalid("contains an empty path component");
-        }
-        if component == ".." {
-            return invalid("must not traverse to a parent folder");
-        }
-        if component == "." || component.starts_with('.') {
-            return invalid("must not use current-folder or dot-prefixed components");
-        }
-    }
-    Ok(())
+    RelativeSourcePath::new(request)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct BinaryLoadArgs {
-    pub(crate) request: Arc<str>,
-    pub(crate) importer_source_path: Option<Arc<str>>,
+    pub(crate) request: RelativeSourcePath,
+    pub(crate) importer_source: Option<Arc<SourceArtifact>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ModuleLoadArgs {
-    pub(crate) request: Arc<str>,
-    pub(crate) importer_source_path: Option<Arc<str>>,
+    pub(crate) request: RelativeSourcePath,
+    pub(crate) importer_source: Option<Arc<SourceArtifact>>,
     pub(crate) importer_trace: Option<Arc<CompilationTrace>>,
     pub(crate) extends: Arc<[String]>,
     pub(crate) module_path: Arc<[String]>,
@@ -67,7 +41,7 @@ pub(crate) struct ModuleLoadArgs {
 pub struct CompileContext {
     // The bootstrap still exposes core Values, but never a semantic expression
     // language. Front ends own their IR and lower it before returning Values.
-    importer_source_path: Option<Arc<str>>,
+    importer_source: Option<Arc<SourceArtifact>>,
     compilation_trace: Option<Arc<CompilationTrace>>,
     module_path: Arc<[String]>,
     prior_defs: Value, // prior dictionary, can be observed at compile-time
@@ -80,7 +54,7 @@ pub struct CompileContext {
 impl Default for CompileContext {
     fn default() -> Self {
         Self {
-            importer_source_path: None,
+            importer_source: None,
             compilation_trace: None,
             module_path: Arc::from([]),
             prior_defs: Value::Dict(Dict::new_sync()), // empty prior dictionary
@@ -101,8 +75,8 @@ impl CompileContext {
         Self::default().with_module_path(parts)
     }
 
-    pub(crate) fn with_importer_source_path(mut self, path: impl Into<Arc<str>>) -> Self {
-        self.importer_source_path = Some(path.into());
+    pub(crate) fn with_importer_source(mut self, source: Arc<SourceArtifact>) -> Self {
+        self.importer_source = Some(source);
         self
     }
 
@@ -216,27 +190,28 @@ impl CompileContext {
         prior_defs: Value,
         final_defs: Value,
     ) -> Value {
-        if let Err(error) = validate_local_source_request(request) {
-            return Value::error(error);
-        }
+        let request = match RelativeSourcePath::new(request) {
+            Ok(request) => request,
+            Err(error) => return Value::error(error.to_string()),
+        };
         let (module_path, extends) = self.qualify_module_path(relative_namespace);
         let args = ModuleLoadArgs {
-            request: Arc::from(request),
-            importer_source_path: self.importer_source_path.clone(),
+            request,
+            importer_source: self.importer_source.clone(),
             importer_trace: self.compilation_trace.clone(),
             extends,
             module_path,
             prior_defs,
             final_defs,
         };
-        let label: Arc<str> = Arc::from(format!("import {}", args.request));
+        let label: Arc<str> = Arc::from(format!("import {}", args.request.as_str()));
         let loader = self.local_module_loader.clone();
 
         Value::deferred(label, move |_| {
             let Some(loader) = &loader else {
                 return Err(format!(
                     "local import `{}` cannot be loaded without a module loader",
-                    args.request
+                    args.request.as_str()
                 ));
             };
             loader(args.clone())
@@ -244,21 +219,22 @@ impl CompileContext {
     }
 
     pub fn import_binary(&self, request: &str) -> Value {
-        if let Err(error) = validate_local_source_request(request) {
-            return Value::error(error);
-        }
-        let args = BinaryLoadArgs {
-            request: Arc::from(request),
-            importer_source_path: self.importer_source_path.clone(),
+        let request = match RelativeSourcePath::new(request) {
+            Ok(request) => request,
+            Err(error) => return Value::error(error.to_string()),
         };
-        let label: Arc<str> = Arc::from(format!("import binary {}", args.request));
+        let args = BinaryLoadArgs {
+            request,
+            importer_source: self.importer_source.clone(),
+        };
+        let label: Arc<str> = Arc::from(format!("import binary {}", args.request.as_str()));
         let loader = self.local_binary_loader.clone();
 
         Value::deferred(label, move |_| {
             let Some(loader) = &loader else {
                 return Err(format!(
                     "binary import `{}` cannot be loaded without a binary loader",
-                    args.request
+                    args.request.as_str()
                 ));
             };
             loader(args.clone())
@@ -313,7 +289,7 @@ mod tests {
     #[test]
     fn invalid_local_request_never_reaches_the_loader() {
         let context = CompileContext::default().with_local_module_loader(Arc::new(|args| {
-            panic!("invalid request reached loader: {}", args.request)
+            panic!("invalid request reached loader: {}", args.request.as_str())
         }));
         let error = crate::eval::eval_value(
             &crate::evaluation::EvalContext::standalone(),
@@ -332,8 +308,12 @@ mod tests {
     fn binary_import_forwards_hidden_source_provenance() {
         let received = Arc::new(std::sync::Mutex::new(None));
         let captured = received.clone();
+        let source = Arc::new(SourceArtifact::new(
+            bytes::Bytes::from_static(b"source"),
+            crate::source::SourceIdentity::file("samples/assembly/hello_text.g"),
+        ));
         let context = CompileContext::default()
-            .with_importer_source_path("samples/assembly/hello_text.g")
+            .with_importer_source(source)
             .with_local_binary_loader(Arc::new(move |args| {
                 *captured
                     .lock()
@@ -355,19 +335,25 @@ mod tests {
             .expect("loader should receive one request");
 
         assert_eq!(
-            args.importer_source_path.as_deref(),
+            args.importer_source
+                .as_ref()
+                .map(|source| source.identity().label()),
             Some("samples/assembly/hello_text.g")
         );
-        assert_eq!(args.request.as_ref(), "message.txt");
+        assert_eq!(args.request.as_str(), "message.txt");
     }
 
     #[test]
     fn module_import_qualifies_only_the_relative_child_namespace() {
         let received = Arc::new(std::sync::Mutex::new(None));
         let captured = received.clone();
+        let source = SourceArtifact::new(
+            bytes::Bytes::from_static(b"source"),
+            crate::source::SourceIdentity::file("root.g"),
+        );
         let trace = Arc::new(CompilationTrace::root(
             crate::diagnostic::CompilationInvocationId::new(1),
-            crate::diagnostic::SourceIdentity::file("root.g"),
+            &source,
             Arc::from(["root".to_owned(), "module".to_owned()]),
         ));
         let context = CompileContext::from_module_path(["root", "module"])

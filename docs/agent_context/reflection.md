@@ -59,6 +59,10 @@ and control flow.
   terminal missing-volume error rather than recreating storage. Explicit
   whole-volume revocation is serialized with commit and returns the final
   unforced root; dropping its Rust owner has no effect.
+- `AssemblerBuilder` owns an unsealed reasoning host. Its environment closure
+  may create volumes tied to the future session ID, but no task or evaluation
+  context exists until `build()` seals the environment and installs the
+  launcher. Draft volume creation never wakes waiters.
 - Heap effects impose no dictionary schema. Root replacement accepts any
   value, and nested updates or accesses return ordinary lazy errors when their
   eventual structure is invalid. `.eval` is the explicit way to observe such
@@ -66,7 +70,7 @@ and control flow.
 - The exact strategy is the correctness reference. Fingerprint collisions may
   cause extra retries but never missed overlaps. The coarse strategy treats
   every heap write as conflicting after any heap read. Strategy selection is
-  fixed for a reasoning session.
+  fixed by the builder before a reasoning session becomes runnable.
 - `.cut` supplies choice and transaction scope, not retryability. Plain `.fail`
   and `.cut .fail` are permanent. A failed operation retries only when it
   observed changeable host state, such as an empty log queue.

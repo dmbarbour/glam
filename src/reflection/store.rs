@@ -459,6 +459,10 @@ impl ReflectionStore {
         self.strategy.clone()
     }
 
+    pub(crate) fn set_strategy(&mut self, strategy: Arc<dyn ConflictAnalysisStrategy>) {
+        self.strategy = strategy;
+    }
+
     #[doc(hidden)]
     pub fn replace_root(&mut self, root: PublicValue) {
         self.roots.insert_mut(self.heap_volume, root);

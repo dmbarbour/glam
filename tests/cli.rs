@@ -320,11 +320,9 @@ fn script_local_import_errors_only_when_observed() {
 
     assert!(!observed.status.success());
     assert_eq!(observed.stdout, b"");
-    assert!(
-        String::from_utf8_lossy(&observed.stderr).contains(
-            "local import `missing.g` cannot be loaded from a source without a file path"
-        )
-    );
+    assert!(String::from_utf8_lossy(&observed.stderr).contains(
+        "local import `missing.g` cannot be loaded from a source without an import resolver"
+    ));
 }
 
 #[test]
@@ -353,7 +351,7 @@ fn script_binary_import_errors_only_when_observed() {
     assert!(!observed.status.success());
     assert_eq!(observed.stdout, b"");
     assert!(String::from_utf8_lossy(&observed.stderr).contains(
-        "binary import `missing.bin` cannot be loaded from a source without a file path"
+        "binary import `missing.bin` cannot be loaded from a source without an import resolver"
     ));
 }
 

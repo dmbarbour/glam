@@ -55,7 +55,8 @@ including overlapping parent and child paths, serialize in commit order while
 their target volume exists. A session-selected
 `Arc<dyn ConflictAnalysisStrategy>` controls only how reads are summarized:
 the bootstrap supplies exact, conservative fingerprint, and fully coarse
-strategies. Changing strategy creates a fresh reasoning session.
+strategies. `AssemblerBuilder` fixes the strategy before the reasoning session
+becomes runnable.
 
 Heap paths are ordinary lazy value operations rather than a store schema.
 `.heap.set` stages a replacement without inspecting the old heap.
@@ -75,6 +76,12 @@ validation therefore cannot duplicate a diagnostic or child-task launch.
 
 ## Protected Client Volumes
 
+`AssemblerBuilder` allocates the future session identity and an unsealed host
+before constructing the reflection environment. Its environment closure may
+therefore create protected volumes and embed their capabilities. `build()`
+then seals the environment and installs the task launcher; it does not copy or
+replace the store.
+
 `Assembler::create_volume` installs an explicitly initialized volume and
 returns a Rust owner handle. The handle exposes one closed Glam
 `{get,set,rewrite}` capability value. Possession is authority: the functions
@@ -83,8 +90,8 @@ to the session's private heap volume.
 
 Each capability request embeds its globally unique `ReasoningSessionId`, its
 session-local `VolumeId`, and its operation. Ordinary child tasks share the
-host identity and may use capabilities passed to them. Logger, IDE, replacement,
-or otherwise foreign reasoning sessions reject the request before it enters a
+host identity and may use capabilities passed to them. Logger, IDE, and other
+foreign reasoning sessions reject the request before it enters a
 store journal.
 
 The owner explicitly revokes the complete volume and recovers its final

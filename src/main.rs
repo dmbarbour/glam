@@ -9,19 +9,17 @@ use std::thread;
 
 use bytes::Bytes;
 use glam::reflection::{
-    CommitResult, ConflictAnalysisStrategy, EffectRequestSpec, EffectRun, HostSnapshot,
-    ReflectionEffects, ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionServices,
-    ReflectionStore, ReflectionTransaction, RequestContext, RequestResult, TaskCommit,
-    TaskEnvironment, TaskHost, TaskOutcome, TaskSpecialization, handle_reflection_request,
-    reflection_request_specs,
+    CommitResult, ConflictAnalysisStrategy, EffectRequestSpec, EffectRun, ExactConflictAnalysis,
+    HostSnapshot, ReflectionEffects, ReflectionHost, ReflectionJournal, ReflectionRequest,
+    ReflectionServices, ReflectionStore, ReflectionTransaction, RequestContext, RequestResult,
+    TaskCommit, TaskEnvironment, TaskHost, TaskOutcome, TaskSpecialization,
+    handle_reflection_request, reflection_request_specs,
 };
 use glam::{
     Assembler, Builtin, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, Error,
-    ModuleInput, ReasoningReport, ReasoningStatus, ReasoningTaskState, Severity, Value,
+    EvaluationRuntime, FileSourceSystem, ModuleInput, ReasoningReport, ReasoningStatus,
+    ReasoningTaskState, Severity, Value,
 };
-
-mod local_files;
-use local_files::LocalFileHost;
 
 // Parse inspection intentionally remains on the front-end API while ordinary
 // assembly uses only the embedding facade.
@@ -276,19 +274,19 @@ fn process_reflection_environment(reflection_arguments: Vec<String>) -> Value {
 }
 
 fn finish_local_files(
-    files: &LocalFileHost,
+    files: &FileSourceSystem,
     manifest: Option<&Path>,
     diagnostics: &DiagnosticBus,
 ) -> bool {
     let mut failed = false;
     if let Err(warning) = files.verify_unchanged() {
-        diagnostics.publish(Diagnostic::new(Severity::Warning, warning));
+        diagnostics.publish(Diagnostic::new(Severity::Warning, warning.to_string()));
     }
     if let Some(path) = manifest
         && let Err(error) = files.write_manifest(path)
     {
         failed = true;
-        diagnostics.publish(Diagnostic::new(Severity::Error, error));
+        diagnostics.publish(Diagnostic::new(Severity::Error, error.to_string()));
     }
     failed
 }
@@ -305,21 +303,25 @@ fn assemble_inputs(command: AssemblyCommand) -> ExitCode {
         Ok(worker_threads) => worker_threads,
         Err(exit_code) => return exit_code,
     };
-    let local_files = LocalFileHost::default();
-    let assembler = match Assembler::default().with_worker_threads(worker_threads) {
-        Ok(assembler) => assembler,
+    let local_files = FileSourceSystem::default();
+    let runtime = match EvaluationRuntime::new(worker_threads) {
+        Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("error: {error}");
             return ExitCode::from(2);
         }
-    }
-    .with_host(local_files.clone())
-    .with_reflection_environment(process_reflection_environment(reflection_arguments))
-    .expect("main's reflection environment must be a dictionary");
-    let log_host = Arc::new(LogHost::with_conflict_analysis(
-        assembler.conflict_analysis(),
-    ));
-    let assembler = assembler.with_diagnostic_subscriber(log_host.clone());
+    };
+    let conflict_analysis: Arc<dyn ConflictAnalysisStrategy> = Arc::new(ExactConflictAnalysis);
+    let log_host = Arc::new(LogHost::with_conflict_analysis(conflict_analysis.clone()));
+    let assembler = Assembler::builder()
+        .source_system(local_files.clone())
+        .evaluation_runtime(runtime)
+        .conflict_analysis(conflict_analysis)
+        .diagnostic_subscriber(log_host.clone())
+        .reflection_environment(|_| Ok(process_reflection_environment(reflection_arguments)))
+        .expect("main's reflection environment must be a dictionary")
+        .build()
+        .expect("main's assembler configuration must be valid");
     let assembler_diagnostics = assembler.diagnostic_bus();
     let configuration = match load_configuration(&assembler) {
         Ok(configuration) => configuration,
@@ -1334,7 +1336,7 @@ Bare arguments are reserved for configured `conf.cli` rewriting.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::Host;
+    use glam::SourceSystem;
 
     #[test]
     fn final_local_file_change_is_only_a_warning() {
@@ -1343,8 +1345,10 @@ mod tests {
         fs::create_dir_all(&directory).expect("test directory should be created");
         let path = directory.join("input.g");
         fs::write(&path, "used").expect("test input should be written");
-        let files = LocalFileHost::default();
-        files.read(&path).expect("assembly read should succeed");
+        let files = FileSourceSystem::default();
+        files
+            .load_top_level(&path)
+            .expect("assembly read should succeed");
         fs::write(&path, "later edit").expect("test input should be changed");
         let diagnostics = DiagnosticBus::new();
         let queue = Arc::new(LogHost::new());

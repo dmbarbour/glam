@@ -35,6 +35,7 @@ protocol_key!(LOCATION, "location");
 protocol_key!(LINE, "line");
 protocol_key!(ORIGIN, "origin");
 protocol_key!(SOURCE, "source");
+protocol_key!(DIGEST, "digest");
 protocol_key!(INVOCATION, "invocation");
 protocol_key!(NAMESPACE, "namespace");
 protocol_key!(IMPORT_CHAIN, "import_chain");
@@ -77,4 +78,3 @@ protocol_value!(WARN_VALUE, WARN);
 protocol_value!(ERROR_VALUE, ERROR);
 
 protocol_key!(FILE, "file");
-protocol_key!(SCRIPT, "script");

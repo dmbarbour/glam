@@ -4,22 +4,31 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use glam::{
-    Assembler, Builtin, DiagnosticEvent, Host, HostError, ModuleInput, ReasoningStatus, Severity,
-    Value,
+    Assembler, AssemblerBuilder, Builtin, ContentDigest, DiagnosticEvent, EvaluationRuntime, Host,
+    HostError, ImportResolver, ModuleInput, ReasoningStatus, RelativeSourcePath, Severity,
+    SourceArtifact, SourceError, SourceIdentity, SourceSystem, Value,
 };
 
 type DiagnosticEvents = Arc<Mutex<Vec<DiagnosticEvent>>>;
 
-fn collecting_assembler() -> (Assembler, DiagnosticEvents) {
+fn collecting_builder() -> (AssemblerBuilder, DiagnosticEvents) {
     let diagnostics = Arc::new(Mutex::new(Vec::new()));
     let received = diagnostics.clone();
-    let assembler = Assembler::default().with_diagnostic_callback(move |event| {
+    let builder = Assembler::builder().diagnostic_callback(move |event| {
         received
             .lock()
             .expect("diagnostic collector should not be poisoned")
             .push(event);
     });
-    (assembler, diagnostics)
+    (builder, diagnostics)
+}
+
+fn collecting_assembler() -> (Assembler, DiagnosticEvents) {
+    let (builder, diagnostics) = collecting_builder();
+    (
+        builder.build().expect("collector assembler should build"),
+        diagnostics,
+    )
 }
 
 fn take_diagnostics(diagnostics: &DiagnosticEvents) -> Vec<DiagnosticEvent> {
@@ -280,9 +289,10 @@ fn revoked_volume_capability_cannot_recreate_its_volume() {
 
 #[test]
 fn worker_configuration_is_shared_by_assembler_clones() {
-    let assembler = Assembler::default()
-        .with_worker_threads(3)
-        .expect("test worker threads should start");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(EvaluationRuntime::new(3).expect("test worker threads should start"))
+        .build()
+        .expect("test assembler should build");
     let clone = assembler.clone();
 
     assert_eq!(assembler.evaluation_runtime().worker_threads(), 3);
@@ -299,19 +309,23 @@ fn public_api_exposes_the_default_diagnostic_formatter_as_a_function() {
 
 #[test]
 fn assembler_owns_an_authoritative_reflection_environment() {
-    let (assembler, diagnostics) = collecting_assembler();
-    let assembler = assembler
-        .with_reflection_environment(Value::record([
-            (
-                "glam",
-                Value::record([
-                    ("version", Value::text("spoofed")),
-                    ("client_field", Value::text("must disappear")),
-                ]),
-            ),
-            ("client", Value::record([("name", Value::text("embedded"))])),
-        ]))
-        .expect("reflection environment should accept a dictionary");
+    let (builder, diagnostics) = collecting_builder();
+    let assembler = builder
+        .reflection_environment(|_| {
+            Ok(Value::record([
+                (
+                    "glam",
+                    Value::record([
+                        ("version", Value::text("spoofed")),
+                        ("client_field", Value::text("must disappear")),
+                    ]),
+                ),
+                ("client", Value::record([("name", Value::text("embedded"))])),
+            ]))
+        })
+        .expect("reflection environment should accept a dictionary")
+        .build()
+        .expect("test assembler should build");
     let environment = assembler.reflection_environment();
 
     assert_eq!(
@@ -350,8 +364,8 @@ fn assembler_owns_an_authoritative_reflection_environment() {
     assert_eq!(diagnostics[0].severity(), Severity::Warning);
     assert!(diagnostics[0].message().contains("reserved"));
     assert!(
-        Assembler::default()
-            .with_reflection_environment(Value::integer(1))
+        Assembler::builder()
+            .reflection_environment(|_| Ok(Value::integer(1)))
             .is_err()
     );
 }
@@ -403,30 +417,32 @@ fn public_evaluation_leaves_automatic_reflection_tasks_for_explicit_drain() {
 }
 
 #[test]
-fn replacing_source_host_preserves_scheduled_reasoning() {
-    let (assembler, diagnostics) = collecting_assembler();
-    let module = assembler
-        .module(["host_replacement"])
-        .script(
-            "g",
-            "language g0\nrefl.notice = .log 'info { msg:{ text:\"survived host replacement\" } }\nvalue = \"value\"\n",
-        )
+fn reflection_environment_can_retain_a_builder_created_volume_handle() {
+    let mut retained_volume = None;
+    let assembler = Assembler::builder()
+        .reflection_environment(|environment| {
+            let volume = environment.create_volume(Value::text("initial"))?;
+            let effects = volume.effects();
+            retained_volume = Some(volume);
+            Ok(Value::record([("client_state", effects)]))
+        })
+        .expect("reflection environment should be constructed")
         .build()
-        .expect("reflection module should build");
+        .expect("assembler should build");
+    let effects = assembler
+        .get(&assembler.reflection_environment(), "client_state")
+        .expect("environment should contain the protected capability");
+    let annotated = volume_write_annotation(&assembler, effects, Value::text("updated"));
+    assert_eq!(assembler.to_binary(&annotated).unwrap(), b"done".as_slice());
+
+    let final_value = retained_volume
+        .expect("closure should retain the owner handle")
+        .revoke()
+        .expect("retained volume should be revocable");
     assert_eq!(
-        assembler
-            .binary_at(module.value(), "value")
-            .expect("ordinary value should schedule automatic reflection"),
-        b"value".as_slice()
+        assembler.to_binary(&final_value).unwrap(),
+        b"updated".as_slice()
     );
-
-    let assembler = assembler.with_host(MemoryHost::new([]));
-    let report = assembler.drain_reasoning();
-    assert_eq!(report.status(), ReasoningStatus::Complete);
-
-    let diagnostics = take_diagnostics(&diagnostics);
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].message(), "survived host replacement");
 }
 
 #[test]
@@ -477,7 +493,10 @@ fn public_api_can_load_sources_and_binaries_from_a_custom_host() {
         ),
         ("payload.bin", b"virtual bytes".as_slice()),
     ]);
-    let assembler = Assembler::default().with_host(host);
+    let assembler = Assembler::builder()
+        .host(host)
+        .build()
+        .expect("custom-host assembler should build");
     let module = assembler
         .module(["virtual"])
         .inputs([ModuleInput::file("main.g")])
@@ -489,6 +508,32 @@ fn public_api_can_load_sources_and_binaries_from_a_custom_host() {
             .binary_at(module.value(), "asm.result")
             .expect("virtual binary import should evaluate"),
         b"virtual bytes".as_slice()
+    );
+}
+
+#[test]
+fn public_api_can_load_from_an_artifact_source_system() {
+    let sources = MemorySourceSystem::new([
+        (
+            "main.g",
+            b"language g0\nimport \"payload.bin\" binary as payload\nasm.result = payload\n"
+                .as_slice(),
+        ),
+        ("payload.bin", b"artifact bytes".as_slice()),
+    ]);
+    let assembler = Assembler::builder()
+        .source_system(sources)
+        .build()
+        .expect("custom-source assembler should build");
+    let module = assembler
+        .module(["artifact_source"])
+        .file("main.g")
+        .build()
+        .expect("artifact source should build");
+
+    assert_eq!(
+        assembler.binary_at(module.value(), "asm.result").unwrap(),
+        b"artifact bytes".as_slice()
     );
 }
 
@@ -509,11 +554,13 @@ fn client_reflection_environment_is_visible_to_reflection_annotations() {
             ("env", process_environment),
         ]),
     )]);
-    let (assembler, diagnostics) = collecting_assembler();
-    let assembler = assembler
-        .with_host(MemoryHost::new([]))
-        .with_reflection_environment(reflection_environment)
-        .expect("test reflection environment should be a dictionary");
+    let (builder, diagnostics) = collecting_builder();
+    let assembler = builder
+        .host(MemoryHost::new([]))
+        .reflection_environment(|_| Ok(reflection_environment))
+        .expect("test reflection environment should be a dictionary")
+        .build()
+        .expect("test assembler should build");
     let module = assembler
         .module(["reflection_host"])
         .script(
@@ -545,10 +592,13 @@ fn client_reflection_environment_is_visible_to_reflection_annotations() {
 #[test]
 fn top_level_file_inputs_may_be_absolute() {
     let source_path = absolute_path_text("absolute-input.g");
-    let assembler = Assembler::default().with_host(MemoryHost::new([(
-        source_path.as_str(),
-        b"language g0\nasm.result = \"absolute\"\n".as_slice(),
-    )]));
+    let assembler = Assembler::builder()
+        .host(MemoryHost::new([(
+            source_path.as_str(),
+            b"language g0\nasm.result = \"absolute\"\n".as_slice(),
+        )]))
+        .build()
+        .expect("test assembler should build");
     let module = assembler
         .module(["absolute"])
         .file(&source_path)
@@ -564,10 +614,13 @@ fn top_level_file_inputs_may_be_absolute() {
 
 #[test]
 fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
-    let assembler = Assembler::default().with_host(MemoryHost::new([(
-        "invalid.g",
-        b"language g0\nvalue = \xff\n".as_slice(),
-    )]));
+    let assembler = Assembler::builder()
+        .host(MemoryHost::new([(
+            "invalid.g",
+            b"language g0\nvalue = \xff\n".as_slice(),
+        )]))
+        .build()
+        .expect("test assembler should build");
 
     let error = assembler
         .module(["invalid"])
@@ -599,6 +652,14 @@ fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
             .as_binary(),
         Some(source_path.as_bytes())
     );
+    let expected_digest = ContentDigest::of(b"language g0\nvalue = \xff\n");
+    assert_eq!(
+        assembler
+            .get(&enriched, "msg.origin.digest.sha256")
+            .expect("assembler provenance should include the consumed digest")
+            .as_binary(),
+        Some(expected_digest.as_bytes().as_slice())
+    );
     assert_eq!(
         assembler
             .get(&enriched, "spec")
@@ -610,10 +671,13 @@ fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
 
 #[test]
 fn repeated_source_compilations_have_distinct_invocations() {
-    let assembler = Assembler::default().with_host(MemoryHost::new([(
-        "invalid.g",
-        b"language g0\nvalue = \xff\n".as_slice(),
-    )]));
+    let assembler = Assembler::builder()
+        .host(MemoryHost::new([(
+            "invalid.g",
+            b"language g0\nvalue = \xff\n".as_slice(),
+        )]))
+        .build()
+        .expect("test assembler should build");
     let error = assembler
         .module(["repeated"])
         .inputs([
@@ -649,14 +713,17 @@ fn repeated_source_compilations_have_distinct_invocations() {
 
 #[test]
 fn imported_source_diagnostics_include_the_import_chain() {
-    let (assembler, diagnostics) = collecting_assembler();
-    let assembler = assembler.with_host(MemoryHost::new([
-        (
-            "main.g",
-            b"language g0\nimport \"child.g\" as child\nasm.result = child.value\n".as_slice(),
-        ),
-        ("child.g", b"language g0\nvalue = \xff\n".as_slice()),
-    ]));
+    let (builder, diagnostics) = collecting_builder();
+    let assembler = builder
+        .host(MemoryHost::new([
+            (
+                "main.g",
+                b"language g0\nimport \"child.g\" as child\nasm.result = child.value\n".as_slice(),
+            ),
+            ("child.g", b"language g0\nvalue = \xff\n".as_slice()),
+        ]))
+        .build()
+        .expect("test assembler should build");
     let module = assembler
         .module(["imports"])
         .file("main.g")
@@ -857,8 +924,61 @@ impl Host for MemoryHost {
             .cloned()
             .ok_or_else(|| HostError::new(format!("missing virtual file `{}`", path.display())))
     }
+}
 
-    fn path_exists(&self, path: &Path) -> bool {
-        self.files.contains_key(path)
+#[derive(Clone)]
+struct MemorySourceSystem {
+    files: Arc<HashMap<PathBuf, Bytes>>,
+}
+
+impl MemorySourceSystem {
+    fn new<const N: usize>(files: [(&str, &[u8]); N]) -> Self {
+        Self {
+            files: Arc::new(
+                files
+                    .into_iter()
+                    .map(|(path, bytes)| (PathBuf::from(path), Bytes::copy_from_slice(bytes)))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn load_path(&self, path: &Path) -> Result<SourceArtifact, SourceError> {
+        let bytes = self.files.get(path).cloned().ok_or_else(|| {
+            SourceError::new(format!("missing memory source `{}`", path.display()))
+        })?;
+        let base = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        Ok(SourceArtifact::new(
+            bytes,
+            SourceIdentity::new(
+                format!("memory:{}", path.display()),
+                Value::record([("memory", Value::text(path.display().to_string()))]),
+            ),
+        )
+        .with_import_resolver(MemoryImportResolver {
+            sources: self.clone(),
+            base,
+        }))
+    }
+}
+
+impl SourceSystem for MemorySourceSystem {
+    fn load_top_level(&self, path: &Path) -> Result<SourceArtifact, SourceError> {
+        self.load_path(path)
+    }
+}
+
+#[derive(Clone)]
+struct MemoryImportResolver {
+    sources: MemorySourceSystem,
+    base: PathBuf,
+}
+
+impl ImportResolver for MemoryImportResolver {
+    fn load_relative(&self, request: &RelativeSourcePath) -> Result<SourceArtifact, SourceError> {
+        self.sources.load_path(&self.base.join(request.as_str()))
     }
 }

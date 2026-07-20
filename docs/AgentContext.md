@@ -45,9 +45,10 @@ notes instead of appending history; put subsystem details in
   cloning it risks lowering and evaluating the same work twice.
 - A complete source function lowers to one bind spine, including leading binds
   for captures. Application spines lower together when possible.
-- Front ends receive raw source bytes separately from `CompileContext`. The
-  built-in `.g` compiler validates UTF-8 itself. Source identity and importer
-  provenance remain assembler-owned.
+- Front ends receive a `SourceArtifact`'s raw bytes separately from
+  `CompileContext`. The built-in `.g` compiler validates UTF-8 itself. Source
+  identity, digest, relative resolver, and importer provenance remain
+  assembler-owned.
 - `CompileContext` supplies capabilities, values, builtins, loaders, and
   diagnostic emission. It must not become a lambda/application expression DSL.
 - Front-end import requests and `abstract_global_path` components are relative.
@@ -107,13 +108,20 @@ their detailed scheduling and representation contracts.
   must not flatten nested binary/list values such as `["A", 10, "B"]`.
 - `Assembler::net` is a scoped facade over the one checked `NetBuilder`; runtime
   nodes, cursors, schedulers, and fan histories stay internal.
+- `AssemblerBuilder` fixes source authority, runtime, conflict strategy, and
+  reflection environment before creating one live reasoning session. Its
+  environment closure may create session-bound protected volumes. Do not add
+  fluent `Assembler` methods that silently replace the session.
+- A completed assembler has one immutable `SourceSystem`. Relative imports use
+  the resolver carried by their loaded artifact; diagnostic origin records the
+  SHA-256 digest of the exact bytes given to the front end.
 - `main` chooses the `configuration` and `assembly` roots. The library assigns
   neither name nor role.
 - CLI worker count comes from `--workers`, then `GLAM_WORKERS`, then zero.
   Workers are shared by related assembler/logger sessions. A divergent spark
   can occupy one indefinitely; cancellation and reduction fuel are deferred.
-- Local-file reads retain the bytes' SHA-256 digest. A conflicting repeat read
-  is an error; a change found only during the final recheck is a warning.
+- `FileSourceSystem` retains each local read's SHA-256 digest. A conflicting
+  repeat read is an error; a change found only during the final recheck is a warning.
   Manifests contain the retained digests, not a later rescan.
 - `--parse` is temporary direct front-end inspection pending an equivalent
   reflection view.

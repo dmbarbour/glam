@@ -16,9 +16,9 @@ not define future language semantics or collect subsystem invariants.
 | Path | Responsibility |
 | --- | --- |
 | `main.rs` | CLI policy, configuration/assembly roots, diagnostic-bus subscriptions, logger host, and process output |
-| `local_files.rs` | CLI local-file consistency and optional SHA-256 manifest |
-| `lib.rs`, `api.rs` | Embedding facade: opaque values, source hosts, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
-| `compiler.rs` | Per-source capabilities, hidden provenance, loaders, namespace qualification, and diagnostic emission |
+| `source.rs` | Immutable source artifacts, identities and digests, relative resolvers, host compatibility, and tracked local files |
+| `lib.rs`, `api.rs` | Embedding facade: staged assembler construction, opaque values, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
+| `compiler.rs` | Per-source capabilities, hidden artifact/import provenance, loaders, namespace qualification, and diagnostic emission |
 | `g_syntax.rs` | Built-in `.g` front-end facade |
 | `g_syntax/parser/` | Layout, declaration, expression, and compound parsing |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs` | Scope resolution, affine semantic IR, captures, and warnings |
@@ -46,15 +46,18 @@ submodules rather than homes for another implementation layer.
 
 ```text
 main or embedding client
+  -> AssemblerBuilder fixes SourceSystem + reasoning resources
   -> Assembler + ModuleBuilder
-  -> Host supplies source bytes
+  -> SourceSystem supplies immutable SourceArtifact
+  -> artifact supplies bytes + identity + digest + relative resolver
   -> CompileContext supplies source-scoped capabilities
   -> selected front end parses, resolves, and lowers
   -> closed module Value
   -> explicit evaluation/extraction
 ```
 
-Imports re-enter the same assembler session through host-installed loaders.
+Imports re-enter the same assembler session through artifact-installed relative
+resolvers.
 The CLI then extracts `asm.result`, drains reflection reasoning, finalizes local
 file tracking, and closes configured logging. See the
 [assembly flow](../docs/architecture/assembly.md) for ordering and failure

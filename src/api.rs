@@ -1,6 +1,6 @@
 //! Stable embedding-oriented facade for assembling modules and observing values.
 //!
-//! This module owns host capabilities and orchestration. Front-end syntax,
+//! This module owns staged source/reasoning construction and orchestration. Front-end syntax,
 //! core values, evaluator topology, and interaction-net scheduling remain
 //! implementation details behind the facade.
 
@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use bytes::Bytes;
 
@@ -21,7 +21,7 @@ use crate::compiler::{
 use crate::core::Value as CoreValue;
 use crate::core::{Builtin, Dict, Key, List, NetValue};
 use crate::core_net::CoreSpecialization;
-use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity, SourceIdentity};
+use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionRun,
@@ -34,6 +34,9 @@ use crate::reflection::{
     CommitResult, ConflictAnalysisStrategy, ExactConflictAnalysis, HostSnapshot,
     ReasoningSessionId, ReflectionEffects, ReflectionServices, ReflectionStore, TaskCommit,
     TaskEnvironment, TaskHost, VolumeId, task_launcher, volume_effects,
+};
+use crate::source::{
+    FileSourceSystem, Host, HostSourceSystem, SourceArtifact, SourceIdentity, SourceSystem,
 };
 
 const GLAM_COMPATIBILITY_VERSION: &str = "0.1.0";
@@ -359,9 +362,10 @@ impl Diagnostic {
 
     pub fn with_source_location(self, source: impl Into<Arc<str>>, line: usize) -> Self {
         let source = source.into();
+        let identity = SourceIdentity::file(Path::new(source.as_ref()));
         let origin = CoreValue::Dict(Dict::new_sync().insert(
             (*crate::core::keys::SOURCE).clone(),
-            SourceIdentity::file(source.clone()).value(),
+            identity.value().as_core().clone(),
         ));
         Self::from_parts(
             Some(source.clone()),
@@ -419,7 +423,7 @@ impl Diagnostic {
 
     fn from_compile(trace: &CompilationTrace, severity: Severity, message: CoreValue) -> Self {
         Self::from_parts(
-            Some(trace.source_label().clone()),
+            Some(Arc::from(trace.source_label())),
             severity,
             message,
             Some(trace.origin_value()),
@@ -678,7 +682,7 @@ where
 
 struct AssemblerReflectionHost {
     reasoning_session: ReasoningSessionId,
-    reflection_environment: Value,
+    reflection_environment: OnceLock<Value>,
     diagnostics: DiagnosticBus,
     state: Mutex<AssemblerReflectionState>,
     changed: Condvar,
@@ -690,15 +694,14 @@ struct AssemblerReflectionState {
 }
 
 impl AssemblerReflectionHost {
-    fn new(
+    fn new_unsealed(
         reasoning_session: ReasoningSessionId,
-        reflection_environment: Value,
         diagnostics: DiagnosticBus,
         conflict_analysis: Arc<dyn ConflictAnalysisStrategy>,
     ) -> Self {
         Self {
             reasoning_session,
-            reflection_environment,
+            reflection_environment: OnceLock::new(),
             diagnostics,
             state: Mutex::new(AssemblerReflectionState {
                 wake_generation: 1,
@@ -708,17 +711,30 @@ impl AssemblerReflectionHost {
         }
     }
 
+    fn seal_environment(&self, environment: Value) -> Result<(), Error> {
+        self.reflection_environment
+            .set(environment)
+            .map_err(|_| Error::new("reflection environment was already configured"))
+    }
+
+    fn set_conflict_analysis(&self, strategy: Arc<dyn ConflictAnalysisStrategy>) {
+        self.state
+            .lock()
+            .expect("assembler reflection host mutex should not be poisoned")
+            .store
+            .set_strategy(strategy);
+    }
+
     fn create_volume(&self, initial: Value) -> Result<(VolumeId, Value), Error> {
         let volume = {
             let mut state = self
                 .state
                 .lock()
                 .expect("assembler reflection host mutex should not be poisoned");
-            let volume = state
+            state
                 .store
                 .create_volume(initial)
-                .map_err(|error| Error::new(error.as_ref()))?;
-            volume
+                .map_err(|error| Error::new(error.as_ref()))?
         };
         Ok((volume, volume_effects(self.reasoning_session, volume)))
     }
@@ -745,7 +761,10 @@ impl AssemblerReflectionHost {
 
 impl TaskEnvironment for AssemblerReflectionHost {
     fn reflection_environment(&self) -> Value {
-        self.reflection_environment.clone()
+        self.reflection_environment
+            .get()
+            .expect("reasoning host must be sealed before it runs tasks")
+            .clone()
     }
 }
 
@@ -818,6 +837,13 @@ pub struct EvaluationRuntime {
 }
 
 impl EvaluationRuntime {
+    pub fn new(worker_threads: usize) -> Result<Self, Error> {
+        Ok(Self {
+            executor: EvaluationExecutor::new(worker_threads)
+                .map_err(|error| Error::new(error.as_ref()))?,
+        })
+    }
+
     pub fn worker_threads(&self) -> usize {
         self.executor.worker_count()
     }
@@ -836,19 +862,11 @@ struct ReasoningSession {
 }
 
 impl ReasoningSession {
-    fn new(
-        environment: Value,
+    fn from_host(
+        host: Arc<AssemblerReflectionHost>,
         diagnostics: DiagnosticBus,
         runtime: EvaluationRuntime,
-        conflict_analysis: Arc<dyn ConflictAnalysisStrategy>,
     ) -> Self {
-        let reasoning_session = allocate_reasoning_session_id();
-        let host = Arc::new(AssemblerReflectionHost::new(
-            reasoning_session,
-            environment,
-            diagnostics.clone(),
-            conflict_analysis,
-        ));
         let evaluation = EvaluationSession::shared(runtime.executor());
         evaluation
             .install_reflection_launcher(task_launcher(ReflectionEffects, host.clone()))
@@ -888,59 +906,6 @@ impl ReasoningSession {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostError {
-    message: Arc<str>,
-}
-
-impl HostError {
-    pub fn new(message: impl Into<Arc<str>>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for HostError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for HostError {}
-
-/// External capabilities used to load module sources and binary inputs.
-pub trait Host: Send + Sync {
-    fn read(&self, path: &Path) -> Result<Bytes, HostError>;
-
-    fn path_exists(&self, path: &Path) -> bool;
-}
-
-impl<T: Host + ?Sized> Host for Arc<T> {
-    fn read(&self, path: &Path) -> Result<Bytes, HostError> {
-        (**self).read(path)
-    }
-
-    fn path_exists(&self, path: &Path) -> bool {
-        (**self).path_exists(path)
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SystemHost;
-
-impl Host for SystemHost {
-    fn read(&self, path: &Path) -> Result<Bytes, HostError> {
-        std::fs::read(path).map(Bytes::from).map_err(|error| {
-            HostError::new(format!("could not read `{}`: {error}", path.display()))
-        })
-    }
-
-    fn path_exists(&self, path: &Path) -> bool {
-        path.exists()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleInput {
     File(PathBuf),
     Script { extension: String, body: Bytes },
@@ -960,7 +925,7 @@ impl ModuleInput {
 }
 
 struct PreparedSource {
-    bytes: Bytes,
+    source: Arc<SourceArtifact>,
     context: CompileContext,
     had_errors: Arc<AtomicBool>,
 }
@@ -1198,49 +1163,178 @@ impl ReasoningVolume {
 
 #[derive(Clone)]
 pub struct Assembler {
-    host: Arc<dyn Host>,
+    source_system: Arc<dyn SourceSystem>,
     next_compilation_invocation: Arc<AtomicU64>,
     reasoning: ReasoningSession,
-    diagnostic_attachment: Option<DiagnosticAttachment>,
+    diagnostic_attachments: Vec<DiagnosticAttachment>,
 }
 
 #[derive(Clone)]
 struct DiagnosticAttachment {
-    subscriber: Arc<dyn DiagnosticSubscriber>,
     _subscription: DiagnosticSubscription,
 }
 
-impl Default for Assembler {
+/// Staged construction of one assembler and its single reasoning session.
+pub struct AssemblerBuilder {
+    source_system: Arc<dyn SourceSystem>,
+    runtime: EvaluationRuntime,
+    host: Arc<AssemblerReflectionHost>,
+    diagnostics: DiagnosticBus,
+    reflection_environment: Option<Value>,
+    diagnostic_attachments: Vec<DiagnosticAttachment>,
+    pending_diagnostics: Vec<Diagnostic>,
+}
+
+/// Capabilities available while constructing the immutable reflection
+/// environment. The borrow cannot escape the construction closure.
+pub struct ReflectionEnvironmentBuilder<'a> {
+    host: &'a Arc<AssemblerReflectionHost>,
+}
+
+impl ReflectionEnvironmentBuilder<'_> {
+    /// Creates a protected volume belonging to the future reasoning session.
+    pub fn create_volume(&mut self, initial: Value) -> Result<ReasoningVolume, Error> {
+        create_reasoning_volume(self.host, initial)
+    }
+}
+
+impl Default for AssemblerBuilder {
     fn default() -> Self {
         let diagnostics = DiagnosticBus::new();
-        let host: Arc<dyn Host> = Arc::new(SystemHost);
-        let (reflection_environment, replaced_glam) =
-            authoritative_reflection_environment(Value::empty_record(), "assembler")
-                .expect("the default reflection environment must be a dictionary");
-        debug_assert!(
-            !replaced_glam,
-            "the default environment must not define `glam`"
-        );
-        let evaluation_runtime = EvaluationRuntime {
-            executor: EvaluationExecutor::new(0)
-                .expect("zero-worker evaluation executor must not start threads"),
-        };
-        let reasoning = ReasoningSession::new(
-            reflection_environment,
-            diagnostics,
-            evaluation_runtime,
+        let host = Arc::new(AssemblerReflectionHost::new_unsealed(
+            allocate_reasoning_session_id(),
+            diagnostics.clone(),
             Arc::new(ExactConflictAnalysis),
-        );
+        ));
         Self {
+            source_system: Arc::new(FileSourceSystem::default()),
+            runtime: EvaluationRuntime::new(0)
+                .expect("zero-worker evaluation runtime must be constructible"),
             host,
-            next_compilation_invocation: Arc::new(AtomicU64::new(1)),
-            reasoning,
-            diagnostic_attachment: None,
+            diagnostics,
+            reflection_environment: None,
+            diagnostic_attachments: Vec::new(),
+            pending_diagnostics: Vec::new(),
         }
     }
 }
 
+impl AssemblerBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn source_system(mut self, source_system: impl SourceSystem + 'static) -> Self {
+        self.source_system = Arc::new(source_system);
+        self
+    }
+
+    /// Adapts the previous byte-host API to the artifact-oriented source API.
+    pub fn host(self, host: impl Host + 'static) -> Self {
+        self.source_system(HostSourceSystem::new(host))
+    }
+
+    pub fn evaluation_runtime(mut self, runtime: EvaluationRuntime) -> Self {
+        self.runtime = runtime;
+        self
+    }
+
+    pub fn conflict_analysis(self, strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
+        self.host.set_conflict_analysis(strategy);
+        self
+    }
+
+    pub fn diagnostic_subscriber(
+        mut self,
+        subscriber: impl DiagnosticSubscriber + 'static,
+    ) -> Self {
+        let subscriber: Arc<dyn DiagnosticSubscriber> = Arc::new(subscriber);
+        let subscription = self.diagnostics.subscribe_shared(subscriber.clone());
+        self.diagnostic_attachments.push(DiagnosticAttachment {
+            _subscription: subscription,
+        });
+        self
+    }
+
+    pub fn diagnostic_callback<F>(self, callback: F) -> Self
+    where
+        F: Fn(DiagnosticEvent) + Send + Sync + 'static,
+    {
+        self.diagnostic_subscriber(DiagnosticCallback(callback))
+    }
+
+    pub fn create_volume(&mut self, initial: Value) -> Result<ReasoningVolume, Error> {
+        create_reasoning_volume(&self.host, initial)
+    }
+
+    /// Constructs the client portion of the reflection environment. The
+    /// closure may create session-bound protected volumes before the session
+    /// becomes runnable.
+    pub fn reflection_environment<F>(mut self, build: F) -> Result<Self, Error>
+    where
+        F: FnOnce(&mut ReflectionEnvironmentBuilder<'_>) -> Result<Value, Error>,
+    {
+        if self.reflection_environment.is_some() {
+            return Err(Error::new("reflection environment was already configured"));
+        }
+        let environment = build(&mut ReflectionEnvironmentBuilder { host: &self.host })?;
+        let (environment, replaced_glam) =
+            authoritative_reflection_environment(environment, "assembler")?;
+        self.reflection_environment = Some(environment);
+        if replaced_glam {
+            self.pending_diagnostics.push(Diagnostic::new(
+                Severity::Warning,
+                "reflection environment namespace `glam` is reserved; supplied value was ignored",
+            ));
+        }
+        Ok(self)
+    }
+
+    pub fn build(mut self) -> Result<Assembler, Error> {
+        let environment = match self.reflection_environment.take() {
+            Some(environment) => environment,
+            None => authoritative_reflection_environment(Value::empty_record(), "assembler")?.0,
+        };
+        self.host.seal_environment(environment)?;
+        let reasoning =
+            ReasoningSession::from_host(self.host, self.diagnostics.clone(), self.runtime);
+        for diagnostic in self.pending_diagnostics {
+            self.diagnostics.publish(diagnostic);
+        }
+        Ok(Assembler {
+            source_system: self.source_system,
+            next_compilation_invocation: Arc::new(AtomicU64::new(1)),
+            reasoning,
+            diagnostic_attachments: self.diagnostic_attachments,
+        })
+    }
+}
+
+fn create_reasoning_volume(
+    host: &Arc<AssemblerReflectionHost>,
+    initial: Value,
+) -> Result<ReasoningVolume, Error> {
+    let (volume, effects) = host.create_volume(initial)?;
+    Ok(ReasoningVolume {
+        host: host.clone(),
+        volume,
+        effects,
+    })
+}
+
+impl Default for Assembler {
+    fn default() -> Self {
+        AssemblerBuilder::default()
+            .build()
+            .expect("the default assembler must be constructible")
+    }
+}
+
 impl Assembler {
+    pub fn builder() -> AssemblerBuilder {
+        AssemblerBuilder::new()
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -1249,12 +1343,7 @@ impl Assembler {
     /// Possession of the returned Glam capability value is the authority to
     /// access it; ordinary `.heap.*` requests cannot address the volume.
     pub fn create_volume(&self, initial: Value) -> Result<ReasoningVolume, Error> {
-        let (volume, effects) = self.reasoning.host.create_volume(initial)?;
-        Ok(ReasoningVolume {
-            host: self.reasoning.host.clone(),
-            volume,
-            effects,
-        })
+        create_reasoning_volume(&self.reasoning.host, initial)
     }
 
     /// Returns the cached closed Glam function used by the executable's
@@ -1335,15 +1424,7 @@ impl Assembler {
         }
     }
 
-    /// Replaces the source-file capability used by future module and binary
-    /// loads. Existing evaluation and scheduled reasoning remain attached to
-    /// this assembler.
-    pub fn with_host(mut self, host: impl Host + 'static) -> Self {
-        self.host = Arc::new(host);
-        self
-    }
-
-    /// Installs or replaces this facade's retained diagnostic subscription
+    /// Installs another retained diagnostic subscription
     /// without rebuilding or otherwise disturbing its reasoning session.
     pub fn with_diagnostic_subscriber(
         mut self,
@@ -1354,49 +1435,9 @@ impl Assembler {
             .reasoning
             .diagnostics()
             .subscribe_shared(subscriber.clone());
-        self.diagnostic_attachment = Some(DiagnosticAttachment {
-            subscriber,
+        self.diagnostic_attachments.push(DiagnosticAttachment {
             _subscription: subscription,
         });
-        self
-    }
-
-    /// Replaces the client-owned portion of the read-only reflection
-    /// environment and starts a fresh evaluation session. The complete `glam`
-    /// namespace is reserved for authoritative assembler metadata. A supplied
-    /// `glam` value is discarded and produces a warning diagnostic.
-    pub fn with_reflection_environment(mut self, environment: Value) -> Result<Self, Error> {
-        let (reflection_environment, replaced_glam) =
-            authoritative_reflection_environment(environment, "assembler")?;
-        let runtime = self.reasoning.runtime();
-        self.replace_reasoning(reflection_environment, runtime);
-        if replaced_glam {
-            self.reasoning.diagnostics().publish(Diagnostic::new(
-                Severity::Warning,
-                "reflection environment namespace `glam` is reserved; supplied value was ignored",
-            ));
-        }
-        Ok(self)
-    }
-
-    /// Replaces the shared background executor and starts a fresh evaluation
-    /// session. The count applies to this assembler and attached logger/IDE
-    /// sessions together; zero disables background workers and drops sparks.
-    pub fn with_worker_threads(mut self, worker_threads: usize) -> Result<Self, Error> {
-        let evaluation_runtime = EvaluationRuntime {
-            executor: EvaluationExecutor::new(worker_threads)
-                .map_err(|error| Error::new(error.as_ref()))?,
-        };
-        self.replace_reasoning(self.reasoning.environment(), evaluation_runtime);
-        Ok(self)
-    }
-
-    /// Starts a fresh reasoning session using `strategy` to summarize shared
-    /// heap reads. Write paths and commit semantics remain exact.
-    pub fn with_conflict_analysis(mut self, strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
-        let environment = self.reasoning.environment();
-        let runtime = self.reasoning.runtime();
-        self.replace_reasoning_with_strategy(environment, runtime, strategy);
         self
     }
 
@@ -1428,31 +1469,6 @@ impl Assembler {
 
     pub(crate) fn record_diagnostic(&self, diagnostic: Diagnostic) {
         self.reasoning.diagnostics().publish(diagnostic);
-    }
-
-    fn replace_reasoning(&mut self, environment: Value, runtime: EvaluationRuntime) {
-        let conflict_analysis = self.reasoning.conflict_analysis();
-        self.replace_reasoning_with_strategy(environment, runtime, conflict_analysis);
-    }
-
-    fn replace_reasoning_with_strategy(
-        &mut self,
-        environment: Value,
-        runtime: EvaluationRuntime,
-        conflict_analysis: Arc<dyn ConflictAnalysisStrategy>,
-    ) {
-        let diagnostics = DiagnosticBus::new();
-        let diagnostic_attachment = self.diagnostic_attachment.as_ref().map(|attachment| {
-            let subscriber = attachment.subscriber.clone();
-            let subscription = diagnostics.subscribe_shared(subscriber.clone());
-            DiagnosticAttachment {
-                subscriber,
-                _subscription: subscription,
-            }
-        });
-        self.reasoning =
-            ReasoningSession::new(environment, diagnostics, runtime, conflict_analysis);
-        self.diagnostic_attachment = diagnostic_attachment;
     }
 
     fn next_compilation_invocation(&self) -> CompilationInvocationId {
@@ -1580,7 +1596,7 @@ impl Assembler {
                     session: session.clone(),
                 },
             )?;
-            definitions = compile_source(&prepared.bytes, &prepared.context);
+            definitions = compile_source(prepared.source.bytes(), &prepared.context);
             had_errors |= prepared.had_errors.load(Ordering::Relaxed);
         }
 
@@ -1608,17 +1624,19 @@ impl Assembler {
         } = setup;
         match input {
             ModuleInput::File(path) => {
-                let bytes = self.read_source(path)?;
-                let loader_label: Arc<str> = Arc::from(path.display().to_string());
-                let source_label = absolute_source_label(path)?;
+                let source = Arc::new(
+                    self.source_system
+                        .load_top_level(path)
+                        .map_err(|error| Error::new(error.to_string()))?,
+                );
                 let trace = Arc::new(CompilationTrace::root(
                     self.next_compilation_invocation(),
-                    SourceIdentity::file(source_label),
+                    &source,
                     module_path.clone(),
                 ));
                 let had_errors = Arc::new(AtomicBool::new(false));
                 let context = CompileContext::from_module_path(module_path.iter().cloned())
-                    .with_importer_source_path(loader_label)
+                    .with_importer_source(source.clone())
                     .with_compilation_trace(trace.clone())
                     .with_prior_defs(prior_defs)
                     .with_final_defs(final_defs)
@@ -1630,16 +1648,20 @@ impl Assembler {
                         had_errors.clone(),
                     ));
                 Ok(PreparedSource {
-                    bytes,
+                    source,
                     context,
                     had_errors,
                 })
             }
             ModuleInput::Script { extension, body } => {
                 let label: Arc<str> = Arc::from(format!("<script.{extension}>"));
+                let source = Arc::new(SourceArtifact::new(
+                    body.clone(),
+                    SourceIdentity::script(label, body.clone()),
+                ));
                 let trace = Arc::new(CompilationTrace::root(
                     self.next_compilation_invocation(),
-                    SourceIdentity::script(label, body.clone()),
+                    &source,
                     module_path.clone(),
                 ));
                 let had_errors = Arc::new(AtomicBool::new(false));
@@ -1655,7 +1677,7 @@ impl Assembler {
                         had_errors.clone(),
                     ));
                 Ok(PreparedSource {
-                    bytes: body.clone(),
+                    source,
                     context,
                     had_errors,
                 })
@@ -1678,34 +1700,37 @@ impl Assembler {
         args: ModuleLoadArgs,
         session: Arc<Mutex<Vec<Diagnostic>>>,
     ) -> Result<CoreValue, String> {
-        let path = resolve_local_import_path(
-            args.importer_source_path.as_deref(),
-            &args.request,
-            "local import",
-        )?;
-        let loader_label: Arc<str> = Arc::from(path.display().to_string());
-        let source_label = absolute_source_label(&path).map_err(|error| error.to_string())?;
-        let source = self.read_source(&path).map_err(|error| error.to_string())?;
+        let importer = args.importer_source.as_ref().ok_or_else(|| {
+            format!(
+                "local import `{}` cannot be loaded from a source without an import resolver",
+                args.request.as_str()
+            )
+        })?;
+        let source = Arc::new(
+            importer
+                .load_relative(&args.request)
+                .map_err(|error| error.to_string())?,
+        );
         let module_loader = self.module_loader(session.clone());
         let binary_loader = self.binary_loader();
         let had_errors = Arc::new(AtomicBool::new(false));
         let trace = match args.importer_trace {
             Some(parent) => Arc::new(CompilationTrace::imported(
                 self.next_compilation_invocation(),
-                SourceIdentity::file(source_label.clone()),
+                &source,
                 args.module_path.clone(),
                 parent,
-                args.request.clone(),
+                Arc::from(args.request.as_str()),
                 args.extends.clone(),
             )),
             None => Arc::new(CompilationTrace::root(
                 self.next_compilation_invocation(),
-                SourceIdentity::file(source_label),
+                &source,
                 args.module_path.clone(),
             )),
         };
         let context = CompileContext::from_module_path(args.module_path.iter().cloned())
-            .with_importer_source_path(loader_label.clone())
+            .with_importer_source(source.clone())
             .with_compilation_trace(trace.clone())
             .with_prior_defs(args.prior_defs)
             .with_final_defs(args.final_defs)
@@ -1716,31 +1741,29 @@ impl Assembler {
                 session,
                 had_errors.clone(),
             ));
-        let definitions = compile_source(&source, &context);
+        let definitions = compile_source(source.bytes(), &context);
 
         if had_errors.load(Ordering::Relaxed) {
-            Err(format!("local import `{loader_label}` failed to compile"))
+            Err(format!(
+                "local import `{}` failed to compile",
+                source.identity().label()
+            ))
         } else {
             Ok(definitions)
         }
     }
 
     fn load_local_binary(&self, args: BinaryLoadArgs) -> Result<CoreValue, String> {
-        let path = resolve_local_import_path(
-            args.importer_source_path.as_deref(),
-            &args.request,
-            "binary import",
-        )?;
-        self.host
-            .read(&path)
-            .map(CoreValue::Binary)
+        let importer = args.importer_source.as_ref().ok_or_else(|| {
+            format!(
+                "binary import `{}` cannot be loaded from a source without an import resolver",
+                args.request.as_str()
+            )
+        })?;
+        importer
+            .load_relative(&args.request)
+            .map(|artifact| CoreValue::Binary(artifact.bytes().clone()))
             .map_err(|error| error.to_string())
-    }
-
-    fn read_source(&self, path: &Path) -> Result<Bytes, Error> {
-        self.host
-            .read(path)
-            .map_err(|error| Error::new(error.to_string()))
     }
 
     fn seal_module(&self, context: &CompileContext, definitions: &CoreValue) -> CoreValue {
@@ -1897,40 +1920,16 @@ impl ModuleBuilder<'_> {
     }
 }
 
-fn resolve_local_import_path(
-    importer_source_path: Option<&str>,
-    request: &str,
-    kind: &str,
-) -> Result<PathBuf, String> {
-    crate::compiler::validate_local_source_request(request)?;
-    let importer = importer_source_path.ok_or_else(|| {
-        format!("{kind} `{request}` cannot be loaded from a source without a file path")
-    })?;
-    let base = Path::new(importer)
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-    Ok(base.join(request))
-}
-
-fn absolute_source_label(path: &Path) -> Result<Arc<str>, Error> {
-    std::path::absolute(path)
-        .map(|path| Arc::from(path.display().to_string()))
-        .map_err(|error| {
-            Error::new(format!(
-                "could not make source path `{}` absolute: {error}",
-                path.display()
-            ))
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn test_compilation_trace(source: &str) -> CompilationTrace {
+        let source =
+            SourceArtifact::new(Bytes::from_static(b"source"), SourceIdentity::file(source));
         CompilationTrace::root(
             CompilationInvocationId::new(1),
-            SourceIdentity::file(Arc::<str>::from(source)),
+            &source,
             Arc::from(["test".to_owned()]),
         )
     }
@@ -1953,35 +1952,31 @@ mod tests {
     }
 
     #[test]
-    fn replacing_the_environment_starts_a_fresh_reasoning_session() {
-        let assembler = Assembler::new();
-        let original = assembler.eval_context();
-        let replaced = assembler
-            .with_reflection_environment(Value::record([(
-                "client",
-                Value::text("new environment"),
-            )]))
-            .expect("replacement environment should be valid");
+    fn builder_seals_the_environment_into_one_reasoning_session() {
+        let assembler = Assembler::builder()
+            .reflection_environment(|_| {
+                Ok(Value::record([("client", Value::text("new environment"))]))
+            })
+            .expect("configured environment should be valid");
+        let assembler = assembler.build().expect("assembler should build");
 
-        assert!(!original.shares_session_with(&replaced.eval_context()));
         assert_eq!(
-            replaced
-                .get(&replaced.reflection_environment(), "client")
-                .expect("replacement environment should be installed")
+            assembler
+                .get(&assembler.reflection_environment(), "client")
+                .expect("configured environment should be installed")
                 .as_binary(),
             Some(b"new environment".as_slice())
         );
     }
 
     #[test]
-    fn replacing_conflict_analysis_starts_a_fresh_reasoning_session() {
-        let assembler = Assembler::new();
-        let original = assembler.eval_context();
-        let replaced =
-            assembler.with_conflict_analysis(Arc::new(crate::reflection::CoarseConflictAnalysis));
+    fn builder_fixes_conflict_analysis_before_reasoning_starts() {
+        let assembler = Assembler::builder()
+            .conflict_analysis(Arc::new(crate::reflection::CoarseConflictAnalysis))
+            .build()
+            .expect("assembler should build");
 
-        assert!(!original.shares_session_with(&replaced.eval_context()));
-        assert_eq!(replaced.conflict_analysis().name(), "coarse");
+        assert_eq!(assembler.conflict_analysis().name(), "coarse");
     }
 
     #[test]
