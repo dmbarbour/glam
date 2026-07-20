@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use crate::api::{EvaluationRuntime, Value as PublicValue};
 use crate::core::{Atom, Dict, FunctionValue, Key, LazyValue, List, NetValue, Value, keys};
-use crate::core_net::CoreSpecialization;
+use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSession,
@@ -972,16 +972,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let checkpoint = branch.retry_candidate();
                 let heap = if let Some(transaction) = branch.transaction.as_mut() {
                     let generation = transaction.snapshot.generation();
-                    transaction.store.observe(&path);
+                    let observed = transaction.store.observe_read(&path);
                     let heap = transaction.store.view().as_core().clone();
-                    branch.observe(checkpoint, generation);
+                    if observed {
+                        branch.observe(checkpoint, generation);
+                    }
                     heap
                 } else {
                     let snapshot = self.host.snapshot();
                     branch.observe(checkpoint, snapshot.generation());
                     snapshot.store().root().as_core().clone()
                 };
-                let value = get_value_path(&self.eval_context, &heap, &path)?;
+                let value = lazy_value_path(heap, &path);
                 MachineWork::Deliver {
                     value,
                     branch,
@@ -992,7 +994,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let path =
                     eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
                 if let Some(transaction) = branch.transaction.as_mut() {
-                    stage_store_write(&self.eval_context, &path, value, &mut transaction.store)?;
+                    transaction.store.write(path, PublicValue::from_core(value));
                     MachineWork::Deliver {
                         value: unit_value(),
                         branch,
@@ -1001,7 +1003,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 } else {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
-                    stage_store_write(&self.eval_context, &path, value, &mut store)?;
+                    store.write(path, PublicValue::from_core(value));
                     let commit =
                         TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
                     match self.host.commit(commit) {
@@ -2562,23 +2564,19 @@ fn get_value_path(context: &EvalContext, value: &Value, path: &[Key]) -> Result<
     Ok(current)
 }
 
-fn stage_store_write(
-    context: &EvalContext,
-    path: &[Key],
-    value: Value,
-    journal: &mut StoreJournal,
-) -> Result<(), TaskError> {
-    let value = if path.is_empty() {
-        require_state_dict(context, value)?
-    } else {
-        let parent = &path[..path.len() - 1];
-        let view = journal.view();
-        let parent_value = get_value_path(context, view.as_core(), parent)?;
-        require_state_dict(context, parent_value)?;
-        value
-    };
-    journal.write(path.to_vec(), PublicValue::from_core(value));
-    Ok(())
+fn lazy_value_path(value: Value, path: &[Key]) -> Value {
+    if path.is_empty() {
+        return value;
+    }
+    Value::Lazy(LazyValue::from_access(
+        Arc::from(
+            path.iter()
+                .cloned()
+                .map(CoreDataKey::Key)
+                .collect::<Vec<_>>(),
+        ),
+        Arc::from([value]),
+    ))
 }
 
 fn set_state_path(
@@ -4292,6 +4290,22 @@ mod tests {
     }
 
     #[test]
+    fn reading_a_covering_own_write_does_not_make_failure_retryable() {
+        let (_, effect) = compile_effect(
+            ".cut ((.heap.set ['owned] \"value\") =>> .heap.get ['owned] >>= (\\_value -> .fail))",
+        );
+        let host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
+            "changed",
+            PublicValue::text("later"),
+        )])));
+        let error = run_standard_on(&effect, host.clone()).unwrap_err();
+
+        assert!(error.to_string().contains("failed permanently"));
+        assert_eq!(host.wait_count(), 0);
+        assert_eq!(host.heap(), PublicValue::empty_record());
+    }
+
+    #[test]
     fn heap_root_get_and_set_are_explicit_whole_heap_operations() {
         let (assembler, effect) =
             compile_effect(".heap.set [] { answer:\"shared\" } =>> .heap.get []");
@@ -4306,6 +4320,66 @@ mod tests {
             b"shared".as_slice()
         );
         assert_eq!(value, host.heap());
+    }
+
+    #[test]
+    fn heap_root_replacement_and_path_errors_remain_lazy() {
+        let (assembler, effect) = compile_effect(".cut ((.heap.set [] 42) =>> .heap.get ['x])");
+        let host = Arc::new(TestHost::default());
+        let TaskOutcome::Complete(value) = run_standard_on(&effect, host.clone()).unwrap() else {
+            panic!("heap access should return its latent error value")
+        };
+        assert!(matches!(value.as_core(), Value::Lazy(_)));
+        assert_eq!(host.heap(), PublicValue::integer(42));
+        assert!(
+            assembler
+                .evaluate(&value)
+                .unwrap_err()
+                .to_string()
+                .contains("not a dictionary")
+        );
+
+        let (_, caught) = compile_effect(
+            ".cut ((.heap.set [] 42) =>> .heap.get ['x] >>= (\\value -> .eval value >>= (\\result -> .r result.err)))",
+        );
+        let TaskOutcome::Complete(error) =
+            run_reflection_test(&caught, Arc::new(TestHost::default())).unwrap()
+        else {
+            panic!("reflection eval should catch a latent heap access error")
+        };
+        assert!(
+            String::from_utf8_lossy(&assembler.to_binary(&error).unwrap())
+                .contains("not a dictionary")
+        );
+    }
+
+    #[test]
+    fn malformed_nested_heap_updates_do_not_poison_unrelated_reads() {
+        let (assembler, update) = compile_effect(
+            ".cut ((.heap.set [] { safe:\"ok\", x:3 }) =>> (.heap.set ['x, 'b] 7) =>> .r ())",
+        );
+        let host = Arc::new(TestHost::default());
+        assert!(matches!(
+            run_standard_on(&update, host.clone()).unwrap(),
+            TaskOutcome::Complete(_)
+        ));
+
+        let (_, safe) = compile_effect(".heap.get ['safe]");
+        let TaskOutcome::Complete(safe) = run_standard_on(&safe, host.clone()).unwrap() else {
+            panic!("unrelated heap access should complete")
+        };
+        assert_eq!(assembler.to_binary(&safe).unwrap(), b"ok".as_slice());
+
+        let (_, bad) = compile_effect(
+            ".heap.get ['x, 'b] >>= (\\value -> .eval value >>= (\\result -> .r result.err))",
+        );
+        let TaskOutcome::Complete(error) = run_reflection_test(&bad, host).unwrap() else {
+            panic!("reflection eval should catch the nested update error")
+        };
+        assert!(
+            String::from_utf8_lossy(&assembler.to_binary(&error).unwrap())
+                .contains("non-dictionary")
+        );
     }
 
     #[test]

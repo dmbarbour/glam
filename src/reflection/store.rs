@@ -238,9 +238,19 @@ impl StoreJournal {
         }
     }
 
-    pub(crate) fn observe(&mut self, path: &[Key]) {
-        self.observations
-            .observe(&ConflictPath::from_keys(path.to_vec()));
+    /// Records a read only when no earlier transaction-local write completely
+    /// supplies the requested path. Earlier observations remain intact.
+    pub(crate) fn observe_read(&mut self, path: &[Key]) -> bool {
+        let path = ConflictPath::from_keys(path.to_vec());
+        if self
+            .writes
+            .iter()
+            .any(|write| write.path.is_prefix_of(&path))
+        {
+            return false;
+        }
+        self.observations.observe(&path);
+        true
     }
 
     pub(crate) fn view(&self) -> PublicValue {
@@ -323,16 +333,7 @@ impl ReflectionStore {
 
     fn conflicts(&self, journal: &StoreJournal) -> bool {
         self.latest_changes.iter().any(|(changed, revision)| {
-            if *revision <= journal.snapshot.revision {
-                return false;
-            }
-            if journal.observations.may_conflict(changed) {
-                return true;
-            }
-            journal
-                .writes
-                .iter()
-                .any(|write| write.path != *changed && write.path.overlaps(changed))
+            *revision > journal.snapshot.revision && journal.observations.may_conflict(changed)
         })
     }
 }
@@ -460,7 +461,7 @@ mod tests {
         let mut store = store();
         let snapshot = store.snapshot();
         let mut reader = StoreJournal::new(snapshot.clone());
-        reader.observe(&[]);
+        reader.observe_read(&[]);
         let mut writer = StoreJournal::new(snapshot);
         writer.write(path(&["anywhere"]), PublicValue::integer(1));
 
@@ -469,11 +470,11 @@ mod tests {
     }
 
     #[test]
-    fn reads_and_strictly_nested_writes_conflict() {
+    fn reads_conflict_while_nested_blind_writes_serialize() {
         let mut store = store();
         let snapshot = store.snapshot();
         let mut reader = StoreJournal::new(snapshot.clone());
-        reader.observe(&path(&["missing", "child"]));
+        reader.observe_read(&path(&["missing", "child"]));
         let mut nested_writer = StoreJournal::new(snapshot.clone());
         nested_writer.write(path(&["tree", "child"]), PublicValue::integer(1));
         let mut parent_writer = StoreJournal::new(snapshot.clone());
@@ -482,9 +483,50 @@ mod tests {
         missing_writer.write(path(&["missing"]), PublicValue::empty_record());
 
         assert!(store.try_commit(&nested_writer));
-        assert!(!store.try_commit(&parent_writer));
+        assert!(store.try_commit(&parent_writer));
         assert!(store.try_commit(&missing_writer));
         assert!(!store.try_commit(&reader));
+    }
+
+    #[test]
+    fn overlapping_blind_writes_serialize_in_commit_order() {
+        let mut store = store();
+        let snapshot = store.snapshot();
+        let mut child = StoreJournal::new(snapshot.clone());
+        child.write(path(&["tree", "child"]), PublicValue::integer(1));
+        let mut parent = StoreJournal::new(snapshot);
+        parent.write(path(&["tree"]), PublicValue::integer(2));
+
+        assert!(store.try_commit(&child));
+        assert!(store.try_commit(&parent));
+    }
+
+    #[test]
+    fn reads_after_covering_writes_do_not_observe_the_snapshot() {
+        let mut store = store();
+        let snapshot = store.snapshot();
+        let mut local = StoreJournal::new(snapshot.clone());
+        local.write(path(&["value"]), PublicValue::integer(1));
+        assert!(!local.observe_read(&path(&["value"])));
+
+        let mut concurrent = StoreJournal::new(snapshot);
+        concurrent.write(path(&["value"]), PublicValue::integer(2));
+        assert!(store.try_commit(&concurrent));
+        assert!(store.try_commit(&local));
+    }
+
+    #[test]
+    fn writes_do_not_erase_earlier_read_dependencies() {
+        let mut store = store();
+        let snapshot = store.snapshot();
+        let mut local = StoreJournal::new(snapshot.clone());
+        assert!(local.observe_read(&path(&["value"])));
+        local.write(path(&["value"]), PublicValue::integer(1));
+
+        let mut concurrent = StoreJournal::new(snapshot);
+        concurrent.write(path(&["value"]), PublicValue::integer(2));
+        assert!(store.try_commit(&concurrent));
+        assert!(!store.try_commit(&local));
     }
 
     #[test]

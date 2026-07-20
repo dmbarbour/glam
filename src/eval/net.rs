@@ -527,7 +527,7 @@ pub(super) fn resolve_core_access(
     let mut current = arguments
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("interaction-net access is missing its base value"))?;
+        .ok_or_else(|| EvalError::new("value access is missing its base value"))?;
     let mut dynamic = arguments[1..].iter();
     for part in path {
         let keys = match part {
@@ -547,9 +547,7 @@ pub(super) fn resolve_core_access(
         for key in keys {
             let value = force_value_shell(context, &current)?;
             let Value::Dict(dict) = value else {
-                return Err(EvalError::new(
-                    "interaction-net access base is not a dictionary",
-                ));
+                return Err(EvalError::new("value access base is not a dictionary"));
             };
             current = dict
                 .get(&key)

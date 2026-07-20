@@ -36,11 +36,16 @@ and control flow.
   without inserting either into local state; failed alternatives discard
   changes, nested success merges upward, and outer success validates and
   commits.
-- Shared-heap reads record their complete requested path, including missing
-  paths and `[]`. Writes remain exact ordered patches. Disjoint writes may
-  rebase; exact blind writes replace earlier exact writes; strict
-  ancestor/descendant writes conflict. The conflict-analysis strategy may only
-  conservatively summarize reads and must never redefine write semantics.
+- Shared-heap reads record their requested snapshot dependency, including
+  missing paths and `[]`. Writes are unvalidated lazy patches and observe
+  nothing: overlapping blind writes serialize in commit order. A prior local
+  write at or above a read path masks that snapshot read, while an earlier
+  observation remains. The conflict-analysis strategy may only conservatively
+  summarize reads and must never redefine write semantics.
+- Heap effects impose no dictionary schema. Root replacement accepts any
+  value, and nested updates or accesses return ordinary lazy errors when their
+  eventual structure is invalid. `.eval` is the explicit way to observe such
+  an error as data instead of failing the task.
 - The exact strategy is the correctness reference. Fingerprint collisions may
   cause extra retries but never missed overlaps. The coarse strategy treats
   every heap write as conflicting after any heap read. Strategy selection is

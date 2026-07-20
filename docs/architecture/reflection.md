@@ -49,10 +49,17 @@ point. `cut` alone does not: unobservant failure is terminal.
 `reflection/store.rs` owns the shared heap independently of host wake state.
 Transactions record hierarchical read paths and an ordered write overlay;
 commits rebase disjoint writes onto the current persistent root. The store
-retains exact changed paths and owns write/write policy. A session-selected
+retains exact changed paths. Blind writes, including overlapping parent and
+child paths, serialize in commit order without validation. A session-selected
 `Arc<dyn ConflictAnalysisStrategy>` controls only how reads are summarized:
 the bootstrap supplies exact, conservative fingerprint, and fully coarse
 strategies. Changing strategy creates a fresh reasoning session.
+
+Heap paths are ordinary lazy value operations rather than a store schema.
+`.heap.set` stages a patch without inspecting the old heap. `.heap.get`
+returns an unforced access value; malformed roots and nested updates therefore
+remain latent evaluator errors, which `.eval` can observe as data. Reads after
+a covering transaction-local write do not add a snapshot dependency.
 
 Host locks still make store and specialization changes atomic. For example,
 the logger validates its input-stream revision, validates and applies its heap
