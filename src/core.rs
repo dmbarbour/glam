@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -226,10 +227,12 @@ impl Key {
                     .flatten()
                     .collect::<Vec<_>>(),
             ))),
-            Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Function(_) | Value::Net(_) => {
-                None
-            }
-            Value::Lazy(_) => None,
+            Value::Builtin(_)
+            | Value::PartialBuiltin(_)
+            | Value::Function(_)
+            | Value::Net(_)
+            | Value::Lazy(_)
+            | Value::Opaque(_) => None,
         }
     }
 }
@@ -265,7 +268,41 @@ pub enum Value {
     Net(NetValue),
     /// A closed suspended computation, promised value, or memoized failure.
     Lazy(LazyValue),
+    /// Host-owned identity whose representation is deliberately unavailable to
+    /// Glam programs. Clones retain the payload and compare by identity.
+    Opaque(OpaqueValue),
 }
+
+/// Type-erased storage for internal handles that must participate in ordinary
+/// [`Value`] ownership without exposing forgeable identifiers to Glam code.
+#[derive(Clone)]
+pub struct OpaqueValue {
+    payload: Arc<dyn Any + Send + Sync>,
+}
+
+impl OpaqueValue {
+    pub(crate) fn new<T: Any + Send + Sync>(payload: Arc<T>) -> Self {
+        Self { payload }
+    }
+
+    pub(crate) fn downcast<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        self.payload.clone().downcast().ok()
+    }
+}
+
+impl fmt::Debug for OpaqueValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OpaqueValue(..)")
+    }
+}
+
+impl PartialEq for OpaqueValue {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.payload, &other.payload)
+    }
+}
+
+impl Eq for OpaqueValue {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetValue {
@@ -859,7 +896,8 @@ impl Value {
                 | Value::Net(_)
                 | Value::Builtin(_)
                 | Value::PartialBuiltin(_)
-                | Value::Lazy(_) => None,
+                | Value::Lazy(_)
+                | Value::Opaque(_) => None,
             },
         }
     }

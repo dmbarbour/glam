@@ -382,7 +382,8 @@ pub(super) fn lower_core_callable(
         | Value::Number(_)
         | Value::Binary(_)
         | Value::List(_)
-        | Value::Function(_) => Err(EvalError::new("application requires a function value")),
+        | Value::Function(_)
+        | Value::Opaque(_) => Err(EvalError::new("application requires a function value")),
         Value::Lazy(_) => unreachable!("callable value shell must be fully forced"),
     }
 }

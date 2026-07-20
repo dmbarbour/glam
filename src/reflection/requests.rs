@@ -1,19 +1,20 @@
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use crate::api::{Diagnostic, Value};
-use crate::core::{Atom, Dict, Key, Value as CoreValue, keys};
+use crate::core::{Atom, Dict, Key, OpaqueValue, Value as CoreValue, keys};
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{
-    EvalContext, EvaluationQueryHandle, EvaluationQueryId, EvaluationQueryPoll,
-    EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskPoll,
-    PendingEvaluationQuery, PendingReflectionTask,
+    EvalContext, EvaluationQueryCompletion, EvaluationTaskCancellation, EvaluationTaskHandle,
+    EvaluationTaskId, EvaluationTaskPoll, PendingReflectionTask,
 };
 use crate::number::Number;
 
 use super::{
-    EffectRequestSpec, RequestContext, RequestResult, TaskEnvironment, TaskError, TaskHost,
-    TaskSpecialization, evaluate, get_value_path,
+    CommitResult, EffectRequestSpec, EvaluationQueryHandle, EvaluationQueryPoll,
+    EvaluationQueryState, RequestContext, RequestResult, StoreJournal, TaskCommit, TaskEnvironment,
+    TaskError, TaskHost, TaskSpecialization, decode_query_state, evaluate, get_value_path,
 };
 
 /// Requests shared by every full reflection task.
@@ -39,8 +40,58 @@ enum ReflectionUpdate {
     Query {
         context: EvalContext,
         task: EvaluationTaskId,
-        query: PendingEvaluationQuery,
+        query: PendingQuery,
     },
+}
+
+#[derive(Clone)]
+struct PendingQuery {
+    inner: Arc<PendingQueryInner>,
+}
+
+struct PendingQueryInner {
+    completion: Arc<dyn EvaluationQueryCompletion>,
+    activated: AtomicBool,
+}
+
+impl PendingQuery {
+    fn new<H>(host: Arc<H>, handle: Arc<EvaluationQueryHandle>) -> Self
+    where
+        H: ReflectionServices + ?Sized + 'static,
+    {
+        let completion = Arc::new(QueryCompletion {
+            host,
+            handle: handle.clone(),
+        });
+        Self {
+            inner: Arc::new(PendingQueryInner {
+                completion,
+                activated: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    fn activate(&self, context: &EvalContext, task: EvaluationTaskId) {
+        if self.inner.activated.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        context.schedule_query(task, self.inner.completion.clone());
+    }
+}
+
+struct QueryCompletion<H: ?Sized> {
+    host: Arc<H>,
+    handle: Arc<EvaluationQueryHandle>,
+}
+
+impl<H> EvaluationQueryCompletion for QueryCompletion<H>
+where
+    H: ReflectionServices + ?Sized,
+{
+    fn complete(&self, result: EvaluationTaskPoll) {
+        self.host
+            .complete_query(&self.handle, Value::from_core(task_query_snapshot(result)));
+    }
 }
 
 /// Transactional writes and deferred observations for reflection requests.
@@ -67,7 +118,7 @@ impl ReflectionJournal {
                     context,
                     task,
                     query,
-                } => query.complete(task_query_snapshot(context.poll_reflection_task_id(*task))),
+                } => query.activate(context, *task),
             }
         }
     }
@@ -87,6 +138,9 @@ impl ReflectionTransaction for ReflectionJournal {
 /// Specialization-independent services used by reusable reflection requests.
 pub trait ReflectionServices: Send + Sync {
     fn emit_diagnostic(&self, diagnostic: Diagnostic);
+
+    #[doc(hidden)]
+    fn complete_query(&self, handle: &Arc<EvaluationQueryHandle>, result: Value);
 }
 
 /// A task host that combines specialization transactions with reflection
@@ -323,11 +377,14 @@ where
         ReflectionRequest::QueryTask => {
             let task = task_handle_argument(context.eval_context(), arguments, "query_task")?;
             let eval_context = context.eval_context().clone();
-            let query = eval_context
-                .reserve_query()
-                .map_err(|error| TaskError::new(error.as_ref()))?;
-            let handle = *query.handle();
+            let host = context.host_arc();
+            let handle;
             if let Some(mut transaction) = context.transaction() {
+                handle = transaction
+                    .store()
+                    .reserve_query()
+                    .map_err(|error| TaskError::new(error.as_ref()))?;
+                let query = PendingQuery::new(host, handle.clone());
                 transaction
                     .parts()
                     .1
@@ -339,22 +396,70 @@ where
                         query,
                     });
             } else {
-                query.complete(task_query_snapshot(
-                    eval_context.poll_reflection_task_id(task),
-                ));
-                context.committed();
+                let snapshot = context.host().snapshot();
+                let mut store = StoreJournal::new(snapshot.store().clone());
+                handle = store
+                    .reserve_query()
+                    .map_err(|error| TaskError::new(error.as_ref()))?;
+                let query = PendingQuery::new(host, handle.clone());
+                let mut journal = S::Journal::default();
+                journal
+                    .reflection_journal()
+                    .updates
+                    .push(ReflectionUpdate::Query {
+                        context: eval_context,
+                        task,
+                        query,
+                    });
+                match context.host().commit(TaskCommit::new(
+                    store,
+                    snapshot.extra().clone(),
+                    journal,
+                )) {
+                    CommitResult::Committed => context.committed(),
+                    CommitResult::Conflict => {
+                        return Err(TaskError::new("fresh query reservation conflicted"));
+                    }
+                    CommitResult::MissingVolume(volume) => {
+                        return Err(TaskError::new(format!(
+                            "private query volume {} is unavailable",
+                            volume.get()
+                        )));
+                    }
+                    CommitResult::Closed => return Ok(RequestResult::Cancelled),
+                }
             }
             Ok(RequestResult::Return(query_handle_value(&handle)))
         }
         ReflectionRequest::QueryResult => {
             let query = query_handle_argument(context.eval_context(), arguments, "query_result")?;
-            match context.eval_context().poll_query(query) {
-                EvaluationQueryPoll::Pending => Ok(RequestResult::Fail),
-                EvaluationQueryPoll::Complete(result) => {
-                    Ok(RequestResult::Return(Value::from_core(result)))
+            let transaction_generation = context.transaction_generation();
+            let (result, generation) = if let Some(mut transaction) = context.transaction() {
+                let generation = transaction_generation
+                    .expect("active transaction must have a snapshot generation");
+                (transaction.store().poll_query(&query), generation)
+            } else {
+                let snapshot = context.host().snapshot();
+                (snapshot.store().poll_query(&query), snapshot.generation())
+            };
+            match result {
+                EvaluationQueryPoll::State { value, observed } => {
+                    let state = evaluate(context.eval_context(), value.into_core())?;
+                    match decode_query_state(&state) {
+                        Some(EvaluationQueryState::Pending) => {
+                            if observed {
+                                context.observe_host_generation(generation);
+                            }
+                            Ok(RequestResult::Fail)
+                        }
+                        Some(EvaluationQueryState::Complete(result)) => {
+                            Ok(RequestResult::Return(result))
+                        }
+                        None => Err(TaskError::new("query handle has been retired")),
+                    }
                 }
                 EvaluationQueryPoll::ForeignSession => Err(TaskError::new(
-                    "query handle does not belong to this evaluation session",
+                    "query handle does not belong to this reasoning session",
                 )),
             }
         }
@@ -418,10 +523,6 @@ static TASK_HANDLE_TAG: LazyLock<Key> = LazyLock::new(|| {
     Key::abstract_global_path(["reflection_runtime", "v0", "value", "task_handle"])
 });
 
-static QUERY_HANDLE_TAG: LazyLock<Key> = LazyLock::new(|| {
-    Key::abstract_global_path(["reflection_runtime", "v0", "value", "query_handle"])
-});
-
 fn task_handle_value(handle: &EvaluationTaskHandle) -> Value {
     Value::from_core(task_handle_core_value(handle))
 }
@@ -433,11 +534,8 @@ fn task_handle_core_value(handle: &EvaluationTaskHandle) -> CoreValue {
     ))
 }
 
-fn query_handle_value(handle: &EvaluationQueryHandle) -> Value {
-    Value::from_core(CoreValue::Dict(Dict::new_sync().insert(
-        QUERY_HANDLE_TAG.clone(),
-        CoreValue::Number(Number::from_u64(handle.id().get())),
-    )))
+fn query_handle_value(handle: &Arc<EvaluationQueryHandle>) -> Value {
+    Value::from_core(CoreValue::Opaque(OpaqueValue::new(handle.clone())))
 }
 
 fn task_query_snapshot(task: EvaluationTaskPoll) -> CoreValue {
@@ -506,30 +604,20 @@ fn query_handle_argument(
     context: &EvalContext,
     arguments: Vec<Value>,
     request: &str,
-) -> Result<EvaluationQueryId, TaskError> {
+) -> Result<Arc<EvaluationQueryHandle>, TaskError> {
     let [handle]: [Value; 1] = arguments.try_into().map_err(|_| {
         TaskError::new(format!(
             "`.{request}` received the wrong number of arguments"
         ))
     })?;
-    let CoreValue::Dict(handle) = evaluate(context, handle.into_core())? else {
+    let CoreValue::Opaque(handle) = evaluate(context, handle.into_core())? else {
         return Err(TaskError::new(format!(
             "`.{request}` requires a reflection query handle"
         )));
     };
-    if handle.iter().count() != 1 {
-        return Err(TaskError::new(format!(
-            "`.{request}` requires a reflection query handle"
-        )));
-    }
-    let Some(CoreValue::Number(id)) = handle.get(&QUERY_HANDLE_TAG) else {
-        return Err(TaskError::new(format!(
-            "`.{request}` requires a reflection query handle"
-        )));
-    };
-    id.to_u64_if_integer()
-        .and_then(EvaluationQueryId::from_u64)
-        .ok_or_else(|| TaskError::new(format!("`.{request}` received an invalid query handle")))
+    handle
+        .downcast::<EvaluationQueryHandle>()
+        .ok_or_else(|| TaskError::new(format!("`.{request}` requires a reflection query handle")))
 }
 
 fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskError> {

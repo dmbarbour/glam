@@ -37,7 +37,7 @@ not define future language semantics or collect subsystem invariants.
 | `list.rs`, `number.rs` | Compact persistent list ropes and exact-number boundary |
 | `diagnostic.rs`, `api.rs` diagnostic facade | Diagnostic values, enrichment metadata, session buses, subscriptions, and severity counts |
 | `reflection.rs`, `reflection/requests.rs` | Persistent freer-effect machine, task API, transactions, and request helpers |
-| `reflection/store.rs` | Persistent shared volumes, journaled ordered edit rebasing, and pluggable read-conflict analysis |
+| `reflection/store.rs` | Persistent shared/private volumes, journaled ordered edit rebasing, asynchronous query state, and pluggable read-conflict analysis |
 
 `interaction_net.rs`, `eval.rs`, and `g_syntax.rs` are facades over their
 submodules rather than homes for another implementation layer.

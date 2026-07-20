@@ -29,30 +29,12 @@ impl EvaluationTaskId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct EvaluationQueryId(NonZeroU64);
-
-impl EvaluationQueryId {
-    pub(crate) fn get(self) -> u64 {
-        self.0.get()
-    }
-
-    pub(crate) fn from_u64(id: u64) -> Option<Self> {
-        NonZeroU64::new(id).map(Self)
-    }
-}
-
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_WAIT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 fn allocate_task_id() -> Result<EvaluationTaskId, Arc<str>> {
     allocate_id(&NEXT_TASK_ID, "evaluation task IDs exhausted").map(EvaluationTaskId)
-}
-
-fn allocate_query_id() -> Result<EvaluationQueryId, Arc<str>> {
-    allocate_id(&NEXT_QUERY_ID, "evaluation query IDs exhausted").map(EvaluationQueryId)
 }
 
 fn allocate_wait_token(session: &Arc<EvaluationSession>) -> Result<EvaluationWaitToken, Arc<str>> {
@@ -114,24 +96,6 @@ impl Hash for EvaluationWaitToken {
 pub(crate) struct EvaluationTaskHandle {
     id: EvaluationTaskId,
     wait: EvaluationWaitToken,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EvaluationQueryHandle {
-    id: EvaluationQueryId,
-}
-
-impl EvaluationQueryHandle {
-    pub(crate) fn id(&self) -> EvaluationQueryId {
-        self.id
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum EvaluationQueryPoll {
-    Pending,
-    Complete(Value),
-    ForeignSession,
 }
 
 impl EvaluationTaskHandle {
@@ -197,6 +161,10 @@ pub(crate) trait ReflectionTaskLauncher: Send + Sync {
         effect: Value,
         kind: ReflectionTaskKind,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>;
+}
+
+pub(crate) trait EvaluationQueryCompletion: Send + Sync {
+    fn complete(&self, result: EvaluationTaskPoll);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,40 +241,6 @@ pub(crate) struct PendingReflectionTask {
     inner: Arc<PendingReflectionTaskInner>,
 }
 
-#[derive(Clone)]
-pub(crate) struct PendingEvaluationQuery {
-    inner: Arc<PendingEvaluationQueryInner>,
-}
-
-struct PendingEvaluationQueryInner {
-    context: EvalContext,
-    handle: EvaluationQueryHandle,
-    completed: AtomicBool,
-}
-
-impl PendingEvaluationQuery {
-    pub(crate) fn handle(&self) -> &EvaluationQueryHandle {
-        &self.inner.handle
-    }
-
-    pub(crate) fn complete(&self, result: Value) {
-        if self.inner.completed.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        self.inner
-            .context
-            .complete_query(&self.inner.handle, result);
-    }
-}
-
-impl Drop for PendingEvaluationQueryInner {
-    fn drop(&mut self) {
-        if !self.completed.load(Ordering::Acquire) {
-            self.context.cancel_reserved_query(&self.handle);
-        }
-    }
-}
-
 struct PendingReflectionTaskInner {
     context: EvalContext,
     handle: EvaluationTaskHandle,
@@ -345,8 +279,10 @@ struct PromiseRecord {
     result: Weak<OnceLock<Result<Value, Arc<str>>>>,
 }
 
-struct EvaluationQueryRecord {
-    result: Option<Value>,
+struct EvaluationQueryJob {
+    context: EvalContext,
+    task: EvaluationTaskId,
+    completion: Arc<dyn EvaluationQueryCompletion>,
 }
 
 #[derive(Default)]
@@ -356,7 +292,7 @@ struct EvaluationTasks {
     ready: VecDeque<EvaluationTaskId>,
     promises: HashMap<EvaluationWaitToken, PromiseRecord>,
     owned_promises: HashMap<EvaluationTaskId, Vec<EvaluationWaitToken>>,
-    queries: BTreeMap<EvaluationQueryId, EvaluationQueryRecord>,
+    queries: VecDeque<EvaluationQueryJob>,
 }
 
 pub(crate) struct EvaluationSession {
@@ -809,73 +745,24 @@ impl EvalContext {
         Ok(EvaluationTaskHandle { id, wait })
     }
 
-    pub(crate) fn reserve_query(&self) -> Result<PendingEvaluationQuery, Arc<str>> {
-        let handle = EvaluationQueryHandle {
-            id: allocate_query_id()?,
-        };
+    pub(crate) fn schedule_query(
+        &self,
+        task: EvaluationTaskId,
+        completion: Arc<dyn EvaluationQueryCompletion>,
+    ) {
         let mut tasks = self
             .session
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
-        let replaced = tasks
-            .queries
-            .insert(handle.id, EvaluationQueryRecord { result: None });
-        assert!(replaced.is_none(), "evaluation query IDs must be unique");
+        tasks.queries.push_back(EvaluationQueryJob {
+            context: self.clone(),
+            task,
+            completion,
+        });
+        self.session.task_changed.notify_all();
         drop(tasks);
-        Ok(PendingEvaluationQuery {
-            inner: Arc::new(PendingEvaluationQueryInner {
-                context: self.clone(),
-                handle,
-                completed: AtomicBool::new(false),
-            }),
-        })
-    }
-
-    fn complete_query(&self, handle: &EvaluationQueryHandle, result: Value) {
-        let mut tasks = self
-            .session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        let Some(query) = tasks.queries.get_mut(&handle.id) else {
-            return;
-        };
-        if query.result.is_none() {
-            query.result = Some(result);
-            self.session.task_changed.notify_all();
-        }
-    }
-
-    fn cancel_reserved_query(&self, handle: &EvaluationQueryHandle) {
-        let mut tasks = self
-            .session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        if tasks
-            .queries
-            .get(&handle.id)
-            .is_some_and(|query| query.result.is_none())
-        {
-            tasks.queries.remove(&handle.id);
-            self.session.task_changed.notify_all();
-        }
-    }
-
-    pub(crate) fn poll_query(&self, id: EvaluationQueryId) -> EvaluationQueryPoll {
-        let tasks = self
-            .session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        match tasks.queries.get(&id) {
-            Some(EvaluationQueryRecord {
-                result: Some(result),
-            }) => EvaluationQueryPoll::Complete(result.clone()),
-            Some(EvaluationQueryRecord { result: None }) => EvaluationQueryPoll::Pending,
-            None => EvaluationQueryPoll::ForeignSession,
-        }
+        self.session.notify_executor_ready();
     }
 
     pub(crate) fn poll_reflection_task(&self, task: &EvaluationTaskHandle) -> EvaluationTaskPoll {
@@ -1063,7 +950,12 @@ struct ClaimedTask {
 impl EvaluationSession {
     fn run_until_quiescent(&self) -> EvaluationSessionRun {
         let mut attempted_blocked = HashSet::new();
-        loop {
+        'run: loop {
+            if let Some(query) = self.take_query_job() {
+                Self::complete_query_job(query);
+                attempted_blocked.clear();
+                continue;
+            }
             let mut claimed = loop {
                 let mut tasks = self
                     .tasks
@@ -1073,6 +965,10 @@ impl EvaluationSession {
                     .or_else(|| claim_blocked_task(&mut tasks, &attempted_blocked))
                 {
                     break claimed;
+                }
+                if !tasks.queries.is_empty() {
+                    drop(tasks);
+                    continue 'run;
                 }
                 if tasks
                     .reflection
@@ -1192,6 +1088,13 @@ impl EvaluationSession {
                 return EvaluationPumpOutcome::BudgetExhausted;
             }
 
+            if let Some(query) = self.take_query_job() {
+                step_budget -= 1;
+                Self::complete_query_job(query);
+                attempted_blocked.clear();
+                continue;
+            }
+
             let claimed = {
                 let mut tasks = self
                     .tasks
@@ -1204,6 +1107,15 @@ impl EvaluationSession {
                     .or_else(|| claim_blocked_task(&mut tasks, &attempted_blocked))
             };
             let Some(mut claimed) = claimed else {
+                let query_pending = !self
+                    .tasks
+                    .lock()
+                    .expect("evaluation task registry was poisoned")
+                    .queries
+                    .is_empty();
+                if query_pending {
+                    continue;
+                }
                 let mut tasks = self
                     .tasks
                     .lock()
@@ -1299,13 +1211,14 @@ impl EvaluationSession {
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
-        let ready = tasks.ready.iter().any(|id| {
-            tasks
-                .reflection_by_id
-                .get(id)
-                .and_then(|wait| tasks.reflection.get(wait))
-                .is_some_and(|record| matches!(record.state, EvaluationTaskState::Queued))
-        });
+        let ready = !tasks.queries.is_empty()
+            || tasks.ready.iter().any(|id| {
+                tasks
+                    .reflection_by_id
+                    .get(id)
+                    .and_then(|wait| tasks.reflection.get(wait))
+                    .is_some_and(|record| matches!(record.state, EvaluationTaskState::Queued))
+            });
         drop(tasks);
         if ready {
             self.notify_executor_ready();
@@ -1313,6 +1226,11 @@ impl EvaluationSession {
     }
 
     fn poll_one_ready_task(&self) {
+        if let Some(query) = self.take_query_job() {
+            Self::complete_query_job(query);
+            self.notify_executor_if_ready();
+            return;
+        }
         let claimed = {
             let mut tasks = self
                 .tasks
@@ -1332,6 +1250,19 @@ impl EvaluationSession {
             machine.cancel();
         }
         self.notify_executor_if_ready();
+    }
+
+    fn take_query_job(&self) -> Option<EvaluationQueryJob> {
+        self.tasks
+            .lock()
+            .expect("evaluation task registry was poisoned")
+            .queries
+            .pop_front()
+    }
+
+    fn complete_query_job(query: EvaluationQueryJob) {
+        let result = query.context.poll_reflection_task_id(query.task);
+        query.completion.complete(result);
     }
 }
 

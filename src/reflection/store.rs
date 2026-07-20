@@ -6,13 +6,16 @@
 use std::collections::{BTreeMap, BTreeSet, hash_map::RandomState};
 use std::hash::BuildHasher;
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, LazyLock, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
 use crate::api::Value as PublicValue;
-use crate::core::{Atom, Builtin, Dict, Key, LazyValue, List, Value};
+use crate::core::{Atom, Builtin, Dict, Key, LazyValue, List, Value, keys};
 use crate::core_net::CoreDataKey;
+use crate::number::Number;
 
 /// A hierarchical address in the shared reflection heap.
 ///
@@ -65,6 +68,84 @@ impl VolumeId {
     pub(crate) fn from_u64(id: u64) -> Option<Self> {
         NonZeroU64::new(id).map(Self)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct EvaluationQueryId(NonZeroU64);
+
+impl EvaluationQueryId {
+    fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+#[derive(Debug)]
+struct QueryDomain {
+    next_id: AtomicU64,
+    retired: Sender<EvaluationQueryId>,
+}
+
+impl QueryDomain {
+    fn new() -> (Arc<Self>, Receiver<EvaluationQueryId>) {
+        let (retired, retirements) = mpsc::channel();
+        (
+            Arc::new(Self {
+                next_id: AtomicU64::new(1),
+                retired,
+            }),
+            retirements,
+        )
+    }
+
+    fn allocate(self: &Arc<Self>) -> Result<Arc<EvaluationQueryHandle>, Arc<str>> {
+        let id = self
+            .next_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| Arc::from("evaluation query IDs exhausted"))?;
+        let id = NonZeroU64::new(id).expect("evaluation query IDs start at one");
+        Ok(Arc::new(EvaluationQueryHandle {
+            id: EvaluationQueryId(id),
+            domain: Arc::downgrade(self),
+        }))
+    }
+
+    fn retire(&self, id: EvaluationQueryId) {
+        // Failure only means the owning store has already been dropped.
+        let _ = self.retired.send(id);
+    }
+}
+
+/// Opaque lifetime lease for one asynchronous reflection query.
+///
+/// The final clone queues removal of the query's private-volume state. Cleanup
+/// is performed later while the store is already at a safe mutation point.
+#[doc(hidden)]
+pub struct EvaluationQueryHandle {
+    id: EvaluationQueryId,
+    domain: Weak<QueryDomain>,
+}
+
+impl std::fmt::Debug for EvaluationQueryHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("EvaluationQueryHandle")
+            .field(&self.id.get())
+            .finish()
+    }
+}
+
+impl Drop for EvaluationQueryHandle {
+    fn drop(&mut self) {
+        if let Some(domain) = self.domain.upgrade() {
+            domain.retire(self.id);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EvaluationQueryPoll {
+    State { value: PublicValue, observed: bool },
+    ForeignSession,
 }
 
 /// A conflict-analysis address. Hierarchical path relationships never cross
@@ -258,6 +339,8 @@ pub struct StoreSnapshot {
     identity: Arc<()>,
     revision: u64,
     heap_volume: VolumeId,
+    query_volume: VolumeId,
+    query_domain: Arc<QueryDomain>,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
 }
@@ -272,6 +355,25 @@ impl StoreSnapshot {
 
     pub(crate) fn volume(&self, volume: VolumeId) -> Option<&PublicValue> {
         self.roots.get(&volume)
+    }
+
+    pub(crate) fn poll_query(&self, handle: &Arc<EvaluationQueryHandle>) -> EvaluationQueryPoll {
+        if !query_belongs_to(&self.query_domain, handle) {
+            return EvaluationQueryPoll::ForeignSession;
+        }
+        let Some(root) = self.volume(self.query_volume) else {
+            return EvaluationQueryPoll::State {
+                value: PublicValue::empty_record(),
+                observed: true,
+            };
+        };
+        EvaluationQueryPoll::State {
+            value: PublicValue::from_core(lazy_core_value_path(
+                root.as_core().clone(),
+                &query_path(handle.id),
+            )),
+            observed: true,
+        }
     }
 }
 
@@ -362,6 +464,40 @@ impl StoreJournal {
         self.views.get(&volume).cloned()
     }
 
+    pub(crate) fn reserve_query(&mut self) -> Result<Arc<EvaluationQueryHandle>, Arc<str>> {
+        let handle = self.snapshot.query_domain.allocate()?;
+        self.write_volume(
+            self.snapshot.query_volume,
+            query_path(handle.id),
+            pending_query_value(),
+        );
+        Ok(handle)
+    }
+
+    pub(crate) fn poll_query(
+        &mut self,
+        handle: &Arc<EvaluationQueryHandle>,
+    ) -> EvaluationQueryPoll {
+        if !query_belongs_to(&self.snapshot.query_domain, handle) {
+            return EvaluationQueryPoll::ForeignSession;
+        }
+        let path = query_path(handle.id);
+        let observed = self.observe_volume_read(self.snapshot.query_volume, &path);
+        let Some(root) = self.volume_view(self.snapshot.query_volume) else {
+            return EvaluationQueryPoll::State {
+                value: PublicValue::empty_record(),
+                observed,
+            };
+        };
+        EvaluationQueryPoll::State {
+            value: PublicValue::from_core(lazy_core_value_path(
+                root.into_core(),
+                &query_path(handle.id),
+            )),
+            observed,
+        }
+    }
+
     pub(crate) fn write(&mut self, path: Vec<Key>, value: PublicValue) {
         self.write_volume(self.snapshot.heap_volume, path, value);
     }
@@ -410,6 +546,9 @@ pub enum StoreCommitResult {
 pub struct ReflectionStore {
     identity: Arc<()>,
     heap_volume: VolumeId,
+    query_volume: VolumeId,
+    query_domain: Arc<QueryDomain>,
+    query_retirements: Receiver<EvaluationQueryId>,
     next_volume: u64,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     revision: u64,
@@ -420,11 +559,18 @@ pub struct ReflectionStore {
 impl ReflectionStore {
     pub fn new(strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
         let heap_volume = VolumeId::from_u64(1).expect("one is a nonzero volume ID");
+        let query_volume = VolumeId::from_u64(2).expect("two is a nonzero volume ID");
+        let (query_domain, query_retirements) = QueryDomain::new();
         Self {
             identity: Arc::new(()),
             heap_volume,
-            next_volume: 2,
-            roots: RedBlackTreeMapSync::new_sync().insert(heap_volume, PublicValue::empty_record()),
+            query_volume,
+            query_domain,
+            query_retirements,
+            next_volume: 3,
+            roots: RedBlackTreeMapSync::new_sync()
+                .insert(heap_volume, PublicValue::empty_record())
+                .insert(query_volume, PublicValue::empty_record()),
             revision: 0,
             latest_changes: BTreeMap::new(),
             strategy,
@@ -437,6 +583,8 @@ impl ReflectionStore {
             identity: self.identity.clone(),
             revision: self.revision,
             heap_volume: self.heap_volume,
+            query_volume: self.query_volume,
+            query_domain: self.query_domain.clone(),
             roots: self.roots.clone(),
             strategy: self.strategy.clone(),
         }
@@ -486,7 +634,7 @@ impl ReflectionStore {
     }
 
     pub(crate) fn revoke_volume(&mut self, volume: VolumeId) -> Option<PublicValue> {
-        if volume == self.heap_volume {
+        if volume == self.heap_volume || volume == self.query_volume {
             return None;
         }
         let root = self.roots.get(&volume).cloned()?;
@@ -495,6 +643,27 @@ impl ReflectionStore {
         self.latest_changes
             .insert(StoreAddress::root(volume), self.revision);
         Some(root)
+    }
+
+    #[doc(hidden)]
+    pub fn complete_query(
+        &mut self,
+        handle: &Arc<EvaluationQueryHandle>,
+        result: PublicValue,
+    ) -> bool {
+        if !query_belongs_to(&self.query_domain, handle) {
+            return false;
+        }
+        if self.roots.get(&self.query_volume).is_none() {
+            return false;
+        }
+        let mut journal = StoreJournal::new(self.snapshot());
+        journal.write_volume(
+            self.query_volume,
+            query_path(handle.id),
+            complete_query_value(result),
+        );
+        matches!(self.try_commit(&journal), StoreCommitResult::Committed)
     }
 
     /// Validates and commits a journal. Exact edit paths and rebase policy
@@ -513,6 +682,7 @@ impl ReflectionStore {
             return StoreCommitResult::Conflict;
         }
         if journal.edits.is_empty() {
+            self.retire_queries();
             return StoreCommitResult::Committed;
         }
 
@@ -527,7 +697,26 @@ impl ReflectionStore {
         for path in normalized_edit_paths(&journal.edits) {
             self.latest_changes.insert(path, self.revision);
         }
+        self.retire_queries();
         StoreCommitResult::Committed
+    }
+
+    fn retire_queries(&mut self) {
+        let retired = self.query_retirements.try_iter().collect::<Vec<_>>();
+        if retired.is_empty() {
+            return;
+        }
+        let Some(mut root) = self.roots.get(&self.query_volume).cloned() else {
+            return;
+        };
+        self.revision = self.revision.wrapping_add(1);
+        for id in retired {
+            let path = ConflictPath::from_keys(query_path(id));
+            root = apply_value_at_path(root, &path, Value::Dict(Dict::new_sync()));
+            self.latest_changes
+                .insert(StoreAddress::new(self.query_volume, path), self.revision);
+        }
+        self.roots.insert_mut(self.query_volume, root);
     }
 
     fn conflicts(&self, journal: &StoreJournal) -> bool {
@@ -566,6 +755,74 @@ fn apply_edits(
         roots.insert_mut(volume, apply_edit(root, edit));
     }
     roots
+}
+
+static QUERY_PENDING: LazyLock<Key> = LazyLock::new(|| {
+    Key::abstract_global_path(["reflection_runtime", "v0", "query_state", "pending"])
+});
+static QUERY_COMPLETE: LazyLock<Key> = LazyLock::new(|| {
+    Key::abstract_global_path(["reflection_runtime", "v0", "query_state", "complete"])
+});
+static QUERY_RESULT: LazyLock<Key> = LazyLock::new(|| {
+    Key::abstract_global_path(["reflection_runtime", "v0", "query_state", "result"])
+});
+static QUERY_PRESENT: LazyLock<Key> = LazyLock::new(|| {
+    Key::abstract_global_path(["reflection_runtime", "v0", "query_state", "present"])
+});
+
+pub(crate) enum EvaluationQueryState {
+    Pending,
+    Complete(PublicValue),
+}
+
+fn query_belongs_to(domain: &Arc<QueryDomain>, handle: &Arc<EvaluationQueryHandle>) -> bool {
+    handle
+        .domain
+        .upgrade()
+        .is_some_and(|owner| Arc::ptr_eq(domain, &owner))
+}
+
+fn query_path(id: EvaluationQueryId) -> Vec<Key> {
+    vec![Key::Number(Number::from_u64(id.get()))]
+}
+
+fn pending_query_value() -> PublicValue {
+    PublicValue::from_core(Value::Dict(
+        Dict::new_sync().insert(QUERY_PENDING.clone(), (*keys::UNIT_VALUE).clone()),
+    ))
+}
+
+fn complete_query_value(result: PublicValue) -> PublicValue {
+    let payload = Value::Dict(
+        Dict::new_sync()
+            .insert(QUERY_PRESENT.clone(), (*keys::UNIT_VALUE).clone())
+            .insert(QUERY_RESULT.clone(), result.into_core()),
+    );
+    PublicValue::from_core(Value::Dict(
+        Dict::new_sync().insert(QUERY_COMPLETE.clone(), payload),
+    ))
+}
+
+pub(crate) fn decode_query_state(value: &Value) -> Option<EvaluationQueryState> {
+    let Value::Dict(state) = value else {
+        return None;
+    };
+    if state.iter().count() != 1 {
+        return None;
+    }
+    if state.get(&QUERY_PENDING).is_some() {
+        return Some(EvaluationQueryState::Pending);
+    }
+    let Value::Dict(complete) = state.get(&QUERY_COMPLETE)? else {
+        return None;
+    };
+    complete.get(&QUERY_PRESENT)?;
+    Some(EvaluationQueryState::Complete(PublicValue::from_core(
+        complete
+            .get(&QUERY_RESULT)
+            .cloned()
+            .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
+    )))
 }
 
 fn apply_edit(root: PublicValue, edit: &StoreEdit) -> PublicValue {
@@ -663,6 +920,61 @@ mod tests {
             crate::eval::list_to_value_items(&assembler.eval_context(), actual).unwrap(),
             crate::eval::list_to_value_items(&assembler.eval_context(), expected).unwrap(),
         );
+    }
+
+    fn evaluate_query_state(
+        assembler: &Assembler,
+        value: PublicValue,
+    ) -> Option<EvaluationQueryState> {
+        let value = assembler.evaluate(&value).unwrap();
+        decode_query_state(value.as_core())
+    }
+
+    #[test]
+    fn query_state_is_transactional_and_retired_after_the_last_handle() {
+        let assembler = Assembler::default();
+        let mut store = store();
+        let mut reservation = StoreJournal::new(store.snapshot());
+        let handle = reservation.reserve_query().unwrap();
+        assert!(matches!(
+            reservation.poll_query(&handle),
+            EvaluationQueryPoll::State {
+                observed: false,
+                ..
+            }
+        ));
+        assert_eq!(store.try_commit(&reservation), StoreCommitResult::Committed);
+
+        let EvaluationQueryPoll::State { value, observed } = store.snapshot().poll_query(&handle)
+        else {
+            panic!("committed query should belong to its store")
+        };
+        assert!(observed);
+        assert!(matches!(
+            evaluate_query_state(&assembler, value),
+            Some(EvaluationQueryState::Pending)
+        ));
+
+        assert!(store.complete_query(&handle, PublicValue::text("snapshot")));
+        let EvaluationQueryPoll::State { value, .. } = store.snapshot().poll_query(&handle) else {
+            panic!("completed query should remain available")
+        };
+        assert!(matches!(
+            evaluate_query_state(&assembler, value),
+            Some(EvaluationQueryState::Complete(value))
+                if value.as_binary() == Some(b"snapshot".as_slice())
+        ));
+
+        let id = handle.id;
+        drop(handle);
+        let maintenance = StoreJournal::new(store.snapshot());
+        assert_eq!(store.try_commit(&maintenance), StoreCommitResult::Committed);
+        let root = store.roots.get(&store.query_volume).unwrap();
+        let retired = PublicValue::from_core(lazy_core_value_path(
+            root.as_core().clone(),
+            &query_path(id),
+        ));
+        assert!(assembler.evaluate(&retired).unwrap().is_undefined());
     }
 
     #[test]

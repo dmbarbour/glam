@@ -13,9 +13,10 @@ pub use requests::{
 };
 pub use store::{
     CoarseConflictAnalysis, ConflictAnalysisStrategy, ConflictObservationIndex, ConflictPath,
-    ExactConflictAnalysis, FingerprintConflictAnalysis, ReflectionStore, StoreCommitResult,
-    StoreJournal, StoreSnapshot, VolumeId,
+    EvaluationQueryHandle, ExactConflictAnalysis, FingerprintConflictAnalysis, ReflectionStore,
+    StoreCommitResult, StoreJournal, StoreSnapshot, VolumeId,
 };
+pub(crate) use store::{EvaluationQueryPoll, EvaluationQueryState, decode_query_state};
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -1310,7 +1311,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     arguments,
                     &mut RequestContext {
                         eval_context: &self.eval_context,
-                        host: self.host.as_ref(),
+                        host: &self.host,
                         transaction: branch.transaction.as_mut(),
                         activity: &mut activity,
                     },
@@ -2393,7 +2394,7 @@ impl<S: TaskSpecialization> Transaction<S> {
 /// Restricted access to the host and current transaction for extra effects.
 pub struct RequestContext<'a, S: TaskSpecialization> {
     eval_context: &'a EvalContext,
-    host: &'a S::Host,
+    host: &'a Arc<S::Host>,
     transaction: Option<&'a mut Transaction<S>>,
     activity: &'a mut RequestActivity,
 }
@@ -2404,7 +2405,11 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
     }
 
     pub fn host(&self) -> &S::Host {
-        self.host
+        self.host.as_ref()
+    }
+
+    pub(crate) fn host_arc(&self) -> Arc<S::Host> {
+        self.host.clone()
     }
 
     pub fn transaction(&mut self) -> Option<TransactionContext<'_, S>> {
@@ -2460,6 +2465,10 @@ impl<S: TaskSpecialization> TransactionContext<'_, S> {
             self.transaction.snapshot.extra(),
             &mut self.transaction.journal,
         )
+    }
+
+    pub(crate) fn store(&mut self) -> &mut StoreJournal {
+        &mut self.transaction.store
     }
 }
 
@@ -3415,6 +3424,13 @@ mod tests {
     impl ReflectionServices for TestHost {
         fn emit_diagnostic(&self, diagnostic: Diagnostic) {
             TestHost::emit_diagnostic(self, diagnostic);
+        }
+
+        fn complete_query(&self, handle: &Arc<EvaluationQueryHandle>, result: PublicValue) {
+            let mut state = self.state.lock().unwrap();
+            if state.store.complete_query(handle, result) {
+                state.generation += 1;
+            }
         }
     }
 

@@ -114,10 +114,13 @@ not revoke it.
 - `.join_task`, `.task_result`, and `.task_error` observe immutable terminal
   task state. `.cancel_task` journals a best-effort cancellation request.
 - `.query_task Task` journals one snapshot of mutable task state and returns a
-  distinct query handle. After commit, `.query_result Query` returns tagged
-  `pending`, `complete`, `error`, `canceled`, or `foreign` data. It fails while
-  the query remains uncommitted, preventing a transaction from waiting on the
-  request that only its own commit can submit.
+  distinct opaque query handle. Its `pending` state is published atomically
+  with the handle in a host-private store volume, then queued as scheduler
+  work. `.query_result Query` fails retryably while that committed state is
+  pending and returns the immutable tagged task snapshot after completion. A
+  same-transaction read of a newly staged query remains an internal read and
+  fails without waiting on the commit that would submit it. Query state stays
+  in the private volume until the final handle clone is retired.
 
 The immutable environment conventionally contains assembler-owned `glam`
 identity plus client context. `glam.reasoning.role` distinguishes assembler,

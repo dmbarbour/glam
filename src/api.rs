@@ -163,6 +163,7 @@ impl Value {
             }
             CoreValue::Net(_) => ValueKind::Net,
             CoreValue::Lazy(_) => ValueKind::Lazy,
+            CoreValue::Opaque(_) => ValueKind::Opaque,
         }
     }
 
@@ -236,6 +237,7 @@ pub enum ValueKind {
     Function,
     Net,
     Lazy,
+    Opaque,
 }
 
 /// An opaque port created during one [`Assembler::net`] construction.
@@ -771,6 +773,21 @@ impl TaskEnvironment for AssemblerReflectionHost {
 impl ReflectionServices for AssemblerReflectionHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
         self.diagnostics.publish(diagnostic);
+    }
+
+    fn complete_query(
+        &self,
+        handle: &Arc<crate::reflection::EvaluationQueryHandle>,
+        result: Value,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("assembler reflection host mutex should not be poisoned");
+        if state.store.complete_query(handle, result) {
+            state.wake_generation = state.wake_generation.wrapping_add(1);
+            self.changed.notify_all();
+        }
     }
 }
 
@@ -1812,9 +1829,8 @@ impl Assembler {
             | CoreValue::Function(_)
             | CoreValue::Net(_)
             | CoreValue::Builtin(_)
-            | CoreValue::PartialBuiltin(_) => {
-                Err(Error::new(format!("`{label}` is not binary text data")))
-            }
+            | CoreValue::PartialBuiltin(_)
+            | CoreValue::Opaque(_) => Err(Error::new(format!("`{label}` is not binary text data"))),
         }
     }
 
@@ -1850,7 +1866,8 @@ impl Assembler {
             | CoreValue::Number(_)
             | CoreValue::Function(_)
             | CoreValue::Builtin(_)
-            | CoreValue::PartialBuiltin(_) => {
+            | CoreValue::PartialBuiltin(_)
+            | CoreValue::Opaque(_) => {
                 return Err(Error::new(format!("`{label}` is not binary list data")));
             }
         }

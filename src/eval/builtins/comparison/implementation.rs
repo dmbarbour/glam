@@ -94,6 +94,9 @@ fn compare_ordered_values(
         | (_, Value::Net(_)) => Err(EvalError::new(format!(
             "{name} builtin cannot compare function values"
         ))),
+        (Value::Opaque(_), _) | (_, Value::Opaque(_)) => Err(EvalError::new(format!(
+            "{name} builtin cannot compare opaque values"
+        ))),
         (left, right) => Err(EvalError::new(format!(
             "{name} builtin cannot order values {left:?} and {right:?}"
         ))),
@@ -159,6 +162,9 @@ fn equal_values(
         | (Value::Net(_), _)
         | (_, Value::Net(_)) => Err(EvalError::new(format!(
             "{name} builtin cannot compare function values"
+        ))),
+        (Value::Opaque(_), _) | (_, Value::Opaque(_)) => Err(EvalError::new(format!(
+            "{name} builtin cannot compare opaque values"
         ))),
         (Value::Atom(_), _)
         | (Value::Number(_), _)

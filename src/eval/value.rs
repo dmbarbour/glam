@@ -312,10 +312,12 @@ pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, 
                 .flatten()
                 .collect::<Vec<_>>(),
         ))),
-        Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Function(_) | Value::Net(_) => Err(
-            EvalError::new("dictionary keys must evaluate to keyable values"),
-        ),
-        Value::Lazy(_) => Err(EvalError::new(
+        Value::Builtin(_)
+        | Value::PartialBuiltin(_)
+        | Value::Function(_)
+        | Value::Net(_)
+        | Value::Lazy(_)
+        | Value::Opaque(_) => Err(EvalError::new(
             "dictionary keys must evaluate to keyable values",
         )),
     }
