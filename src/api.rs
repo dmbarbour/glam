@@ -31,8 +31,8 @@ use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
 use crate::number::Number;
 use crate::reflection::{
-    CommitResult, HostSnapshot, ReflectionEffects, ReflectionServices, TaskCommit, TaskEnvironment,
-    TaskHost, task_launcher,
+    CommitResult, ConflictAnalysisStrategy, ExactConflictAnalysis, HostSnapshot, ReflectionEffects,
+    ReflectionServices, ReflectionStore, TaskCommit, TaskEnvironment, TaskHost, task_launcher,
 };
 
 const GLAM_COMPATIBILITY_VERSION: &str = "0.1.0";
@@ -675,18 +675,22 @@ struct AssemblerReflectionHost {
 }
 
 struct AssemblerReflectionState {
-    generation: u64,
-    heap: Value,
+    wake_generation: u64,
+    store: ReflectionStore,
 }
 
 impl AssemblerReflectionHost {
-    fn new(reflection_environment: Value, diagnostics: DiagnosticBus) -> Self {
+    fn new(
+        reflection_environment: Value,
+        diagnostics: DiagnosticBus,
+        conflict_analysis: Arc<dyn ConflictAnalysisStrategy>,
+    ) -> Self {
         Self {
             reflection_environment,
             diagnostics,
             state: Mutex::new(AssemblerReflectionState {
-                generation: 1,
-                heap: Value::empty_record(),
+                wake_generation: 1,
+                store: ReflectionStore::new(conflict_analysis),
             }),
             changed: Condvar::new(),
         }
@@ -711,27 +715,27 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
             .state
             .lock()
             .expect("assembler reflection host mutex should not be poisoned");
-        HostSnapshot::new(state.generation, state.heap.clone(), ())
+        HostSnapshot::new(state.wake_generation, state.store.snapshot(), ())
     }
 
     fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
+        let (store, _extra_snapshot, extra) = commit.into_parts();
         let diagnostics = {
             let mut state = self
                 .state
                 .lock()
                 .expect("assembler reflection host mutex should not be poisoned");
-            if state.generation != commit.generation() {
+            if !state.store.try_commit(&store) {
                 return CommitResult::Conflict;
             }
-            state.heap = commit.heap().clone();
-            state.generation = state.generation.wrapping_add(1);
+            state.wake_generation = state.wake_generation.wrapping_add(1);
             self.changed.notify_all();
-            commit.extra().diagnostics().to_vec()
+            extra.diagnostics().to_vec()
         };
         for diagnostic in diagnostics {
             self.diagnostics.publish(diagnostic);
         }
-        commit.extra().commit_updates();
+        extra.commit_updates();
         CommitResult::Committed
     }
 
@@ -740,7 +744,7 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
             .state
             .lock()
             .expect("assembler reflection host mutex should not be poisoned");
-        while state.generation == observed_generation {
+        while state.wake_generation == observed_generation {
             state = self
                 .changed
                 .wait(state)
@@ -776,10 +780,16 @@ struct ReasoningSession {
 }
 
 impl ReasoningSession {
-    fn new(environment: Value, diagnostics: DiagnosticBus, runtime: EvaluationRuntime) -> Self {
+    fn new(
+        environment: Value,
+        diagnostics: DiagnosticBus,
+        runtime: EvaluationRuntime,
+        conflict_analysis: Arc<dyn ConflictAnalysisStrategy>,
+    ) -> Self {
         let host = Arc::new(AssemblerReflectionHost::new(
             environment,
             diagnostics.clone(),
+            conflict_analysis,
         ));
         let evaluation = EvaluationSession::shared(runtime.executor());
         evaluation
@@ -807,6 +817,15 @@ impl ReasoningSession {
 
     fn eval_context(&self) -> EvalContext {
         EvalContext::new(self.evaluation.clone())
+    }
+
+    fn conflict_analysis(&self) -> Arc<dyn ConflictAnalysisStrategy> {
+        self.host
+            .state
+            .lock()
+            .expect("assembler reflection host mutex should not be poisoned")
+            .store
+            .strategy()
     }
 }
 
@@ -1123,8 +1142,12 @@ impl Default for Assembler {
             executor: EvaluationExecutor::new(0)
                 .expect("zero-worker evaluation executor must not start threads"),
         };
-        let reasoning =
-            ReasoningSession::new(reflection_environment, diagnostics, evaluation_runtime);
+        let reasoning = ReasoningSession::new(
+            reflection_environment,
+            diagnostics,
+            evaluation_runtime,
+            Arc::new(ExactConflictAnalysis),
+        );
         Self {
             host,
             next_compilation_invocation: Arc::new(AtomicU64::new(1)),
@@ -1163,6 +1186,11 @@ impl Assembler {
     /// service evaluation sessions explicitly attached to it.
     pub fn evaluation_runtime(&self) -> EvaluationRuntime {
         self.reasoning.runtime()
+    }
+
+    /// Returns the read-conflict strategy fixed for this reasoning session.
+    pub fn conflict_analysis(&self) -> Arc<dyn ConflictAnalysisStrategy> {
+        self.reasoning.conflict_analysis()
     }
 
     /// Returns this reasoning session's non-buffering diagnostic bus.
@@ -1268,6 +1296,15 @@ impl Assembler {
         Ok(self)
     }
 
+    /// Starts a fresh reasoning session using `strategy` to summarize shared
+    /// heap reads. Write paths and commit semantics remain exact.
+    pub fn with_conflict_analysis(mut self, strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
+        let environment = self.reasoning.environment();
+        let runtime = self.reasoning.runtime();
+        self.replace_reasoning_with_strategy(environment, runtime, strategy);
+        self
+    }
+
     pub fn with_diagnostic_callback<F>(self, callback: F) -> Self
     where
         F: Fn(DiagnosticEvent) + Send + Sync + 'static,
@@ -1299,6 +1336,16 @@ impl Assembler {
     }
 
     fn replace_reasoning(&mut self, environment: Value, runtime: EvaluationRuntime) {
+        let conflict_analysis = self.reasoning.conflict_analysis();
+        self.replace_reasoning_with_strategy(environment, runtime, conflict_analysis);
+    }
+
+    fn replace_reasoning_with_strategy(
+        &mut self,
+        environment: Value,
+        runtime: EvaluationRuntime,
+        conflict_analysis: Arc<dyn ConflictAnalysisStrategy>,
+    ) {
         let diagnostics = DiagnosticBus::new();
         let diagnostic_attachment = self.diagnostic_attachment.as_ref().map(|attachment| {
             let subscriber = attachment.subscriber.clone();
@@ -1308,7 +1355,8 @@ impl Assembler {
                 _subscription: subscription,
             }
         });
-        self.reasoning = ReasoningSession::new(environment, diagnostics, runtime);
+        self.reasoning =
+            ReasoningSession::new(environment, diagnostics, runtime, conflict_analysis);
         self.diagnostic_attachment = diagnostic_attachment;
     }
 
@@ -1828,6 +1876,17 @@ mod tests {
                 .as_binary(),
             Some(b"new environment".as_slice())
         );
+    }
+
+    #[test]
+    fn replacing_conflict_analysis_starts_a_fresh_reasoning_session() {
+        let assembler = Assembler::new();
+        let original = assembler.eval_context();
+        let replaced =
+            assembler.with_conflict_analysis(Arc::new(crate::reflection::CoarseConflictAnalysis));
+
+        assert!(!original.shares_session_with(&replaced.eval_context()));
+        assert_eq!(replaced.conflict_analysis().name(), "coarse");
     }
 
     #[test]

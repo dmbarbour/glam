@@ -36,6 +36,15 @@ and control flow.
   without inserting either into local state; failed alternatives discard
   changes, nested success merges upward, and outer success validates and
   commits.
+- Shared-heap reads record their complete requested path, including missing
+  paths and `[]`. Writes remain exact ordered patches. Disjoint writes may
+  rebase; exact blind writes replace earlier exact writes; strict
+  ancestor/descendant writes conflict. The conflict-analysis strategy may only
+  conservatively summarize reads and must never redefine write semantics.
+- The exact strategy is the correctness reference. Fingerprint collisions may
+  cause extra retries but never missed overlaps. The coarse strategy treats
+  every heap write as conflicting after any heap read. Strategy selection is
+  fixed for a reasoning session.
 - `.cut` supplies choice and transaction scope, not retryability. Plain `.fail`
   and `.cut .fail` are permanent. A failed operation retries only when it
   observed changeable host state, such as an empty log queue.
@@ -104,6 +113,10 @@ and control flow.
   diagnostic bus are separate. Logger output cannot reopen or feed a sealed
   input stream. Its children inherit `.log`, but not `read_log`, `log_status`,
   or `write_stderr`.
+- Logger input has a revision distinct from heap revisions and the coarse wake
+  generation. Arriving diagnostics do not invalidate heap-only transactions;
+  a committed queue read still validates and consumes input atomically with
+  its heap journal.
 - Batch execution seals diagnostics only after assembler reasoning drains. A
   logger waiting on an empty input must observe `.log_status` and finish after
   closure. Logger failure falls back to the default formatter and makes the

@@ -9,10 +9,11 @@ use std::thread;
 
 use bytes::Bytes;
 use glam::reflection::{
-    CommitResult, EffectRequestSpec, EffectRun, HostSnapshot, ReflectionEffects, ReflectionHost,
-    ReflectionJournal, ReflectionRequest, ReflectionServices, ReflectionTransaction,
-    RequestContext, RequestResult, TaskCommit, TaskEnvironment, TaskHost, TaskOutcome,
-    TaskSpecialization, handle_reflection_request, reflection_request_specs,
+    CommitResult, ConflictAnalysisStrategy, EffectRequestSpec, EffectRun, HostSnapshot,
+    ReflectionEffects, ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionServices,
+    ReflectionStore, ReflectionTransaction, RequestContext, RequestResult, TaskCommit,
+    TaskEnvironment, TaskHost, TaskOutcome, TaskSpecialization, handle_reflection_request,
+    reflection_request_specs,
 };
 use glam::{
     Assembler, Builtin, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, Error,
@@ -304,7 +305,6 @@ fn assemble_inputs(command: AssemblyCommand) -> ExitCode {
         Ok(worker_threads) => worker_threads,
         Err(exit_code) => return exit_code,
     };
-    let log_host = Arc::new(LogHost::new());
     let local_files = LocalFileHost::default();
     let assembler = match Assembler::default().with_worker_threads(worker_threads) {
         Ok(assembler) => assembler,
@@ -315,8 +315,11 @@ fn assemble_inputs(command: AssemblyCommand) -> ExitCode {
     }
     .with_host(local_files.clone())
     .with_reflection_environment(process_reflection_environment(reflection_arguments))
-    .expect("main's reflection environment must be a dictionary")
-    .with_diagnostic_subscriber(log_host.clone());
+    .expect("main's reflection environment must be a dictionary");
+    let log_host = Arc::new(LogHost::with_conflict_analysis(
+        assembler.conflict_analysis(),
+    ));
+    let assembler = assembler.with_diagnostic_subscriber(log_host.clone());
     let assembler_diagnostics = assembler.diagnostic_bus();
     let configuration = match load_configuration(&assembler) {
         Ok(configuration) => configuration,
@@ -539,6 +542,7 @@ enum MainRequest {
 struct MainSnapshot {
     diagnostics: Arc<[DiagnosticEvent]>,
     input_closed: bool,
+    input_revision: u64,
 }
 
 #[derive(Clone, Default)]
@@ -546,6 +550,7 @@ struct MainJournal {
     reflection: ReflectionJournal,
     consumed_diagnostics: usize,
     stderr: Vec<Bytes>,
+    observed_input: bool,
 }
 
 impl ReflectionTransaction for MainJournal {
@@ -634,7 +639,9 @@ fn log_status(
         let mut transaction = context
             .transaction()
             .expect("checked active reflection transaction");
-        (generation, transaction.parts().0.input_closed)
+        let (snapshot, journal) = transaction.parts();
+        journal.observed_input = true;
+        (generation, snapshot.input_closed)
     } else {
         let snapshot = <LoggerTaskHost as TaskHost<MainEffects>>::snapshot(context.host());
         (snapshot.generation(), snapshot.extra().input_closed)
@@ -654,6 +661,7 @@ fn read_log(
             .transaction()
             .expect("checked active reflection transaction");
         let (snapshot, journal) = transaction.parts();
+        journal.observed_input = true;
         if let Some(diagnostic) = snapshot.diagnostics.get(journal.consumed_diagnostics) {
             journal.consumed_diagnostics += 1;
             return diagnostic
@@ -676,12 +684,13 @@ fn read_log(
             .enrich()
             .map_err(|error| glam::reflection::TaskError::new(error.to_string()))?;
         let commit = TaskCommit::new(
-            snapshot.generation(),
-            snapshot.heap().clone(),
+            glam::reflection::StoreJournal::new(snapshot.store().clone()),
+            snapshot.extra().clone(),
             MainJournal {
                 reflection: ReflectionJournal::default(),
                 consumed_diagnostics: 1,
                 stderr: Vec::new(),
+                observed_input: true,
             },
         );
         match <LoggerTaskHost as TaskHost<MainEffects>>::commit(context.host(), commit) {
@@ -724,8 +733,9 @@ impl LoggerTaskHost {
 }
 
 struct LogHostState {
-    generation: u64,
-    heap: Value,
+    wake_generation: u64,
+    input_revision: u64,
+    store: ReflectionStore,
     diagnostics: VecDeque<DiagnosticEvent>,
     stderr: VecDeque<Bytes>,
     input_closed: bool,
@@ -733,11 +743,17 @@ struct LogHostState {
 }
 
 impl LogHost {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_conflict_analysis(Arc::new(glam::reflection::ExactConflictAnalysis))
+    }
+
+    fn with_conflict_analysis(strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
         Self {
             state: Mutex::new(LogHostState {
-                generation: 1,
-                heap: Value::empty_record(),
+                wake_generation: 1,
+                input_revision: 0,
+                store: ReflectionStore::new(strategy),
                 diagnostics: VecDeque::new(),
                 stderr: VecDeque::new(),
                 input_closed: false,
@@ -753,7 +769,8 @@ impl LogHost {
             .lock()
             .expect("log host mutex should not be poisoned");
         state.input_closed = true;
-        state.generation = state.generation.wrapping_add(1);
+        state.input_revision = state.input_revision.wrapping_add(1);
+        state.wake_generation = state.wake_generation.wrapping_add(1);
         self.changed.notify_all();
     }
 
@@ -763,7 +780,8 @@ impl LogHost {
             .lock()
             .expect("log host mutex should not be poisoned");
         state.cancelled = true;
-        state.generation = state.generation.wrapping_add(1);
+        state.input_revision = state.input_revision.wrapping_add(1);
+        state.wake_generation = state.wake_generation.wrapping_add(1);
         self.changed.notify_all();
     }
 
@@ -781,7 +799,8 @@ impl LogHost {
             .expect("log host mutex should not be poisoned");
         loop {
             if let Some(diagnostic) = state.diagnostics.pop_front() {
-                state.generation = state.generation.wrapping_add(1);
+                state.input_revision = state.input_revision.wrapping_add(1);
+                state.wake_generation = state.wake_generation.wrapping_add(1);
                 self.changed.notify_all();
                 return Some(diagnostic);
             }
@@ -830,7 +849,8 @@ impl DiagnosticSubscriber for LogHost {
             .lock()
             .expect("log host mutex should not be poisoned");
         self.push_diagnostic(&mut state, event);
-        state.generation = state.generation.wrapping_add(1);
+        state.input_revision = state.input_revision.wrapping_add(1);
+        state.wake_generation = state.wake_generation.wrapping_add(1);
         self.changed.notify_all();
     }
 }
@@ -855,40 +875,43 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
             .lock()
             .expect("log host mutex should not be poisoned");
         HostSnapshot::new(
-            state.generation,
-            state.heap.clone(),
+            state.wake_generation,
+            state.store.snapshot(),
             MainSnapshot {
                 diagnostics: Arc::from(state.diagnostics.iter().cloned().collect::<Vec<_>>()),
                 input_closed: state.input_closed,
+                input_revision: state.input_revision,
             },
         )
     }
 
     fn commit(&self, commit: TaskCommit<MainEffects>) -> CommitResult {
+        let (store, snapshot, journal) = commit.into_parts();
         let diagnostics = {
             let mut state = self
                 .input
                 .state
                 .lock()
                 .expect("log host mutex should not be poisoned");
-            if state.generation != commit.generation()
-                || state.diagnostics.len() < commit.extra().consumed_diagnostics
+            if (journal.observed_input && state.input_revision != snapshot.input_revision)
+                || state.diagnostics.len() < journal.consumed_diagnostics
+                || !state.store.try_commit(&store)
             {
                 return CommitResult::Conflict;
             }
-            state.heap = commit.heap().clone();
-            state
-                .diagnostics
-                .drain(..commit.extra().consumed_diagnostics);
-            state.stderr.extend(commit.extra().stderr.iter().cloned());
-            state.generation = state.generation.wrapping_add(1);
+            state.diagnostics.drain(..journal.consumed_diagnostics);
+            if journal.consumed_diagnostics != 0 {
+                state.input_revision = state.input_revision.wrapping_add(1);
+            }
+            state.stderr.extend(journal.stderr.iter().cloned());
+            state.wake_generation = state.wake_generation.wrapping_add(1);
             self.input.changed.notify_all();
-            commit.extra().reflection.diagnostics().to_vec()
+            journal.reflection.diagnostics().to_vec()
         };
         for diagnostic in diagnostics {
             self.emit_output(diagnostic);
         }
-        commit.extra().reflection.commit_updates();
+        journal.reflection.commit_updates();
         self.input.flush_stderr();
         CommitResult::Committed
     }
@@ -899,10 +922,10 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
             .state
             .lock()
             .expect("log host mutex should not be poisoned");
-        if state.generation != observed_generation {
+        if state.wake_generation != observed_generation {
             return true;
         }
-        while state.generation == observed_generation
+        while state.wake_generation == observed_generation
             && !state.cancelled
             && !(state.input_closed && state.diagnostics.is_empty())
         {
@@ -912,7 +935,7 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
                 .wait(state)
                 .expect("log host mutex should not be poisoned");
         }
-        state.generation != observed_generation
+        state.wake_generation != observed_generation
     }
 }
 
@@ -923,28 +946,28 @@ impl TaskHost<ReflectionEffects> for LoggerTaskHost {
             .state
             .lock()
             .expect("log host mutex should not be poisoned");
-        HostSnapshot::new(state.generation, state.heap.clone(), ())
+        HostSnapshot::new(state.wake_generation, state.store.snapshot(), ())
     }
 
     fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
+        let (store, _snapshot, journal) = commit.into_parts();
         let diagnostics = {
             let mut state = self
                 .input
                 .state
                 .lock()
                 .expect("log host mutex should not be poisoned");
-            if state.generation != commit.generation() {
+            if !state.store.try_commit(&store) {
                 return CommitResult::Conflict;
             }
-            state.heap = commit.heap().clone();
-            state.generation = state.generation.wrapping_add(1);
+            state.wake_generation = state.wake_generation.wrapping_add(1);
             self.input.changed.notify_all();
-            commit.extra().diagnostics().to_vec()
+            journal.diagnostics().to_vec()
         };
         for diagnostic in diagnostics {
             self.emit_output(diagnostic);
         }
-        commit.extra().commit_updates();
+        journal.commit_updates();
         CommitResult::Committed
     }
 

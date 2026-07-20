@@ -5,10 +5,16 @@
 //! performs the state, control, transaction, and host operations.
 
 mod requests;
+mod store;
 
 pub use requests::{
     ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionServices,
     ReflectionTransaction, handle_reflection_request, reflection_request_specs,
+};
+pub use store::{
+    CoarseConflictAnalysis, ConflictAnalysisStrategy, ConflictObservationIndex, ConflictPath,
+    ExactConflictAnalysis, FingerprintConflictAnalysis, ReflectionStore, StoreJournal,
+    StoreSnapshot,
 };
 
 use std::collections::HashMap;
@@ -145,26 +151,27 @@ impl TaskSpecialization for ReflectionEffects {
 
 /// Immutable host state observed at the start of an optimistic transaction.
 pub struct HostSnapshot<S: TaskSpecialization> {
-    generation: u64,
-    heap: PublicValue,
+    wake_generation: u64,
+    store: StoreSnapshot,
     extra: S::Snapshot,
 }
 
 impl<S: TaskSpecialization> HostSnapshot<S> {
-    pub fn new(generation: u64, heap: PublicValue, extra: S::Snapshot) -> Self {
+    pub fn new(wake_generation: u64, store: StoreSnapshot, extra: S::Snapshot) -> Self {
         Self {
-            generation,
-            heap,
+            wake_generation,
+            store,
             extra,
         }
     }
 
     pub fn generation(&self) -> u64 {
-        self.generation
+        self.wake_generation
     }
 
-    pub fn heap(&self) -> &PublicValue {
-        &self.heap
+    #[doc(hidden)]
+    pub fn store(&self) -> &StoreSnapshot {
+        &self.store
     }
 
     pub fn extra(&self) -> &S::Snapshot {
@@ -175,8 +182,8 @@ impl<S: TaskSpecialization> HostSnapshot<S> {
 impl<S: TaskSpecialization> Clone for HostSnapshot<S> {
     fn clone(&self) -> Self {
         Self {
-            generation: self.generation,
-            heap: self.heap.clone(),
+            wake_generation: self.wake_generation,
+            store: self.store.clone(),
             extra: self.extra.clone(),
         }
     }
@@ -184,30 +191,31 @@ impl<S: TaskSpecialization> Clone for HostSnapshot<S> {
 
 /// Changes to host-owned resources produced by one successful outer cut.
 pub struct TaskCommit<S: TaskSpecialization> {
-    generation: u64,
-    heap: PublicValue,
+    store: StoreJournal,
+    extra_snapshot: S::Snapshot,
     extra: S::Journal,
 }
 
 impl<S: TaskSpecialization> TaskCommit<S> {
-    pub fn new(generation: u64, heap: PublicValue, extra: S::Journal) -> Self {
+    pub fn new(store: StoreJournal, extra_snapshot: S::Snapshot, extra: S::Journal) -> Self {
         Self {
-            generation,
-            heap,
+            store,
+            extra_snapshot,
             extra,
         }
     }
 
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    pub fn heap(&self) -> &PublicValue {
-        &self.heap
+    pub fn extra_snapshot(&self) -> &S::Snapshot {
+        &self.extra_snapshot
     }
 
     pub fn extra(&self) -> &S::Journal {
         &self.extra
+    }
+
+    #[doc(hidden)]
+    pub fn into_parts(self) -> (StoreJournal, S::Snapshot, S::Journal) {
+        (self.store, self.extra_snapshot, self.extra)
     }
 }
 
@@ -962,19 +970,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let path =
                     eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
                 let checkpoint = branch.retry_candidate();
-                let heap = if branch.transaction.is_some() {
-                    branch.observe(checkpoint, 0);
-                    branch
-                        .transaction
-                        .as_ref()
-                        .expect("transaction checked above")
-                        .heap
-                        .as_core()
-                        .clone()
+                let heap = if let Some(transaction) = branch.transaction.as_mut() {
+                    let generation = transaction.snapshot.generation();
+                    transaction.store.observe(&path);
+                    let heap = transaction.store.view().as_core().clone();
+                    branch.observe(checkpoint, generation);
+                    heap
                 } else {
                     let snapshot = self.host.snapshot();
                     branch.observe(checkpoint, snapshot.generation());
-                    snapshot.heap().as_core().clone()
+                    snapshot.store().root().as_core().clone()
                 };
                 let value = get_value_path(&self.eval_context, &heap, &path)?;
                 MachineWork::Deliver {
@@ -984,14 +989,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             }
             Request::HeapSet(path, value) => {
+                let path =
+                    eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
                 if let Some(transaction) = branch.transaction.as_mut() {
-                    let heap = set_state_path(
-                        &self.eval_context,
-                        transaction.heap.as_core().clone(),
-                        &path,
-                        value,
-                    )?;
-                    transaction.heap = PublicValue::from_core(heap);
+                    stage_store_write(&self.eval_context, &path, value, &mut transaction.store)?;
                     MachineWork::Deliver {
                         value: unit_value(),
                         branch,
@@ -999,17 +1000,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                 } else {
                     let snapshot = self.host.snapshot();
-                    let heap = set_state_path(
-                        &self.eval_context,
-                        snapshot.heap().as_core().clone(),
-                        &path,
-                        value,
-                    )?;
-                    let commit = TaskCommit::new(
-                        snapshot.generation(),
-                        PublicValue::from_core(heap),
-                        S::Journal::default(),
-                    );
+                    let mut store = StoreJournal::new(snapshot.store().clone());
+                    stage_store_write(&self.eval_context, &path, value, &mut store)?;
+                    let commit =
+                        TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
                     match self.host.commit(commit) {
                         CommitResult::Committed => {
                             branch.retry = None;
@@ -1371,8 +1365,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         .as_ref()
                         .expect("outer cut must own a transaction");
                     let commit = TaskCommit::new(
-                        transaction.snapshot.generation(),
-                        transaction.heap.clone(),
+                        transaction.store.clone(),
+                        transaction.snapshot.extra().clone(),
                         transaction.journal.clone(),
                     );
                     match self.host.commit(commit) {
@@ -2193,7 +2187,7 @@ impl CapturedLayer {
 #[derive(Clone)]
 struct Transaction<S: TaskSpecialization> {
     snapshot: HostSnapshot<S>,
-    heap: PublicValue,
+    store: StoreJournal,
     journal: S::Journal,
     observed: bool,
     wait: Option<EvaluationWaitToken>,
@@ -2201,10 +2195,10 @@ struct Transaction<S: TaskSpecialization> {
 
 impl<S: TaskSpecialization> Transaction<S> {
     fn new(snapshot: HostSnapshot<S>) -> Self {
-        let heap = snapshot.heap().clone();
+        let store = StoreJournal::new(snapshot.store().clone());
         Self {
             snapshot,
-            heap,
+            store,
             journal: S::Journal::default(),
             observed: false,
             wait: None,
@@ -2568,6 +2562,25 @@ fn get_value_path(context: &EvalContext, value: &Value, path: &[Key]) -> Result<
     Ok(current)
 }
 
+fn stage_store_write(
+    context: &EvalContext,
+    path: &[Key],
+    value: Value,
+    journal: &mut StoreJournal,
+) -> Result<(), TaskError> {
+    let value = if path.is_empty() {
+        require_state_dict(context, value)?
+    } else {
+        let parent = &path[..path.len() - 1];
+        let view = journal.view();
+        let parent_value = get_value_path(context, view.as_core(), parent)?;
+        require_state_dict(context, parent_value)?;
+        value
+    };
+    journal.write(path.to_vec(), PublicValue::from_core(value));
+    Ok(())
+}
+
 fn set_state_path(
     context: &EvalContext,
     state: Value,
@@ -2770,6 +2783,7 @@ mod tests {
     #[derive(Clone)]
     struct TestSnapshot {
         diagnostics: Arc<[Diagnostic]>,
+        revision: u64,
     }
 
     #[derive(Clone, Default)]
@@ -2869,8 +2883,8 @@ mod tests {
                 .enrich()
                 .map_err(|error| TaskError::new(error.to_string()))?;
             let commit = TaskCommit::new(
-                snapshot.generation(),
-                snapshot.heap().clone(),
+                StoreJournal::new(snapshot.store().clone()),
+                snapshot.extra().clone(),
                 TestJournal {
                     reflection: ReflectionJournal::default(),
                     consumed_diagnostics: 1,
@@ -2895,7 +2909,8 @@ mod tests {
 
     struct TestHostState {
         generation: u64,
-        heap: PublicValue,
+        extra_revision: u64,
+        store: ReflectionStore,
         diagnostics: Vec<Diagnostic>,
         stderr: Vec<Bytes>,
         wake_diagnostic: Option<Diagnostic>,
@@ -2908,7 +2923,8 @@ mod tests {
         fn default() -> Self {
             Self {
                 generation: 1,
-                heap: PublicValue::empty_record(),
+                extra_revision: 0,
+                store: ReflectionStore::new(Arc::new(ExactConflictAnalysis)),
                 diagnostics: Vec::new(),
                 stderr: Vec::new(),
                 wake_diagnostic: None,
@@ -2952,7 +2968,7 @@ mod tests {
         }
 
         fn heap(&self) -> PublicValue {
-            self.state.lock().unwrap().heap.clone()
+            self.state.lock().unwrap().store.root().clone()
         }
 
         fn diagnostics(&self) -> Vec<Diagnostic> {
@@ -2966,6 +2982,7 @@ mod tests {
         fn emit_diagnostic(&self, diagnostic: Diagnostic) {
             let mut state = self.state.lock().unwrap();
             state.diagnostics.push(diagnostic);
+            state.extra_revision += 1;
             state.generation += 1;
         }
 
@@ -2980,7 +2997,7 @@ mod tests {
                 return true;
             }
             if let Some(heap) = state.wake_heap.take() {
-                state.heap = heap;
+                state.store.replace_root(heap);
                 state.generation += 1;
                 return true;
             }
@@ -2988,6 +3005,7 @@ mod tests {
                 return false;
             };
             state.diagnostics.push(diagnostic);
+            state.extra_revision += 1;
             state.generation += 1;
             true
         }
@@ -3035,35 +3053,39 @@ mod tests {
             let state = self.state.lock().unwrap();
             HostSnapshot::new(
                 state.generation,
-                state.heap.clone(),
+                state.store.snapshot(),
                 TestSnapshot {
                     diagnostics: Arc::from(state.diagnostics.clone()),
+                    revision: state.extra_revision,
                 },
             )
         }
 
         fn commit(&self, commit: TaskCommit<TestEffects>) -> CommitResult {
+            let (store, snapshot, journal) = commit.into_parts();
             {
                 let mut state = self.state.lock().unwrap();
                 if state.closed {
                     return CommitResult::Closed;
                 }
-                if state.generation != commit.generation() {
+                if (journal.consumed_diagnostics != 0 && state.extra_revision != snapshot.revision)
+                    || state.diagnostics.len() < journal.consumed_diagnostics
+                    || !state.store.try_commit(&store)
+                {
                     return CommitResult::Conflict;
                 }
-                state.heap = commit.heap().clone();
-                let consumed = commit
-                    .extra()
-                    .consumed_diagnostics
-                    .min(state.diagnostics.len());
+                let consumed = journal.consumed_diagnostics;
                 state.diagnostics.drain(..consumed);
                 state
                     .diagnostics
-                    .extend(commit.extra().reflection.diagnostics().iter().cloned());
-                state.stderr.extend_from_slice(&commit.extra().stderr);
+                    .extend(journal.reflection.diagnostics().iter().cloned());
+                state.stderr.extend_from_slice(&journal.stderr);
+                if consumed != 0 || !journal.reflection.diagnostics().is_empty() {
+                    state.extra_revision += 1;
+                }
                 state.generation += 1;
             }
-            commit.extra().reflection.commit_updates();
+            journal.reflection.commit_updates();
             CommitResult::Committed
         }
 
@@ -3075,18 +3097,18 @@ mod tests {
     impl TaskHost<StandardEffects> for TestHost {
         fn snapshot(&self) -> HostSnapshot<StandardEffects> {
             let state = self.state.lock().unwrap();
-            HostSnapshot::new(state.generation, state.heap.clone(), ())
+            HostSnapshot::new(state.generation, state.store.snapshot(), ())
         }
 
         fn commit(&self, commit: TaskCommit<StandardEffects>) -> CommitResult {
+            let (store, _snapshot, _journal) = commit.into_parts();
             let mut state = self.state.lock().unwrap();
             if state.closed {
                 return CommitResult::Closed;
             }
-            if state.generation != commit.generation() {
+            if !state.store.try_commit(&store) {
                 return CommitResult::Conflict;
             }
-            state.heap = commit.heap().clone();
             state.generation += 1;
             CommitResult::Committed
         }
@@ -3099,25 +3121,28 @@ mod tests {
     impl TaskHost<ReflectionEffects> for TestHost {
         fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
             let state = self.state.lock().unwrap();
-            HostSnapshot::new(state.generation, state.heap.clone(), ())
+            HostSnapshot::new(state.generation, state.store.snapshot(), ())
         }
 
         fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
+            let (store, _snapshot, journal) = commit.into_parts();
             {
                 let mut state = self.state.lock().unwrap();
                 if state.closed {
                     return CommitResult::Closed;
                 }
-                if state.generation != commit.generation() {
+                if !state.store.try_commit(&store) {
                     return CommitResult::Conflict;
                 }
-                state.heap = commit.heap().clone();
                 state
                     .diagnostics
-                    .extend(commit.extra().diagnostics().iter().cloned());
+                    .extend(journal.diagnostics().iter().cloned());
+                if !journal.diagnostics().is_empty() {
+                    state.extra_revision += 1;
+                }
                 state.generation += 1;
             }
-            commit.extra().commit_updates();
+            journal.commit_updates();
             CommitResult::Committed
         }
 

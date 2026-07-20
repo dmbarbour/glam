@@ -46,6 +46,19 @@ from snapshots; losing branches discard changes; a winning outer branch
 validates and commits. A host observation can turn later failure into a retry
 point. `cut` alone does not: unobservant failure is terminal.
 
+`reflection/store.rs` owns the shared heap independently of host wake state.
+Transactions record hierarchical read paths and an ordered write overlay;
+commits rebase disjoint writes onto the current persistent root. The store
+retains exact changed paths and owns write/write policy. A session-selected
+`Arc<dyn ConflictAnalysisStrategy>` controls only how reads are summarized:
+the bootstrap supplies exact, conservative fingerprint, and fully coarse
+strategies. Changing strategy creates a fresh reasoning session.
+
+Host locks still make store and specialization changes atomic. For example,
+the logger validates its input-stream revision, validates and applies its heap
+journal, then consumes input and publishes deferred output. A failed store
+validation therefore cannot duplicate a diagnostic or child-task launch.
+
 ## Reusable Reflection Requests
 
 - `.env Path` reads the active task host's immutable reasoning environment.
@@ -76,7 +89,8 @@ reflection API.
 claims a machine under the session mutex, polls it without the mutex, then
 records its queued, blocked, or terminal state. Exact lazy wait tokens allow it
 to prioritize a known producer chain. Coarse host generations currently wake
-state observations.
+state observations; path journals decide whether an optimistic heap commit
+must retry.
 
 Foreground evaluation pumps only tasks needed by the lazy value it is trying
 to observe. Shared workers may opportunistically poll any ready task. Explicit
