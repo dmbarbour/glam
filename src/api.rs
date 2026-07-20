@@ -718,8 +718,6 @@ impl AssemblerReflectionHost {
                 .store
                 .create_volume(initial)
                 .map_err(|error| Error::new(error.as_ref()))?;
-            state.wake_generation = state.wake_generation.wrapping_add(1);
-            self.changed.notify_all();
             volume
         };
         Ok((volume, volume_effects(self.reasoning_session, volume)))
@@ -1191,6 +1189,8 @@ impl ReasoningVolume {
     }
 
     /// Removes the volume and returns its final value without forcing it.
+    /// Further uses of any capability for this volume produce
+    /// use-after-revoke errors.
     pub fn revoke(self) -> Result<Value, Error> {
         self.host.revoke_volume(self.volume)
     }
