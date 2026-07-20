@@ -90,6 +90,75 @@ fn manifest_records_local_sources_and_binary_imports() {
     assert!(entries.contains(&source_entry.as_str()));
     assert!(entries.contains(&payload_entry.as_str()));
     assert!(entries.contains(&config_entry.as_str()));
+
+    let checked = glam_command()
+        .env("GLAM_CONF", dir.join("missing-conf.g"))
+        .arg("--check_manifest")
+        .arg(&manifest)
+        .output()
+        .expect("failed to check an unchanged manifest");
+    assert!(checked.status.success());
+    assert_eq!(checked.stdout, b"");
+    assert_eq!(checked.stderr, b"");
+
+    fs::write(&source, b"changed source")
+        .unwrap_or_else(|err| panic!("failed to change {}: {err}", source.display()));
+    fs::remove_file(&payload)
+        .unwrap_or_else(|err| panic!("failed to remove {}: {err}", payload.display()));
+    let changed = glam_command()
+        .arg("--check_manifest")
+        .arg(&manifest)
+        .output()
+        .expect("failed to check a changed manifest");
+    assert!(!changed.status.success());
+    let changed_stdout = String::from_utf8(changed.stdout).expect("check output should be UTF-8");
+    assert_eq!(changed_stdout.lines().count(), 2, "{changed_stdout}");
+    assert!(changed_stdout.contains(&source.display().to_string()));
+    assert!(changed_stdout.contains(&payload.display().to_string()));
+    assert!(changed.stderr.is_empty());
+
+    let quiet = glam_command()
+        .arg("--check_manifest")
+        .arg(&manifest)
+        .arg("--quiet")
+        .output()
+        .expect("failed to quietly check a changed manifest");
+    assert!(!quiet.status.success());
+    assert!(quiet.stdout.is_empty());
+    assert!(quiet.stderr.is_empty());
+
+    let leading_quiet = glam_command()
+        .arg("--quiet")
+        .arg("--check_manifest")
+        .arg(&manifest)
+        .output()
+        .expect("failed to quietly check with a leading modifier");
+    assert!(!leading_quiet.status.success());
+    assert!(leading_quiet.stdout.is_empty());
+    assert!(leading_quiet.stderr.is_empty());
+
+    let misplaced_quiet = glam_command()
+        .arg("--check_manifest")
+        .arg("--quiet")
+        .arg(&manifest)
+        .output()
+        .expect("failed to reject a modifier before the manifest path");
+    assert_eq!(misplaced_quiet.status.code(), Some(2));
+    assert!(misplaced_quiet.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&misplaced_quiet.stderr).contains("manifest path before"));
+
+    let extra_path = glam_command()
+        .arg("--check_manifest")
+        .arg(&manifest)
+        .arg("another.manifest")
+        .output()
+        .expect("failed to reject an extra manifest path");
+    assert_eq!(extra_path.status.code(), Some(2));
+    assert!(extra_path.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&extra_path.stderr)
+            .contains("accepts only a manifest path and optional `--quiet`")
+    );
 }
 
 #[test]

@@ -27,6 +27,6 @@ pub use core::Builtin;
 pub use diagnostic::Severity;
 pub use source::{
     CONTENT_DIGEST_ALGORITHM, ContentDigest, FileSourceSystem, Host, HostError, HostSourceSystem,
-    ImportResolver, RelativeSourcePath, SourceArtifact, SourceError, SourceIdentity, SourceSystem,
-    SystemHost,
+    ImportResolver, ManifestMismatch, RelativeSourcePath, SourceArtifact, SourceError,
+    SourceIdentity, SourceSystem, SystemHost, check_local_manifest,
 };

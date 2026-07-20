@@ -1,6 +1,6 @@
 //! Source acquisition, immutable loaded artifacts, and local consistency.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
 use std::fs;
@@ -13,6 +13,9 @@ use sha2::{Digest, Sha256};
 use crate::api::Value;
 
 pub const CONTENT_DIGEST_ALGORITHM: &str = "sha256";
+const LOCAL_MANIFEST_HEADER: &str = "# glam local-file manifest v2";
+const LOCAL_MANIFEST_COLUMNS: &str =
+    "# percent-encoded platform path bytes<TAB>digest algorithm<TAB>hex digest bytes";
 
 /// A SHA-256 digest of the exact bytes supplied by a source system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -205,6 +208,154 @@ impl fmt::Display for SourceError {
 
 impl std::error::Error for SourceError {}
 
+/// A local file that no longer agrees with a retained manifest entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestMismatch {
+    path: PathBuf,
+    expected: ContentDigest,
+    observation: ManifestObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ManifestObservation {
+    Digest(ContentDigest),
+    Unreadable(Arc<str>),
+}
+
+impl ManifestMismatch {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn expected_digest(&self) -> ContentDigest {
+        self.expected
+    }
+
+    pub fn observed_digest(&self) -> Option<ContentDigest> {
+        match self.observation {
+            ManifestObservation::Digest(digest) => Some(digest),
+            ManifestObservation::Unreadable(_) => None,
+        }
+    }
+
+    pub fn read_error(&self) -> Option<&str> {
+        match &self.observation {
+            ManifestObservation::Digest(_) => None,
+            ManifestObservation::Unreadable(error) => Some(error),
+        }
+    }
+}
+
+impl fmt::Display for ManifestMismatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "changed: `{}`", self.path.display())?;
+        match &self.observation {
+            ManifestObservation::Digest(actual) => write!(
+                formatter,
+                " (expected {}:{}, found {}:{})",
+                self.expected.algorithm(),
+                self.expected.to_hex(),
+                actual.algorithm(),
+                actual.to_hex()
+            ),
+            ManifestObservation::Unreadable(error) => {
+                write!(formatter, " (could not read: {error})")
+            }
+        }
+    }
+}
+
+/// Checks every local file recorded by a versioned Glam manifest.
+///
+/// Relative entries are resolved by the filesystem relative to the process's
+/// current working directory, matching the directory used when writing them.
+pub fn check_local_manifest(path: &Path) -> Result<Vec<ManifestMismatch>, SourceError> {
+    let manifest = fs::read_to_string(path).map_err(|error| {
+        SourceError::new(format!(
+            "could not read manifest `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    let mut lines = manifest.lines();
+    match lines.next() {
+        Some(LOCAL_MANIFEST_HEADER) => {}
+        Some(header) => {
+            return Err(SourceError::new(format!(
+                "unsupported manifest header `{header}` in `{}`",
+                path.display()
+            )));
+        }
+        None => {
+            return Err(SourceError::new(format!(
+                "manifest `{}` is empty",
+                path.display()
+            )));
+        }
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut mismatches = Vec::new();
+    for (index, line) in lines.enumerate() {
+        let line_number = index + 2;
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let encoded_path = fields.next().unwrap_or_default();
+        let algorithm = fields.next();
+        let digest = fields.next();
+        if encoded_path.is_empty()
+            || algorithm.is_none()
+            || digest.is_none()
+            || fields.next().is_some()
+        {
+            return Err(manifest_line_error(
+                path,
+                line_number,
+                "expected path, digest algorithm, and digest bytes separated by tabs",
+            ));
+        }
+        let algorithm = algorithm.expect("checked above");
+        if algorithm != CONTENT_DIGEST_ALGORITHM {
+            return Err(manifest_line_error(
+                path,
+                line_number,
+                &format!("unsupported digest algorithm `{algorithm}`"),
+            ));
+        }
+        let expected = parse_digest_hex(digest.expect("checked above")).ok_or_else(|| {
+            manifest_line_error(
+                path,
+                line_number,
+                "SHA-256 digest must contain exactly 64 hexadecimal digits",
+            )
+        })?;
+        let source = decode_manifest_path(encoded_path).map_err(|message| {
+            manifest_line_error(path, line_number, &format!("invalid path: {message}"))
+        })?;
+        if !seen.insert(source.clone()) {
+            return Err(manifest_line_error(
+                path,
+                line_number,
+                &format!("duplicate path `{}`", source.display()),
+            ));
+        }
+
+        let observation = match fs::read(&source) {
+            Ok(bytes) => ManifestObservation::Digest(ContentDigest::of(&bytes)),
+            Err(error) => ManifestObservation::Unreadable(Arc::from(error.to_string())),
+        };
+        if !matches!(observation, ManifestObservation::Digest(actual) if actual == expected) {
+            mismatches.push(ManifestMismatch {
+                path: source,
+                expected,
+                observation,
+            });
+        }
+    }
+    Ok(mismatches)
+}
+
 /// Compatibility byte host adapted into the artifact-oriented source API.
 pub trait Host: Send + Sync {
     fn read(&self, path: &Path) -> Result<Bytes, SourceError>;
@@ -357,9 +508,7 @@ impl FileSourceSystem {
             )));
         }
 
-        let mut manifest = String::from(
-            "# glam local-file manifest v2\n# percent-encoded platform path bytes<TAB>digest algorithm<TAB>hex digest bytes\n",
-        );
+        let mut manifest = format!("{LOCAL_MANIFEST_HEADER}\n{LOCAL_MANIFEST_COLUMNS}\n");
         for (source, digest) in observed.iter() {
             manifest.push_str(&percent_encoded_path(source));
             manifest.push('\t');
@@ -435,6 +584,78 @@ fn absolute_path(path: &Path) -> Result<PathBuf, SourceError> {
             path.display()
         ))
     })
+}
+
+fn manifest_line_error(manifest: &Path, line: usize, message: &str) -> SourceError {
+    SourceError::new(format!(
+        "invalid manifest `{}` at line {line}: {message}",
+        manifest.display()
+    ))
+}
+
+fn parse_digest_hex(text: &str) -> Option<ContentDigest> {
+    if text.len() != 64 || !text.is_ascii() {
+        return None;
+    }
+    let mut digest = [0; 32];
+    for (byte, pair) in digest.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+        let high = hex_digit(pair[0])?;
+        let low = hex_digit(pair[1])?;
+        *byte = (high << 4) | low;
+    }
+    Some(ContentDigest(digest))
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_manifest_path(encoded: &str) -> Result<PathBuf, &'static str> {
+    if !encoded.is_ascii() {
+        return Err("path representation must be ASCII");
+    }
+    let encoded = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(encoded.len());
+    let mut index = 0;
+    while index < encoded.len() {
+        if encoded[index] == b'%' {
+            let Some(pair) = encoded.get(index + 1..index + 3) else {
+                return Err("incomplete percent escape");
+            };
+            let Some(high) = hex_digit(pair[0]) else {
+                return Err("invalid percent escape");
+            };
+            let Some(low) = hex_digit(pair[1]) else {
+                return Err("invalid percent escape");
+            };
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            let byte = encoded[index];
+            if !(byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b':')) {
+                return Err("unescaped character in path representation");
+            }
+            decoded.push(byte);
+            index += 1;
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(decoded)
+            .map(PathBuf::from)
+            .map_err(|_| "decoded path is not valid UTF-8 on this platform")
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -523,10 +744,12 @@ mod tests {
 
     #[test]
     fn manifest_uses_the_digest_of_consumed_bytes() {
-        let directory =
-            env::temp_dir().join(format!("glam-file-source-manifest-{}", std::process::id()));
+        let working_directory = env::current_dir().expect("test should have a working directory");
+        let directory = working_directory
+            .join("target")
+            .join(format!("glam-file-source-manifest-{}", std::process::id()));
         fs::create_dir_all(&directory).expect("test directory should be created");
-        let input = directory.join("input.g");
+        let input = directory.join("input file.g");
         let manifest = directory.join("manifest.txt");
         fs::write(&input, "consumed").expect("test input should be written");
         let sources = FileSourceSystem::default();
@@ -552,5 +775,44 @@ mod tests {
             ]
         );
         assert!(!manifest.contains(&ContentDigest::of(b"later edit").to_hex()));
+
+        let mismatches = check_local_manifest(&directory.join("manifest.txt"))
+            .expect("generated manifest should be accepted");
+        assert_eq!(mismatches.len(), 1);
+        assert_eq!(
+            mismatches[0].path(),
+            input
+                .strip_prefix(working_directory)
+                .expect("manifest input should be relative to the working directory")
+        );
+        assert_eq!(
+            mismatches[0].expected_digest(),
+            ContentDigest::of(b"consumed")
+        );
+        assert_eq!(
+            mismatches[0].observed_digest(),
+            Some(ContentDigest::of(b"later edit"))
+        );
+        assert_eq!(mismatches[0].read_error(), None);
+    }
+
+    #[test]
+    fn manifest_check_rejects_unknown_digest_algorithms() {
+        let directory =
+            env::temp_dir().join(format!("glam-manifest-algorithm-{}", std::process::id()));
+        fs::create_dir_all(&directory).expect("test directory should be created");
+        let manifest = directory.join("manifest.txt");
+        fs::write(
+            &manifest,
+            format!("{LOCAL_MANIFEST_HEADER}\nfile.g\tmd5\t{}\n", "0".repeat(64)),
+        )
+        .expect("test manifest should be written");
+
+        let error = check_local_manifest(&manifest).expect_err("unknown algorithm should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported digest algorithm `md5`")
+        );
     }
 }

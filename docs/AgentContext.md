@@ -122,7 +122,8 @@ their detailed scheduling and representation contracts.
   can occupy one indefinitely; cancellation and reduction fuel are deferred.
 - `FileSourceSystem` retains each local read's SHA-256 digest. A conflicting
   repeat read is an error; a change found only during the final recheck is a warning.
-  Manifests contain the retained digests, not a later rescan.
+  Manifests contain the retained digests, not a later rescan. Standalone
+  `--check_manifest` verifies those files without entering assembly.
 - `--parse` is temporary direct front-end inspection pending an equivalent
   reflection view.
 

@@ -18,7 +18,7 @@ use glam::reflection::{
 use glam::{
     Assembler, Builtin, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, Error,
     EvaluationRuntime, FileSourceSystem, ModuleInput, ReasoningReport, ReasoningStatus,
-    ReasoningTaskState, Severity, Value,
+    ReasoningTaskState, Severity, Value, check_local_manifest,
 };
 
 // Parse inspection intentionally remains on the front-end API while ordinary
@@ -57,6 +57,20 @@ fn main() -> ExitCode {
             };
             parse_path(&path)
         }
+        "--check_manifest" => check_manifest_command(args, false),
+        "--quiet" => match args.next().as_deref() {
+            Some("--check_manifest") => check_manifest_command(args, true),
+            Some(option) => {
+                eprintln!(
+                    "error: `--quiet` is currently supported only with `--check_manifest`, got `{option}`"
+                );
+                ExitCode::from(2)
+            }
+            None => {
+                eprintln!("error: `--quiet` needs `--check_manifest <PATH>`");
+                ExitCode::from(2)
+            }
+        },
         "-f" | "--file" => {
             let Some(path) = args.next() else {
                 eprintln!("error: `{}` needs a source path", first);
@@ -137,6 +151,60 @@ fn main() -> ExitCode {
                 "error: bare command-line arguments are reserved for configured `conf.cli` rewriting; use `--parse <PATH>` to inspect a source file"
             );
             ExitCode::from(2)
+        }
+    }
+}
+
+fn check_manifest_command(mut args: impl Iterator<Item = String>, leading_quiet: bool) -> ExitCode {
+    let Some(manifest) = args.next() else {
+        eprintln!("error: `--check_manifest` needs a manifest path");
+        return ExitCode::from(2);
+    };
+    if manifest.starts_with('-') {
+        eprintln!("error: `--check_manifest` needs a manifest path before any options");
+        return ExitCode::from(2);
+    }
+    let quiet = match args.next().as_deref() {
+        None => leading_quiet,
+        Some("--quiet") if !leading_quiet => true,
+        Some("--quiet") => {
+            eprintln!("error: `--quiet` may be specified only once");
+            return ExitCode::from(2);
+        }
+        Some(option) if option.starts_with('-') => {
+            eprintln!("error: unknown `--check_manifest` option `{option}`");
+            return ExitCode::from(2);
+        }
+        Some(_) => {
+            eprintln!(
+                "error: `--check_manifest` accepts only a manifest path and optional `--quiet`"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    if args.next().is_some() {
+        eprintln!("error: `--check_manifest` accepts only a manifest path and optional `--quiet`");
+        return ExitCode::from(2);
+    }
+    let manifest = PathBuf::from(manifest);
+
+    match check_local_manifest(&manifest) {
+        Ok(mismatches) if mismatches.is_empty() => ExitCode::SUCCESS,
+        Ok(mismatches) => {
+            if !quiet {
+                let mut stdout = io::stdout().lock();
+                for mismatch in mismatches {
+                    if writeln!(stdout, "{mismatch}").is_err() {
+                        eprintln!("error: could not write manifest check results to stdout");
+                        return ExitCode::from(1);
+                    }
+                }
+            }
+            ExitCode::from(1)
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(1)
         }
     }
 }
@@ -1318,11 +1386,14 @@ Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...
             [--refl <ARG>]...
             [--workers <N>]
        glam --parse <PATH>
+       glam --check_manifest <PATH> [--quiet]
        glam --help
        glam --version
 
 Assembly inputs are applied as mixins; earlier inputs override later inputs.
 --manifest records every local input path and its SHA-256 digest.
+--check_manifest verifies every local file recorded by a manifest.
+--quiet suppresses changed-file output from --check_manifest.
 --refl appends an argument visible only as reflection environment process.refl_args.
 --workers sets the shared background evaluator thread count; zero disables sparks.
 GLAM_WORKERS provides the default worker count when --workers is absent.

@@ -86,6 +86,12 @@ path, digest algorithm, and hexadecimal digest in tab-separated fields, so the
 algorithm remains explicit even if a manifest combines different source kinds
 or digest formats in the future.
 
+Standalone `--check_manifest PATH` re-reads every entry relative to the
+invocation directory when its recorded path is relative. It prints every
+changed or unreadable path and exits unsuccessfully if any differ;
+`--quiet` suppresses that changed-file output. Manifest checking does not
+construct an assembler or load configuration.
+
 ## Batch Lifecycle
 
 ```text
