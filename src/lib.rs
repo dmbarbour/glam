@@ -1,15 +1,12 @@
 mod api;
-
-/// compiler and g_syntax are exposed for `--parse` and will be
-/// removed from the public API in the future (when reflection is
-/// implemented).
-pub mod compiler;
+mod compiler;
 mod core;
 mod core_net;
 pub mod diagnostic;
 mod eval;
 mod evaluation;
-pub mod g_syntax;
+mod g_source;
+mod g_syntax;
 mod interaction_net;
 mod list;
 mod number;
@@ -23,8 +20,10 @@ pub use api::{
     ReasoningReport, ReasoningStatus, ReasoningTask, ReasoningTaskState, ReasoningVolume,
     ReflectionEnvironmentBuilder, Value, ValueKind,
 };
-pub use core::Builtin;
 pub use diagnostic::Severity;
+pub use g_source::{
+    GDeclarationKind, GDeclarationSummary, GSourceDiagnostic, GSourceInspection, inspect_g_source,
+};
 pub use source::{
     CONTENT_DIGEST_ALGORITHM, ContentDigest, FileSourceSystem, Host, HostError, HostSourceSystem,
     ImportResolver, ManifestMismatch, RelativeSourcePath, SourceArtifact, SourceError,

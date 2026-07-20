@@ -18,8 +18,9 @@ not define future language semantics or collect subsystem invariants.
 | `main.rs` | CLI policy, configuration/assembly roots, diagnostic-bus subscriptions, logger host, and process output |
 | `source.rs` | Immutable source artifacts, identities and digests, relative resolvers, host compatibility, and tracked local files |
 | `lib.rs`, `api.rs` | Embedding facade: staged assembler construction, opaque values, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
+| `g_source.rs` | Narrow public inspection report for the built-in `.g` parser; no syntax tree or lowering context escapes |
 | `compiler.rs` | Per-source capabilities, hidden artifact/import provenance, loaders, namespace qualification, and diagnostic emission |
-| `g_syntax.rs` | Built-in `.g` front-end facade |
+| `g_syntax.rs` | Private built-in `.g` front-end facade |
 | `g_syntax/parser/` | Layout, declaration, expression, and compound parsing |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs` | Scope resolution, affine semantic IR, captures, and warnings |
 | `g_syntax/compiler_values.rs` | Shared closed helpers and built-in modules owned by the g compiler |

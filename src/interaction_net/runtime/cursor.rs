@@ -89,18 +89,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         function
     }
 
-    /// Replaces an evaluator interface with one embedded data node.
-    pub fn complete_interface_with_data(&mut self, interface: Port, data: S::Data) -> NodeId {
-        self.assert_interface(interface);
-        let target = self
-            .disconnect(interface)
-            .expect("completed interaction-net interface must remain wired");
-        self.remove_node(interface.node());
-        let node = self.add_node(RuntimeNode::Data(data));
-        self.connect(Port::principal(node), target);
-        node
-    }
-
     pub(in crate::interaction_net::runtime) fn take_operator_call(
         &mut self,
         call: OperatorCall,

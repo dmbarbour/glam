@@ -16,14 +16,10 @@ use glam::reflection::{
     handle_reflection_request, reflection_request_specs,
 };
 use glam::{
-    Assembler, Builtin, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, Error,
-    EvaluationRuntime, FileSourceSystem, ModuleInput, ReasoningReport, ReasoningStatus,
-    ReasoningTaskState, Severity, Value, check_local_manifest,
+    Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, Error,
+    EvaluationRuntime, FileSourceSystem, GSourceInspection, ModuleInput, ReasoningReport,
+    ReasoningStatus, ReasoningTaskState, Severity, Value, check_local_manifest, inspect_g_source,
 };
-
-// Parse inspection intentionally remains on the front-end API while ordinary
-// assembly uses only the embedding facade.
-use glam::g_syntax::{DeclarationKind, ParsedSource, parse_source};
 
 #[derive(Default)]
 struct AssemblyCommand {
@@ -50,13 +46,7 @@ fn main() -> ExitCode {
             println!("glam {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        "--parse" => {
-            let Some(path) = args.next() else {
-                eprintln!("error: `glam --parse` needs a source path");
-                return ExitCode::from(2);
-            };
-            parse_path(&path)
-        }
+        "--parse" => parse_command(args),
         "--check_manifest" => check_manifest_command(args, false),
         "--quiet" => match args.next().as_deref() {
             Some("--check_manifest") => check_manifest_command(args, true),
@@ -1079,15 +1069,7 @@ impl TaskHost<ReflectionEffects> for LoggerTaskHost {
 }
 
 fn empty_environment_object() -> Value {
-    let spec = Value::record([
-        (
-            "name",
-            Value::abstract_global_path(["configuration", "env"]),
-        ),
-        ("deps", Value::list(std::iter::empty())),
-        ("defs", Value::builtin(Builtin::ObjectDefaultDefs)),
-    ]);
-    Value::builtin_call(Builtin::ObjectInstance, [spec])
+    Value::empty_object(Value::abstract_global_path(["configuration", "env"]))
 }
 
 fn configuration_paths() -> Vec<PathBuf> {
@@ -1321,16 +1303,54 @@ impl TerminalColor {
     }
 }
 
-fn parse_path(path: &str) -> ExitCode {
-    let parsed = match parse_source_path(path) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParseVerbosity {
+    Quiet,
+    Normal,
+    Verbose,
+}
+
+fn parse_command(args: impl Iterator<Item = String>) -> ExitCode {
+    let mut path = None;
+    let mut verbosity = ParseVerbosity::Normal;
+    for argument in args {
+        match argument.as_str() {
+            "-q" | "--quiet" if verbosity != ParseVerbosity::Verbose => {
+                verbosity = ParseVerbosity::Quiet;
+            }
+            "-v" | "--verbose" if verbosity != ParseVerbosity::Quiet => {
+                verbosity = ParseVerbosity::Verbose;
+            }
+            "-q" | "--quiet" | "-v" | "--verbose" => {
+                eprintln!("error: `--quiet` and `--verbose` cannot be combined with `--parse`");
+                return ExitCode::from(2);
+            }
+            option if option.starts_with('-') => {
+                eprintln!("error: unknown `--parse` option `{option}`");
+                return ExitCode::from(2);
+            }
+            _ if path.is_some() => {
+                eprintln!("error: `glam --parse` accepts exactly one source path");
+                return ExitCode::from(2);
+            }
+            _ => path = Some(argument),
+        }
+    }
+
+    let Some(path) = path else {
+        eprintln!("error: `glam --parse` needs a source path");
+        return ExitCode::from(2);
+    };
+
+    let parsed = match inspect_g_source_path(&path) {
         Ok(parsed) => parsed,
         Err(exit_code) => return exit_code,
     };
 
-    print_parse_summary(path, &parsed)
+    print_parse_summary(&path, &parsed, verbosity)
 }
 
-fn parse_source_path(path: &str) -> Result<ParsedSource, ExitCode> {
+fn inspect_g_source_path(path: &str) -> Result<GSourceInspection, ExitCode> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -1339,55 +1359,58 @@ fn parse_source_path(path: &str) -> Result<ParsedSource, ExitCode> {
         }
     };
 
-    Ok(parse_source(&bytes))
+    Ok(inspect_g_source(&bytes))
 }
 
-fn print_parse_summary(path: &str, parsed: &ParsedSource) -> ExitCode {
-    let has_errors = parsed
-        .diagnostics
-        .iter()
-        .any(|diagnostic| matches!(diagnostic.severity, Severity::Error));
-
-    let logger = DefaultLogger::new(Assembler::default());
-    for diagnostic in &parsed.diagnostics {
-        logger.emit(
-            &Diagnostic::new(diagnostic.severity, diagnostic.message.clone())
-                .with_source_location(path, diagnostic.line),
-        );
+fn print_parse_summary(
+    path: &str,
+    parsed: &GSourceInspection,
+    verbosity: ParseVerbosity,
+) -> ExitCode {
+    let mut out = io::stdout().lock();
+    let result = (|| -> io::Result<()> {
+        if verbosity != ParseVerbosity::Quiet {
+            for diagnostic in parsed.diagnostics() {
+                writeln!(
+                    out,
+                    "{path}:{}: {}: {}",
+                    diagnostic.line(),
+                    severity_label(diagnostic.severity()),
+                    diagnostic.message()
+                )?;
+            }
+            writeln!(out, "{} declarations", parsed.declarations().len())?;
+        }
+        if verbosity == ParseVerbosity::Verbose {
+            for declaration in parsed.declarations() {
+                writeln!(
+                    out,
+                    "{:>4}: {:<12} {}",
+                    declaration.line(),
+                    declaration.kind().as_str(),
+                    declaration.preview()
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        eprintln!("error: could not write parse inspection to stdout");
+        return ExitCode::from(1);
     }
 
-    let out = &mut io::stderr();
-
-    writeln!(out, "{} declarations", parsed.declarations.len())
-        .expect("failed to write parse summary");
-    for declaration in &parsed.declarations {
-        writeln!(
-            out,
-            "{:>4}: {:<12} {}",
-            declaration.line,
-            declaration_label(&declaration.kind),
-            declaration.text.lines().next().unwrap_or("")
-        )
-        .expect("failed to write parse summary");
-    }
-
-    if has_errors {
+    if parsed.has_errors() {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     }
 }
 
-fn declaration_label(kind: &DeclarationKind) -> &'static str {
-    match kind {
-        DeclarationKind::Language(_) => "language",
-        DeclarationKind::Import(_) => "import",
-        DeclarationKind::Abstract(_) => "abstract",
-        DeclarationKind::Unique(_) => "unique",
-        DeclarationKind::Object(_) => "object",
-        DeclarationKind::Extend(_) => "extend",
-        DeclarationKind::Definition(_) => "definition",
-        DeclarationKind::Unknown => "unknown",
+fn severity_label(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Info => "info",
+        Severity::Warning => "warning",
+        Severity::Error => "error",
     }
 }
 
@@ -1397,7 +1420,7 @@ Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...
             [--manifest <PATH>]
             [--refl <ARG>]...
             [--workers <N>]
-       glam --parse <PATH>
+       glam --parse <PATH> [--quiet|--verbose]
        glam --check_manifest <PATH> [--quiet]
        glam --help
        glam --version
@@ -1406,6 +1429,8 @@ Assembly inputs are applied as mixins; earlier inputs override later inputs.
 --manifest records every local input path and its SHA-256 digest.
 --check_manifest verifies every local file recorded by a manifest.
 --quiet suppresses changed-file output from --check_manifest.
+--parse inspects one built-in .g source without compiling or loading imports.
+--parse --quiet reports only through its exit status; --verbose lists declarations.
 --refl appends an argument visible only as reflection environment process.refl_args.
 --workers sets the shared background evaluator thread count; zero disables sparks.
 GLAM_WORKERS provides the default worker count when --workers is absent.

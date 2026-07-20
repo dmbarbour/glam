@@ -66,10 +66,6 @@ impl<D: TestData> NetSpecialization for D {
     type Operator = TestOperator<D>;
     type WaitToken = u64;
     type StuckReason = Arc<str>;
-
-    fn operator_name(operator: &Self::Operator) -> &str {
-        operator.name
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,10 +88,6 @@ impl NetSpecialization for StructuredSpecialization {
     type Operator = ();
     type WaitToken = u64;
     type StuckReason = StructuredStuckReason;
-
-    fn operator_name(_operator: &Self::Operator) -> &str {
-        "unreachable test operator"
-    }
 }
 
 fn finish_claimed_cursor<D: TestData>(

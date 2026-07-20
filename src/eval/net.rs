@@ -346,20 +346,6 @@ impl NetSpecialization for CoreSpecialization {
     type Operator = CoreOperator;
     type WaitToken = crate::core_net::CoreWaitToken;
     type StuckReason = EvalError;
-
-    fn operator_name(operator: &Self::Operator) -> &str {
-        match operator {
-            CoreOperator::ApplyArity { .. } => "semantic apply",
-            CoreOperator::FunctionCaptures { .. } => "function captures",
-            CoreOperator::ComputationCaptures { .. } => "computation captures",
-            CoreOperator::Dict { .. } => "dictionary literal",
-            CoreOperator::Builtin(_) => "builtin",
-            CoreOperator::Applicable(_) => "core applicable",
-            CoreOperator::List { .. } => "list literal",
-            CoreOperator::Access { .. } => "dictionary access",
-            CoreOperator::Request { .. } => "effect request",
-        }
-    }
 }
 
 pub(super) fn lower_core_callable(

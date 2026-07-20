@@ -1,8 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use glam::diagnostic::Severity;
-use glam::g_syntax::parse_source;
+use glam::inspect_g_source;
 
 #[test]
 fn syntax_samples_parse_without_errors() {
@@ -27,11 +26,11 @@ fn assert_samples_parse_without_errors(relative_dir: &str) {
 
         let bytes = fs::read(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let parsed = parse_source(&bytes);
+        let parsed = inspect_g_source(&bytes);
         let errors = parsed
-            .diagnostics
+            .diagnostics()
             .iter()
-            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .filter(|diagnostic| diagnostic.severity() == glam::Severity::Error)
             .collect::<Vec<_>>();
 
         assert!(

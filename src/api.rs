@@ -126,15 +126,34 @@ impl Value {
         Self(CoreValue::Dict(Dict::new_sync()))
     }
 
-    pub fn builtin(builtin: Builtin) -> Self {
+    pub(crate) fn builtin(builtin: Builtin) -> Self {
         Self(CoreValue::Builtin(builtin))
     }
 
-    pub fn builtin_call(builtin: Builtin, arguments: impl IntoIterator<Item = Value>) -> Self {
+    pub(crate) fn builtin_call(
+        builtin: Builtin,
+        arguments: impl IntoIterator<Item = Value>,
+    ) -> Self {
         Self(CoreValue::builtin_call(
             builtin,
             arguments.into_iter().map(Value::into_core).collect(),
         ))
+    }
+
+    /// Constructs an empty named Glam object without exposing bootstrap object
+    /// implementation builtins through the embedding API.
+    pub fn empty_object(name: Value) -> Self {
+        let spec = Self::record([
+            ("name", name),
+            ("deps", Self::list(std::iter::empty())),
+            ("defs", Self::builtin(Builtin::ObjectDefaultDefs)),
+        ]);
+        Self::builtin_call(Builtin::ObjectInstance, [spec])
+    }
+
+    /// Returns `target` after running `effect` as a reflection annotation.
+    pub fn after_reflection(effect: Value, target: Value) -> Self {
+        Self::builtin_call(Builtin::Anno, [Self::record([("refl", effect)]), target])
     }
 
     pub fn abstract_global_path<I, S>(parts: I) -> Self

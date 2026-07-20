@@ -883,6 +883,7 @@ impl Value {
 }
 
 impl Value {
+    #[cfg(test)]
     pub fn get_key_path(&self, path: &[Key]) -> Option<&Value> {
         match path {
             [] => Some(self),

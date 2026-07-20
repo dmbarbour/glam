@@ -425,7 +425,7 @@ fn script_binary_import_errors_only_when_observed() {
 }
 
 #[test]
-fn parse_errors_write_summary_and_diagnostics_to_stderr() {
+fn parse_errors_write_summary_and_diagnostics_to_stdout() {
     let output = glam_command()
         .arg("--parse")
         .arg("samples/invalid/syntax/missing_language.g")
@@ -433,29 +433,59 @@ fn parse_errors_write_summary_and_diagnostics_to_stderr() {
         .expect("failed to run glam");
 
     assert!(!output.status.success());
-    assert_eq!(output.stdout, b"");
+    assert_eq!(output.stderr, b"");
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("samples/invalid/syntax/missing_language.g:1: error:"));
-    assert!(stderr.contains("1 declarations"));
-    assert!(stderr.contains("definition"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("samples/invalid/syntax/missing_language.g:1: error:"));
+    assert!(stdout.contains("1 declarations"));
 }
 
 #[test]
-fn parse_success_writes_summary_to_stderr() {
+fn parse_success_writes_summary_to_stdout() {
     let output = glam_command()
         .arg("--parse")
         .arg("samples/syntax/minimal.g")
+        .arg("--verbose")
         .output()
         .expect("failed to run glam");
 
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"");
+    assert_eq!(output.stderr, b"");
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("2 declarations"));
-    assert!(stderr.contains("language"));
-    assert!(stderr.contains("definition"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("2 declarations"));
+    assert!(stdout.contains("language"));
+    assert!(stdout.contains("definition"));
+}
+
+#[test]
+fn parse_is_a_standalone_single_path_operation() {
+    let output = glam_command()
+        .args(["--parse", "samples/syntax/minimal.g", "--workers", "1"])
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unknown `--parse` option `--workers`")
+    );
+}
+
+#[test]
+fn parse_quiet_reports_only_through_exit_status() {
+    let output = glam_command()
+        .args([
+            "--parse",
+            "samples/invalid/syntax/missing_language.g",
+            "--quiet",
+        ])
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"");
+    assert_eq!(output.stderr, b"");
 }
 
 #[test]

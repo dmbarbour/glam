@@ -110,8 +110,12 @@ diagnostics report an error. Main checks the assembler and logger bus error
 counts independently; both are independent of queue retention, reads, and
 rendering.
 
-The current CLI also exposes temporary `--parse` inspection. `--workers`
-overrides `GLAM_WORKERS`; zero workers is the default. Raw process arguments
-remain in `process.args`; repeated `--refl` values are additionally collected
-in `process.refl_args` and excluded from `asm.args`, while arguments after `--`
-form `asm.args`.
+Standalone `--parse` inspects one built-in `.g` source through the narrow
+library report without constructing an assembler or loading imports. Its
+diagnostics and summaries go to stdout; `--quiet` keeps only the exit status
+and `--verbose` includes declaration rows.
+
+For assembly, `--workers` overrides `GLAM_WORKERS`; zero workers is the default.
+Raw process arguments remain in `process.args`; repeated `--refl` values are
+additionally collected in `process.refl_args` and excluded from `asm.args`,
+while arguments after `--` form `asm.args`.

@@ -2,9 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use glam::compiler::CompileContext;
-use glam::diagnostic::Severity;
-use glam::g_syntax::{Diagnostic, lower_to_core_with_context, parse_source};
+use glam::{GSourceDiagnostic, Severity, inspect_g_source};
 
 #[test]
 fn invalid_syntax_samples_report_expected_diagnostics() {
@@ -22,13 +20,11 @@ fn invalid_syntax_samples_report_expected_diagnostics() {
         let expect_text = fs::read_to_string(&expect_path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", expect_path.display()));
 
-        let context = CompileContext::default();
-        let parsed = parse_source(&source_bytes);
-        let lowered = lower_to_core_with_context(parsed, &context);
+        let inspected = inspect_g_source(&source_bytes);
         assert_expectations(
             &source_path,
             &parse_expectations(&expect_path, &expect_text),
-            &lowered.diagnostics,
+            inspected.diagnostics(),
         );
     }
 }
@@ -163,7 +159,11 @@ fn parse_expectation(path: &Path, line_number: usize, line: &str) -> ExpectedDia
     }
 }
 
-fn assert_expectations(source_path: &Path, expected: &[ExpectedDiagnostic], actual: &[Diagnostic]) {
+fn assert_expectations(
+    source_path: &Path,
+    expected: &[ExpectedDiagnostic],
+    actual: &[GSourceDiagnostic],
+) {
     for expected in expected {
         assert!(
             actual
@@ -175,13 +175,13 @@ fn assert_expectations(source_path: &Path, expected: &[ExpectedDiagnostic], actu
     }
 }
 
-fn diagnostic_matches(expected: &ExpectedDiagnostic, actual: &Diagnostic) -> bool {
-    expected.severity == actual.severity
-        && expected.line == actual.line
+fn diagnostic_matches(expected: &ExpectedDiagnostic, actual: &GSourceDiagnostic) -> bool {
+    expected.severity == actual.severity()
+        && expected.line == actual.line()
         && expected
             .substrings
             .iter()
-            .all(|substring| actual.message.contains(substring))
+            .all(|substring| actual.message().contains(substring))
 }
 
 fn sample_files(relative_dir: &str) -> Vec<PathBuf> {

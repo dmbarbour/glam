@@ -461,6 +461,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    #[cfg(test)]
     pub fn blocked_calls(&self) -> impl Iterator<Item = BlockedCall<S::WaitToken>> + '_ {
         self.active.iter().filter_map(|(pair, state)| match state {
             ActivePairState::BlockedCall { wait } => Some(BlockedCall {

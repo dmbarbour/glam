@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use glam::{
-    Assembler, AssemblerBuilder, Builtin, CONTENT_DIGEST_ALGORITHM, ContentDigest, DiagnosticEvent,
+    Assembler, AssemblerBuilder, CONTENT_DIGEST_ALGORITHM, ContentDigest, DiagnosticEvent,
     EvaluationRuntime, Host, HostError, ImportResolver, ModuleInput, ReasoningStatus,
     RelativeSourcePath, Severity, SourceArtifact, SourceError, SourceIdentity, SourceSystem, Value,
 };
@@ -80,16 +80,11 @@ fn volume_write_annotation(assembler: &Assembler, effects: Value, value: Value) 
     let effect = assembler
         .apply(&set, [Value::list([]), value])
         .expect("volume set should construct an effect");
-    reflection_annotation(assembler, effect)
+    reflection_annotation(effect)
 }
 
-fn reflection_annotation(assembler: &Assembler, effect: Value) -> Value {
-    assembler
-        .apply(
-            &Value::builtin(Builtin::Anno),
-            [Value::record([("refl", effect)]), Value::text("done")],
-        )
-        .expect("reflection annotation should be constructed")
+fn reflection_annotation(effect: Value) -> Value {
+    Value::after_reflection(effect, Value::text("done"))
 }
 
 #[test]
@@ -157,7 +152,7 @@ fn protected_volume_rewrite_uses_the_commit_time_value() {
         .apply(&rewrite, [Value::list([]), increment])
         .expect("volume rewrite should construct an effect");
     assembler
-        .to_binary(&reflection_annotation(&assembler, effect))
+        .to_binary(&reflection_annotation(effect))
         .expect("volume rewrite annotation should complete");
 
     let final_value = volume.revoke().unwrap();
@@ -193,7 +188,7 @@ fn protected_volume_get_is_an_ordinary_effect_result() {
 
     assert_eq!(
         assembler
-            .to_binary(&reflection_annotation(&assembler, discard_effect))
+            .to_binary(&reflection_annotation(discard_effect))
             .expect("volume get should complete"),
         b"done".as_slice()
     );
@@ -232,7 +227,7 @@ fn revoked_volume_get_exposes_a_lazy_error_through_reflection_eval() {
         .apply(&inspect, [get_effect])
         .expect("missing-volume inspector should accept the effect");
     assembler
-        .to_binary(&reflection_annotation(&assembler, inspect_effect))
+        .to_binary(&reflection_annotation(inspect_effect))
         .expect("`.eval` should contain the missing-volume error");
 
     let diagnostics = take_diagnostics(&diagnostics);

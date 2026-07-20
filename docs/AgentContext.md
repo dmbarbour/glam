@@ -124,8 +124,10 @@ their detailed scheduling and representation contracts.
   repeat read is an error; a change found only during the final recheck is a warning.
   Manifests contain the retained digests, not a later rescan. Standalone
   `--check_manifest` verifies those files without entering assembly.
-- `--parse` is temporary direct front-end inspection pending an equivalent
-  reflection view.
+- `inspect_g_source` is the narrow public Rust facade for built-in `.g` parser
+  diagnostics and declaration summaries. The syntax AST, compile context, and
+  lowering implementation stay private. Standalone `--parse` writes this
+  report to stdout and does not enter assembly or load imports.
 
 ## Source-Surface Regressions
 

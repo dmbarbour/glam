@@ -188,6 +188,7 @@ impl<V: Clone, T: Clone> List<V, T> {
         }
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.known_len()
             .expect("list length requires all lazy list chunks to be forced")
@@ -220,6 +221,7 @@ impl<V: Clone, T: Clone> List<V, T> {
         }
     }
 
+    #[cfg(test)]
     pub fn balanced(&self) -> Self {
         Self::from_finger(self.to_finger())
     }
@@ -231,6 +233,7 @@ impl<V: Clone, T: Clone> List<V, T> {
         Ok(Self::from_finger(self.to_finger_with(force_thunk)?))
     }
 
+    #[cfg(test)]
     pub fn slice(&self, start: usize, end: usize) -> Self {
         assert!(start <= end);
         assert!(end <= self.len());
@@ -253,11 +256,6 @@ impl<V: Clone, T: Clone> List<V, T> {
         Ok(Some(middle))
     }
 
-    pub fn split_at(&self, index: usize) -> (Self, Self) {
-        assert!(index <= self.len());
-        self.split_at_checked(index)
-    }
-
     pub fn try_split_at<E>(
         &self,
         index: usize,
@@ -266,6 +264,7 @@ impl<V: Clone, T: Clone> List<V, T> {
         self.split_at_checked_with(index, force_thunk)
     }
 
+    #[cfg(test)]
     pub fn split_from_end(&self, count: usize) -> Option<(Self, Self)> {
         self.split_from_end_checked(count)
     }
@@ -379,6 +378,7 @@ impl<V: Clone, T: Clone> List<V, T> {
         }
     }
 
+    #[cfg(test)]
     fn to_finger(&self) -> FingerList<V> {
         let mut finger = FingerList::new();
         self.push_chunks_into(&mut finger);
@@ -394,6 +394,7 @@ impl<V: Clone, T: Clone> List<V, T> {
         Ok(finger)
     }
 
+    #[cfg(test)]
     fn push_chunks_into(&self, finger: &mut FingerList<V>) {
         match self.0.as_ref() {
             ListNode::Empty => {}
@@ -439,6 +440,7 @@ impl<V: Clone, T: Clone> List<V, T> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn slice_checked(&self, start: usize, end: usize) -> Self {
         if start == end {
             return Self::empty();
@@ -457,6 +459,7 @@ impl<V: Clone, T: Clone> List<V, T> {
         }
     }
 
+    #[cfg(test)]
     fn split_at_checked(&self, index: usize) -> (Self, Self) {
         match self.0.as_ref() {
             ListNode::Empty => {
@@ -552,6 +555,7 @@ impl<V: Clone, T: Clone> List<V, T> {
         }
     }
 
+    #[cfg(test)]
     fn split_from_end_checked(&self, count: usize) -> Option<(Self, Self)> {
         match self.0.as_ref() {
             ListNode::Concat(left, right) => {
@@ -613,6 +617,7 @@ impl<V: Clone, T: Clone> List<V, T> {
         }
     }
 
+    #[cfg(test)]
     fn slice_finger(finger: &FingerList<V>, start: usize, end: usize) -> Self {
         let (_, tail) = Self::split_finger_at(finger, start);
         let (middle, _) = Self::split_finger_at(&tail, end - start);
@@ -647,6 +652,7 @@ impl<V: Clone, T: Clone> List<V, T> {
         (left, right)
     }
 
+    #[cfg(test)]
     fn slice_concat(left: &Self, left_len: usize, right: &Self, start: usize, end: usize) -> Self {
         if end <= left_len {
             left.slice_checked(start, end)

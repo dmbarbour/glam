@@ -103,8 +103,6 @@ pub trait NetSpecialization: Clone + fmt::Debug + PartialEq + Eq + Sized + 'stat
     /// Structured explanation retained when specialization policy cannot
     /// reduce an otherwise valid active pair.
     type StuckReason: Clone + fmt::Debug + 'static;
-
-    fn operator_name(operator: &Self::Operator) -> &str;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
