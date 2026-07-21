@@ -163,7 +163,7 @@ pub struct LazyValue {
 }
 
 #[derive(Clone)]
-pub struct PromisedValue {
+pub(crate) struct PromisedValue {
     id: PromiseId,
     label: Arc<str>,
     assignment: Arc<OnceLock<Result<Value, Arc<str>>>>,
@@ -236,7 +236,7 @@ impl LazyValue {
 }
 
 impl PromisedValue {
-    pub fn new(label: impl Into<Arc<str>>) -> Self {
+    pub(crate) fn new(label: impl Into<Arc<str>>) -> Self {
         Self {
             id: allocate_promise_id(),
             label: label.into(),
@@ -272,7 +272,7 @@ impl PromisedValue {
         self.task.as_deref()
     }
 
-    pub fn set(&self, value: Value) -> Result<(), Value> {
+    pub(crate) fn set(&self, value: Value) -> Result<(), Value> {
         self.assignment.set(Ok(value)).map_err(|assignment| {
             assignment.expect("setting a promised value always supplies a successful value")
         })
