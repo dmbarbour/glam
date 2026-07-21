@@ -11,7 +11,7 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
-use crate::core::Value;
+use crate::core::{LazyId, Value};
 
 mod executor;
 pub(crate) use executor::EvaluationExecutor;
@@ -359,7 +359,7 @@ pub(crate) struct EvaluationSession {
     task_changed: Condvar,
     reflection_launcher: OnceLock<Arc<dyn ReflectionTaskLauncher>>,
     executor: Weak<EvaluationExecutor>,
-    lazy_claims: Mutex<HashMap<u64, EvaluationTaskId>>,
+    lazy_claims: Mutex<HashMap<LazyId, EvaluationTaskId>>,
     lazy_changed: Condvar,
 }
 
@@ -424,7 +424,7 @@ impl EvaluationSession {
 
 pub(crate) struct LazyEvaluationClaim {
     session: Arc<EvaluationSession>,
-    lazy: u64,
+    lazy: LazyId,
     owner: EvaluationTaskId,
 }
 
@@ -479,7 +479,7 @@ impl EvalContext {
         }
     }
 
-    pub(crate) fn claim_lazy(&self, lazy: u64) -> Result<LazyEvaluationClaim, Arc<str>> {
+    pub(crate) fn claim_lazy(&self, lazy: LazyId) -> Result<LazyEvaluationClaim, Arc<str>> {
         let owner = self.task_id()?;
         let mut claims = self
             .session
@@ -498,7 +498,8 @@ impl EvalContext {
                 }
                 Some(active) if active == owner => {
                     return Err(Arc::from(format!(
-                        "lazy value {lazy} recursively observed itself"
+                        "lazy value {} recursively observed itself",
+                        lazy.get()
                     )));
                 }
                 Some(_) => {

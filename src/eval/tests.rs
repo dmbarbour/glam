@@ -374,6 +374,34 @@ fn deferred_values_use_the_context_that_forces_them() {
 }
 
 #[test]
+fn forcing_a_lazy_value_reaches_outer_whnf_without_forcing_lazy_fields() {
+    let context = test_context();
+    let field_forces = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted_field_forces = field_forces.clone();
+    let field = Value::deferred("lazy dictionary field", move |_| {
+        counted_field_forces.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(n(42))
+    });
+    let expected_field = field.clone();
+    let forwarded = Value::deferred("forwarded dictionary", move |_| {
+        Ok(Value::Dict(
+            Dict::new_sync().insert(Key::atom_from_text("field"), field.clone()),
+        ))
+    });
+    let root = Value::deferred("forwarding root", move |_| Ok(forwarded.clone()));
+
+    let forced = force_value_shell(&context, &root).expect("root should reach dictionary WHNF");
+    let Value::Dict(dict) = forced else {
+        panic!("forcing should expose the outer dictionary")
+    };
+    assert_eq!(
+        dict.get(&Key::atom_from_text("field")),
+        Some(&expected_field)
+    );
+    assert_eq!(field_forces.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
 fn ready_lazy_errors_fail_when_observed() {
     let value = Value::error("deliberate failure");
 
@@ -1827,7 +1855,7 @@ fn reflection_annotation(context: &EvalContext, effect: Value, target: Value) ->
 }
 
 #[test]
-fn reflection_gate_starts_once_and_leaves_its_target_unforced() {
+fn reflection_gate_waits_before_continuing_target_demand() {
     let context = test_context();
     let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let forced_by_target = forced.clone();
@@ -1836,6 +1864,9 @@ fn reflection_gate_starts_once_and_leaves_its_target_unforced() {
         Ok(n(42))
     });
     let gate = reflection_annotation(&context, n(0), target.clone());
+
+    assert_eq!(context.reflection_task_count(), 0);
+    assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 0);
 
     let first = eval_value(&context, &gate).expect_err("new reflection task should block");
     let wait = first
@@ -1848,8 +1879,13 @@ fn reflection_gate_starts_once_and_leaves_its_target_unforced() {
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 0);
 
     context.complete_wait(&wait.0);
-    assert_eq!(eval_value(&context, &gate).unwrap(), target);
-    assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        force_value_shell(&context, &gate).expect("completed gate should continue target demand"),
+        n(42)
+    );
+    assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(force_value_shell(&context, &gate).unwrap(), n(42));
+    assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -1946,7 +1982,7 @@ fn builtins_are_curried_and_do_not_force_arguments_early() {
 }
 
 #[test]
-fn seq_forces_its_first_argument_and_preserves_the_target() {
+fn seq_forces_its_first_argument_before_continuing_target_demand() {
     let context = test_context();
     let error = apply_values(
         &context,
@@ -1956,8 +1992,17 @@ fn seq_forces_its_first_argument_and_preserves_the_target() {
     .unwrap_err();
     assert_eq!(error.to_string(), "seq forced this error");
 
-    let result = apply_values(&context, Value::Builtin(Builtin::Seq), vec![n(0), n(42)]).unwrap();
-    assert_eq!(eval_value(&context, &result).unwrap(), n(42));
+    let target_forces = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted_target_forces = target_forces.clone();
+    let target = Value::deferred("seq target", move |_| {
+        counted_target_forces.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(n(42))
+    });
+    let result = apply_values(&context, Value::Builtin(Builtin::Seq), vec![n(0), target]).unwrap();
+
+    assert_eq!(target_forces.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(force_value_shell(&context, &result).unwrap(), n(42));
+    assert_eq!(target_forces.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[test]

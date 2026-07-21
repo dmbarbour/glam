@@ -2,8 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::core::{
-    Builtin, ComputedFixpointAction, FixpointComputation, Key, LazySource, LazyValue, List, Value,
-    keys,
+    Builtin, ComputedFixpointAction, EvaluatedValue, FixpointComputation, Key, LazySource,
+    LazyValue, List, Value, keys,
 };
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
@@ -458,7 +458,9 @@ pub(super) fn force_value_shell(context: &EvalContext, value: &Value) -> Result<
     while matches!(current, Value::Lazy(_)) {
         current = eval_value(context, &current)?;
     }
-    Ok(current)
+    Ok(EvaluatedValue::try_from(current)
+        .expect("forcing a value shell must eliminate the outer lazy variant")
+        .into_value())
 }
 
 pub(super) fn force_list_thunk(

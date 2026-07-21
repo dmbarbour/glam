@@ -15,6 +15,14 @@ control-flow overview.
 - `Value::Net` is an explicit first-class closed net. A net-backed
   `Value::Lazy` is a computation and must expose `Data` when forced; an exposed
   `Bind` is an error, not an implicit function conversion.
+- `force_value_shell` defines outer weak-head normal form: its result cannot be
+  `Value::Lazy`, but dictionaries and lists may retain lazy children. The
+  `EvaluatedValue` wrapper records this boundary. Lazy result cells still
+  temporarily accept forwarding values until session-owned lazy tasks replace
+  that compatibility path.
+- Lazy identities are process-global nonzero IDs because a value and its result
+  cell may cross evaluation sessions; each session uses them only as local
+  scheduling keys.
 - `Value::Function` is an independently observable curried stage. Partial
   application shares its staged runtime; saturation returns memoized work.
 - Lazy lists contain opaque holes, but list code never evaluates them.

@@ -14,9 +14,94 @@ use crate::number::Number;
 
 pub(crate) mod keys;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct LazyId(NonZeroU64);
+
+impl LazyId {
+    pub(crate) fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// A value whose outer shell has reached weak-head normal form.
+///
+/// Containers may still contain lazy fields. This wrapper becomes the success
+/// type of the lazy result cache after forwarding moves into the evaluation
+/// session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvaluatedValue(Value);
+
+impl EvaluatedValue {
+    pub(crate) fn into_value(self) -> Value {
+        self.0
+    }
+}
+
+impl TryFrom<Value> for EvaluatedValue {
+    type Error = Value;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        if matches!(value, Value::Lazy(_)) {
+            Err(value)
+        } else {
+            Ok(Self(value))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LazyFailure {
+    Evaluation(Arc<str>),
+    DependencyCycle(Arc<LazyCycle>),
+}
+
+impl LazyFailure {
+    fn evaluation(message: impl Into<Arc<str>>) -> Self {
+        Self::Evaluation(message.into())
+    }
+
+    fn into_legacy_message(self) -> Arc<str> {
+        match self {
+            Self::Evaluation(message) => message,
+            Self::DependencyCycle(cycle) => Arc::from(Self::DependencyCycle(cycle).to_string()),
+        }
+    }
+}
+
+impl fmt::Display for LazyFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Evaluation(message) => formatter.write_str(message),
+            Self::DependencyCycle(cycle) => {
+                formatter.write_str("lazy dependency cycle")?;
+                for member in cycle.members.iter() {
+                    write!(formatter, " -> {} ({})", member.id.get(), member.label)?;
+                }
+                if let Some(first) = cycle.members.first() {
+                    write!(formatter, " -> {}", first.id.get())?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LazyFailure {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LazyCycle {
+    pub(crate) members: Box<[LazyCycleMember]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LazyCycleMember {
+    pub(crate) id: LazyId,
+    pub(crate) label: Arc<str>,
+}
+
 #[derive(Clone)]
 pub struct LazyValue {
-    id: u64,
+    id: LazyId,
     label: Arc<str>,
     source: LazySource,
     result: Arc<OnceLock<Result<Value, Arc<str>>>>,
@@ -28,7 +113,7 @@ static NEXT_FIXPOINT_ID: AtomicU64 = AtomicU64::new(1);
 impl LazyValue {
     fn with_source(label: impl Into<Arc<str>>, source: LazySource) -> Self {
         Self {
-            id: NEXT_LAZY_ID.fetch_add(1, Ordering::Relaxed),
+            id: allocate_lazy_id(),
             label: label.into(),
             source,
             result: Arc::new(OnceLock::new()),
@@ -47,7 +132,7 @@ impl LazyValue {
         let (owner, wait) = context.register_promise(&result)?;
         let id = allocate_fixpoint_id()?;
         Ok(Self {
-            id: NEXT_LAZY_ID.fetch_add(1, Ordering::Relaxed),
+            id: allocate_lazy_id(),
             label: label.into(),
             source: LazySource::Fixpoint(Arc::new(FixpointCell { id, owner, wait })),
             result,
@@ -60,7 +145,7 @@ impl LazyValue {
     ) -> Result<Self, Arc<str>> {
         let id = allocate_fixpoint_id()?;
         Ok(Self {
-            id: NEXT_LAZY_ID.fetch_add(1, Ordering::Relaxed),
+            id: allocate_lazy_id(),
             label: label.into(),
             source: LazySource::ComputedFixpoint(Arc::new(ComputedFixpointCell {
                 id,
@@ -82,12 +167,12 @@ impl LazyValue {
         let value = Self::with_source("error", LazySource::Promised);
         value
             .result
-            .set(Err(message.into()))
+            .set(Err(LazyFailure::evaluation(message).into_legacy_message()))
             .expect("new lazy error must be uninitialized");
         value
     }
 
-    pub(crate) fn id(&self) -> u64 {
+    pub(crate) fn id(&self) -> LazyId {
         self.id
     }
 
@@ -112,6 +197,30 @@ impl LazyValue {
             .expect("lazy cache should contain a value after set")
             .clone()
     }
+
+    #[cfg(test)]
+    pub(crate) fn checked_cached(
+        &self,
+    ) -> Result<Option<Result<EvaluatedValue, Arc<str>>>, CachedValueIsLazy> {
+        match self.cached() {
+            None => Ok(None),
+            Some(Err(error)) => Ok(Some(Err(error))),
+            Some(Ok(value)) => EvaluatedValue::try_from(value)
+                .map(|value| Some(Ok(value)))
+                .map_err(|_| CachedValueIsLazy),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CachedValueIsLazy;
+
+fn allocate_lazy_id() -> LazyId {
+    let id = NEXT_LAZY_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("lazy IDs exhausted");
+    LazyId(NonZeroU64::new(id).expect("lazy IDs start at one"))
 }
 
 fn allocate_fixpoint_id() -> Result<FixpointId, Arc<str>> {
@@ -948,6 +1057,75 @@ mod tests {
 
         assert!(
             matches!(value, Value::Lazy(lazy) if lazy.cached().is_some_and(|value| value.is_err()))
+        );
+    }
+
+    #[test]
+    fn evaluated_values_reject_only_a_lazy_outer_shell() {
+        let field = Value::deferred("lazy field", |_| Ok(Value::Number(1.into())));
+        let container =
+            Value::Dict(Dict::new_sync().insert(Key::atom_from_text("field"), field.clone()));
+
+        let evaluated = EvaluatedValue::try_from(container.clone())
+            .expect("a container with a lazy field is in outer WHNF");
+        assert_eq!(evaluated.into_value(), container);
+        assert!(matches!(
+            EvaluatedValue::try_from(field),
+            Err(Value::Lazy(_))
+        ));
+    }
+
+    #[test]
+    fn checked_lazy_cache_rejects_forwarding_values() {
+        let target = LazyValue::promised("target");
+        let forwarding = LazyValue::promised("forwarding");
+        forwarding
+            .set(Value::Lazy(target))
+            .expect("new promise should accept its target");
+
+        assert_eq!(forwarding.checked_cached(), Err(CachedValueIsLazy));
+
+        let ready = LazyValue::promised("ready");
+        ready
+            .set(Value::Number(42.into()))
+            .expect("new promise should accept its value");
+        assert_eq!(
+            ready
+                .checked_cached()
+                .expect("number cache should satisfy the WHNF invariant")
+                .expect("number cache should be initialized")
+                .expect("number cache should be successful")
+                .into_value(),
+            Value::Number(42.into())
+        );
+    }
+
+    #[test]
+    fn lazy_cycle_failures_retain_member_identity_and_labels() {
+        let first = LazyValue::promised("first");
+        let second = LazyValue::promised("second");
+        let cycle = LazyFailure::DependencyCycle(Arc::new(LazyCycle {
+            members: vec![
+                LazyCycleMember {
+                    id: first.id(),
+                    label: Arc::from("first"),
+                },
+                LazyCycleMember {
+                    id: second.id(),
+                    label: Arc::from("second"),
+                },
+            ]
+            .into_boxed_slice(),
+        }));
+
+        assert_eq!(
+            cycle.to_string(),
+            format!(
+                "lazy dependency cycle -> {} (first) -> {} (second) -> {}",
+                first.id().get(),
+                second.id().get(),
+                first.id().get()
+            )
         );
     }
 
