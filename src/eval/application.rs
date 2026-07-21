@@ -27,20 +27,34 @@ pub(super) fn apply_value(
 
 pub(crate) fn apply_values(
     context: &EvalContext,
-    mut function: Value,
+    function: Value,
     arguments: Vec<Value>,
 ) -> Result<Value, EvalError> {
-    let mut arguments = arguments.into_iter();
-    while let Some(argument) = arguments.next() {
-        match function {
-            Value::Function(function_value) => {
-                let arguments = std::iter::once(argument).chain(arguments).collect();
-                return apply_function_values(context, function_value, arguments);
-            }
-            other => function = apply_value(context, other, argument)?,
-        }
+    if arguments.is_empty() {
+        return Ok(function);
     }
-    Ok(function)
+    let mut function = match function {
+        Value::Function(function) => {
+            return apply_function_values(context, function, arguments);
+        }
+        function => function,
+    };
+    let mut arguments = arguments.into_iter();
+    loop {
+        let argument = arguments
+            .next()
+            .expect("non-empty application arguments must have a first value");
+        function = apply_value(context, function, argument)?;
+        if arguments.as_slice().is_empty() {
+            return Ok(function);
+        }
+        function = match function {
+            Value::Function(function_value) => {
+                return apply_function_values(context, function_value, arguments.collect());
+            }
+            function => function,
+        };
+    }
 }
 
 pub(super) fn apply_function_values(
@@ -62,15 +76,16 @@ pub(super) fn apply_function_values(
         )));
     }
 
-    let (saturating, rest) = arguments.split_at(remaining);
+    let mut saturating = arguments;
+    let rest = saturating.split_off(remaining);
     let result = Value::Lazy(LazyValue::from_function_call(
         function,
-        Arc::from(saturating.to_vec()),
+        Arc::from(saturating),
     ));
     if rest.is_empty() {
         Ok(result)
     } else {
-        apply_values(context, result, rest.to_vec())
+        apply_values(context, result, rest)
     }
 }
 
