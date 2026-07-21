@@ -174,21 +174,21 @@ impl EvaluationTaskMachine for LazyTaskMachine {
     }
 }
 
-enum PromiseTaskWork {
-    Produce,
-    Follow(Value),
+enum PromiseFollowerState {
+    AwaitAssignment,
+    FollowAssignment(Value),
 }
 
-struct PromiseTaskMachine {
+struct PromiseFollower {
     context: EvalContext,
     promise: PromisedValue,
-    work: PromiseTaskWork,
+    state: PromiseFollowerState,
 }
 
-impl EvaluationTaskMachine for PromiseTaskMachine {
+impl EvaluationTaskMachine for PromiseFollower {
     fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
-        let result = match &self.work {
-            PromiseTaskWork::Produce => match self.promise.assignment() {
+        let result = match &self.state {
+            PromiseFollowerState::AwaitAssignment => match self.promise.assignment() {
                 Some(result) => result.map_err(|error| EvalError::new(error.as_ref())),
                 None => {
                     let Some(task) = self.promise.task() else {
@@ -209,7 +209,7 @@ impl EvaluationTaskMachine for PromiseTaskMachine {
                         EvaluationTaskPoll::Complete(_) => match self.promise.assignment() {
                             Some(result) => match result {
                                 Ok(value) => {
-                                    self.work = PromiseTaskWork::Follow(value);
+                                    self.state = PromiseFollowerState::FollowAssignment(value);
                                     EvaluationMachinePoll::Yielded
                                 }
                                 Err(error) => EvaluationMachinePoll::Failed(error),
@@ -228,12 +228,12 @@ impl EvaluationTaskMachine for PromiseTaskMachine {
                     };
                 }
             },
-            PromiseTaskWork::Follow(target) => eval_value(&self.context, target),
+            PromiseFollowerState::FollowAssignment(target) => eval_value(&self.context, target),
         };
 
         match result {
             Ok(value) if is_deferred(&value) => {
-                self.work = PromiseTaskWork::Follow(value);
+                self.state = PromiseFollowerState::FollowAssignment(value);
                 EvaluationMachinePoll::Yielded
             }
             Ok(value) => EvaluationMachinePoll::Complete(value),
@@ -251,10 +251,10 @@ fn promise_wait(
     promise: &PromisedValue,
 ) -> Result<crate::evaluation::EvaluationWaitToken, Arc<str>> {
     context.promise_task(promise, |task_context| {
-        Box::new(PromiseTaskMachine {
+        Box::new(PromiseFollower {
             context: task_context,
             promise: promise.clone(),
-            work: PromiseTaskWork::Produce,
+            state: PromiseFollowerState::AwaitAssignment,
         })
     })
 }
