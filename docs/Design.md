@@ -32,7 +32,11 @@ These present significant design challenges. I'll generally prioritize system-le
 
 ## Overview of Semantics
 
-Toplevel semantics is a lazy, untyped lambda calculus. For performance, users may express some functions via [interaction nets]https://en.wikipedia.org/wiki/Interaction_nets). A few data types - lists, numbers, dicts - have built-in representations and operators. 
+Toplevel semantics is a lazy, untyped lambda calculus. For performance, users
+may implement computations and functions behind explicit lambda-style
+interfaces using [interaction nets](https://en.wikipedia.org/wiki/Interaction_nets).
+A few data types - lists, numbers, dicts - have built-in representations and
+operators.
 
 We'll model object-oriented programming in terms of [open fixpoints](http://fare.tunes.org/files/cs/poof.pdf), and monadic effects in terms of a [freer monad](https://okmij.org/ftp/Haskell/extensible/more.pdf). The toplevel namespace is modeled in an object-oriented style, thus supports overrides as a foundation for extensibility.
 
@@ -60,6 +64,10 @@ The built-in data types are numbers, lists, dicts, and functions. All data is im
 - Lists are a one-size-fits-all sequential data structure. Concretely represented by finger-tree ropes under the hood, supporting append at either, compact binaries, array-like flattening. 
 - Dicts are finite key-value associative structures. Keys must be equatable, i.e. excluding functions. There is no iteration over keys. Tagged data is modeled as a singleton dict.
 - Functions are frequently expressed as lambdas, but are closed-term inets under-the-hood.
+
+The `interaction_net` escape hatch additionally produces opaque net values.
+They are not functions or ordinarily applicable data; the Interaction Nets
+section defines their composition and explicit `net_arity` bridge.
 
 All basic data types are implicitly tagged, i.e. users can distinguish a function from a number in context of pattern matching. Users can further tag data to support a dynamic type feel.
 
@@ -337,6 +345,34 @@ In contrast to lambda calculus, interaction nets are graph-structured instead of
         .wire arg result
         .r ap
 
+The construction effect produces a closed, opaque net value:
+
+    interaction_net :: Eff [NetBuilder, Standard] Port -> Net
+
+`Net` is already in weak-head normal form. It can be stored, copied, erased,
+or embedded as data, but it is not an ordinary lambda-calculus function and
+cannot be applied directly. Within another interaction net, connecting a
+`Bind` to `Data net` loads a logical copy of `net` through its exposed port.
+If that interface eventually presents `Data d`, the loaded net behaves as `d`
+in its caller. Ordinary evaluation does not project `d` from the opaque net.
+
+An explicit, arity-directed bridge gives a net a lambda-style interface. The
+provisional name is `net_arity`:
+
+    net_arity        :: Nat -> Net -> Value
+    net_arity 0      :: Net -> a
+    net_arity n      :: Net -> a1 -> ... -> an -> result  -- n > 0
+
+Constructing this bridge does not inspect the net. At arity zero, demand
+expects `Data` at the exposed interface and continues into its payload; `Bind`
+or another normal form is an error. At positive arity, the bridge constructs
+an ordinary function. Each application stage expects `Bind`, and after the
+last argument the result expects `Data`. Encountering `Data` before all
+arguments or a remaining `Bind` after saturation is an interface error.
+
+A raw net boundary is therefore opened only by interaction-net loading or by
+`net_arity`, never by ordinary evaluation or application.
+
 Effects API: 
 
 - Node constructors introduce ports. Principal port is head.
@@ -356,7 +392,8 @@ Effects API:
 Nodes interact only when principal ports connect.
 - bind-bind: join
 - bind-copy: dup
-- bind-data: call function, stuck otherwise
+- bind-data: call applicable data; a net is loaded by logical copy, other
+  non-callable data is stuck
 - copy-data: dup
 - copy-copy: join paired residuals of one duplication process, dup otherwise
   - pairing follows complete dynamic duplication identity, not equality of one
@@ -376,7 +413,7 @@ Rules:
   - copy node to each auxilliary opposite
   - wire auxilliaries to copies positionally
 - call: 
-  - make the function inet available in the caller inet
+  - make the called inet available in the caller inet
     - ideal: retain one shared function graph and push duplication through it
       lazily instead of eagerly relabeling or copying its body
   - connect the bind-bind principal ports 
@@ -386,7 +423,12 @@ Lambda calculus becomes a design pattern within interaction nets:
 - lambda as `.bind` that copies and wires `arg` *into* `result`
 - application as `.bind` that provides `arg`, extracts `result`
 
-For interaction nets in general, there is no arg-result distinction. Data flows in both directions similar to session types. Users can feasibly define functions based on session types, but the ".g" syntax strongly favors lambdas and won't offer any help. Initially, we'll mostly use interaction nets as a performance tool for difficult dataflows within lambda bodies, preserving the lambda interface.
+For interaction nets in general, there is no arg-result distinction. Data
+flows in both directions similar to session types. `net_arity` presents only
+the selected prefix of `Bind` stages and final `Data` as an ordinary function;
+the raw net retains its more general interface. Initially, we'll mostly use
+interaction nets as a performance tool for difficult dataflows behind explicit
+lambda-style interfaces.
 
 *Aside:* These aren't necessarily the nodes the assembler uses under-the-hood, just initial constructors for them.
 

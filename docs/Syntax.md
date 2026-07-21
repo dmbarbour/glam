@@ -152,7 +152,7 @@ Operators may support limited ad-hoc polymorphism. For example, `>` will only co
 
 Application is essentially expressed as a special whitespace 'operator', i.e. `f x` applies `f` to `x`. The compiler supports some ad hoc polymorphism for application:
 
-- functions via lambda or interaction net
+- functions, including interaction nets wrapped by `net_arity`
 - method objects, `{apply:f,_} x = f x`
 - lightweight effects, `(eff:f) x = eff:(\api -> f api x)`
 
@@ -489,7 +489,23 @@ Unlike Haskell, there is no support for pattern matching on lambda or definition
 
 ### Interaction Nets
 
-Interaction nets are expressed effectfully and constructed via builtin `interaction_net`. Effects API is detailed in the *Design* doc. Eventually, we may want a macro DSL or user-defined syntax to support direct expression of inets. 
+Interaction nets are expressed effectfully and constructed via builtin
+`interaction_net`. The result is an opaque net value, already in weak-head
+normal form, rather than an ordinary function. Ordinary application of a raw
+net is an error. Inside another interaction net, a raw net embedded as data is
+called when it meets a `Bind`; the runtime loads it lazily through its exposed
+port.
+
+The provisional `net_arity N Net` builtin presents a raw net to the ordinary
+lambda-calculus layer. At arity zero it is a lazy computation that expects the
+exposed interface to produce data. At positive arity it is an ordinary
+function that expects `N` successive bind stages and then data. A mismatched
+interface is an error. Constructing either `interaction_net` or `net_arity`
+does not itself demand the net.
+
+The construction effects API is detailed in the *Design* doc. Eventually, we
+may want a macro DSL or user-defined syntax to support direct expression of
+interaction nets.
 
 ## Errors
 
@@ -928,4 +944,3 @@ Assuming the *Lightweight Extension* syntax for objects, we can support continua
             D ::= \ prior -> prior + 42
 
 I'm uncertain how useful this 'style' will be, but Koru language is essentially built around a restricted subset of this form of composition.
-

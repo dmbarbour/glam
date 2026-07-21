@@ -8,7 +8,7 @@
 
 ## Semantics
 
-- **Pure, lazy, untyped lambda calculus** at toplevel; **interaction nets** (graph-structured, symmetric, one exposed port) available for performance-critical dataflow via `interaction_net` and an effects API (`.bind`, `.copy N`, `.data`, `.wire`).
+- **Pure, lazy, untyped lambda calculus** at toplevel; **interaction nets** (graph-structured, symmetric, one exposed port) available for performance-critical dataflow via `interaction_net` and an effects API (`.bind`, `.copy N`, `.data`, `.wire`). Raw nets are opaque values already in WHNF and compose only through interaction-net calls; the provisional arity-directed `net_arity` bridge presents a net as an ordinary computation or function.
 - **Data types** (all immutable, implicitly type-tagged): numbers (exact rationals, unbounded — precision loss is always explicit), lists (finger-tree ropes; append `++` at either end, log-time split), dicts (finite key-value; `{}` is both empty dict and the 'undefined' value; `{foo:{}}` ≡ `{}`; no key iteration), functions.
 - **Tagged data** = singleton dict: `tag:Data` ≡ `{tag:Data}`; `:tag` is the constructor function. **Atoms**: `'name` ≡ `["name"]:()`; `()` is the built-in unit atom. `anno 'scope_unique` uniquely marks atoms (comparing same atom with different marks diverges); enables ephemeron/weakref dict keys.
 - **Objects** = dicts containing `spec:{name, defs, deps}`. `defs` is a mixin `\_self self -> _self with ...`; `deps` lists parent specs; multiple inheritance via linearization (C3), deduplicating by `spec.name` (globally unique via `abstract_global_path` for toplevel declarations). Anonymous objects (`object _`) skip deduplication, apply before named parents. Dicts are treated as anonymous objects for inheritance.

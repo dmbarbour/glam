@@ -115,7 +115,9 @@ not revoke it.
 - `.log Severity Message` stages a diagnostic in the current transaction and
   publishes it through the session's diagnostic bus only after commit.
 - `.dict_items Dict` returns ordered `{key,value}` records.
-- `.eval Value` reduces lazy outer shells and returns `ok:WHNF` or `err:Text`.
+- `.eval Value` demands weak-head normal form and returns `ok:WHNF` or
+  `err:Text`. A raw opaque `Value::Net` is already WHNF and is returned
+  unchanged; only an explicit net-arity bridge observes its interface.
 - `.refl_task Effect` reserves an opaque child handle plus a private status
   query; launch is commit-ordered inside a transaction. The status query is
   updated only when the projected state changes between atoms `'launched` and

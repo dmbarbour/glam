@@ -12,20 +12,31 @@ control-flow overview.
   second expression interpreter or local environment.
 - Entry points receive an explicit `EvalContext`. A lazy value is evaluated in
   the observing context, not the context that constructed it.
-- `Value::Net` is an explicit first-class closed net. A net-backed
-  `Value::Lazy` is a computation and must expose `Data` when forced; an exposed
-  `Bind` is an error, not an implicit function conversion.
-- `force_value_shell` defines outer weak-head normal form: its result cannot be
-  `Value::Lazy`, but dictionaries and lists may retain lazy children. The
-  `EvaluatedValue` wrapper records this boundary.
+- `Value::Net` is an explicit, opaque, first-class closed net already in WHNF.
+  Ordinary application does not accept it. Only `Data(Value::Net) >< Bind`
+  opens it by installing a logical-copy cursor. A net-backed `Value::Lazy` is
+  instead an explicit zero-arity computation and must expose `Data` when
+  forced; an exposed `Bind` is an error.
+- `force_value_shell` currently eliminates an outer `Value::Lazy` chain while
+  leaving lazy dictionary fields and list elements untouched. Its
+  `EvaluatedValue` wrapper records only that non-lazy structural boundary; it
+  does not authorize inspecting an opaque net.
 - Computed lazy work is owned by demand-driven `EvaluationSession` task
   records. Contending observers receive the task's stable wait token; they do
   not wait on a lazy-specific condition variable. Lazy tasks participate in
   exact dependency pumping but never enter the background-ready queue.
-- A shallow evaluation may return another lazy value as data. That result is
-  shared in the session task record rather than installed in the immutable
-  result cell. Explicit promised values can still be assigned a lazy value
-  until promises move to their dedicated representation.
+- Current `eval_value`, `PostForcePolicy`, and terminal shallow aliases are
+  transition machinery, not language semantics. A WHNF demand ultimately
+  follows a top-level lazy result; only lazy children inside a completed
+  constructor remain undemanded. Keep the compatibility path until the
+  lazy-cycle plan is complete, then remove it rather than extending it.
+- A raw `Value::Net` is a valid non-lazy cached result. Reaching it does not
+  inspect its exposed interface. `LazySource::NetComputation` is the internal
+  arity-zero bridge, while `FunctionValue` staging supplies the positive-arity
+  bridge. The provisional source spelling for both is `net_arity`.
+- The current `eval_value(Value::Net)` path contradicts this boundary by
+  calling `observe_net`; it is a known bootstrap mismatch scheduled for the
+  post-lazy-cycle cleanup. New code must not rely on raw-net projection.
 - Lazy identities are process-global nonzero IDs because a value and its result
   cell may cross evaluation sessions; each session uses them only as local
   scheduling keys.
@@ -46,9 +57,10 @@ control-flow overview.
   fail when observed before assignment. Do not silently reinterpret them as
   blocking joins; migrate each producer explicitly when its scheduling
   semantics are defined.
-- Reflection annotations are lazy gates. Their queued/running/blocked state is
-  session-owned, waits are not cached as lazy failures, and success returns the
-  original target without forcing it. The effect must return canonical unit.
+- Reflection annotations are lazy gates. Construction demands neither effect
+  nor target. Demand on a gate waits for its session-owned task, requires
+  canonical unit, and then transfers the same demand to the target. Waits are
+  not cached as lazy failures.
 - A gate's first observer owns its task. Another session may consume its final
   result but must not drive it. Wait tokens retain the owner weakly.
 
@@ -57,7 +69,7 @@ control-flow overview.
 - `Assembler` clones share an `EvaluationSession`. Replacing an assembler's
   host, sink, environment, or executor creates a session consistent with the
   new configuration.
-- Lazy single-flight claims are stored per session and keyed by stable lazy IDs;
+- Demand-driven lazy tasks are stored per session and keyed by stable lazy IDs;
   do not enlarge every value with mutable scheduler state.
 - One `EvaluationExecutor` is shared by related assembler, logger, and future
   IDE sessions. Workers opportunistically poll reflection tasks and are the

@@ -10,8 +10,8 @@ interaction nets, and background workers. Detailed hazards live in
 Every production evaluator entry receives an `EvalContext` borrowed from an
 `EvaluationSession`. An `Assembler` and its clones share one internal
 `ReasoningSession`, which owns that evaluation session and the assembler's
-reflection host. `EvaluationSession` owns task records, lazy single-flight
-claims, wait lookup, the reflection launcher, and its connection to a shared
+reflection host. `EvaluationSession` owns reflection and lazy task records,
+wait lookup, the reflection launcher, and its connection to a shared
 `EvaluationExecutor`. The immutable reflection environment belongs to the
 active task host rather than the scheduler.
 
@@ -22,23 +22,38 @@ the value is forced.
 ## Value Observation
 
 ```text
-Value + EvalContext
-  -> eval_value / force_value_shell
-       -> return already observable data
-       -> claim, compute, and memoize LazyValue work
-       -> drive a net computation until its interface exposes Data
+ordinary value demand
+  -> non-lazy data, FunctionValue, or Value::Net is already WHNF
+  -> LazyValue work is claimed, computed, and memoized through its session task
+
+arity bridge
+  -> arity 0: LazySource::NetComputation expects exposed Data
+  -> arity n: FunctionValue expects n staged Bind interfaces, then Data
 
 apply(function, arguments)
   -> builtin or partial-builtin staging
   -> shared FunctionValue curried stage
-  -> explicit Value::Net cursor attachment
   -> temporary dictionary-applicability compatibility
+
+interaction-net call
+  -> Bind >< Data(Value::Net)
+  -> logical-copy cursor attached to the opaque net's exposed interface
 ```
 
 An undersaturated `FunctionValue` shares a curried runtime stage; saturation
-produces memoized work. An explicit `Value::Net` may leave a residual net after
-application. A net-backed lazy computation has a narrower contract: forcing it
-must expose data.
+produces memoized work. A raw `Value::Net` is an opaque value already in WHNF,
+not an ordinary callable. Only the interaction-net call reduction opens it by
+attaching a cursor. `LazySource::NetComputation` is the internal zero-arity
+bridge: forcing it must expose data, and an exposed bind or non-data normal
+form is an error. `FunctionValue` provides the corresponding positive-arity
+bridge and checks its bind spine during staged application.
+
+The source language does not yet expose `interaction_net` or the provisional
+`net_arity` bridge. There is also one deliberate bootstrap mismatch:
+`eval_value(Value::Net)` still calls `observe_net` and may project exposed data.
+Do not build new behavior on that path. Removing raw-net projection and the
+shallow evaluator is deferred until the lazy-cycle transition plan is
+complete.
 
 Compact persistent lists live in `list.rs`. Their lazy holes are opaque; range
 and binary observation in `eval/sequence.rs` forces only the pieces required by
@@ -51,10 +66,11 @@ The owner detects recursive self-observation, while other tasks wait on a
 stable token if production suspended. Assignment-style `Promised` cells are a
 separate fail-fast bootstrap mechanism.
 
-Reflection annotations are also lazy producers. Their first observer registers
-an effect task in that session. Completion returns the untouched target after
-checking the effect returned unit; blocking remains session task state rather
-than a cached lazy error.
+Reflection annotations are also lazy producers. Constructing a gate demands
+neither its effect nor its target. Demand on the gate registers or resumes the
+effect task; after checking that it returned unit, the same demand continues
+into the target. Blocking remains session task state rather than a cached lazy
+error.
 
 ## Interaction-Net Handoff
 
@@ -76,10 +92,11 @@ Related assembler, logger, and future IDE sessions register with one
 sessions and optional spark work. The serial pump remains available for exact
 foreground dependencies and explicit batch draining.
 
-`seq A B` forces the outer semantic value of `A` before returning `B`.
-`spark A B` submits `A` and immediately returns `B`; its annotation forms use
-the same paths. Only workers consume sparks, so a zero-worker executor discards
-them immediately.
+Demand on `seq A B` forces the outer semantic value of `A` before transferring
+that demand to `B`. Demand on `spark A B` submits `A` and transfers foreground
+demand to `B`; merely constructing either expression demands neither target.
+Their annotation forms use the same paths. Only workers consume sparks, so a
+zero-worker executor discards them immediately.
 
 Sparks are performance hints outside reflection transactions and reasoning
 completion. They do not keep sessions alive or report independent failure. A

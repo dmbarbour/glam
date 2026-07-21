@@ -101,9 +101,11 @@ and control flow.
 - `.cancel_task` is an unconditional best-effort, commit-ordered request; late
   and foreign cancellation are harmless no-ops. Losing branches discard
   cancellation requests.
-- `.eval` forces only successive lazy outer shells and returns `ok:WHNF` or
-  provisional `err:Text`. A pending evaluator dependency suspends it. It does
-  not isolate or roll back reflection tasks activated by evaluation.
+- `.eval` demands WHNF and returns `ok:WHNF` or provisional `err:Text`. A raw
+  opaque `Value::Net` is already WHNF and is returned unchanged; only an
+  explicit net-arity bridge observes its interface. A pending evaluator
+  dependency suspends the request. `.eval` does not isolate or roll back
+  reflection tasks activated by evaluation.
 - Task failure is never implicitly acknowledged or cleared by inspection.
 
 ## Machine and Scheduler

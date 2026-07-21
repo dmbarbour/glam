@@ -157,10 +157,20 @@ execution.
   closures. `Error` is an operator whose activated result is stuck.
 
 Ordinary `Value::Function` application is evaluator-owned semantic staging and
-does not reify a linear bind as a host function. Raw `Value::Net` is the
-explicit callable-data path that attaches its exposed interface through a
-cursor. A net-backed `Value::Lazy` instead represents a computation and must
-produce `Data` when observed.
+does not reify a linear bind as a host function. Raw `Value::Net` is opaque
+closed data already in WHNF; ordinary `apply_value` must not reinterpret it as
+a lambda-calculus callable. When a `Data(Value::Net)` node instead meets a
+`Bind` inside an interaction net, `CallableData` installs a logical-copy cursor
+at the raw net's exposed interface. This runtime call reduction is the only
+implicit operation that opens the net.
+
+`HostFn`, copying, and erasure otherwise treat `Value::Net` like closed data;
+they do not project its exposed agent. A net-backed `Value::Lazy` represents
+the explicit zero-arity bridge and must produce `Data` when observed.
+`FunctionValue` staging is the positive-arity bridge: partial stages must
+expose `Bind`, and saturation must produce `Data`. The provisional source form
+for both bridges is `net_arity N Net`; it and `interaction_net` are not yet
+implemented by `.g` syntax.
 
 Shared runtime mutation increments a condition-variable generation. If one
 observer encounters an active pair already claimed by another evaluator, it

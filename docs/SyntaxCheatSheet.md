@@ -141,14 +141,21 @@ Body where
 ## Interaction Nets (performance escape hatch)
 
 ```
-# Functions may alternatively be built as interaction nets:
-# graph-structured, symmetric dataflow. Scoped to an expression,
-# exposing exactly ONE port. Constructed effectfully.
+# interaction_net constructs an opaque, closed graph with exactly ONE
+# exposed port. A raw net is already WHNF and is not directly applicable.
 
-id_fn = interaction_net do
+id_net = interaction_net do
     .bind -> [ap, arg, result]      # function node; principal port first
     .wire arg result                # identity: arg flows to result
     .r ap                           # return port wired implicitly
+
+# Provisional arity bridge into ordinary application:
+id_fn = net_arity 1 id_net         # expect one Bind, then Data
+
+answer_net = interaction_net do
+    .data 42 -> [d]
+    .r d
+answer = net_arity 0 answer_net    # expect Data immediately
 
 # Node constructors (introduce ports; principal port is head of list):
     .bind -> [ap, arg, result]      # function constructor
@@ -171,6 +178,7 @@ id_fn = interaction_net do
 # Lambda calculus is a design pattern within inets:
 #   lambda      = .bind copying/wiring arg INTO result
 #   application = .bind providing arg, extracting result
+# A raw net embedded behind Bind is called by lazy cursor-based loading.
 # Data flows BOTH directions (no inherent arg/result distinction),
 # but ".g" syntax favors lambdas — use inets to accelerate difficult
 # dataflows inside lambda bodies while preserving the lambda interface.
@@ -189,7 +197,8 @@ g << f
 # No mixing of opposing directions (>> vs <<, |> vs <|) without parens.
 
 f x                 # application; ad hoc polymorphism:
-                    #   lambdas/inets; {apply:f,_} x = f x; (eff:f) x
+                    #   functions; {apply:f,_} x = f x; (eff:f) x
+                    #   raw interaction-net values are not applicable
 ```
 
 ## Effects & Do Notation
