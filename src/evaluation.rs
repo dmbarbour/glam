@@ -11,7 +11,7 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
-use crate::core::{LazyId, LazyValue, Value};
+use crate::core::{LazyCycle, LazyCycleMember, LazyFailure, LazyId, LazyValue, Value};
 
 mod executor;
 pub(crate) use executor::EvaluationExecutor;
@@ -254,13 +254,17 @@ enum LazyTaskState {
     Running,
     Blocked(EvaluationTaskBlock),
     Complete(Value),
-    Failed(Arc<str>),
+    Failed(Arc<LazyFailure>),
 }
 
 struct LazyTaskRecord {
     id: EvaluationTaskId,
     wait: EvaluationWaitToken,
+    lazy: LazyValue,
     state: LazyTaskState,
+    /// The strict lazy producer currently preventing this task from reaching
+    /// WHNF. Non-lazy waits remain in `state` but do not enter this graph.
+    dependency: Option<LazyId>,
     machine: Option<Box<dyn EvaluationTaskMachine>>,
 }
 
@@ -503,48 +507,9 @@ impl EvalContext {
         self.scheduled_task
     }
 
-    pub(crate) fn is_current_lazy(&self, lazy: LazyId) -> bool {
-        if !self.scheduled_task {
-            return false;
-        }
-        let Some(Ok(task)) = self.task.get() else {
-            return false;
-        };
-        self.session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned")
-            .lazy_by_id
-            .get(task)
-            .is_some_and(|current| *current == lazy)
-    }
-
     pub(crate) fn observes_as_task(&self, task: EvaluationTaskId) -> bool {
         self.originating_task == Some(task)
             || matches!(self.task.get(), Some(Ok(current)) if *current == task)
-    }
-
-    pub(crate) fn wait_depends_on_lazy(&self, wait: &EvaluationWaitToken, target: LazyId) -> bool {
-        let tasks = self
-            .session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        let mut wait = wait.clone();
-        let mut seen = HashSet::new();
-        while seen.insert(wait.clone()) {
-            if tasks.lazy_by_wait.get(&wait) == Some(&target) {
-                return true;
-            }
-            let Some(producer) = producer_for_wait(&tasks, &wait) else {
-                return false;
-            };
-            let Some(dependency) = task_dependency(&tasks, &producer) else {
-                return false;
-            };
-            wait = dependency.clone();
-        }
-        false
     }
 
     pub(crate) fn lazy_task<F>(
@@ -587,7 +552,9 @@ impl EvalContext {
         let record = LazyTaskRecord {
             id,
             wait: wait.clone(),
+            lazy: lazy.clone(),
             state: LazyTaskState::Dormant,
+            dependency: None,
             machine: Some(machine),
         };
         assert!(
@@ -980,7 +947,9 @@ impl EvalContext {
                     .expect("lazy wait index must refer to a task record");
                 return match &record.state {
                     LazyTaskState::Complete(value) => EvaluationTaskPoll::Complete(value.clone()),
-                    LazyTaskState::Failed(error) => EvaluationTaskPoll::Failed(error.clone()),
+                    LazyTaskState::Failed(error) => {
+                        EvaluationTaskPoll::Failed(error.legacy_message())
+                    }
                     LazyTaskState::Dormant | LazyTaskState::Running | LazyTaskState::Blocked(_) => {
                         if Arc::ptr_eq(&self.session, &owner) {
                             EvaluationTaskPoll::Pending(wait.clone())
@@ -1104,6 +1073,20 @@ impl EvalContext {
     }
 
     #[cfg(test)]
+    pub(crate) fn lazy_failure(&self, lazy: &LazyValue) -> Option<Arc<LazyFailure>> {
+        let tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let record = tasks.lazy.get(&lazy.id())?;
+        match &record.state {
+            LazyTaskState::Failed(failure) => Some(failure.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn shares_session_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.session, &other.session)
     }
@@ -1147,6 +1130,7 @@ struct ClaimedLazyTask {
     id: EvaluationTaskId,
     lazy: LazyId,
     prior_state: LazyTaskState,
+    prior_dependency: Option<LazyId>,
     machine: Box<dyn EvaluationTaskMachine>,
 }
 
@@ -1462,36 +1446,67 @@ impl EvaluationSession {
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
-        let record = tasks
-            .lazy
-            .get_mut(&claimed.lazy)
-            .expect("claimed lazy task must remain registered");
-        assert_eq!(record.id, claimed.id, "lazy task ID index must agree");
-        assert!(
-            matches!(record.state, LazyTaskState::Running),
-            "only a running lazy task may release its machine"
-        );
-        assert!(record.machine.is_none(), "claimed machine must be absent");
-        record.machine = Some(claimed.machine);
+        {
+            let record = tasks
+                .lazy
+                .get_mut(&claimed.lazy)
+                .expect("claimed lazy task must remain registered");
+            assert_eq!(record.id, claimed.id, "lazy task ID index must agree");
+            assert!(
+                matches!(record.state, LazyTaskState::Running),
+                "only a running lazy task may release its machine"
+            );
+            assert!(record.machine.is_none(), "claimed machine must be absent");
+            record.machine = Some(claimed.machine);
+        }
 
-        let (state, made_progress, remains_blocked) = match poll {
-            EvaluationMachinePoll::Yielded => (LazyTaskState::Dormant, true, false),
+        let (state, mut made_progress) = match poll {
+            EvaluationMachinePoll::Yielded => (LazyTaskState::Dormant, true),
             EvaluationMachinePoll::Blocked(block) => {
                 let unchanged = matches!(
                     &claimed.prior_state,
                     LazyTaskState::Blocked(prior) if prior == &block
                 );
-                (LazyTaskState::Blocked(block), !unchanged, true)
+                (LazyTaskState::Blocked(block), !unchanged)
             }
-            EvaluationMachinePoll::Complete(value) => (LazyTaskState::Complete(value), true, false),
-            EvaluationMachinePoll::Failed(error) => (LazyTaskState::Failed(error), true, false),
-            EvaluationMachinePoll::Cancelled => (
-                LazyTaskState::Failed(Arc::from("lazy evaluation task was cancelled")),
+            EvaluationMachinePoll::Complete(value) => (LazyTaskState::Complete(value), true),
+            EvaluationMachinePoll::Failed(error) => (
+                LazyTaskState::Failed(Arc::new(LazyFailure::evaluation(error))),
                 true,
-                false,
+            ),
+            EvaluationMachinePoll::Cancelled => (
+                LazyTaskState::Failed(Arc::new(LazyFailure::evaluation(
+                    "lazy evaluation task was cancelled",
+                ))),
+                true,
             ),
         };
+        let dependency = match &state {
+            LazyTaskState::Blocked(block) => block
+                .lazy
+                .as_ref()
+                .and_then(|wait| tasks.lazy_by_wait.get(wait))
+                .copied(),
+            _ => None,
+        };
+        let record = tasks
+            .lazy
+            .get_mut(&claimed.lazy)
+            .expect("claimed lazy task must remain registered");
+        made_progress |= claimed.prior_dependency != dependency;
         record.state = state;
+        record.dependency = dependency;
+
+        if dependency.is_some()
+            && let Some(cycle) = lazy_dependency_cycle(&tasks, claimed.lazy)
+        {
+            poison_lazy_cycle(&mut tasks, &cycle);
+            made_progress = true;
+        }
+        let remains_blocked = tasks
+            .lazy
+            .get(&claimed.lazy)
+            .is_some_and(|record| matches!(record.state, LazyTaskState::Blocked(_)));
         self.task_changed.notify_all();
         (made_progress, remains_blocked, None, None)
     }
@@ -1627,6 +1642,72 @@ fn wait_is_terminal(tasks: &EvaluationTasks, wait: &EvaluationWaitToken) -> bool
         .get(wait)
         .and_then(|promise| promise.result.upgrade())
         .is_some_and(|result| result.get().is_some())
+}
+
+/// Returns the canonical cycle reachable from `start` in the strict lazy
+/// dependency graph. The graph is functional, so a successor walk is enough.
+fn lazy_dependency_cycle(tasks: &EvaluationTasks, start: LazyId) -> Option<Vec<LazyId>> {
+    let mut path = Vec::new();
+    let mut positions = HashMap::new();
+    let mut current = start;
+    loop {
+        if let Some(first) = positions.insert(current, path.len()) {
+            let mut cycle = path[first..].to_vec();
+            let canonical = cycle
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, lazy)| **lazy)
+                .map(|(position, _)| position)
+                .expect("a repeated successor must produce a non-empty cycle");
+            cycle.rotate_left(canonical);
+            return Some(cycle);
+        }
+        path.push(current);
+        current = tasks.lazy.get(&current)?.dependency?;
+    }
+}
+
+/// Installs one shared structured failure in every member of a proven strict
+/// lazy cycle. The legacy string cache remains a projection until Spike 4
+/// changes the cache result type to `LazyFailure` directly.
+fn poison_lazy_cycle(tasks: &mut EvaluationTasks, members: &[LazyId]) {
+    let cycle = Arc::new(LazyCycle {
+        members: members
+            .iter()
+            .map(|id| {
+                let record = tasks
+                    .lazy
+                    .get(id)
+                    .expect("cycle members must remain registered");
+                LazyCycleMember {
+                    id: *id,
+                    label: record.lazy.label().clone(),
+                }
+            })
+            .collect(),
+    });
+    let failure = Arc::new(LazyFailure::DependencyCycle(cycle));
+    let legacy = failure.legacy_message();
+
+    for id in members {
+        let record = tasks
+            .lazy
+            .get_mut(id)
+            .expect("cycle members must remain registered");
+        let authoritative = record.lazy.cache(Err(legacy.clone()));
+        record.dependency = None;
+        record.state = match authoritative {
+            Err(error) if Arc::ptr_eq(&error, &legacy) => LazyTaskState::Failed(failure.clone()),
+            Err(error) => LazyTaskState::Failed(Arc::new(LazyFailure::evaluation(error))),
+            Ok(value) => {
+                debug_assert!(
+                    false,
+                    "a successful concurrent lazy result contradicts a strict dependency cycle"
+                );
+                LazyTaskState::Complete(value)
+            }
+        };
+    }
 }
 
 fn prioritized_task(
@@ -1766,11 +1847,15 @@ fn claim_task(tasks: &mut EvaluationTasks, id: EvaluationTaskId) -> Option<Claim
         return None;
     }
     let machine = record.machine.take()?;
+    // Once a blocked task resumes, its old dependency is no longer a strict
+    // prerequisite. Its next poll either completes or records a fresh edge.
+    let prior_dependency = record.dependency.take();
     let prior_state = std::mem::replace(&mut record.state, LazyTaskState::Running);
     Some(ClaimedTask::Lazy(ClaimedLazyTask {
         id,
         lazy,
         prior_state,
+        prior_dependency,
         machine,
     }))
 }
@@ -1839,6 +1924,69 @@ mod tests {
                 EvaluationTaskPoll::ForeignSession => EvaluationMachinePoll::Failed(Arc::from(
                     "test dependency unexpectedly belongs to another session",
                 )),
+            }
+        }
+    }
+
+    struct AwaitCell {
+        context: EvalContext,
+        dependency: Arc<OnceLock<EvaluationWaitToken>>,
+    }
+
+    impl EvaluationTaskMachine for AwaitCell {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            let dependency = self
+                .dependency
+                .get()
+                .expect("test dependency must be installed before polling");
+            match self.context.poll_wait(dependency) {
+                EvaluationTaskPoll::Pending(wait) => {
+                    EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                        lazy: Some(wait),
+                        observed_generation: None,
+                        error: None,
+                    })
+                }
+                EvaluationTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value),
+                EvaluationTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error),
+                EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
+                EvaluationTaskPoll::ForeignSession => EvaluationMachinePoll::Failed(Arc::from(
+                    "test dependency unexpectedly belongs to another session",
+                )),
+            }
+        }
+    }
+
+    fn inert_lazy(label: &'static str) -> LazyValue {
+        LazyValue::deferred(label, |_| {
+            panic!("scheduler cycle fixtures must use their installed test machine")
+        })
+    }
+
+    fn register_lazy_await(
+        context: &EvalContext,
+        lazy: &LazyValue,
+        dependency: Arc<OnceLock<EvaluationWaitToken>>,
+    ) -> EvaluationWaitToken {
+        context
+            .lazy_task(lazy, move |task_context| {
+                Box::new(AwaitCell {
+                    context: task_context,
+                    dependency,
+                })
+            })
+            .expect("test lazy task should register")
+    }
+
+    fn dependency_cycle(context: &EvalContext, lazy: &LazyValue) -> Arc<LazyCycle> {
+        match context
+            .lazy_failure(lazy)
+            .expect("test lazy should have a structured failure")
+            .as_ref()
+        {
+            LazyFailure::DependencyCycle(cycle) => cycle.clone(),
+            LazyFailure::Evaluation(error) => {
+                panic!("expected dependency cycle, got evaluation failure: {error}")
             }
         }
     }
@@ -1940,6 +2088,172 @@ mod tests {
         assert!(matches!(
             context.poll_reflection_task(&target),
             EvaluationTaskPoll::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn a_lazy_task_that_waits_on_itself_is_poisoned_as_a_cycle() {
+        let context = EvalContext::standalone();
+        let lazy = inert_lazy("self cycle");
+        let dependency = Arc::new(OnceLock::new());
+        let wait = register_lazy_await(&context, &lazy, dependency.clone());
+        dependency
+            .set(wait.clone())
+            .expect("self wait should be installed once");
+
+        assert_eq!(
+            context.pump_wait(&wait, 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        let cycle = dependency_cycle(&context, &lazy);
+        assert_eq!(cycle.members.len(), 1);
+        assert_eq!(cycle.members[0].id, lazy.id());
+        assert_eq!(cycle.members[0].label.as_ref(), "self cycle");
+        assert!(matches!(
+            context.poll_wait(&wait),
+            EvaluationTaskPoll::Failed(error)
+                if error.contains("lazy dependency cycle")
+        ));
+    }
+
+    #[test]
+    fn concurrently_demanded_lazy_tasks_share_one_two_node_cycle_failure() {
+        let context = EvalContext::standalone();
+        let left = inert_lazy("left");
+        let right = inert_lazy("right");
+        let left_dependency = Arc::new(OnceLock::new());
+        let right_dependency = Arc::new(OnceLock::new());
+        let left_wait = register_lazy_await(&context, &left, left_dependency.clone());
+        let right_wait = register_lazy_await(&context, &right, right_dependency.clone());
+        left_dependency
+            .set(right_wait.clone())
+            .expect("left dependency should be installed once");
+        right_dependency
+            .set(left_wait.clone())
+            .expect("right dependency should be installed once");
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let left_thread = {
+            let context = context.clone();
+            let barrier = barrier.clone();
+            let wait = left_wait.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                context.pump_wait(&wait, 256)
+            })
+        };
+        let right_thread = {
+            let context = context.clone();
+            let barrier = barrier.clone();
+            let wait = right_wait.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                context.pump_wait(&wait, 256)
+            })
+        };
+        barrier.wait();
+        assert_eq!(
+            left_thread.join().unwrap(),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert_eq!(
+            right_thread.join().unwrap(),
+            EvaluationPumpOutcome::TargetReady
+        );
+
+        let left_failure = context.lazy_failure(&left).unwrap();
+        let right_failure = context.lazy_failure(&right).unwrap();
+        assert!(Arc::ptr_eq(&left_failure, &right_failure));
+        let cycle = dependency_cycle(&context, &left);
+        assert_eq!(
+            cycle
+                .members
+                .iter()
+                .map(|member| member.id)
+                .collect::<Vec<_>>(),
+            vec![left.id(), right.id()]
+        );
+    }
+
+    #[test]
+    fn lazy_cycles_are_canonical_and_exclude_upstream_dependents() {
+        let context = EvalContext::standalone();
+        let upstream = inert_lazy("upstream");
+        let first = inert_lazy("first");
+        let second = inert_lazy("second");
+        let third = inert_lazy("third");
+
+        let upstream_dependency = Arc::new(OnceLock::new());
+        let first_dependency = Arc::new(OnceLock::new());
+        let second_dependency = Arc::new(OnceLock::new());
+        let third_dependency = Arc::new(OnceLock::new());
+        let upstream_wait = register_lazy_await(&context, &upstream, upstream_dependency.clone());
+        let first_wait = register_lazy_await(&context, &first, first_dependency.clone());
+        let second_wait = register_lazy_await(&context, &second, second_dependency.clone());
+        let third_wait = register_lazy_await(&context, &third, third_dependency.clone());
+        upstream_dependency.set(first_wait.clone()).unwrap();
+        first_dependency.set(second_wait.clone()).unwrap();
+        second_dependency.set(third_wait.clone()).unwrap();
+        third_dependency.set(first_wait).unwrap();
+
+        assert_eq!(
+            context.pump_wait(&upstream_wait, 512),
+            EvaluationPumpOutcome::TargetReady
+        );
+        let cycle = dependency_cycle(&context, &first);
+        assert_eq!(
+            cycle
+                .members
+                .iter()
+                .map(|member| member.id)
+                .collect::<Vec<_>>(),
+            vec![first.id(), second.id(), third.id()]
+        );
+        assert!(matches!(
+            context.lazy_failure(&upstream).as_deref(),
+            Some(LazyFailure::Evaluation(error))
+                if error.contains("lazy dependency cycle")
+        ));
+    }
+
+    #[test]
+    fn a_mixed_lazy_reflection_cycle_remains_quiescent() {
+        let context = EvalContext::standalone();
+        let lazy = inert_lazy("mixed lazy");
+        let lazy_wait_slot = Arc::new(OnceLock::new());
+        let reflection = context
+            .schedule_task({
+                let dependency = lazy_wait_slot.clone();
+                move |task_context| {
+                    Ok(Box::new(AwaitCell {
+                        context: task_context,
+                        dependency,
+                    }))
+                }
+            })
+            .expect("reflection task should schedule");
+        let reflection_wait_slot = Arc::new(OnceLock::new());
+        reflection_wait_slot
+            .set(reflection.wait.clone())
+            .expect("reflection dependency should be installed once");
+        let lazy_wait = register_lazy_await(&context, &lazy, reflection_wait_slot);
+        lazy_wait_slot
+            .set(lazy_wait.clone())
+            .expect("lazy dependency should be installed once");
+
+        assert_eq!(
+            context.pump_wait(&lazy_wait, 256),
+            EvaluationPumpOutcome::NoProgress
+        );
+        assert!(context.lazy_failure(&lazy).is_none());
+        assert!(lazy.cached().is_none());
+        assert!(matches!(
+            context.poll_wait(&lazy_wait),
+            EvaluationTaskPoll::Pending(_)
+        ));
+        assert!(matches!(
+            context.poll_reflection_task(&reflection),
+            EvaluationTaskPoll::Pending(_)
         ));
     }
 

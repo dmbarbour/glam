@@ -19,6 +19,12 @@ Lazy values retain computation and a stable identity, not a captured evaluator
 session. The observing `EvalContext` supplies host and scheduling behavior when
 the value is forced.
 
+When a lazy task blocks on another lazy producer, the session records one
+strict dependency edge. The graph has at most one outgoing edge per unresolved
+lazy task, so an edge insertion can find a cycle with a successor walk. A pure
+lazy cycle receives one canonical structured failure shared by all members;
+an edge through reflection or another external producer is not poisoned.
+
 ## Value Observation
 
 ```text
@@ -61,10 +67,12 @@ the caller.
 
 ## Lazy Producers
 
-Computed fixpoint cells track the task currently responsible for production.
-The owner detects recursive self-observation, while other tasks wait on a
-stable token if production suspended. Assignment-style `Promised` cells are a
-separate fail-fast bootstrap mechanism.
+Computed fixpoint cells track the lazy task currently responsible for
+production. Strict recursive observation is diagnosed by the common lazy
+dependency graph, while guarded recursion can finish at a constructor. Other
+tasks wait on a stable token if production suspended. Task-owned reflection
+fixpoints retain their direct owner check. Assignment-style `Promised` cells
+are a separate fail-fast bootstrap mechanism.
 
 Reflection annotations are also lazy producers. Constructing a gate demands
 neither its effect nor its target. Demand on the gate registers or resumes the

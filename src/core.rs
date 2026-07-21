@@ -56,14 +56,14 @@ pub(crate) enum LazyFailure {
 }
 
 impl LazyFailure {
-    fn evaluation(message: impl Into<Arc<str>>) -> Self {
+    pub(crate) fn evaluation(message: impl Into<Arc<str>>) -> Self {
         Self::Evaluation(message.into())
     }
 
-    fn into_legacy_message(self) -> Arc<str> {
+    pub(crate) fn legacy_message(&self) -> Arc<str> {
         match self {
-            Self::Evaluation(message) => message,
-            Self::DependencyCycle(cycle) => Arc::from(Self::DependencyCycle(cycle).to_string()),
+            Self::Evaluation(message) => message.clone(),
+            Self::DependencyCycle(_) => Arc::from(self.to_string()),
         }
     }
 }
@@ -167,13 +167,17 @@ impl LazyValue {
         let value = Self::with_source("error", LazySource::Promised);
         value
             .result
-            .set(Err(LazyFailure::evaluation(message).into_legacy_message()))
+            .set(Err(LazyFailure::evaluation(message).legacy_message()))
             .expect("new lazy error must be uninitialized");
         value
     }
 
     pub(crate) fn id(&self) -> LazyId {
         self.id
+    }
+
+    pub(crate) fn label(&self) -> &Arc<str> {
+        &self.label
     }
 
     pub(crate) fn source(&self) -> &LazySource {

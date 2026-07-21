@@ -294,7 +294,7 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
 }
 
 #[test]
-fn value_fixpoint_reports_recursive_self_observation() {
+fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
     let context = test_context();
     let function = closed_function_value(1, TestExpr::Local(0));
     let fixpoint = Value::Lazy(
@@ -307,10 +307,26 @@ fn value_fixpoint_reports_recursive_self_observation() {
 
     let error = eval_value(&context, &fixpoint).unwrap_err();
     assert!(
-        error.to_string().contains("recursively observed itself"),
+        error.to_string().contains("lazy dependency cycle"),
         "{error}"
     );
     assert!(error.blocked_on().is_none());
+
+    let Value::Lazy(fixpoint_lazy) = &fixpoint else {
+        unreachable!("test fixture is a lazy fixpoint")
+    };
+    let failure = context
+        .lazy_failure(fixpoint_lazy)
+        .expect("the fixpoint task should retain its structured failure");
+    let crate::core::LazyFailure::DependencyCycle(cycle) = failure.as_ref() else {
+        panic!("strict recursion should retain a dependency cycle")
+    };
+    assert!(
+        cycle
+            .members
+            .iter()
+            .any(|member| member.id == fixpoint_lazy.id())
+    );
 
     let observer = context.with_new_task().unwrap();
     assert_eq!(
@@ -320,12 +336,12 @@ fn value_fixpoint_reports_recursive_self_observation() {
 }
 
 #[test]
-fn fixpoint_builtin_uses_task_owned_recursive_observation() {
+fn fixpoint_builtin_reports_a_strict_lazy_dependency_cycle() {
     let expression = builtin1_expr(Builtin::Fixpoint, function_expr(1, TestExpr::Local(0)));
 
     let error = eval_closed_expr(&expression).unwrap_err();
     assert!(
-        error.to_string().contains("recursively observed itself"),
+        error.to_string().contains("lazy dependency cycle"),
         "{error}"
     );
     assert!(error.blocked_on().is_none());
@@ -402,6 +418,39 @@ fn forcing_a_lazy_value_reaches_outer_whnf_without_forcing_lazy_fields() {
         Some(&expected_field)
     );
     assert_eq!(field_forces.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
+    let context = test_context();
+    let self_reference = Arc::new(std::sync::OnceLock::<LazyValue>::new());
+    let captured = self_reference.clone();
+    let lazy = LazyValue::deferred("guarded self reference", move |_| {
+        Ok(Value::Dict(
+            Dict::new_sync().insert(
+                Key::atom_from_text("tail"),
+                Value::Lazy(
+                    captured
+                        .get()
+                        .expect("guarded self reference should be installed")
+                        .clone(),
+                ),
+            ),
+        ))
+    });
+    self_reference
+        .set(lazy.clone())
+        .expect("guarded self reference should be installed once");
+
+    let forced = force_value_shell(&context, &Value::Lazy(lazy.clone()))
+        .expect("a lazy reference under a dictionary constructor is guarded");
+    let Value::Dict(dict) = forced else {
+        panic!("guarded recursive value should expose a dictionary")
+    };
+    assert_eq!(
+        dict.get(&Key::atom_from_text("tail")),
+        Some(&Value::Lazy(lazy))
+    );
 }
 
 #[test]

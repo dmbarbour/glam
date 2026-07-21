@@ -25,6 +25,12 @@ control-flow overview.
   records. Contending observers receive the task's stable wait token; they do
   not wait on a lazy-specific condition variable. Lazy tasks participate in
   exact dependency pumping but never enter the background-ready queue.
+- A blocked lazy task records an edge only when its wait is produced by another
+  lazy task. The resulting functional graph is checked on every edge change.
+  Pure cycles are rotated to the lowest `LazyId`, poisoned with one shared
+  structured failure, and cleared; mixed lazy/reflection waits remain ordinary
+  quiescent scheduler state. Lazy labels and IDs belong in internal cycle
+  diagnostics, never in the public value facade.
 - Current `eval_value`, `PostForcePolicy`, and terminal shallow aliases are
   transition machinery, not language semantics. A WHNF demand ultimately
   follows a top-level lazy result; only lazy children inside a completed
@@ -49,8 +55,12 @@ control-flow overview.
 ## Promises and Fixpoints
 
 - Ordinary `fix` and object-self knots use computed fixpoint cells. The first
-  observing task claims production. Recursive observation by that active
-  producer is an error; other tasks wait if the producer is suspended.
+  observing lazy task claims production. Strict recursive demand becomes an
+  ordinary lazy dependency cycle; guarded self-reference beneath a completed
+  constructor reaches WHNF. Other tasks wait if the producer is suspended.
+- Task-owned reflection fixpoint promises retain their separate rule: direct
+  observation by their owning reflection task is an error, while other tasks
+  wait for the owner's assignment.
 - Do not replace fixpoint ownership with a Rust stack guard: suspended
   evaluation unwinds the stack before scheduling resumes it.
 - Anonymous `Promised` cells used by module assembly and deferred-list effects

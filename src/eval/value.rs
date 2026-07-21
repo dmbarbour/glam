@@ -186,12 +186,6 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
             ));
         }
     }
-    if context.is_current_lazy(lazy.id()) {
-        return Err(EvalError::new(format!(
-            "lazy value {} recursively observed itself",
-            lazy.id().get()
-        )));
-    }
     let wait = context
         .lazy_task(lazy, |task_context| {
             Box::new(LazyTaskMachine {
@@ -457,20 +451,8 @@ fn eval_computed_fixpoint(
                 }
             };
             if let Err(error) = &produced
-                && let Some(wait) = error.blocked_on()
+                && error.blocked_on().is_some()
             {
-                if context.wait_depends_on_lazy(&wait.0, lazy.id()) {
-                    let produced = Err(EvalError::new(format!(
-                        "lazy value {} recursively observed itself",
-                        lazy.id().get()
-                    )));
-                    let produced = produced.map_err(|error| Arc::<str>::from(error.to_string()));
-                    let result = lazy
-                        .cache(produced)
-                        .map_err(|message| EvalError::new(message.as_ref()));
-                    fixpoint.complete(context, owner);
-                    return result;
-                }
                 fixpoint.suspend(owner);
                 return Err(error.clone());
             }
