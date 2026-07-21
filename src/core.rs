@@ -150,7 +150,7 @@ pub(crate) struct LazyCycle {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LazyCycleMember {
-    pub(crate) id: DeferredValueId,
+    pub(crate) id: LazyId,
     pub(crate) label: Arc<str>,
 }
 
@@ -1230,16 +1230,16 @@ mod tests {
 
     #[test]
     fn lazy_cycle_failures_retain_member_identity_and_labels() {
-        let first = PromisedValue::new("first");
-        let second = PromisedValue::new("second");
+        let first = LazyValue::error("first failure");
+        let second = LazyValue::error("second failure");
         let cycle = LazyFailure::DependencyCycle(Arc::new(LazyCycle {
             members: vec![
                 LazyCycleMember {
-                    id: first.id().into(),
+                    id: first.id(),
                     label: Arc::from("first"),
                 },
                 LazyCycleMember {
-                    id: second.id().into(),
+                    id: second.id(),
                     label: Arc::from("second"),
                 },
             ]

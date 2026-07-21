@@ -297,7 +297,7 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
 }
 
 #[test]
-fn promise_only_cycle_is_structured_without_overwriting_its_assignment() {
+fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
     let context = test_context();
     let promise = PromisedValue::new("promise cycle");
     promise
@@ -305,14 +305,9 @@ fn promise_only_cycle_is_structured_without_overwriting_its_assignment() {
         .expect("promise should accept its own named assignment");
 
     let error = force_value_shell(&context, &Value::Promised(promise.clone()))
-        .expect_err("strict promise recursion should fail");
-    assert!(error.to_string().contains("lazy dependency cycle"));
-    let failure = context.promise_failure(&promise).unwrap();
-    let crate::core::LazyFailure::DependencyCycle(cycle) = failure.as_ref() else {
-        panic!("promise recursion should retain a dependency cycle")
-    };
-    assert_eq!(cycle.members.len(), 1);
-    assert_eq!(cycle.members[0].id, promise.id().into());
+        .expect_err("strict promise recursion should remain blocked");
+    assert!(error.blocked_on().is_some());
+    assert!(context.promise_failure(&promise).is_none());
     assert!(matches!(
         promise.assignment(),
         Some(Ok(Value::Promised(assigned))) if assigned == promise
@@ -320,29 +315,18 @@ fn promise_only_cycle_is_structured_without_overwriting_its_assignment() {
 }
 
 #[test]
-fn mixed_promise_lazy_cycle_shares_one_structured_failure() {
+fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
     let context = test_context();
     let promise = PromisedValue::new("mixed promise");
     let lazy = LazyValue::from_access(Arc::from([]), Arc::from([Value::Promised(promise.clone())]));
     promise.set(Value::Lazy(lazy.clone())).unwrap();
 
     let error = force_value_shell(&context, &Value::Promised(promise.clone()))
-        .expect_err("strict mixed recursion should fail");
-    assert!(error.to_string().contains("lazy dependency cycle"));
-    let promise_failure = context.promise_failure(&promise).unwrap();
-    let lazy_failure = context.lazy_failure(&lazy).unwrap();
-    assert!(Arc::ptr_eq(&promise_failure, &lazy_failure));
-    let crate::core::LazyFailure::DependencyCycle(cycle) = promise_failure.as_ref() else {
-        panic!("mixed recursion should retain a dependency cycle")
-    };
-    assert_eq!(
-        cycle
-            .members
-            .iter()
-            .map(|member| member.id)
-            .collect::<Vec<_>>(),
-        vec![promise.id().into(), lazy.id().into()]
-    );
+        .expect_err("strict mixed recursion should remain blocked");
+    assert!(error.blocked_on().is_some());
+    assert!(context.promise_failure(&promise).is_none());
+    assert!(context.lazy_failure(&lazy).is_none());
+    assert!(lazy.cached().is_none());
     assert!(matches!(
         promise.assignment(),
         Some(Ok(Value::Lazy(assigned))) if assigned == lazy
@@ -424,7 +408,7 @@ fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
         cycle
             .members
             .iter()
-            .any(|member| member.id == fixpoint_lazy.id().into())
+            .any(|member| member.id == fixpoint_lazy.id())
     );
 
     let observer = context.with_new_task().unwrap();

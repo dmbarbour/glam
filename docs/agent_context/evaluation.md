@@ -27,11 +27,12 @@ control-flow overview.
   exact dependency pumping but never enter the background-ready queue.
 - A blocked lazy or assigned-promise task records an edge only when its wait is
   produced by another deferred-value task. The resulting functional graph is
-  checked on every edge change. Pure cycles are rotated to the lowest common
-  `DeferredValueId`, poisoned with one shared structured failure, and cleared;
-  mixed deferred/reflection waits remain ordinary quiescent scheduler state.
-  Deferred labels and IDs belong in internal cycle diagnostics, never in the
-  public value facade.
+  checked on every edge change. Cycles containing only computed lazies are
+  rotated to the lowest `LazyId`, poisoned with one shared structured failure,
+  and cleared. Any cycle involving a promise remains retryable, quiescent
+  scheduler state and may only become a session-level deadlock; poisoning a
+  lazy from such a temporary dependency would be unsound. Deferred labels and
+  IDs belong in internal cycle diagnostics, never in the public value facade.
 - Current `eval_value`, `PostForcePolicy`, and terminal shallow aliases are
   transition machinery, not language semantics. A WHNF demand ultimately
   follows a top-level lazy result; only lazy children inside a completed
@@ -77,9 +78,10 @@ control-flow overview.
   after assignment retries it. Anonymous promises have no producer to
   prioritize and do not keep a session alive independently.
 - Assigned promises participate in the common deferred dependency graph.
-  Promise-only and mixed promise/lazy strict cycles are diagnosed without
-  overwriting raw assignments; another evaluation session may rediscover a
-  promise-only cycle.
+  Promise-only and mixed promise/lazy cycles remain blocked without poisoning
+  promise assignments or lazy result cells. Stable session quiescence may
+  diagnose them as deadlocks, while retry or producer progress may first
+  remove their temporary dependency edges.
 - Reflection annotations are lazy gates. Construction demands neither effect
   nor target. Demand on a gate waits for its session-owned task, requires
   canonical unit, and then transfers the same demand to the target. Waits are

@@ -1667,8 +1667,9 @@ impl EvaluationSession {
 
         if dependency.is_some()
             && let Some(cycle) = deferred_dependency_cycle(&tasks, claimed.deferred)
+            && let Some(cycle) = pure_lazy_cycle(&tasks, &cycle)
         {
-            poison_deferred_cycle(&mut tasks, &cycle);
+            poison_lazy_cycle(&mut tasks, &cycle);
             made_progress = true;
         }
         let remains_blocked = tasks
@@ -1849,16 +1850,36 @@ fn deferred_dependency_cycle(
     }
 }
 
+fn pure_lazy_cycle(
+    tasks: &EvaluationTasks,
+    members: &[DeferredValueId],
+) -> Option<Vec<crate::core::LazyId>> {
+    members
+        .iter()
+        .map(|id| {
+            let record = tasks
+                .deferred
+                .get(id)
+                .expect("cycle members must remain registered");
+            match &record.value {
+                DeferredValue::Lazy(lazy) => Some(lazy.id()),
+                DeferredValue::Promise(_) => None,
+            }
+        })
+        .collect()
+}
+
 /// Installs one shared structured failure in every member of a proven strict
-/// deferred cycle.
-fn poison_deferred_cycle(tasks: &mut EvaluationTasks, members: &[DeferredValueId]) {
+/// lazy cycle. Promise dependencies are retryable scheduler state and must not
+/// permanently poison a computed lazy result.
+fn poison_lazy_cycle(tasks: &mut EvaluationTasks, members: &[crate::core::LazyId]) {
     let cycle = Arc::new(LazyCycle {
         members: members
             .iter()
             .map(|id| {
                 let record = tasks
                     .deferred
-                    .get(id)
+                    .get(&DeferredValueId::Lazy(*id))
                     .expect("cycle members must remain registered");
                 LazyCycleMember {
                     id: *id,
@@ -1872,21 +1893,21 @@ fn poison_deferred_cycle(tasks: &mut EvaluationTasks, members: &[DeferredValueId
     for id in members {
         let record = tasks
             .deferred
-            .get_mut(id)
+            .get_mut(&DeferredValueId::Lazy(*id))
             .expect("cycle members must remain registered");
         record.dependency = None;
-        record.state = match &record.value {
-            DeferredValue::Promise(_) => DeferredTaskState::Failed(failure.clone()),
-            DeferredValue::Lazy(lazy) => match lazy.cache(Err(failure.clone())) {
-                Err(error) => DeferredTaskState::Failed(error),
-                Ok(value) => {
-                    debug_assert!(
-                        false,
-                        "a successful concurrent lazy result contradicts a strict dependency cycle"
-                    );
-                    DeferredTaskState::Complete(value.into_value())
-                }
-            },
+        let DeferredValue::Lazy(lazy) = &record.value else {
+            unreachable!("a pure lazy cycle cannot contain a promise")
+        };
+        record.state = match lazy.cache(Err(failure.clone())) {
+            Err(error) => DeferredTaskState::Failed(error),
+            Ok(value) => {
+                debug_assert!(
+                    false,
+                    "a successful concurrent lazy result contradicts a strict dependency cycle"
+                );
+                DeferredTaskState::Complete(value.into_value())
+            }
         };
     }
 }
@@ -2299,7 +2320,7 @@ mod tests {
         );
         let cycle = dependency_cycle(&context, &lazy);
         assert_eq!(cycle.members.len(), 1);
-        assert_eq!(cycle.members[0].id, lazy.id().into());
+        assert_eq!(cycle.members[0].id, lazy.id());
         assert_eq!(cycle.members[0].label.as_ref(), "self cycle");
         assert!(matches!(
             context.poll_wait(&wait),
@@ -2373,7 +2394,7 @@ mod tests {
                 .iter()
                 .map(|member| member.id)
                 .collect::<Vec<_>>(),
-            vec![left.id().into(), right.id().into()]
+            vec![left.id(), right.id()]
         );
     }
 
@@ -2409,7 +2430,7 @@ mod tests {
                 .iter()
                 .map(|member| member.id)
                 .collect::<Vec<_>>(),
-            vec![first.id().into(), second.id().into(), third.id().into()]
+            vec![first.id(), second.id(), third.id()]
         );
         let upstream_failure = context
             .lazy_failure(&upstream)
