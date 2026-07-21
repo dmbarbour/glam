@@ -54,7 +54,7 @@ fn lazy_run_list_effect(effect: Value) -> List {
 }
 
 fn run_list_effect_to_list(context: &EvalContext, effect: Value) -> Result<List, EvalError> {
-    let effect = force_value_shell(context, &effect)?;
+    let effect = eval_value(context, &effect)?;
     let Value::Dict(dict) = effect else {
         return Err(EvalError::new(format!(
             "list effect handler requires an effect dictionary, got {effect:?}"
@@ -71,7 +71,7 @@ fn run_list_effect_to_list(context: &EvalContext, effect: Value) -> Result<List,
     };
 
     let handled = apply_value(context, eval_value(context, &function)?, list_effect_api())?;
-    let handled = force_value_shell(context, &handled)?;
+    let handled = eval_value(context, &handled)?;
     let Value::List(results) = handled else {
         return Err(EvalError::new(format!(
             "list effect handler expected a standard effect result list, got {handled:?}"

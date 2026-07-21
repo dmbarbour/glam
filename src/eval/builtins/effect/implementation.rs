@@ -31,10 +31,10 @@ pub(super) fn eval_effect_map_run_builtin(
     results: &Value,
     api: &Value,
 ) -> Result<Value, EvalError> {
-    let Value::List(items) = force_value_shell(context, items)? else {
+    let Value::List(items) = eval_value(context, items)? else {
         return Err(EvalError::new("effect map requires a list"));
     };
-    let Value::List(results) = force_value_shell(context, results)? else {
+    let Value::List(results) = eval_value(context, results)? else {
         return Err(EvalError::new("effect map internal results must be a list"));
     };
     let Some((item, remaining)) =

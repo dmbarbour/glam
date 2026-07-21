@@ -22,8 +22,8 @@ pub(in crate::eval::builtins) fn eval_dict_union_builtin(
     left: &Value,
     right: &Value,
 ) -> Result<Value, EvalError> {
-    let left = force_value_shell(context, left)?;
-    let right = force_value_shell(context, right)?;
+    let left = eval_value(context, left)?;
+    let right = eval_value(context, right)?;
     let Value::Dict(left_dict) = left else {
         return Err(EvalError::new(
             "dictionary union requires dictionary values",
@@ -50,7 +50,7 @@ pub(super) fn eval_dict_update_builtin(
             "dict update builtin requires a non-empty path",
         ));
     }
-    let dict = force_value_shell(context, dict)?;
+    let dict = eval_value(context, dict)?;
     let Value::Dict(dict) = dict else {
         return Err(EvalError::new("dict update builtin requires a dictionary"));
     };

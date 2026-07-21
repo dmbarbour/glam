@@ -91,7 +91,7 @@ pub(super) fn list_to_binary_bytes(
         },
         &mut |values| {
             for value in values.iter() {
-                match force_value_shell(context, value).map_err(|err| err.to_string())? {
+                match eval_value(context, value).map_err(|err| err.to_string())? {
                     Value::Number(number) => {
                         let byte = number.to_u8_if_integer().ok_or_else(|| {
                             format!("{subject} cannot encode number `{number}` as a byte")

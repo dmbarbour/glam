@@ -1,28 +1,5 @@
 use super::*;
 
-pub(super) fn apply_net(
-    context: &EvalContext,
-    function: NetValue,
-    argument: Value,
-) -> Result<Value, EvalError> {
-    apply_explicit_net_many(context, function, vec![argument])
-}
-
-pub(super) fn apply_explicit_net_many(
-    context: &EvalContext,
-    function: NetValue,
-    arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
-    assert!(
-        !arguments.is_empty(),
-        "batched net application requires an argument"
-    );
-    let net = attach_net_many(Value::Net(function), arguments);
-    let runtime = net.into_runtime();
-    let exposed = runtime.with(|net| net.exposed());
-    finish_explicit_net_application(context, runtime, exposed)
-}
-
 pub(super) fn attach_net_many(function: Value, arguments: Vec<Value>) -> NetValue {
     assert!(!arguments.is_empty(), "net attachment requires an argument");
     let mut net = NetBuilder::new();
@@ -34,20 +11,6 @@ pub(super) fn attach_net_many(function: Value, arguments: Vec<Value>) -> NetValu
         net.wire(argument_port, argument);
     }
     NetValue::new(net.finish(spine.result).instantiate_shared())
-}
-
-pub(super) fn observe_net(context: &EvalContext, net: NetValue) -> Result<Value, EvalError> {
-    let runtime = net.runtime().clone();
-    let exposed = runtime.with(|runtime| runtime.exposed());
-    match drive_net_interface(context, &runtime, exposed)? {
-        NetInterfaceOutcome::Data => {
-            let data = runtime
-                .with(|runtime| runtime.interface_data(exposed).cloned())
-                .expect("observed interaction-net interface must contain data");
-            Ok(data)
-        }
-        NetInterfaceOutcome::Bind | NetInterfaceOutcome::NormalForm => Ok(Value::Net(net)),
-    }
 }
 
 pub(super) fn extract_net_data(
@@ -72,25 +35,6 @@ pub(super) fn extract_net_data(
         NetInterfaceOutcome::NormalForm => Err(EvalError::new(format!(
             "{operation} reached a non-data normal form"
         ))),
-    }
-}
-
-pub(super) fn finish_explicit_net_application(
-    context: &EvalContext,
-    runtime: crate::core_net::CoreRuntimeNet,
-    interface: Port,
-) -> Result<Value, EvalError> {
-    match drive_net_interface(context, &runtime, interface)? {
-        NetInterfaceOutcome::Data => {
-            let data = runtime
-                .with(|runtime| runtime.interface_data(interface).cloned())
-                .expect("applied interaction-net interface must contain data");
-            Ok(data)
-        }
-        NetInterfaceOutcome::Bind => Ok(Value::Net(NetValue::new(runtime))),
-        NetInterfaceOutcome::NormalForm => Err(EvalError::new(
-            "interaction-net application reached a non-data normal form without exposing a bind",
-        )),
     }
 }
 
@@ -353,7 +297,7 @@ pub(super) fn lower_core_callable(
     value: Value,
 ) -> Result<Callable<CoreSpecialization>, EvalError> {
     let value = if matches!(value, Value::Lazy(_) | Value::Promised(_)) {
-        force_value_shell(context, &value)?
+        eval_value(context, &value)?
     } else {
         value
     };
@@ -523,7 +467,7 @@ pub(super) fn resolve_core_access(
             CoreDataKey::Key(key) => vec![key.clone()],
             CoreDataKey::Index => {
                 let value = dynamic.next().expect("lowered access index must exist");
-                let value = force_value_shell(context, value)?;
+                let value = eval_value(context, value)?;
                 vec![value_to_key(context, &value)?]
             }
             CoreDataKey::PathIndex => eval_key_path_list(
@@ -534,7 +478,7 @@ pub(super) fn resolve_core_access(
             )?,
         };
         for key in keys {
-            let value = force_value_shell(context, &current)?;
+            let value = eval_value(context, &current)?;
             let Value::Dict(dict) = value else {
                 return Err(EvalError::new("value access base is not a dictionary"));
             };

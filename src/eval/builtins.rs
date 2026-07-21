@@ -6,6 +6,7 @@ mod dict;
 mod effect;
 mod list;
 mod list_effect;
+mod net;
 mod numeric;
 mod object;
 mod strategy;
@@ -77,6 +78,7 @@ pub(super) fn apply_builtin(
         | Builtin::EffectMapRun
         | Builtin::EffectMapContinue => effect::apply(context, builtin, arguments),
         Builtin::Seq | Builtin::Spark => strategy::apply(context, builtin, arguments),
+        Builtin::NetArity => net::apply(context, arguments),
         Builtin::Anno => annotation::apply(context, arguments),
     }
 }

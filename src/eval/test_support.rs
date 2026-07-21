@@ -48,7 +48,7 @@ pub(super) fn lower_test_computation_value(expr: TestExpr) -> Value {
 
 pub(super) fn eval_key(value: &Value) -> Result<Key, EvalError> {
     let context = test_context();
-    let value = force_value_shell(&context, value)?;
+    let value = eval_value(&context, value)?;
     value_to_key(&context, &value)
 }
 

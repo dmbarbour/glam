@@ -30,23 +30,29 @@ fn cached_value(lazy: &LazyValue) -> Value {
 }
 
 #[test]
-fn closed_net_values_can_expose_ordinary_data_repeatedly() {
+fn raw_net_values_are_opaque_while_net_computations_expose_data() {
     let net = closed_net(|builder| builder.data(n(42)));
-    let value = Value::Net(net);
+    let raw = Value::Net(net.clone());
 
-    assert_eq!(eval_value(&test_context(), &value).unwrap(), n(42));
-    assert_eq!(eval_value(&test_context(), &value).unwrap(), n(42));
+    assert_eq!(eval_value(&test_context(), &raw).unwrap(), raw);
+
+    let computation = Value::Lazy(LazyValue::from_net_computation(net));
+    assert_eq!(eval_value(&test_context(), &computation).unwrap(), n(42));
+    assert_eq!(eval_value(&test_context(), &computation).unwrap(), n(42));
 }
 
 #[test]
-fn closed_net_values_attach_to_applications_through_cursors() {
+fn net_arity_functions_attach_to_applications_through_cursors() {
     let identity = closed_net(|builder| {
         let [application, argument, result] = builder.bind();
         builder.wire(argument, result);
         application
     });
     let expression = TestExpr::Apply(
-        Arc::new(TestExpr::Value(Value::Net(identity))),
+        Arc::new(TestExpr::Value(apply_test_values(
+            Value::Builtin(Builtin::NetArity),
+            [n(1), Value::Net(identity)],
+        ))),
         Arc::new(TestExpr::Value(n(42))),
     );
 
@@ -84,6 +90,63 @@ fn net_backed_lazy_values_require_an_exposed_data_node() {
 }
 
 #[test]
+fn net_backed_lazy_values_reject_non_data_normal_forms() {
+    let inert = closed_net(|builder| builder.copy(0).input);
+    let value = Value::Lazy(LazyValue::from_net_computation(inert));
+
+    assert_eq!(
+        eval_value(&test_context(), &value).unwrap_err().to_string(),
+        "lazy net computation reached a non-data normal form"
+    );
+}
+
+#[test]
+fn partial_function_stages_reject_data_before_their_final_argument() {
+    let one_argument_stage = closed_net(|builder| {
+        let [application, argument, result] = builder.bind();
+        let erase = builder.copy(0);
+        builder.wire(argument, erase.input);
+        let data = builder.data(n(42));
+        builder.wire(result, data);
+        application
+    });
+    let function = FunctionValue::new(one_argument_stage, 2);
+
+    assert_eq!(
+        apply_function_values(&test_context(), function, vec![n(0)])
+            .unwrap_err()
+            .to_string(),
+        "partial function stage produced data before exposing its next bind"
+    );
+}
+
+#[test]
+fn net_arity_bridges_opaque_nets_to_computations_and_functions() {
+    let data_net = closed_net(|builder| builder.data(n(42)));
+    let computation = apply_test_values(
+        Value::Builtin(Builtin::NetArity),
+        [n(0), Value::Net(data_net)],
+    );
+    assert_eq!(eval_value(&test_context(), &computation).unwrap(), n(42));
+
+    let identity = closed_net(|builder| {
+        let [application, argument, result] = builder.bind();
+        builder.wire(argument, result);
+        application
+    });
+    let function = apply_test_values(
+        Value::Builtin(Builtin::NetArity),
+        [n(1), Value::Net(identity)],
+    );
+    let Value::Function(function) = eval_value(&test_context(), &function).unwrap() else {
+        panic!("positive net arity should produce a function value")
+    };
+    assert_eq!(function.remaining_arity(), 1);
+    let result = apply_test_values(Value::Function(function), [n(43)]);
+    assert_eq!(eval_value(&test_context(), &result).unwrap(), n(43));
+}
+
+#[test]
 fn saturated_function_calls_reject_a_remaining_bind() {
     let two_argument_stage = closed_net(|builder| {
         let spine = builder.bind_spine(2);
@@ -104,25 +167,6 @@ fn saturated_function_calls_reject_a_remaining_bind() {
             .to_string(),
         "function call exposed a bind instead of data"
     );
-}
-
-#[test]
-fn explicit_net_application_may_return_a_residual_bind() {
-    let two_argument_net = closed_net(|builder| {
-        let spine = builder.bind_spine(2);
-        for argument in &spine.arguments {
-            let eraser = builder.copy(0);
-            builder.wire(*argument, eraser.input);
-        }
-        let result = builder.data(n(42));
-        builder.wire(spine.result, result);
-        spine.input
-    });
-
-    assert!(matches!(
-        apply_net(&test_context(), two_argument_net, n(0)).unwrap(),
-        Value::Net(_)
-    ));
 }
 
 #[test]
@@ -286,7 +330,7 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
     promise.set(Value::Lazy(target.clone())).unwrap();
 
     assert_eq!(
-        force_value_shell(&context, &Value::Promised(promise.clone())).unwrap(),
+        eval_value(&context, &Value::Promised(promise.clone())).unwrap(),
         n(42)
     );
     assert_eq!(promise.assignment(), Some(Ok(Value::Lazy(target.clone()))));
@@ -304,7 +348,7 @@ fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
         .set(Value::Promised(promise.clone()))
         .expect("promise should accept its own named assignment");
 
-    let error = force_value_shell(&context, &Value::Promised(promise.clone()))
+    let error = eval_value(&context, &Value::Promised(promise.clone()))
         .expect_err("strict promise recursion should remain blocked");
     assert!(error.blocked_on().is_some());
     assert!(context.promise_failure(&promise).is_none());
@@ -321,7 +365,7 @@ fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
     let lazy = LazyValue::from_access(Arc::from([]), Arc::from([Value::Promised(promise.clone())]));
     promise.set(Value::Lazy(lazy.clone())).unwrap();
 
-    let error = force_value_shell(&context, &Value::Promised(promise.clone()))
+    let error = eval_value(&context, &Value::Promised(promise.clone()))
         .expect_err("strict mixed recursion should remain blocked");
     assert!(error.blocked_on().is_some());
     assert!(context.promise_failure(&promise).is_none());
@@ -469,17 +513,17 @@ fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
     );
     let fixpoint = Value::Lazy(lazy.clone());
 
-    let first_block = force_value_shell(&first, &fixpoint)
-        .expect_err("the first session should wait for the promise");
-    let second_block = force_value_shell(&second, &fixpoint)
+    let first_block =
+        eval_value(&first, &fixpoint).expect_err("the first session should wait for the promise");
+    let second_block = eval_value(&second, &fixpoint)
         .expect_err("the second session should own an independent wait");
     assert!(first_block.blocked_on().is_some());
     assert!(second_block.blocked_on().is_some());
     assert!(lazy.cached().is_none());
 
     promise.set(n(42)).unwrap();
-    assert_eq!(force_value_shell(&first, &fixpoint).unwrap(), n(42));
-    assert_eq!(force_value_shell(&second, &fixpoint).unwrap(), n(42));
+    assert_eq!(eval_value(&first, &fixpoint).unwrap(), n(42));
+    assert_eq!(eval_value(&second, &fixpoint).unwrap(), n(42));
     assert_eq!(cached_value(&lazy), n(42));
 }
 
@@ -493,7 +537,7 @@ fn computed_fixpoint_preserves_a_forwarded_structured_failure() {
         FixpointComputation::Function(function),
     );
 
-    let error = force_value_shell(&context, &Value::Lazy(fixpoint.clone()))
+    let error = eval_value(&context, &Value::Lazy(fixpoint.clone()))
         .expect_err("the source failure should fail the fixpoint");
     assert_eq!(error.to_string(), "fixpoint source failed");
 
@@ -531,7 +575,7 @@ fn forcing_a_lazy_value_reaches_outer_whnf_without_forcing_lazy_fields() {
     });
     let root = Value::deferred("forwarding root", move |_| Ok(forwarded.clone()));
 
-    let forced = force_value_shell(&context, &root).expect("root should reach dictionary WHNF");
+    let forced = eval_value(&context, &root).expect("root should reach dictionary WHNF");
     let Value::Dict(dict) = forced else {
         panic!("forcing should expose the outer dictionary")
     };
@@ -564,7 +608,7 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
         .set(lazy.clone())
         .expect("guarded self reference should be installed once");
 
-    let forced = force_value_shell(&context, &Value::Lazy(lazy.clone()))
+    let forced = eval_value(&context, &Value::Lazy(lazy.clone()))
         .expect("a lazy reference under a dictionary constructor is guarded");
     let Value::Dict(dict) = forced else {
         panic!("guarded recursive value should expose a dictionary")
@@ -576,18 +620,23 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
 }
 
 #[test]
-fn shallow_lazy_aliases_are_shared_by_the_session_without_entering_the_cache() {
+fn lazy_aliases_share_and_cache_their_final_whnf() {
     let context = test_context();
     let target = Value::deferred("alias target", |_| Ok(n(42)));
-    let expected = target.clone();
+    let Value::Lazy(target_lazy) = &target else {
+        unreachable!()
+    };
+    let target_lazy = target_lazy.clone();
     let root = LazyValue::deferred("shallow alias", move |_| Ok(target.clone()));
     let value = Value::Lazy(root.clone());
 
     assert_eq!(context.deferred_task_count(), 0);
-    assert_eq!(eval_value(&context, &value).unwrap(), expected);
-    assert_eq!(context.deferred_task_count(), 1);
-    assert_eq!(root.cached(), None);
-    assert_eq!(force_value_shell(&context, &value).unwrap(), n(42));
+    assert_eq!(eval_value(&context, &value).unwrap(), n(42));
+    assert_eq!(context.deferred_task_count(), 2);
+    assert_eq!(cached_value(&target_lazy), n(42));
+    assert_eq!(cached_value(&root), n(42));
+    assert_eq!(eval_value(&context, &value).unwrap(), n(42));
+    assert_eq!(context.deferred_task_count(), 2);
 }
 
 #[test]
@@ -600,7 +649,7 @@ fn demanded_forwarding_chain_caches_whnf_in_every_lazy_member() {
     let root = LazyValue::from_application(identity, Arc::from([Value::Lazy(middle.clone())]));
 
     assert_eq!(
-        force_value_shell(&context, &Value::Lazy(root.clone())).unwrap(),
+        eval_value(&context, &Value::Lazy(root.clone())).unwrap(),
         n(42)
     );
     assert_eq!(cached_value(&leaf), n(42));
@@ -615,7 +664,7 @@ fn forwarding_chain_preserves_one_structured_failure() {
     let leaf = LazyValue::error("shared failure");
     let root = LazyValue::from_application(identity, Arc::from([Value::Lazy(leaf.clone())]));
 
-    let error = force_value_shell(&context, &Value::Lazy(root.clone()))
+    let error = eval_value(&context, &Value::Lazy(root.clone()))
         .expect_err("forwarding into an error should fail");
     assert_eq!(error.to_string(), "shared failure");
 
@@ -1953,7 +2002,7 @@ fn missing_dictionary_members_resolve_to_empty_dictionary() {
 }
 
 #[test]
-fn anno_builtin_preserves_lazy_targets_when_assertions_pass() {
+fn anno_builtin_continues_demand_after_assertions_pass() {
     let root =
         Value::Dict(crate::core::Dict::new_sync().insert(Key::atom_from_text("later"), n(42)));
     let annotation = singleton_expr(
@@ -1993,16 +2042,11 @@ fn anno_builtin_preserves_lazy_targets_when_assertions_pass() {
     )
     .expect("anno should pass through successful assertions");
 
-    let Value::Lazy(thunk) = value else {
-        panic!("anno should preserve lazy target evaluation");
-    };
-    let resolved = eval_value(&test_context(), &Value::Lazy(thunk))
-        .expect("returned target should still evaluate");
-    assert_eq!(resolved, n(42));
+    assert_eq!(value, n(42));
 }
 
 #[test]
-fn anno_builtin_returns_stuck_errors_for_failed_assertions() {
+fn anno_builtin_reports_failed_assertions_during_demand() {
     let annotation = singleton_expr(
         Value::Atom(crate::core::Atom::from_key(
             &crate::core::Key::binary_from_text("assert_defined"),
@@ -2023,7 +2067,7 @@ fn anno_builtin_returns_stuck_errors_for_failed_assertions() {
         ),
     );
 
-    let value = eval_value(
+    let error = eval_value(
         &test_context(),
         &apply_rooted_fixture(
             &Value::Dict(crate::core::Dict::new_sync()),
@@ -2036,15 +2080,9 @@ fn anno_builtin_returns_stuck_errors_for_failed_assertions() {
             ),
         ),
     )
-    .expect("failed anno should still produce a stuck value");
-
-    let Value::Lazy(thunk) = value else {
-        panic!("failed anno should produce a stuck expression");
-    };
-    let err = eval_value(&test_context(), &Value::Lazy(thunk))
-        .expect_err("failed anno should raise on demand");
+    .expect_err("failed anno should raise during demand");
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         "cannot override `foo` because it is not defined"
     );
 }
@@ -2098,33 +2136,32 @@ fn list_annotations_rebalance_and_flatten_lists() {
 }
 
 #[test]
-fn list_annotations_return_stuck_errors_for_wrong_targets() {
-    let value = eval_closed_expr(&builtin2_expr(
+fn list_annotations_report_errors_for_wrong_targets() {
+    let error = eval_closed_expr(&builtin2_expr(
         Builtin::Anno,
         TestExpr::Value(Value::Atom(crate::core::Atom::from_key(
             &Key::binary_from_text("binary"),
         ))),
         TestExpr::Value(Value::List(List::from_values(vec![n(300)]))),
     ))
-    .expect("annotation should evaluate to a stuck expression");
+    .expect_err("invalid binary annotation should fail during demand");
 
     assert_eq!(
-        eval_value(&test_context(), &value).unwrap_err().to_string(),
+        error.to_string(),
         "`binary` annotation cannot encode number `300` as a byte"
     );
 
-    let value = eval_closed_expr(&builtin2_expr(
+    let error = eval_closed_expr(&builtin2_expr(
         Builtin::Anno,
         TestExpr::Value(Value::Atom(crate::core::Atom::from_key(
             &Key::binary_from_text("deque"),
         ))),
         TestExpr::Value(n(1)),
     ))
-    .expect("annotation should evaluate to a stuck expression");
+    .expect_err("invalid deque annotation should fail during demand");
 
     assert!(
-        eval_value(&test_context(), &value)
-            .unwrap_err()
+        error
             .to_string()
             .contains("`deque` annotation requires a list target")
     );
@@ -2181,11 +2218,11 @@ fn reflection_gate_waits_before_continuing_target_demand() {
 
     context.complete_wait(&wait.0);
     assert_eq!(
-        force_value_shell(&context, &gate).expect("completed gate should continue target demand"),
+        eval_value(&context, &gate).expect("completed gate should continue target demand"),
         n(42)
     );
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(force_value_shell(&context, &gate).unwrap(), n(42));
+    assert_eq!(eval_value(&context, &gate).unwrap(), n(42));
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
@@ -2251,8 +2288,9 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
     });
     let runtime = applied.runtime().clone();
 
-    let blocked = eval_value(&context, &Value::Net(applied))
-        .expect_err("call should wait for its reflection gate");
+    let computation = Value::Lazy(LazyValue::from_net_computation(applied));
+    let blocked =
+        eval_value(&context, &computation).expect_err("call should wait for its reflection gate");
     let wait = blocked
         .blocked_on()
         .expect("call should report a task wait");
@@ -2260,10 +2298,8 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
 
     context.complete_wait(&wait.0);
     let observer = test_context();
-    assert_eq!(
-        eval_value(&observer, &Value::Net(NetValue::new(runtime))).unwrap(),
-        n(42)
-    );
+    let resumed = Value::Lazy(LazyValue::from_net_computation(NetValue::new(runtime)));
+    assert_eq!(eval_value(&observer, &resumed).unwrap(), n(42));
 }
 
 #[test]
@@ -2308,7 +2344,7 @@ fn seq_forces_its_first_argument_before_continuing_target_demand() {
     let result = apply_values(&context, Value::Builtin(Builtin::Seq), vec![n(0), target]).unwrap();
 
     assert_eq!(target_forces.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(force_value_shell(&context, &result).unwrap(), n(42));
+    assert_eq!(eval_value(&context, &result).unwrap(), n(42));
     assert_eq!(target_forces.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 

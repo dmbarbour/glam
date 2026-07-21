@@ -26,7 +26,7 @@ pub(super) fn apply(
             let [name, arguments, api] = super::exact(arguments, "effect call")?;
             let name = value_to_key(context, &eval_value(context, &name)?)?;
             let function = resolve_core_access(context, &[api], &[CoreDataKey::Key(name)])?;
-            let arguments = match force_value_shell(context, &arguments)? {
+            let arguments = match eval_value(context, &arguments)? {
                 Value::List(arguments) => list_to_value_items(context, &arguments)?,
                 _ => {
                     return Err(EvalError::new(

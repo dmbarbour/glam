@@ -7,7 +7,7 @@ pub(super) fn eval_merge_duplicate_builtin(
     left: &Value,
     right: &Value,
 ) -> Result<Value, EvalError> {
-    let name = force_value_shell(context, name)?;
+    let name = eval_value(context, name)?;
     let name = match name {
         Value::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Value::Atom(atom) => atom_name(&atom)

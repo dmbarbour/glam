@@ -20,7 +20,7 @@ pub(in crate::eval) fn seq(
     first: &Value,
     target: &Value,
 ) -> Result<Value, EvalError> {
-    force_value_shell(context, first)?;
+    eval_value(context, first)?;
     Ok(target.clone())
 }
 

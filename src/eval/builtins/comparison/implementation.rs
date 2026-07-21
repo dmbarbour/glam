@@ -55,8 +55,8 @@ fn compare_ordered_values(
     right: &Value,
     name: &str,
 ) -> Result<Ordering, EvalError> {
-    let left = force_value_shell(context, left)?;
-    let right = force_value_shell(context, right)?;
+    let left = eval_value(context, left)?;
+    let right = eval_value(context, right)?;
     match (left, right) {
         (Value::Number(left), Value::Number(right)) => Ok(left.cmp(&right)),
         (Value::Binary(left), Value::Binary(right)) => Ok(left.cmp(&right)),
@@ -136,8 +136,8 @@ fn equal_values(
     right: &Value,
     name: &str,
 ) -> Result<bool, EvalError> {
-    let left = force_value_shell(context, left)?;
-    let right = force_value_shell(context, right)?;
+    let left = eval_value(context, left)?;
+    let right = eval_value(context, right)?;
     match (left, right) {
         (Value::Atom(left), Value::Atom(right)) => Ok(left == right),
         (Value::Number(left), Value::Number(right)) => Ok(left == right),
@@ -154,7 +154,7 @@ fn equal_values(
         | (_, Value::Lazy(_))
         | (Value::Promised(_), _)
         | (_, Value::Promised(_)) => {
-            unreachable!("force_value_shell removes suspended values")
+            unreachable!("eval_value removes suspended values")
         }
         (Value::Builtin(_), _)
         | (_, Value::Builtin(_))

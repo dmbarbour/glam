@@ -2,8 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::core::{
-    Builtin, EvaluatedValue, FixpointComputation, Key, LazyFailure, LazyResult, LazySource,
-    LazyValue, List, ListThunk, PromisedValue, Value, keys,
+    EvaluatedValue, FixpointComputation, Key, LazyFailure, LazySource, LazyValue, List, ListThunk,
+    PromisedValue, Value, keys,
 };
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
@@ -97,16 +97,8 @@ pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvalErr
     match value {
         Value::Lazy(lazy) => eval_lazy(context, lazy),
         Value::Promised(promise) => eval_promised(context, promise),
-        Value::Net(net) => observe_net(context, net.clone()),
         other => Ok(other.clone()),
     }
-}
-
-#[derive(Clone, Copy)]
-enum PostForcePolicy {
-    Return,
-    ContinueEvaluation,
-    RunReflectionGate,
 }
 
 enum LazyTaskWork {
@@ -117,7 +109,6 @@ enum LazyTaskWork {
 struct LazyTaskMachine {
     context: EvalContext,
     lazy: LazyValue,
-    policy: PostForcePolicy,
     work: LazyTaskWork,
 }
 
@@ -130,14 +121,8 @@ impl LazyTaskMachine {
     }
 
     fn complete(&self, value: Value) -> EvaluationMachinePoll {
-        if is_deferred(&value) {
-            // Shallow evaluation may intentionally return a lazy value as
-            // data. The session task shares that result without installing a
-            // forwarding value in the immutable cache.
-            return EvaluationMachinePoll::Complete(value);
-        }
         let value = EvaluatedValue::try_from(value)
-            .expect("a non-deferred outer shell must be an evaluated value");
+            .expect("WHNF demand must eliminate the outer deferred variant");
         match self.lazy.cache(Ok(value)) {
             Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
             Err(error) => EvaluationMachinePoll::LazyFailed(error),
@@ -154,9 +139,8 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             };
         }
 
-        let following = matches!(self.work, LazyTaskWork::Follow(_));
         match self.poll_source() {
-            Ok(value) if !following && should_follow_result(self.policy, &value) => {
+            Ok(value) if is_deferred(&value) => {
                 self.work = LazyTaskWork::Follow(value);
                 EvaluationMachinePoll::Yielded
             }
@@ -296,38 +280,17 @@ fn block_or_fail(context: &EvalContext, error: EvalError) -> EvaluationMachinePo
     EvaluationMachinePoll::LazyFailed(error.into_lazy_failure())
 }
 
-fn should_follow_result(policy: PostForcePolicy, value: &Value) -> bool {
-    match policy {
-        PostForcePolicy::Return => false,
-        PostForcePolicy::ContinueEvaluation => true,
-        PostForcePolicy::RunReflectionGate => matches!(
-            value,
-            Value::Lazy(lazy) if matches!(lazy.source(), LazySource::ReflectionGate(_))
-        ),
-    }
-}
-
 pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvalError> {
-    let policy = match lazy.source() {
-        LazySource::Error => PostForcePolicy::Return,
-        LazySource::ComputedFixpoint(_) | LazySource::Deferred(_) | LazySource::Access { .. } => {
-            PostForcePolicy::Return
-        }
-        LazySource::ReflectionGate(_) => PostForcePolicy::Return,
-        LazySource::Application(_)
-        | LazySource::NetComputation(_)
-        | LazySource::FunctionCall { .. } => PostForcePolicy::ContinueEvaluation,
-        LazySource::Builtin(call) => builtin_post_force(call.builtin),
-    };
     if let Some(result) = lazy.cached() {
-        return finish_lazy_result(context, result, policy);
+        return result
+            .map(EvaluatedValue::into_value)
+            .map_err(EvalError::lazy_failure);
     }
     let wait = context
         .lazy_task(lazy, |task_context| {
             Box::new(LazyTaskMachine {
                 context: task_context,
                 lazy: lazy.clone(),
-                policy,
                 work: LazyTaskWork::Produce,
             })
         })
@@ -441,86 +404,6 @@ fn produce_lazy_source(context: &EvalContext, lazy: &LazyValue) -> Result<Value,
     }
 }
 
-fn finish_lazy_result(
-    context: &EvalContext,
-    result: LazyResult,
-    policy: PostForcePolicy,
-) -> Result<Value, EvalError> {
-    let result = result
-        .map(EvaluatedValue::into_value)
-        .map_err(EvalError::lazy_failure)?;
-    match policy {
-        PostForcePolicy::Return => Ok(result),
-        PostForcePolicy::ContinueEvaluation => {
-            // Cache a net's exposed Data payload before continuing. If the
-            // payload blocks or re-enters evaluation, source-net work remains
-            // shared instead of being repeated.
-            eval_value(context, &result)
-        }
-        PostForcePolicy::RunReflectionGate => match &result {
-            Value::Lazy(lazy) if matches!(lazy.source(), LazySource::ReflectionGate(_)) => {
-                eval_lazy(context, lazy)
-            }
-            _ => Ok(result),
-        },
-    }
-}
-
-fn builtin_post_force(builtin: Builtin) -> PostForcePolicy {
-    match builtin {
-        Builtin::Anno => PostForcePolicy::RunReflectionGate,
-        Builtin::Fixpoint
-        | Builtin::ObjectInstanceFromParts
-        | Builtin::ObjectInstance
-        | Builtin::ObjectWithDefs => PostForcePolicy::ContinueEvaluation,
-        Builtin::Append
-        | Builtin::Add
-        | Builtin::Subtract
-        | Builtin::Multiply
-        | Builtin::Divide
-        | Builtin::Greater
-        | Builtin::GreaterEqual
-        | Builtin::Equal
-        | Builtin::NotEqual
-        | Builtin::LessEqual
-        | Builtin::Less
-        | Builtin::Seq
-        | Builtin::Spark
-        | Builtin::MergeDuplicate
-        | Builtin::Floor
-        | Builtin::Mod
-        | Builtin::Slice
-        | Builtin::Map
-        | Builtin::ListConcat
-        | Builtin::ListLen
-        | Builtin::ListSplit
-        | Builtin::ListSplitEnd
-        | Builtin::ListHead
-        | Builtin::ListTail
-        | Builtin::TextLines
-        | Builtin::ListEffect
-        | Builtin::ListEffectReturn
-        | Builtin::ListEffectSeq
-        | Builtin::ListEffectAlt
-        | Builtin::ListEffectCut
-        | Builtin::ListEffectFix
-        | Builtin::DictSingleton
-        | Builtin::DictUnion
-        | Builtin::DictUpdate
-        | Builtin::ObjectSpec
-        | Builtin::ObjectLocalName
-        | Builtin::EffectApply
-        | Builtin::EffectCall
-        | Builtin::EffectMap
-        | Builtin::EffectMapRun
-        | Builtin::EffectMapContinue
-        | Builtin::ObjectDefaultDefs
-        | Builtin::ObjectDictDefs
-        | Builtin::ObjectComposedDefs
-        | Builtin::ObjectOverrideDefs => PostForcePolicy::Return,
-    }
-}
-
 fn eval_promised(context: &EvalContext, promise: &PromisedValue) -> Result<Value, EvalError> {
     if let Some(assignment) = promise.assignment() {
         let value = assignment.map_err(|message| EvalError::new(message.as_ref()))?;
@@ -576,7 +459,7 @@ fn eval_computed_fixpoint(
     let marker = Value::Lazy(lazy.clone());
     match computation {
         FixpointComputation::Function(function) => apply_value(context, function.clone(), marker)
-            .and_then(|application| force_value_shell(context, &application)),
+            .and_then(|application| eval_value(context, &application)),
         FixpointComputation::ObjectInstance(spec) => {
             construct_fixpoint_object(context, spec, marker)
         }
@@ -597,7 +480,7 @@ pub(super) fn format_name_part(key: &Key) -> String {
 }
 
 pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, EvalError> {
-    let value = force_value_shell(context, value)?;
+    let value = eval_value(context, value)?;
     match &value {
         Value::Atom(atom) => Ok(Key::Atom(*atom)),
         Value::Number(number) => Ok(Key::Number(number.clone())),
@@ -629,16 +512,6 @@ pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, 
     }
 }
 
-pub(super) fn force_value_shell(context: &EvalContext, value: &Value) -> Result<Value, EvalError> {
-    let mut current = eval_value(context, value)?;
-    while matches!(current, Value::Lazy(_) | Value::Promised(_)) {
-        current = eval_value(context, &current)?;
-    }
-    Ok(EvaluatedValue::try_from(current)
-        .expect("forcing a value shell must eliminate the outer lazy variant")
-        .into_value())
-}
-
 pub(super) fn force_list_thunk(
     context: &EvalContext,
     thunk: &ListThunk,
@@ -647,7 +520,7 @@ pub(super) fn force_list_thunk(
         ListThunk::Lazy(lazy) => Value::Lazy(lazy.clone()),
         ListThunk::Promised(promise) => Value::Promised(promise.clone()),
     };
-    match force_value_shell(context, &thunk)? {
+    match eval_value(context, &thunk)? {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
         other => Err(EvalError::new(format!(
@@ -684,7 +557,7 @@ pub(super) fn eval_number(
     value: &Value,
     builtin_name: &str,
 ) -> Result<Number, EvalError> {
-    let value = force_value_shell(context, value)?;
+    let value = eval_value(context, value)?;
     let Value::Number(number) = value else {
         return Err(EvalError::new(format!(
             "{builtin_name} builtin requires number values"
@@ -746,7 +619,7 @@ impl TaggedDictExt for crate::core::Dict {
 }
 
 fn is_semantically_undefined(context: &EvalContext, value: &Value) -> Result<bool, EvalError> {
-    let value = force_value_shell(context, value)?;
+    let value = eval_value(context, value)?;
     let Value::Dict(dict) = value else {
         return Ok(false);
     };

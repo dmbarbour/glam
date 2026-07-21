@@ -863,7 +863,7 @@ fn assembler_extracts_ranges_from_compact_and_list_binary_data() {
 }
 
 #[test]
-fn checked_net_builder_constructs_an_identity_function() {
+fn checked_net_builder_constructs_an_opaque_identity_net() {
     let assembler = Assembler::default();
     let identity = assembler
         .net(|net| {
@@ -872,16 +872,14 @@ fn checked_net_builder_constructs_an_identity_function() {
             Ok(bind.application)
         })
         .expect("identity net should be closed");
-    let result = assembler
+    let error = assembler
         .apply(&identity, [Value::integer(42)])
-        .and_then(|value| assembler.evaluate(&value))
-        .expect("identity net should return its argument");
-
-    assert_eq!(result.as_i64(), Some(42));
+        .expect_err("raw nets require an explicit lambda-style arity bridge");
+    assert_eq!(error.to_string(), "application requires a function value");
 }
 
 #[test]
-fn checked_net_builder_exposes_data_through_copy_helpers() {
+fn checked_net_builder_keeps_data_exposing_nets_opaque() {
     let assembler = Assembler::default();
     let net = assembler
         .net(|net| {
@@ -895,9 +893,8 @@ fn checked_net_builder_exposes_data_through_copy_helpers() {
     assert_eq!(
         assembler
             .evaluate(&net)
-            .expect("net should expose its data")
-            .as_binary(),
-        Some(b"copied".as_slice())
+            .expect("an opaque net is already in weak-head normal form"),
+        net
     );
 }
 

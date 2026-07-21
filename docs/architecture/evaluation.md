@@ -56,12 +56,12 @@ bridge: forcing it must expose data, and an exposed bind or non-data normal
 form is an error. `FunctionValue` provides the corresponding positive-arity
 bridge and checks its bind spine during staged application.
 
-The source language does not yet expose `interaction_net` or the provisional
-`net_arity` bridge. There is also one deliberate bootstrap mismatch:
-`eval_value(Value::Net)` still calls `observe_net` and may project exposed data.
-Do not build new behavior on that path. Removing raw-net projection and the
-shallow evaluator is deferred until the lazy-cycle transition plan is
-complete.
+The built-in `std` module exposes `net_arity`, `seq`, and `spark` as ordinary
+curried values. `net_arity 0 Net` constructs a net computation; a positive
+arity constructs a `FunctionValue`. The source language does not yet expose
+the `interaction_net` construction effect. Ordinary evaluation is one WHNF
+demand: it follows top-level lazy aliases, but returns a raw `Value::Net`
+unchanged and does not inspect its interface.
 
 Compact persistent lists live in `list.rs`. Their `ListThunk` holes distinguish
 computed lazies from named promises but remain opaque to list structure; range

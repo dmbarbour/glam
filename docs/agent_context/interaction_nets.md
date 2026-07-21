@@ -169,8 +169,9 @@ they do not project its exposed agent. A net-backed `Value::Lazy` represents
 the explicit zero-arity bridge and must produce `Data` when observed.
 `FunctionValue` staging is the positive-arity bridge: partial stages must
 expose `Bind`, and saturation must produce `Data`. The provisional source form
-for both bridges is `net_arity N Net`; it and `interaction_net` are not yet
-implemented by `.g` syntax.
+for both bridges is `net_arity N Net` and is available through `import 'std`.
+The `interaction_net` construction effect is not yet implemented by `.g`
+syntax.
 
 Shared runtime mutation increments a condition-variable generation. If one
 observer encounters an active pair already claimed by another evaluator, it

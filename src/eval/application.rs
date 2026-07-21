@@ -14,7 +14,6 @@ pub(super) fn apply_value(
             argument,
         ),
         Value::Function(function) => apply_function_values(context, function, vec![argument]),
-        Value::Net(net) => apply_net(context, net, argument),
         Value::Dict(dict) => apply_dict_value(context, &dict, argument),
         Value::Lazy(thunk) => apply_value(context, eval_lazy(context, &thunk)?, argument),
         Value::Promised(promise) => apply_value(
@@ -37,10 +36,6 @@ pub(crate) fn apply_values(
             Value::Function(function_value) => {
                 let arguments = std::iter::once(argument).chain(arguments).collect();
                 return apply_function_values(context, function_value, arguments);
-            }
-            Value::Net(net) => {
-                let arguments = std::iter::once(argument).chain(arguments).collect();
-                return apply_explicit_net_many(context, net, arguments);
             }
             other => function = apply_value(context, other, argument)?,
         }

@@ -2555,6 +2555,18 @@ fn lowers_builtin_imports_to_module_dictionaries() {
         std_list_pure,
     ) = match &std {
         Value::Dict(std) => {
+            assert!(matches!(
+                std.get(&Key::atom_from_text("net_arity")),
+                Some(Value::Builtin(crate::core::Builtin::NetArity))
+            ));
+            assert!(matches!(
+                std.get(&Key::atom_from_text("seq")),
+                Some(Value::Builtin(crate::core::Builtin::Seq))
+            ));
+            assert!(matches!(
+                std.get(&Key::atom_from_text("spark")),
+                Some(Value::Builtin(crate::core::Builtin::Spark))
+            ));
             let anno = std
                 .get(&Key::atom_from_text("anno"))
                 .expect("std import should expose anno");

@@ -27,7 +27,7 @@ pub(in crate::eval) fn construct_object_instance(
             .unwrap_or_else(default_object_defs_value);
         let mixed = apply_value(context, eval_value(context, &defs)?, base)?;
         let mixed = apply_value(context, eval_value(context, &mixed)?, self_marker.clone())?;
-        let Value::Dict(mixed_dict) = force_value_shell(context, &mixed)? else {
+        let Value::Dict(mixed_dict) = eval_value(context, &mixed)? else {
             return Err(EvalError::new(
                 "object definition mixin must produce a dictionary",
             ));
@@ -106,8 +106,8 @@ pub(super) fn eval_object_override_defs_builtin(
     updates: &Value,
     base: &Value,
 ) -> Result<Value, EvalError> {
-    let updates = force_value_shell(context, updates)?;
-    let base = force_value_shell(context, base)?;
+    let updates = eval_value(context, updates)?;
+    let base = eval_value(context, base)?;
     let (Value::Dict(updates), Value::Dict(base)) = (updates, base) else {
         return Err(EvalError::new(
             "object override definitions require dictionary values",
@@ -132,7 +132,7 @@ pub(super) fn eval_object_spec_builtin(
     context: &EvalContext,
     value: &Value,
 ) -> Result<Value, EvalError> {
-    let value = force_value_shell(context, value)?;
+    let value = eval_value(context, value)?;
     let Value::Dict(dict) = value else {
         return Err(EvalError::new(
             "object spec builtin requires an object or dictionary value",
@@ -140,7 +140,7 @@ pub(super) fn eval_object_spec_builtin(
     };
 
     if let Some(spec) = dict.get(&*keys::SPEC) {
-        let spec = force_value_shell(context, spec)?;
+        let spec = eval_value(context, spec)?;
         if !is_undefined_dict_value(&spec) {
             return Ok(spec);
         }
@@ -161,7 +161,7 @@ pub(super) fn eval_object_local_name_builtin(
     };
 
     let mut name_parts = vec![eval_value(context, &host_name)?];
-    name_parts.extend(match force_value_shell(context, parts)? {
+    name_parts.extend(match eval_value(context, parts)? {
         Value::List(parts) => list_to_value_items(context, &parts)?,
         Value::Dict(dict) if dict.is_empty() => Vec::new(),
         _ => {
@@ -174,7 +174,7 @@ pub(super) fn eval_object_local_name_builtin(
 }
 
 fn object_spec_dict(context: &EvalContext, spec: &Value) -> Result<crate::core::Dict, EvalError> {
-    let spec = force_value_shell(context, spec)?;
+    let spec = eval_value(context, spec)?;
     let Value::Dict(spec_dict) = spec else {
         return Err(EvalError::new(
             "object instance builtin requires a specification dictionary",
@@ -343,7 +343,7 @@ fn object_spec_name(context: &EvalContext, spec: &crate::core::Dict) -> Result<K
     let Some(name) = spec.get(&*keys::NAME) else {
         return Err(EvalError::new("object specification requires a name"));
     };
-    let name = force_value_shell(context, name)?;
+    let name = eval_value(context, name)?;
     value_to_key(context, &name)
 }
 
@@ -361,7 +361,7 @@ fn remember_object_spec(
 }
 
 fn object_dep_specs(context: &EvalContext, deps: &Value) -> Result<Vec<Value>, EvalError> {
-    match force_value_shell(context, deps)? {
+    match eval_value(context, deps)? {
         Value::List(list) => list_to_value_items(context, &list),
         Value::Dict(dict) if dict.is_empty() => Ok(Vec::new()),
         _ => Err(EvalError::new(

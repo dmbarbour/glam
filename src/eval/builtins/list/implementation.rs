@@ -5,7 +5,7 @@ pub(in crate::eval::builtins) fn list_like_value(
     value: Value,
     name: &str,
 ) -> Result<List, EvalError> {
-    match force_value_shell(context, &value)? {
+    match eval_value(context, &value)? {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
         other => Err(EvalError::new(format!(
@@ -28,7 +28,7 @@ pub(super) fn eval_slice_builtin(
         ));
     }
 
-    match force_value_shell(context, value)? {
+    match eval_value(context, value)? {
         Value::Binary(bytes) => {
             if end > bytes.len() {
                 return Err(EvalError::new("slice builtin end is out of bounds"));
@@ -54,8 +54,8 @@ pub(super) fn eval_map_builtin(
     function: &Value,
     value: &Value,
 ) -> Result<Value, EvalError> {
-    let function = force_value_shell(context, function)?;
-    let mapped = match force_value_shell(context, value)? {
+    let function = eval_value(context, function)?;
+    let mapped = match eval_value(context, value)? {
         Value::Binary(bytes) => bytes
             .iter()
             .map(|byte| {
@@ -84,7 +84,7 @@ pub(super) fn eval_list_concat_builtin(
     context: &EvalContext,
     value: &Value,
 ) -> Result<Value, EvalError> {
-    let Value::List(list) = force_value_shell(context, value)? else {
+    let Value::List(list) = eval_value(context, value)? else {
         return Err(EvalError::new(
             "list concat builtin requires a list of lists",
         ));
@@ -101,7 +101,7 @@ pub(super) fn eval_list_len_builtin(
     context: &EvalContext,
     value: &Value,
 ) -> Result<Value, EvalError> {
-    match force_value_shell(context, value)? {
+    match eval_value(context, value)? {
         Value::Binary(bytes) => Ok(Value::Number(Number::from_usize(bytes.len()))),
         Value::List(list) => Ok(Value::Number(Number::from_usize(
             list.try_len(&mut |thunk| force_list_thunk(context, thunk))?,
@@ -118,7 +118,7 @@ pub(super) fn eval_list_split_builtin(
     value: &Value,
 ) -> Result<Value, EvalError> {
     let index = eval_index_number(context, index, "split")?;
-    match force_value_shell(context, value)? {
+    match eval_value(context, value)? {
         Value::Binary(bytes) => {
             if index > bytes.len() {
                 return Err(EvalError::new("split builtin index is out of bounds"));
@@ -148,7 +148,7 @@ pub(super) fn eval_list_split_end_builtin(
     value: &Value,
 ) -> Result<Value, EvalError> {
     let count = eval_index_number(context, count, "split_end")?;
-    match force_value_shell(context, value)? {
+    match eval_value(context, value)? {
         Value::Binary(bytes) => {
             if count > bytes.len() {
                 return Err(EvalError::new("split_end builtin count is out of bounds"));
@@ -177,7 +177,7 @@ pub(super) fn eval_list_head_builtin(
     context: &EvalContext,
     value: &Value,
 ) -> Result<Value, EvalError> {
-    match force_value_shell(context, value)? {
+    match eval_value(context, value)? {
         Value::Binary(bytes) => bytes
             .first()
             .map(|byte| Value::Number(Number::from_u8(*byte)))
@@ -195,7 +195,7 @@ pub(super) fn eval_list_tail_builtin(
     context: &EvalContext,
     value: &Value,
 ) -> Result<Value, EvalError> {
-    match force_value_shell(context, value)? {
+    match eval_value(context, value)? {
         Value::Binary(bytes) => {
             if bytes.is_empty() {
                 Err(EvalError::new(
@@ -223,7 +223,7 @@ pub(super) fn eval_text_lines_builtin(
     context: &EvalContext,
     value: &Value,
 ) -> Result<Value, EvalError> {
-    let bytes = match force_value_shell(context, value)? {
+    let bytes = match eval_value(context, value)? {
         Value::Binary(bytes) => bytes,
         Value::List(list) => Bytes::from(
             list_to_binary_bytes(context, &list, "text lines builtin")

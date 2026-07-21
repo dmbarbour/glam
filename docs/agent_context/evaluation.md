@@ -17,10 +17,10 @@ control-flow overview.
   opens it by installing a logical-copy cursor. A net-backed `Value::Lazy` is
   instead an explicit zero-arity computation and must expose `Data` when
   forced; an exposed `Bind` is an error.
-- `force_value_shell` currently eliminates an outer `Value::Lazy` chain while
-  leaving lazy dictionary fields and list elements untouched. Its
-  `EvaluatedValue` wrapper records only that non-lazy structural boundary; it
-  does not authorize inspecting an opaque net.
+- `eval_value` is the single outer-WHNF demand operation. It follows every
+  top-level lazy or promised result while leaving lazy dictionary fields and
+  list elements untouched. `EvaluatedValue` records only that non-deferred
+  structural boundary; it does not authorize inspecting an opaque net.
 - Computed lazy work is owned by demand-driven `EvaluationSession` task
   records. Contending observers receive the task's stable wait token; they do
   not wait on a lazy-specific condition variable. Lazy tasks participate in
@@ -33,18 +33,15 @@ control-flow overview.
   scheduler state and may only become a session-level deadlock; poisoning a
   lazy from such a temporary dependency would be unsound. Deferred labels and
   IDs belong in internal cycle diagnostics, never in the public value facade.
-- Current `eval_value`, `PostForcePolicy`, and terminal shallow aliases are
-  transition machinery, not language semantics. A WHNF demand ultimately
-  follows a top-level lazy result; only lazy children inside a completed
-  constructor remain undemanded. Keep the compatibility path until the
-  lazy-cycle plan is complete, then remove it rather than extending it.
+- Lazy production always transfers the current WHNF demand through a
+  top-level lazy or promised result. Reflection gates, `seq`, and `spark`
+  therefore perform their prerequisite work and continue the same demand;
+  only lazy children inside a completed constructor remain undemanded.
 - A raw `Value::Net` is a valid non-lazy cached result. Reaching it does not
   inspect its exposed interface. `LazySource::NetComputation` is the internal
   arity-zero bridge, while `FunctionValue` staging supplies the positive-arity
-  bridge. The provisional source spelling for both is `net_arity`.
-- The current `eval_value(Value::Net)` path contradicts this boundary by
-  calling `observe_net`; it is a known bootstrap mismatch scheduled for the
-  post-lazy-cycle cleanup. New code must not rely on raw-net projection.
+  bridge. `import 'std` exposes the provisional `net_arity` builtin for both
+  forms, alongside `seq` and `spark`.
 - Lazy identities are process-global nonzero IDs because a value and its result
   cell may cross evaluation sessions; each session uses them only as local
   scheduling keys.

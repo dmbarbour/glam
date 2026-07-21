@@ -248,6 +248,7 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             SyntaxOperator::Builtin(crate::core::Builtin::Anno) => "anno",
             SyntaxOperator::Builtin(crate::core::Builtin::Seq) => "seq",
             SyntaxOperator::Builtin(crate::core::Builtin::Spark) => "spark",
+            SyntaxOperator::Builtin(crate::core::Builtin::NetArity) => "net_arity",
             SyntaxOperator::Builtin(crate::core::Builtin::MergeDuplicate) => "merge_duplicate",
             SyntaxOperator::Builtin(crate::core::Builtin::Floor) => "floor",
             SyntaxOperator::Builtin(crate::core::Builtin::Mod) => "mod",
