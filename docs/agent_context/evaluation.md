@@ -61,15 +61,17 @@ control-flow overview.
 
 ## Promises and Fixpoints
 
-- Ordinary `fix` and object-self knots use computed fixpoint cells. The first
-  observing lazy task claims production. Strict recursive demand becomes an
-  ordinary lazy dependency cycle; guarded self-reference beneath a completed
-  constructor reaches WHNF. Other tasks wait if the producer is suspended.
+- Ordinary `fix` and object-self knots use immutable computed-fixpoint sources
+  beneath ordinary `LazyValue`s. The session lazy task is their only producer
+  owner and wait source. Strict recursive demand becomes an ordinary lazy
+  dependency cycle; guarded self-reference beneath a completed constructor
+  reaches WHNF. Same-session observers share the lazy task, while another
+  session may duplicate pure work against the shared result cell.
 - Task-owned reflection fixpoint promises retain their separate rule: direct
   observation by their owning reflection task is an error, while other tasks
   wait for the owner's assignment.
-- Do not replace fixpoint ownership with a Rust stack guard: suspended
-  evaluation unwinds the stack before scheduling resumes it.
+- Suspended fixpoint production is ordinary scheduler state, not a Rust stack
+  guard; evaluation unwinds the stack before scheduling resumes it.
 - `PromisedValue` is a distinct raw one-write assignment cell, not a
   `LazySource` and not a computed-lazy result cache. Its payload may itself be
   lazy or promised. Direct empty observation fails fast without filling the

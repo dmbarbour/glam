@@ -70,17 +70,19 @@ the caller.
 
 ## Lazy Producers
 
-Computed fixpoint cells track the lazy task currently responsible for
-production. Strict recursive observation is diagnosed by the common lazy
-dependency graph, while guarded recursion can finish at a constructor. Other
-tasks wait on a stable token if production suspended. Task-owned reflection
-fixpoints retain their direct owner check. Assignment-style `PromisedValue`
-cells hold a raw one-write assignment rather than a computed result cache.
+Computed fixpoints are immutable lazy sources; their ordinary session lazy task
+is the sole production owner and wait source. Strict recursive observation is
+diagnosed by the common lazy dependency graph, while guarded recursion can
+finish at a constructor. Same-session observers share a stable token if
+production suspends. Task-owned reflection fixpoints retain their direct owner
+check. Assignment-style `PromisedValue` cells hold a raw one-write assignment
+rather than a computed result cache.
 Direct observation before assignment fails without filling the cell. An
 enclosing lazy task instead records a scheduler-visible promise dependency and
 stays uncached, so later assignment can satisfy a new demand. Assigned promises
-follow lazy or promised payloads through the common deferred dependency graph;
-strict mixed cycles receive the same structured diagnosis as lazy-only cycles.
+follow lazy or promised payloads through the common deferred dependency graph.
+Promise-only and mixed promise/lazy cycles remain retryable scheduler waits;
+only pure lazy cycles permanently poison computed results.
 
 Reflection annotations are also lazy producers. Constructing a gate demands
 neither its effect nor its target. Demand on the gate registers or resumes the

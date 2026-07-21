@@ -11,9 +11,10 @@ pub(super) fn eval_fixpoint_builtin(
         return Err(EvalError::new("fixpoint builtin requires a function value"));
     }
 
-    LazyValue::computed_fixpoint("fixpoint", FixpointComputation::Function(function))
-        .map(Value::Lazy)
-        .map_err(|error| EvalError::new(error.as_ref()))
+    Ok(Value::Lazy(LazyValue::computed_fixpoint(
+        "fixpoint",
+        FixpointComputation::Function(function),
+    )))
 }
 
 pub(super) fn eval_effect_map_builtin(function: &Value, items: &Value) -> Result<Value, EvalError> {

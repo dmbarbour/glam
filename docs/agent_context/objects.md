@@ -106,7 +106,8 @@ updates from accidentally treating runtime metadata as a user definition.
   abstraction.
 - Dictionary/object compatibility uses the current eager dictionary
   representation and will need review when persistent lazy dictionaries land.
-- Final-self uses a computed fixpoint cell. Its first evaluator owns production;
-  recursive self-demand fails, while concurrent observation waits if that
-  producer has suspended on other work. Module final definitions still use a
-  separate fail-fast `Promised` assignment hole.
+- Final-self is an immutable computed-fixpoint source beneath an ordinary lazy
+  value. Its session lazy task owns production; recursive self-demand forms a
+  lazy cycle, while same-session observers share its wait if production blocks.
+  Module final definitions still use a separate fail-fast `Promised` assignment
+  hole.

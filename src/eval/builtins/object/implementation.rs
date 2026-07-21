@@ -5,12 +5,10 @@ pub(super) fn eval_object_instance_builtin(
     _context: &EvalContext,
     spec: &Value,
 ) -> Result<Value, EvalError> {
-    LazyValue::computed_fixpoint(
+    Ok(Value::Lazy(LazyValue::computed_fixpoint(
         "object self",
         FixpointComputation::ObjectInstance(spec.clone()),
-    )
-    .map(Value::Lazy)
-    .map_err(|error| EvalError::new(error.as_ref()))
+    )))
 }
 
 pub(in crate::eval) fn construct_object_instance(

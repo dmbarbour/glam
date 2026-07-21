@@ -2,7 +2,7 @@ use std::any::Any;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use internment::Intern;
@@ -176,7 +176,6 @@ pub(crate) struct TaskPromise {
 }
 
 static NEXT_DEFERRED_VALUE_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_FIXPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl LazyValue {
     fn with_source(label: impl Into<Arc<str>>, source: LazySource) -> Self {
@@ -191,18 +190,8 @@ impl LazyValue {
     pub(crate) fn computed_fixpoint(
         label: impl Into<Arc<str>>,
         computation: FixpointComputation,
-    ) -> Result<Self, Arc<str>> {
-        let id = allocate_fixpoint_id()?;
-        Ok(Self {
-            id: allocate_lazy_id(),
-            label: label.into(),
-            source: LazySource::ComputedFixpoint(Arc::new(ComputedFixpointCell {
-                id,
-                computation,
-                state: Mutex::new(ComputedFixpointState::Unclaimed),
-            })),
-            result: Arc::new(OnceLock::new()),
-        })
+    ) -> Self {
+        Self::with_source(label, LazySource::ComputedFixpoint(Arc::new(computation)))
     }
 
     pub(crate) fn deferred(
@@ -316,13 +305,6 @@ fn allocate_deferred_value_id() -> NonZeroU64 {
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
         .expect("deferred value IDs exhausted");
     NonZeroU64::new(id).expect("deferred value IDs start at one")
-}
-
-fn allocate_fixpoint_id() -> Result<FixpointId, Arc<str>> {
-    NEXT_FIXPOINT_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .map(|id| FixpointId(NonZeroU64::new(id).expect("fixpoint IDs start at one")))
-        .map_err(|_| Arc::<str>::from("fixpoint IDs exhausted"))
 }
 
 impl PartialEq for LazyValue {
@@ -611,7 +593,7 @@ impl BuiltinCall {
 #[derive(Clone)]
 pub(crate) enum LazySource {
     Error,
-    ComputedFixpoint(Arc<ComputedFixpointCell>),
+    ComputedFixpoint(Arc<FixpointComputation>),
     Deferred(Arc<DeferredComputation>),
     ReflectionGate(Arc<ReflectionGate>),
     Access {
@@ -642,44 +624,10 @@ impl LazyApplication {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct FixpointId(NonZeroU64);
-
 #[derive(Clone)]
 pub(crate) enum FixpointComputation {
     Function(Value),
     ObjectInstance(Value),
-}
-
-pub(crate) struct ComputedFixpointCell {
-    id: FixpointId,
-    computation: FixpointComputation,
-    state: Mutex<ComputedFixpointState>,
-}
-
-enum ComputedFixpointState {
-    Unclaimed,
-    Running(FixpointClaim),
-    Suspended(FixpointClaim),
-    Complete(FixpointClaim),
-}
-
-#[derive(Clone)]
-struct FixpointClaim {
-    owner: EvaluationTaskId,
-    wait: EvaluationWaitToken,
-}
-
-pub(crate) enum ComputedFixpointAction {
-    Produce {
-        owner: EvaluationTaskId,
-        computation: FixpointComputation,
-    },
-    Recursive {
-        id: u64,
-        owner: EvaluationTaskId,
-    },
-    Wait(EvaluationWaitToken),
 }
 
 impl TaskPromise {
@@ -689,86 +637,6 @@ impl TaskPromise {
 
     pub(crate) fn wait(&self) -> &EvaluationWaitToken {
         &self.wait
-    }
-}
-
-impl ComputedFixpointCell {
-    pub(crate) fn begin(
-        &self,
-        context: &EvalContext,
-        result: &Arc<OnceLock<LazyResult>>,
-    ) -> Result<ComputedFixpointAction, Arc<str>> {
-        let observer = context.task_id()?;
-        let mut state = self
-            .state
-            .lock()
-            .expect("computed fixpoint state was poisoned");
-        match &*state {
-            ComputedFixpointState::Unclaimed => {
-                let (owner, wait) = context.register_result_promise(result)?;
-                let claim = FixpointClaim { owner, wait };
-                *state = ComputedFixpointState::Running(claim);
-                Ok(ComputedFixpointAction::Produce {
-                    owner,
-                    computation: self.computation.clone(),
-                })
-            }
-            ComputedFixpointState::Running(claim) if claim.owner == observer => {
-                Ok(ComputedFixpointAction::Recursive {
-                    id: self.id.0.get(),
-                    owner: claim.owner,
-                })
-            }
-            ComputedFixpointState::Suspended(claim) if claim.owner == observer => {
-                let claim = claim.clone();
-                *state = ComputedFixpointState::Running(claim.clone());
-                Ok(ComputedFixpointAction::Produce {
-                    owner: claim.owner,
-                    computation: self.computation.clone(),
-                })
-            }
-            ComputedFixpointState::Running(claim)
-            | ComputedFixpointState::Suspended(claim)
-            | ComputedFixpointState::Complete(claim) => {
-                Ok(ComputedFixpointAction::Wait(claim.wait.clone()))
-            }
-        }
-    }
-
-    pub(crate) fn suspend(&self, owner: EvaluationTaskId) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("computed fixpoint state was poisoned");
-        let ComputedFixpointState::Running(claim) = &*state else {
-            return;
-        };
-        assert_eq!(
-            claim.owner, owner,
-            "only the producer may suspend a fixpoint"
-        );
-        *state = ComputedFixpointState::Suspended(claim.clone());
-    }
-
-    pub(crate) fn complete(&self, context: &EvalContext, owner: EvaluationTaskId) {
-        let wait = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("computed fixpoint state was poisoned");
-            let ComputedFixpointState::Running(claim) = &*state else {
-                return;
-            };
-            assert_eq!(
-                claim.owner, owner,
-                "only the producer may complete a fixpoint"
-            );
-            let claim = claim.clone();
-            let wait = claim.wait.clone();
-            *state = ComputedFixpointState::Complete(claim);
-            wait
-        };
-        context.release_owned_promise(owner, &wait);
     }
 }
 
@@ -843,10 +711,6 @@ impl LazyValue {
                 task: OnceLock::new(),
             })),
         )
-    }
-
-    pub(crate) fn result_cell(&self) -> &Arc<OnceLock<LazyResult>> {
-        &self.result
     }
 }
 
@@ -1096,7 +960,7 @@ mod tests {
         #[allow(dead_code)]
         enum LazySourceWithoutReflection {
             Error,
-            ComputedFixpoint(Arc<ComputedFixpointCell>),
+            ComputedFixpoint(Arc<FixpointComputation>),
             Deferred(Arc<DeferredComputation>),
             Access {
                 path: Arc<[CoreDataKey]>,

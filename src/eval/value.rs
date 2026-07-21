@@ -2,8 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::core::{
-    Builtin, ComputedFixpointAction, EvaluatedValue, FixpointComputation, Key, LazyFailure,
-    LazyResult, LazySource, LazyValue, List, ListThunk, PromisedValue, Value, keys,
+    Builtin, EvaluatedValue, FixpointComputation, Key, LazyFailure, LazyResult, LazySource,
+    LazyValue, List, ListThunk, PromisedValue, Value, keys,
 };
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
@@ -584,51 +584,14 @@ fn eval_reflection_gate_source(
 fn eval_computed_fixpoint(
     context: &EvalContext,
     lazy: &LazyValue,
-    fixpoint: &crate::core::ComputedFixpointCell,
+    computation: &FixpointComputation,
 ) -> Result<Value, EvalError> {
-    match fixpoint
-        .begin(context, lazy.result_cell())
-        .map_err(|error| EvalError::new(error.as_ref()))?
-    {
-        ComputedFixpointAction::Recursive { id, owner } => Err(EvalError::new(format!(
-            "fixpoint {id} recursively observed itself in task {}",
-            owner.get()
-        ))),
-        ComputedFixpointAction::Wait(wait) => match context.poll_wait(&wait) {
-            EvaluationTaskPoll::Pending(wait) => Err(EvalError::blocked(CoreWaitToken(wait))),
-            EvaluationTaskPoll::Complete(_) => eval_lazy(context, lazy),
-            EvaluationTaskPoll::Failed(error) => Err(deferred_task_failure(context, &wait, error)),
-            EvaluationTaskPoll::Cancelled => Err(EvalError::new("fixpoint producer was cancelled")),
-            EvaluationTaskPoll::ForeignSession => Err(EvalError::new(
-                "fixpoint belongs to another evaluation session",
-            )),
-        },
-        ComputedFixpointAction::Produce { owner, computation } => {
-            let marker = Value::Lazy(lazy.clone());
-            let produced = match computation {
-                FixpointComputation::Function(function) => apply_value(context, function, marker)
-                    .and_then(|application| force_value_shell(context, &application)),
-                FixpointComputation::ObjectInstance(spec) => {
-                    construct_fixpoint_object(context, &spec, marker)
-                }
-            };
-            if let Err(error) = &produced
-                && error.blocked_on().is_some()
-            {
-                fixpoint.suspend(owner);
-                return Err(error.clone());
-            }
-            let produced = match produced {
-                Ok(value) => Ok(EvaluatedValue::try_from(value)
-                    .expect("forcing a fixpoint result shell must produce evaluated data")),
-                Err(error) => Err(error.into_lazy_failure()),
-            };
-            let result = lazy
-                .cache(produced)
-                .map(EvaluatedValue::into_value)
-                .map_err(EvalError::lazy_failure);
-            fixpoint.complete(context, owner);
-            result
+    let marker = Value::Lazy(lazy.clone());
+    match computation {
+        FixpointComputation::Function(function) => apply_value(context, function.clone(), marker)
+            .and_then(|application| force_value_shell(context, &application)),
+        FixpointComputation::ObjectInstance(spec) => {
+            construct_fixpoint_object(context, spec, marker)
         }
     }
 }

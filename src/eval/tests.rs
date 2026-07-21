@@ -380,13 +380,10 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
 fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
     let context = test_context();
     let function = closed_function_value(1, TestExpr::Local(0));
-    let fixpoint = Value::Lazy(
-        LazyValue::computed_fixpoint(
-            "recursive value fixpoint",
-            FixpointComputation::Function(function),
-        )
-        .unwrap(),
-    );
+    let fixpoint = Value::Lazy(LazyValue::computed_fixpoint(
+        "recursive value fixpoint",
+        FixpointComputation::Function(function),
+    ));
 
     let error = eval_value(&context, &fixpoint).unwrap_err();
     assert!(
@@ -437,13 +434,10 @@ fn suspended_value_fixpoint_keeps_one_knot_for_concurrent_observers() {
     let observer = session.with_new_task().unwrap();
     let gate = reflection_annotation(&owner, n(0), n(42));
     let function = closed_function_value(1, TestExpr::Value(gate));
-    let fixpoint = Value::Lazy(
-        LazyValue::computed_fixpoint(
-            "suspended value fixpoint",
-            FixpointComputation::Function(function),
-        )
-        .unwrap(),
-    );
+    let fixpoint = Value::Lazy(LazyValue::computed_fixpoint(
+        "suspended value fixpoint",
+        FixpointComputation::Function(function),
+    ));
 
     let producer_block = eval_value(&owner, &fixpoint).unwrap_err();
     let producer_wait = producer_block
@@ -461,6 +455,51 @@ fn suspended_value_fixpoint_keeps_one_knot_for_concurrent_observers() {
     owner.complete_wait(&producer_wait.0);
     assert_eq!(eval_value(&owner, &fixpoint).unwrap(), n(42));
     assert_eq!(eval_value(&observer, &fixpoint).unwrap(), n(42));
+}
+
+#[test]
+fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
+    let first = test_context();
+    let second = test_context();
+    let promise = PromisedValue::new("cross-session fixpoint input");
+    let function = closed_function_value(1, TestExpr::Value(Value::Promised(promise.clone())));
+    let lazy = LazyValue::computed_fixpoint(
+        "cross-session value fixpoint",
+        FixpointComputation::Function(function),
+    );
+    let fixpoint = Value::Lazy(lazy.clone());
+
+    let first_block = force_value_shell(&first, &fixpoint)
+        .expect_err("the first session should wait for the promise");
+    let second_block = force_value_shell(&second, &fixpoint)
+        .expect_err("the second session should own an independent wait");
+    assert!(first_block.blocked_on().is_some());
+    assert!(second_block.blocked_on().is_some());
+    assert!(lazy.cached().is_none());
+
+    promise.set(n(42)).unwrap();
+    assert_eq!(force_value_shell(&first, &fixpoint).unwrap(), n(42));
+    assert_eq!(force_value_shell(&second, &fixpoint).unwrap(), n(42));
+    assert_eq!(cached_value(&lazy), n(42));
+}
+
+#[test]
+fn computed_fixpoint_preserves_a_forwarded_structured_failure() {
+    let context = test_context();
+    let source = LazyValue::error("fixpoint source failed");
+    let function = closed_function_value(1, TestExpr::Value(Value::Lazy(source.clone())));
+    let fixpoint = LazyValue::computed_fixpoint(
+        "failed value fixpoint",
+        FixpointComputation::Function(function),
+    );
+
+    let error = force_value_shell(&context, &Value::Lazy(fixpoint.clone()))
+        .expect_err("the source failure should fail the fixpoint");
+    assert_eq!(error.to_string(), "fixpoint source failed");
+
+    let source_failure = source.cached().unwrap().unwrap_err();
+    let fixpoint_failure = fixpoint.cached().unwrap().unwrap_err();
+    assert!(Arc::ptr_eq(&source_failure, &fixpoint_failure));
 }
 
 #[test]

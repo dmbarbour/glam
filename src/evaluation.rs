@@ -12,8 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use crate::core::{
-    DeferredValueId, LazyCycle, LazyCycleMember, LazyFailure, LazyResult, LazyValue, PromisedValue,
-    Value,
+    DeferredValueId, LazyCycle, LazyCycleMember, LazyFailure, LazyValue, PromisedValue, Value,
 };
 
 mod executor;
@@ -388,41 +387,7 @@ impl Drop for PendingReflectionTaskInner {
 #[derive(Debug)]
 struct PromiseRecord {
     producer: EvaluationTaskId,
-    result: PromiseResult,
-}
-
-#[derive(Debug)]
-enum PromiseResult {
-    Assignment(Weak<OnceLock<Result<Value, Arc<str>>>>),
-    Lazy(Weak<OnceLock<LazyResult>>),
-}
-
-impl PromiseResult {
-    fn is_ready(&self) -> bool {
-        match self {
-            Self::Assignment(result) => result
-                .upgrade()
-                .is_some_and(|result| result.get().is_some()),
-            Self::Lazy(result) => result
-                .upgrade()
-                .is_some_and(|result| result.get().is_some()),
-        }
-    }
-
-    fn fail(&self, reason: Arc<str>) {
-        match self {
-            Self::Assignment(result) => {
-                if let Some(result) = result.upgrade() {
-                    let _ = result.set(Err(reason));
-                }
-            }
-            Self::Lazy(result) => {
-                if let Some(result) = result.upgrade() {
-                    let _ = result.set(Err(Arc::new(LazyFailure::evaluation(reason))));
-                }
-            }
-        }
-    }
+    result: Weak<OnceLock<Result<Value, Arc<str>>>>,
 }
 
 #[derive(Default)]
@@ -696,34 +661,7 @@ impl EvalContext {
             wait.clone(),
             PromiseRecord {
                 producer: owner,
-                result: PromiseResult::Assignment(Arc::downgrade(result)),
-            },
-        );
-        assert!(replaced.is_none(), "evaluation wait tokens must be unique");
-        tasks
-            .owned_promises
-            .entry(owner)
-            .or_default()
-            .push(wait.clone());
-        Ok((owner, wait))
-    }
-
-    pub(crate) fn register_result_promise(
-        &self,
-        result: &Arc<OnceLock<LazyResult>>,
-    ) -> Result<(EvaluationTaskId, EvaluationWaitToken), Arc<str>> {
-        let owner = self.task_id()?;
-        let wait = allocate_wait_token(&self.session)?;
-        let mut tasks = self
-            .session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        let replaced = tasks.promises.insert(
-            wait.clone(),
-            PromiseRecord {
-                producer: owner,
-                result: PromiseResult::Lazy(Arc::downgrade(result)),
+                result: Arc::downgrade(result),
             },
         );
         assert!(replaced.is_none(), "evaluation wait tokens must be unique");
@@ -751,28 +689,9 @@ impl EvalContext {
             let Some(promise) = tasks.promises.get(&wait) else {
                 continue;
             };
-            promise.result.fail(reason.clone());
-        }
-    }
-
-    pub(crate) fn release_owned_promise(
-        &self,
-        owner: EvaluationTaskId,
-        wait: &EvaluationWaitToken,
-    ) {
-        let mut tasks = self
-            .session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        let remove_owner = if let Some(waits) = tasks.owned_promises.get_mut(&owner) {
-            waits.retain(|candidate| candidate != wait);
-            waits.is_empty()
-        } else {
-            false
-        };
-        if remove_owner {
-            tasks.owned_promises.remove(&owner);
+            if let Some(result) = promise.result.upgrade() {
+                let _ = result.set(Err(reason.clone()));
+            }
         }
     }
 
@@ -1080,31 +999,16 @@ impl EvalContext {
                     "evaluation wait token is no longer registered",
                 ));
             };
-            return match &promise.result {
-                PromiseResult::Assignment(result) => match result.upgrade() {
-                    Some(result) => match result.get() {
-                        Some(Ok(value)) => EvaluationTaskPoll::Complete(value.clone()),
-                        Some(Err(error)) => EvaluationTaskPoll::Failed(error.clone()),
-                        None if Arc::ptr_eq(&self.session, &owner) => {
-                            EvaluationTaskPoll::Pending(wait.clone())
-                        }
-                        None => EvaluationTaskPoll::ForeignSession,
-                    },
-                    None => {
-                        EvaluationTaskPoll::Failed(Arc::from("promised value no longer exists"))
-                    }
-                },
-                PromiseResult::Lazy(result) => match result.upgrade() {
-                    Some(result) => match result.get() {
-                        Some(Ok(value)) => EvaluationTaskPoll::Complete(value.clone().into_value()),
-                        Some(Err(error)) => EvaluationTaskPoll::Failed(error.legacy_message()),
-                        None if Arc::ptr_eq(&self.session, &owner) => {
-                            EvaluationTaskPoll::Pending(wait.clone())
-                        }
-                        None => EvaluationTaskPoll::ForeignSession,
-                    },
-                    None => EvaluationTaskPoll::Failed(Arc::from("lazy result no longer exists")),
-                },
+            let Some(result) = promise.result.upgrade() else {
+                return EvaluationTaskPoll::Failed(Arc::from("promised value no longer exists"));
+            };
+            return match result.get() {
+                Some(Ok(value)) => EvaluationTaskPoll::Complete(value.clone()),
+                Some(Err(error)) => EvaluationTaskPoll::Failed(error.clone()),
+                None if Arc::ptr_eq(&self.session, &owner) => {
+                    EvaluationTaskPoll::Pending(wait.clone())
+                }
+                None => EvaluationTaskPoll::ForeignSession,
             };
         };
         match &record.state {
@@ -1229,10 +1133,7 @@ impl EvalContext {
             }
             return None;
         }
-        let PromiseResult::Lazy(result) = &tasks.promises.get(wait)?.result else {
-            return None;
-        };
-        result.upgrade()?.get()?.as_ref().err().cloned()
+        None
     }
 
     #[cfg(test)]
@@ -1814,7 +1715,8 @@ fn wait_is_terminal(tasks: &EvaluationTasks, wait: &EvaluationWaitToken) -> bool
     tasks
         .promises
         .get(wait)
-        .is_some_and(|promise| promise.result.is_ready())
+        .and_then(|promise| promise.result.upgrade())
+        .is_some_and(|result| result.get().is_some())
 }
 
 fn deferred_for_wait(
