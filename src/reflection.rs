@@ -40,7 +40,7 @@ use crate::number::Number;
 
 /// One additional effect constructor contributed by a task specialization.
 pub struct EffectRequestSpec<R> {
-    api_name: Arc<str>,
+    api_path: Arc<[Arc<str>]>,
     tag_path: Arc<[Arc<str>]>,
     arity: usize,
     request: R,
@@ -52,8 +52,19 @@ impl<R> EffectRequestSpec<R> {
         I: IntoIterator<Item = P>,
         P: Into<Arc<str>>,
     {
+        Self::at_path([api_name], tag_path, arity, request)
+    }
+
+    /// Contributes a request constructor at a nested effect API path.
+    pub fn at_path<A, P, I, T>(api_path: A, tag_path: I, arity: usize, request: R) -> Self
+    where
+        A: IntoIterator<Item = P>,
+        P: Into<Arc<str>>,
+        I: IntoIterator<Item = T>,
+        T: Into<Arc<str>>,
+    {
         Self {
-            api_name: api_name.into(),
+            api_path: api_path.into_iter().map(Into::into).collect(),
             tag_path: tag_path.into_iter().map(Into::into).collect(),
             arity,
             request,
@@ -62,7 +73,7 @@ impl<R> EffectRequestSpec<R> {
 
     pub fn map_request<T>(self, map: impl FnOnce(R) -> T) -> EffectRequestSpec<T> {
         EffectRequestSpec {
-            api_name: self.api_name,
+            api_path: self.api_path,
             tag_path: self.tag_path,
             arity: self.arity,
             request: map(self.request),
@@ -355,7 +366,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
         self
     }
 
-    /// Gives `.refl_task` children only the reusable reflection capabilities.
+    /// Gives `.task.new` children only the reusable reflection capabilities.
     pub fn with_reflection_children(
         mut self,
         host: Arc<dyn ReflectionHost<ReflectionEffects>>,
@@ -2799,20 +2810,19 @@ fn effect_api<R: Clone>(
     let mut requests = Vec::with_capacity(specs.len());
     for spec in specs {
         let tag = Key::abstract_global_path(spec.tag_path.iter().map(Arc::as_ref));
-        let api_key = Key::atom_from_text(&spec.api_name);
-        if api.get(&api_key).is_some() {
-            return Err(TaskError::new(format!(
-                "duplicate effect API name `{}`",
-                spec.api_name
-            )));
-        }
+        let api_name = spec
+            .api_path
+            .iter()
+            .map(Arc::as_ref)
+            .collect::<Vec<_>>()
+            .join(".");
         if requests
             .iter()
             .any(|request: &SpecializedRequest<R>| request.tag == tag)
         {
             return Err(TaskError::new(format!(
                 "duplicate private tag for effect API name `{}`",
-                spec.api_name
+                api_name
             )));
         }
         let value = if spec.arity == 0 {
@@ -2820,7 +2830,7 @@ fn effect_api<R: Clone>(
         } else {
             request_function(tag.clone(), spec.arity, Vec::new(), false)
         };
-        api = api.insert(api_key, value);
+        api = insert_effect_api_path(api, &spec.api_path, value, &api_name)?;
         requests.push(SpecializedRequest {
             tag,
             arity: spec.arity,
@@ -2828,6 +2838,38 @@ fn effect_api<R: Clone>(
         });
     }
     Ok((Value::Dict(api), requests))
+}
+
+fn insert_effect_api_path(
+    api: Dict,
+    path: &[Arc<str>],
+    value: Value,
+    display_path: &str,
+) -> Result<Dict, TaskError> {
+    let Some((name, rest)) = path.split_first() else {
+        return Err(TaskError::new("effect API path must not be empty"));
+    };
+    let key = Key::atom_from_text(name);
+    if rest.is_empty() {
+        if api.get(&key).is_some() {
+            return Err(TaskError::new(format!(
+                "duplicate effect API name `{display_path}`"
+            )));
+        }
+        return Ok(api.insert(key, value));
+    }
+
+    let nested = match api.get(&key) {
+        Some(Value::Dict(nested)) => nested.clone(),
+        Some(_) => {
+            return Err(TaskError::new(format!(
+                "effect API path `{display_path}` crosses non-dictionary `{name}`"
+            )));
+        }
+        None => Dict::new_sync(),
+    };
+    let nested = insert_effect_api_path(nested, rest, value, display_path)?;
+    Ok(api.insert(key, Value::Dict(nested)))
 }
 
 fn request_function(tag: Key, arity: usize, supplied: Vec<Value>, wrap_effect: bool) -> Value {
@@ -3694,7 +3736,7 @@ mod tests {
     #[test]
     fn effect_run_composes_runtime_children_and_unit_policy() {
         let (assembler, effect) = compile_effect(
-            ".refl_task (.log 'warn { msg:{ text:\"child\" } }) >>= (\\_task -> .r ())",
+            ".task.new (.log 'warn { msg:{ text:\"child\" } }) >>= (\\_task -> .r ())",
         );
         let host = Arc::new(TestHost::default());
         let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
@@ -3714,7 +3756,7 @@ mod tests {
     #[test]
     fn reflection_task_returns_a_joinable_result() {
         let (assembler, effect) =
-            compile_effect(".refl_task (.r \"child\") >>= (\\task -> .join_task task)");
+            compile_effect(".task.new (.r \"child\") >>= (\\task -> .task.join task)");
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&effect, host);
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
@@ -3944,7 +3986,7 @@ mod tests {
         );
 
         let (_, child_environment) =
-            compile_effect(".refl_task (.env ['process,'args]) >>= (\\task -> .join_task task)");
+            compile_effect(".task.new (.env ['process,'args]) >>= (\\task -> .task.join task)");
         let (context, task) = schedule_composed_test_task(&child_environment, host.clone());
         let EvaluationTaskPoll::Complete(Value::List(arguments)) =
             pump_composed_test_task(&context, &task)
@@ -3970,14 +4012,14 @@ mod tests {
     }
 
     #[test]
-    fn task_result_is_symmetric_with_task_error() {
+    fn task_value_is_symmetric_with_task_error() {
         let (assembler, effect) = compile_effect(
-            ".refl_task (.r \"result\") >>= (\\task -> .join_task task >>= (\\_value -> .task_result task))",
+            ".task.new (.r \"result\") >>= (\\task -> .task.join task >>= (\\_value -> .task.value task))",
         );
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&effect, host);
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
-            panic!("task_result should return a completed task result")
+            panic!("task.value should return a completed task result")
         };
         assert_eq!(
             assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
@@ -3989,10 +4031,10 @@ mod tests {
     fn task_status_reports_launched_and_terminal_states() {
         let host = Arc::new(TestHost::default());
         for source in [
-            ".refl_task (.r ()) >>= (\\task -> .task_status task >>= (\\status -> (status == 'launched) =>> .r ()))",
-            ".refl_task (.r ()) >>= (\\task -> .join_task task >>= (\\_ -> .task_status task >>= (\\status -> .r status.ok)))",
-            ".refl_task .fail >>= (\\task -> .task_error task >>= (\\_ -> .task_status task >>= (\\status -> .r status.err)))",
-            ".refl_task (.r ()) >>= (\\task -> .cancel_task task =>> .task_error task >>= (\\_ -> .task_status task >>= (\\status -> (status == 'canceled) =>> .r ())))",
+            ".task.new (.r ()) >>= (\\task -> .task.status task >>= (\\status -> (status == 'launched) =>> .r ()))",
+            ".task.new (.r ()) >>= (\\task -> .task.join task >>= (\\_ -> .task.status task >>= (\\status -> .r status.ok)))",
+            ".task.new .fail >>= (\\task -> .task.error task >>= (\\_ -> .task.status task >>= (\\status -> .r status.err)))",
+            ".task.new (.r ()) >>= (\\task -> .task.cancel task =>> .task.error task >>= (\\_ -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ())))",
         ] {
             let (_, effect) = compile_effect(source);
             let (context, task) = schedule_composed_test_task(&effect, host.clone());
@@ -4006,7 +4048,7 @@ mod tests {
 
     #[test]
     fn task_status_rejects_a_handle_from_another_session() {
-        let (assembler, spawn) = compile_effect(".refl_task (.r ())");
+        let (assembler, spawn) = compile_effect(".task.new (.r ())");
         let host = Arc::new(TestHost::default());
         let (first_context, first_task) = schedule_composed_test_task(&spawn, host.clone());
         let EvaluationTaskPoll::Complete(handle) =
@@ -4015,7 +4057,7 @@ mod tests {
             panic!("first session should return a task handle")
         };
 
-        let (_, inspect) = compile_effect("\\task -> .task_status task");
+        let (_, inspect) = compile_effect("\\task -> .task.status task");
         let inspect = assembler
             .apply(&inspect, [PublicValue::from_core(handle)])
             .expect("foreign task inspection should apply");
@@ -4030,7 +4072,7 @@ mod tests {
     #[test]
     fn join_does_not_advance_an_alternative_while_the_child_is_nonterminal() {
         let (_, effect) = compile_effect(
-            ".refl_task (.cut (.heap.get ['never] >>= (\\_ -> .fail))) >>= (\\task -> .cut (.alt (.join_task task) (.r \"fallback\")))",
+            ".task.new (.cut (.heap.get ['never] >>= (\\_ -> .fail))) >>= (\\task -> .cut (.alt (.task.join task) (.r \"fallback\")))",
         );
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&effect, host);
@@ -4047,7 +4089,7 @@ mod tests {
     #[test]
     fn cancellation_is_transactional_and_late_cancellation_is_harmless() {
         let (assembler, rolled_back) = compile_effect(
-            ".refl_task (.r \"alive\") >>= (\\task -> (.cut (.alt ((.cancel_task task) =>> .fail) (.r ()))) =>> .join_task task)",
+            ".task.new (.r \"alive\") >>= (\\task -> (.cut (.alt ((.task.cancel task) =>> .fail) (.r ()))) =>> .task.join task)",
         );
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&rolled_back, host.clone());
@@ -4060,7 +4102,7 @@ mod tests {
         );
 
         let (_, committed) = compile_effect(
-            ".cut (.refl_task (.r ()) >>= (\\task -> (.cancel_task task) =>> .r task)) >>= (\\task -> .task_status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
+            ".cut (.task.new (.r ()) >>= (\\task -> (.task.cancel task) =>> .r task)) >>= (\\task -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
         );
         let (context, task) = schedule_composed_test_task(&committed, host.clone());
         assert!(matches!(
@@ -4068,7 +4110,7 @@ mod tests {
             EvaluationTaskPoll::Complete(_)
         ));
 
-        let (_, spawn_foreign) = compile_effect(".refl_task (.r ())");
+        let (_, spawn_foreign) = compile_effect(".task.new (.r ())");
         let (source_context, source_task) =
             schedule_composed_test_task(&spawn_foreign, host.clone());
         let EvaluationTaskPoll::Complete(foreign_handle) =
@@ -4076,7 +4118,7 @@ mod tests {
         else {
             panic!("source session should produce a foreign task handle")
         };
-        let (_, cancel_foreign) = compile_effect("\\task -> .cancel_task task");
+        let (_, cancel_foreign) = compile_effect("\\task -> .task.cancel task");
         let cancel_foreign = assembler
             .apply(&cancel_foreign, [PublicValue::from_core(foreign_handle)])
             .expect("foreign cancellation should apply");
@@ -4088,7 +4130,7 @@ mod tests {
         ));
 
         let (_, late) = compile_effect(
-            ".refl_task (.r \"done\") >>= (\\task -> .join_task task >>= (\\value -> (.cancel_task task) =>> .r value))",
+            ".task.new (.r \"done\") >>= (\\task -> .task.join task >>= (\\value -> (.task.cancel task) =>> .r value))",
         );
         let (context, task) = schedule_composed_test_task(&late, host);
         assert!(matches!(
@@ -4100,7 +4142,7 @@ mod tests {
     #[test]
     fn reflection_task_launch_is_buffered_until_cut_commit() {
         let (assembler, effect) =
-            compile_effect(".cut (.refl_task (.r \"committed\")) >>= (\\task -> .join_task task)");
+            compile_effect(".cut (.task.new (.r \"committed\")) >>= (\\task -> .task.join task)");
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&effect, host);
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
@@ -4115,7 +4157,7 @@ mod tests {
     #[test]
     fn failed_transaction_discards_its_reflection_task_launch() {
         let (_, effect) = compile_effect(
-            ".cut (.alt (.refl_task (.log 'error { msg:{ text:\"discarded\" } }) >>= (\\task -> .fail)) (.r \"kept\"))",
+            ".cut (.alt (.task.new (.log 'error { msg:{ text:\"discarded\" } }) >>= (\\task -> .fail)) (.r \"kept\"))",
         );
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&effect, host.clone());
@@ -4130,7 +4172,7 @@ mod tests {
 
     #[test]
     fn join_propagates_task_error_and_task_error_extracts_it() {
-        let (_, join) = compile_effect(".refl_task .fail >>= (\\task -> .join_task task)");
+        let (_, join) = compile_effect(".task.new .fail >>= (\\task -> .task.join task)");
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&join, host.clone());
         let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
@@ -4139,7 +4181,7 @@ mod tests {
         assert!(error.contains("failed permanently"));
 
         let (assembler, extract) =
-            compile_effect(".refl_task .fail >>= (\\task -> .task_error task)");
+            compile_effect(".task.new .fail >>= (\\task -> .task.error task)");
         let (context, task) = schedule_composed_test_task(&extract, host);
         let poll = pump_composed_test_task(&context, &task);
         let EvaluationTaskPoll::Complete(value) = poll else {
@@ -4156,11 +4198,11 @@ mod tests {
         let host = Arc::new(TestHost::default());
         for (source, expected) in [
             (
-                ".refl_task .fail >>= (\\task -> .cut (.heap.get ['observed] >>= (\\_ -> .join_task task)))",
+                ".task.new .fail >>= (\\task -> .cut (.heap.get ['observed] >>= (\\_ -> .task.join task)))",
                 "failed permanently",
             ),
             (
-                ".refl_task (.r ()) >>= (\\task -> (.cancel_task task) =>> .cut (.heap.get ['observed] >>= (\\_ -> .join_task task)))",
+                ".task.new (.r ()) >>= (\\task -> (.task.cancel task) =>> .cut (.heap.get ['observed] >>= (\\_ -> .task.join task)))",
                 "was cancelled",
             ),
         ] {
@@ -4257,7 +4299,7 @@ mod tests {
 
     #[test]
     fn task_error_fails_for_a_successful_task() {
-        let (_, effect) = compile_effect(".refl_task (.r ()) >>= (\\task -> .task_error task)");
+        let (_, effect) = compile_effect(".task.new (.r ()) >>= (\\task -> .task.error task)");
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&effect, host);
         let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
@@ -4269,7 +4311,7 @@ mod tests {
     #[test]
     fn pending_task_error_is_an_effect_failure_before_it_is_a_wait() {
         let (assembler, effect) = compile_effect(
-            ".refl_task (.r \"child\") >>= (\\task -> .cut (.alt (.task_error task) (.r \"fallback\")))",
+            ".task.new (.r \"child\") >>= (\\task -> .cut (.alt (.task.error task) (.r \"fallback\")))",
         );
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&effect, host);
@@ -4285,7 +4327,7 @@ mod tests {
     #[test]
     fn spawned_tasks_receive_only_reusable_reflection_capabilities() {
         let (assembler, effect) = compile_effect(
-            ".refl_task (.write_stderr \"forbidden\") >>= (\\task -> .task_error task)",
+            ".task.new (.write_stderr \"forbidden\") >>= (\\task -> .task.error task)",
         );
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&effect, host.clone());
@@ -4490,6 +4532,12 @@ mod tests {
 
         let (_, effect) = compile_effect(".log 'info { msg:{ text:\"hidden\" } }");
         assert!(run_standard_test(&effect).is_err());
+    }
+
+    #[test]
+    fn reusable_reflection_api_does_not_expose_internal_queries() {
+        let (_, effect) = compile_effect(".query.result {}");
+        assert!(run_reflection_test(&effect, Arc::new(TestHost::default())).is_err());
     }
 
     #[test]
@@ -4713,7 +4761,7 @@ mod tests {
     #[test]
     fn child_tasks_start_with_fresh_local_state_and_share_heap() {
         let (assembler, effect) = compile_effect(
-            ".heap.set ['shared] \"visible\" =>> .set ['local] \"private\" =>> .refl_task (.get ['local] >>= (\\local -> .heap.get ['shared] >>= (\\shared -> .r { local:local, shared:shared }))) >>= (\\task -> .join_task task)",
+            ".heap.set ['shared] \"visible\" =>> .set ['local] \"private\" =>> .task.new (.get ['local] >>= (\\local -> .heap.get ['shared] >>= (\\shared -> .r { local:local, shared:shared }))) >>= (\\task -> .task.join task)",
         );
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&effect, host);
@@ -4751,7 +4799,7 @@ mod tests {
             .module(["reflection_volume_child"])
             .script(
                 "g",
-                "language g0\nimport 'std\nlaunch = \\cap -> .refl_task (cap.set [] \"child\") >>= (\\task -> .join_task task)\n",
+                "language g0\nimport 'std\nlaunch = \\cap -> .task.new (cap.set [] \"child\") >>= (\\task -> .task.join task)\n",
             )
             .build()
             .expect("volume child fixture should compile");

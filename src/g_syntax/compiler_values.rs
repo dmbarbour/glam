@@ -353,7 +353,7 @@ fn build_reflection_annotator() -> Value {
     let launch_item = effect_call(
         "seq",
         [
-            effect_call("refl_task", [require_unit]),
+            effect_path_call(&["task", "new"], [require_unit]),
             ResolvedExpr::lambda(vec![handle], effect_call("r", [task_record])),
         ],
     );
@@ -388,7 +388,7 @@ fn build_reflection_annotator() -> Value {
     let launch_and_remember = effect_call(
         "seq",
         [
-            effect_call("refl_task", [scanner]),
+            effect_path_call(&["task", "new"], [scanner]),
             ResolvedExpr::lambda(
                 vec![scanner_handle],
                 effect_path_call(

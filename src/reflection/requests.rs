@@ -22,13 +22,12 @@ pub enum ReflectionRequest {
     DictItems,
     Eval,
     Log,
-    ReflTask,
-    JoinTask,
+    TaskNew,
+    TaskJoin,
     TaskStatus,
-    TaskResult,
+    TaskValue,
     TaskError,
-    QueryResult,
-    CancelTask,
+    TaskCancel,
 }
 
 #[derive(Clone)]
@@ -140,47 +139,41 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
             2,
             ReflectionRequest::Log,
         ),
-        EffectRequestSpec::new(
-            "refl_task",
-            ["reflection_runtime", "v0", "request", "refl_task"],
+        EffectRequestSpec::at_path(
+            ["task", "new"],
+            ["reflection_runtime", "v0", "request", "task", "new"],
             1,
-            ReflectionRequest::ReflTask,
+            ReflectionRequest::TaskNew,
         ),
-        EffectRequestSpec::new(
-            "join_task",
-            ["reflection_runtime", "v0", "request", "join_task"],
+        EffectRequestSpec::at_path(
+            ["task", "join"],
+            ["reflection_runtime", "v0", "request", "task", "join"],
             1,
-            ReflectionRequest::JoinTask,
+            ReflectionRequest::TaskJoin,
         ),
-        EffectRequestSpec::new(
-            "task_status",
-            ["reflection_runtime", "v0", "request", "task_status"],
+        EffectRequestSpec::at_path(
+            ["task", "status"],
+            ["reflection_runtime", "v0", "request", "task", "status"],
             1,
             ReflectionRequest::TaskStatus,
         ),
-        EffectRequestSpec::new(
-            "task_result",
-            ["reflection_runtime", "v0", "request", "task_result"],
+        EffectRequestSpec::at_path(
+            ["task", "value"],
+            ["reflection_runtime", "v0", "request", "task", "value"],
             1,
-            ReflectionRequest::TaskResult,
+            ReflectionRequest::TaskValue,
         ),
-        EffectRequestSpec::new(
-            "task_error",
-            ["reflection_runtime", "v0", "request", "task_error"],
+        EffectRequestSpec::at_path(
+            ["task", "error"],
+            ["reflection_runtime", "v0", "request", "task", "error"],
             1,
             ReflectionRequest::TaskError,
         ),
-        EffectRequestSpec::new(
-            "query_result",
-            ["reflection_runtime", "v0", "request", "query_result"],
+        EffectRequestSpec::at_path(
+            ["task", "cancel"],
+            ["reflection_runtime", "v0", "request", "task", "cancel"],
             1,
-            ReflectionRequest::QueryResult,
-        ),
-        EffectRequestSpec::new(
-            "cancel_task",
-            ["reflection_runtime", "v0", "request", "cancel_task"],
-            1,
-            ReflectionRequest::CancelTask,
+            ReflectionRequest::TaskCancel,
         ),
     ]
 }
@@ -251,9 +244,9 @@ where
             }
             Ok(RequestResult::ReturnUnit)
         }
-        ReflectionRequest::ReflTask => {
+        ReflectionRequest::TaskNew => {
             let [effect]: [Value; 1] = arguments.try_into().map_err(|_| {
-                TaskError::new("`.refl_task` received the wrong number of arguments")
+                TaskError::new("`.task.new` received the wrong number of arguments")
             })?;
             let eval_context = context.eval_context().clone();
             let host = context.host_arc();
@@ -332,8 +325,8 @@ where
                 };
             Ok(RequestResult::Return(task_handle_value(handle)))
         }
-        ReflectionRequest::JoinTask => {
-            let handle = task_handle_argument(context.eval_context(), arguments, "join_task")?;
+        ReflectionRequest::TaskJoin => {
+            let handle = task_handle_argument(context.eval_context(), arguments, "task.join")?;
             match context.eval_context().poll_reflection_task_id(handle.task) {
                 EvaluationTaskPoll::Pending(wait) => Err(TaskError::blocked(wait)),
                 EvaluationTaskPoll::Complete(value) => {
@@ -349,15 +342,15 @@ where
             }
         }
         ReflectionRequest::TaskStatus => {
-            let (handle, query) = read_task_status(context, arguments, "task_status")?;
+            let (handle, query) = read_task_status(context, arguments, "task.status")?;
             let Some(state) = query.value else {
                 observe_query_change(context, &handle.status, query.generation);
                 return Ok(RequestResult::Fail);
             };
             Ok(RequestResult::Return(state))
         }
-        ReflectionRequest::TaskResult => {
-            let (handle, query) = read_task_status(context, arguments, "task_result")?;
+        ReflectionRequest::TaskValue => {
+            let (handle, query) = read_task_status(context, arguments, "task.value")?;
             let Some(state) = query.value else {
                 observe_query_change(context, &handle.status, query.generation);
                 return Ok(RequestResult::Fail);
@@ -372,7 +365,7 @@ where
             }
         }
         ReflectionRequest::TaskError => {
-            let (handle, query) = read_task_status(context, arguments, "task_error")?;
+            let (handle, query) = read_task_status(context, arguments, "task.error")?;
             let Some(state) = query.value else {
                 observe_query_change(context, &handle.status, query.generation);
                 return Ok(RequestResult::Fail);
@@ -389,19 +382,8 @@ where
                 TaggedTaskState::Complete(_) => Ok(RequestResult::Fail),
             }
         }
-        ReflectionRequest::QueryResult => {
-            let query = query_handle_argument(context.eval_context(), arguments, "query_result")?;
-            let result = read_query(context, &query)?;
-            match result.value {
-                Some(value) => Ok(RequestResult::Return(value)),
-                None => {
-                    observe_query_change(context, &query, result.generation);
-                    Ok(RequestResult::Fail)
-                }
-            }
-        }
-        ReflectionRequest::CancelTask => {
-            let handle = task_handle_argument(context.eval_context(), arguments, "cancel_task")?;
+        ReflectionRequest::TaskCancel => {
+            let handle = task_handle_argument(context.eval_context(), arguments, "task.cancel")?;
             let eval_context = context.eval_context().clone();
             if let Some(mut transaction) = context.transaction() {
                 transaction
@@ -624,26 +606,6 @@ fn observe_query_change<S: TaskSpecialization>(
     if observed {
         context.observe_host_generation(generation);
     }
-}
-
-fn query_handle_argument(
-    context: &EvalContext,
-    arguments: Vec<Value>,
-    request: &str,
-) -> Result<Arc<EvaluationQueryHandle>, TaskError> {
-    let [handle]: [Value; 1] = arguments.try_into().map_err(|_| {
-        TaskError::new(format!(
-            "`.{request}` received the wrong number of arguments"
-        ))
-    })?;
-    let CoreValue::Opaque(handle) = evaluate(context, handle.into_core())? else {
-        return Err(TaskError::new(format!(
-            "`.{request}` requires a reflection query handle"
-        )));
-    };
-    handle
-        .downcast::<EvaluationQueryHandle>()
-        .ok_or_else(|| TaskError::new(format!("`.{request}` requires a reflection query handle")))
 }
 
 fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskError> {

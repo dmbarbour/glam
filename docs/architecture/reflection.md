@@ -15,7 +15,7 @@ reusable by mapping their request type into a specialization.
 The reusable `ReflectionEffects` family adds environment lookup, diagnostic
 emission, dictionary iteration, lazy-shell value observation, and child-task
 operations. `main` defines a broader logger specialization with diagnostic
-stream reads and stderr output. Children launched through `.refl_task` receive
+stream reads and stderr output. Children launched through `.task.new` receive
 only the reusable reflection family.
 
 Core operators merely construct tagged request values. Host operations occur
@@ -118,15 +118,15 @@ not revoke it.
 - `.eval Value` demands weak-head normal form and returns `ok:WHNF` or
   `err:Text`. A raw opaque `Value::Net` is already WHNF and is returned
   unchanged; only an explicit net-arity bridge observes its interface.
-- `.refl_task Effect` reserves an opaque child handle plus a private status
+- `.task.new Effect` reserves an opaque child handle plus a private status
   query; launch is commit-ordered inside a transaction. The status query is
   updated only when the projected state changes between atoms `'launched` and
   `'blocked`, terminal tagged values `ok:Value` and `err:Error`, and the atom
   `'canceled`.
-- `.join_task` waits directly and propagates non-success terminal states.
-  `.task_status` returns that stored status value unchanged, while
-  `.task_result` and `.task_error` project and transactionally wait for their
-  matching terminal payload. `.cancel_task` journals a best-effort
+- `.task.join` waits directly and propagates non-success terminal states.
+  `.task.status` returns that stored status value unchanged, while
+  `.task.value` and `.task.error` project and transactionally wait for their
+  matching terminal payload. `.task.cancel` journals a best-effort
   cancellation request. Task inspection creates no secondary scheduler work.
 
 The immutable environment conventionally contains assembler-owned `glam`

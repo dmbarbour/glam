@@ -563,7 +563,7 @@ fn configured_logger_can_join_a_restricted_reflection_task() {
     let invalid = dir.join("invalid.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .refl_task (.r \"SPAWNED\") >>= (\\task -> .join_task task >>= (\\text -> .write_stderr (text ++ [10])))\n",
+        "language g0\nobject conf.env\nconf.log = .task.new (.r \"SPAWNED\") >>= (\\task -> .task.join task >>= (\\text -> .write_stderr (text ++ [10])))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(&invalid, b"language g0\nvalue = \xff\n")
@@ -866,7 +866,7 @@ fn configured_logger_drains_unjoined_child_tasks_to_its_output() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .refl_task ((.log 'warn { msg:{ text:\"DETACHED CHILD\" } }) =>> .r ()) >>= (\\_task -> .r ())\n",
+        "language g0\nobject conf.env\nconf.log = .task.new ((.log 'warn { msg:{ text:\"DETACHED CHILD\" } }) =>> .r ()) >>= (\\_task -> .r ())\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 
@@ -895,7 +895,7 @@ fn configured_logger_reports_an_unjoined_child_failure() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .refl_task .fail >>= (\\_task -> .r ())\n",
+        "language g0\nobject conf.env\nconf.log = .task.new .fail >>= (\\_task -> .r ())\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 

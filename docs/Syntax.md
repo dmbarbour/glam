@@ -99,11 +99,13 @@ In some cases, it is useful to guard against accidental updates to definitions. 
 
 To this end, we might use a pattern such as defining `final_of.foo = _foo`. We can assign a reflection task to verify.
 
-### Forbidden Shadows
+### Forbidden Shadows (Tentative)
 
 Name shadowing, where a function argument or local variable accidentally masks another name defined or declared in lexical scope, is a common source of subtle bugs. Humans are a lot more flexible about referential context than our compiler, thus easily overlook the error when reading code. To resist this bug, we'll warn on name shadowing by default.
 
 A special exception is object namespaces. Names are localized to `self` by default. Users may write `^name` (or `^(Expr)`) to escape the scope. This enables very coarse-grained shadowing. The `using` scope is an example of this.
+
+*Note:* This might be via separate linter rather than compiler. 
 
 ### Using Scopes
 

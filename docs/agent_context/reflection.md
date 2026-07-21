@@ -13,7 +13,7 @@ and control flow.
 - `TaskSpecialization` adds a request family, private tags, and transactional
   host data. Reusable request families map their request enum into a host
   specialization rather than depending on it directly.
-- Spawned `.refl_task` children receive only `ReflectionEffects`, even when the
+- Spawned `.task.new` children receive only `ReflectionEffects`, even when the
   parent has logger-only capabilities.
 - `.env Path` reads the active task host's immutable reasoning environment
   using `.get` path and missing-as-`{}` conventions. There is no reflection
@@ -86,19 +86,19 @@ and control flow.
 
 ## Child Tasks and Evaluation
 
-- `.refl_task` reserves an opaque handle and a private transactional status
+- `.task.new` reserves an opaque handle and a private transactional status
   query, but journals launch inside a transaction. Losing branches discard
   both. The query stores atoms `'launched` or `'blocked`, terminal tagged values
   `ok:Value` or `err:Error`, or the atom `'canceled`; the handle keeps it alive.
-- `.join_task` waits directly on every nonterminal child state and propagates
+- `.task.join` waits directly on every nonterminal child state and propagates
   terminal errors. A joined dependency becoming terminal reruns the join
   operation; it does not select another `.alt` branch. An error with prior
   state observations remains blocked until those observations can retry its
-  checkpoint. `.task_status` returns the stored status value unchanged.
-  `.task_result` and `.task_error` project its matching terminal payload, fail
+  checkpoint. `.task.status` returns the stored status value unchanged.
+  `.task.value` and `.task.error` project its matching terminal payload, fail
   transactionally while it is nonterminal, and fail permanently for the other
   terminal outcome.
-- `.cancel_task` is an unconditional best-effort, commit-ordered request; late
+- `.task.cancel` is an unconditional best-effort, commit-ordered request; late
   and foreign cancellation are harmless no-ops. Losing branches discard
   cancellation requests.
 - `.eval` demands WHNF and returns `ok:WHNF` or provisional `err:Text`. A raw
