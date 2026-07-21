@@ -26,8 +26,9 @@ pub(super) fn apply_builtin_values_lazily(
         }));
     }
 
-    let (saturating, rest) = arguments.split_at(remaining);
-    supplied.extend_from_slice(saturating);
+    let mut saturating = arguments;
+    let rest = saturating.split_off(remaining);
+    supplied.extend(saturating);
     let result = Value::Lazy(LazyValue::from_builtin(BuiltinCall {
         builtin,
         arguments: Arc::from(supplied),
@@ -35,7 +36,7 @@ pub(super) fn apply_builtin_values_lazily(
     if rest.is_empty() {
         Ok(result)
     } else {
-        apply_values(context, result, rest.to_vec())
+        apply_values(context, result, rest)
     }
 }
 

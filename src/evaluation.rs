@@ -1796,7 +1796,7 @@ fn deferred_dependency_cycle(
     let mut current = start;
     loop {
         if let Some(first) = positions.insert(current, path.len()) {
-            let mut cycle = path[first..].to_vec();
+            let mut cycle = path.split_off(first);
             let canonical = cycle
                 .iter()
                 .enumerate()
