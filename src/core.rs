@@ -79,9 +79,8 @@ impl Ord for DeferredValueId {
 
 /// A value whose outer shell has reached weak-head normal form.
 ///
-/// Containers may still contain lazy fields. This wrapper becomes the success
-/// type of the lazy result cache after forwarding moves into the evaluation
-/// session.
+/// Containers may still contain lazy fields. The wrapper prevents a computed
+/// lazy result cache from storing another deferred outer shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EvaluatedValue(Value);
 
@@ -90,6 +89,8 @@ impl EvaluatedValue {
         self.0
     }
 }
+
+pub(crate) type LazyResult = Result<EvaluatedValue, Arc<LazyFailure>>;
 
 impl TryFrom<Value> for EvaluatedValue {
     type Error = Value;
@@ -158,7 +159,7 @@ pub struct LazyValue {
     id: LazyId,
     label: Arc<str>,
     source: LazySource,
-    result: Arc<OnceLock<Result<Value, Arc<str>>>>,
+    result: Arc<OnceLock<LazyResult>>,
 }
 
 #[derive(Clone)]
@@ -215,7 +216,7 @@ impl LazyValue {
         let value = Self::with_source("error", LazySource::Error);
         value
             .result
-            .set(Err(LazyFailure::evaluation(message).legacy_message()))
+            .set(Err(Arc::new(LazyFailure::evaluation(message))))
             .expect("new lazy error must be uninitialized");
         value
     }
@@ -232,29 +233,16 @@ impl LazyValue {
         &self.source
     }
 
-    pub fn cached(&self) -> Option<Result<Value, Arc<str>>> {
+    pub(crate) fn cached(&self) -> Option<LazyResult> {
         self.result.get().cloned()
     }
 
-    pub fn cache(&self, value: Result<Value, Arc<str>>) -> Result<Value, Arc<str>> {
-        let _ = self.result.set(value);
+    pub(crate) fn cache(&self, result: LazyResult) -> LazyResult {
+        let _ = self.result.set(result);
         self.result
             .get()
             .expect("lazy cache should contain a value after set")
             .clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn checked_cached(
-        &self,
-    ) -> Result<Option<Result<EvaluatedValue, Arc<str>>>, CachedValueIsLazy> {
-        match self.cached() {
-            None => Ok(None),
-            Some(Err(error)) => Ok(Some(Err(error))),
-            Some(Ok(value)) => EvaluatedValue::try_from(value)
-                .map(|value| Some(Ok(value)))
-                .map_err(|_| CachedValueIsLazy),
-        }
     }
 }
 
@@ -314,10 +302,6 @@ impl PromisedValue {
         self.assignment.get().cloned()
     }
 }
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CachedValueIsLazy;
 
 fn allocate_lazy_id() -> LazyId {
     LazyId(allocate_deferred_value_id())
@@ -712,7 +696,7 @@ impl ComputedFixpointCell {
     pub(crate) fn begin(
         &self,
         context: &EvalContext,
-        result: &Arc<OnceLock<Result<Value, Arc<str>>>>,
+        result: &Arc<OnceLock<LazyResult>>,
     ) -> Result<ComputedFixpointAction, Arc<str>> {
         let observer = context.task_id()?;
         let mut state = self
@@ -861,7 +845,7 @@ impl LazyValue {
         )
     }
 
-    pub(crate) fn result_cell(&self) -> &Arc<OnceLock<Result<Value, Arc<str>>>> {
+    pub(crate) fn result_cell(&self) -> &Arc<OnceLock<LazyResult>> {
         &self.result
     }
 }

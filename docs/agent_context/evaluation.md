@@ -47,6 +47,11 @@ control-flow overview.
 - Lazy identities are process-global nonzero IDs because a value and its result
   cell may cross evaluation sessions; each session uses them only as local
   scheduling keys.
+- A computed `LazyValue` caches `Result<EvaluatedValue, Arc<LazyFailure>>`.
+  Successful cache installation therefore rejects deferred outer shells at the
+  type boundary, while a forwarded failure keeps one structured `Arc` through
+  cycle members and upstream dependents. Raw `PromisedValue` assignments are a
+  separate representation and may still contain deferred values.
 - `Value::Function` is an independently observable curried stage. Partial
   application shares its staged runtime; saturation returns memoized work.
 - Lazy lists contain opaque `ListThunk` holes for either computed lazies or

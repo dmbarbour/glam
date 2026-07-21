@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::core::{Dict, FixpointComputation, Key, LazyValue, Value};
+use crate::core::{Dict, EvaluatedValue, FixpointComputation, Key, LazyValue, Value};
 use crate::number::Number;
 
 use super::*;
@@ -20,6 +20,13 @@ fn fixture_computation(expr: TestExpr) -> Value {
 fn apply_test_values(function: Value, arguments: impl IntoIterator<Item = Value>) -> Value {
     apply_values(&test_context(), function, arguments.into_iter().collect())
         .expect("test application should accept a callable value")
+}
+
+fn cached_value(lazy: &LazyValue) -> Value {
+    lazy.cached()
+        .expect("lazy value should be cached")
+        .expect("lazy value should succeed")
+        .into_value()
 }
 
 #[test]
@@ -265,7 +272,10 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
 
     promise.set(n(42)).unwrap();
     assert_eq!(eval_value(&context, &value).unwrap(), n(42));
-    assert_eq!(lazy.cached(), Some(Ok(n(42))));
+    assert_eq!(
+        lazy.cached(),
+        Some(Ok(EvaluatedValue::try_from(n(42)).unwrap()))
+    );
 }
 
 #[test]
@@ -280,7 +290,10 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
         n(42)
     );
     assert_eq!(promise.assignment(), Some(Ok(Value::Lazy(target.clone()))));
-    assert_eq!(target.cached(), Some(Ok(n(42))));
+    assert_eq!(
+        target.cached(),
+        Some(Ok(EvaluatedValue::try_from(n(42)).unwrap()))
+    );
 }
 
 #[test]
@@ -550,12 +563,42 @@ fn shallow_lazy_aliases_are_shared_by_the_session_without_entering_the_cache() {
     assert_eq!(context.deferred_task_count(), 0);
     assert_eq!(eval_value(&context, &value).unwrap(), expected);
     assert_eq!(context.deferred_task_count(), 1);
-    assert_eq!(
-        root.checked_cached()
-            .expect("a computed alias must not enter the immutable cache"),
-        None
-    );
+    assert_eq!(root.cached(), None);
     assert_eq!(force_value_shell(&context, &value).unwrap(), n(42));
+}
+
+#[test]
+fn demanded_forwarding_chain_caches_whnf_in_every_lazy_member() {
+    let context = test_context();
+    let identity = closed_function_value(1, TestExpr::Local(0));
+    let leaf = LazyValue::deferred("forwarding leaf", |_| Ok(n(42)));
+    let middle =
+        LazyValue::from_application(identity.clone(), Arc::from([Value::Lazy(leaf.clone())]));
+    let root = LazyValue::from_application(identity, Arc::from([Value::Lazy(middle.clone())]));
+
+    assert_eq!(
+        force_value_shell(&context, &Value::Lazy(root.clone())).unwrap(),
+        n(42)
+    );
+    assert_eq!(cached_value(&leaf), n(42));
+    assert_eq!(cached_value(&middle), n(42));
+    assert_eq!(cached_value(&root), n(42));
+}
+
+#[test]
+fn forwarding_chain_preserves_one_structured_failure() {
+    let context = test_context();
+    let identity = closed_function_value(1, TestExpr::Local(0));
+    let leaf = LazyValue::error("shared failure");
+    let root = LazyValue::from_application(identity, Arc::from([Value::Lazy(leaf.clone())]));
+
+    let error = force_value_shell(&context, &Value::Lazy(root.clone()))
+        .expect_err("forwarding into an error should fail");
+    assert_eq!(error.to_string(), "shared failure");
+
+    let leaf_failure = leaf.cached().unwrap().unwrap_err();
+    let root_failure = root.cached().unwrap().unwrap_err();
+    assert!(Arc::ptr_eq(&leaf_failure, &root_failure));
 }
 
 #[test]

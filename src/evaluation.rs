@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use crate::core::{
-    DeferredValueId, LazyCycle, LazyCycleMember, LazyFailure, LazyValue, PromisedValue, Value,
+    DeferredValueId, LazyCycle, LazyCycleMember, LazyFailure, LazyResult, LazyValue, PromisedValue,
+    Value,
 };
 
 mod executor;
@@ -148,6 +149,7 @@ pub(crate) enum EvaluationMachinePoll {
     Blocked(EvaluationTaskBlock),
     Complete(Value),
     Failed(Arc<str>),
+    LazyFailed(Arc<LazyFailure>),
     Cancelled,
 }
 
@@ -386,7 +388,41 @@ impl Drop for PendingReflectionTaskInner {
 #[derive(Debug)]
 struct PromiseRecord {
     producer: EvaluationTaskId,
-    result: Weak<OnceLock<Result<Value, Arc<str>>>>,
+    result: PromiseResult,
+}
+
+#[derive(Debug)]
+enum PromiseResult {
+    Assignment(Weak<OnceLock<Result<Value, Arc<str>>>>),
+    Lazy(Weak<OnceLock<LazyResult>>),
+}
+
+impl PromiseResult {
+    fn is_ready(&self) -> bool {
+        match self {
+            Self::Assignment(result) => result
+                .upgrade()
+                .is_some_and(|result| result.get().is_some()),
+            Self::Lazy(result) => result
+                .upgrade()
+                .is_some_and(|result| result.get().is_some()),
+        }
+    }
+
+    fn fail(&self, reason: Arc<str>) {
+        match self {
+            Self::Assignment(result) => {
+                if let Some(result) = result.upgrade() {
+                    let _ = result.set(Err(reason));
+                }
+            }
+            Self::Lazy(result) => {
+                if let Some(result) = result.upgrade() {
+                    let _ = result.set(Err(Arc::new(LazyFailure::evaluation(reason))));
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -660,7 +696,7 @@ impl EvalContext {
             wait.clone(),
             PromiseRecord {
                 producer: owner,
-                result: Arc::downgrade(result),
+                result: PromiseResult::Assignment(Arc::downgrade(result)),
             },
         );
         assert!(replaced.is_none(), "evaluation wait tokens must be unique");
@@ -674,7 +710,7 @@ impl EvalContext {
 
     pub(crate) fn register_result_promise(
         &self,
-        result: &Arc<OnceLock<Result<Value, Arc<str>>>>,
+        result: &Arc<OnceLock<LazyResult>>,
     ) -> Result<(EvaluationTaskId, EvaluationWaitToken), Arc<str>> {
         let owner = self.task_id()?;
         let wait = allocate_wait_token(&self.session)?;
@@ -687,7 +723,7 @@ impl EvalContext {
             wait.clone(),
             PromiseRecord {
                 producer: owner,
-                result: Arc::downgrade(result),
+                result: PromiseResult::Lazy(Arc::downgrade(result)),
             },
         );
         assert!(replaced.is_none(), "evaluation wait tokens must be unique");
@@ -715,9 +751,7 @@ impl EvalContext {
             let Some(promise) = tasks.promises.get(&wait) else {
                 continue;
             };
-            if let Some(result) = promise.result.upgrade() {
-                let _ = result.set(Err(reason.clone()));
-            }
+            promise.result.fail(reason.clone());
         }
     }
 
@@ -1046,16 +1080,31 @@ impl EvalContext {
                     "evaluation wait token is no longer registered",
                 ));
             };
-            let Some(result) = promise.result.upgrade() else {
-                return EvaluationTaskPoll::Failed(Arc::from("promised value no longer exists"));
-            };
-            return match result.get() {
-                Some(Ok(value)) => EvaluationTaskPoll::Complete(value.clone()),
-                Some(Err(error)) => EvaluationTaskPoll::Failed(error.clone()),
-                None if Arc::ptr_eq(&self.session, &owner) => {
-                    EvaluationTaskPoll::Pending(wait.clone())
-                }
-                None => EvaluationTaskPoll::ForeignSession,
+            return match &promise.result {
+                PromiseResult::Assignment(result) => match result.upgrade() {
+                    Some(result) => match result.get() {
+                        Some(Ok(value)) => EvaluationTaskPoll::Complete(value.clone()),
+                        Some(Err(error)) => EvaluationTaskPoll::Failed(error.clone()),
+                        None if Arc::ptr_eq(&self.session, &owner) => {
+                            EvaluationTaskPoll::Pending(wait.clone())
+                        }
+                        None => EvaluationTaskPoll::ForeignSession,
+                    },
+                    None => {
+                        EvaluationTaskPoll::Failed(Arc::from("promised value no longer exists"))
+                    }
+                },
+                PromiseResult::Lazy(result) => match result.upgrade() {
+                    Some(result) => match result.get() {
+                        Some(Ok(value)) => EvaluationTaskPoll::Complete(value.clone().into_value()),
+                        Some(Err(error)) => EvaluationTaskPoll::Failed(error.legacy_message()),
+                        None if Arc::ptr_eq(&self.session, &owner) => {
+                            EvaluationTaskPoll::Pending(wait.clone())
+                        }
+                        None => EvaluationTaskPoll::ForeignSession,
+                    },
+                    None => EvaluationTaskPoll::Failed(Arc::from("lazy result no longer exists")),
+                },
             };
         };
         match &record.state {
@@ -1162,6 +1211,28 @@ impl EvalContext {
     #[cfg(test)]
     pub(crate) fn promise_failure(&self, promise: &PromisedValue) -> Option<Arc<LazyFailure>> {
         self.deferred_failure(promise.id().into())
+    }
+
+    pub(crate) fn lazy_failure_for_wait(
+        &self,
+        wait: &EvaluationWaitToken,
+    ) -> Option<Arc<LazyFailure>> {
+        let tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        if let Some(deferred) = tasks.deferred_by_wait.get(wait) {
+            let record = tasks.deferred.get(deferred)?;
+            if let DeferredTaskState::Failed(failure) = &record.state {
+                return Some(failure.clone());
+            }
+            return None;
+        }
+        let PromiseResult::Lazy(result) = &tasks.promises.get(wait)?.result else {
+            return None;
+        };
+        result.upgrade()?.get()?.as_ref().err().cloned()
     }
 
     #[cfg(test)]
@@ -1510,6 +1581,11 @@ impl EvaluationSession {
             EvaluationMachinePoll::Failed(error) => {
                 (EvaluationTaskState::Failed(error), true, false)
             }
+            EvaluationMachinePoll::LazyFailed(error) => (
+                EvaluationTaskState::Failed(error.legacy_message()),
+                true,
+                false,
+            ),
             EvaluationMachinePoll::Cancelled => (EvaluationTaskState::Cancelled, true, false),
         };
         record.state = state;
@@ -1566,6 +1642,7 @@ impl EvaluationSession {
                 DeferredTaskState::Failed(Arc::new(LazyFailure::evaluation(error))),
                 true,
             ),
+            EvaluationMachinePoll::LazyFailed(error) => (DeferredTaskState::Failed(error), true),
             EvaluationMachinePoll::Cancelled => (
                 DeferredTaskState::Failed(Arc::new(LazyFailure::evaluation(
                     "deferred evaluation task was cancelled",
@@ -1736,8 +1813,7 @@ fn wait_is_terminal(tasks: &EvaluationTasks, wait: &EvaluationWaitToken) -> bool
     tasks
         .promises
         .get(wait)
-        .and_then(|promise| promise.result.upgrade())
-        .is_some_and(|result| result.get().is_some())
+        .is_some_and(|promise| promise.result.is_ready())
 }
 
 fn deferred_for_wait(
@@ -1774,8 +1850,7 @@ fn deferred_dependency_cycle(
 }
 
 /// Installs one shared structured failure in every member of a proven strict
-/// deferred cycle. The legacy lazy string cache remains a projection until Spike 4
-/// changes the cache result type to `LazyFailure` directly.
+/// deferred cycle.
 fn poison_deferred_cycle(tasks: &mut EvaluationTasks, members: &[DeferredValueId]) {
     let cycle = Arc::new(LazyCycle {
         members: members
@@ -1793,7 +1868,6 @@ fn poison_deferred_cycle(tasks: &mut EvaluationTasks, members: &[DeferredValueId
             .collect(),
     });
     let failure = Arc::new(LazyFailure::DependencyCycle(cycle));
-    let legacy = failure.legacy_message();
 
     for id in members {
         let record = tasks
@@ -1803,17 +1877,14 @@ fn poison_deferred_cycle(tasks: &mut EvaluationTasks, members: &[DeferredValueId
         record.dependency = None;
         record.state = match &record.value {
             DeferredValue::Promise(_) => DeferredTaskState::Failed(failure.clone()),
-            DeferredValue::Lazy(lazy) => match lazy.cache(Err(legacy.clone())) {
-                Err(error) if Arc::ptr_eq(&error, &legacy) => {
-                    DeferredTaskState::Failed(failure.clone())
-                }
-                Err(error) => DeferredTaskState::Failed(Arc::new(LazyFailure::evaluation(error))),
+            DeferredValue::Lazy(lazy) => match lazy.cache(Err(failure.clone())) {
+                Err(error) => DeferredTaskState::Failed(error),
                 Ok(value) => {
                     debug_assert!(
                         false,
                         "a successful concurrent lazy result contradicts a strict dependency cycle"
                     );
-                    DeferredTaskState::Complete(value)
+                    DeferredTaskState::Complete(value.into_value())
                 }
             },
         };
@@ -2032,7 +2103,11 @@ mod tests {
                     })
                 }
                 EvaluationTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value),
-                EvaluationTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error),
+                EvaluationTaskPoll::Failed(error) => self
+                    .context
+                    .lazy_failure_for_wait(&self.dependency)
+                    .map(EvaluationMachinePoll::LazyFailed)
+                    .unwrap_or(EvaluationMachinePoll::Failed(error)),
                 EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
                 EvaluationTaskPoll::ForeignSession => EvaluationMachinePoll::Failed(Arc::from(
                     "test dependency unexpectedly belongs to another session",
@@ -2061,7 +2136,11 @@ mod tests {
                     })
                 }
                 EvaluationTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value),
-                EvaluationTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error),
+                EvaluationTaskPoll::Failed(error) => self
+                    .context
+                    .lazy_failure_for_wait(dependency)
+                    .map(EvaluationMachinePoll::LazyFailed)
+                    .unwrap_or(EvaluationMachinePoll::Failed(error)),
                 EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
                 EvaluationTaskPoll::ForeignSession => EvaluationMachinePoll::Failed(Arc::from(
                     "test dependency unexpectedly belongs to another session",
@@ -2265,14 +2344,24 @@ mod tests {
             })
         };
         barrier.wait();
-        assert_eq!(
-            left_thread.join().unwrap(),
-            EvaluationPumpOutcome::TargetReady
-        );
-        assert_eq!(
-            right_thread.join().unwrap(),
-            EvaluationPumpOutcome::TargetReady
-        );
+        let left_outcome = left_thread.join().unwrap();
+        let right_outcome = right_thread.join().unwrap();
+        assert!(matches!(
+            left_outcome,
+            EvaluationPumpOutcome::TargetReady | EvaluationPumpOutcome::NoProgress
+        ));
+        assert!(matches!(
+            right_outcome,
+            EvaluationPumpOutcome::TargetReady | EvaluationPumpOutcome::NoProgress
+        ));
+        assert!(matches!(
+            context.poll_wait(&left_wait),
+            EvaluationTaskPoll::Failed(_)
+        ));
+        assert!(matches!(
+            context.poll_wait(&right_wait),
+            EvaluationTaskPoll::Failed(_)
+        ));
 
         let left_failure = context.lazy_failure(&left).unwrap();
         let right_failure = context.lazy_failure(&right).unwrap();
@@ -2322,11 +2411,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first.id().into(), second.id().into(), third.id().into()]
         );
-        assert!(matches!(
-            context.lazy_failure(&upstream).as_deref(),
-            Some(LazyFailure::Evaluation(error))
-                if error.contains("lazy dependency cycle")
-        ));
+        let upstream_failure = context
+            .lazy_failure(&upstream)
+            .expect("upstream dependent should receive the cycle failure");
+        let cycle_failure = context
+            .lazy_failure(&first)
+            .expect("cycle member should retain its failure");
+        assert!(Arc::ptr_eq(&upstream_failure, &cycle_failure));
     }
 
     #[test]
