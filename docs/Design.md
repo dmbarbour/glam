@@ -366,9 +366,12 @@ provisional name is `net_arity`:
 Constructing this bridge does not inspect the net. At arity zero, demand
 expects `Data` at the exposed interface and continues into its payload; `Bind`
 or another normal form is an error. At positive arity, the bridge constructs
-an ordinary function. Each application stage expects `Bind`, and after the
-last argument the result expects `Data`. Encountering `Data` before all
-arguments or a remaining `Bind` after saturation is an interface error.
+an ordinary function that attaches `n` arguments before demanding a result.
+Partial application does not inspect or normalize the staged interface. After
+the last argument, the result must expose `Data`; a remaining `Bind` or another
+normal form is an interface error. If the net produces `Data` early, subsequent
+argument wiring is governed by ordinary interaction rules and may become
+stuck; the bridge does not add a separate early-result check.
 
 A raw net boundary is therefore opened only by interaction-net loading or by
 `net_arity`, never by ordinary evaluation or application.

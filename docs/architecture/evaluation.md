@@ -36,7 +36,7 @@ ordinary value demand
 
 arity bridge
   -> arity 0: LazySource::NetComputation expects exposed Data
-  -> arity n: FunctionValue expects n staged Bind interfaces, then Data
+  -> arity n: FunctionValue attaches n arguments, then expects exposed Data
 
 apply(function, arguments)
   -> builtin or partial-builtin staging
@@ -54,7 +54,9 @@ not an ordinary callable. Only the interaction-net call reduction opens it by
 attaching a cursor. `LazySource::NetComputation` is the internal zero-arity
 bridge: forcing it must expose data, and an exposed bind or non-data normal
 form is an error. `FunctionValue` provides the corresponding positive-arity
-bridge and checks its bind spine during staged application.
+bridge. Partial application only attaches arguments and returns another shared
+stage; it does not evaluate the net to verify an intermediate bind. Saturation
+demands data from the fully applied stage.
 
 The built-in `std` module exposes `net_arity`, `seq`, and `spark` as ordinary
 curried values. `net_arity 0 Net` constructs a net computation; a positive

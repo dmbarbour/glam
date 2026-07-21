@@ -49,23 +49,8 @@ pub(super) fn evaluate_function_call(
     extract_net_data(context, runtime, exposed, "function call")
 }
 
-pub(super) fn advance_function_stage(
-    context: &EvalContext,
-    function: NetValue,
-    arguments: Vec<Value>,
-) -> Result<NetValue, EvalError> {
-    let net = attach_net_many(Value::Net(function), arguments);
-    let runtime = net.into_runtime();
-    let exposed = runtime.with(|runtime| runtime.exposed());
-    match drive_net_interface(context, &runtime, exposed)? {
-        NetInterfaceOutcome::Bind => Ok(NetValue::new(runtime)),
-        NetInterfaceOutcome::Data => Err(EvalError::new(
-            "partial function stage produced data before exposing its next bind",
-        )),
-        NetInterfaceOutcome::NormalForm => Err(EvalError::new(
-            "partial function stage reached a non-data normal form without exposing its next bind",
-        )),
-    }
+pub(super) fn attach_function_stage(function: NetValue, arguments: Vec<Value>) -> NetValue {
+    attach_net_many(Value::Net(function), arguments)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

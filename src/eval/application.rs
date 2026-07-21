@@ -55,7 +55,7 @@ pub(super) fn apply_function_values(
     let remaining = function.remaining_arity();
     if arguments.len() < remaining {
         let supplied = arguments.len();
-        let stage = advance_function_stage(context, function.stage().clone(), arguments)?;
+        let stage = attach_function_stage(function.stage().clone(), arguments);
         return Ok(Value::Function(FunctionValue::new(
             stage,
             remaining - supplied,
@@ -106,7 +106,6 @@ pub(super) fn effect_value(function: Value) -> Value {
 }
 
 pub(super) fn instantiate_function(
-    context: &EvalContext,
     code: &FunctionCode,
     captures: Vec<Value>,
 ) -> Result<Value, EvalError> {
@@ -116,7 +115,7 @@ pub(super) fn instantiate_function(
     let stage = if captures.is_empty() {
         NetValue::new(code.runtime().clone())
     } else {
-        advance_function_stage(context, NetValue::new(code.runtime().clone()), captures)?
+        attach_function_stage(NetValue::new(code.runtime().clone()), captures)
     };
     Ok(Value::Function(FunctionValue::new(stage, code.arity())))
 }

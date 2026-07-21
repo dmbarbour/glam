@@ -499,9 +499,11 @@ port.
 The provisional `net_arity N Net` builtin presents a raw net to the ordinary
 lambda-calculus layer. At arity zero it is a lazy computation that expects the
 exposed interface to produce data. At positive arity it is an ordinary
-function that expects `N` successive bind stages and then data. A mismatched
-interface is an error. Constructing either `interaction_net` or `net_arity`
-does not itself demand the net.
+function that attaches `N` arguments before demanding data. Partial application
+does not inspect the staged net. A residual bind or non-data normal form after
+saturation is an error; data produced before saturation is left to ordinary
+interaction rules and may become stuck. Constructing either `interaction_net`
+or `net_arity` does not itself demand the net.
 
 The construction effects API is detailed in the *Design* doc. Eventually, we
 may want a macro DSL or user-defined syntax to support direct expression of

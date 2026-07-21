@@ -145,9 +145,7 @@ pub(super) fn apply_core_operator(
                     Arc::from(captures),
                 )));
             }
-            Ok(OperatorYield::Data(instantiate_function(
-                context, code, captures,
-            )?))
+            Ok(OperatorYield::Data(instantiate_function(code, captures)?))
         }
         CoreOperator::ComputationCaptures { code, supplied } => {
             let mut captures = supplied.iter().cloned().collect::<Vec<_>>();

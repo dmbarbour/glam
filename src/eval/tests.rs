@@ -101,7 +101,7 @@ fn net_backed_lazy_values_reject_non_data_normal_forms() {
 }
 
 #[test]
-fn partial_function_stages_reject_data_before_their_final_argument() {
+fn early_function_data_is_left_to_ordinary_stuck_net_semantics() {
     let one_argument_stage = closed_net(|builder| {
         let [application, argument, result] = builder.bind();
         let erase = builder.copy(0);
@@ -111,12 +111,21 @@ fn partial_function_stages_reject_data_before_their_final_argument() {
         application
     });
     let function = FunctionValue::new(one_argument_stage, 2);
+    let partial = apply_function_values(&test_context(), function, vec![n(0)])
+        .expect("partial application should not inspect the staged interface");
+    let Value::Function(partial) = partial else {
+        panic!("partial application should retain an ordinary function value")
+    };
+    assert_eq!(partial.remaining_arity(), 1);
 
     assert_eq!(
-        apply_function_values(&test_context(), function, vec![n(0)])
-            .unwrap_err()
-            .to_string(),
-        "partial function stage produced data before exposing its next bind"
+        eval_value(
+            &test_context(),
+            &apply_function_values(&test_context(), partial, vec![n(1)]).unwrap(),
+        )
+        .unwrap_err()
+        .to_string(),
+        "application requires a function value"
     );
 }
 
@@ -193,10 +202,10 @@ fn compiled_function_values_reuse_one_shared_interaction_net() {
 }
 
 #[test]
-fn curried_function_partial_application_exposes_the_next_bind() {
+fn curried_function_partial_application_retains_a_shared_stage() {
     let function = closed_function_value(3, TestExpr::Local(2));
     let partially_applied = eval_value(&test_context(), &apply_test_values(function, [n(11)]))
-        .expect("first application should expose the remaining bind chain");
+        .expect("first application should construct the remaining function stage");
     let Value::Function(first_stage) = &partially_applied else {
         panic!("partial application should produce another function stage");
     };

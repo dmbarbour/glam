@@ -167,8 +167,10 @@ implicit operation that opens the net.
 `HostFn`, copying, and erasure otherwise treat `Value::Net` like closed data;
 they do not project its exposed agent. A net-backed `Value::Lazy` represents
 the explicit zero-arity bridge and must produce `Data` when observed.
-`FunctionValue` staging is the positive-arity bridge: partial stages must
-expose `Bind`, and saturation must produce `Data`. The provisional source form
+`FunctionValue` staging is the positive-arity bridge: partial application only
+attaches arguments and never inspects the intermediate interface. Saturation
+must produce `Data`; an early `Data` is left to ordinary interaction rules and
+may become stuck as later arguments are attached. The provisional source form
 for both bridges is `net_arity N Net` and is available through `import 'std`.
 The `interaction_net` construction effect is not yet implemented by `.g`
 syntax.
