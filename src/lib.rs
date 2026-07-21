@@ -16,9 +16,9 @@ mod source;
 pub use api::{
     Assembler, AssemblerBuilder, BuiltModule, Diagnostic, DiagnosticBus, DiagnosticCounts,
     DiagnosticEvent, DiagnosticSubscriber, DiagnosticSubscription, Error, EvaluationRuntime,
-    ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort, ReasoningFailure,
-    ReasoningReport, ReasoningStatus, ReasoningTask, ReasoningTaskState, ReasoningVolume,
-    ReflectionEnvironmentBuilder, Value, ValueKind,
+    ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort, PromiseResolver,
+    ReasoningFailure, ReasoningReport, ReasoningStatus, ReasoningTask, ReasoningTaskState,
+    ReasoningVolume, ReflectionEnvironmentBuilder, Value, ValueKind,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

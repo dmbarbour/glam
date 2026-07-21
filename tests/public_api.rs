@@ -74,6 +74,53 @@ fn public_api_reports_an_empty_reasoning_session_as_complete() {
 }
 
 #[test]
+fn public_promise_resolver_completes_a_cloneable_consumer() {
+    let assembler = Assembler::default();
+    let (promise, resolver) = assembler.promise("public input");
+    let cloned = promise.clone();
+
+    let pending = assembler
+        .evaluate(&promise)
+        .expect_err("an unresolved promise should fail fast");
+    assert!(pending.to_string().contains("before initialization"));
+
+    resolver
+        .resolve(Value::integer(42))
+        .expect("the unique resolver should complete its promise");
+    assert_eq!(
+        assembler
+            .evaluate(&cloned)
+            .expect("the cloned consumer should observe completion")
+            .as_i64(),
+        Some(42)
+    );
+}
+
+#[test]
+fn public_promise_resolver_can_fail_or_be_abandoned() {
+    let assembler = Assembler::default();
+    let (failed, resolver) = assembler.promise("explicit failure");
+    resolver
+        .fail("host operation failed")
+        .expect("the unique resolver should fail its promise");
+    assert!(
+        assembler
+            .evaluate(&failed)
+            .expect_err("a failed promise should expose its producer error")
+            .to_string()
+            .contains("host operation failed")
+    );
+
+    let (abandoned, resolver) = assembler.promise("abandoned input");
+    drop(resolver);
+    let error = assembler
+        .evaluate(&abandoned)
+        .expect_err("dropping a resolver should permanently fail its promise");
+    assert!(error.to_string().contains("abandoned input"));
+    assert!(error.to_string().contains("dropped before completion"));
+}
+
+#[test]
 fn public_reasoning_report_exposes_retryable_blocked_errors() {
     let assembler = Assembler::default();
     let module = assembler

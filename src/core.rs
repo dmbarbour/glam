@@ -278,7 +278,6 @@ impl PromisedValue {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn fail(&self, error: impl Into<Arc<str>>) -> Result<(), Arc<str>> {
         self.assignment
             .set(Err(error.into()))

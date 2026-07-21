@@ -19,7 +19,7 @@ use crate::compiler::{
     ModuleLoader,
 };
 use crate::core::Value as CoreValue;
-use crate::core::{Builtin, Dict, Key, List, NetValue};
+use crate::core::{Builtin, Dict, Key, List, NetValue, PromisedValue};
 use crate::core_net::CoreSpecialization;
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
@@ -233,6 +233,66 @@ impl Value {
 
     pub(crate) fn into_core(self) -> CoreValue {
         self.0
+    }
+}
+
+/// The unique host capability for completing one promised [`Value`].
+///
+/// This handle is affine: it cannot be cloned and is consumed by
+/// [`resolve`](Self::resolve) or [`fail`](Self::fail). Dropping it unresolved
+/// permanently fails the promised value.
+///
+/// Completion wakes only the evaluation session belonging to the
+/// [`Assembler`] that created the promise. If the value is shared with other
+/// assemblers, the client is responsible for pumping those sessions.
+#[must_use = "dropping an unresolved promise resolver fails its value"]
+pub struct PromiseResolver {
+    promise: Option<PromisedValue>,
+    context: EvalContext,
+}
+
+impl PromiseResolver {
+    /// Completes the promise successfully with `value`.
+    pub fn resolve(mut self, value: Value) -> Result<(), Error> {
+        let promise = self
+            .promise
+            .take()
+            .expect("a live promise resolver must retain its promise");
+        let label = promise.label().clone();
+        promise
+            .set(value.into_core())
+            .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
+        self.context.notify_promise_changed();
+        Ok(())
+    }
+
+    /// Completes the promise with a permanent producer error.
+    pub fn fail(mut self, message: impl Into<Arc<str>>) -> Result<(), Error> {
+        let promise = self
+            .promise
+            .take()
+            .expect("a live promise resolver must retain its promise");
+        let label = promise.label().clone();
+        promise
+            .fail(message)
+            .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
+        self.context.notify_promise_changed();
+        Ok(())
+    }
+}
+
+impl Drop for PromiseResolver {
+    fn drop(&mut self) {
+        let Some(promise) = self.promise.take() else {
+            return;
+        };
+        let message = format!(
+            "promise resolver for `{}` was dropped before completion",
+            promise.label()
+        );
+        if promise.fail(message).is_ok() {
+            self.context.notify_promise_changed();
+        }
     }
 }
 
@@ -1385,6 +1445,22 @@ impl Assembler {
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a host-resolved promised value and its unique resolver.
+    ///
+    /// Resolving, failing, or dropping the resolver wakes this assembler's
+    /// evaluation session only. If `value` is shared with another assembler,
+    /// the client must explicitly pump or evaluate through that other session.
+    pub fn promise(&self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
+        let promise = PromisedValue::new(label);
+        (
+            Value::from_core(CoreValue::Promised(promise.clone())),
+            PromiseResolver {
+                promise: Some(promise),
+                context: self.eval_context(),
+            },
+        )
     }
 
     /// Creates a protected reflection volume initialized with `initial`.

@@ -81,6 +81,10 @@ control-flow overview.
   promise assignments or lazy result cells. Stable session quiescence may
   diagnose them as deadlocks, while retry or producer progress may first
   remove their temporary dependency edges.
+- The public `Assembler::promise` pair gives clients one affine Rust
+  `PromiseResolver`. Resolving, failing, or dropping it wakes only the creating
+  assembler's evaluation session. A client that shares the consumer value with
+  another session is responsible for pumping that session.
 - Reflection annotations are lazy gates. Construction demands neither effect
   nor target. Demand on a gate waits for its session-owned task, requires
   canonical unit, and then transfers the same demand to the target. Waits are

@@ -563,6 +563,22 @@ impl EvalContext {
         }
     }
 
+    /// Signals completion of a host-owned promise to pumps of this context's
+    /// session. Promise values may be shared across sessions, but completion
+    /// deliberately does not discover or wake those foreign observers.
+    pub(crate) fn notify_promise_changed(&self) {
+        // Taking the scheduler lock pairs this notification with condvar waits
+        // and prevents a completion between their final check and sleep from
+        // being lost. Public resolvers are never stored inside task records.
+        let tasks = self
+            .session
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.session.task_changed.notify_all();
+        drop(tasks);
+    }
+
     pub(crate) fn runs_scheduled_task(&self) -> bool {
         self.scheduled_task
     }
