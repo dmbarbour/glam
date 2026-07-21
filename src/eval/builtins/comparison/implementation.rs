@@ -150,7 +150,10 @@ fn equal_values(
         }
         (Value::List(left), Value::List(right)) => equal_lists(context, left, right, name),
         (Value::Dict(left), Value::Dict(right)) => equal_dicts(context, &left, &right, name),
-        (Value::Lazy(_), _) | (_, Value::Lazy(_)) => {
+        (Value::Lazy(_), _)
+        | (_, Value::Lazy(_))
+        | (Value::Promised(_), _)
+        | (_, Value::Promised(_)) => {
             unreachable!("force_value_shell removes suspended values")
         }
         (Value::Builtin(_), _)

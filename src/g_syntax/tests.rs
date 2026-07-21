@@ -14,8 +14,8 @@ fn core_global_access(context: &CompileContext, path: Vec<Key>) -> Value {
 }
 
 fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> Value {
-    let Value::Lazy(final_defs) = context.final_defs() else {
-        panic!("final module binding should be a promised lazy value");
+    let Value::Promised(final_defs) = context.final_defs() else {
+        panic!("final module binding should be a promised value");
     };
     final_defs
         .set(lowered.definitions.clone())
@@ -67,7 +67,7 @@ fn fully_evaluated_value_with_context(
     context: &crate::evaluation::EvalContext,
     mut value: Value,
 ) -> Value {
-    while matches!(value, Value::Lazy(_)) {
+    while matches!(value, Value::Lazy(_) | Value::Promised(_)) {
         value = crate::eval::eval_value(context, &value)
             .expect("reflection-enabled value should fully evaluate");
     }
@@ -76,7 +76,7 @@ fn fully_evaluated_value_with_context(
 
 fn fully_evaluated_value(mut value: Value) -> Value {
     let context = test_eval_context();
-    while matches!(value, Value::Lazy(_)) {
+    while matches!(value, Value::Lazy(_) | Value::Promised(_)) {
         value = crate::eval::eval_value(&context, &value).expect("value should fully evaluate");
     }
     value
@@ -86,7 +86,7 @@ fn fully_evaluated_error(mut value: Value) -> crate::eval::EvalError {
     let context = test_eval_context();
     loop {
         match crate::eval::eval_value(&context, &value) {
-            Ok(next @ Value::Lazy(_)) => value = next,
+            Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => value = next,
             Ok(other) => panic!("value should fail instead of evaluating to {other:?}"),
             Err(error) => return error,
         }
@@ -124,7 +124,10 @@ fn output_binary_result_list(value: &Value) -> Vec<u8> {
         },
         &mut |thunk| match crate::eval::eval_value(
             &test_eval_context(),
-            &Value::Lazy(thunk.clone()),
+            &match thunk {
+                crate::core::ListThunk::Lazy(lazy) => Value::Lazy(lazy.clone()),
+                crate::core::ListThunk::Promised(promise) => Value::Promised(promise.clone()),
+            },
         )
         .map_err(|err| err.to_string())?
         {
@@ -186,7 +189,7 @@ fn reflection_test_module(
         .with_prior_defs(Value::Dict(prior));
     let lowered = lower_parsed_source(parse(source), &context);
     assert_eq!(lowered.diagnostics, []);
-    let Value::Lazy(final_defs) = context.final_defs() else {
+    let Value::Promised(final_defs) = context.final_defs() else {
         panic!("final module binding should be promised");
     };
     final_defs
@@ -2212,7 +2215,7 @@ fn effect_then_requires_unit_result_when_observed() {
     let mut result = value_at_atom_path(&value, &["asm", "result"]).expect("result should exist");
     let err = loop {
         match crate::eval::eval_value(&test_eval_context(), &result) {
-            Ok(Value::Lazy(next)) => result = Value::Lazy(next),
+            Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => result = next,
             Ok(other) => panic!("non-unit result should not evaluate to {other:?}"),
             Err(err) => break err,
         }

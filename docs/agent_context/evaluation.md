@@ -25,12 +25,13 @@ control-flow overview.
   records. Contending observers receive the task's stable wait token; they do
   not wait on a lazy-specific condition variable. Lazy tasks participate in
   exact dependency pumping but never enter the background-ready queue.
-- A blocked lazy task records an edge only when its wait is produced by another
-  lazy task. The resulting functional graph is checked on every edge change.
-  Pure cycles are rotated to the lowest `LazyId`, poisoned with one shared
-  structured failure, and cleared; mixed lazy/reflection waits remain ordinary
-  quiescent scheduler state. Lazy labels and IDs belong in internal cycle
-  diagnostics, never in the public value facade.
+- A blocked lazy or assigned-promise task records an edge only when its wait is
+  produced by another deferred-value task. The resulting functional graph is
+  checked on every edge change. Pure cycles are rotated to the lowest common
+  `DeferredValueId`, poisoned with one shared structured failure, and cleared;
+  mixed deferred/reflection waits remain ordinary quiescent scheduler state.
+  Deferred labels and IDs belong in internal cycle diagnostics, never in the
+  public value facade.
 - Current `eval_value`, `PostForcePolicy`, and terminal shallow aliases are
   transition machinery, not language semantics. A WHNF demand ultimately
   follows a top-level lazy result; only lazy children inside a completed
@@ -48,9 +49,9 @@ control-flow overview.
   scheduling keys.
 - `Value::Function` is an independently observable curried stage. Partial
   application shares its staged runtime; saturation returns memoized work.
-- Lazy lists contain opaque holes, but list code never evaluates them.
-  Evaluator-owned operations force only the required pieces. Keep compact byte
-  leaves compact.
+- Lazy lists contain opaque `ListThunk` holes for either computed lazies or
+  named promises, but list code never evaluates them. Evaluator-owned
+  operations force only the required pieces. Keep compact byte leaves compact.
 
 ## Promises and Fixpoints
 
@@ -63,10 +64,17 @@ control-flow overview.
   wait for the owner's assignment.
 - Do not replace fixpoint ownership with a Rust stack guard: suspended
   evaluation unwinds the stack before scheduling resumes it.
-- Anonymous `Promised` cells used by module assembly and deferred-list effects
-  fail when observed before assignment. Do not silently reinterpret them as
-  blocking joins; migrate each producer explicitly when its scheduling
-  semantics are defined.
+- `PromisedValue` is a distinct raw one-write assignment cell, not a
+  `LazySource` and not a computed-lazy result cache. Its payload may itself be
+  lazy or promised. Direct empty observation fails fast without filling the
+  cell. An enclosing computed-lazy task translates that typed condition into a
+  demand-driven promise wait and leaves its own cache empty; explicit demand
+  after assignment retries it. Anonymous promises have no producer to
+  prioritize and do not keep a session alive independently.
+- Assigned promises participate in the common deferred dependency graph.
+  Promise-only and mixed promise/lazy strict cycles are diagnosed without
+  overwriting raw assignments; another evaluation session may rediscover a
+  promise-only cycle.
 - Reflection annotations are lazy gates. Construction demands neither effect
   nor target. Demand on a gate waits for its session-owned task, requires
   canonical unit, and then transfers the same demand to the target. Waits are
@@ -79,8 +87,8 @@ control-flow overview.
 - `Assembler` clones share an `EvaluationSession`. Replacing an assembler's
   host, sink, environment, or executor creates a session consistent with the
   new configuration.
-- Demand-driven lazy tasks are stored per session and keyed by stable lazy IDs;
-  do not enlarge every value with mutable scheduler state.
+- Demand-driven deferred tasks are stored per session and keyed by stable lazy
+  or promise IDs; do not enlarge every value with mutable scheduler state.
 - One `EvaluationExecutor` is shared by related assembler, logger, and future
   IDE sessions. Workers opportunistically poll reflection tasks and are the
   only consumers of sparks.

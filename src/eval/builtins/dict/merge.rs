@@ -73,8 +73,8 @@ fn merge_duplicate_dict_value(key: &Key, left: &Value, right: &Value) -> Value {
     } else if is_undefined_dict_value(right) {
         left.clone()
     } else if matches!((left, right), (Value::Dict(_), Value::Dict(_)))
-        || is_lazy_value(left)
-        || is_lazy_value(right)
+        || is_deferred_value(left)
+        || is_deferred_value(right)
     {
         builtin_apply3_value(
             Builtin::MergeDuplicate,
@@ -119,7 +119,7 @@ pub(super) fn update_dict_path(
 fn update_nested_dict_path(head: &Key, rest: &[Key], new_value: Value, prior: Value) -> Value {
     match prior {
         Value::Dict(dict) => Value::Dict(update_dict_path(&dict, rest, new_value)),
-        Value::Lazy(_) => builtin_apply3_value(
+        Value::Lazy(_) | Value::Promised(_) => builtin_apply3_value(
             Builtin::DictUpdate,
             &key_path_value(rest),
             &new_value,

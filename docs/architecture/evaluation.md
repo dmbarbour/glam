@@ -10,7 +10,7 @@ interaction nets, and background workers. Detailed hazards live in
 Every production evaluator entry receives an `EvalContext` borrowed from an
 `EvaluationSession`. An `Assembler` and its clones share one internal
 `ReasoningSession`, which owns that evaluation session and the assembler's
-reflection host. `EvaluationSession` owns reflection and lazy task records,
+reflection host. `EvaluationSession` owns reflection and deferred-value task records,
 wait lookup, the reflection launcher, and its connection to a shared
 `EvaluationExecutor`. The immutable reflection environment belongs to the
 active task host rather than the scheduler.
@@ -19,11 +19,12 @@ Lazy values retain computation and a stable identity, not a captured evaluator
 session. The observing `EvalContext` supplies host and scheduling behavior when
 the value is forced.
 
-When a lazy task blocks on another lazy producer, the session records one
-strict dependency edge. The graph has at most one outgoing edge per unresolved
-lazy task, so an edge insertion can find a cycle with a successor walk. A pure
-lazy cycle receives one canonical structured failure shared by all members;
-an edge through reflection or another external producer is not poisoned.
+When a lazy or assigned-promise task blocks on another deferred producer, the
+session records one strict dependency edge. The graph has at most one outgoing
+edge per unresolved producer, so an edge insertion can find a cycle with a
+successor walk. A pure deferred-value cycle receives one canonical structured
+failure shared by all members; an edge through reflection or another external
+producer is not poisoned.
 
 ## Value Observation
 
@@ -31,6 +32,7 @@ an edge through reflection or another external producer is not poisoned.
 ordinary value demand
   -> non-lazy data, FunctionValue, or Value::Net is already WHNF
   -> LazyValue work is claimed, computed, and memoized through its session task
+  -> PromisedValue reads one raw assignment, then follows a deferred assignment
 
 arity bridge
   -> arity 0: LazySource::NetComputation expects exposed Data
@@ -61,7 +63,8 @@ Do not build new behavior on that path. Removing raw-net projection and the
 shallow evaluator is deferred until the lazy-cycle transition plan is
 complete.
 
-Compact persistent lists live in `list.rs`. Their lazy holes are opaque; range
+Compact persistent lists live in `list.rs`. Their `ListThunk` holes distinguish
+computed lazies from named promises but remain opaque to list structure; range
 and binary observation in `eval/sequence.rs` forces only the pieces required by
 the caller.
 
@@ -71,8 +74,13 @@ Computed fixpoint cells track the lazy task currently responsible for
 production. Strict recursive observation is diagnosed by the common lazy
 dependency graph, while guarded recursion can finish at a constructor. Other
 tasks wait on a stable token if production suspended. Task-owned reflection
-fixpoints retain their direct owner check. Assignment-style `Promised` cells
-are a separate fail-fast bootstrap mechanism.
+fixpoints retain their direct owner check. Assignment-style `PromisedValue`
+cells hold a raw one-write assignment rather than a computed result cache.
+Direct observation before assignment fails without filling the cell. An
+enclosing lazy task instead records a scheduler-visible promise dependency and
+stays uncached, so later assignment can satisfy a new demand. Assigned promises
+follow lazy or promised payloads through the common deferred dependency graph;
+strict mixed cycles receive the same structured diagnosis as lazy-only cycles.
 
 Reflection annotations are also lazy producers. Constructing a gate demands
 neither its effect nor its target. Demand on the gate registers or resumes the

@@ -238,16 +238,102 @@ fn n(value: i64) -> Value {
 }
 
 #[test]
-fn promised_lazy_values_fail_fast_until_initialized() {
-    let promised = LazyValue::promised("test promised value");
-    let value = Value::Lazy(promised.clone());
+fn promised_values_fail_fast_without_poisoning_later_assignment() {
+    let promised = PromisedValue::new("test promised value");
+    let value = Value::Promised(promised.clone());
 
     assert_eq!(
         eval_value(&test_context(), &value).unwrap_err().to_string(),
         "promised value was observed before initialization"
     );
+    assert_eq!(promised.assignment(), None);
     promised.set(n(42)).unwrap();
     assert_eq!(eval_value(&test_context(), &value).unwrap(), n(42));
+}
+
+#[test]
+fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
+    let context = test_context();
+    let promise = PromisedValue::new("late assignment");
+    let lazy = LazyValue::from_access(Arc::from([]), Arc::from([Value::Promised(promise.clone())]));
+    let value = Value::Lazy(lazy.clone());
+
+    let blocked = eval_value(&context, &value).expect_err("empty promise should block its lazy");
+    assert!(blocked.blocked_on().is_some());
+    assert!(lazy.cached().is_none());
+    assert_eq!(promise.assignment(), None);
+
+    promise.set(n(42)).unwrap();
+    assert_eq!(eval_value(&context, &value).unwrap(), n(42));
+    assert_eq!(lazy.cached(), Some(Ok(n(42))));
+}
+
+#[test]
+fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
+    let context = test_context();
+    let target = LazyValue::deferred("promise target", |_| Ok(n(42)));
+    let promise = PromisedValue::new("forwarding promise");
+    promise.set(Value::Lazy(target.clone())).unwrap();
+
+    assert_eq!(
+        force_value_shell(&context, &Value::Promised(promise.clone())).unwrap(),
+        n(42)
+    );
+    assert_eq!(promise.assignment(), Some(Ok(Value::Lazy(target.clone()))));
+    assert_eq!(target.cached(), Some(Ok(n(42))));
+}
+
+#[test]
+fn promise_only_cycle_is_structured_without_overwriting_its_assignment() {
+    let context = test_context();
+    let promise = PromisedValue::new("promise cycle");
+    promise
+        .set(Value::Promised(promise.clone()))
+        .expect("promise should accept its own named assignment");
+
+    let error = force_value_shell(&context, &Value::Promised(promise.clone()))
+        .expect_err("strict promise recursion should fail");
+    assert!(error.to_string().contains("lazy dependency cycle"));
+    let failure = context.promise_failure(&promise).unwrap();
+    let crate::core::LazyFailure::DependencyCycle(cycle) = failure.as_ref() else {
+        panic!("promise recursion should retain a dependency cycle")
+    };
+    assert_eq!(cycle.members.len(), 1);
+    assert_eq!(cycle.members[0].id, promise.id().into());
+    assert!(matches!(
+        promise.assignment(),
+        Some(Ok(Value::Promised(assigned))) if assigned == promise
+    ));
+}
+
+#[test]
+fn mixed_promise_lazy_cycle_shares_one_structured_failure() {
+    let context = test_context();
+    let promise = PromisedValue::new("mixed promise");
+    let lazy = LazyValue::from_access(Arc::from([]), Arc::from([Value::Promised(promise.clone())]));
+    promise.set(Value::Lazy(lazy.clone())).unwrap();
+
+    let error = force_value_shell(&context, &Value::Promised(promise.clone()))
+        .expect_err("strict mixed recursion should fail");
+    assert!(error.to_string().contains("lazy dependency cycle"));
+    let promise_failure = context.promise_failure(&promise).unwrap();
+    let lazy_failure = context.lazy_failure(&lazy).unwrap();
+    assert!(Arc::ptr_eq(&promise_failure, &lazy_failure));
+    let crate::core::LazyFailure::DependencyCycle(cycle) = promise_failure.as_ref() else {
+        panic!("mixed recursion should retain a dependency cycle")
+    };
+    assert_eq!(
+        cycle
+            .members
+            .iter()
+            .map(|member| member.id)
+            .collect::<Vec<_>>(),
+        vec![promise.id().into(), lazy.id().into()]
+    );
+    assert!(matches!(
+        promise.assignment(),
+        Some(Ok(Value::Lazy(assigned))) if assigned == lazy
+    ));
 }
 
 #[test]
@@ -255,8 +341,8 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
     let session = test_context();
     let owner = session.with_new_task().unwrap();
     let observer = session.with_new_task().unwrap();
-    let fixpoint = LazyValue::fixpoint(&owner, "test fixpoint").unwrap();
-    let value = Value::Lazy(fixpoint.clone());
+    let fixpoint = PromisedValue::fixpoint(&owner, "test fixpoint").unwrap();
+    let value = Value::Promised(fixpoint.clone());
 
     let recursive = eval_value(&owner, &value).unwrap_err();
     assert!(
@@ -277,8 +363,8 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
     let session = test_context();
     let owner = session.with_new_task().unwrap();
     let observer = session.with_new_task().unwrap();
-    let fixpoint = LazyValue::fixpoint(&owner, "test fixpoint").unwrap();
-    let value = Value::Lazy(fixpoint);
+    let fixpoint = PromisedValue::fixpoint(&owner, "test fixpoint").unwrap();
+    let value = Value::Promised(fixpoint);
 
     assert!(
         eval_value(&observer, &value)
@@ -325,7 +411,7 @@ fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
         cycle
             .members
             .iter()
-            .any(|member| member.id == fixpoint_lazy.id())
+            .any(|member| member.id == fixpoint_lazy.id().into())
     );
 
     let observer = context.with_new_task().unwrap();
@@ -461,9 +547,9 @@ fn shallow_lazy_aliases_are_shared_by_the_session_without_entering_the_cache() {
     let root = LazyValue::deferred("shallow alias", move |_| Ok(target.clone()));
     let value = Value::Lazy(root.clone());
 
-    assert_eq!(context.lazy_task_count(), 0);
+    assert_eq!(context.deferred_task_count(), 0);
     assert_eq!(eval_value(&context, &value).unwrap(), expected);
-    assert_eq!(context.lazy_task_count(), 1);
+    assert_eq!(context.deferred_task_count(), 1);
     assert_eq!(
         root.checked_cached()
             .expect("a computed alias must not enter the immutable cache"),
@@ -858,8 +944,28 @@ fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
 }
 
 #[test]
+fn promised_list_chunks_remain_assignable_after_early_observation() {
+    let promise = PromisedValue::new("promised list tail");
+    let list = append_sequence(Value::Promised(promise.clone()))
+        .expect("a promise remains a valid deferred list tail");
+
+    assert!(
+        list_output_bytes(&test_context(), &list)
+            .expect_err("an empty list promise should fail fast")
+            .contains("promised value was observed before initialization")
+    );
+    promise
+        .set(Value::Binary(Bytes::from_static(b"assigned")))
+        .expect("early observation must not fill the promise");
+    assert_eq!(
+        list_output_bytes(&test_context(), &list).expect("assigned list promise should resolve"),
+        b"assigned"
+    );
+}
+
+#[test]
 fn split_end_does_not_force_lazy_left_branch_when_suffix_is_in_right_branch() {
-    let lazy_left = List::from_thunk(LazyValue::error("left branch was forced"));
+    let lazy_left = List::from_thunk(LazyValue::error("left branch was forced").into());
     let list = List::concat(lazy_left, List::from_bytes(Bytes::from_static(b"abc")));
     let split = eval_closed_expr(&builtin2_expr(
         Builtin::ListSplitEnd,
@@ -1224,7 +1330,7 @@ fn closed_semantic_list_holes_remain_host_observable() {
     }) else {
         unreachable!()
     };
-    let list = List::from_thunk(hole);
+    let list = List::from_thunk(hole.into());
 
     let (value, tail) = pop_list_front(&test_context(), &list).unwrap().unwrap();
     assert_eq!(value, n(42));

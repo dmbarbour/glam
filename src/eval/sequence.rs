@@ -142,7 +142,8 @@ pub(super) fn append_sequence(value: Value) -> Result<List, EvalError> {
     match value {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
-        Value::Lazy(thunk) => Ok(List::from_thunk(thunk)),
+        Value::Lazy(thunk) => Ok(List::from_thunk(thunk.into())),
+        Value::Promised(promise) => Ok(List::from_thunk(promise.into())),
         _ => Err(EvalError::new(
             "append requires list or binary values on both sides",
         )),

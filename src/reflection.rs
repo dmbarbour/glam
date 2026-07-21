@@ -25,7 +25,9 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use crate::api::{EvaluationRuntime, Value as PublicValue};
-use crate::core::{Atom, Dict, FunctionValue, Key, LazyValue, List, NetValue, Value, keys};
+use crate::core::{
+    Atom, Dict, FunctionValue, Key, LazyValue, List, NetValue, PromisedValue, Value, keys,
+};
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::eval;
 use crate::evaluation::{
@@ -677,9 +679,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
             &[],
         )?;
         let order = self.allocate_control_order()?;
-        let handle = LazyValue::fixpoint(&self.eval_context, "reflection effect fixpoint")
+        let handle = PromisedValue::fixpoint(&self.eval_context, "reflection effect fixpoint")
             .map_err(|error| TaskError::new(error.as_ref()))?;
-        let marker = Value::Lazy(handle.clone());
+        let marker = Value::Promised(handle.clone());
         let outer_control = std::mem::take(&mut branch.control);
         branch.state = state;
         branch.active_fixes.push(ActiveFix {
@@ -2245,7 +2247,7 @@ struct ActiveFix<S: TaskSpecialization> {
     root: Arc<FixRoot<S>>,
     choices: Vec<FixChoice>,
     next_choice: usize,
-    handle: LazyValue,
+    handle: PromisedValue,
 }
 
 #[derive(Clone)]
@@ -2271,7 +2273,7 @@ struct Control {
 enum Continuation {
     Glam(Value),
     RequireUnit,
-    Fix(LazyValue),
+    Fix(PromisedValue),
 }
 
 #[derive(Clone)]
@@ -2855,7 +2857,7 @@ fn apply(
 
 fn evaluate(context: &EvalContext, value: Value) -> Result<Value, TaskError> {
     let mut value = value;
-    while matches!(value, Value::Lazy(_)) {
+    while matches!(value, Value::Lazy(_) | Value::Promised(_)) {
         value = eval::eval_value(context, &value).map_err(task_eval_error)?;
     }
     Ok(value)
@@ -3831,11 +3833,11 @@ mod tests {
         let session = EvalContext::standalone();
         let owner = session.with_new_task().unwrap();
         let observer = session.with_new_task().unwrap();
-        let promised = LazyValue::fixpoint(&owner, "eval test dependency").unwrap();
+        let promised = PromisedValue::fixpoint(&owner, "eval test dependency").unwrap();
         let effect = eval::apply_values(
             &observer,
             function.as_core().clone(),
-            vec![Value::Lazy(promised.clone())],
+            vec![Value::Promised(promised.clone())],
         )
         .unwrap();
         let mut task = EffectTask::new_in_context(
@@ -3852,8 +3854,8 @@ mod tests {
         assert!(blocked.lazy.is_some());
 
         promised
-            .cache(Err(Arc::from("dependency failed")))
-            .unwrap_err();
+            .fail("dependency failed")
+            .expect("test promise should fail once");
         let poll = task.poll(256);
         let EffectTaskPoll::Complete(value) = poll else {
             panic!("eval should retry a terminal dependency and return err");
@@ -3884,7 +3886,7 @@ mod tests {
             .map(|mut item| {
                 loop {
                     item = eval::eval_value(&context, &item).unwrap();
-                    if !matches!(item, Value::Lazy(_)) {
+                    if !matches!(item, Value::Lazy(_) | Value::Promised(_)) {
                         break item;
                     }
                 }

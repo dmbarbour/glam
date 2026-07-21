@@ -17,6 +17,11 @@ pub(super) fn apply_value(
         Value::Net(net) => apply_net(context, net, argument),
         Value::Dict(dict) => apply_dict_value(context, &dict, argument),
         Value::Lazy(thunk) => apply_value(context, eval_lazy(context, &thunk)?, argument),
+        Value::Promised(promise) => apply_value(
+            context,
+            eval_value(context, &Value::Promised(promise))?,
+            argument,
+        ),
         _ => Err(EvalError::new("application requires a function value")),
     }
 }

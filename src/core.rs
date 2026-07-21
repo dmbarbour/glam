@@ -23,6 +23,60 @@ impl LazyId {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct PromiseId(NonZeroU64);
+
+impl PromiseId {
+    pub(crate) fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DeferredValueId {
+    Lazy(LazyId),
+    Promise(PromiseId),
+}
+
+impl DeferredValueId {
+    pub(crate) fn get(self) -> u64 {
+        match self {
+            Self::Lazy(id) => id.get(),
+            Self::Promise(id) => id.get(),
+        }
+    }
+}
+
+impl From<LazyId> for DeferredValueId {
+    fn from(id: LazyId) -> Self {
+        Self::Lazy(id)
+    }
+}
+
+impl From<PromiseId> for DeferredValueId {
+    fn from(id: PromiseId) -> Self {
+        Self::Promise(id)
+    }
+}
+
+impl PartialOrd for DeferredValueId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DeferredValueId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.get().cmp(&other.get()).then_with(|| {
+            let kind = |id| match id {
+                Self::Lazy(_) => 0,
+                Self::Promise(_) => 1,
+            };
+            kind(*self).cmp(&kind(*other))
+        })
+    }
+}
+
 /// A value whose outer shell has reached weak-head normal form.
 ///
 /// Containers may still contain lazy fields. This wrapper becomes the success
@@ -41,7 +95,7 @@ impl TryFrom<Value> for EvaluatedValue {
     type Error = Value;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
-        if matches!(value, Value::Lazy(_)) {
+        if matches!(value, Value::Lazy(_) | Value::Promised(_)) {
             Err(value)
         } else {
             Ok(Self(value))
@@ -95,7 +149,7 @@ pub(crate) struct LazyCycle {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LazyCycleMember {
-    pub(crate) id: LazyId,
+    pub(crate) id: DeferredValueId,
     pub(crate) label: Arc<str>,
 }
 
@@ -107,7 +161,20 @@ pub struct LazyValue {
     result: Arc<OnceLock<Result<Value, Arc<str>>>>,
 }
 
-static NEXT_LAZY_ID: AtomicU64 = AtomicU64::new(1);
+#[derive(Clone)]
+pub struct PromisedValue {
+    id: PromiseId,
+    label: Arc<str>,
+    assignment: Arc<OnceLock<Result<Value, Arc<str>>>>,
+    task: Option<Arc<TaskPromise>>,
+}
+
+pub(crate) struct TaskPromise {
+    owner: EvaluationTaskId,
+    wait: EvaluationWaitToken,
+}
+
+static NEXT_DEFERRED_VALUE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_FIXPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl LazyValue {
@@ -118,25 +185,6 @@ impl LazyValue {
             source,
             result: Arc::new(OnceLock::new()),
         }
-    }
-
-    pub fn promised(label: impl Into<Arc<str>>) -> Self {
-        Self::with_source(label, LazySource::Promised)
-    }
-
-    pub(crate) fn fixpoint(
-        context: &EvalContext,
-        label: impl Into<Arc<str>>,
-    ) -> Result<Self, Arc<str>> {
-        let result = Arc::new(OnceLock::new());
-        let (owner, wait) = context.register_promise(&result)?;
-        let id = allocate_fixpoint_id()?;
-        Ok(Self {
-            id: allocate_lazy_id(),
-            label: label.into(),
-            source: LazySource::Fixpoint(Arc::new(FixpointCell { id, owner, wait })),
-            result,
-        })
     }
 
     pub(crate) fn computed_fixpoint(
@@ -164,7 +212,7 @@ impl LazyValue {
     }
 
     pub fn error(message: impl Into<Arc<str>>) -> Self {
-        let value = Self::with_source("error", LazySource::Promised);
+        let value = Self::with_source("error", LazySource::Error);
         value
             .result
             .set(Err(LazyFailure::evaluation(message).legacy_message()))
@@ -182,12 +230,6 @@ impl LazyValue {
 
     pub(crate) fn source(&self) -> &LazySource {
         &self.source
-    }
-
-    pub fn set(&self, value: Value) -> Result<(), Value> {
-        self.result.set(Ok(value)).map_err(|result| {
-            result.expect("setting a lazy value always supplies a successful value")
-        })
     }
 
     pub fn cached(&self) -> Option<Result<Value, Arc<str>>> {
@@ -216,15 +258,80 @@ impl LazyValue {
     }
 }
 
+impl PromisedValue {
+    pub fn new(label: impl Into<Arc<str>>) -> Self {
+        Self {
+            id: allocate_promise_id(),
+            label: label.into(),
+            assignment: Arc::new(OnceLock::new()),
+            task: None,
+        }
+    }
+
+    pub(crate) fn fixpoint(
+        context: &EvalContext,
+        label: impl Into<Arc<str>>,
+    ) -> Result<Self, Arc<str>> {
+        let id = allocate_promise_id();
+        let assignment = Arc::new(OnceLock::new());
+        let (owner, wait) = context.register_promise(&assignment)?;
+        Ok(Self {
+            id,
+            label: label.into(),
+            assignment,
+            task: Some(Arc::new(TaskPromise { owner, wait })),
+        })
+    }
+
+    pub(crate) fn id(&self) -> PromiseId {
+        self.id
+    }
+
+    pub(crate) fn label(&self) -> &Arc<str> {
+        &self.label
+    }
+
+    pub(crate) fn task(&self) -> Option<&TaskPromise> {
+        self.task.as_deref()
+    }
+
+    pub fn set(&self, value: Value) -> Result<(), Value> {
+        self.assignment.set(Ok(value)).map_err(|assignment| {
+            assignment.expect("setting a promised value always supplies a successful value")
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail(&self, error: impl Into<Arc<str>>) -> Result<(), Arc<str>> {
+        self.assignment
+            .set(Err(error.into()))
+            .map_err(|assignment| {
+                assignment.expect_err("failing a promised value always supplies an error")
+            })
+    }
+
+    pub(crate) fn assignment(&self) -> Option<Result<Value, Arc<str>>> {
+        self.assignment.get().cloned()
+    }
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CachedValueIsLazy;
 
 fn allocate_lazy_id() -> LazyId {
-    let id = NEXT_LAZY_ID
+    LazyId(allocate_deferred_value_id())
+}
+
+fn allocate_promise_id() -> PromiseId {
+    PromiseId(allocate_deferred_value_id())
+}
+
+fn allocate_deferred_value_id() -> NonZeroU64 {
+    let id = NEXT_DEFERRED_VALUE_ID
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .expect("lazy IDs exhausted");
-    LazyId(NonZeroU64::new(id).expect("lazy IDs start at one"))
+        .expect("deferred value IDs exhausted");
+    NonZeroU64::new(id).expect("deferred value IDs start at one")
 }
 
 fn allocate_fixpoint_id() -> Result<FixpointId, Arc<str>> {
@@ -245,6 +352,24 @@ impl Eq for LazyValue {}
 impl fmt::Debug for LazyValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LazyValue")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for PromisedValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for PromisedValue {}
+
+impl fmt::Debug for PromisedValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PromisedValue")
             .field("id", &self.id)
             .field("label", &self.label)
             .finish_non_exhaustive()
@@ -334,6 +459,7 @@ impl Key {
             | Value::Function(_)
             | Value::Net(_)
             | Value::Lazy(_)
+            | Value::Promised(_)
             | Value::Opaque(_) => None,
         }
     }
@@ -368,8 +494,10 @@ pub enum Value {
     Function(FunctionValue),
     /// A closed interaction net with one designated exposed port.
     Net(NetValue),
-    /// A closed suspended computation, promised value, or memoized failure.
+    /// A closed suspended computation or memoized failure.
     Lazy(LazyValue),
+    /// A named one-write hole whose assignment may itself be deferred.
+    Promised(PromisedValue),
     /// Host-owned identity whose representation is deliberately unavailable to
     /// Glam programs. Clones retain the payload and compare by identity.
     Opaque(OpaqueValue),
@@ -498,8 +626,7 @@ impl BuiltinCall {
 
 #[derive(Clone)]
 pub(crate) enum LazySource {
-    Promised,
-    Fixpoint(Arc<FixpointCell>),
+    Error,
     ComputedFixpoint(Arc<ComputedFixpointCell>),
     Deferred(Arc<DeferredComputation>),
     ReflectionGate(Arc<ReflectionGate>),
@@ -529,12 +656,6 @@ impl LazyApplication {
     pub(crate) fn arguments(&self) -> &[Value] {
         &self.arguments
     }
-}
-
-pub(crate) struct FixpointCell {
-    id: FixpointId,
-    owner: EvaluationTaskId,
-    wait: EvaluationWaitToken,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -577,11 +698,7 @@ pub(crate) enum ComputedFixpointAction {
     Wait(EvaluationWaitToken),
 }
 
-impl FixpointCell {
-    pub(crate) fn id(&self) -> u64 {
-        self.id.0.get()
-    }
-
+impl TaskPromise {
     pub(crate) fn owner(&self) -> EvaluationTaskId {
         self.owner
     }
@@ -604,7 +721,7 @@ impl ComputedFixpointCell {
             .expect("computed fixpoint state was poisoned");
         match &*state {
             ComputedFixpointState::Unclaimed => {
-                let (owner, wait) = context.register_promise(result)?;
+                let (owner, wait) = context.register_result_promise(result)?;
                 let claim = FixpointClaim { owner, wait };
                 *state = ComputedFixpointState::Running(claim);
                 Ok(ComputedFixpointAction::Produce {
@@ -866,7 +983,30 @@ impl Builtin {
 
 pub type Dict = RedBlackTreeMapSync<Key, Value>;
 
-pub type List = crate::list::List<Value, LazyValue>;
+/// An opaque deferred tail in a persistent list.
+///
+/// Lists preserve the distinction between computed lazy chunks and named
+/// assignment holes without depending on evaluator state. Only evaluator-owned
+/// list operations decide when to force either kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListThunk {
+    Lazy(LazyValue),
+    Promised(PromisedValue),
+}
+
+impl From<LazyValue> for ListThunk {
+    fn from(lazy: LazyValue) -> Self {
+        Self::Lazy(lazy)
+    }
+}
+
+impl From<PromisedValue> for ListThunk {
+    fn from(promise: PromisedValue) -> Self {
+        Self::Promised(promise)
+    }
+}
+
+pub type List = crate::list::List<Value, ListThunk>;
 
 fn list_to_key_items(list: &List) -> Option<Arc<[Key]>> {
     let items = std::cell::RefCell::new(Vec::new());
@@ -949,6 +1089,7 @@ impl Value {
                 | Value::Builtin(_)
                 | Value::PartialBuiltin(_)
                 | Value::Lazy(_)
+                | Value::Promised(_)
                 | Value::Opaque(_) => None,
             },
         }
@@ -970,8 +1111,7 @@ mod tests {
     fn boxed_reflection_gate_does_not_enlarge_lazy_source() {
         #[allow(dead_code)]
         enum LazySourceWithoutReflection {
-            Promised,
-            Fixpoint(Arc<FixpointCell>),
+            Error,
             ComputedFixpoint(Arc<ComputedFixpointCell>),
             Deferred(Arc<DeferredComputation>),
             Access {
@@ -1065,8 +1205,9 @@ mod tests {
     }
 
     #[test]
-    fn evaluated_values_reject_only_a_lazy_outer_shell() {
+    fn evaluated_values_reject_deferred_outer_shells_only() {
         let field = Value::deferred("lazy field", |_| Ok(Value::Number(1.into())));
+        let promise = PromisedValue::new("promised field");
         let container =
             Value::Dict(Dict::new_sync().insert(Key::atom_from_text("field"), field.clone()));
 
@@ -1077,45 +1218,44 @@ mod tests {
             EvaluatedValue::try_from(field),
             Err(Value::Lazy(_))
         ));
+        assert!(matches!(
+            EvaluatedValue::try_from(Value::Promised(promise)),
+            Err(Value::Promised(_))
+        ));
     }
 
     #[test]
-    fn checked_lazy_cache_rejects_forwarding_values() {
-        let target = LazyValue::promised("target");
-        let forwarding = LazyValue::promised("forwarding");
+    fn promised_assignments_retain_deferred_aliases() {
+        let target = PromisedValue::new("target");
+        let forwarding = PromisedValue::new("forwarding");
         forwarding
-            .set(Value::Lazy(target))
+            .set(Value::Promised(target))
             .expect("new promise should accept its target");
 
-        assert_eq!(forwarding.checked_cached(), Err(CachedValueIsLazy));
+        assert!(matches!(
+            forwarding.assignment(),
+            Some(Ok(Value::Promised(_)))
+        ));
 
-        let ready = LazyValue::promised("ready");
+        let ready = PromisedValue::new("ready");
         ready
             .set(Value::Number(42.into()))
             .expect("new promise should accept its value");
-        assert_eq!(
-            ready
-                .checked_cached()
-                .expect("number cache should satisfy the WHNF invariant")
-                .expect("number cache should be initialized")
-                .expect("number cache should be successful")
-                .into_value(),
-            Value::Number(42.into())
-        );
+        assert_eq!(ready.assignment(), Some(Ok(Value::Number(42.into()))));
     }
 
     #[test]
     fn lazy_cycle_failures_retain_member_identity_and_labels() {
-        let first = LazyValue::promised("first");
-        let second = LazyValue::promised("second");
+        let first = PromisedValue::new("first");
+        let second = PromisedValue::new("second");
         let cycle = LazyFailure::DependencyCycle(Arc::new(LazyCycle {
             members: vec![
                 LazyCycleMember {
-                    id: first.id(),
+                    id: first.id().into(),
                     label: Arc::from("first"),
                 },
                 LazyCycleMember {
-                    id: second.id(),
+                    id: second.id().into(),
                     label: Arc::from("second"),
                 },
             ]
@@ -1171,9 +1311,13 @@ mod tests {
     }
 
     #[test]
-    fn keys_reject_lazy_values() {
+    fn keys_reject_deferred_values() {
         assert_eq!(
             Key::from_value(&Value::deferred("number", |_| Ok(Value::Number(1.into())))),
+            None
+        );
+        assert_eq!(
+            Key::from_value(&Value::Promised(PromisedValue::new("number"))),
             None
         );
     }

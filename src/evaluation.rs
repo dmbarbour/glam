@@ -11,7 +11,9 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
-use crate::core::{LazyCycle, LazyCycleMember, LazyFailure, LazyId, LazyValue, Value};
+use crate::core::{
+    DeferredValueId, LazyCycle, LazyCycleMember, LazyFailure, LazyValue, PromisedValue, Value,
+};
 
 mod executor;
 pub(crate) use executor::EvaluationExecutor;
@@ -249,7 +251,7 @@ struct ReflectionTaskRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum LazyTaskState {
+enum DeferredTaskState {
     Dormant,
     Running,
     Blocked(EvaluationTaskBlock),
@@ -257,14 +259,37 @@ enum LazyTaskState {
     Failed(Arc<LazyFailure>),
 }
 
-struct LazyTaskRecord {
+#[derive(Clone)]
+enum DeferredValue {
+    Lazy(LazyValue),
+    Promise(PromisedValue),
+}
+
+impl DeferredValue {
+    fn id(&self) -> DeferredValueId {
+        match self {
+            Self::Lazy(lazy) => lazy.id().into(),
+            Self::Promise(promise) => promise.id().into(),
+        }
+    }
+
+    fn label(&self) -> &Arc<str> {
+        match self {
+            Self::Lazy(lazy) => lazy.label(),
+            Self::Promise(promise) => promise.label(),
+        }
+    }
+}
+
+struct DeferredTaskRecord {
     id: EvaluationTaskId,
     wait: EvaluationWaitToken,
-    lazy: LazyValue,
-    state: LazyTaskState,
-    /// The strict lazy producer currently preventing this task from reaching
-    /// WHNF. Non-lazy waits remain in `state` but do not enter this graph.
-    dependency: Option<LazyId>,
+    value: DeferredValue,
+    state: DeferredTaskState,
+    /// The strict deferred producer currently preventing this task from
+    /// reaching WHNF. External waits remain in `state` but do not enter this
+    /// graph.
+    dependency: Option<DeferredValueId>,
     machine: Option<Box<dyn EvaluationTaskMachine>>,
 }
 
@@ -371,9 +396,9 @@ struct EvaluationTasks {
     ready: VecDeque<EvaluationTaskId>,
     promises: HashMap<EvaluationWaitToken, PromiseRecord>,
     owned_promises: HashMap<EvaluationTaskId, Vec<EvaluationWaitToken>>,
-    lazy: HashMap<LazyId, LazyTaskRecord>,
-    lazy_by_wait: HashMap<EvaluationWaitToken, LazyId>,
-    lazy_by_id: HashMap<EvaluationTaskId, LazyId>,
+    deferred: HashMap<DeferredValueId, DeferredTaskRecord>,
+    deferred_by_wait: HashMap<EvaluationWaitToken, DeferredValueId>,
+    deferred_by_task: HashMap<EvaluationTaskId, DeferredValueId>,
 }
 
 pub(crate) struct EvaluationSession {
@@ -475,14 +500,14 @@ impl EvalContext {
         }
     }
 
-    fn for_lazy_task(
+    fn for_deferred_task(
         session: Arc<EvaluationSession>,
         id: EvaluationTaskId,
         originating_task: Option<EvaluationTaskId>,
     ) -> Self {
         let task = Arc::new(OnceLock::new());
         task.set(Ok(id))
-            .expect("fresh lazy task identity cell must be empty");
+            .expect("fresh deferred task identity cell must be empty");
         Self {
             session,
             task,
@@ -498,7 +523,7 @@ impl EvalContext {
     }
 
     pub(crate) fn spark(&self, value: Value) {
-        if matches!(value, Value::Lazy(_) | Value::Net(_)) {
+        if matches!(value, Value::Lazy(_) | Value::Promised(_) | Value::Net(_)) {
             self.session.submit_spark(value);
         }
     }
@@ -520,13 +545,36 @@ impl EvalContext {
     where
         F: FnOnce(EvalContext) -> Box<dyn EvaluationTaskMachine>,
     {
+        self.deferred_task(DeferredValue::Lazy(lazy.clone()), build)
+    }
+
+    pub(crate) fn promise_task<F>(
+        &self,
+        promise: &PromisedValue,
+        build: F,
+    ) -> Result<EvaluationWaitToken, Arc<str>>
+    where
+        F: FnOnce(EvalContext) -> Box<dyn EvaluationTaskMachine>,
+    {
+        self.deferred_task(DeferredValue::Promise(promise.clone()), build)
+    }
+
+    fn deferred_task<F>(
+        &self,
+        value: DeferredValue,
+        build: F,
+    ) -> Result<EvaluationWaitToken, Arc<str>>
+    where
+        F: FnOnce(EvalContext) -> Box<dyn EvaluationTaskMachine>,
+    {
+        let deferred = value.id();
         {
             let tasks = self
                 .session
                 .tasks
                 .lock()
                 .expect("evaluation task registry was poisoned");
-            if let Some(record) = tasks.lazy.get(&lazy.id()) {
+            if let Some(record) = tasks.deferred.get(&deferred) {
                 return Ok(record.wait.clone());
             }
         }
@@ -536,7 +584,7 @@ impl EvalContext {
         let originating_task = self
             .originating_task
             .or_else(|| self.task.get().and_then(|task| task.as_ref().ok()).copied());
-        let machine = build(Self::for_lazy_task(
+        let machine = build(Self::for_deferred_task(
             self.session.clone(),
             id,
             originating_task,
@@ -546,22 +594,25 @@ impl EvalContext {
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
-        if let Some(record) = tasks.lazy.get(&lazy.id()) {
+        if let Some(record) = tasks.deferred.get(&deferred) {
             return Ok(record.wait.clone());
         }
-        let record = LazyTaskRecord {
+        let record = DeferredTaskRecord {
             id,
             wait: wait.clone(),
-            lazy: lazy.clone(),
-            state: LazyTaskState::Dormant,
+            value,
+            state: DeferredTaskState::Dormant,
             dependency: None,
             machine: Some(machine),
         };
         assert!(
-            tasks.lazy.insert(lazy.id(), record).is_none()
-                && tasks.lazy_by_wait.insert(wait.clone(), lazy.id()).is_none()
-                && tasks.lazy_by_id.insert(id, lazy.id()).is_none(),
-            "lazy task identities must be unique"
+            tasks.deferred.insert(deferred, record).is_none()
+                && tasks
+                    .deferred_by_wait
+                    .insert(wait.clone(), deferred)
+                    .is_none()
+                && tasks.deferred_by_task.insert(id, deferred).is_none(),
+            "deferred task identities must be unique"
         );
         self.session.task_changed.notify_all();
         Ok(wait)
@@ -595,6 +646,33 @@ impl EvalContext {
     }
 
     pub(crate) fn register_promise(
+        &self,
+        result: &Arc<OnceLock<Result<Value, Arc<str>>>>,
+    ) -> Result<(EvaluationTaskId, EvaluationWaitToken), Arc<str>> {
+        let owner = self.task_id()?;
+        let wait = allocate_wait_token(&self.session)?;
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let replaced = tasks.promises.insert(
+            wait.clone(),
+            PromiseRecord {
+                producer: owner,
+                result: Arc::downgrade(result),
+            },
+        );
+        assert!(replaced.is_none(), "evaluation wait tokens must be unique");
+        tasks
+            .owned_promises
+            .entry(owner)
+            .or_default()
+            .push(wait.clone());
+        Ok((owner, wait))
+    }
+
+    pub(crate) fn register_result_promise(
         &self,
         result: &Arc<OnceLock<Result<Value, Arc<str>>>>,
     ) -> Result<(EvaluationTaskId, EvaluationWaitToken), Arc<str>> {
@@ -940,17 +1018,21 @@ impl EvalContext {
             .lock()
             .expect("evaluation task registry was poisoned");
         let Some(record) = tasks.reflection.get(wait) else {
-            if let Some(lazy) = tasks.lazy_by_wait.get(wait) {
+            if let Some(deferred) = tasks.deferred_by_wait.get(wait) {
                 let record = tasks
-                    .lazy
-                    .get(lazy)
-                    .expect("lazy wait index must refer to a task record");
+                    .deferred
+                    .get(deferred)
+                    .expect("deferred wait index must refer to a task record");
                 return match &record.state {
-                    LazyTaskState::Complete(value) => EvaluationTaskPoll::Complete(value.clone()),
-                    LazyTaskState::Failed(error) => {
+                    DeferredTaskState::Complete(value) => {
+                        EvaluationTaskPoll::Complete(value.clone())
+                    }
+                    DeferredTaskState::Failed(error) => {
                         EvaluationTaskPoll::Failed(error.legacy_message())
                     }
-                    LazyTaskState::Dormant | LazyTaskState::Running | LazyTaskState::Blocked(_) => {
+                    DeferredTaskState::Dormant
+                    | DeferredTaskState::Running
+                    | DeferredTaskState::Blocked(_) => {
                         if Arc::ptr_eq(&self.session, &owner) {
                             EvaluationTaskPoll::Pending(wait.clone())
                         } else {
@@ -1063,25 +1145,35 @@ impl EvalContext {
     }
 
     #[cfg(test)]
-    pub(crate) fn lazy_task_count(&self) -> usize {
+    pub(crate) fn deferred_task_count(&self) -> usize {
         self.session
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned")
-            .lazy
+            .deferred
             .len()
     }
 
     #[cfg(test)]
     pub(crate) fn lazy_failure(&self, lazy: &LazyValue) -> Option<Arc<LazyFailure>> {
+        self.deferred_failure(lazy.id().into())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn promise_failure(&self, promise: &PromisedValue) -> Option<Arc<LazyFailure>> {
+        self.deferred_failure(promise.id().into())
+    }
+
+    #[cfg(test)]
+    fn deferred_failure(&self, deferred: DeferredValueId) -> Option<Arc<LazyFailure>> {
         let tasks = self
             .session
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
-        let record = tasks.lazy.get(&lazy.id())?;
+        let record = tasks.deferred.get(&deferred)?;
         match &record.state {
-            LazyTaskState::Failed(failure) => Some(failure.clone()),
+            DeferredTaskState::Failed(failure) => Some(failure.clone()),
             _ => None,
         }
     }
@@ -1100,13 +1192,13 @@ fn test_reflection_dependency(
     let mut wait = wait.clone();
     let mut seen = HashSet::new();
     while seen.insert(wait.clone()) {
-        let Some(lazy) = tasks.lazy_by_wait.get(&wait) else {
+        let Some(deferred) = tasks.deferred_by_wait.get(&wait) else {
             break;
         };
-        let Some(record) = tasks.lazy.get(lazy) else {
+        let Some(record) = tasks.deferred.get(deferred) else {
             break;
         };
-        let LazyTaskState::Blocked(block) = &record.state else {
+        let DeferredTaskState::Blocked(block) = &record.state else {
             break;
         };
         let Some(dependency) = &block.lazy else {
@@ -1126,31 +1218,31 @@ struct ClaimedReflectionTask {
     machine: Box<dyn EvaluationTaskMachine>,
 }
 
-struct ClaimedLazyTask {
+struct ClaimedDeferredTask {
     id: EvaluationTaskId,
-    lazy: LazyId,
-    prior_state: LazyTaskState,
-    prior_dependency: Option<LazyId>,
+    deferred: DeferredValueId,
+    prior_state: DeferredTaskState,
+    prior_dependency: Option<DeferredValueId>,
     machine: Box<dyn EvaluationTaskMachine>,
 }
 
 enum ClaimedTask {
     Reflection(ClaimedReflectionTask),
-    Lazy(ClaimedLazyTask),
+    Deferred(ClaimedDeferredTask),
 }
 
 impl ClaimedTask {
     fn id(&self) -> EvaluationTaskId {
         match self {
             Self::Reflection(task) => task.id,
-            Self::Lazy(task) => task.id,
+            Self::Deferred(task) => task.id,
         }
     }
 
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
         match self {
             Self::Reflection(task) => task.machine.poll(step_budget),
-            Self::Lazy(task) => task.machine.poll(step_budget),
+            Self::Deferred(task) => task.machine.poll(step_budget),
         }
     }
 }
@@ -1297,7 +1389,7 @@ impl EvaluationSession {
                     .tasks
                     .lock()
                     .expect("evaluation task registry was poisoned");
-                if target_has_running_lazy_producer(&tasks, target)
+                if target_has_running_deferred_producer(&tasks, target)
                     || context.runs_scheduled_task() && target_has_running_producer(&tasks, target)
                 {
                     return EvaluationPumpOutcome::NoProgress;
@@ -1315,7 +1407,7 @@ impl EvaluationSession {
                     .expect("evaluation task registry was poisoned");
                 if target_has_running_producer(&tasks, target) {
                     if context.runs_scheduled_task()
-                        || target_has_running_lazy_producer(&tasks, target)
+                        || target_has_running_deferred_producer(&tasks, target)
                     {
                         return EvaluationPumpOutcome::NoProgress;
                     }
@@ -1367,7 +1459,7 @@ impl EvaluationSession {
     ) {
         match claimed {
             ClaimedTask::Reflection(claimed) => self.release_reflection_task(claimed, poll),
-            ClaimedTask::Lazy(claimed) => self.release_lazy_task(claimed, poll),
+            ClaimedTask::Deferred(claimed) => self.release_deferred_task(claimed, poll),
         }
     }
 
@@ -1432,9 +1524,9 @@ impl EvaluationSession {
         (made_progress, remains_blocked, None, status)
     }
 
-    fn release_lazy_task(
+    fn release_deferred_task(
         &self,
-        claimed: ClaimedLazyTask,
+        claimed: ClaimedDeferredTask,
         poll: EvaluationMachinePoll,
     ) -> (
         bool,
@@ -1448,65 +1540,64 @@ impl EvaluationSession {
             .expect("evaluation task registry was poisoned");
         {
             let record = tasks
-                .lazy
-                .get_mut(&claimed.lazy)
-                .expect("claimed lazy task must remain registered");
-            assert_eq!(record.id, claimed.id, "lazy task ID index must agree");
+                .deferred
+                .get_mut(&claimed.deferred)
+                .expect("claimed deferred task must remain registered");
+            assert_eq!(record.id, claimed.id, "deferred task ID index must agree");
             assert!(
-                matches!(record.state, LazyTaskState::Running),
-                "only a running lazy task may release its machine"
+                matches!(record.state, DeferredTaskState::Running),
+                "only a running deferred task may release its machine"
             );
             assert!(record.machine.is_none(), "claimed machine must be absent");
             record.machine = Some(claimed.machine);
         }
 
         let (state, mut made_progress) = match poll {
-            EvaluationMachinePoll::Yielded => (LazyTaskState::Dormant, true),
+            EvaluationMachinePoll::Yielded => (DeferredTaskState::Dormant, true),
             EvaluationMachinePoll::Blocked(block) => {
                 let unchanged = matches!(
                     &claimed.prior_state,
-                    LazyTaskState::Blocked(prior) if prior == &block
+                    DeferredTaskState::Blocked(prior) if prior == &block
                 );
-                (LazyTaskState::Blocked(block), !unchanged)
+                (DeferredTaskState::Blocked(block), !unchanged)
             }
-            EvaluationMachinePoll::Complete(value) => (LazyTaskState::Complete(value), true),
+            EvaluationMachinePoll::Complete(value) => (DeferredTaskState::Complete(value), true),
             EvaluationMachinePoll::Failed(error) => (
-                LazyTaskState::Failed(Arc::new(LazyFailure::evaluation(error))),
+                DeferredTaskState::Failed(Arc::new(LazyFailure::evaluation(error))),
                 true,
             ),
             EvaluationMachinePoll::Cancelled => (
-                LazyTaskState::Failed(Arc::new(LazyFailure::evaluation(
-                    "lazy evaluation task was cancelled",
+                DeferredTaskState::Failed(Arc::new(LazyFailure::evaluation(
+                    "deferred evaluation task was cancelled",
                 ))),
                 true,
             ),
         };
         let dependency = match &state {
-            LazyTaskState::Blocked(block) => block
+            DeferredTaskState::Blocked(block) => block
                 .lazy
                 .as_ref()
-                .and_then(|wait| tasks.lazy_by_wait.get(wait))
-                .copied(),
+                .and_then(|wait| deferred_for_wait(&tasks, wait)),
             _ => None,
         };
         let record = tasks
-            .lazy
-            .get_mut(&claimed.lazy)
-            .expect("claimed lazy task must remain registered");
+            .deferred
+            .get_mut(&claimed.deferred)
+            .expect("claimed deferred task must remain registered");
         made_progress |= claimed.prior_dependency != dependency;
         record.state = state;
         record.dependency = dependency;
 
         if dependency.is_some()
-            && let Some(cycle) = lazy_dependency_cycle(&tasks, claimed.lazy)
+            && let Some(cycle) = deferred_dependency_cycle(&tasks, claimed.deferred)
         {
-            poison_lazy_cycle(&mut tasks, &cycle);
+            poison_deferred_cycle(&mut tasks, &cycle);
             made_progress = true;
         }
         let remains_blocked = tasks
-            .lazy
-            .get(&claimed.lazy)
-            .is_some_and(|record| matches!(record.state, LazyTaskState::Blocked(_)));
+            .deferred
+            .get(&claimed.deferred)
+            .is_some_and(|record| matches!(record.state, DeferredTaskState::Blocked(_)));
         self.task_changed.notify_all();
         (made_progress, remains_blocked, None, None)
     }
@@ -1563,9 +1654,9 @@ fn producer_for_wait(
         .map(|record| record.id)
         .or_else(|| {
             tasks
-                .lazy_by_wait
+                .deferred_by_wait
                 .get(wait)
-                .and_then(|lazy| tasks.lazy.get(lazy))
+                .and_then(|deferred| tasks.deferred.get(deferred))
                 .map(|record| record.id)
         })
         .or_else(|| tasks.promises.get(wait).map(|promise| promise.producer))
@@ -1582,10 +1673,10 @@ fn task_dependency<'a>(
             _ => None,
         };
     }
-    let lazy = tasks.lazy_by_id.get(id)?;
-    let record = tasks.lazy.get(lazy)?;
+    let deferred = tasks.deferred_by_task.get(id)?;
+    let record = tasks.deferred.get(deferred)?;
     match &record.state {
-        LazyTaskState::Blocked(block) => block.lazy.as_ref(),
+        DeferredTaskState::Blocked(block) => block.lazy.as_ref(),
         _ => None,
     }
 }
@@ -1607,16 +1698,21 @@ fn task_is_claimable(
         });
     }
     tasks
-        .lazy_by_id
+        .deferred_by_task
         .get(id)
-        .and_then(|lazy| tasks.lazy.get(lazy))
+        .and_then(|deferred| tasks.deferred.get(deferred))
         .is_some_and(|record| match &record.state {
-            LazyTaskState::Dormant => true,
-            LazyTaskState::Blocked(block) => block
-                .lazy
-                .as_ref()
-                .is_some_and(|wait| wait_is_terminal(tasks, wait)),
-            LazyTaskState::Running | LazyTaskState::Complete(_) | LazyTaskState::Failed(_) => false,
+            DeferredTaskState::Dormant => true,
+            DeferredTaskState::Blocked(block) => {
+                block
+                    .lazy
+                    .as_ref()
+                    .is_some_and(|wait| wait_is_terminal(tasks, wait))
+                    || matches!(&record.value, DeferredValue::Promise(promise) if promise.assignment().is_some())
+            }
+            DeferredTaskState::Running
+            | DeferredTaskState::Complete(_)
+            | DeferredTaskState::Failed(_) => false,
         })
 }
 
@@ -1629,11 +1725,11 @@ fn wait_is_terminal(tasks: &EvaluationTasks, wait: &EvaluationWaitToken) -> bool
                 | EvaluationTaskState::Cancelled
         );
     }
-    if let Some(lazy) = tasks.lazy_by_wait.get(wait) {
-        return tasks.lazy.get(lazy).is_some_and(|record| {
+    if let Some(deferred) = tasks.deferred_by_wait.get(wait) {
+        return tasks.deferred.get(deferred).is_some_and(|record| {
             matches!(
                 record.state,
-                LazyTaskState::Complete(_) | LazyTaskState::Failed(_)
+                DeferredTaskState::Complete(_) | DeferredTaskState::Failed(_)
             )
         });
     }
@@ -1644,9 +1740,19 @@ fn wait_is_terminal(tasks: &EvaluationTasks, wait: &EvaluationWaitToken) -> bool
         .is_some_and(|result| result.get().is_some())
 }
 
-/// Returns the canonical cycle reachable from `start` in the strict lazy
+fn deferred_for_wait(
+    tasks: &EvaluationTasks,
+    wait: &EvaluationWaitToken,
+) -> Option<DeferredValueId> {
+    tasks.deferred_by_wait.get(wait).copied()
+}
+
+/// Returns the canonical cycle reachable from `start` in the strict deferred
 /// dependency graph. The graph is functional, so a successor walk is enough.
-fn lazy_dependency_cycle(tasks: &EvaluationTasks, start: LazyId) -> Option<Vec<LazyId>> {
+fn deferred_dependency_cycle(
+    tasks: &EvaluationTasks,
+    start: DeferredValueId,
+) -> Option<Vec<DeferredValueId>> {
     let mut path = Vec::new();
     let mut positions = HashMap::new();
     let mut current = start;
@@ -1663,25 +1769,25 @@ fn lazy_dependency_cycle(tasks: &EvaluationTasks, start: LazyId) -> Option<Vec<L
             return Some(cycle);
         }
         path.push(current);
-        current = tasks.lazy.get(&current)?.dependency?;
+        current = tasks.deferred.get(&current)?.dependency?;
     }
 }
 
 /// Installs one shared structured failure in every member of a proven strict
-/// lazy cycle. The legacy string cache remains a projection until Spike 4
+/// deferred cycle. The legacy lazy string cache remains a projection until Spike 4
 /// changes the cache result type to `LazyFailure` directly.
-fn poison_lazy_cycle(tasks: &mut EvaluationTasks, members: &[LazyId]) {
+fn poison_deferred_cycle(tasks: &mut EvaluationTasks, members: &[DeferredValueId]) {
     let cycle = Arc::new(LazyCycle {
         members: members
             .iter()
             .map(|id| {
                 let record = tasks
-                    .lazy
+                    .deferred
                     .get(id)
                     .expect("cycle members must remain registered");
                 LazyCycleMember {
                     id: *id,
-                    label: record.lazy.label().clone(),
+                    label: record.value.label().clone(),
                 }
             })
             .collect(),
@@ -1691,21 +1797,25 @@ fn poison_lazy_cycle(tasks: &mut EvaluationTasks, members: &[LazyId]) {
 
     for id in members {
         let record = tasks
-            .lazy
+            .deferred
             .get_mut(id)
             .expect("cycle members must remain registered");
-        let authoritative = record.lazy.cache(Err(legacy.clone()));
         record.dependency = None;
-        record.state = match authoritative {
-            Err(error) if Arc::ptr_eq(&error, &legacy) => LazyTaskState::Failed(failure.clone()),
-            Err(error) => LazyTaskState::Failed(Arc::new(LazyFailure::evaluation(error))),
-            Ok(value) => {
-                debug_assert!(
-                    false,
-                    "a successful concurrent lazy result contradicts a strict dependency cycle"
-                );
-                LazyTaskState::Complete(value)
-            }
+        record.state = match &record.value {
+            DeferredValue::Promise(_) => DeferredTaskState::Failed(failure.clone()),
+            DeferredValue::Lazy(lazy) => match lazy.cache(Err(legacy.clone())) {
+                Err(error) if Arc::ptr_eq(&error, &legacy) => {
+                    DeferredTaskState::Failed(failure.clone())
+                }
+                Err(error) => DeferredTaskState::Failed(Arc::new(LazyFailure::evaluation(error))),
+                Ok(value) => {
+                    debug_assert!(
+                        false,
+                        "a successful concurrent lazy result contradicts a strict dependency cycle"
+                    );
+                    DeferredTaskState::Complete(value)
+                }
+            },
         };
     }
 }
@@ -1758,15 +1868,15 @@ fn target_has_running_producer(tasks: &EvaluationTasks, target: &EvaluationWaitT
             }
             continue;
         }
-        let Some(lazy) = tasks.lazy_by_id.get(&id) else {
+        let Some(deferred) = tasks.deferred_by_task.get(&id) else {
             return false;
         };
-        let Some(record) = tasks.lazy.get(lazy) else {
+        let Some(record) = tasks.deferred.get(deferred) else {
             return false;
         };
         match &record.state {
-            LazyTaskState::Running => return true,
-            LazyTaskState::Blocked(block) => {
+            DeferredTaskState::Running => return true,
+            DeferredTaskState::Blocked(block) => {
                 let Some(dependency) = &block.lazy else {
                     return false;
                 };
@@ -1778,20 +1888,23 @@ fn target_has_running_producer(tasks: &EvaluationTasks, target: &EvaluationWaitT
     false
 }
 
-fn target_has_running_lazy_producer(tasks: &EvaluationTasks, target: &EvaluationWaitToken) -> bool {
+fn target_has_running_deferred_producer(
+    tasks: &EvaluationTasks,
+    target: &EvaluationWaitToken,
+) -> bool {
     let mut seen = HashSet::new();
     let mut wait = target.clone();
     while let Some(id) = producer_for_wait(tasks, &wait) {
         if !seen.insert(id) {
             return false;
         }
-        if let Some(lazy) = tasks.lazy_by_id.get(&id) {
-            let Some(record) = tasks.lazy.get(lazy) else {
+        if let Some(deferred) = tasks.deferred_by_task.get(&id) {
+            let Some(record) = tasks.deferred.get(deferred) else {
                 return false;
             };
             match &record.state {
-                LazyTaskState::Running => return true,
-                LazyTaskState::Blocked(block) => {
+                DeferredTaskState::Running => return true,
+                DeferredTaskState::Blocked(block) => {
                     let Some(dependency) = &block.lazy else {
                         return false;
                     };
@@ -1838,11 +1951,11 @@ fn claim_task(tasks: &mut EvaluationTasks, id: EvaluationTaskId) -> Option<Claim
             machine,
         }));
     }
-    let lazy = *tasks.lazy_by_id.get(&id)?;
-    let record = tasks.lazy.get_mut(&lazy)?;
+    let deferred = *tasks.deferred_by_task.get(&id)?;
+    let record = tasks.deferred.get_mut(&deferred)?;
     if !matches!(
         record.state,
-        LazyTaskState::Dormant | LazyTaskState::Blocked(_)
+        DeferredTaskState::Dormant | DeferredTaskState::Blocked(_)
     ) {
         return None;
     }
@@ -1850,10 +1963,10 @@ fn claim_task(tasks: &mut EvaluationTasks, id: EvaluationTaskId) -> Option<Claim
     // Once a blocked task resumes, its old dependency is no longer a strict
     // prerequisite. Its next poll either completes or records a fresh edge.
     let prior_dependency = record.dependency.take();
-    let prior_state = std::mem::replace(&mut record.state, LazyTaskState::Running);
-    Some(ClaimedTask::Lazy(ClaimedLazyTask {
+    let prior_state = std::mem::replace(&mut record.state, DeferredTaskState::Running);
+    Some(ClaimedTask::Deferred(ClaimedDeferredTask {
         id,
-        lazy,
+        deferred,
         prior_state,
         prior_dependency,
         machine,
@@ -2107,7 +2220,7 @@ mod tests {
         );
         let cycle = dependency_cycle(&context, &lazy);
         assert_eq!(cycle.members.len(), 1);
-        assert_eq!(cycle.members[0].id, lazy.id());
+        assert_eq!(cycle.members[0].id, lazy.id().into());
         assert_eq!(cycle.members[0].label.as_ref(), "self cycle");
         assert!(matches!(
             context.poll_wait(&wait),
@@ -2171,7 +2284,7 @@ mod tests {
                 .iter()
                 .map(|member| member.id)
                 .collect::<Vec<_>>(),
-            vec![left.id(), right.id()]
+            vec![left.id().into(), right.id().into()]
         );
     }
 
@@ -2207,7 +2320,7 @@ mod tests {
                 .iter()
                 .map(|member| member.id)
                 .collect::<Vec<_>>(),
-            vec![first.id(), second.id(), third.id()]
+            vec![first.id().into(), second.id().into(), third.id().into()]
         );
         assert!(matches!(
             context.lazy_failure(&upstream).as_deref(),

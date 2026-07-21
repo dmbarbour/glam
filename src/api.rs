@@ -181,7 +181,7 @@ impl Value {
                 ValueKind::Function
             }
             CoreValue::Net(_) => ValueKind::Net,
-            CoreValue::Lazy(_) => ValueKind::Lazy,
+            CoreValue::Lazy(_) | CoreValue::Promised(_) => ValueKind::Lazy,
             CoreValue::Opaque(_) => ValueKind::Opaque,
         }
     }
@@ -1807,8 +1807,8 @@ impl Assembler {
     }
 
     fn seal_module(&self, context: &CompileContext, definitions: &CoreValue) -> CoreValue {
-        let CoreValue::Lazy(final_defs) = context.final_defs() else {
-            panic!("CompileContext.final_defs must be a promised lazy value");
+        let CoreValue::Promised(final_defs) = context.final_defs() else {
+            panic!("CompileContext.final_defs must be a promised value");
         };
         final_defs
             .set(definitions.clone())
@@ -1841,7 +1841,7 @@ impl Assembler {
             CoreValue::List(list) => eval::list_output_bytes(&self.eval_context(), list)
                 .map(Bytes::from)
                 .map_err(|error| Error::new(format!("`{label}` {error}"))),
-            CoreValue::Lazy(_) => {
+            CoreValue::Lazy(_) | CoreValue::Promised(_) => {
                 let value = eval::eval_value(&self.eval_context(), value)
                     .map_err(|error| Error::new(error.to_string()))?;
                 self.core_value_bytes(&value, label)
@@ -1879,7 +1879,7 @@ impl Assembler {
                     .map(|bytes| bytes.map(Bytes::from))
                     .map_err(|error| Error::new(format!("`{label}` {error}")))?
             }
-            CoreValue::Lazy(_) | CoreValue::Net(_) => {
+            CoreValue::Lazy(_) | CoreValue::Promised(_) | CoreValue::Net(_) => {
                 let value = eval::eval_value(&self.eval_context(), value)
                     .map_err(|error| Error::new(error.to_string()))?;
                 return self.core_value_binary_slice(&value, range, label);

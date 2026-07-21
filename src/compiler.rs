@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::core::{Atom, Dict, Key, LazyValue, Value, keys};
+use crate::core::{Atom, Dict, Key, PromisedValue, Value, keys};
 use crate::diagnostic::{CompilationTrace, Severity};
 use crate::source::{RelativeSourcePath, SourceArtifact};
 
@@ -56,7 +56,7 @@ impl Default for CompileContext {
             compilation_trace: None,
             module_path: Arc::from([]),
             prior_defs: Value::Dict(Dict::new_sync()), // empty prior dictionary
-            final_defs: Value::Lazy(LazyValue::promised("final definitions")),
+            final_defs: Value::Promised(PromisedValue::new("final definitions")),
             local_module_loader: None,
             local_binary_loader: None,
             diagnostic_emitter: None,

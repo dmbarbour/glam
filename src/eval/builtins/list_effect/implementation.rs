@@ -41,8 +41,8 @@ pub(super) fn eval_list_effect_fix_builtin(
     function: &Value,
 ) -> Result<Value, EvalError> {
     let function = eval_value(context, function)?;
-    let handle = LazyValue::promised("list effect fixpoint");
-    let marker = Value::Lazy(handle.clone());
+    let handle = PromisedValue::new("list effect fixpoint");
+    let marker = Value::Promised(handle.clone());
     let operation = apply_value(context, function, marker.clone())?;
     Ok(Value::List(fix_list_effect_results(operation, handle)))
 }
@@ -104,7 +104,7 @@ fn cut_list_effect_results(operation: Value) -> List {
     })
 }
 
-fn fix_list_effect_results(operation: Value, handle: LazyValue) -> List {
+fn fix_list_effect_results(operation: Value, handle: PromisedValue) -> List {
     deferred_list("list effect fix", move |context| {
         let results = lazy_run_list_effect(operation.clone());
         let Some((head, tail)) = pop_list_front(context, &results)? else {
@@ -124,11 +124,14 @@ fn deferred_list(
     label: &'static str,
     thunk: impl Fn(&EvalContext) -> Result<List, EvalError> + Send + Sync + 'static,
 ) -> List {
-    List::from_thunk(LazyValue::deferred(label, move |context| {
-        thunk(context)
-            .map(Value::List)
-            .map_err(|err| err.to_string())
-    }))
+    List::from_thunk(
+        LazyValue::deferred(label, move |context| {
+            thunk(context)
+                .map(Value::List)
+                .map_err(|err| err.to_string())
+        })
+        .into(),
+    )
 }
 
 fn list_effect_api() -> Value {

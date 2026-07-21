@@ -352,7 +352,7 @@ pub(super) fn lower_core_callable(
     context: &EvalContext,
     value: Value,
 ) -> Result<Callable<CoreSpecialization>, EvalError> {
-    let value = if matches!(value, Value::Lazy(_)) {
+    let value = if matches!(value, Value::Lazy(_) | Value::Promised(_)) {
         force_value_shell(context, &value)?
     } else {
         value
@@ -370,7 +370,9 @@ pub(super) fn lower_core_callable(
         | Value::List(_)
         | Value::Function(_)
         | Value::Opaque(_) => Err(EvalError::new("application requires a function value")),
-        Value::Lazy(_) => unreachable!("callable value shell must be fully forced"),
+        Value::Lazy(_) | Value::Promised(_) => {
+            unreachable!("callable value shell must be fully forced")
+        }
     }
 }
 

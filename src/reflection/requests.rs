@@ -430,7 +430,7 @@ fn evaluate_request(
         .try_into()
         .map_err(|_| TaskError::new("`.eval` received the wrong number of arguments"))?;
     let mut value = value.into_core();
-    while matches!(value, CoreValue::Lazy(_)) {
+    while matches!(value, CoreValue::Lazy(_) | CoreValue::Promised(_)) {
         value = match eval::eval_value(context, &value) {
             Ok(value) => value,
             Err(error) => {
