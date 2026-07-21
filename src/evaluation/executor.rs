@@ -101,7 +101,9 @@ impl EvaluationExecutor {
             .queue
             .lock()
             .expect("evaluation executor queue was poisoned");
-        queue.sessions.insert(session.id, Arc::downgrade(session));
+        queue
+            .sessions
+            .insert(session.id.get(), Arc::downgrade(session));
     }
 
     pub(super) fn notify_session_ready(&self, session: u64) {

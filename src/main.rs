@@ -442,12 +442,20 @@ fn report_reasoning(diagnostics: &DiagnosticBus, report: &ReasoningReport) {
             ),
         ));
     }
-    if report.status() != ReasoningStatus::Deadlocked {
+    let (severity, summary) = match report.status() {
+        ReasoningStatus::Complete => return,
+        ReasoningStatus::Quiescent => (
+            Severity::Warning,
+            "reflection scheduler is quiescent on live foreign work",
+        ),
+        ReasoningStatus::Deadlocked => (Severity::Error, "reflection scheduler deadlocked"),
+    };
+    if report.unfinished().is_empty() {
         return;
     }
 
     let mut message = format!(
-        "reflection scheduler deadlocked with {} unfinished task{}",
+        "{summary} with {} unfinished task{}",
         report.unfinished().len(),
         if report.unfinished().len() == 1 {
             ""
@@ -459,21 +467,30 @@ fn report_reasoning(diagnostics: &DiagnosticBus, report: &ReasoningReport) {
         let mut detail = match task.state() {
             ReasoningTaskState::Blocked => match (
                 task.waiting_on_task(),
+                task.waiting_on_session(),
                 task.observed_generation(),
                 task.wait_id(),
             ) {
-                (Some(dependency), Some(generation), _) => {
+                (Some(dependency), Some(session), Some(generation), _) => {
+                    format!(
+                        "waits on task {dependency} in evaluation session {session} and shared-state generation {generation}"
+                    )
+                }
+                (Some(dependency), Some(session), None, _) => {
+                    format!("waits on task {dependency} in evaluation session {session}")
+                }
+                (Some(dependency), None, Some(generation), _) => {
                     format!("waits on task {dependency} and shared-state generation {generation}")
                 }
-                (Some(dependency), None, _) => format!("waits on task {dependency}"),
-                (None, Some(generation), Some(wait)) => {
+                (Some(dependency), None, None, _) => format!("waits on task {dependency}"),
+                (None, _, Some(generation), Some(wait)) => {
                     format!("waits on token {wait} and shared-state generation {generation}")
                 }
-                (None, Some(generation), None) => {
+                (None, _, Some(generation), None) => {
                     format!("waits on shared-state generation {generation}")
                 }
-                (None, None, Some(wait)) => format!("waits on token {wait}"),
-                (None, None, None) => "is blocked without a wake condition".to_owned(),
+                (None, _, None, Some(wait)) => format!("waits on token {wait}"),
+                (None, _, None, None) => "is blocked without a wake condition".to_owned(),
             },
             state => format!("remains in anomalous {state:?} state"),
         };
@@ -482,7 +499,7 @@ fn report_reasoning(diagnostics: &DiagnosticBus, report: &ReasoningReport) {
         }
         message.push_str(&format!("\ntask {} {detail}", task.task_id()));
     }
-    diagnostics.publish(Diagnostic::new(Severity::Error, message));
+    diagnostics.publish(Diagnostic::new(severity, message));
 }
 
 fn assemble(

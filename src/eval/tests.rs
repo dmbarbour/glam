@@ -2190,15 +2190,21 @@ fn reflection_gate_waits_before_continuing_target_demand() {
 }
 
 #[test]
-fn running_reflection_gate_rejects_a_foreign_session() {
+fn running_reflection_gate_blocks_a_foreign_session_without_poisoning_its_cache() {
     let owner = test_context();
     let observer = test_context();
     let gate = reflection_annotation(&owner, n(0), n(42));
+    let Value::Lazy(gate_lazy) = &gate else {
+        panic!("reflection annotation should produce a lazy gate")
+    };
     let blocked = eval_value(&owner, &gate).expect_err("new reflection task should block");
 
+    let foreign = eval_value(&observer, &gate).expect_err("foreign gate task should block");
+    assert!(foreign.blocked_on().is_some());
     assert_eq!(
-        eval_value(&observer, &gate).unwrap_err().to_string(),
-        "reflection annotation task belongs to another evaluation session"
+        gate_lazy.cached(),
+        None,
+        "a live foreign dependency must not become a permanent lazy failure"
     );
 
     owner.complete_wait(&blocked.blocked_on().unwrap().0);

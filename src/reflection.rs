@@ -434,7 +434,9 @@ fn run_composed_effect_task<S: TaskSpecialization>(
 fn composed_child_error(run: EvaluationSessionRun) -> Option<TaskError> {
     let (quiescent, report) = match run {
         EvaluationSessionRun::Complete(report) => (false, report),
-        EvaluationSessionRun::Quiescent(report) => (true, report),
+        EvaluationSessionRun::Quiescent(report) | EvaluationSessionRun::Deadlocked(report) => {
+            (true, report)
+        }
     };
     if report.failures.is_empty() && !quiescent {
         return None;
@@ -4164,7 +4166,7 @@ mod tests {
         ] {
             let (_, effect) = compile_effect(source);
             let (context, parent) = schedule_composed_test_task(&effect, host.clone());
-            let EvaluationSessionRun::Quiescent(report) = context.run_until_quiescent() else {
+            let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
                 panic!("retryable joined task error should remain unfinished for {source}")
             };
             let blocked = report

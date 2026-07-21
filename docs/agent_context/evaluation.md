@@ -88,8 +88,12 @@ control-flow overview.
   nor target. Demand on a gate waits for its session-owned task, requires
   canonical unit, and then transfers the same demand to the target. Waits are
   not cached as lazy failures.
-- A gate's first observer owns its task. Another session may consume its final
-  result but must not drive it. Wait tokens retain the owner weakly.
+- A gate's first observer owns its task. Another session may poll but must not
+  drive that task: pending work becomes a foreign dependency in the local
+  lazy-task record, while a terminal result transfers demand to the target.
+  Wait tokens retain the owner weakly plus stable session and producer IDs, so
+  a dropped owner is a terminal failure and live foreign work remains visible
+  in quiescence reports without becoming a cached `LazyFailure`.
 
 ## Sessions and Workers
 
@@ -109,3 +113,7 @@ control-flow overview.
 - Claimed interaction-net pairs are live work, not quiescence. An observer must
   wait for that runtime's generation to change before deciding the net is
   blocked or complete.
+- A stable pass containing a live foreign task dependency is quiescent, not a
+  proven deadlock. The client may poll the reported session/task later. The
+  bootstrap does not spin or pump the foreign session, and cross-session cycle
+  diagnosis remains future work.

@@ -88,7 +88,11 @@ Reflection annotations are also lazy producers. Constructing a gate demands
 neither its effect nor its target. Demand on the gate registers or resumes the
 effect task; after checking that it returned unit, the same demand continues
 into the target. Blocking remains session task state rather than a cached lazy
-error.
+error. If another session owns a still-pending gate task, the observer records
+a foreign dependency and polls it once per quiescence pass without driving its
+owner. Reports retain the producing session and task IDs; clients decide when
+to poll again. Terminal foreign results remain observable, while a dropped
+owner is a permanent producer failure.
 
 ## Interaction-Net Handoff
 

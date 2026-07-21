@@ -322,19 +322,6 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
     if let Some(result) = lazy.cached() {
         return finish_lazy_result(context, result, policy);
     }
-    if let LazySource::ReflectionGate(gate) = lazy.source() {
-        let task = gate
-            .task(context)
-            .map_err(|error| EvalError::new(error.as_ref()))?;
-        if matches!(
-            context.poll_reflection_task(task),
-            EvaluationTaskPoll::ForeignSession
-        ) {
-            return Err(EvalError::new(
-                "reflection annotation task belongs to another evaluation session",
-            ));
-        }
-    }
     let wait = context
         .lazy_task(lazy, |task_context| {
             Box::new(LazyTaskMachine {

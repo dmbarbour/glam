@@ -1053,6 +1053,9 @@ impl ReasoningReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningStatus {
     Complete,
+    /// Stable local quiescence while a live foreign evaluation session may
+    /// still satisfy an unfinished dependency.
+    Quiescent,
     Deadlocked,
 }
 
@@ -1077,6 +1080,7 @@ pub struct ReasoningTask {
     task_id: u64,
     state: ReasoningTaskState,
     waiting_on_task: Option<u64>,
+    waiting_on_session: Option<u64>,
     wait_id: Option<u64>,
     observed_generation: Option<u64>,
     blocked_error: Option<Arc<str>>,
@@ -1093,6 +1097,11 @@ impl ReasoningTask {
 
     pub fn waiting_on_task(&self) -> Option<u64> {
         self.waiting_on_task
+    }
+
+    /// The evaluation session that owns `waiting_on_task`.
+    pub fn waiting_on_session(&self) -> Option<u64> {
+        self.waiting_on_session
     }
 
     pub fn wait_id(&self) -> Option<u64> {
@@ -1431,7 +1440,8 @@ impl Assembler {
         let run = self.eval_context().run_until_quiescent();
         let (status, report) = match run {
             EvaluationSessionRun::Complete(report) => (ReasoningStatus::Complete, report),
-            EvaluationSessionRun::Quiescent(report) => (ReasoningStatus::Deadlocked, report),
+            EvaluationSessionRun::Quiescent(report) => (ReasoningStatus::Quiescent, report),
+            EvaluationSessionRun::Deadlocked(report) => (ReasoningStatus::Deadlocked, report),
         };
         ReasoningReport {
             status,
@@ -1456,6 +1466,7 @@ impl Assembler {
                         EvaluationUnfinishedState::Blocked => ReasoningTaskState::Blocked,
                     },
                     waiting_on_task: task.dependency.map(|task| task.get()),
+                    waiting_on_session: task.dependency_session.map(|session| session.get()),
                     wait_id: task.wait,
                     observed_generation: task.observed_generation,
                     blocked_error: task.error,

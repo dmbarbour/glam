@@ -31,6 +31,15 @@ impl EvaluationTaskId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct EvaluationSessionId(NonZeroU64);
+
+impl EvaluationSessionId {
+    pub(crate) fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_WAIT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -39,17 +48,23 @@ fn allocate_task_id() -> Result<EvaluationTaskId, Arc<str>> {
     allocate_id(&NEXT_TASK_ID, "evaluation task IDs exhausted").map(EvaluationTaskId)
 }
 
-fn allocate_wait_token(session: &Arc<EvaluationSession>) -> Result<EvaluationWaitToken, Arc<str>> {
+fn allocate_wait_token(
+    session: &Arc<EvaluationSession>,
+    producer: EvaluationTaskId,
+) -> Result<EvaluationWaitToken, Arc<str>> {
     Ok(EvaluationWaitToken {
         id: allocate_id(&NEXT_WAIT_ID, "evaluation wait-token IDs exhausted")?,
+        owner_id: session.id,
         owner: Arc::downgrade(session),
+        producer,
     })
 }
 
-fn allocate_session_id() -> u64 {
-    NEXT_SESSION_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .expect("evaluation session IDs exhausted")
+fn allocate_session_id() -> EvaluationSessionId {
+    EvaluationSessionId(
+        allocate_id(&NEXT_SESSION_ID, "evaluation session IDs exhausted")
+            .expect("evaluation session IDs are process-global"),
+    )
 }
 
 fn allocate_id(source: &AtomicU64, exhausted: &'static str) -> Result<NonZeroU64, Arc<str>> {
@@ -62,21 +77,33 @@ fn allocate_id(source: &AtomicU64, exhausted: &'static str) -> Result<NonZeroU64
 #[derive(Clone)]
 pub(crate) struct EvaluationWaitToken {
     id: NonZeroU64,
+    owner_id: EvaluationSessionId,
     owner: Weak<EvaluationSession>,
+    producer: EvaluationTaskId,
 }
 
 impl EvaluationWaitToken {
     pub(crate) fn get(&self) -> u64 {
         self.id.get()
     }
+
+    pub(crate) fn owner_id(&self) -> EvaluationSessionId {
+        self.owner_id
+    }
+
+    pub(crate) fn producer(&self) -> EvaluationTaskId {
+        self.producer
+    }
 }
 
 impl fmt::Debug for EvaluationWaitToken {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_tuple("EvaluationWaitToken")
-            .field(&self.id)
-            .finish()
+            .debug_struct("EvaluationWaitToken")
+            .field("wait", &self.id)
+            .field("session", &self.owner_id)
+            .field("producer", &self.producer)
+            .finish_non_exhaustive()
     }
 }
 
@@ -105,6 +132,10 @@ impl EvaluationTaskHandle {
         self.id
     }
 
+    pub(crate) fn session_id(&self) -> EvaluationSessionId {
+        self.wait.owner_id()
+    }
+
     #[cfg(test)]
     pub(crate) fn wait(&self) -> &EvaluationWaitToken {
         &self.wait
@@ -116,6 +147,7 @@ impl fmt::Debug for EvaluationTaskHandle {
         formatter
             .debug_struct("EvaluationTaskHandle")
             .field("task", &self.id.get())
+            .field("session", &self.session_id().get())
             .finish_non_exhaustive()
     }
 }
@@ -197,6 +229,7 @@ pub(crate) enum EvaluationPumpOutcome {
 pub(crate) enum EvaluationSessionRun {
     Complete(EvaluationSessionReport),
     Quiescent(EvaluationSessionReport),
+    Deadlocked(EvaluationSessionReport),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +258,7 @@ pub(crate) struct EvaluationUnfinishedTask {
     pub(crate) task: EvaluationTaskId,
     pub(crate) state: EvaluationUnfinishedState,
     pub(crate) dependency: Option<EvaluationTaskId>,
+    pub(crate) dependency_session: Option<EvaluationSessionId>,
     pub(crate) wait: Option<u64>,
     pub(crate) observed_generation: Option<u64>,
     pub(crate) error: Option<Arc<str>>,
@@ -403,7 +437,7 @@ struct EvaluationTasks {
 }
 
 pub(crate) struct EvaluationSession {
-    id: u64,
+    id: EvaluationSessionId,
     tasks: Mutex<EvaluationTasks>,
     task_changed: Condvar,
     reflection_launcher: OnceLock<Arc<dyn ReflectionTaskLauncher>>,
@@ -456,7 +490,7 @@ impl EvaluationSession {
 
     fn notify_executor_ready(&self) {
         if let Some(executor) = self.executor.upgrade() {
-            executor.notify_session_ready(self.id);
+            executor.notify_session_ready(self.id.get());
         }
     }
 
@@ -581,7 +615,7 @@ impl EvalContext {
         }
 
         let id = allocate_task_id()?;
-        let wait = allocate_wait_token(&self.session)?;
+        let wait = allocate_wait_token(&self.session, id)?;
         let originating_task = self
             .originating_task
             .or_else(|| self.task.get().and_then(|task| task.as_ref().ok()).copied());
@@ -651,7 +685,7 @@ impl EvalContext {
         result: &Arc<OnceLock<Result<Value, Arc<str>>>>,
     ) -> Result<(EvaluationTaskId, EvaluationWaitToken), Arc<str>> {
         let owner = self.task_id()?;
-        let wait = allocate_wait_token(&self.session)?;
+        let wait = allocate_wait_token(&self.session, owner)?;
         let mut tasks = self
             .session
             .tasks
@@ -705,7 +739,7 @@ impl EvalContext {
         F: FnOnce(EvalContext) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>,
     {
         let id = allocate_task_id()?;
-        let wait = allocate_wait_token(&self.session)?;
+        let wait = allocate_wait_token(&self.session, id)?;
         let context = Self::for_task(self.session.clone(), id);
         let machine = build(context)?;
         let mut tasks = self
@@ -737,7 +771,7 @@ impl EvalContext {
 
     fn reserve_task(&self) -> Result<EvaluationTaskHandle, Arc<str>> {
         let id = allocate_task_id()?;
-        let wait = allocate_wait_token(&self.session)?;
+        let wait = allocate_wait_token(&self.session, id)?;
         let mut tasks = self
             .session
             .tasks
@@ -873,7 +907,7 @@ impl EvalContext {
         // bare session. Preserve an inspectable wait record for them; ordinary
         // Assembler sessions always install a launcher.
         let id = allocate_task_id()?;
-        let wait = allocate_wait_token(&self.session)?;
+        let wait = allocate_wait_token(&self.session, id)?;
         let mut tasks = self
             .session
             .tasks
@@ -985,13 +1019,7 @@ impl EvalContext {
                     }
                     DeferredTaskState::Dormant
                     | DeferredTaskState::Running
-                    | DeferredTaskState::Blocked(_) => {
-                        if Arc::ptr_eq(&self.session, &owner) {
-                            EvaluationTaskPoll::Pending(wait.clone())
-                        } else {
-                            EvaluationTaskPoll::ForeignSession
-                        }
-                    }
+                    | DeferredTaskState::Blocked(_) => EvaluationTaskPoll::Pending(wait.clone()),
                 };
             }
             let Some(promise) = tasks.promises.get(wait) else {
@@ -1005,10 +1033,7 @@ impl EvalContext {
             return match result.get() {
                 Some(Ok(value)) => EvaluationTaskPoll::Complete(value.clone()),
                 Some(Err(error)) => EvaluationTaskPoll::Failed(error.clone()),
-                None if Arc::ptr_eq(&self.session, &owner) => {
-                    EvaluationTaskPoll::Pending(wait.clone())
-                }
-                None => EvaluationTaskPoll::ForeignSession,
+                None => EvaluationTaskPoll::Pending(wait.clone()),
             };
         };
         match &record.state {
@@ -1019,13 +1044,7 @@ impl EvalContext {
             | EvaluationTaskState::Reserved
             | EvaluationTaskState::Queued
             | EvaluationTaskState::Running
-            | EvaluationTaskState::Blocked(_) => {
-                if Arc::ptr_eq(&self.session, &owner) {
-                    EvaluationTaskPoll::Pending(wait.clone())
-                } else {
-                    EvaluationTaskPoll::ForeignSession
-                }
-            }
+            | EvaluationTaskState::Blocked(_) => EvaluationTaskPoll::Pending(wait.clone()),
         }
     }
 
@@ -1198,6 +1217,13 @@ struct ClaimedDeferredTask {
     machine: Box<dyn EvaluationTaskMachine>,
 }
 
+struct ReportedDependency {
+    task: EvaluationTaskId,
+    session: EvaluationSessionId,
+    wait: u64,
+    live_foreign: bool,
+}
+
 enum ClaimedTask {
     Reflection(ClaimedReflectionTask),
     Deferred(ClaimedDeferredTask),
@@ -1245,7 +1271,7 @@ impl EvaluationSession {
                     );
                     continue;
                 }
-                return Self::session_run_report(&tasks);
+                return self.session_run_report(&tasks);
             };
 
             let poll = claimed.poll(TASK_POLL_QUANTUM);
@@ -1266,9 +1292,10 @@ impl EvaluationSession {
         }
     }
 
-    fn session_run_report(tasks: &EvaluationTasks) -> EvaluationSessionRun {
+    fn session_run_report(&self, tasks: &EvaluationTasks) -> EvaluationSessionRun {
         let mut failures = Vec::new();
         let mut unfinished = Vec::new();
+        let mut has_live_foreign_dependency = false;
         for (task, wait) in &tasks.reflection_by_id {
             let record = tasks
                 .reflection
@@ -1281,43 +1308,38 @@ impl EvaluationSession {
                     error: error.clone(),
                 }),
                 state => {
-                    let (state, dependency, dependency_wait, observed_generation, error) =
-                        match state {
-                            EvaluationTaskState::Dormant => {
-                                (EvaluationUnfinishedState::Dormant, None, None, None, None)
-                            }
-                            EvaluationTaskState::Reserved => {
-                                (EvaluationUnfinishedState::Reserved, None, None, None, None)
-                            }
-                            EvaluationTaskState::Queued => {
-                                (EvaluationUnfinishedState::Queued, None, None, None, None)
-                            }
-                            EvaluationTaskState::Running => {
-                                (EvaluationUnfinishedState::Running, None, None, None, None)
-                            }
-                            EvaluationTaskState::Blocked(block) => (
-                                EvaluationUnfinishedState::Blocked,
-                                block
-                                    .lazy
-                                    .as_ref()
-                                    .and_then(|wait| producer_for_wait(tasks, wait)),
-                                block.lazy.as_ref().map(EvaluationWaitToken::get),
-                                block.observed_generation,
-                                block.error.clone(),
-                            ),
-                            EvaluationTaskState::Complete(_)
-                            | EvaluationTaskState::Failed(_)
-                            | EvaluationTaskState::Cancelled => {
-                                unreachable!("terminal task states were handled above")
-                            }
-                        };
+                    let (state, block) = match state {
+                        EvaluationTaskState::Dormant => (EvaluationUnfinishedState::Dormant, None),
+                        EvaluationTaskState::Reserved => {
+                            (EvaluationUnfinishedState::Reserved, None)
+                        }
+                        EvaluationTaskState::Queued => (EvaluationUnfinishedState::Queued, None),
+                        EvaluationTaskState::Running => (EvaluationUnfinishedState::Running, None),
+                        EvaluationTaskState::Blocked(block) => {
+                            (EvaluationUnfinishedState::Blocked, Some(block))
+                        }
+                        EvaluationTaskState::Complete(_)
+                        | EvaluationTaskState::Failed(_)
+                        | EvaluationTaskState::Cancelled => {
+                            unreachable!("terminal task states were handled above")
+                        }
+                    };
+                    let dependency = block
+                        .and_then(|block| block.lazy.as_ref())
+                        .map(|wait| self.reported_dependency(tasks, wait));
+                    has_live_foreign_dependency |= dependency
+                        .as_ref()
+                        .is_some_and(|dependency| dependency.live_foreign);
                     unfinished.push(EvaluationUnfinishedTask {
                         task: *task,
                         state,
-                        dependency,
-                        wait: dependency_wait,
-                        observed_generation,
-                        error,
+                        dependency: dependency.as_ref().map(|dependency| dependency.task),
+                        dependency_session: dependency
+                            .as_ref()
+                            .map(|dependency| dependency.session),
+                        wait: dependency.as_ref().map(|dependency| dependency.wait),
+                        observed_generation: block.and_then(|block| block.observed_generation),
+                        error: block.and_then(|block| block.error.clone()),
                     });
                 }
             }
@@ -1328,8 +1350,38 @@ impl EvaluationSession {
         };
         if report.unfinished.is_empty() {
             EvaluationSessionRun::Complete(report)
-        } else {
+        } else if has_live_foreign_dependency {
             EvaluationSessionRun::Quiescent(report)
+        } else {
+            EvaluationSessionRun::Deadlocked(report)
+        }
+    }
+
+    fn reported_dependency(
+        &self,
+        tasks: &EvaluationTasks,
+        initial: &EvaluationWaitToken,
+    ) -> ReportedDependency {
+        let mut wait = initial.clone();
+        let mut seen = HashSet::new();
+        loop {
+            if !seen.insert(wait.get()) || wait.owner_id() != self.id {
+                return ReportedDependency {
+                    task: wait.producer(),
+                    session: wait.owner_id(),
+                    wait: wait.get(),
+                    live_foreign: wait.owner_id() != self.id && wait.owner.upgrade().is_some(),
+                };
+            }
+            let Some(next) = task_dependency(tasks, &wait.producer()).cloned() else {
+                return ReportedDependency {
+                    task: wait.producer(),
+                    session: wait.owner_id(),
+                    wait: wait.get(),
+                    live_foreign: false,
+                };
+            };
+            wait = next;
         }
     }
 
@@ -1712,11 +1764,18 @@ fn wait_is_terminal(tasks: &EvaluationTasks, wait: &EvaluationWaitToken) -> bool
             )
         });
     }
-    tasks
-        .promises
-        .get(wait)
-        .and_then(|promise| promise.result.upgrade())
-        .is_some_and(|result| result.get().is_some())
+    if let Some(promise) = tasks.promises.get(wait) {
+        return promise
+            .result
+            .upgrade()
+            .is_none_or(|result| result.get().is_some());
+    }
+
+    // A dependency owned by another session cannot be inspected while this
+    // session's task registry is locked. Claim its local follower once per
+    // scheduler pass; the machine polls the foreign task after releasing this
+    // lock and either advances or records the same stable blockage.
+    true
 }
 
 fn deferred_for_wait(
@@ -2488,8 +2547,8 @@ mod tests {
             .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
             .unwrap();
 
-        let EvaluationSessionRun::Quiescent(report) = context.run_until_quiescent() else {
-            panic!("an unchanged blocked task should leave the session quiescent");
+        let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
+            panic!("an unchanged local blockage should be diagnosed as deadlock");
         };
         assert!(report.failures.is_empty());
         assert_eq!(report.unfinished.len(), 1);
@@ -2503,6 +2562,80 @@ mod tests {
             report.unfinished[0].error.as_deref(),
             Some("retryable evaluation error")
         );
+    }
+
+    #[test]
+    fn live_foreign_dependencies_are_reported_as_quiescent() {
+        let owner = EvalContext::standalone();
+        let dependency = owner
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("foreign dependency should schedule");
+        let observer = EvalContext::standalone();
+        let dependency_wait = dependency.wait.clone();
+        let follower = observer
+            .schedule_task(move |task_context| {
+                Ok(Box::new(Await {
+                    context: task_context,
+                    dependency: dependency_wait,
+                }))
+            })
+            .expect("foreign follower should schedule");
+
+        let EvaluationSessionRun::Quiescent(report) = observer.run_until_quiescent() else {
+            panic!("a live foreign dependency should produce resumable quiescence")
+        };
+        let blocked = report
+            .unfinished
+            .iter()
+            .find(|task| task.task == follower.id())
+            .expect("foreign follower should remain blocked");
+        assert_eq!(blocked.dependency, Some(dependency.id()));
+        assert_eq!(blocked.dependency_session, Some(dependency.session_id()));
+        assert_eq!(blocked.wait, Some(dependency.wait.get()));
+
+        let EvaluationSessionRun::Complete(owner_report) = owner.run_until_quiescent() else {
+            panic!("foreign producer should complete independently")
+        };
+        assert!(owner_report.unfinished.is_empty());
+        let EvaluationSessionRun::Complete(observer_report) = observer.run_until_quiescent() else {
+            panic!("polling again should observe foreign task completion")
+        };
+        assert!(observer_report.unfinished.is_empty());
+    }
+
+    #[test]
+    fn a_dropped_foreign_session_turns_its_follower_into_a_failure() {
+        let dependency_wait = {
+            let owner = EvalContext::standalone();
+            owner
+                .schedule_task(|_| Ok(Box::new(Complete)))
+                .expect("foreign dependency should schedule")
+                .wait
+                .clone()
+        };
+        let observer = EvalContext::standalone();
+        let follower = observer
+            .schedule_task(move |task_context| {
+                Ok(Box::new(Await {
+                    context: task_context,
+                    dependency: dependency_wait,
+                }))
+            })
+            .expect("foreign follower should schedule");
+
+        let EvaluationSessionRun::Complete(report) = observer.run_until_quiescent() else {
+            panic!("a dead foreign producer cannot leave retryable work")
+        };
+        let failure = report
+            .failures
+            .iter()
+            .find(|failure| failure.task == follower.id())
+            .expect("the foreign follower should fail");
+        assert_eq!(
+            failure.error.as_ref(),
+            "reflection task's evaluation session no longer exists"
+        );
+        assert!(report.unfinished.is_empty());
     }
 
     #[test]
