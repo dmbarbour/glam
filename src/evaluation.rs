@@ -11,7 +11,7 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
-use crate::core::{LazyId, Value};
+use crate::core::{LazyId, LazyValue, Value};
 
 mod executor;
 pub(crate) use executor::EvaluationExecutor;
@@ -248,6 +248,22 @@ struct ReflectionTaskRecord {
     status_sinks: Vec<Arc<dyn EvaluationTaskStatusSink>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LazyTaskState {
+    Dormant,
+    Running,
+    Blocked(EvaluationTaskBlock),
+    Complete(Value),
+    Failed(Arc<str>),
+}
+
+struct LazyTaskRecord {
+    id: EvaluationTaskId,
+    wait: EvaluationWaitToken,
+    state: LazyTaskState,
+    machine: Option<Box<dyn EvaluationTaskMachine>>,
+}
+
 struct TaskStatusUpdate {
     status: EvaluationTaskStatus,
     sinks: Vec<Arc<dyn EvaluationTaskStatusSink>>,
@@ -351,6 +367,9 @@ struct EvaluationTasks {
     ready: VecDeque<EvaluationTaskId>,
     promises: HashMap<EvaluationWaitToken, PromiseRecord>,
     owned_promises: HashMap<EvaluationTaskId, Vec<EvaluationWaitToken>>,
+    lazy: HashMap<LazyId, LazyTaskRecord>,
+    lazy_by_wait: HashMap<EvaluationWaitToken, LazyId>,
+    lazy_by_id: HashMap<EvaluationTaskId, LazyId>,
 }
 
 pub(crate) struct EvaluationSession {
@@ -359,8 +378,6 @@ pub(crate) struct EvaluationSession {
     task_changed: Condvar,
     reflection_launcher: OnceLock<Arc<dyn ReflectionTaskLauncher>>,
     executor: Weak<EvaluationExecutor>,
-    lazy_claims: Mutex<HashMap<LazyId, EvaluationTaskId>>,
-    lazy_changed: Condvar,
 }
 
 impl Default for EvaluationSession {
@@ -389,8 +406,6 @@ impl EvaluationSession {
             task_changed: Condvar::new(),
             reflection_launcher: OnceLock::new(),
             executor,
-            lazy_claims: Mutex::new(HashMap::new()),
-            lazy_changed: Condvar::new(),
         }
     }
 
@@ -422,26 +437,6 @@ impl EvaluationSession {
     }
 }
 
-pub(crate) struct LazyEvaluationClaim {
-    session: Arc<EvaluationSession>,
-    lazy: LazyId,
-    owner: EvaluationTaskId,
-}
-
-impl Drop for LazyEvaluationClaim {
-    fn drop(&mut self) {
-        let mut claims = self
-            .session
-            .lazy_claims
-            .lock()
-            .expect("lazy evaluation claim table was poisoned");
-        if claims.get(&self.lazy) == Some(&self.owner) {
-            claims.remove(&self.lazy);
-            self.session.lazy_changed.notify_all();
-        }
-    }
-}
-
 /// Cheap per-evaluation handle to one shared assembler session.
 ///
 /// Narrower provenance can be added to this handle without duplicating the
@@ -450,6 +445,8 @@ impl Drop for LazyEvaluationClaim {
 pub(crate) struct EvalContext {
     session: Arc<EvaluationSession>,
     task: Arc<OnceLock<Result<EvaluationTaskId, Arc<str>>>>,
+    scheduled_task: bool,
+    originating_task: Option<EvaluationTaskId>,
 }
 
 impl EvalContext {
@@ -457,6 +454,8 @@ impl EvalContext {
         Self {
             session,
             task: Arc::new(OnceLock::new()),
+            scheduled_task: false,
+            originating_task: None,
         }
     }
 
@@ -464,7 +463,28 @@ impl EvalContext {
         let task = Arc::new(OnceLock::new());
         task.set(Ok(id))
             .expect("fresh task identity cell must be empty");
-        Self { session, task }
+        Self {
+            session,
+            task,
+            scheduled_task: true,
+            originating_task: Some(id),
+        }
+    }
+
+    fn for_lazy_task(
+        session: Arc<EvaluationSession>,
+        id: EvaluationTaskId,
+        originating_task: Option<EvaluationTaskId>,
+    ) -> Self {
+        let task = Arc::new(OnceLock::new());
+        task.set(Ok(id))
+            .expect("fresh lazy task identity cell must be empty");
+        Self {
+            session,
+            task,
+            scheduled_task: true,
+            originating_task,
+        }
     }
 
     /// Creates a session for internal clients that do not yet run under an
@@ -479,38 +499,105 @@ impl EvalContext {
         }
     }
 
-    pub(crate) fn claim_lazy(&self, lazy: LazyId) -> Result<LazyEvaluationClaim, Arc<str>> {
-        let owner = self.task_id()?;
-        let mut claims = self
-            .session
-            .lazy_claims
+    pub(crate) fn runs_scheduled_task(&self) -> bool {
+        self.scheduled_task
+    }
+
+    pub(crate) fn is_current_lazy(&self, lazy: LazyId) -> bool {
+        if !self.scheduled_task {
+            return false;
+        }
+        let Some(Ok(task)) = self.task.get() else {
+            return false;
+        };
+        self.session
+            .tasks
             .lock()
-            .expect("lazy evaluation claim table was poisoned");
-        loop {
-            match claims.get(&lazy).copied() {
-                None => {
-                    claims.insert(lazy, owner);
-                    return Ok(LazyEvaluationClaim {
-                        session: self.session.clone(),
-                        lazy,
-                        owner,
-                    });
-                }
-                Some(active) if active == owner => {
-                    return Err(Arc::from(format!(
-                        "lazy value {} recursively observed itself",
-                        lazy.get()
-                    )));
-                }
-                Some(_) => {
-                    claims = self
-                        .session
-                        .lazy_changed
-                        .wait(claims)
-                        .expect("lazy evaluation claim table was poisoned");
-                }
+            .expect("evaluation task registry was poisoned")
+            .lazy_by_id
+            .get(task)
+            .is_some_and(|current| *current == lazy)
+    }
+
+    pub(crate) fn observes_as_task(&self, task: EvaluationTaskId) -> bool {
+        self.originating_task == Some(task)
+            || matches!(self.task.get(), Some(Ok(current)) if *current == task)
+    }
+
+    pub(crate) fn wait_depends_on_lazy(&self, wait: &EvaluationWaitToken, target: LazyId) -> bool {
+        let tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let mut wait = wait.clone();
+        let mut seen = HashSet::new();
+        while seen.insert(wait.clone()) {
+            if tasks.lazy_by_wait.get(&wait) == Some(&target) {
+                return true;
+            }
+            let Some(producer) = producer_for_wait(&tasks, &wait) else {
+                return false;
+            };
+            let Some(dependency) = task_dependency(&tasks, &producer) else {
+                return false;
+            };
+            wait = dependency.clone();
+        }
+        false
+    }
+
+    pub(crate) fn lazy_task<F>(
+        &self,
+        lazy: &LazyValue,
+        build: F,
+    ) -> Result<EvaluationWaitToken, Arc<str>>
+    where
+        F: FnOnce(EvalContext) -> Box<dyn EvaluationTaskMachine>,
+    {
+        {
+            let tasks = self
+                .session
+                .tasks
+                .lock()
+                .expect("evaluation task registry was poisoned");
+            if let Some(record) = tasks.lazy.get(&lazy.id()) {
+                return Ok(record.wait.clone());
             }
         }
+
+        let id = allocate_task_id()?;
+        let wait = allocate_wait_token(&self.session)?;
+        let originating_task = self
+            .originating_task
+            .or_else(|| self.task.get().and_then(|task| task.as_ref().ok()).copied());
+        let machine = build(Self::for_lazy_task(
+            self.session.clone(),
+            id,
+            originating_task,
+        ));
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        if let Some(record) = tasks.lazy.get(&lazy.id()) {
+            return Ok(record.wait.clone());
+        }
+        let record = LazyTaskRecord {
+            id,
+            wait: wait.clone(),
+            state: LazyTaskState::Dormant,
+            machine: Some(machine),
+        };
+        assert!(
+            tasks.lazy.insert(lazy.id(), record).is_none()
+                && tasks.lazy_by_wait.insert(wait.clone(), lazy.id()).is_none()
+                && tasks.lazy_by_id.insert(id, lazy.id()).is_none(),
+            "lazy task identities must be unique"
+        );
+        self.session.task_changed.notify_all();
+        Ok(wait)
     }
 
     #[cfg(test)]
@@ -526,9 +613,14 @@ impl EvalContext {
         let context = Self {
             session: self.session.clone(),
             task: Arc::new(OnceLock::new()),
+            scheduled_task: false,
+            originating_task: None,
         };
-        context.task_id()?;
-        Ok(context)
+        let task = context.task_id()?;
+        Ok(Self {
+            originating_task: Some(task),
+            ..context
+        })
     }
 
     pub(crate) fn task_id(&self) -> Result<EvaluationTaskId, Arc<str>> {
@@ -881,6 +973,23 @@ impl EvalContext {
             .lock()
             .expect("evaluation task registry was poisoned");
         let Some(record) = tasks.reflection.get(wait) else {
+            if let Some(lazy) = tasks.lazy_by_wait.get(wait) {
+                let record = tasks
+                    .lazy
+                    .get(lazy)
+                    .expect("lazy wait index must refer to a task record");
+                return match &record.state {
+                    LazyTaskState::Complete(value) => EvaluationTaskPoll::Complete(value.clone()),
+                    LazyTaskState::Failed(error) => EvaluationTaskPoll::Failed(error.clone()),
+                    LazyTaskState::Dormant | LazyTaskState::Running | LazyTaskState::Blocked(_) => {
+                        if Arc::ptr_eq(&self.session, &owner) {
+                            EvaluationTaskPoll::Pending(wait.clone())
+                        } else {
+                            EvaluationTaskPoll::ForeignSession
+                        }
+                    }
+                };
+            }
             let Some(promise) = tasks.promises.get(wait) else {
                 return EvaluationTaskPoll::Failed(Arc::from(
                     "evaluation wait token is no longer registered",
@@ -932,30 +1041,46 @@ impl EvalContext {
 
     #[cfg(test)]
     pub(crate) fn complete_wait(&self, wait: &EvaluationWaitToken) {
+        let target = wait.clone();
         let mut tasks = self
             .session
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
+        let wait = test_reflection_dependency(&tasks, wait);
         tasks
             .reflection
-            .get_mut(wait)
+            .get_mut(&wait)
             .expect("test task must belong to this session")
             .state = EvaluationTaskState::Complete((*crate::core::keys::UNIT_VALUE).clone());
+        self.session.task_changed.notify_all();
+        drop(tasks);
+        while matches!(
+            self.pump_wait(&target, 256),
+            EvaluationPumpOutcome::BudgetExhausted
+        ) {}
     }
 
     #[cfg(test)]
     pub(crate) fn fail_wait(&self, wait: &EvaluationWaitToken, error: impl Into<Arc<str>>) {
+        let target = wait.clone();
         let mut tasks = self
             .session
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
+        let wait = test_reflection_dependency(&tasks, wait);
         tasks
             .reflection
-            .get_mut(wait)
+            .get_mut(&wait)
             .expect("test task must belong to this session")
             .state = EvaluationTaskState::Failed(error.into());
+        self.session.task_changed.notify_all();
+        drop(tasks);
+        while matches!(
+            self.pump_wait(&target, 256),
+            EvaluationPumpOutcome::BudgetExhausted
+        ) {}
     }
 
     #[cfg(test)]
@@ -969,18 +1094,81 @@ impl EvalContext {
     }
 
     #[cfg(test)]
+    pub(crate) fn lazy_task_count(&self) -> usize {
+        self.session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned")
+            .lazy
+            .len()
+    }
+
+    #[cfg(test)]
     pub(crate) fn shares_session_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.session, &other.session)
     }
 }
 
+#[cfg(test)]
+fn test_reflection_dependency(
+    tasks: &EvaluationTasks,
+    wait: &EvaluationWaitToken,
+) -> EvaluationWaitToken {
+    let mut wait = wait.clone();
+    let mut seen = HashSet::new();
+    while seen.insert(wait.clone()) {
+        let Some(lazy) = tasks.lazy_by_wait.get(&wait) else {
+            break;
+        };
+        let Some(record) = tasks.lazy.get(lazy) else {
+            break;
+        };
+        let LazyTaskState::Blocked(block) = &record.state else {
+            break;
+        };
+        let Some(dependency) = &block.lazy else {
+            break;
+        };
+        wait = dependency.clone();
+    }
+    wait
+}
+
 const TASK_POLL_QUANTUM: usize = 64;
 
-struct ClaimedTask {
+struct ClaimedReflectionTask {
     id: EvaluationTaskId,
     wait: EvaluationWaitToken,
     prior_state: EvaluationTaskState,
     machine: Box<dyn EvaluationTaskMachine>,
+}
+
+struct ClaimedLazyTask {
+    id: EvaluationTaskId,
+    lazy: LazyId,
+    prior_state: LazyTaskState,
+    machine: Box<dyn EvaluationTaskMachine>,
+}
+
+enum ClaimedTask {
+    Reflection(ClaimedReflectionTask),
+    Lazy(ClaimedLazyTask),
+}
+
+impl ClaimedTask {
+    fn id(&self) -> EvaluationTaskId {
+        match self {
+            Self::Reflection(task) => task.id,
+            Self::Lazy(task) => task.id,
+        }
+    }
+
+    fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
+        match self {
+            Self::Reflection(task) => task.machine.poll(step_budget),
+            Self::Lazy(task) => task.machine.poll(step_budget),
+        }
+    }
 }
 
 impl EvaluationSession {
@@ -1012,8 +1200,8 @@ impl EvaluationSession {
                 return Self::session_run_report(&tasks);
             };
 
-            let poll = claimed.machine.poll(TASK_POLL_QUANTUM);
-            let claimed_id = claimed.id;
+            let poll = claimed.poll(TASK_POLL_QUANTUM);
+            let claimed_id = claimed.id();
             let (made_progress, remains_blocked, cancelled, status) =
                 self.release_task(claimed, poll);
             publish_task_status(status);
@@ -1125,6 +1313,11 @@ impl EvaluationSession {
                     .tasks
                     .lock()
                     .expect("evaluation task registry was poisoned");
+                if target_has_running_lazy_producer(&tasks, target)
+                    || context.runs_scheduled_task() && target_has_running_producer(&tasks, target)
+                {
+                    return EvaluationPumpOutcome::NoProgress;
+                }
                 let prioritized = prioritized_task(&tasks, target, &attempted_blocked);
                 prioritized
                     .and_then(|id| claim_task(&mut tasks, id))
@@ -1137,6 +1330,11 @@ impl EvaluationSession {
                     .lock()
                     .expect("evaluation task registry was poisoned");
                 if target_has_running_producer(&tasks, target) {
+                    if context.runs_scheduled_task()
+                        || target_has_running_lazy_producer(&tasks, target)
+                    {
+                        return EvaluationPumpOutcome::NoProgress;
+                    }
                     tasks = self
                         .task_changed
                         .wait(tasks)
@@ -1153,8 +1351,8 @@ impl EvaluationSession {
 
             let quantum = step_budget.min(TASK_POLL_QUANTUM);
             step_budget -= quantum;
-            let poll = claimed.machine.poll(quantum);
-            let claimed_id = claimed.id;
+            let poll = claimed.poll(quantum);
+            let claimed_id = claimed.id();
             let (made_progress, remains_blocked, cancelled, status) =
                 self.release_task(claimed, poll);
             publish_task_status(status);
@@ -1176,6 +1374,22 @@ impl EvaluationSession {
     fn release_task(
         &self,
         claimed: ClaimedTask,
+        poll: EvaluationMachinePoll,
+    ) -> (
+        bool,
+        bool,
+        Option<Box<dyn EvaluationTaskMachine>>,
+        Option<TaskStatusUpdate>,
+    ) {
+        match claimed {
+            ClaimedTask::Reflection(claimed) => self.release_reflection_task(claimed, poll),
+            ClaimedTask::Lazy(claimed) => self.release_lazy_task(claimed, poll),
+        }
+    }
+
+    fn release_reflection_task(
+        &self,
+        claimed: ClaimedReflectionTask,
         poll: EvaluationMachinePoll,
     ) -> (
         bool,
@@ -1234,6 +1448,54 @@ impl EvaluationSession {
         (made_progress, remains_blocked, None, status)
     }
 
+    fn release_lazy_task(
+        &self,
+        claimed: ClaimedLazyTask,
+        poll: EvaluationMachinePoll,
+    ) -> (
+        bool,
+        bool,
+        Option<Box<dyn EvaluationTaskMachine>>,
+        Option<TaskStatusUpdate>,
+    ) {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let record = tasks
+            .lazy
+            .get_mut(&claimed.lazy)
+            .expect("claimed lazy task must remain registered");
+        assert_eq!(record.id, claimed.id, "lazy task ID index must agree");
+        assert!(
+            matches!(record.state, LazyTaskState::Running),
+            "only a running lazy task may release its machine"
+        );
+        assert!(record.machine.is_none(), "claimed machine must be absent");
+        record.machine = Some(claimed.machine);
+
+        let (state, made_progress, remains_blocked) = match poll {
+            EvaluationMachinePoll::Yielded => (LazyTaskState::Dormant, true, false),
+            EvaluationMachinePoll::Blocked(block) => {
+                let unchanged = matches!(
+                    &claimed.prior_state,
+                    LazyTaskState::Blocked(prior) if prior == &block
+                );
+                (LazyTaskState::Blocked(block), !unchanged, true)
+            }
+            EvaluationMachinePoll::Complete(value) => (LazyTaskState::Complete(value), true, false),
+            EvaluationMachinePoll::Failed(error) => (LazyTaskState::Failed(error), true, false),
+            EvaluationMachinePoll::Cancelled => (
+                LazyTaskState::Failed(Arc::from("lazy evaluation task was cancelled")),
+                true,
+                false,
+            ),
+        };
+        record.state = state;
+        self.task_changed.notify_all();
+        (made_progress, remains_blocked, None, None)
+    }
+
     fn notify_executor_if_ready(&self) {
         let tasks = self
             .tasks
@@ -1266,7 +1528,7 @@ impl EvaluationSession {
         // Re-advertise remaining ready work before polling so other workers
         // may claim independent tasks from this same session concurrently.
         self.notify_executor_if_ready();
-        let poll = claimed.machine.poll(TASK_POLL_QUANTUM);
+        let poll = claimed.poll(TASK_POLL_QUANTUM);
         let (_, _, cancelled, status) = self.release_task(claimed, poll);
         publish_task_status(status);
         if let Some(mut machine) = cancelled {
@@ -1284,7 +1546,87 @@ fn producer_for_wait(
         .reflection
         .get(wait)
         .map(|record| record.id)
+        .or_else(|| {
+            tasks
+                .lazy_by_wait
+                .get(wait)
+                .and_then(|lazy| tasks.lazy.get(lazy))
+                .map(|record| record.id)
+        })
         .or_else(|| tasks.promises.get(wait).map(|promise| promise.producer))
+}
+
+fn task_dependency<'a>(
+    tasks: &'a EvaluationTasks,
+    id: &EvaluationTaskId,
+) -> Option<&'a EvaluationWaitToken> {
+    if let Some(wait) = tasks.reflection_by_id.get(id) {
+        let record = tasks.reflection.get(wait)?;
+        return match &record.state {
+            EvaluationTaskState::Blocked(block) => block.lazy.as_ref(),
+            _ => None,
+        };
+    }
+    let lazy = tasks.lazy_by_id.get(id)?;
+    let record = tasks.lazy.get(lazy)?;
+    match &record.state {
+        LazyTaskState::Blocked(block) => block.lazy.as_ref(),
+        _ => None,
+    }
+}
+
+fn task_is_claimable(
+    tasks: &EvaluationTasks,
+    id: &EvaluationTaskId,
+    attempted: &HashSet<EvaluationTaskId>,
+) -> bool {
+    if attempted.contains(id) {
+        return false;
+    }
+    if let Some(wait) = tasks.reflection_by_id.get(id) {
+        return tasks.reflection.get(wait).is_some_and(|record| {
+            matches!(
+                record.state,
+                EvaluationTaskState::Queued | EvaluationTaskState::Blocked(_)
+            )
+        });
+    }
+    tasks
+        .lazy_by_id
+        .get(id)
+        .and_then(|lazy| tasks.lazy.get(lazy))
+        .is_some_and(|record| match &record.state {
+            LazyTaskState::Dormant => true,
+            LazyTaskState::Blocked(block) => block
+                .lazy
+                .as_ref()
+                .is_some_and(|wait| wait_is_terminal(tasks, wait)),
+            LazyTaskState::Running | LazyTaskState::Complete(_) | LazyTaskState::Failed(_) => false,
+        })
+}
+
+fn wait_is_terminal(tasks: &EvaluationTasks, wait: &EvaluationWaitToken) -> bool {
+    if let Some(record) = tasks.reflection.get(wait) {
+        return matches!(
+            record.state,
+            EvaluationTaskState::Complete(_)
+                | EvaluationTaskState::Failed(_)
+                | EvaluationTaskState::Cancelled
+        );
+    }
+    if let Some(lazy) = tasks.lazy_by_wait.get(wait) {
+        return tasks.lazy.get(lazy).is_some_and(|record| {
+            matches!(
+                record.state,
+                LazyTaskState::Complete(_) | LazyTaskState::Failed(_)
+            )
+        });
+    }
+    tasks
+        .promises
+        .get(wait)
+        .and_then(|promise| promise.result.upgrade())
+        .is_some_and(|result| result.get().is_some())
 }
 
 fn prioritized_task(
@@ -1299,33 +1641,17 @@ fn prioritized_task(
         if !seen.insert(id) {
             break;
         }
-        let Some(task_wait) = tasks.reflection_by_id.get(&id) else {
-            break;
-        };
-        let Some(record) = tasks.reflection.get(task_wait) else {
-            break;
-        };
         chain.push(id);
-        let EvaluationTaskState::Blocked(block) = &record.state else {
-            break;
-        };
-        let Some(dependency) = &block.lazy else {
+        let Some(dependency) = task_dependency(tasks, &id) else {
             break;
         };
         wait = dependency.clone();
     }
 
-    chain.into_iter().rev().find(|id| {
-        let Some(wait) = tasks.reflection_by_id.get(id) else {
-            return false;
-        };
-        let Some(record) = tasks.reflection.get(wait) else {
-            return false;
-        };
-        matches!(record.state, EvaluationTaskState::Queued)
-            || matches!(record.state, EvaluationTaskState::Blocked(_))
-                && !attempted_blocked.contains(id)
-    })
+    chain
+        .into_iter()
+        .rev()
+        .find(|id| task_is_claimable(tasks, id, attempted_blocked))
 }
 
 fn target_has_running_producer(tasks: &EvaluationTasks, target: &EvaluationWaitToken) -> bool {
@@ -1335,6 +1661,65 @@ fn target_has_running_producer(tasks: &EvaluationTasks, target: &EvaluationWaitT
         if !seen.insert(id) {
             return false;
         }
+        if let Some(task_wait) = tasks.reflection_by_id.get(&id) {
+            let Some(record) = tasks.reflection.get(task_wait) else {
+                return false;
+            };
+            match &record.state {
+                EvaluationTaskState::Running => return true,
+                EvaluationTaskState::Blocked(block) => {
+                    let Some(dependency) = &block.lazy else {
+                        return false;
+                    };
+                    wait = dependency.clone();
+                }
+                _ => return false,
+            }
+            continue;
+        }
+        let Some(lazy) = tasks.lazy_by_id.get(&id) else {
+            return false;
+        };
+        let Some(record) = tasks.lazy.get(lazy) else {
+            return false;
+        };
+        match &record.state {
+            LazyTaskState::Running => return true,
+            LazyTaskState::Blocked(block) => {
+                let Some(dependency) = &block.lazy else {
+                    return false;
+                };
+                wait = dependency.clone();
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn target_has_running_lazy_producer(tasks: &EvaluationTasks, target: &EvaluationWaitToken) -> bool {
+    let mut seen = HashSet::new();
+    let mut wait = target.clone();
+    while let Some(id) = producer_for_wait(tasks, &wait) {
+        if !seen.insert(id) {
+            return false;
+        }
+        if let Some(lazy) = tasks.lazy_by_id.get(&id) {
+            let Some(record) = tasks.lazy.get(lazy) else {
+                return false;
+            };
+            match &record.state {
+                LazyTaskState::Running => return true,
+                LazyTaskState::Blocked(block) => {
+                    let Some(dependency) = &block.lazy else {
+                        return false;
+                    };
+                    wait = dependency.clone();
+                }
+                _ => return false,
+            }
+            continue;
+        }
         let Some(task_wait) = tasks.reflection_by_id.get(&id) else {
             return false;
         };
@@ -1342,7 +1727,6 @@ fn target_has_running_producer(tasks: &EvaluationTasks, target: &EvaluationWaitT
             return false;
         };
         match &record.state {
-            EvaluationTaskState::Running => return true,
             EvaluationTaskState::Blocked(block) => {
                 let Some(dependency) = &block.lazy else {
                     return false;
@@ -1356,22 +1740,39 @@ fn target_has_running_producer(tasks: &EvaluationTasks, target: &EvaluationWaitT
 }
 
 fn claim_task(tasks: &mut EvaluationTasks, id: EvaluationTaskId) -> Option<ClaimedTask> {
-    let wait = tasks.reflection_by_id.get(&id)?.clone();
-    let record = tasks.reflection.get_mut(&wait)?;
+    if let Some(wait) = tasks.reflection_by_id.get(&id).cloned() {
+        let record = tasks.reflection.get_mut(&wait)?;
+        if !matches!(
+            record.state,
+            EvaluationTaskState::Queued | EvaluationTaskState::Blocked(_)
+        ) {
+            return None;
+        }
+        let machine = record.machine.take()?;
+        let prior_state = std::mem::replace(&mut record.state, EvaluationTaskState::Running);
+        return Some(ClaimedTask::Reflection(ClaimedReflectionTask {
+            id,
+            wait,
+            prior_state,
+            machine,
+        }));
+    }
+    let lazy = *tasks.lazy_by_id.get(&id)?;
+    let record = tasks.lazy.get_mut(&lazy)?;
     if !matches!(
         record.state,
-        EvaluationTaskState::Queued | EvaluationTaskState::Blocked(_)
+        LazyTaskState::Dormant | LazyTaskState::Blocked(_)
     ) {
         return None;
     }
     let machine = record.machine.take()?;
-    let prior_state = std::mem::replace(&mut record.state, EvaluationTaskState::Running);
-    Some(ClaimedTask {
+    let prior_state = std::mem::replace(&mut record.state, LazyTaskState::Running);
+    Some(ClaimedTask::Lazy(ClaimedLazyTask {
         id,
-        wait,
+        lazy,
         prior_state,
         machine,
-    })
+    }))
 }
 
 fn claim_ready_task(tasks: &mut EvaluationTasks) -> Option<ClaimedTask> {
@@ -1381,8 +1782,8 @@ fn claim_ready_task(tasks: &mut EvaluationTasks) -> Option<ClaimedTask> {
             .get(&id)
             .and_then(|wait| tasks.reflection.get(wait))
             .is_some_and(|record| matches!(record.state, EvaluationTaskState::Queued));
-        if is_queued && let Some(claimed) = claim_task(tasks, id) {
-            return Some(claimed);
+        if is_queued && let Some(ClaimedTask::Reflection(claimed)) = claim_task(tasks, id) {
+            return Some(ClaimedTask::Reflection(claimed));
         }
     }
     None
@@ -1397,7 +1798,10 @@ fn claim_blocked_task(
         (matches!(record.state, EvaluationTaskState::Blocked(_)) && !attempted.contains(id))
             .then_some(*id)
     })?;
-    claim_task(tasks, id)
+    match claim_task(tasks, id) {
+        Some(ClaimedTask::Reflection(claimed)) => Some(ClaimedTask::Reflection(claimed)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

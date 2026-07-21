@@ -17,9 +17,15 @@ control-flow overview.
   `Bind` is an error, not an implicit function conversion.
 - `force_value_shell` defines outer weak-head normal form: its result cannot be
   `Value::Lazy`, but dictionaries and lists may retain lazy children. The
-  `EvaluatedValue` wrapper records this boundary. Lazy result cells still
-  temporarily accept forwarding values until session-owned lazy tasks replace
-  that compatibility path.
+  `EvaluatedValue` wrapper records this boundary.
+- Computed lazy work is owned by demand-driven `EvaluationSession` task
+  records. Contending observers receive the task's stable wait token; they do
+  not wait on a lazy-specific condition variable. Lazy tasks participate in
+  exact dependency pumping but never enter the background-ready queue.
+- A shallow evaluation may return another lazy value as data. That result is
+  shared in the session task record rather than installed in the immutable
+  result cell. Explicit promised values can still be assigned a lazy value
+  until promises move to their dedicated representation.
 - Lazy identities are process-global nonzero IDs because a value and its result
   cell may cross evaluation sessions; each session uses them only as local
   scheduling keys.

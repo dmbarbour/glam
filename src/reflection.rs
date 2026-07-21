@@ -1776,7 +1776,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
             return Some(self.blocked_poll());
         };
         match self.eval_context.poll_wait(wait) {
-            EvaluationTaskPoll::Pending(_) => Some(self.blocked_poll()),
+            EvaluationTaskPoll::Pending(_) => {
+                if matches!(
+                    self.eval_context.pump_wait(wait, 256),
+                    EvaluationPumpOutcome::TargetReady
+                ) {
+                    self.blocked = None;
+                    None
+                } else {
+                    Some(self.blocked_poll())
+                }
+            }
             EvaluationTaskPoll::Complete(_)
             | EvaluationTaskPoll::Failed(_)
             | EvaluationTaskPoll::Cancelled

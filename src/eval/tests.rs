@@ -354,7 +354,10 @@ fn suspended_value_fixpoint_keeps_one_knot_for_concurrent_observers() {
     let fixpoint_wait = observer_block
         .blocked_on()
         .expect("observer should wait on the fixpoint itself");
-    assert_ne!(producer_wait, fixpoint_wait);
+    assert_eq!(
+        producer_wait, fixpoint_wait,
+        "all observers should wait on the session-owned lazy task"
+    );
 
     owner.complete_wait(&producer_wait.0);
     assert_eq!(eval_value(&owner, &fixpoint).unwrap(), n(42));
@@ -399,6 +402,83 @@ fn forcing_a_lazy_value_reaches_outer_whnf_without_forcing_lazy_fields() {
         Some(&expected_field)
     );
     assert_eq!(field_forces.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn shallow_lazy_aliases_are_shared_by_the_session_without_entering_the_cache() {
+    let context = test_context();
+    let target = Value::deferred("alias target", |_| Ok(n(42)));
+    let expected = target.clone();
+    let root = LazyValue::deferred("shallow alias", move |_| Ok(target.clone()));
+    let value = Value::Lazy(root.clone());
+
+    assert_eq!(context.lazy_task_count(), 0);
+    assert_eq!(eval_value(&context, &value).unwrap(), expected);
+    assert_eq!(context.lazy_task_count(), 1);
+    assert_eq!(
+        root.checked_cached()
+            .expect("a computed alias must not enter the immutable cache"),
+        None
+    );
+    assert_eq!(force_value_shell(&context, &value).unwrap(), n(42));
+}
+
+#[test]
+fn concurrent_lazy_observers_receive_one_wait_without_parking() {
+    let context = test_context();
+    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let producer_release = release.clone();
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
+    let lazy = LazyValue::deferred("contended lazy", move |_| {
+        started_sender
+            .send(())
+            .expect("test should still be waiting for its producer");
+        let (lock, changed) = &*producer_release;
+        let mut released = lock.lock().expect("test release lock was poisoned");
+        while !*released {
+            released = changed
+                .wait(released)
+                .expect("test release lock was poisoned");
+        }
+        Ok(n(42))
+    });
+    let value = Value::Lazy(lazy);
+    let producer_context = context.clone();
+    let producer_value = value.clone();
+    let producer = std::thread::spawn(move || eval_value(&producer_context, &producer_value));
+    started_receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("producer should claim the lazy task");
+
+    let (observed_sender, observed_receiver) = std::sync::mpsc::channel();
+    let observer_context = context.clone();
+    let observer_value = value.clone();
+    let observer = std::thread::spawn(move || {
+        observed_sender
+            .send(eval_value(&observer_context, &observer_value))
+            .expect("test should still be waiting for its observer");
+    });
+    let observed = observed_receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("a contending observer must return instead of parking");
+    let first_wait = observed
+        .expect_err("contending observation should block cooperatively")
+        .blocked_on()
+        .expect("contending observation should expose the lazy task wait");
+    let second_wait = eval_value(&context, &value)
+        .expect_err("a second contending observation should also block")
+        .blocked_on()
+        .expect("all contending observations should expose the wait");
+    assert_eq!(first_wait, second_wait);
+
+    let (lock, changed) = &*release;
+    *lock.lock().expect("test release lock was poisoned") = true;
+    changed.notify_all();
+    observer.join().expect("observer should finish");
+    assert_eq!(
+        producer.join().expect("producer should finish").unwrap(),
+        n(42)
+    );
 }
 
 #[test]
