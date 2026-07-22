@@ -190,3 +190,7 @@ their detailed scheduling and representation contracts.
   resolution. A bare intermediate statement reuses `=>>` and therefore
   requires unit; the final expression is the continuation itself and is not
   implicitly wrapped in `.r`.
+- Recursive do is never implicit. A direct `abstract Name, ...` step delimits
+  a region through its last fulfillment and lowers through the standard-effect
+  `.fix`; the resolved values and continuation use a compiler-private payload,
+  with no dedicated recursive-do representation in core or evaluation.

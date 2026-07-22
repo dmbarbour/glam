@@ -224,7 +224,9 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
         SyntaxExpr::Lambda(_, body) => mark_used_prior_alias(body, alias, used),
         SyntaxExpr::Do(do_expr) => {
             for step in &do_expr.steps {
-                mark_used_prior_alias(do_step_expr(step), alias, used);
+                if let Some(expr) = do_step_expr(step) {
+                    mark_used_prior_alias(expr, alias, used);
+                }
             }
             mark_used_prior_alias(&do_expr.result, alias, used);
         }
@@ -406,16 +408,34 @@ fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {
     let mut locals = Vec::new();
     let mut used = Vec::new();
     let mut binding_lines = Vec::new();
+    let mut unresolved_abstracts = Vec::new();
 
     for step in &do_expr.steps {
-        let expr = do_step_expr(step);
-        mark_used_locals(expr, &locals, &mut used);
-        analyze_expr_locals(expr, step.line, diagnostics);
+        if let Some(expr) = do_step_expr(step) {
+            mark_used_locals(expr, &locals, &mut used);
+            analyze_expr_locals(expr, step.line, diagnostics);
+        }
 
-        if let Some(name) = do_step_binder(step) {
-            locals.push(local_name_metadata(name));
-            used.push(false);
-            binding_lines.push(step.line);
+        match &step.kind {
+            DoStepKind::Abstract(names) => {
+                for name in names {
+                    let local = local_name_metadata(name);
+                    if let Some(canonical) = &local.canonical {
+                        unresolved_abstracts.push(canonical.clone());
+                    }
+                    locals.push(local);
+                    used.push(false);
+                    binding_lines.push(step.line);
+                }
+            }
+            DoStepKind::Bind { name, .. } | DoStepKind::ValueBind { name, .. } => {
+                if !fulfills_abstract(name, &mut unresolved_abstracts) {
+                    locals.push(local_name_metadata(name));
+                    used.push(false);
+                    binding_lines.push(step.line);
+                }
+            }
+            DoStepKind::Then(_) => {}
         }
     }
 
@@ -438,31 +458,55 @@ fn mark_used_do_locals(do_expr: &DoExpr, locals: &[LocalName], used: &mut [bool]
     combined.extend_from_slice(locals);
     let mut combined_used = Vec::with_capacity(outer_len + do_expr.steps.len());
     combined_used.extend_from_slice(used);
+    let mut unresolved_abstracts = Vec::new();
 
     for step in &do_expr.steps {
-        mark_used_locals(do_step_expr(step), &combined, &mut combined_used);
-        if let Some(name) = do_step_binder(step) {
-            combined.push(local_name_metadata(name));
-            combined_used.push(false);
+        if let Some(expr) = do_step_expr(step) {
+            mark_used_locals(expr, &combined, &mut combined_used);
+        }
+        match &step.kind {
+            DoStepKind::Abstract(names) => {
+                for name in names {
+                    let local = local_name_metadata(name);
+                    if let Some(canonical) = &local.canonical {
+                        unresolved_abstracts.push(canonical.clone());
+                    }
+                    combined.push(local);
+                    combined_used.push(false);
+                }
+            }
+            DoStepKind::Bind { name, .. } | DoStepKind::ValueBind { name, .. } => {
+                if !fulfills_abstract(name, &mut unresolved_abstracts) {
+                    combined.push(local_name_metadata(name));
+                    combined_used.push(false);
+                }
+            }
+            DoStepKind::Then(_) => {}
         }
     }
     mark_used_locals(&do_expr.result, &combined, &mut combined_used);
     used.copy_from_slice(&combined_used[..outer_len]);
 }
 
-fn do_step_expr(step: &DoStep) -> &SyntaxExpr {
+fn do_step_expr(step: &DoStep) -> Option<&SyntaxExpr> {
     match &step.kind {
-        DoStepKind::Bind { operation, .. } => operation,
-        DoStepKind::ValueBind { value, .. } => value,
-        DoStepKind::Then(expr) => expr,
+        DoStepKind::Abstract(_) => None,
+        DoStepKind::Bind { operation, .. } => Some(operation),
+        DoStepKind::ValueBind { value, .. } => Some(value),
+        DoStepKind::Then(expr) => Some(expr),
     }
 }
 
-fn do_step_binder(step: &DoStep) -> Option<&str> {
-    match &step.kind {
-        DoStepKind::Bind { name, .. } | DoStepKind::ValueBind { name, .. } => Some(name),
-        DoStepKind::Then(_) => None,
-    }
+fn fulfills_abstract(name: &str, unresolved: &mut Vec<String>) -> bool {
+    let canonical = local_name_metadata(name).canonical;
+    let Some(index) = unresolved
+        .iter()
+        .rposition(|abstract_name| Some(abstract_name) == canonical.as_ref())
+    else {
+        return false;
+    };
+    unresolved.remove(index);
+    true
 }
 
 fn mark_used_body_item_locals(

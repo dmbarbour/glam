@@ -1139,6 +1139,184 @@ fn do_bindings_follow_sequential_unused_local_rules() {
 }
 
 #[test]
+fn recursive_do_forward_names_follow_unused_local_rules() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "recursive = do\n",
+        "  abstract unused, _quiet, used\n",
+        "  reader = \\_ -> used\n",
+        "  unused = 1\n",
+        "  quiet = 2\n",
+        "  used = 3\n",
+        "  .r reader\n",
+    ));
+
+    let warnings = parsed
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Warning)
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].line, 3);
+    assert_eq!(warnings[0].message, "unused local `unused`");
+}
+
+#[test]
+fn recursive_do_reports_invalid_regions() {
+    let cases = [
+        (
+            concat!(
+                "language g0\n",
+                "bad = do\n",
+                "  abstract missing\n",
+                "  .r ()\n",
+            ),
+            3,
+            "no later fulfillment for `missing`",
+        ),
+        (
+            concat!(
+                "language g0\n",
+                "bad = do\n",
+                "  abstract value, _value\n",
+                "  value = 1\n",
+                "  .r value\n",
+            ),
+            3,
+            "duplicate recursive do abstract declaration for `value`",
+        ),
+        (
+            concat!(
+                "language g0\n",
+                "bad = do\n",
+                "  abstract first\n",
+                "  abstract second\n",
+                "  first = 1\n",
+                "  second = 2\n",
+                "  .r first\n",
+            ),
+            4,
+            "overlapping recursive do abstract regions are not supported",
+        ),
+        (
+            concat!(
+                "language g0\n",
+                "bad outer = do\n",
+                "  abstract outer\n",
+                "  outer = 1\n",
+                "  .r outer\n",
+            ),
+            3,
+            "local `outer` shadows existing local `outer`",
+        ),
+    ];
+
+    for (source, line, expected) in cases {
+        let parsed = parse(source);
+        let lowered = lower_parsed_source(parsed, &CompileContext::default());
+        assert!(lowered.diagnostics.iter().any(|diagnostic| {
+            diagnostic.line == line && diagnostic.message.contains(expected)
+        }));
+    }
+}
+
+#[test]
+fn recursive_do_uses_standard_fix_and_preserves_region_locals() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "single = do\n",
+        "  abstract answer\n",
+        "  reader = \\_ -> answer\n",
+        "  .r 72 -> answer\n",
+        "  .r (reader ())\n",
+        "mutual = do\n",
+        "  abstract left, right\n",
+        "  captured = 72\n",
+        "  left = \\_ -> right\n",
+        "  right = captured\n",
+        "  ((left () == 72) and (captured == 72)) =>> .r 72\n",
+        "sequential = do\n",
+        "  abstract first\n",
+        "  first = 70\n",
+        "  abstract second\n",
+        "  second = first + 2\n",
+        "  .r second\n",
+        "asm.single = list.head (list.pure single)\n",
+        "asm.mutual = list.head (list.pure mutual)\n",
+        "asm.sequential = list.head (list.pure sequential)\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for path in ["single", "mutual", "sequential"] {
+        assert_eq!(
+            fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
+            Value::Number(n(72)),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn recursive_do_strict_forward_observation_reports_the_fixpoint_cycle() {
+    let source = concat!(
+        "language g0\n",
+        "import 'std\n",
+        "task = do\n",
+        "  abstract answer\n",
+        "  (answer == 72) =>> .r ()\n",
+        "  answer = 72\n",
+        "  .r ()\n",
+        "probe = anno { refl:task } \"unreachable\"\n",
+    );
+    let (_assembler, eval_context, definitions, _diagnostics) =
+        reflection_test_module(source, &["recursive_do_cycle"], &[]);
+    let mut probe = value_at_atom_path(&definitions, &["probe"]).expect("probe should exist");
+    let error = loop {
+        match crate::eval::eval_value(&eval_context, &probe) {
+            Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => probe = next,
+            Ok(other) => panic!("strict recursive observation produced {other:?}"),
+            Err(error) => break error.to_string(),
+        }
+    };
+    assert!(
+        error.contains("recursively observed itself"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn recursive_do_without_fix_handler_fails_like_an_explicit_fix_request() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "api = { r:(\\x -> x), seq:(\\op k -> (k (op.eff api)).eff api) }\n",
+        "recursive = do\n",
+        "  abstract answer\n",
+        "  answer = 72\n",
+        "  .r answer\n",
+        "explicit = .fix (\\_future -> .r 72)\n",
+        "asm.recursive = recursive.eff api\n",
+        "asm.explicit = explicit.eff api\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    let recursive = value_at_atom_path(&value, &["asm", "recursive"]).expect("result exists");
+    let explicit = value_at_atom_path(&value, &["asm", "explicit"]).expect("result exists");
+    assert_eq!(
+        fully_evaluated_error(recursive).to_string(),
+        fully_evaluated_error(explicit).to_string()
+    );
+}
+
+#[test]
 fn do_lowering_rejects_shadowing_at_the_binding_statement() {
     let parsed = parse(concat!(
         "language g0\n",

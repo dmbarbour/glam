@@ -7,6 +7,7 @@ use super::compound::{
 use super::layout::{dedent_layout_block, is_glam_whitespace, local_name, split_layout_statements};
 
 enum ParsedDoStatement {
+    Abstract(Vec<String>),
     Bind { name: String, operation: SyntaxExpr },
     ValueBind { name: String, value: SyntaxExpr },
     Expr(SyntaxExpr),
@@ -127,6 +128,7 @@ fn parse_do_block(
     for statement in statements {
         let line = do_line + 1 + statement.line_offset;
         let kind = match parse_do_statement(statement.text.trim(), line, diagnostics)? {
+            ParsedDoStatement::Abstract(names) => DoStepKind::Abstract(names),
             ParsedDoStatement::Bind { name, operation } => DoStepKind::Bind { name, operation },
             ParsedDoStatement::ValueBind { name, value } => DoStepKind::ValueBind { name, value },
             ParsedDoStatement::Expr(expr) => DoStepKind::Then(expr),
@@ -137,6 +139,12 @@ fn parse_do_block(
     let result_line = do_line + 1 + result_statement.line_offset;
     let result = match parse_do_statement(result_statement.text.trim(), result_line, diagnostics)? {
         ParsedDoStatement::Expr(expr) => expr,
+        ParsedDoStatement::Abstract(_) => {
+            return Err(
+                "do block cannot end with an abstract declaration; add its fulfillment and a final expression"
+                    .to_owned(),
+            );
+        }
         ParsedDoStatement::Bind { .. } | ParsedDoStatement::ValueBind { .. } => {
             return Err("do block cannot end with a binding; add a final expression".to_owned());
         }
@@ -153,6 +161,33 @@ fn parse_do_statement(
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<ParsedDoStatement, String> {
+    if text == "abstract"
+        || text
+            .strip_prefix("abstract")
+            .is_some_and(|rest| rest.chars().next().is_some_and(is_glam_whitespace))
+    {
+        let names = text
+            .strip_prefix("abstract")
+            .expect("checked abstract statement prefix")
+            .trim();
+        let names = local_name()
+            .padded()
+            .separated_by(just(',').padded())
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .then_ignore(end())
+            .parse(names)
+            .into_result()
+            .map_err(|_| {
+                "do abstract declaration requires one or more comma-separated local names"
+                    .to_owned()
+            })?;
+        if names.iter().any(|name| name == "_") {
+            return Err("do abstract declaration cannot use the inaccessible `_` name".to_owned());
+        }
+        return Ok(ParsedDoStatement::Abstract(names));
+    }
+
     if let Some(index) = top_level_token_indices(text, "<-").into_iter().next() {
         let name = text[..index].trim();
         let operation = text[index + 2..].trim();
@@ -272,6 +307,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_explicit_recursive_do_declarations() {
+        let expr = parse_expr_result(
+            "do\nabstract left, _right\n.r (\\_ -> left) -> use_left\nleft = 1\nright <- .r 2\n.r (use_left ())",
+        )
+        .unwrap();
+        let SyntaxExpr::Do(do_expr) = expr else {
+            panic!("expected a do expression");
+        };
+
+        assert!(matches!(
+            &do_expr.steps[0].kind,
+            DoStepKind::Abstract(names) if names == &["left", "_right"]
+        ));
+        assert!(matches!(
+            &do_expr.steps[2].kind,
+            DoStepKind::ValueBind { name, .. } if name == "left"
+        ));
+        assert!(matches!(
+            &do_expr.steps[3].kind,
+            DoStepKind::Bind { name, .. } if name == "right"
+        ));
+    }
+
+    #[test]
     fn parses_nested_do_and_multiline_operations() {
         let expr = parse_expr_result(
             "do\nvalue <- do\n  input <- source\n  .r input\nwritten <- write\n  value\n.r written",
@@ -369,6 +428,18 @@ mod tests {
                 "do\n  .first\n .second",
                 "indented less than the first statement",
             ),
+            (
+                "do\nabstract\n.r ()",
+                "requires one or more comma-separated local names",
+            ),
+            (
+                "do\nabstract _\n.r ()",
+                "cannot use the inaccessible `_` name",
+            ),
+            (
+                "do\nabstract value",
+                "cannot end with an abstract declaration",
+            ),
         ];
 
         for (source, expected) in cases {
@@ -379,5 +450,6 @@ mod tests {
             );
         }
         assert!(parse_expr_result("do value").is_err());
+        assert!(parse_expr_result("abstract value").is_err());
     }
 }

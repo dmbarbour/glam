@@ -347,7 +347,9 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
         let name = glam_name().boxed();
         let expr_name = glam_name()
             .try_map(|name, span| match name.as_str() {
-                "and" | "do" | "or" => Err(Rich::custom(span, format!("`{name}` is a keyword"))),
+                "abstract" | "and" | "do" | "or" => {
+                    Err(Rich::custom(span, format!("`{name}` is a keyword")))
+                }
                 _ => Ok(name),
             })
             .boxed();

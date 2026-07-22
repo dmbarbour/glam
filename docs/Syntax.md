@@ -193,8 +193,8 @@ requirement that the discarded result be unit. The final statement should
 express an effect and is not implicitly wrapped with `.r`. The current layout
 form must be non-empty and occupy the trailing position of its containing 
 definition, lambda body, or enclosing do statement; in an application it can
-therefore only be the final argument. General patterns, `abstract` recursive 
-declarations, and braced/semicolon do blocks remain unimplemented.
+therefore only be the final argument. General patterns and braced/semicolon do
+blocks remain unimplemented.
 
 Lightweight effects are supported: we desugar `.name` to `eff:(\api -> api.name)`, and we support application `(eff:f) x = eff:(\api -> f api x)`. This enables us to work with APIs concisely without redefining things:
 
@@ -216,8 +216,25 @@ Use of fixpoint within do notation is not implicit. It's problematic for it to b
 
 The compiler will leverage `.fix` to capture the name. Haskell already does this with `mdo`, so we can reference that implementation.
 
-This subsection describes target semantics; the current Rust bootstrap does
-not yet accept `abstract` inside a do block.
+The current Rust bootstrap implements this explicitly declared, name-only
+form. `abstract Name, ...` is valid only as a non-final do statement and makes
+those names visible to following statements. The first later direct bind or
+pure name binding with the same canonical name fulfills each declaration.
+References before fulfillment use the `.fix` future; references afterward use
+the ordinary resolved local.
+
+One recursive region runs from an `abstract` statement through the last of its
+fulfillments. The compiler privately returns the resolved values plus a
+continuation closing over locals created within the region, then resumes that
+continuation outside `.fix`. This payload is a compiler-private protocol, not
+a stable source-level data shape.
+Sequential regions are supported. Missing fulfillment, duplicate declarations,
+source-scope conflicts, and overlapping regions are diagnosed; a later region
+must begin only after the current region is fulfilled. Strictly observing an
+unresolved forward value follows the standard fixpoint failure behavior. The
+selected effect handler must provide `.fix` just as it must for an explicitly
+written `.fix` request. `_name` retains warning suppression, but the
+inaccessible `_` cannot be declared abstract.
 
 ### Applicatives
 

@@ -234,8 +234,7 @@ my_proc = do
 #   it may express an effect to return a value)
 # - The layout block must be the trailing part of its containing expression;
 #   in an application it can therefore only be the final argument.
-# - Patterns, recursive `abstract` statements, and braced/semicolon blocks are
-#   not implemented yet.
+# - Patterns and braced/semicolon blocks are not implemented yet.
 
 op1 >>= k           # bind        k1 >=> k2   # Kleisli
 op1 =>> op2         # sequence, dropping unit result
@@ -247,8 +246,18 @@ op1 !> op2 !> .r f          # right-assoc; always run left-to-right
 # mx !> mf = mx >>= (\x -> mf >>= (\f -> .r (f x)))
 # Opposing directions require parentheses.
 
-# Target design reserves explicit `abstract` statements for recursive do;
-# ordinary do blocks never acquire an implicit fixpoint.
+# Recursive do is explicit; ordinary do never acquires an implicit fixpoint.
+do
+    abstract loop_top, loop_exit
+    .jmp loop_top           # may pass the future value without observing it
+    .label -> loop_top      # first direct bind fulfills loop_top
+    .exit_label -> loop_exit
+    .r loop_exit
+
+# The region runs through the last fulfillment and requires standard `.fix`.
+# Missing/duplicate declarations, overlapping regions, and strict premature
+# observations are errors. `_name` may suppress a warning; bare `_` cannot be
+# abstract because it is inaccessible.
 ```
 
 ## Conditionals & Patterns

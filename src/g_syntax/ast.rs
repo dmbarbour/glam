@@ -108,6 +108,7 @@ pub struct DoStep {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DoStepKind {
+    Abstract(Vec<String>),
     Bind { name: String, operation: SyntaxExpr },
     ValueBind { name: String, value: SyntaxExpr },
     Then(SyntaxExpr),
