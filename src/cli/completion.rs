@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::sync::Arc;
 
-use crate::Diagnostic;
+use crate::{Diagnostic, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionRequest {
@@ -106,16 +106,29 @@ pub struct CompletionCandidate {
     replacement: OsString,
     display: String,
     kind: CompletionKind,
+    explanations: Vec<CliCaseExplanation>,
 }
 
 impl CompletionCandidate {
     pub(super) fn new(replacement: impl Into<OsString>, kind: CompletionKind) -> Self {
+        Self::with_explanations(replacement, kind, std::iter::empty())
+    }
+
+    pub(super) fn with_explanations(
+        replacement: impl Into<OsString>,
+        kind: CompletionKind,
+        explanations: impl IntoIterator<Item = Value>,
+    ) -> Self {
         let replacement = replacement.into();
         let display = replacement.to_string_lossy().into_owned();
         Self {
             replacement,
             display,
             kind,
+            explanations: explanations
+                .into_iter()
+                .map(CliCaseExplanation::new)
+                .collect(),
         }
     }
 
@@ -129,6 +142,35 @@ impl CompletionCandidate {
 
     pub fn kind(&self) -> CompletionKind {
         self.kind
+    }
+
+    /// Explained parser cases that remain viable for this replacement.
+    pub fn explanations(&self) -> &[CliCaseExplanation] {
+        &self.explanations
+    }
+
+    pub(super) fn merge_explanations(&mut self, other: &Self) {
+        for explanation in &other.explanations {
+            if !self.explanations.contains(explanation) {
+                self.explanations.push(explanation.clone());
+            }
+        }
+    }
+}
+
+/// One lazy, structured explanation supplied to `.case` by configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliCaseExplanation {
+    value: Value,
+}
+
+impl CliCaseExplanation {
+    pub(super) fn new(value: Value) -> Self {
+        Self { value }
+    }
+
+    pub fn value(&self) -> &Value {
+        &self.value
     }
 }
 
@@ -170,6 +212,7 @@ pub struct CompletionExpectation {
     argument: usize,
     token_offset: usize,
     label: String,
+    explanations: Vec<CliCaseExplanation>,
 }
 
 impl CompletionExpectation {
@@ -184,6 +227,18 @@ impl CompletionExpectation {
     pub fn label(&self) -> &str {
         &self.label
     }
+
+    pub fn explanations(&self) -> &[CliCaseExplanation] {
+        &self.explanations
+    }
+
+    pub(super) fn merge_explanations(&mut self, other: &Self) {
+        for explanation in &other.explanations {
+            if !self.explanations.contains(explanation) {
+                self.explanations.push(explanation.clone());
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -196,6 +251,7 @@ pub(super) struct Frontier {
 pub(super) struct ExpectationEvidence {
     pub(super) frontier: Frontier,
     pub(super) label: String,
+    pub(super) explanations: Vec<Value>,
 }
 
 impl ExpectationEvidence {
@@ -204,6 +260,12 @@ impl ExpectationEvidence {
             argument: self.frontier.argument,
             token_offset: self.frontier.token_offset,
             label: self.label.clone(),
+            explanations: self
+                .explanations
+                .iter()
+                .cloned()
+                .map(CliCaseExplanation::new)
+                .collect(),
         }
     }
 }
@@ -221,10 +283,11 @@ impl CompletionEvidence {
         replacement: OsString,
         kind: CompletionKind,
         complete_reader: bool,
+        explanations: Vec<Value>,
     ) -> Self {
         Self {
             frontier,
-            candidate: CompletionCandidate::new(replacement, kind),
+            candidate: CompletionCandidate::with_explanations(replacement, kind, explanations),
             complete_reader,
         }
     }

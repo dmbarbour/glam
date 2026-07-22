@@ -20,8 +20,8 @@ pub use adapters::{BUILTIN_COMPLETION_SCRIPTS, builtin_completion_script};
 pub use basic::{CompletionRoute, complete_basic, route_completion};
 pub use bootstrap::{dispatch_bootstrap, parse_worker_count};
 pub use completion::{
-    ActiveArgument, CliCompletion, CompletionCandidate, CompletionExpectation, CompletionKind,
-    CompletionRequest,
+    ActiveArgument, CliCaseExplanation, CliCompletion, CompletionCandidate, CompletionExpectation,
+    CompletionKind, CompletionRequest,
 };
 pub use configured::{complete_configured, expand_configured};
 pub use model::{

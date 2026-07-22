@@ -95,7 +95,7 @@ fn configured_completion(request: glam::cli::CompletionRequest) -> ExitCode {
                 prepared
                     .assembler
                     .diagnostic_bus()
-                    .publish(Diagnostic::new(Severity::Error, error.to_string()));
+                    .publish(error.diagnostic());
                 return finish_without_logger(prepared, None, true);
             }
         };
@@ -528,7 +528,7 @@ fn configured_cli(arguments: CliArguments, inspection: Option<bool>) -> ExitCode
             prepared
                 .assembler
                 .diagnostic_bus()
-                .publish(Diagnostic::new(Severity::Error, error.to_string()));
+                .publish(error.diagnostic());
             return finish_without_logger(prepared, None, true);
         }
     };

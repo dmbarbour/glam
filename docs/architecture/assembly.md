@@ -142,6 +142,16 @@ inspected rather than committed. `--parse_cli` prints the selected canonical
 arguments one per line; `--parse_cli.0` uses NUL delimiters. Neither executes
 the command nor activates workers.
 
+`.case Explain Parse` scopes lazy, structured explanation metadata around one
+configured parser branch without changing `.alt`. A failed reader captures its
+active outer-to-inner case stack at the same argument/token frontier as its
+expectation. Ordinary successful construction never observes `Explain`.
+Completion returns those values as structured candidate/expectation metadata;
+parse and ambiguity errors render plain text or the conventional `usage`,
+`summary`, and `details` fields. Published error diagnostics retain the original
+values at `cli.cases` alongside `msg.text`. Higher-level choice helpers remain
+configuration/library code.
+
 Configured parsing records an argument index and token-relative byte offset for
 failed reader expectations. `.read.token` starts a nested restricted effect
 search over one UTF-8 argument; literal, capture-free `regex-lite`, Unicode

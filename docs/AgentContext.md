@@ -132,6 +132,12 @@ their detailed scheduling and representation contracts.
   all-results machine against exactly one UTF-8 argument and requires complete
   token consumption. Token requests that escape this boundary are errors;
   token alternatives resume the enclosing CLI continuation independently.
+- `.case Explain Parse` is CLI-owned scoped metadata. It does not change raw
+  `.alt` ordering and does not force `Explain` during successful command
+  construction. Failed readers retain their active nested cases; successful
+  scopes close them. Completion exposes the original explanation values, while
+  parse errors render text or the conventional `usage`, `summary`, and
+  `details` fields and retain the raw values under diagnostic `cli.cases`.
 - `complete_configured` is shell-neutral analysis, not bootstrap dispatch. It
   retains an optional active argument's prefix/suffix and following arguments,
   keeps only the furthest candidate/expectation frontier, and never commits

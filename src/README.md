@@ -80,9 +80,12 @@ retains only evidence at the furthest argument/token frontier, and validates
 complete candidates by replaying ordinary isolated parsing. Bootstrap and
 configured completion share that request/result model. `--completions v0`
 accepts a count-framed OS-argument request and emits only NUL-terminated whole
-argument replacements. `.read.token` delegates one UTF-8 argument to a second
-restricted all-results effect machine; its ordinary result resumes the
-enclosing CLI continuation once per token alternative.
+argument replacements. `.case` scopes lazy structured explanations around
+configured branches; failed frontier evidence and completion results retain
+those values without changing raw choice semantics. `.read.token` delegates
+one UTF-8 argument to a second restricted all-results effect machine; its
+ordinary result resumes the enclosing CLI continuation once per token
+alternative.
 
 ## Front-End Dataflow
 

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::api::{ModuleInput, Value};
-use crate::core::{Atom, Key, OpaqueValue, Value as CoreValue};
+use crate::core::{Atom, Dict, Key, List, OpaqueValue, Value as CoreValue};
 use crate::eval;
 use crate::reflection::{
     EffectRequestSpec, ReflectionRequest, RequestContext, RequestResult, TaskError,
@@ -14,6 +14,8 @@ use super::host::{CliHost, CliJournal};
 use super::model::CommandEdit;
 use super::path::{self, PathAccess, PathKind};
 use super::token;
+
+const CASE_EXIT_TAG: [&str; 5] = ["cli_runtime", "v0", "request", "case", "exit"];
 
 #[derive(Clone, Copy)]
 pub(super) struct CliEffects;
@@ -32,6 +34,8 @@ pub(super) enum CliRequest {
     WriteReflectionArgument,
     WriteAssemblyArgument,
     WriteWorkerCount,
+    Case,
+    CaseExit,
     EscapedToken,
 }
 
@@ -91,6 +95,13 @@ impl TaskSpecialization for CliEffects {
                     1,
                     CliRequest::WriteWorkerCount,
                 ),
+                EffectRequestSpec::new(
+                    "case",
+                    ["cli_runtime", "v0", "request", "case"],
+                    2,
+                    CliRequest::Case,
+                ),
+                EffectRequestSpec::hidden(CASE_EXIT_TAG, 0, CliRequest::CaseExit),
             ])
             .chain(
                 token::request_specs()
@@ -125,6 +136,8 @@ impl TaskSpecialization for CliEffects {
                 write_text_argument(arguments, context, TextWriter::Assembly)
             }
             CliRequest::WriteWorkerCount => write_worker_count(arguments, context),
+            CliRequest::Case => enter_case(arguments, context),
+            CliRequest::CaseExit => exit_case(arguments, context),
             CliRequest::EscapedToken => Err(TaskError::new(
                 "token parser operation escaped `.read.token`",
             )),
@@ -144,6 +157,51 @@ fn request(
         arity,
         request,
     )
+}
+
+fn enter_case(
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, CliEffects>,
+) -> Result<RequestResult, TaskError> {
+    let [explanation, parse]: [Value; 2] = arguments
+        .try_into()
+        .map_err(|_| TaskError::new("`.case` received the wrong number of arguments"))?;
+    let mut transaction = context
+        .transaction()
+        .ok_or_else(|| TaskError::new("`.case` escaped its isolated search transaction"))?;
+    let (_, journal) = transaction.parts();
+    journal.active_cases.push(explanation.clone());
+    journal.visited_cases.push(explanation);
+    Ok(RequestResult::Scoped {
+        operation: parse,
+        close: case_exit_effect(),
+    })
+}
+
+fn exit_case(
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, CliEffects>,
+) -> Result<RequestResult, TaskError> {
+    let []: [Value; 0] = arguments
+        .try_into()
+        .map_err(|_| TaskError::new("internal CLI case close received arguments"))?;
+    let mut transaction = context
+        .transaction()
+        .ok_or_else(|| TaskError::new("CLI case close escaped its isolated transaction"))?;
+    let (_, journal) = transaction.parts();
+    journal
+        .active_cases
+        .pop()
+        .ok_or_else(|| TaskError::new("CLI case stack became unbalanced"))?;
+    Ok(RequestResult::ReturnUnit)
+}
+
+fn case_exit_effect() -> Value {
+    let request = CoreValue::Dict(Dict::new_sync().insert(
+        Key::abstract_global_path(CASE_EXIT_TAG),
+        CoreValue::List(List::empty()),
+    ));
+    Value::from_core(eval::constant_effect(request))
 }
 
 fn read_keyword(
@@ -175,7 +233,8 @@ fn read_keyword(
                 .to_str()
                 .is_some_and(|suffix| expected.ends_with(suffix))
         {
-            journal.candidates.push(CompletionEvidence::new(
+            record_candidate(
+                journal,
                 Frontier {
                     argument: journal.cursor,
                     token_offset: offset,
@@ -183,7 +242,7 @@ fn read_keyword(
                 expected.into(),
                 CompletionKind::Keyword,
                 true,
-            ));
+            );
         }
         return Ok(RequestResult::Fail);
     }
@@ -305,17 +364,16 @@ fn read_token(
     let (_, journal) = transaction.parts();
     if completion_offset.is_some() {
         for (candidate, complete_reader) in completion_candidates {
-            journal
-                .candidates
-                .push(super::completion::CompletionEvidence::new(
-                    super::completion::Frontier {
-                        argument: argument_index,
-                        token_offset: candidate.offset,
-                    },
-                    candidate.replacement.into(),
-                    super::completion::CompletionKind::Value,
-                    complete_reader,
-                ));
+            record_candidate(
+                journal,
+                super::completion::Frontier {
+                    argument: argument_index,
+                    token_offset: candidate.offset,
+                },
+                candidate.replacement.into(),
+                super::completion::CompletionKind::Value,
+                complete_reader,
+            );
         }
         let labels = if result.expectations.is_empty() {
             vec![expectation]
@@ -409,12 +467,13 @@ fn read_path(
         for (replacement, candidate_kind, complete_reader) in
             path::completions(&completion.prefix, &completion.suffix, kind, access)
         {
-            journal.candidates.push(CompletionEvidence::new(
+            record_candidate(
+                journal,
                 frontier,
                 replacement,
                 candidate_kind,
                 complete_reader,
-            ));
+            );
         }
         return Ok(RequestResult::Fail);
     }
@@ -618,7 +677,24 @@ fn record_expectation(
             token_offset,
         },
         label: label.into(),
+        explanations: journal.active_cases.clone(),
     });
+}
+
+fn record_candidate(
+    journal: &mut CliJournal,
+    frontier: Frontier,
+    replacement: std::ffi::OsString,
+    kind: CompletionKind,
+    complete_reader: bool,
+) {
+    journal.candidates.push(CompletionEvidence::new(
+        frontier,
+        replacement,
+        kind,
+        complete_reader,
+        journal.active_cases.clone(),
+    ));
 }
 
 fn common_prefix_bytes(left: &str, right: &str) -> usize {

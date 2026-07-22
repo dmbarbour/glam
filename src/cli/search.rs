@@ -4,7 +4,9 @@ use crate::api::{Assembler, Diagnostic, Value};
 use crate::core::keys;
 use crate::reflection::{IsolatedEffectSearch, IsolatedSearchBranch, IsolatedSearchPoll};
 
-use super::completion::{CliCompletion, CompletionCandidate, CompletionRequest, Frontier};
+use super::completion::{
+    CliCompletion, CompletionCandidate, CompletionExpectation, CompletionRequest, Frontier,
+};
 use super::effects::CliEffects;
 use super::host::{CliHost, CliInvocation, CliJournal};
 use super::model::{CliArguments, CliError, CommandPlan, CommandPlanBuilder};
@@ -14,6 +16,11 @@ const SEARCH_STEP_BUDGET: usize = 256;
 pub(super) struct CliSearchResult {
     pub(super) plan: CommandPlan,
     pub(super) diagnostics: Vec<Diagnostic>,
+}
+
+struct SuccessfulBranch {
+    result: CliSearchResult,
+    explanations: Vec<Value>,
 }
 
 pub(super) fn run_cli_search(
@@ -26,7 +33,7 @@ pub(super) fn run_cli_search(
         effect,
         CliInvocation::new(arguments.shared_args()),
     )?;
-    select_branch(arguments, &branches)
+    select_branch(assembler, arguments, &branches)
 }
 
 pub(super) fn run_cli_completion(
@@ -84,18 +91,29 @@ pub(super) fn run_cli_completion(
 
     let mut candidates = Vec::<CompletionCandidate>::new();
     for item in evidence {
-        if !candidates.contains(&item.candidate) {
+        if let Some(existing) = candidates.iter_mut().find(|candidate| {
+            candidate.replacement() == item.candidate.replacement()
+                && candidate.kind() == item.candidate.kind()
+        }) {
+            existing.merge_explanations(&item.candidate);
+        } else {
             candidates.push(item.candidate);
         }
     }
-    let mut expectations = Vec::new();
+    let mut expectations = Vec::<CompletionExpectation>::new();
     for item in branches
         .iter()
         .flat_map(|branch| branch.journal().expectations.iter())
         .filter(|item| item.frontier == furthest)
     {
         let item = item.public();
-        if !expectations.contains(&item) {
+        if let Some(existing) = expectations.iter_mut().find(|expectation| {
+            expectation.argument() == item.argument()
+                && expectation.token_offset() == item.token_offset()
+                && expectation.label() == item.label()
+        }) {
+            existing.merge_explanations(&item);
+        } else {
             expectations.push(item);
         }
     }
@@ -181,10 +199,11 @@ fn plan_is_valid(journal: &CliJournal, arguments: CliArguments) -> bool {
 }
 
 fn select_branch(
+    assembler: &Assembler,
     arguments: CliArguments,
     branches: &[crate::reflection::IsolatedSearchBranch<CliEffects>],
 ) -> Result<CliSearchResult, CliError> {
-    let mut successful = Vec::<CliSearchResult>::new();
+    let mut successful = Vec::<SuccessfulBranch>::new();
     let mut best_failure: Option<&CliJournal> = None;
     let mut best_invalid: Option<(Frontier, CliError)> = None;
 
@@ -198,6 +217,7 @@ fn select_branch(
         };
         if value.as_core() != &*keys::UNIT_VALUE {
             retain_invalid(
+                assembler,
                 &mut best_invalid,
                 journal,
                 CliError::new("configured `conf.cli` must return unit"),
@@ -206,6 +226,7 @@ fn select_branch(
         }
         if journal.cursor != arguments.args().len() {
             retain_invalid(
+                assembler,
                 &mut best_invalid,
                 journal,
                 CliError::new(format!(
@@ -227,13 +248,16 @@ fn select_branch(
         let plan = match invalid.map_or_else(|| builder.finish_configured(arguments.clone()), Err) {
             Ok(plan) => plan,
             Err(error) => {
-                retain_invalid(&mut best_invalid, journal, error);
+                retain_invalid(assembler, &mut best_invalid, journal, error);
                 continue;
             }
         };
-        successful.push(CliSearchResult {
-            plan,
-            diagnostics: journal.reflection.diagnostics().to_vec(),
+        successful.push(SuccessfulBranch {
+            result: CliSearchResult {
+                plan,
+                diagnostics: journal.reflection.diagnostics().to_vec(),
+            },
+            explanations: journal.visited_cases.clone(),
         });
     }
 
@@ -245,35 +269,53 @@ fn select_branch(
             .map(|journal| journal.reflection.diagnostics().to_vec())
             .unwrap_or_default();
         let detail = best_failure
-            .and_then(expectation_detail)
+            .map(|journal| expectation_detail(assembler, journal))
             .unwrap_or_default();
+        let explanations = best_failure.map(failure_explanations).unwrap_or_default();
         return Err(CliError::new(format!(
             "configured `conf.cli` did not match the command line{detail}"
         ))
-        .with_diagnostics(diagnostics));
+        .with_diagnostics(diagnostics)
+        .with_explanations(explanations));
     };
     if successful
         .iter()
         .skip(1)
-        .any(|candidate| candidate.plan != selected.plan)
+        .any(|candidate| candidate.result.plan != selected.result.plan)
     {
-        return Err(CliError::new(
-            "configured `conf.cli` produced more than one distinct command",
-        ));
+        let explanations = unique_values(
+            successful
+                .iter()
+                .flat_map(|candidate| candidate.explanations.iter().cloned()),
+        );
+        let detail = render_explanation_detail(assembler, &explanations);
+        return Err(CliError::new(format!(
+            "configured `conf.cli` produced more than one distinct command{detail}"
+        ))
+        .with_explanations(explanations));
     }
 
-    Ok(successful.remove(0))
+    Ok(successful.remove(0).result)
 }
 
-fn retain_invalid(best: &mut Option<(Frontier, CliError)>, journal: &CliJournal, error: CliError) {
+fn retain_invalid(
+    assembler: &Assembler,
+    best: &mut Option<(Frontier, CliError)>,
+    journal: &CliJournal,
+    error: CliError,
+) {
     let frontier = journal_frontier(journal);
     if best
         .as_ref()
         .is_none_or(|(existing, _)| frontier > *existing)
     {
+        let explanations = unique_values(journal.active_cases.iter().cloned());
+        let detail = render_explanation_detail(assembler, &explanations);
         *best = Some((
             frontier,
-            error.with_diagnostics(journal.reflection.diagnostics().to_vec()),
+            CliError::new(format!("{error}{detail}"))
+                .with_diagnostics(journal.reflection.diagnostics().to_vec())
+                .with_explanations(explanations),
         ));
     }
 }
@@ -291,7 +333,7 @@ fn journal_frontier(journal: &CliJournal) -> Frontier {
         })
 }
 
-fn expectation_detail(journal: &CliJournal) -> Option<String> {
+fn expectation_detail(assembler: &Assembler, journal: &CliJournal) -> String {
     let frontier = journal_frontier(journal);
     let mut labels = journal
         .expectations
@@ -302,12 +344,92 @@ fn expectation_detail(journal: &CliJournal) -> Option<String> {
     labels.sort_unstable();
     labels.dedup();
     if labels.is_empty() {
-        return None;
+        return render_explanation_detail(assembler, &failure_explanations(journal));
     }
-    Some(format!(
+    let expected = format!(
         " at argument {}, byte {}: expected {}",
         frontier.argument + 1,
         frontier.token_offset,
         labels.join(" or ")
-    ))
+    );
+    format!(
+        "{expected}{}",
+        render_explanation_detail(assembler, &failure_explanations(journal))
+    )
+}
+
+fn failure_explanations(journal: &CliJournal) -> Vec<Value> {
+    let frontier = journal_frontier(journal);
+    let explanations = unique_values(
+        journal
+            .expectations
+            .iter()
+            .filter(|item| item.frontier == frontier)
+            .flat_map(|item| item.explanations.iter().cloned()),
+    );
+    if !explanations.is_empty() {
+        return explanations;
+    }
+    if !journal.active_cases.is_empty() {
+        return unique_values(journal.active_cases.iter().cloned());
+    }
+    Vec::new()
+}
+
+fn unique_values(values: impl IntoIterator<Item = Value>) -> Vec<Value> {
+    let mut unique = Vec::new();
+    for value in values {
+        if !unique.contains(&value) {
+            unique.push(value);
+        }
+    }
+    unique
+}
+
+fn render_explanation_detail(assembler: &Assembler, explanations: &[Value]) -> String {
+    explanations
+        .iter()
+        .map(|explanation| {
+            format!(
+                "\n  while parsing: {}",
+                render_explanation(assembler, explanation)
+            )
+        })
+        .collect()
+}
+
+fn render_explanation(assembler: &Assembler, explanation: &Value) -> String {
+    let explanation = match assembler.evaluate(explanation) {
+        Ok(value) => value,
+        Err(error) => return format!("explanation unavailable ({error})"),
+    };
+    if let Some(text) = utf8_text(&explanation) {
+        return text;
+    }
+
+    let usage = explanation_field(assembler, &explanation, "usage");
+    let summary = explanation_field(assembler, &explanation, "summary");
+    let details = explanation_field(assembler, &explanation, "details");
+    match (usage, summary, details) {
+        (Some(usage), Some(summary), _) => format!("{usage} — {summary}"),
+        (Some(usage), None, _) => usage,
+        (None, Some(summary), _) => summary,
+        (None, None, Some(details)) => details,
+        (None, None, None) => {
+            "explanation has no textual `usage`, `summary`, or `details`".to_owned()
+        }
+    }
+}
+
+fn explanation_field(assembler: &Assembler, explanation: &Value, field: &str) -> Option<String> {
+    let value = assembler.get(explanation, field).ok()?;
+    if value.is_undefined() {
+        return None;
+    }
+    let value = assembler.evaluate(&value).ok()?;
+    utf8_text(&value)
+}
+
+fn utf8_text(value: &Value) -> Option<String> {
+    String::from_utf8(value.as_binary()?.to_vec()).ok()
 }

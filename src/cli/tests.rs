@@ -454,6 +454,132 @@ fn configured_completion_combines_only_furthest_viable_keywords() {
 }
 
 #[test]
+fn explained_cli_cases_render_furthest_parse_context() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .case {usage:\"build FILE\", summary:\"Assemble one file\"} (.read.keyword \"build\" =>> .read.text \"source file\" =>> .read.end =>> .write.script \"g\" \"ok\")\n",
+    );
+    let error = expand_configured(
+        &assembler,
+        &configuration,
+        configured_arguments(&["bundle"]),
+    )
+    .expect_err("a mismatched explained case should fail");
+    assert!(error.to_string().contains("expected `build`"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("while parsing: build FILE — Assemble one file"),
+        "{error}"
+    );
+    assert_eq!(error.explanations().len(), 1);
+    assert_eq!(
+        assembler
+            .get(error.explanations()[0].value(), "usage")
+            .expect("usage should be readable")
+            .as_binary(),
+        Some(b"build FILE".as_slice())
+    );
+    assert!(
+        !assembler
+            .get(error.diagnostic().emission(), "cli.cases")
+            .expect("rich CLI diagnostic should retain case values")
+            .is_undefined()
+    );
+}
+
+#[test]
+fn explained_cli_cases_are_scoped_and_remain_lazy_on_success() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .case 42 (.read.keyword \"build\") =>> .read.keyword \"tail\" =>> .read.end =>> .write.script \"g\" \"ok\"\n",
+    );
+    let expansion = expand_configured(
+        &assembler,
+        &configuration,
+        configured_arguments(&["build", "tail"]),
+    )
+    .expect("ordinary command construction must not inspect case explanations");
+    assert_eq!(expansion.plan().process_args(), ["--script.g", "ok"]);
+
+    let error = expand_configured(
+        &assembler,
+        &configuration,
+        configured_arguments(&["build", "wrong"]),
+    )
+    .expect_err("a reader after the case should fail");
+    assert!(error.to_string().contains("expected `tail`"), "{error}");
+    assert!(!error.to_string().contains("while parsing"), "{error}");
+    assert!(error.explanations().is_empty());
+}
+
+#[test]
+fn nested_cli_cases_attach_context_to_completion_candidates() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .case {summary:\"Build commands\"} (.case {summary:\"Build one input\"} (.read.keyword \"build\" =>> .read.end =>> .write.script \"g\" \"ok\"))\n",
+    );
+    let completion = complete_configured(
+        &assembler,
+        &configuration,
+        CompletionRequest::with_active([], "bu", "", []),
+    )
+    .expect("explained completion should run");
+    assert_eq!(replacements(&completion), ["build"]);
+    let explanations = completion.candidates()[0].explanations();
+    assert_eq!(explanations.len(), 2);
+    assert_eq!(
+        assembler
+            .get(explanations[0].value(), "summary")
+            .expect("outer summary should be readable")
+            .as_binary(),
+        Some(b"Build commands".as_slice())
+    );
+    assert_eq!(
+        assembler
+            .get(explanations[1].value(), "summary")
+            .expect("inner summary should be readable")
+            .as_binary(),
+        Some(b"Build one input".as_slice())
+    );
+}
+
+#[test]
+fn ambiguous_explained_cli_cases_name_the_competing_commands() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .alt (.case {summary:\"First build form\"} (.read.keyword \"build\" =>> .read.end =>> .write.script \"g\" \"one\")) (.case {summary:\"Second build form\"} (.read.keyword \"build\" =>> .read.end =>> .write.script \"g\" \"two\"))\n",
+    );
+    let error = expand_configured(&assembler, &configuration, configured_arguments(&["build"]))
+        .expect_err("distinct explained plans should remain ambiguous");
+    assert!(error.to_string().contains("First build form"), "{error}");
+    assert!(error.to_string().contains("Second build form"), "{error}");
+    assert_eq!(error.explanations().len(), 2);
+}
+
+#[test]
+fn explained_cli_cases_attach_context_to_completion_expectations() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .case {summary:\"Name the output\"} (.read.text \"output name\" =>> .read.end =>> .write.script \"g\" \"ok\")\n",
+    );
+    let completion = complete_configured(
+        &assembler,
+        &configuration,
+        CompletionRequest::with_active([], "", "", []),
+    )
+    .expect("explained expectation completion should run");
+    let expectation = completion
+        .expectations()
+        .iter()
+        .find(|expectation| expectation.label() == "output name")
+        .expect("text reader should report its expectation");
+    assert_eq!(expectation.explanations().len(), 1);
+    assert_eq!(
+        assembler
+            .get(expectation.explanations()[0].value(), "summary")
+            .expect("summary should be readable")
+            .as_binary(),
+        Some(b"Name the output".as_slice())
+    );
+}
+
+#[test]
 fn configured_completion_derives_literals_but_not_regex_languages() {
     let (assembler, configuration) = configuration(
         "language g0\nimport 'std\nconf.cli = .read.token \"script option\" (.token.text \"--script.\" =>> .token.regex \"[A-Za-z]+\") >>= (\\_ -> .read.text \"body\" =>> .read.end =>> .write.script \"g\" \"body\")\n",

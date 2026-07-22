@@ -49,7 +49,7 @@ use crate::number::Number;
 
 /// One additional effect constructor contributed by a task specialization.
 pub struct EffectRequestSpec<R> {
-    api_path: Arc<[Arc<str>]>,
+    api_path: Option<Arc<[Arc<str>]>>,
     tag_path: Arc<[Arc<str>]>,
     arity: usize,
     request: R,
@@ -73,7 +73,24 @@ impl<R> EffectRequestSpec<R> {
         T: Into<Arc<str>>,
     {
         Self {
-            api_path: api_path.into_iter().map(Into::into).collect(),
+            api_path: Some(api_path.into_iter().map(Into::into).collect()),
+            tag_path: tag_path.into_iter().map(Into::into).collect(),
+            arity,
+            request,
+        }
+    }
+
+    /// Registers a request tag without placing its constructor in the effect
+    /// API. This is useful for host-owned close operations paired with a
+    /// visible scoped request.
+    #[doc(hidden)]
+    pub fn hidden<I, T>(tag_path: I, arity: usize, request: R) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<Arc<str>>,
+    {
+        Self {
+            api_path: None,
             tag_path: tag_path.into_iter().map(Into::into).collect(),
             arity,
             request,
@@ -96,6 +113,14 @@ pub enum RequestResult {
     /// Resumes the current continuation once per value, preserving order.
     /// An empty collection is an ordinary effect failure.
     Alternatives(Vec<PublicValue>),
+    /// Runs `operation` in the current branch, then runs the unit-returning
+    /// `close` effect before delivering the operation's original result.
+    /// Failed operation branches deliberately do not run `close`, allowing a
+    /// specialization journal to retain scoped failure evidence.
+    Scoped {
+        operation: PublicValue,
+        close: PublicValue,
+    },
     ReturnUnit,
     Fail,
     Cancelled,
@@ -1410,6 +1435,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             },
                         }
                     }
+                    RequestResult::Scoped { operation, close } => {
+                        branch
+                            .control
+                            .sequence
+                            .push(Continuation::CloseScope(close.into_core()));
+                        MachineWork::Drive {
+                            branch: branch.with_effect(operation.into_core()),
+                            scope_depth,
+                        }
+                    }
                     RequestResult::ReturnUnit => MachineWork::Deliver {
                         value: unit_value(),
                         branch,
@@ -1480,6 +1515,32 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     branch.active_fixes.pop();
                     Ok(MachineStep::Continue(MachineWork::Deliver {
                         value,
+                        branch,
+                        scope_depth,
+                    }))
+                }
+                Continuation::CloseScope(close) => {
+                    branch.control.sequence.pop();
+                    branch
+                        .control
+                        .sequence
+                        .push(Continuation::RestoreScopedValue(value));
+                    branch.effect = close;
+                    Ok(MachineStep::Continue(MachineWork::Drive {
+                        branch,
+                        scope_depth,
+                    }))
+                }
+                Continuation::RestoreScopedValue(scoped_value) => {
+                    let value = evaluate(&self.eval_context, value)?;
+                    if value != unit_value() {
+                        return Err(TaskError::new(format!(
+                            "scoped effect close must return unit, got {value:?}"
+                        )));
+                    }
+                    branch.control.sequence.pop();
+                    Ok(MachineStep::Continue(MachineWork::Deliver {
+                        value: scoped_value,
                         branch,
                         scope_depth,
                     }))
@@ -2485,6 +2546,8 @@ enum Continuation {
     Glam(Value),
     RequireUnit,
     Fix(PromisedValue),
+    CloseScope(Value),
+    RestoreScopedValue(Value),
 }
 
 #[derive(Clone)]
@@ -3014,25 +3077,32 @@ fn effect_api<R: Clone>(
         let tag = Key::abstract_global_path(spec.tag_path.iter().map(Arc::as_ref));
         let api_name = spec
             .api_path
-            .iter()
-            .map(Arc::as_ref)
-            .collect::<Vec<_>>()
-            .join(".");
+            .as_ref()
+            .map(|path| path.iter().map(Arc::as_ref).collect::<Vec<_>>().join("."));
         if requests
             .iter()
             .any(|request: &SpecializedRequest<R>| request.tag == tag)
         {
             return Err(TaskError::new(format!(
                 "duplicate private tag for effect API name `{}`",
-                api_name
+                api_name.as_deref().unwrap_or("<hidden>")
             )));
         }
-        let value = if spec.arity == 0 {
-            nullary_request(tag.clone())
-        } else {
-            request_function(tag.clone(), spec.arity, Vec::new(), false)
-        };
-        api = insert_effect_api_path(api, &spec.api_path, value, &api_name)?;
+        if let Some(path) = &spec.api_path {
+            let value = if spec.arity == 0 {
+                nullary_request(tag.clone())
+            } else {
+                request_function(tag.clone(), spec.arity, Vec::new(), false)
+            };
+            api = insert_effect_api_path(
+                api,
+                path,
+                value,
+                api_name
+                    .as_deref()
+                    .expect("visible request must have a name"),
+            )?;
+        }
         requests.push(SpecializedRequest {
             tag,
             arity: spec.arity,

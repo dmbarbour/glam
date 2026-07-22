@@ -73,6 +73,12 @@ pub(super) struct CliJournal {
     pub(super) edits: Vec<CommandEdit>,
     pub(super) expectations: Vec<ExpectationEvidence>,
     pub(super) candidates: Vec<CompletionEvidence>,
+    /// Cases currently enclosing the effect being interpreted. Failed reader
+    /// evidence captures this stack before the branch terminates.
+    pub(super) active_cases: Vec<Value>,
+    /// Cases entered by this branch, retained for ambiguity explanations after
+    /// successful scopes have closed.
+    pub(super) visited_cases: Vec<Value>,
 }
 
 impl ReflectionTransaction for CliJournal {
