@@ -74,9 +74,16 @@ and control flow.
 - `.cut` supplies choice and transaction scope, not retryability. Plain `.fail`
   and `.cut .fail` are permanent. A failed operation retries only when it
   observed changeable host state, such as an empty log queue.
-- Top-level `.alt` is invalid. `.shift` continuations are task-local and carry
-  a global task ID so foreign invocation fails before consulting a local
-  continuation ID.
+- Top-level `.alt` is invalid for ordinary reflection tasks. The isolated
+  all-results runner is an explicit host policy that supplies its own outer
+  transaction and may enumerate top-level alternatives without changing that
+  general rule. `.shift` continuations are task-local and carry a global task
+  ID so foreign invocation fails before consulting a local continuation ID.
+- Isolated all-results search never commits its branches. It retains successful
+  values and specialization journals in deterministic left-to-right order;
+  nested `.cut` remains first-success. A changed state observation restarts the
+  whole isolated search conservatively, while a lazy dependency resumes its
+  current branch.
 - Choice and lazy demand are deterministic. A blocked branch waits on at most
   one lazy value, though it may retain several prior state observations. Any
   racing choice must be introduced as a distinct explicit effect.

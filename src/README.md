@@ -39,7 +39,7 @@ not define future language semantics or collect subsystem invariants.
 | `eval/sequence.rs` | Lazy list-to-binary observation and ranged extraction |
 | `list.rs`, `number.rs` | Compact persistent list ropes and exact-number boundary |
 | `diagnostic.rs`, `api.rs` diagnostic facade | Diagnostic values, enrichment metadata, session buses, subscriptions, and severity counts |
-| `reflection.rs`, `reflection/requests.rs` | Persistent freer-effect machine, task API, transactions, and request helpers |
+| `reflection.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent freer-effect machine, task API, transactions, request helpers, and isolated all-results policy |
 | `reflection/store.rs` | Persistent shared/private volumes, journaled ordered edit rebasing, asynchronous query state, and pluggable read-conflict analysis |
 
 `interaction_net.rs`, `eval.rs`, and `g_syntax.rs` are facades over their

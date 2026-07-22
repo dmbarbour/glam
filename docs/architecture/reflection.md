@@ -47,7 +47,19 @@ from snapshots; losing branches discard changes; a winning outer branch
 validates and commits. A host observation can turn later failure into a retry
 point. `cut` alone does not: unobservant failure is terminal.
 
-The machine separates deterministic effect failure, current dependency waits,
+`reflection/search.rs` supplies a second outer policy for clients that need all
+effect results, such as configured CLI parsing. It installs one uncommitted
+outer transaction, explores successful alternatives in deterministic
+left-to-right depth-first order, and returns each value with its isolated
+specialization journal. Nested `cut` still chooses at most its first success.
+No search branch commits to the host. A retryable observation or lazy
+dependency suspends the pollable search without discarding pending branches;
+an observed-state change conservatively restarts the complete isolated search.
+Ordinary `EffectRun` retains its explicit-cut requirement and single-result
+behavior.
+
+Both outer policies use the same standard-effect machine. The machine separates
+deterministic effect failure, current dependency waits,
 and evaluation errors. A dependency becoming terminal reruns the unchanged
 operation that observed it. A non-blocking evaluation error remains retryably
 blocked only when an existing state observation can rewind its checkpoint; it

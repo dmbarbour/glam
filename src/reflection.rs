@@ -5,7 +5,13 @@
 //! performs the state, control, transaction, and host operations.
 
 mod requests;
+mod search;
 mod store;
+
+#[doc(hidden)]
+pub use search::{
+    IsolatedEffectSearch, IsolatedSearchBlock, IsolatedSearchPoll, IsolatedSearchResult,
+};
 
 pub use requests::{
     ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionServices,
@@ -23,6 +29,8 @@ use std::convert::Infallible;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
+
+use search::SearchPolicy;
 
 use crate::api::{EvaluationRuntime, Value as PublicValue};
 use crate::core::{
@@ -587,6 +595,7 @@ struct EffectTask<S: TaskSpecialization> {
     next_continuation: u64,
     next_control_order: usize,
     continuations: HashMap<u64, CapturedContinuation>,
+    search: SearchPolicy<Branch<S>, IsolatedSearchResult<S>>,
     execution: TaskExecution<S>,
     blocked: Option<BlockedExecution<S>>,
     terminal: Option<TaskTerminal>,
@@ -604,12 +613,39 @@ impl<S: TaskSpecialization> EffectTask<S> {
         host: Arc<S::Host>,
         eval_context: EvalContext,
     ) -> Result<Self, TaskError> {
+        Self::new_in_context_with_policy(effect, specialization, host, eval_context, false)
+    }
+
+    fn new_isolated_in_context(
+        effect: Value,
+        specialization: S,
+        host: Arc<S::Host>,
+        eval_context: EvalContext,
+    ) -> Result<Self, TaskError> {
+        Self::new_in_context_with_policy(effect, specialization, host, eval_context, true)
+    }
+
+    fn new_in_context_with_policy(
+        effect: Value,
+        specialization: S,
+        host: Arc<S::Host>,
+        eval_context: EvalContext,
+        retain_all: bool,
+    ) -> Result<Self, TaskError> {
         let tags = Tags::new();
         let (api, specialized_requests) = effect_api(&tags, specialization.requests())?;
         let id = eval_context
             .task_id()
             .map_err(|error| TaskError::new(error.as_ref()))?;
         let initial_state = Value::Dict(Dict::new_sync());
+        let root = Branch::new(effect, initial_state);
+        let (search, branch) = if retain_all {
+            let mut branch = root.clone();
+            branch.transaction = Some(Transaction::new(host.snapshot()));
+            (SearchPolicy::retaining_all(root), branch)
+        } else {
+            (SearchPolicy::FirstSuccess, root)
+        };
         Ok(Self {
             eval_context,
             id,
@@ -621,9 +657,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
             next_continuation: 1,
             next_control_order: 1,
             continuations: HashMap::new(),
+            search,
             execution: TaskExecution {
                 work: MachineWork::Drive {
-                    branch: Branch::new(effect, initial_state),
+                    branch,
                     scope_depth: 0,
                 },
                 cuts: Vec::new(),
@@ -631,6 +668,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
             blocked: None,
             terminal: None,
         })
+    }
+
+    fn completed_search(&self) -> Option<Arc<[IsolatedSearchResult<S>]>> {
+        self.search.completed()
     }
 
     fn requiring_unit_result(mut self) -> Self {
@@ -929,7 +970,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             }
             Request::Alt(left, right) => {
-                if scope_depth > 0 && !branch.active_fixes.is_empty() {
+                if (scope_depth > 0 || self.search.retains_all()) && !branch.active_fixes.is_empty()
+                {
                     let inherited_restarts = branch.fix_restarts.clone();
                     let active = branch
                         .active_fixes
@@ -1694,6 +1736,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
         outcome: BranchOutcome<S>,
         scope_depth: usize,
     ) -> Result<MachineStep<S>, TaskError> {
+        if self.search.retains_all() {
+            return self.handle_isolated_search_outcome(outcome, scope_depth);
+        }
         match outcome {
             BranchOutcome::Complete(value, _) => Ok(MachineStep::Terminal(TaskTerminal::Complete(
                 PublicValue::from_core(value),
@@ -1725,6 +1770,88 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 )))
             }
             BranchOutcome::Cancelled => Ok(MachineStep::Terminal(TaskTerminal::Cancelled)),
+        }
+    }
+
+    fn handle_isolated_search_outcome(
+        &mut self,
+        outcome: BranchOutcome<S>,
+        scope_depth: usize,
+    ) -> Result<MachineStep<S>, TaskError> {
+        debug_assert_eq!(scope_depth, 0);
+        match outcome {
+            BranchOutcome::Complete(value, mut completed) => {
+                let restarted = self.restart_fixpoint_at_scope(&mut completed, scope_depth)?;
+                let transaction = completed
+                    .transaction
+                    .take()
+                    .expect("an isolated outer branch must retain its transaction");
+                self.search.retain(IsolatedSearchResult::new(
+                    PublicValue::from_core(value),
+                    TaskCommit::new(
+                        transaction.store,
+                        transaction.snapshot.extra().clone(),
+                        transaction.journal,
+                    ),
+                ));
+                Ok(restarted
+                    .map(MachineStep::Continue)
+                    .unwrap_or_else(|| self.advance_isolated_search()))
+            }
+            BranchOutcome::Fork(left, right) => {
+                let branch = self
+                    .search
+                    .fork(*left, *right)
+                    .expect("isolated search must accept an outer alternative");
+                Ok(MachineStep::Continue(MachineWork::Drive {
+                    branch,
+                    scope_depth: 0,
+                }))
+            }
+            BranchOutcome::Fail(mut failed) => {
+                if let Some(restarted) = self.restart_fixpoint_at_scope(&mut failed, scope_depth)? {
+                    return Ok(MachineStep::Continue(restarted));
+                }
+                Ok(self.advance_isolated_search())
+            }
+            BranchOutcome::Retry(mut failed) => {
+                if let Some(restarted) = self.restart_fixpoint_at_scope(&mut failed, scope_depth)? {
+                    return Ok(MachineStep::Continue(restarted));
+                }
+                let generation = failed
+                    .transaction
+                    .as_ref()
+                    .filter(|transaction| transaction.observed)
+                    .map(|transaction| transaction.snapshot.generation())
+                    .or_else(|| {
+                        failed
+                            .retry
+                            .as_ref()
+                            .and_then(|checkpoint| checkpoint.generation)
+                    })
+                    .ok_or_else(|| {
+                        TaskError::new("retryable isolated branch lost its wake generation")
+                    })?;
+                Ok(MachineStep::Blocked(BlockedExecution::exhausted(
+                    RetryWake {
+                        observed_generation: generation,
+                        action: WakeAction::RestartSearch,
+                    },
+                )))
+            }
+            BranchOutcome::Cancelled => Ok(MachineStep::Terminal(TaskTerminal::Cancelled)),
+        }
+    }
+
+    fn advance_isolated_search(&mut self) -> MachineStep<S> {
+        if let Some(branch) = self.search.next_alternative() {
+            MachineStep::Continue(MachineWork::Drive {
+                branch,
+                scope_depth: 0,
+            })
+        } else {
+            self.search.finish();
+            MachineStep::Terminal(TaskTerminal::Complete(PublicValue::from_core(unit_value())))
         }
     }
 
@@ -1761,6 +1888,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     });
                 }
             }
+        }
+        if self.search.retains_all()
+            && let Some(transaction) = self
+                .execution
+                .work
+                .branch()
+                .and_then(|branch| branch.transaction.as_ref())
+            && transaction.observed
+        {
+            return Some(RetryWake {
+                observed_generation: transaction.snapshot.generation(),
+                action: WakeAction::RestartSearch,
+            });
         }
         let branch = self.execution.work.branch()?;
         let checkpoint = branch.retry.as_ref()?;
@@ -1828,7 +1968,21 @@ impl<S: TaskSpecialization> EffectTask<S> {
         match wake {
             WakeAction::ReplaceWork(work) => self.execution.work = *work,
             WakeAction::RestartCut(index) => self.restart_cut(index),
+            WakeAction::RestartSearch => self.restart_search(),
         }
+    }
+
+    fn restart_search(&mut self) {
+        self.execution.cuts.clear();
+        let mut root = self
+            .search
+            .restart()
+            .expect("only isolated search can restart its outer boundary");
+        root.transaction = Some(Transaction::new(self.host.snapshot()));
+        self.execution.work = MachineWork::Drive {
+            branch: root,
+            scope_depth: 0,
+        };
     }
 
     fn restart_cut(&mut self, index: usize) {
@@ -2209,6 +2363,7 @@ struct RetryWake<S: TaskSpecialization> {
 enum WakeAction<S: TaskSpecialization> {
     ReplaceWork(Box<MachineWork<S>>),
     RestartCut(usize),
+    RestartSearch,
 }
 
 struct TaskBlock {
@@ -3643,6 +3798,271 @@ mod tests {
             panic!("finite effect should complete")
         };
         (assembler, value)
+    }
+
+    fn poll_isolated_search<S: TaskSpecialization>(
+        search: &mut IsolatedEffectSearch<S>,
+    ) -> Arc<[IsolatedSearchResult<S>]> {
+        loop {
+            match search.poll(256) {
+                IsolatedSearchPoll::Yielded => {}
+                IsolatedSearchPoll::Complete(results) => return results,
+                IsolatedSearchPoll::Blocked(blocked) => panic!(
+                    "finite isolated search blocked: dependency={}, generation={:?}, error={:?}",
+                    blocked.waiting_on_dependency(),
+                    blocked.observed_generation(),
+                    blocked.error()
+                ),
+                IsolatedSearchPoll::Failed(error) => {
+                    panic!("finite isolated search failed: {error}")
+                }
+                IsolatedSearchPoll::Cancelled => panic!("finite isolated search was cancelled"),
+            }
+        }
+    }
+
+    fn isolated_standard_results(source: &str) -> (Assembler, Vec<PublicValue>) {
+        let (assembler, effect) = compile_effect(source);
+        let host: Arc<dyn TaskHost<StandardEffects>> = Arc::new(TestHost::default());
+        let mut search = IsolatedEffectSearch::new(&effect, StandardEffects, host)
+            .expect("isolated effect should initialize");
+        let results = poll_isolated_search(&mut search);
+        let values = results
+            .iter()
+            .map(|result| result.value().clone())
+            .collect();
+        (assembler, values)
+    }
+
+    fn assert_search_bytes(source: &str, expected: &[&[u8]]) {
+        let (assembler, values) = isolated_standard_results(source);
+        let actual = values
+            .iter()
+            .map(|value| assembler.to_binary(value).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn isolated_search_obeys_ordered_choice_laws() {
+        assert_search_bytes(".r \"single\"", &[b"single"]);
+        assert_search_bytes(".fail", &[]);
+        assert_search_bytes(".cut .fail", &[]);
+        assert_search_bytes(
+            ".alt (.r \"left\") (.alt .fail (.r \"right\"))",
+            &[b"left", b"right"],
+        );
+        assert_search_bytes(
+            "(.alt (.r \"A\") (.r \"B\")) >>= (\\x -> .alt (.r (x ++ \"1\")) (.r (x ++ \"2\")))",
+            &[b"A1", b"A2", b"B1", b"B2"],
+        );
+        assert_search_bytes(
+            ".alt (.cut (.alt (.r \"first\") (.r \"discarded\"))) (.r \"outer\")",
+            &[b"first", b"outer"],
+        );
+        assert_search_bytes(
+            ".fix (\\self -> .alt (.r \"fix left\") (.r \"fix right\"))",
+            &[b"fix left", b"fix right"],
+        );
+        assert_search_bytes(
+            ".alt (.reset \"prompt\" (.shift \"prompt\" (\\continuation -> continuation \"resumed\"))) (.r \"outer\")",
+            &[b"resumed", b"outer"],
+        );
+    }
+
+    #[test]
+    fn isolated_search_retains_branch_local_journals_without_committing() {
+        let (assembler, effect) = compile_effect(
+            ".alt ((.write_stderr \"left journal\") =>> .heap.set ['choice] \"left\" =>> .heap.get ['choice]) ((.write_stderr \"right journal\") =>> .heap.set ['choice] \"right\" =>> .heap.get ['choice])",
+        );
+        let host = Arc::new(TestHost::default());
+        let mut search = IsolatedEffectSearch::new(&effect, TestEffects, host.clone())
+            .expect("isolated effect should initialize");
+        let results = poll_isolated_search(&mut search);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            assembler.to_binary(results[0].value()).unwrap(),
+            b"left".as_slice()
+        );
+        assert_eq!(
+            assembler.to_binary(results[1].value()).unwrap(),
+            b"right".as_slice()
+        );
+        assert_eq!(
+            results[0].journal().stderr,
+            [Bytes::from_static(b"left journal")]
+        );
+        assert_eq!(
+            results[1].journal().stderr,
+            [Bytes::from_static(b"right journal")]
+        );
+        assert!(host.stderr().is_empty());
+        assert_eq!(host.heap(), PublicValue::empty_record());
+    }
+
+    #[test]
+    fn isolated_search_reports_and_resumes_retryable_state_observations() {
+        let (assembler, effect) = compile_effect(
+            ".heap.get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)",
+        );
+        let host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
+            "answer",
+            PublicValue::text("ready"),
+        )])));
+        let mut search = IsolatedEffectSearch::new(&effect, TestEffects, host.clone())
+            .expect("isolated effect should initialize");
+
+        let generation = loop {
+            match search.poll(256) {
+                IsolatedSearchPoll::Yielded => {}
+                IsolatedSearchPoll::Blocked(blocked) => {
+                    assert!(!blocked.waiting_on_dependency());
+                    break blocked
+                        .observed_generation()
+                        .expect("retryable search must retain its observed generation");
+                }
+                IsolatedSearchPoll::Complete(_) => {
+                    panic!("search completed before its observed state changed")
+                }
+                IsolatedSearchPoll::Failed(error) => panic!("search failed: {error}"),
+                IsolatedSearchPoll::Cancelled => panic!("search was cancelled"),
+            }
+        };
+        assert!(host.wait_for_change(generation));
+
+        let results = poll_isolated_search(&mut search);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            assembler.to_binary(results[0].value()).unwrap(),
+            b"ready".as_slice()
+        );
+        assert_eq!(host.wait_count(), 1);
+    }
+
+    #[test]
+    fn isolated_search_retries_observed_errors_without_advancing_choice() {
+        let (assembler, effect) =
+            compile_effect(".heap.get ['handler] >>= (\\handler -> handler ())");
+        let (_, handler) = compile_effect("\\_ -> .r \"recovered\"");
+        let host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
+            "handler", handler,
+        )])));
+        let mut search = IsolatedEffectSearch::new(&effect, TestEffects, host.clone())
+            .expect("isolated effect should initialize");
+
+        let generation = loop {
+            match search.poll(256) {
+                IsolatedSearchPoll::Yielded => {}
+                IsolatedSearchPoll::Blocked(blocked) => {
+                    assert!(!blocked.waiting_on_dependency());
+                    assert!(
+                        blocked
+                            .error()
+                            .is_some_and(|error| error.contains("requires a function value"))
+                    );
+                    break blocked
+                        .observed_generation()
+                        .expect("observed error must retain its generation");
+                }
+                IsolatedSearchPoll::Complete(_) => {
+                    panic!("search completed before its observed state changed")
+                }
+                IsolatedSearchPoll::Failed(error) => panic!("search failed: {error}"),
+                IsolatedSearchPoll::Cancelled => panic!("search was cancelled"),
+            }
+        };
+        assert!(host.wait_for_change(generation));
+
+        let results = poll_isolated_search(&mut search);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            assembler.to_binary(results[0].value()).unwrap(),
+            b"recovered".as_slice()
+        );
+    }
+
+    #[test]
+    fn isolated_search_keeps_unobserved_errors_terminal() {
+        let (_, effect) = compile_effect(".alt (1 2) (.r \"not reached\")");
+        let host: Arc<dyn TaskHost<StandardEffects>> = Arc::new(TestHost::default());
+        let mut search = IsolatedEffectSearch::new(&effect, StandardEffects, host)
+            .expect("isolated effect should initialize");
+
+        loop {
+            match search.poll(256) {
+                IsolatedSearchPoll::Yielded => {}
+                IsolatedSearchPoll::Failed(error) => {
+                    assert!(error.to_string().contains("requires a function value"));
+                    break;
+                }
+                IsolatedSearchPoll::Blocked(_) => panic!("unobserved error should not block"),
+                IsolatedSearchPoll::Complete(_) => {
+                    panic!("an evaluation error must not advance to another branch")
+                }
+                IsolatedSearchPoll::Cancelled => panic!("search was cancelled"),
+            }
+        }
+    }
+
+    #[test]
+    fn isolated_search_can_be_cancelled_between_polls() {
+        let (_, effect) = compile_effect(".r \"unused\"");
+        let host: Arc<dyn TaskHost<StandardEffects>> = Arc::new(TestHost::default());
+        let mut search = IsolatedEffectSearch::new(&effect, StandardEffects, host)
+            .expect("isolated effect should initialize");
+        search.cancel();
+        assert!(matches!(search.poll(256), IsolatedSearchPoll::Cancelled));
+    }
+
+    #[test]
+    fn isolated_search_reports_and_resumes_lazy_dependencies() {
+        let (assembler, function) =
+            compile_effect("\\value -> .eval value >>= (\\result -> .r result.ok)");
+        let session = EvalContext::standalone();
+        let owner = session.with_new_task().unwrap();
+        let observer = session.with_new_task().unwrap();
+        let promised = PromisedValue::fixpoint(&owner, "isolated search dependency").unwrap();
+        let effect = eval::apply_values(
+            &observer,
+            function.as_core().clone(),
+            vec![Value::Promised(promised.clone())],
+        )
+        .unwrap();
+        let host = Arc::new(TestHost::default());
+        let mut search = IsolatedEffectSearch::new_in_context(
+            &PublicValue::from_core(effect),
+            TestEffects,
+            host,
+            observer,
+        )
+        .expect("isolated effect should initialize");
+
+        loop {
+            match search.poll(256) {
+                IsolatedSearchPoll::Yielded => {}
+                IsolatedSearchPoll::Blocked(blocked) => {
+                    assert!(blocked.waiting_on_dependency());
+                    assert!(blocked.observed_generation().is_none());
+                    break;
+                }
+                IsolatedSearchPoll::Complete(_) => {
+                    panic!("search completed before its dependency")
+                }
+                IsolatedSearchPoll::Failed(error) => panic!("search failed: {error}"),
+                IsolatedSearchPoll::Cancelled => panic!("search was cancelled"),
+            }
+        }
+        promised
+            .set(Value::Binary(Bytes::from_static(b"ready")))
+            .expect("test dependency should resolve once");
+
+        let results = poll_isolated_search(&mut search);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            assembler.to_binary(results[0].value()).unwrap(),
+            b"ready".as_slice()
+        );
     }
 
     #[test]
