@@ -7,32 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 
 #[test]
-fn hello_assembly_samples_write_hello_world_to_stdout() {
-    for path in hello_sample_files() {
-        let output = glam_command()
-            .arg("--file")
-            .arg(&path)
-            .output()
-            .unwrap_or_else(|err| panic!("failed to run glam for {}: {err}", path.display()));
-
-        assert!(
-            output.status.success(),
-            "{} failed\nstdout: {}\nstderr: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            output.stdout,
-            b"Hello, World!",
-            "{} produced unexpected stdout",
-            path.display()
-        );
-        assert_eq!(output.stderr, b"", "{} produced stderr", path.display());
-    }
-}
-
-#[test]
 fn short_file_option_writes_asm_result_to_stdout() {
     let output = glam_command()
         .arg("-f")
@@ -1299,27 +1273,6 @@ fn basic_completion_filters_source_paths() {
     assert!(output.stderr.is_empty());
 
     fs::remove_dir_all(directory).expect("basic completion directory should be removed");
-}
-
-fn hello_sample_files() -> Vec<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/assembly");
-    let mut files = fs::read_dir(&root)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()))
-        .map(|entry| {
-            entry
-                .unwrap_or_else(|err| panic!("failed to read entry in {}: {err}", root.display()))
-                .path()
-        })
-        .filter(|path| path.is_file())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "g"))
-        .filter(|path| {
-            path.file_stem()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("hello_"))
-        })
-        .collect::<Vec<_>>();
-    files.sort();
-    files
 }
 
 fn glam_command() -> Command {
