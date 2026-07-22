@@ -18,6 +18,11 @@ fn assembly_samples_parse_without_errors() {
     assert_samples_parse_without_errors("samples/assembly");
 }
 
+#[test]
+fn hello_samples_parse_without_errors() {
+    assert_samples_parse_without_errors("samples/hello");
+}
+
 fn assert_samples_parse_without_errors(relative_dir: &str) {
     for path in sample_files(relative_dir) {
         if is_aspirational_syntax_sample(&path) {

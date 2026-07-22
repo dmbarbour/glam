@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 fn short_file_option_writes_asm_result_to_stdout() {
     let output = glam_command()
         .arg("-f")
-        .arg("samples/assembly/hello_text.g")
+        .arg("samples/hello/hello_text.g")
         .output()
         .expect("failed to run glam");
 
@@ -161,7 +161,7 @@ fn scripts_compose_with_files_as_ordered_mixins() {
         .arg("--script.g")
         .arg("language g0\nasm.result := \"script\"\n")
         .arg("--file")
-        .arg("samples/assembly/hello_text.g")
+        .arg("samples/hello/hello_text.g")
         .output()
         .expect("failed to run glam");
 

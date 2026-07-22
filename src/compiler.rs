@@ -281,7 +281,7 @@ mod tests {
         let captured = received.clone();
         let source = Arc::new(SourceArtifact::new(
             bytes::Bytes::from_static(b"source"),
-            crate::source::SourceIdentity::file("samples/assembly/hello_text.g"),
+            crate::source::SourceIdentity::file("samples/hello/hello_text.g"),
         ));
         let context = CompileContext::default()
             .with_importer_source(source)
@@ -309,7 +309,7 @@ mod tests {
             args.importer_source
                 .as_ref()
                 .map(|source| source.identity().label()),
-            Some("samples/assembly/hello_text.g")
+            Some("samples/hello/hello_text.g")
         );
         assert_eq!(args.request.as_str(), "message.txt");
     }

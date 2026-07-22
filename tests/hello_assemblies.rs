@@ -29,7 +29,7 @@ fn hello_assembly_samples_write_hello_world_to_stdout() {
 }
 
 fn hello_sample_files() -> Vec<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/assembly");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/hello");
     let mut files = fs::read_dir(&root)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", root.display()))
         .map(|entry| {

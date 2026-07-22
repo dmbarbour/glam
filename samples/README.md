@@ -14,7 +14,9 @@ Use cases:
 - `config/` configurations; `dev.g` is default for container.
   - common utility functions via `conf.env`
   - `unit_tests.g` is reserved for Rust CLI tests; do not use it for manual preferences
-- `assembly/` source to output examples. 
+- `hello/` self-contained source-to-output examples that produce `Hello, World!`.
+  - `hello/libs/` contains their relative-import fixtures.
+- `assembly/` other assembly and multi-input fixtures.
   - early samples may produce raw binary text.
 - `invalid/` for testing of diagnostics and runtime failures.
 
