@@ -3,6 +3,7 @@ use super::declaration::{classify_declaration, validate_language_position};
 use super::layout::{
     closes_multiline_text, indentation_width, is_dedent_closer, is_indented,
     line_ending_diagnostics, opens_multiline_text, split_lines, strip_comment, strip_indent_width,
+    unsupported_whitespace_diagnostics,
 };
 
 pub fn parse_source(source: &[u8]) -> ParsedSource {
@@ -20,6 +21,14 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
     };
 
     let mut diagnostics = line_ending_diagnostics(text);
+    let whitespace_diagnostics = unsupported_whitespace_diagnostics(text);
+    if !whitespace_diagnostics.is_empty() {
+        diagnostics.extend(whitespace_diagnostics);
+        return ParsedSource {
+            declarations: Vec::new(),
+            diagnostics,
+        };
+    }
     let physical_lines = split_lines(text);
     let mut declarations = Vec::new();
     let mut index = 0;

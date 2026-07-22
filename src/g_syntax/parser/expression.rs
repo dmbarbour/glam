@@ -439,7 +439,7 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
                 Rich::custom(span, format!("invalid number literal `{text}`: {err}"))
             })
         });
-        let multiline_indent = one_of(" \t").repeated().ignored();
+        let multiline_indent = just(' ').repeated().ignored();
         let multiline_content = multiline_indent.ignore_then(just('"')).ignore_then(choice((
             just('\n').to(String::new()),
             just(' ')

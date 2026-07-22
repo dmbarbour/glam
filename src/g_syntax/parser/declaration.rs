@@ -7,8 +7,9 @@ use super::super::{
     warn_unused_locals, warn_unused_with_alias,
 };
 use super::layout::{
-    closes_multiline_text, first_word, glam_name, indentation_width, is_indented, local_name,
-    opens_multiline_text, strip_comment, strip_indent_width, whitespace0, whitespace1,
+    closes_multiline_text, first_word, glam_name, indentation_width, is_glam_whitespace,
+    is_indented, local_name, opens_multiline_text, strip_comment, strip_indent_width, whitespace0,
+    whitespace1,
 };
 use super::{parse_expr_result_with_diagnostics, syntax_expr_parser};
 
@@ -435,7 +436,7 @@ pub(super) fn take_header_word(text: &str) -> Option<(&str, &str)> {
     if text.is_empty() {
         return None;
     }
-    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    let end = text.find(is_glam_whitespace).unwrap_or(text.len());
     Some((&text[..end], &text[end..]))
 }
 

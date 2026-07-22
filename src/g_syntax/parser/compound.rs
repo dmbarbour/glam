@@ -3,7 +3,7 @@ use chumsky::prelude::*;
 use super::super::{Diagnostic, ObjectExpr, SyntaxExpr, SyntaxOperator};
 use super::declaration::{parse_object_body, take_header_word};
 use super::expression::syntax_expr_parser;
-use super::layout::{indentation_width, is_indented, local_name};
+use super::layout::{indentation_width, is_glam_whitespace, is_indented, local_name};
 
 pub(super) fn syntax_binary_expr(
     operator: SyntaxOperator,
@@ -85,11 +85,7 @@ pub(super) fn parse_let_expr_result(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Result<SyntaxExpr, String>> {
     let rest = text.strip_prefix("let")?;
-    if !rest
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_whitespace())
-    {
+    if !rest.chars().next().is_some_and(is_glam_whitespace) {
         return None;
     }
     let rest = rest.trim_start();
@@ -213,7 +209,7 @@ pub(super) fn parse_local_binding(
         return Err(format!("local binding `{text}` must use `=`"));
     };
     let name = name.trim();
-    if local_name().parse(name).into_result().is_err() || name.contains(char::is_whitespace) {
+    if local_name().parse(name).into_result().is_err() || name.contains(is_glam_whitespace) {
         return Err(format!("invalid local binding name `{name}`"));
     }
     let value = value.trim();

@@ -300,6 +300,34 @@ fn multiline_texts_preserve_content_and_ignore_source_only_lines() {
 }
 
 #[test]
+fn rejects_every_source_whitespace_other_than_space_cr_and_lf() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "separator\t= 1\n",
+        "\tindent = 2\n",
+        "text = \"tab\there\"\n",
+        "# non-breaking space: \u{00A0}\n",
+        "vertical = 3\u{000B}\n",
+    ));
+
+    assert!(parsed.declarations.is_empty());
+    let expected = [
+        (2, "U+0009"),
+        (3, "U+0009"),
+        (4, "U+0009"),
+        (5, "U+00A0"),
+        (6, "U+000B"),
+    ];
+    for (line, codepoint) in expected {
+        assert!(parsed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.line == line
+                && diagnostic.message.contains(codepoint)
+                && diagnostic.message.contains("only SP, CR, and LF")
+        }));
+    }
+}
+
+#[test]
 fn parses_local_imports() {
     let parsed = parse("language g0\nimport \"minimal.g\" as conf\n");
 

@@ -30,16 +30,20 @@ pub(super) fn local_name<'src>()
 
 pub(super) fn whitespace0<'src>() -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>>
 {
-    one_of(" \t\r\n").repeated().ignored()
+    one_of(" \r\n").repeated().ignored()
 }
 
 pub(super) fn whitespace1<'src>() -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>>
 {
-    one_of(" \t\r\n").repeated().at_least(1).ignored()
+    one_of(" \r\n").repeated().at_least(1).ignored()
+}
+
+pub(super) fn is_glam_whitespace(ch: char) -> bool {
+    matches!(ch, ' ' | '\r' | '\n')
 }
 
 pub(super) fn first_word(text: &str) -> Option<&str> {
-    text.split(|ch: char| ch.is_whitespace()).next()
+    text.split(is_glam_whitespace).next()
 }
 
 pub(super) fn strip_comment(line: &str) -> &str {
@@ -74,25 +78,42 @@ pub(super) fn closes_multiline_text(line: &str) -> bool {
 }
 
 pub(super) fn is_indented(line: &str) -> bool {
-    line.starts_with(' ') || line.starts_with('\t')
+    line.starts_with(' ')
 }
 
 pub(super) fn indentation_width(line: &str) -> usize {
-    line.chars()
-        .take_while(|ch| matches!(ch, ' ' | '\t'))
-        .map(char::len_utf8)
-        .sum()
+    line.chars().take_while(|ch| *ch == ' ').count()
 }
 
 pub(super) fn strip_indent_width(line: &str, width: usize) -> &str {
     let mut remaining = width;
     for (index, ch) in line.char_indices() {
-        if remaining == 0 || !matches!(ch, ' ' | '\t') {
+        if remaining == 0 || ch != ' ' {
             return &line[index..];
         }
         remaining = remaining.saturating_sub(ch.len_utf8());
     }
     ""
+}
+
+pub(super) fn unsupported_whitespace_diagnostics(text: &str) -> Vec<Diagnostic> {
+    split_lines(text)
+        .into_iter()
+        .filter_map(|line| {
+            line.text
+                .chars()
+                .find(|ch| ch.is_whitespace() && *ch != ' ')
+                .map(|ch| {
+                    Diagnostic::error(
+                        line.number,
+                        format!(
+                            "unsupported whitespace U+{:04X}; .g source permits only SP, CR, and LF",
+                            ch as u32
+                        ),
+                    )
+                })
+        })
+        .collect()
 }
 
 pub(super) fn is_dedent_closer(trimmed: &str) -> bool {

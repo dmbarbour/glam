@@ -18,7 +18,10 @@ pub(in crate::g_syntax) fn definition_param_count(
     let (params, _) = suffix.split_once(operator).ok_or_else(|| {
         Diagnostic::error(line, "internal error extracting definition parameters")
     })?;
-    Ok(params.split_whitespace().count())
+    Ok(params
+        .split([' ', '\r', '\n'])
+        .filter(|param| !param.is_empty())
+        .count())
 }
 
 #[cfg(test)]
