@@ -120,8 +120,19 @@ their detailed scheduling and representation contracts.
 - `main` chooses the `configuration` and `assembly` roots. The library assigns
   neither name nor role.
 - CLI worker count comes from `--workers`, then `GLAM_WORKERS`, then zero.
-  Workers are shared by related assembler/logger sessions. A divergent spark
-  can occupy one indefinitely; cancellation and reduction fuel are deferred.
+  Configuration and configured CLI rewriting run on a dormant zero-worker
+  runtime; selected assembly activates that same runtime exactly once. Workers
+  are shared by related assembler/logger sessions. A divergent spark can
+  occupy one indefinitely; cancellation and reduction fuel are deferred.
+- Bare arguments run `conf.cli` through the isolated all-results interpreter.
+  Its API contains standard control, `.env`, CLI-local `.log`, and CLI
+  readers/writers, but deliberately omits `.heap.*` and `.task.*`; it therefore
+  makes no retryable state observations. Branch journals never commit.
+- `process.cli.args` is concrete while configuration loads. For bare dispatch,
+  canonical `process.args` and `process.refl_args` are builder-created promises
+  resolved only after one semantic command plan is selected. Bootstrap plans
+  resolve them before configuration. Do not construct a second assembler or
+  reparse projected arguments to cross this lifecycle seam.
 - `FileSourceSystem` retains each local read's SHA-256 digest. A conflicting
   repeat read is an error; a change found only during the final recheck is a warning.
   Manifests contain the retained digests, not a later rescan. Standalone
@@ -134,6 +145,9 @@ their detailed scheduling and representation contracts.
   `OsString`; `main` executes its typed `TopLevelCommand` without interpreting
   individual assembly flags. Keep opaque paths and arguments out of UTF-8
   conversion until a typed operation explicitly requires text.
+- `--parse_cli` and `--parse_cli.0` use the same configured expansion as bare
+  execution but neither executes the plan nor activates workers. Their line
+  and NUL output forms invent no escaping language.
 
 ## Source-Surface Regressions
 

@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 
@@ -27,7 +28,7 @@ struct ExecutorQueue {
 struct EvaluationExecutorInner {
     queue: Mutex<ExecutorQueue>,
     work_available: Condvar,
-    worker_count: usize,
+    worker_count: AtomicUsize,
 }
 
 /// Shared background execution resources for one assembler runtime.
@@ -39,6 +40,7 @@ struct EvaluationExecutorInner {
 pub(crate) struct EvaluationExecutor {
     inner: Arc<EvaluationExecutorInner>,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
+    activated: Mutex<bool>,
 }
 
 const MAX_EVALUATION_WORKERS: usize = 256;
@@ -63,20 +65,42 @@ impl EvaluationExecutor {
             inner: Arc::new(EvaluationExecutorInner {
                 queue: Mutex::new(ExecutorQueue::default()),
                 work_available: Condvar::new(),
-                worker_count,
+                worker_count: AtomicUsize::new(0),
             }),
             workers: Mutex::new(Vec::with_capacity(worker_count)),
+            activated: Mutex::new(false),
         });
-        if worker_count == 0 {
-            return Ok(executor);
+        if worker_count != 0 {
+            executor.activate_workers(worker_count)?;
         }
 
-        let mut workers = executor
+        Ok(executor)
+    }
+
+    pub(crate) fn activate_workers(self: &Arc<Self>, worker_count: usize) -> Result<(), Arc<str>> {
+        if worker_count > MAX_EVALUATION_WORKERS {
+            return Err(Arc::from(format!(
+                "worker count {worker_count} exceeds the supported maximum of {MAX_EVALUATION_WORKERS}"
+            )));
+        }
+        let mut activated = self
+            .activated
+            .lock()
+            .expect("evaluation worker activation mutex was poisoned");
+        if *activated {
+            return Err(Arc::from("evaluation workers were already activated"));
+        }
+        *activated = true;
+        if worker_count == 0 {
+            return Ok(());
+        }
+
+        let mut workers = self
             .workers
             .lock()
             .expect("evaluation worker registry was poisoned");
         for index in 0..worker_count {
-            let inner = executor.inner.clone();
+            let inner = self.inner.clone();
             let worker = thread::Builder::new()
                 .name(format!("glam-eval-{index}"))
                 .spawn(move || evaluation_worker(inner))
@@ -87,12 +111,15 @@ impl EvaluationExecutor {
                 })?;
             workers.push(worker);
         }
+        self.inner
+            .worker_count
+            .store(worker_count, Ordering::Release);
         drop(workers);
-        Ok(executor)
+        Ok(())
     }
 
     pub(crate) fn worker_count(&self) -> usize {
-        self.inner.worker_count
+        self.inner.worker_count.load(Ordering::Acquire)
     }
 
     pub(super) fn register_session(&self, session: &Arc<EvaluationSession>) {

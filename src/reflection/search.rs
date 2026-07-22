@@ -8,7 +8,8 @@ use super::{
 ///
 /// Ordinary reflection execution preserves the language rule that choice must
 /// be scoped by an explicit cut. Isolated search instead retains every
-/// successful outer branch and never commits its transaction to the host.
+/// terminal outer branch as evidence and never commits its transaction to the
+/// host.
 pub(super) enum SearchPolicy<B, R> {
     FirstSuccess,
     RetainAll(AllResults<B, R>),
@@ -87,18 +88,28 @@ pub(super) struct AllResults<B, R> {
 }
 
 #[doc(hidden)]
-pub struct IsolatedSearchResult<S: TaskSpecialization> {
-    value: PublicValue,
+pub struct IsolatedSearchBranch<S: TaskSpecialization> {
+    value: Option<PublicValue>,
     transaction: TaskCommit<S>,
 }
 
-impl<S: TaskSpecialization> IsolatedSearchResult<S> {
-    pub(super) fn new(value: PublicValue, transaction: TaskCommit<S>) -> Self {
-        Self { value, transaction }
+impl<S: TaskSpecialization> IsolatedSearchBranch<S> {
+    pub(super) fn complete(value: PublicValue, transaction: TaskCommit<S>) -> Self {
+        Self {
+            value: Some(value),
+            transaction,
+        }
     }
 
-    pub fn value(&self) -> &PublicValue {
-        &self.value
+    pub(super) fn failed(transaction: TaskCommit<S>) -> Self {
+        Self {
+            value: None,
+            transaction,
+        }
+    }
+
+    pub fn value(&self) -> Option<&PublicValue> {
+        self.value.as_ref()
     }
 
     pub fn journal(&self) -> &S::Journal {
@@ -131,13 +142,14 @@ impl IsolatedSearchBlock {
 pub enum IsolatedSearchPoll<S: TaskSpecialization> {
     Yielded,
     Blocked(IsolatedSearchBlock),
-    Complete(Arc<[IsolatedSearchResult<S>]>),
+    Complete(Arc<[IsolatedSearchBranch<S>]>),
     Failed(TaskError),
     Cancelled,
 }
 
 /// Pollable all-results execution used by policy tests and, later, configured
-/// CLI parsing. Successful branch journals remain isolated from the host.
+/// CLI parsing. Successful and failed branch journals remain isolated from the
+/// host.
 #[doc(hidden)]
 pub struct IsolatedEffectSearch<S: TaskSpecialization> {
     task: EffectTask<S>,

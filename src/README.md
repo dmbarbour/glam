@@ -16,8 +16,10 @@ not define future language semantics or collect subsystem invariants.
 | Path | Responsibility |
 | --- | --- |
 | `main.rs` | Executes typed top-level commands, chooses configuration/assembly roots, owns logger policy, process I/O, and exit status |
-| `cli.rs`, `cli/model.rs` | Public CLI facade plus validated bootstrap command and argument models |
-| `cli/bootstrap.rs`, `cli/output.rs` | OS-string bootstrap dispatch, standalone-option validation, help text, and parser-report formatting |
+| `cli.rs`, `cli/model.rs` | Public CLI facade plus validated bootstrap/configured command and argument models |
+| `cli/bootstrap.rs`, `cli/output.rs` | OS-string bootstrap dispatch, standalone-option validation, help text, and inspection formatting |
+| `cli/configured.rs`, `cli/search.rs` | `conf.cli` lookup, isolated all-results execution, branch validation, and semantic-plan selection |
+| `cli/effects.rs`, `cli/host.rs` | Serial CLI reader/writer effect specialization and immutable invocation host |
 | `source.rs` | Immutable source artifacts, identities and digests, relative resolvers, host compatibility, and tracked local files |
 | `lib.rs`, `api.rs` | Embedding facade: staged assembler construction, opaque values, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
 | `g_source.rs` | Narrow public inspection report for the built-in `.g` parser; no syntax tree or lowering context escapes |
@@ -61,8 +63,11 @@ main or embedding client
 
 Imports re-enter the same assembler session through artifact-installed relative
 resolvers.
-The CLI then extracts `asm.result`, drains reflection reasoning, finalizes local
-file tracking, and closes configured logging. See the
+For a bare command, the CLI first loads configuration with a dormant runtime,
+runs `conf.cli` as an isolated all-results search, resolves the promised
+canonical argument environment, and only then activates the selected worker
+count. It then extracts `asm.result`, drains reflection reasoning, finalizes
+local file tracking, and closes configured logging. See the
 [assembly flow](../docs/architecture/assembly.md) for ordering and failure
 behavior.
 

@@ -248,7 +248,25 @@ impl Value {
 #[must_use = "dropping an unresolved promise resolver fails its value"]
 pub struct PromiseResolver {
     promise: Option<PromisedValue>,
-    context: EvalContext,
+    wake: PromiseWake,
+}
+
+enum PromiseWake {
+    Ready(EvalContext),
+    Deferred(Arc<OnceLock<EvalContext>>),
+}
+
+impl PromiseWake {
+    fn notify(&self) {
+        match self {
+            Self::Ready(context) => context.notify_promise_changed(),
+            Self::Deferred(context) => {
+                if let Some(context) = context.get() {
+                    context.notify_promise_changed();
+                }
+            }
+        }
+    }
 }
 
 impl PromiseResolver {
@@ -262,7 +280,7 @@ impl PromiseResolver {
         promise
             .set(value.into_core())
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
-        self.context.notify_promise_changed();
+        self.wake.notify();
         Ok(())
     }
 
@@ -276,7 +294,7 @@ impl PromiseResolver {
         promise
             .fail(message)
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
-        self.context.notify_promise_changed();
+        self.wake.notify();
         Ok(())
     }
 }
@@ -291,7 +309,7 @@ impl Drop for PromiseResolver {
             promise.label()
         );
         if promise.fail(message).is_ok() {
-            self.context.notify_promise_changed();
+            self.wake.notify();
         }
     }
 }
@@ -940,6 +958,14 @@ impl EvaluationRuntime {
         self.executor.worker_count()
     }
 
+    /// Starts this runtime's worker pool exactly once. A runtime constructed
+    /// with zero workers remains dormant until this method is called.
+    pub fn activate_workers(&self, worker_threads: usize) -> Result<(), Error> {
+        self.executor
+            .activate_workers(worker_threads)
+            .map_err(|error| Error::new(error.as_ref()))
+    }
+
     pub(crate) fn executor(&self) -> &Arc<EvaluationExecutor> {
         &self.executor
     }
@@ -1291,18 +1317,36 @@ pub struct AssemblerBuilder {
     reflection_environment: Option<Value>,
     diagnostic_attachments: Vec<DiagnosticAttachment>,
     pending_diagnostics: Vec<Diagnostic>,
+    environment_promises: Vec<Arc<OnceLock<EvalContext>>>,
 }
 
 /// Capabilities available while constructing the immutable reflection
 /// environment. The borrow cannot escape the construction closure.
 pub struct ReflectionEnvironmentBuilder<'a> {
     host: &'a Arc<AssemblerReflectionHost>,
+    environment_promises: &'a mut Vec<Arc<OnceLock<EvalContext>>>,
 }
 
 impl ReflectionEnvironmentBuilder<'_> {
     /// Creates a protected volume belonging to the future reasoning session.
     pub fn create_volume(&mut self, initial: Value) -> Result<ReasoningVolume, Error> {
         create_reasoning_volume(self.host, initial)
+    }
+
+    /// Creates a promised environment value resolved by the host after the
+    /// assembler has been built. Its resolver is affine and is armed with the
+    /// new reasoning session during [`AssemblerBuilder::build`].
+    pub fn promise(&mut self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
+        let promise = PromisedValue::new(label);
+        let wake = Arc::new(OnceLock::new());
+        self.environment_promises.push(wake.clone());
+        (
+            Value::from_core(CoreValue::Promised(promise.clone())),
+            PromiseResolver {
+                promise: Some(promise),
+                wake: PromiseWake::Deferred(wake),
+            },
+        )
     }
 }
 
@@ -1323,6 +1367,7 @@ impl Default for AssemblerBuilder {
             reflection_environment: None,
             diagnostic_attachments: Vec::new(),
             pending_diagnostics: Vec::new(),
+            environment_promises: Vec::new(),
         }
     }
 }
@@ -1385,7 +1430,10 @@ impl AssemblerBuilder {
         if self.reflection_environment.is_some() {
             return Err(Error::new("reflection environment was already configured"));
         }
-        let environment = build(&mut ReflectionEnvironmentBuilder { host: &self.host })?;
+        let environment = build(&mut ReflectionEnvironmentBuilder {
+            host: &self.host,
+            environment_promises: &mut self.environment_promises,
+        })?;
         let (environment, replaced_glam) =
             authoritative_reflection_environment(environment, "assembler")?;
         self.reflection_environment = Some(environment);
@@ -1406,6 +1454,11 @@ impl AssemblerBuilder {
         self.host.seal_environment(environment)?;
         let reasoning =
             ReasoningSession::from_host(self.host, self.diagnostics.clone(), self.runtime);
+        let context = reasoning.eval_context();
+        for wake in self.environment_promises {
+            wake.set(context.clone())
+                .expect("environment promise wake context must be armed once");
+        }
         for diagnostic in self.pending_diagnostics {
             self.diagnostics.publish(diagnostic);
         }
@@ -1458,7 +1511,7 @@ impl Assembler {
             Value::from_core(CoreValue::Promised(promise.clone())),
             PromiseResolver {
                 promise: Some(promise),
-                context: self.eval_context(),
+                wake: PromiseWake::Ready(self.eval_context()),
             },
         )
     }
@@ -2094,6 +2147,102 @@ mod tests {
                 .as_binary(),
             Some(b"new environment".as_slice())
         );
+    }
+
+    #[test]
+    fn builder_environment_promise_can_resolve_after_early_observation() {
+        let mut resolver = None;
+        let assembler = Assembler::builder()
+            .reflection_environment(|environment| {
+                let (value, promise_resolver) = environment.promise("late environment value");
+                resolver = Some(promise_resolver);
+                Ok(Value::record([("late", value)]))
+            })
+            .expect("environment should build")
+            .build()
+            .expect("assembler should build");
+        let promised = assembler
+            .get(&assembler.reflection_environment(), "late")
+            .expect("promise should be present");
+
+        assert!(assembler.evaluate(&promised).is_err());
+        resolver
+            .take()
+            .expect("resolver should escape the builder")
+            .resolve(Value::text("ready"))
+            .expect("promise should resolve once");
+        assert_eq!(
+            assembler
+                .evaluate(&promised)
+                .expect("resolved promise should evaluate")
+                .as_binary(),
+            Some(b"ready".as_slice())
+        );
+    }
+
+    #[test]
+    fn dropped_builder_environment_resolver_fails_its_promise() {
+        let assembler = Assembler::builder()
+            .reflection_environment(|environment| {
+                let (value, resolver) = environment.promise("abandoned environment value");
+                drop(resolver);
+                Ok(Value::record([("abandoned", value)]))
+            })
+            .expect("environment should build")
+            .build()
+            .expect("assembler should build");
+        let promised = assembler
+            .get(&assembler.reflection_environment(), "abandoned")
+            .expect("promise should be present");
+
+        assert!(
+            assembler
+                .evaluate(&promised)
+                .expect_err("dropped resolver must fail its promise")
+                .to_string()
+                .contains("was dropped before completion")
+        );
+    }
+
+    #[test]
+    fn builder_environment_promise_does_not_complete_through_self_dependency() {
+        let mut resolver = None;
+        let assembler = Assembler::builder()
+            .reflection_environment(|environment| {
+                let (value, promise_resolver) = environment.promise("self-dependent value");
+                resolver = Some(promise_resolver);
+                Ok(Value::record([("self", value)]))
+            })
+            .expect("environment should build")
+            .build()
+            .expect("assembler should build");
+        let promised = assembler
+            .get(&assembler.reflection_environment(), "self")
+            .expect("promise should be present");
+        resolver
+            .take()
+            .expect("resolver should escape the builder")
+            .resolve(promised.clone())
+            .expect("the host may assign a self-dependent value");
+
+        let error = assembler
+            .evaluate(&promised)
+            .expect_err("self dependency cannot reach weak head normal form");
+        assert!(
+            error.to_string().contains("blocked on wait token"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn evaluation_runtime_workers_activate_only_once() {
+        let runtime = EvaluationRuntime::new(0).expect("dormant runtime should build");
+        assert_eq!(runtime.worker_threads(), 0);
+        runtime
+            .activate_workers(1)
+            .expect("dormant runtime should activate");
+        assert_eq!(runtime.worker_threads(), 1);
+        assert!(runtime.activate_workers(1).is_err());
     }
 
     #[test]

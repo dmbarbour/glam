@@ -3,18 +3,29 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::ModuleInput;
+use crate::{Diagnostic, ModuleInput};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
     message: String,
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl CliError {
     pub(super) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            diagnostics: Vec::new(),
         }
+    }
+
+    pub(super) fn with_diagnostics(mut self, diagnostics: Vec<Diagnostic>) -> Self {
+        self.diagnostics = diagnostics;
+        self
+    }
+
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
     }
 }
 
@@ -66,6 +77,10 @@ pub enum TopLevelCommand {
     },
     Assembly(CommandPlan),
     ConfiguredCli(CliArguments),
+    InspectConfiguredCli {
+        arguments: CliArguments,
+        nul_terminated: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +101,14 @@ impl CommandPlan {
 
     pub fn process_args(&self) -> &[OsString] {
         &self.process_args
+    }
+
+    pub fn reflection_args(&self) -> &[OsString] {
+        &self.reflection_args
+    }
+
+    pub fn manifest(&self) -> Option<&std::path::Path> {
+        self.manifest.as_deref()
     }
 
     pub fn into_parts(self) -> CommandPlanParts {
@@ -112,6 +135,30 @@ pub struct CommandPlanParts {
     pub cli_arguments: CliArguments,
 }
 
+#[derive(Debug, Clone)]
+pub struct CliExpansion {
+    plan: CommandPlan,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl CliExpansion {
+    pub(super) fn new(plan: CommandPlan, diagnostics: Vec<Diagnostic>) -> Self {
+        Self { plan, diagnostics }
+    }
+
+    pub fn plan(&self) -> &CommandPlan {
+        &self.plan
+    }
+
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn into_parts(self) -> (CommandPlan, Vec<Diagnostic>) {
+        (self.plan, self.diagnostics)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CommandEdit {
     Input(ModuleInput),
@@ -126,6 +173,14 @@ pub(super) struct CommandPlanBuilder {
     edits: Vec<CommandEdit>,
     has_manifest: bool,
     has_worker_count: bool,
+}
+
+struct CommandFields {
+    inputs: Vec<ModuleInput>,
+    assembly_args: Vec<OsString>,
+    reflection_args: Vec<OsString>,
+    manifest: Option<PathBuf>,
+    worker_count: Option<usize>,
 }
 
 impl CommandPlanBuilder {
@@ -146,6 +201,63 @@ impl CommandPlanBuilder {
     }
 
     pub(super) fn finish(self, cli_arguments: CliArguments) -> Result<CommandPlan, CliError> {
+        let process_args = cli_arguments.shared_args();
+        self.finish_with_process_args(cli_arguments, process_args)
+    }
+
+    pub(super) fn finish_configured(
+        self,
+        cli_arguments: CliArguments,
+    ) -> Result<CommandPlan, CliError> {
+        let CommandFields {
+            inputs,
+            assembly_args,
+            reflection_args,
+            manifest,
+            worker_count,
+        } = self.finalize_fields()?;
+        let process_args = canonical_arguments(
+            &inputs,
+            &assembly_args,
+            &reflection_args,
+            manifest.as_deref(),
+            worker_count,
+        );
+        Ok(CommandPlan {
+            inputs,
+            assembly_args,
+            reflection_args,
+            manifest,
+            worker_count,
+            process_args,
+            cli_arguments,
+        })
+    }
+
+    fn finish_with_process_args(
+        self,
+        cli_arguments: CliArguments,
+        process_args: Arc<[OsString]>,
+    ) -> Result<CommandPlan, CliError> {
+        let CommandFields {
+            inputs,
+            assembly_args,
+            reflection_args,
+            manifest,
+            worker_count,
+        } = self.finalize_fields()?;
+        Ok(CommandPlan {
+            inputs,
+            assembly_args,
+            reflection_args,
+            manifest,
+            worker_count,
+            process_args,
+            cli_arguments,
+        })
+    }
+
+    fn finalize_fields(self) -> Result<CommandFields, CliError> {
         let mut inputs = Vec::new();
         let mut assembly_args = Vec::new();
         let mut reflection_args = Vec::new();
@@ -167,15 +279,54 @@ impl CommandPlanBuilder {
             ));
         }
 
-        let process_args = cli_arguments.shared_args();
-        Ok(CommandPlan {
+        Ok(CommandFields {
             inputs,
             assembly_args,
             reflection_args,
             manifest,
             worker_count,
-            process_args,
-            cli_arguments,
         })
     }
+}
+
+fn canonical_arguments(
+    inputs: &[ModuleInput],
+    assembly_args: &[OsString],
+    reflection_args: &[OsString],
+    manifest: Option<&std::path::Path>,
+    worker_count: Option<usize>,
+) -> Arc<[OsString]> {
+    let mut arguments = Vec::new();
+    for input in inputs {
+        match input {
+            ModuleInput::File(path) => {
+                arguments.push(OsString::from("--file"));
+                arguments.push(path.as_os_str().to_owned());
+            }
+            ModuleInput::Script { extension, body } => {
+                arguments.push(OsString::from(format!("--script.{extension}")));
+                arguments.push(OsString::from(
+                    String::from_utf8(body.to_vec())
+                        .expect("configured script bodies originate as UTF-8 text"),
+                ));
+            }
+        }
+    }
+    if let Some(manifest) = manifest {
+        arguments.push(OsString::from("--manifest"));
+        arguments.push(manifest.as_os_str().to_owned());
+    }
+    for argument in reflection_args {
+        arguments.push(OsString::from("--refl"));
+        arguments.push(argument.clone());
+    }
+    if let Some(worker_count) = worker_count {
+        arguments.push(OsString::from("--workers"));
+        arguments.push(OsString::from(worker_count.to_string()));
+    }
+    if !assembly_args.is_empty() {
+        arguments.push(OsString::from("--"));
+        arguments.extend(assembly_args.iter().cloned());
+    }
+    Arc::from(arguments)
 }

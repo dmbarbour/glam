@@ -21,6 +21,8 @@ pub fn dispatch_bootstrap(
         Some("-h" | "--help") => Ok(TopLevelCommand::Help),
         Some("-V" | "--version") => Ok(TopLevelCommand::Version),
         Some("--parse") => parse_inspection(&user_args[1..]),
+        Some("--parse_cli") => parse_configured_inspection(&user_args[1..], false),
+        Some("--parse_cli.0") => parse_configured_inspection(&user_args[1..], true),
         Some("--check_manifest") => parse_manifest_check(&user_args[1..], false),
         Some("--quiet")
             if user_args
@@ -49,6 +51,26 @@ pub fn dispatch_bootstrap(
         ))),
         None => Ok(TopLevelCommand::ConfiguredCli(cli_arguments)),
     }
+}
+
+fn parse_configured_inspection(
+    args: &[OsString],
+    nul_terminated: bool,
+) -> Result<TopLevelCommand, CliError> {
+    let Some(first) = args.first() else {
+        return Err(CliError::new(
+            "configured CLI inspection needs at least one bare argument",
+        ));
+    };
+    if is_option_like(first) {
+        return Err(CliError::new(
+            "configured CLI inspection requires a bare first argument",
+        ));
+    }
+    Ok(TopLevelCommand::InspectConfiguredCli {
+        arguments: CliArguments::new(Arc::from(args)),
+        nul_terminated,
+    })
 }
 
 pub fn parse_worker_count(value: &OsStr, source: &str) -> Result<usize, CliError> {

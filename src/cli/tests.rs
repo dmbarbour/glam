@@ -1,7 +1,13 @@
 use std::ffi::OsString;
+use std::fs;
 use std::path::Path;
 
-use super::{ParseVerbosity, TopLevelCommand, dispatch_bootstrap};
+use crate::Assembler;
+
+use super::{
+    ParseVerbosity, TopLevelCommand, dispatch_bootstrap, expand_configured,
+    format_configured_arguments,
+};
 
 fn dispatch(arguments: &[&str]) -> Result<TopLevelCommand, String> {
     dispatch_bootstrap(arguments.iter().map(OsString::from)).map_err(|error| error.to_string())
@@ -137,4 +143,254 @@ fn a_bare_first_argument_is_deferred_to_configured_cli() {
         arguments.args(),
         [OsString::from("build"), OsString::from("input.g")]
     );
+}
+
+#[test]
+fn configured_inspection_has_an_explicit_bare_arity() {
+    let command = dispatch(&["--parse_cli", "build", "input.g"])
+        .expect("configured inspection should dispatch");
+    let TopLevelCommand::InspectConfiguredCli {
+        arguments,
+        nul_terminated,
+    } = command
+    else {
+        panic!("expected configured CLI inspection");
+    };
+    assert!(!nul_terminated);
+    assert_eq!(arguments.args(), ["build", "input.g"]);
+    assert_eq!(
+        dispatch(&["--parse_cli.0", "--file"]),
+        Err("configured CLI inspection requires a bare first argument".to_owned())
+    );
+}
+
+fn configuration(source: &str) -> (Assembler, crate::Value) {
+    let assembler = Assembler::new();
+    let module = assembler
+        .module(["configuration"])
+        .script("g", source)
+        .build()
+        .expect("CLI configuration should compile");
+    (assembler, module.into_value())
+}
+
+fn configured_arguments(arguments: &[&str]) -> super::CliArguments {
+    let TopLevelCommand::ConfiguredCli(arguments) =
+        dispatch(arguments).expect("bare arguments should dispatch")
+    else {
+        panic!("expected configured CLI dispatch");
+    };
+    arguments
+}
+
+#[test]
+fn configured_cli_builds_one_canonical_command_plan() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli =\n    .read.keyword \"build\" =>>\n    .read.text \"script\" >>= (\\body ->\n    .write.script \"g\" body =>>\n    .write.refl_arg \"detail\" =>>\n    .write.assembly_arg \"argument\" =>>\n    .write.worker_count 2 =>>\n    .read.end)\n",
+    );
+    let expansion = expand_configured(
+        &assembler,
+        &configuration,
+        configured_arguments(&["build", "asm.result = \"ok\""]),
+    )
+    .expect("configured command should expand");
+    assert!(expansion.diagnostics().is_empty());
+    assert_eq!(
+        expansion.plan().process_args(),
+        [
+            "--script.g",
+            "asm.result = \"ok\"",
+            "--refl",
+            "detail",
+            "--workers",
+            "2",
+            "--",
+            "argument",
+        ]
+    );
+}
+
+#[test]
+fn configured_cli_reads_its_immutable_environment() {
+    let assembler = Assembler::builder()
+        .reflection_environment(|_| {
+            Ok(crate::Value::record([(
+                "process",
+                crate::Value::record([(
+                    "cli",
+                    crate::Value::record([(
+                        "args",
+                        crate::Value::list([crate::Value::text("build")]),
+                    )]),
+                )]),
+            )]))
+        })
+        .expect("CLI environment should build")
+        .build()
+        .expect("assembler should build");
+    let module = assembler
+        .module(["configuration"])
+        .script(
+            "g",
+            "language g0\nimport 'std\nconf.cli = .env ['process,'cli,'args] >>= (\\args -> (args == [\"build\"]) =>> .read.keyword \"build\" =>> .read.end =>> .write.script \"g\" \"asm.result = 1\")\n",
+        )
+        .build()
+        .expect("CLI configuration should compile");
+    let expansion = expand_configured(&assembler, module.value(), configured_arguments(&["build"]))
+        .expect("CLI should observe its immutable environment");
+    assert_eq!(
+        expansion.plan().process_args(),
+        ["--script.g", "asm.result = 1"]
+    );
+}
+
+#[test]
+fn configured_cli_cannot_observe_canonical_arguments_before_selection() {
+    let mut resolver = None;
+    let assembler = Assembler::builder()
+        .reflection_environment(|environment| {
+            let (process_args, process_resolver) = environment.promise("canonical arguments");
+            resolver = Some(process_resolver);
+            Ok(crate::Value::record([(
+                "process",
+                crate::Value::record([("args", process_args)]),
+            )]))
+        })
+        .expect("CLI environment should build")
+        .build()
+        .expect("assembler should build");
+    let module = assembler
+        .module(["configuration"])
+        .script(
+            "g",
+            "language g0\nimport 'std\nconf.cli = .env ['process,'args] >>= (\\args -> (args == [\"canonical\"]) =>> .read.keyword \"build\" =>> .read.end =>> .write.script \"g\" \"asm.result = 1\")\n",
+        )
+        .build()
+        .expect("CLI configuration should compile");
+    let arguments = configured_arguments(&["build"]);
+
+    let error = expand_configured(&assembler, module.value(), arguments.clone())
+        .expect_err("canonical arguments must remain unresolved during selection");
+    assert!(error.to_string().contains("configured CLI became blocked"));
+
+    resolver
+        .take()
+        .expect("resolver should remain available")
+        .resolve(crate::Value::list([crate::Value::text("canonical")]))
+        .expect("canonical argument promise should resolve");
+    if let Err(error) = expand_configured(&assembler, module.value(), arguments) {
+        panic!("resolved canonical arguments should unblock a new search: {error}");
+    }
+}
+
+#[test]
+fn configured_cli_rejects_nonunit_unconsumed_and_ambiguous_results() {
+    let cases = [
+        ("conf.cli = .r 1", "configured `conf.cli` must return unit"),
+        (
+            "conf.cli = .write.script \"g\" \"asm.result = 1\"",
+            "left 1 command-line argument(s) unconsumed",
+        ),
+        (
+            "conf.cli = .read.keyword \"build\" =>> .read.end =>> .alt (.write.script \"g\" \"asm.result = 1\") (.write.script \"g\" \"asm.result = 2\")",
+            "more than one distinct command",
+        ),
+    ];
+    for (effect, expected) in cases {
+        let source = format!("language g0\nimport 'std\n{effect}\n");
+        let (assembler, configuration) = configuration(&source);
+        let error = expand_configured(&assembler, &configuration, configured_arguments(&["build"]))
+            .expect_err("invalid configured command should fail");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn missing_configured_cli_behaves_like_an_explicit_failure() {
+    let arguments = configured_arguments(&["build"]);
+    let (missing_assembler, missing_configuration) =
+        configuration("language g0\nobject conf.env\n");
+    let missing = expand_configured(
+        &missing_assembler,
+        &missing_configuration,
+        arguments.clone(),
+    )
+    .expect_err("missing conf.cli should not match");
+    let (failed_assembler, failed_configuration) =
+        configuration("language g0\nimport 'std\nconf.cli = .fail\n");
+    let failed = expand_configured(&failed_assembler, &failed_configuration, arguments)
+        .expect_err("explicit failure should not match");
+
+    assert_eq!(missing.to_string(), failed.to_string());
+}
+
+#[test]
+fn invalid_alternative_does_not_veto_a_valid_configured_plan() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.keyword \"build\" =>> .read.end =>> .alt (.r 1) (.write.script \"g\" \"asm.result = 1\")\n",
+    );
+    let expansion = expand_configured(&assembler, &configuration, configured_arguments(&["build"]))
+        .expect("valid alternative should win over invalid parse evidence");
+    assert_eq!(
+        expansion.plan().process_args(),
+        ["--script.g", "asm.result = 1"]
+    );
+}
+
+#[test]
+fn configured_cli_api_omits_shared_heap_and_task_capabilities() {
+    for effect in [".heap.get []", ".task.status 1"] {
+        let source = format!(
+            "language g0\nimport 'std\nconf.cli = {effect} =>> .write.script \"g\" \"asm.result = 1\"\n"
+        );
+        let (assembler, configuration) = configuration(&source);
+        let error = expand_configured(&assembler, &configuration, configured_arguments(&["build"]))
+            .expect_err("CLI effects must not expose shared state or task capabilities");
+        assert!(error.to_string().contains("configured CLI failed"));
+    }
+}
+
+#[test]
+fn configured_cli_path_handles_are_invocation_scoped_writer_inputs() {
+    let path = std::env::temp_dir().join(format!(
+        "glam-cli-path-handle-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    fs::write(&path, "language g0\nasm.result = 1\n")
+        .expect("temporary CLI input should be written");
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.keyword \"build\" =>> .read.path 'file 'r >>= (\\path -> .read.end =>> .write.file path)\n",
+    );
+    let arguments =
+        super::CliArguments::new([OsString::from("build"), path.as_os_str().to_owned()].into());
+    let expansion = expand_configured(&assembler, &configuration, arguments)
+        .expect("readable file path should produce an input edit");
+    assert_eq!(
+        expansion.plan().process_args(),
+        [OsString::from("--file"), path.as_os_str().to_owned()]
+    );
+    fs::remove_file(path).expect("temporary CLI input should be removed");
+}
+
+#[test]
+fn configured_cli_returns_only_selected_branch_diagnostics() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.keyword \"build\" =>> .read.end =>> .log 'warn { msg:{ text:\"selected\" } } =>> .write.script \"g\" \"asm.result = 1\"\n",
+    );
+    let expansion = expand_configured(&assembler, &configuration, configured_arguments(&["build"]))
+        .expect("logged configured command should expand");
+    assert_eq!(expansion.diagnostics().len(), 1);
+    assert_eq!(expansion.diagnostics()[0].message(), "selected");
+    assert_eq!(assembler.diagnostic_bus().counts().total(), 0);
+}
+
+#[test]
+fn configured_argument_output_preserves_boundaries() {
+    let arguments = [OsString::from("one"), OsString::from("two")];
+    assert_eq!(
+        format_configured_arguments(&arguments, false),
+        b"one\ntwo\n"
+    );
+    assert_eq!(format_configured_arguments(&arguments, true), b"one\0two\0");
 }

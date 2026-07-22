@@ -114,6 +114,62 @@ where
 
 /// API constructors contributed by the reusable reflection request family.
 pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
+    environment_log_request_specs()
+        .into_iter()
+        .chain([
+            EffectRequestSpec::new(
+                "dict_items",
+                ["reflection_runtime", "v0", "request", "dict_items"],
+                1,
+                ReflectionRequest::DictItems,
+            ),
+            EffectRequestSpec::new(
+                "eval",
+                ["reflection_runtime", "v0", "request", "eval"],
+                1,
+                ReflectionRequest::Eval,
+            ),
+            EffectRequestSpec::at_path(
+                ["task", "new"],
+                ["reflection_runtime", "v0", "request", "task", "new"],
+                1,
+                ReflectionRequest::TaskNew,
+            ),
+            EffectRequestSpec::at_path(
+                ["task", "join"],
+                ["reflection_runtime", "v0", "request", "task", "join"],
+                1,
+                ReflectionRequest::TaskJoin,
+            ),
+            EffectRequestSpec::at_path(
+                ["task", "status"],
+                ["reflection_runtime", "v0", "request", "task", "status"],
+                1,
+                ReflectionRequest::TaskStatus,
+            ),
+            EffectRequestSpec::at_path(
+                ["task", "value"],
+                ["reflection_runtime", "v0", "request", "task", "value"],
+                1,
+                ReflectionRequest::TaskValue,
+            ),
+            EffectRequestSpec::at_path(
+                ["task", "error"],
+                ["reflection_runtime", "v0", "request", "task", "error"],
+                1,
+                ReflectionRequest::TaskError,
+            ),
+            EffectRequestSpec::at_path(
+                ["task", "cancel"],
+                ["reflection_runtime", "v0", "request", "task", "cancel"],
+                1,
+                ReflectionRequest::TaskCancel,
+            ),
+        ])
+        .collect()
+}
+
+pub(crate) fn environment_log_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
     vec![
         EffectRequestSpec::new(
             "env",
@@ -122,58 +178,10 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
             ReflectionRequest::Environment,
         ),
         EffectRequestSpec::new(
-            "dict_items",
-            ["reflection_runtime", "v0", "request", "dict_items"],
-            1,
-            ReflectionRequest::DictItems,
-        ),
-        EffectRequestSpec::new(
-            "eval",
-            ["reflection_runtime", "v0", "request", "eval"],
-            1,
-            ReflectionRequest::Eval,
-        ),
-        EffectRequestSpec::new(
             "log",
             ["reflection_runtime", "v0", "request", "log"],
             2,
             ReflectionRequest::Log,
-        ),
-        EffectRequestSpec::at_path(
-            ["task", "new"],
-            ["reflection_runtime", "v0", "request", "task", "new"],
-            1,
-            ReflectionRequest::TaskNew,
-        ),
-        EffectRequestSpec::at_path(
-            ["task", "join"],
-            ["reflection_runtime", "v0", "request", "task", "join"],
-            1,
-            ReflectionRequest::TaskJoin,
-        ),
-        EffectRequestSpec::at_path(
-            ["task", "status"],
-            ["reflection_runtime", "v0", "request", "task", "status"],
-            1,
-            ReflectionRequest::TaskStatus,
-        ),
-        EffectRequestSpec::at_path(
-            ["task", "value"],
-            ["reflection_runtime", "v0", "request", "task", "value"],
-            1,
-            ReflectionRequest::TaskValue,
-        ),
-        EffectRequestSpec::at_path(
-            ["task", "error"],
-            ["reflection_runtime", "v0", "request", "task", "error"],
-            1,
-            ReflectionRequest::TaskError,
-        ),
-        EffectRequestSpec::at_path(
-            ["task", "cancel"],
-            ["reflection_runtime", "v0", "request", "task", "cancel"],
-            1,
-            ReflectionRequest::TaskCancel,
         ),
     ]
 }

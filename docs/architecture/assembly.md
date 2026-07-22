@@ -16,10 +16,12 @@ choose module paths and inputs; the library does not assign special meaning to
 
 `main` is one client. `cli::dispatch_bootstrap` first turns raw `OsString`
 arguments into a typed `TopLevelCommand`; `main` performs the requested I/O but
-does not interpret individual assembly flags. For assembly it chooses the two
-module roots, supplies CLI-derived values, installs a `FileSourceSystem` and
-subscribes a diagnostic queue, requests `asm.result`, and decides process output
-and exit status.
+does not interpret individual assembly flags. A hyphen-leading command uses
+the bootstrap plan directly. A bare command loads configuration and runs
+`conf.cli` through the CLI effect specialization before producing the same
+typed plan. For assembly main chooses the two module roots, supplies CLI-derived
+values, installs a `FileSourceSystem` and subscribes a diagnostic queue,
+requests `asm.result`, and decides process output and exit status.
 
 ## Module Construction
 
@@ -98,7 +100,11 @@ construct an assembler or load configuration.
 ## Batch Lifecycle
 
 ```text
-compile configuration and assembly
+construct one dormant assembler and compile configuration
+  -> for bare input, search all isolated conf.cli alternatives
+  -> select one semantic command and resolve canonical environment promises
+  -> activate the selected worker count exactly once
+  -> compile assembly
   -> evaluate and write valid asm.result bytes
   -> drain assembler reflection reasoning
   -> emit task-failure or deadlock diagnostics
@@ -119,10 +125,19 @@ diagnostics and summaries go to stdout; `--quiet` keeps only the exit status
 and `--verbose` includes declaration rows.
 
 For assembly, `--workers` overrides `GLAM_WORKERS`; zero workers is the default.
+Configuration and `conf.cli` always run before activation with zero workers.
 Bootstrap parsing retains paths and unrelated arguments as OS strings instead
 of requiring process-wide UTF-8. `process.cli.args` records the arguments the
 user supplied, while `process.args` is their final canonical interpretation;
-both exclude the executable name and are identical before configured rewriting
-is introduced. Repeated `--refl` values are additionally collected in
+both exclude the executable name. The canonical value is a promised environment
+slot while `conf.cli` runs, so a rewrite cannot depend on its own result.
+Repeated `--refl` values are additionally collected in
 `process.refl_args` and excluded from `asm.args`, while arguments after `--`
 form `asm.args`.
+
+The configured CLI exposes standard control effects, read-only `.env`,
+branch-local `.log`, and CLI reader/writer operations. It exposes neither the
+shared heap nor reflection-task operations, and its outer branch journals are
+inspected rather than committed. `--parse_cli` prints the selected canonical
+arguments one per line; `--parse_cli.0` uses NUL delimiters. Neither executes
+the command nor activates workers.

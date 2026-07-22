@@ -1053,6 +1053,66 @@ fn command_line_workers_override_glam_workers() {
     assert_eq!(output.stdout, b"ok");
 }
 
+#[test]
+fn configured_bare_cli_rewrites_and_executes_in_the_prepared_session() {
+    let directory = unique_temp_dir("glam-configured-cli");
+    fs::create_dir_all(&directory).expect("configured CLI directory should be created");
+    let configuration = directory.join("conf.g");
+    fs::write(
+        &configuration,
+        "language g0\nimport 'std\nobject conf.env\nconf.cli =\n    .read.keyword \"run\" =>>\n    .read.text \"script\" >>= (\\body ->\n    .write.script \"g\" body =>>\n    .write.worker_count 1 =>>\n    .read.end)\n",
+    )
+    .expect("configured CLI source should be written");
+
+    let output = glam_command()
+        .env("GLAM_CONF", &configuration)
+        .env("GLAM_WORKERS", "invalid but overridden by conf.cli")
+        .arg("run")
+        .arg("language g0\nimport 'std\nasm.result = seq 1 (spark 2 \"ok\")\n")
+        .output()
+        .expect("configured bare command should run");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ok");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn configured_cli_inspection_uses_line_or_nul_delimiters_without_execution() {
+    let directory = unique_temp_dir("glam-configured-cli-inspection");
+    fs::create_dir_all(&directory).expect("configured CLI directory should be created");
+    let configuration = directory.join("conf.g");
+    fs::write(
+        &configuration,
+        "language g0\nimport 'std\nobject conf.env\nconf.cli =\n    .read.keyword \"run\" =>>\n    .read.text \"script\" >>= (\\body ->\n    .write.script \"g\" body =>>\n    .read.end)\n",
+    )
+    .expect("configured CLI source should be written");
+
+    for (option, expected) in [
+        ("--parse_cli", b"--script.g\nasm.result = 1\n".as_slice()),
+        ("--parse_cli.0", b"--script.g\0asm.result = 1\0".as_slice()),
+    ] {
+        let output = glam_command()
+            .env("GLAM_CONF", &configuration)
+            .env("GLAM_WORKERS", "must not be inspected")
+            .args([option, "run", "asm.result = 1"])
+            .output()
+            .expect("configured CLI inspection should run");
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, expected);
+        assert!(output.stderr.is_empty());
+    }
+}
+
 fn hello_sample_files() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/assembly");
     let mut files = fs::read_dir(&root)

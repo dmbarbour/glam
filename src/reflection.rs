@@ -10,9 +10,10 @@ mod store;
 
 #[doc(hidden)]
 pub use search::{
-    IsolatedEffectSearch, IsolatedSearchBlock, IsolatedSearchPoll, IsolatedSearchResult,
+    IsolatedEffectSearch, IsolatedSearchBlock, IsolatedSearchBranch, IsolatedSearchPoll,
 };
 
+pub(crate) use requests::environment_log_request_specs;
 pub use requests::{
     ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionServices,
     ReflectionTransaction, handle_reflection_request, reflection_request_specs,
@@ -127,6 +128,12 @@ pub trait TaskSpecialization: Clone + Sized + Send + Sync + 'static {
     type Request: Clone + Send + Sync + 'static;
     type Snapshot: Clone + Send + Sync + 'static;
     type Journal: Clone + Default + Send + Sync + 'static;
+
+    /// Controls whether the shared `.heap.*` family is installed in this
+    /// task's effect API. Task-local state and control effects remain standard.
+    fn exposes_shared_heap(&self) -> bool {
+        true
+    }
 
     fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>>;
 
@@ -595,7 +602,7 @@ struct EffectTask<S: TaskSpecialization> {
     next_continuation: u64,
     next_control_order: usize,
     continuations: HashMap<u64, CapturedContinuation>,
-    search: SearchPolicy<Branch<S>, IsolatedSearchResult<S>>,
+    search: SearchPolicy<Branch<S>, IsolatedSearchBranch<S>>,
     execution: TaskExecution<S>,
     blocked: Option<BlockedExecution<S>>,
     terminal: Option<TaskTerminal>,
@@ -633,7 +640,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
         retain_all: bool,
     ) -> Result<Self, TaskError> {
         let tags = Tags::new();
-        let (api, specialized_requests) = effect_api(&tags, specialization.requests())?;
+        let (api, specialized_requests) = effect_api(
+            &tags,
+            specialization.requests(),
+            specialization.exposes_shared_heap(),
+        )?;
         let id = eval_context
             .task_id()
             .map_err(|error| TaskError::new(error.as_ref()))?;
@@ -670,7 +681,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         })
     }
 
-    fn completed_search(&self) -> Option<Arc<[IsolatedSearchResult<S>]>> {
+    fn completed_search(&self) -> Option<Arc<[IsolatedSearchBranch<S>]>> {
         self.search.completed()
     }
 
@@ -1782,17 +1793,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
         match outcome {
             BranchOutcome::Complete(value, mut completed) => {
                 let restarted = self.restart_fixpoint_at_scope(&mut completed, scope_depth)?;
-                let transaction = completed
-                    .transaction
-                    .take()
-                    .expect("an isolated outer branch must retain its transaction");
-                self.search.retain(IsolatedSearchResult::new(
+                let transaction = Self::isolated_transaction(&mut completed);
+                self.search.retain(IsolatedSearchBranch::complete(
                     PublicValue::from_core(value),
-                    TaskCommit::new(
-                        transaction.store,
-                        transaction.snapshot.extra().clone(),
-                        transaction.journal,
-                    ),
+                    transaction,
                 ));
                 Ok(restarted
                     .map(MachineStep::Continue)
@@ -1812,6 +1816,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 if let Some(restarted) = self.restart_fixpoint_at_scope(&mut failed, scope_depth)? {
                     return Ok(MachineStep::Continue(restarted));
                 }
+                let transaction = Self::isolated_transaction(&mut failed);
+                self.search
+                    .retain(IsolatedSearchBranch::failed(transaction));
                 Ok(self.advance_isolated_search())
             }
             BranchOutcome::Retry(mut failed) => {
@@ -1853,6 +1860,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
             self.search.finish();
             MachineStep::Terminal(TaskTerminal::Complete(PublicValue::from_core(unit_value())))
         }
+    }
+
+    fn isolated_transaction(branch: &mut Branch<S>) -> TaskCommit<S> {
+        let transaction = branch
+            .transaction
+            .take()
+            .expect("an isolated outer branch must retain its transaction");
+        TaskCommit::new(
+            transaction.store,
+            transaction.snapshot.extra().clone(),
+            transaction.journal,
+        )
     }
 
     fn waiting_block(&self, wait: EvaluationWaitToken) -> BlockedExecution<S> {
@@ -2899,6 +2918,7 @@ fn request_id(context: &EvalContext, value: Value, kind: &str) -> Result<u64, Ta
 fn effect_api<R: Clone>(
     tags: &Tags,
     specs: Vec<EffectRequestSpec<R>>,
+    expose_shared_heap: bool,
 ) -> Result<(Value, Vec<SpecializedRequest<R>>), TaskError> {
     let entry = |name: &str, value| (Key::atom_from_text(name), value);
     let heap_api = Value::Dict(
@@ -2921,7 +2941,7 @@ fn effect_api<R: Clone>(
             dict.insert(key, value)
         }),
     );
-    let mut api = [
+    let mut entries = vec![
         entry("r", request_function(tags.r.clone(), 1, Vec::new(), false)),
         entry(
             "seq",
@@ -2948,7 +2968,6 @@ fn effect_api<R: Clone>(
             "set",
             request_function(tags.set.clone(), 2, Vec::new(), false),
         ),
-        entry("heap", heap_api),
         entry(
             "reset",
             request_function(tags.reset.clone(), 2, Vec::new(), false),
@@ -2957,11 +2976,15 @@ fn effect_api<R: Clone>(
             "shift",
             request_function(tags.shift.clone(), 2, Vec::new(), false),
         ),
-    ]
-    .into_iter()
-    .fold(Dict::new_sync(), |dict, (key, value)| {
-        dict.insert(key, value)
-    });
+    ];
+    if expose_shared_heap {
+        entries.push(entry("heap", heap_api));
+    }
+    let mut api = entries
+        .into_iter()
+        .fold(Dict::new_sync(), |dict, (key, value)| {
+            dict.insert(key, value)
+        });
     let mut requests = Vec::with_capacity(specs.len());
     for spec in specs {
         let tag = Key::abstract_global_path(spec.tag_path.iter().map(Arc::as_ref));
@@ -3802,7 +3825,7 @@ mod tests {
 
     fn poll_isolated_search<S: TaskSpecialization>(
         search: &mut IsolatedEffectSearch<S>,
-    ) -> Arc<[IsolatedSearchResult<S>]> {
+    ) -> Arc<[IsolatedSearchBranch<S>]> {
         loop {
             match search.poll(256) {
                 IsolatedSearchPoll::Yielded => {}
@@ -3829,7 +3852,7 @@ mod tests {
         let results = poll_isolated_search(&mut search);
         let values = results
             .iter()
-            .map(|result| result.value().clone())
+            .filter_map(|result| result.value().cloned())
             .collect();
         (assembler, values)
     }
@@ -3882,11 +3905,15 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert_eq!(
-            assembler.to_binary(results[0].value()).unwrap(),
+            assembler
+                .to_binary(results[0].value().expect("left branch should succeed"))
+                .unwrap(),
             b"left".as_slice()
         );
         assert_eq!(
-            assembler.to_binary(results[1].value()).unwrap(),
+            assembler
+                .to_binary(results[1].value().expect("right branch should succeed"))
+                .unwrap(),
             b"right".as_slice()
         );
         assert_eq!(
@@ -3899,6 +3926,25 @@ mod tests {
         );
         assert!(host.stderr().is_empty());
         assert_eq!(host.heap(), PublicValue::empty_record());
+    }
+
+    #[test]
+    fn isolated_search_retains_failed_branch_journals_as_parse_evidence() {
+        let (_, effect) =
+            compile_effect(".alt ((.write_stderr \"failed evidence\") =>> .fail) (.r \"success\")");
+        let host = Arc::new(TestHost::default());
+        let mut search = IsolatedEffectSearch::new(&effect, TestEffects, host.clone())
+            .expect("isolated effect should initialize");
+        let results = poll_isolated_search(&mut search);
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].value().is_none());
+        assert_eq!(
+            results[0].journal().stderr,
+            [Bytes::from_static(b"failed evidence")]
+        );
+        assert!(results[1].value().is_some());
+        assert!(host.stderr().is_empty());
     }
 
     #[test]
@@ -3934,7 +3980,9 @@ mod tests {
         let results = poll_isolated_search(&mut search);
         assert_eq!(results.len(), 1);
         assert_eq!(
-            assembler.to_binary(results[0].value()).unwrap(),
+            assembler
+                .to_binary(results[0].value().expect("retry branch should succeed"))
+                .unwrap(),
             b"ready".as_slice()
         );
         assert_eq!(host.wait_count(), 1);
@@ -3977,7 +4025,9 @@ mod tests {
         let results = poll_isolated_search(&mut search);
         assert_eq!(results.len(), 1);
         assert_eq!(
-            assembler.to_binary(results[0].value()).unwrap(),
+            assembler
+                .to_binary(results[0].value().expect("recovered branch should succeed"))
+                .unwrap(),
             b"recovered".as_slice()
         );
     }
@@ -4060,7 +4110,9 @@ mod tests {
         let results = poll_isolated_search(&mut search);
         assert_eq!(results.len(), 1);
         assert_eq!(
-            assembler.to_binary(results[0].value()).unwrap(),
+            assembler
+                .to_binary(results[0].value().expect("resumed branch should succeed"))
+                .unwrap(),
             b"ready".as_slice()
         );
     }

@@ -4,14 +4,20 @@
 //! process I/O. `main` remains responsible for executing the returned command.
 
 mod bootstrap;
+mod configured;
+mod effects;
+mod host;
 mod model;
 mod output;
+mod search;
 
 pub use bootstrap::{dispatch_bootstrap, parse_worker_count};
+pub use configured::expand_configured;
 pub use model::{
-    CliArguments, CliError, CommandPlan, CommandPlanParts, ParseVerbosity, TopLevelCommand,
+    CliArguments, CliError, CliExpansion, CommandPlan, CommandPlanParts, ParseVerbosity,
+    TopLevelCommand,
 };
-pub use output::{HELP_TEXT, format_parse_summary};
+pub use output::{HELP_TEXT, format_configured_arguments, format_parse_summary};
 
 #[cfg(test)]
 mod tests;

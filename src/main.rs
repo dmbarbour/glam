@@ -10,7 +10,7 @@ use std::thread;
 use bytes::Bytes;
 use glam::cli::{
     CliArguments, CommandPlan, CommandPlanParts, HELP_TEXT, TopLevelCommand, dispatch_bootstrap,
-    format_parse_summary, parse_worker_count,
+    expand_configured, format_configured_arguments, format_parse_summary, parse_worker_count,
 };
 use glam::reflection::{
     CommitResult, ConflictAnalysisStrategy, EffectRequestSpec, EffectRun, ExactConflictAnalysis,
@@ -21,8 +21,8 @@ use glam::reflection::{
 };
 use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, Error,
-    EvaluationRuntime, FileSourceSystem, ModuleInput, ReasoningReport, ReasoningStatus,
-    ReasoningTaskState, Severity, Value, check_local_manifest, inspect_g_source,
+    EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, ReasoningReport,
+    ReasoningStatus, ReasoningTaskState, Severity, Value, check_local_manifest, inspect_g_source,
 };
 
 fn main() -> ExitCode {
@@ -48,12 +48,11 @@ fn main() -> ExitCode {
         }
         TopLevelCommand::CheckManifest { path, quiet } => check_manifest_command(&path, quiet),
         TopLevelCommand::Assembly(plan) => assemble_inputs(plan),
-        TopLevelCommand::ConfiguredCli(_) => {
-            eprintln!(
-                "error: bare command-line arguments are reserved for configured `conf.cli` rewriting; use `--parse <PATH>` to inspect a source file"
-            );
-            ExitCode::from(2)
-        }
+        TopLevelCommand::ConfiguredCli(arguments) => configured_cli(arguments, None),
+        TopLevelCommand::InspectConfiguredCli {
+            arguments,
+            nul_terminated,
+        } => configured_cli(arguments, Some(nul_terminated)),
     }
 }
 
@@ -93,8 +92,8 @@ fn configured_worker_count(command_line: Option<usize>) -> Result<usize, ExitCod
 }
 
 fn process_reflection_environment(
-    reflection_arguments: Vec<std::ffi::OsString>,
-    process_arguments: &[std::ffi::OsString],
+    reflection_arguments: Value,
+    process_arguments: Value,
     cli_arguments: CliArguments,
 ) -> Value {
     fn os_value(value: &std::ffi::OsStr) -> Value {
@@ -108,12 +107,6 @@ fn process_reflection_environment(
         )
     }))
     .expect("OS environment names must be keyable binary values");
-    let arguments = Value::list(process_arguments.iter().map(|argument| os_value(argument)));
-    let reflection_arguments = Value::list(
-        reflection_arguments
-            .iter()
-            .map(|argument| os_value(argument)),
-    );
     let cli_arguments = Value::list(
         cli_arguments
             .args()
@@ -123,12 +116,20 @@ fn process_reflection_environment(
     Value::record([(
         "process",
         Value::record([
-            ("args", arguments),
+            ("args", process_arguments),
             ("env", variables),
             ("refl_args", reflection_arguments),
             ("cli", Value::record([("args", cli_arguments)])),
         ]),
     )])
+}
+
+fn argument_values(arguments: &[std::ffi::OsString]) -> Value {
+    Value::list(
+        arguments
+            .iter()
+            .map(|argument| Value::binary(argument.as_encoded_bytes().to_vec())),
+    )
 }
 
 fn finish_local_files(
@@ -149,7 +150,118 @@ fn finish_local_files(
     failed
 }
 
+struct PreparedAssembly {
+    local_files: FileSourceSystem,
+    runtime: EvaluationRuntime,
+    log_host: Arc<LogHost>,
+    assembler: Assembler,
+    configuration: LoadedConfiguration,
+    process_args: Option<PromiseResolver>,
+    reflection_args: Option<PromiseResolver>,
+}
+
+impl PreparedAssembly {
+    fn resolve_environment(&mut self, command: &CommandPlanParts) -> Result<(), Error> {
+        if let Some(resolver) = self.process_args.take() {
+            resolver.resolve(argument_values(&command.process_args))?;
+        }
+        if let Some(resolver) = self.reflection_args.take() {
+            resolver.resolve(argument_values(&command.reflection_args))?;
+        }
+        Ok(())
+    }
+
+    fn fail_environment(&mut self, message: &str) {
+        if let Some(resolver) = self.process_args.take() {
+            let _ = resolver.fail(message);
+        }
+        if let Some(resolver) = self.reflection_args.take() {
+            let _ = resolver.fail(message);
+        }
+    }
+}
+
+fn prepare_assembly(
+    cli_arguments: CliArguments,
+    failure_manifest: Option<&Path>,
+    initial_environment: Option<(Value, Value)>,
+) -> Result<PreparedAssembly, ExitCode> {
+    let local_files = FileSourceSystem::default();
+    let runtime = EvaluationRuntime::new(0).expect("a dormant evaluation runtime is valid");
+    let conflict_analysis: Arc<dyn ConflictAnalysisStrategy> = Arc::new(ExactConflictAnalysis);
+    let log_host = Arc::new(LogHost::with_conflict_analysis(conflict_analysis.clone()));
+    let mut process_args = None;
+    let mut reflection_args = None;
+    let assembler = Assembler::builder()
+        .source_system(local_files.clone())
+        .evaluation_runtime(runtime.clone())
+        .conflict_analysis(conflict_analysis)
+        .diagnostic_subscriber(log_host.clone())
+        .reflection_environment(|environment| {
+            let (process_value, process_resolver) =
+                environment.promise("canonical process arguments");
+            let (reflection_value, reflection_resolver) =
+                environment.promise("canonical reflection arguments");
+            process_args = Some(process_resolver);
+            reflection_args = Some(reflection_resolver);
+            Ok(process_reflection_environment(
+                reflection_value,
+                process_value,
+                cli_arguments,
+            ))
+        })
+        .expect("main's reflection environment must be a dictionary")
+        .build()
+        .expect("main's assembler configuration must be valid");
+    if let Some((process_value, reflection_value)) = initial_environment {
+        process_args
+            .take()
+            .expect("bootstrap process argument resolver should be present")
+            .resolve(process_value)
+            .expect("fresh bootstrap process argument promise should resolve");
+        reflection_args
+            .take()
+            .expect("bootstrap reflection argument resolver should be present")
+            .resolve(reflection_value)
+            .expect("fresh bootstrap reflection argument promise should resolve");
+    }
+    let configuration = match load_configuration(&assembler) {
+        Ok(configuration) => configuration,
+        Err(error) => {
+            let diagnostics = assembler.diagnostic_bus();
+            diagnostics.publish(Diagnostic::new(Severity::Error, error.to_string()));
+            finish_local_files(&local_files, failure_manifest, &diagnostics);
+            log_host.close_input();
+            log_host.drain_default(&DefaultLogger::new(assembler));
+            return Err(ExitCode::from(1));
+        }
+    };
+    Ok(PreparedAssembly {
+        local_files,
+        runtime,
+        log_host,
+        assembler,
+        configuration,
+        process_args,
+        reflection_args,
+    })
+}
+
 fn assemble_inputs(command: CommandPlan) -> ExitCode {
+    let cli_arguments = command.cli_arguments().clone();
+    let manifest = command.manifest().map(Path::to_owned);
+    let initial_environment = Some((
+        argument_values(command.process_args()),
+        argument_values(command.reflection_args()),
+    ));
+    let prepared = match prepare_assembly(cli_arguments, manifest.as_deref(), initial_environment) {
+        Ok(prepared) => prepared,
+        Err(exit) => return exit,
+    };
+    execute_assembly(prepared, command)
+}
+
+fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> ExitCode {
     let CommandPlanParts {
         inputs,
         assembly_args,
@@ -159,46 +271,50 @@ fn assemble_inputs(command: CommandPlan) -> ExitCode {
         process_args,
         cli_arguments,
     } = command.into_parts();
+    let command_parts = CommandPlanParts {
+        inputs,
+        assembly_args,
+        reflection_args,
+        manifest,
+        worker_count,
+        process_args,
+        cli_arguments,
+    };
+    if let Err(error) = prepared.resolve_environment(&command_parts) {
+        prepared
+            .assembler
+            .diagnostic_bus()
+            .publish(Diagnostic::new(Severity::Error, error.to_string()));
+        return finish_without_logger(prepared, command_parts.manifest.as_deref(), true);
+    }
     let worker_threads = match configured_worker_count(worker_count) {
         Ok(worker_threads) => worker_threads,
-        Err(exit_code) => return exit_code,
-    };
-    let local_files = FileSourceSystem::default();
-    let runtime = match EvaluationRuntime::new(worker_threads) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return ExitCode::from(2);
+        Err(exit_code) => {
+            finish_without_logger(prepared, command_parts.manifest.as_deref(), true);
+            return exit_code;
         }
     };
-    let conflict_analysis: Arc<dyn ConflictAnalysisStrategy> = Arc::new(ExactConflictAnalysis);
-    let log_host = Arc::new(LogHost::with_conflict_analysis(conflict_analysis.clone()));
-    let assembler = Assembler::builder()
-        .source_system(local_files.clone())
-        .evaluation_runtime(runtime)
-        .conflict_analysis(conflict_analysis)
-        .diagnostic_subscriber(log_host.clone())
-        .reflection_environment(|_| {
-            Ok(process_reflection_environment(
-                reflection_args,
-                &process_args,
-                cli_arguments,
-            ))
-        })
-        .expect("main's reflection environment must be a dictionary")
-        .build()
-        .expect("main's assembler configuration must be valid");
+    if let Err(error) = prepared.runtime.activate_workers(worker_threads) {
+        prepared
+            .assembler
+            .diagnostic_bus()
+            .publish(Diagnostic::new(Severity::Error, error.to_string()));
+        return finish_without_logger(prepared, command_parts.manifest.as_deref(), true);
+    }
+    let CommandPlanParts {
+        inputs,
+        assembly_args,
+        manifest,
+        ..
+    } = command_parts;
+    let PreparedAssembly {
+        local_files,
+        log_host,
+        assembler,
+        configuration,
+        ..
+    } = prepared;
     let assembler_diagnostics = assembler.diagnostic_bus();
-    let configuration = match load_configuration(&assembler) {
-        Ok(configuration) => configuration,
-        Err(error) => {
-            assembler_diagnostics.publish(Diagnostic::new(Severity::Error, error.to_string()));
-            finish_local_files(&local_files, manifest.as_deref(), &assembler_diagnostics);
-            log_host.close_input();
-            log_host.drain_default(&DefaultLogger::new(assembler.clone()));
-            return ExitCode::from(1);
-        }
-    };
     let logger = start_logger(&assembler, &configuration.value, log_host.clone());
     let result = assemble(&assembler, inputs, assembly_args, configuration.environment);
     let mut operation_failed = false;
@@ -237,6 +353,79 @@ fn assemble_inputs(command: CommandPlan) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+fn finish_without_logger(
+    prepared: PreparedAssembly,
+    manifest: Option<&Path>,
+    operation_failed: bool,
+) -> ExitCode {
+    let diagnostics = prepared.assembler.diagnostic_bus();
+    report_reasoning(&diagnostics, &prepared.assembler.drain_reasoning());
+    let file_failure = finish_local_files(&prepared.local_files, manifest, &diagnostics);
+    prepared.log_host.close_input();
+    prepared
+        .log_host
+        .drain_default(&DefaultLogger::new(prepared.assembler));
+    if operation_failed || file_failure || diagnostics.counts().errors() != 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn configured_cli(arguments: CliArguments, inspection: Option<bool>) -> ExitCode {
+    let mut prepared = match prepare_assembly(arguments.clone(), None, None) {
+        Ok(prepared) => prepared,
+        Err(exit) => return exit,
+    };
+    let expansion = match expand_configured(
+        &prepared.assembler,
+        &prepared.configuration.value,
+        arguments,
+    ) {
+        Ok(expansion) => expansion,
+        Err(error) => {
+            prepared.fail_environment("configured CLI expansion failed");
+            for diagnostic in error.diagnostics() {
+                prepared
+                    .assembler
+                    .diagnostic_bus()
+                    .publish(diagnostic.clone());
+            }
+            prepared
+                .assembler
+                .diagnostic_bus()
+                .publish(Diagnostic::new(Severity::Error, error.to_string()));
+            return finish_without_logger(prepared, None, true);
+        }
+    };
+    let (command, diagnostics) = expansion.into_parts();
+    for diagnostic in diagnostics {
+        prepared.assembler.diagnostic_bus().publish(diagnostic);
+    }
+    if let Some(nul_terminated) = inspection {
+        let parts = command.into_parts();
+        if let Err(error) = prepared.resolve_environment(&parts) {
+            prepared
+                .assembler
+                .diagnostic_bus()
+                .publish(Diagnostic::new(Severity::Error, error.to_string()));
+            return finish_without_logger(prepared, None, true);
+        }
+        let output = format_configured_arguments(&parts.process_args, nul_terminated);
+        let failed = if let Err(error) = io::stdout().write_all(&output) {
+            prepared.assembler.diagnostic_bus().publish(Diagnostic::new(
+                Severity::Error,
+                format!("could not write configured CLI inspection to stdout: {error}"),
+            ));
+            true
+        } else {
+            false
+        };
+        return finish_without_logger(prepared, None, failed);
+    }
+    execute_assembly(prepared, command)
 }
 
 fn report_reasoning(diagnostics: &DiagnosticBus, report: &ReasoningReport) {
