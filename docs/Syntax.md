@@ -170,8 +170,8 @@ vertical columns of assembly mnemonics. `Pattern = Expr` is the pure guard form
 and does not use `let`. General pattern matching either captures locals or
 evaluates to `.fail`.
 
-The current Rust bootstrap implements the name-only, non-recursive subset as a
-newline-delimited layout block:
+The current Rust bootstrap implements name-only statements in both layout and
+braced forms. A layout block is newline-delimited:
 
         my_effect = do
             .read 'left -> left
@@ -190,11 +190,25 @@ shadowed.
 
 A non-final bare operation uses the existing `=>>` behavior, including its
 requirement that the discarded result be unit. The final statement should
-express an effect and is not implicitly wrapped with `.r`. The current layout
-form must be non-empty and occupy the trailing position of its containing 
-definition, lambda body, or enclosing do statement; in an application it can
-therefore only be the final argument. General patterns and braced/semicolon do
-blocks remain unimplemented.
+express an effect and is not implicitly wrapped with `.r`. A layout block must
+be non-empty and occupy the trailing position of its containing definition,
+lambda body, or enclosing do statement; in an application it can therefore
+only be the final argument. A singleton may be written inline as `do Effect`.
+
+Braces make do notation an ordinary expression atom and use semicolons as
+statement separators:
+
+        inline = do { left <- .read 'left; .write left; .r left }
+        nested = consume [do { .r first }, do { .r second }]
+
+One leading and one trailing semicolon are accepted around a non-empty block,
+so `do {; A; B;}` means `do { A; B }`; interior empty statements such as
+`do { A;; B }` remain errors. A trailing semicolon is punctuation and does not
+synthesize a result, so a block still cannot end with a binding. The special
+separator-free `do {}` means `.r ()`, while `do {;}` is invalid. Semicolons are
+owned by the nearest enclosing grammar: `do { x = do A; B }` has the two outer
+statements `x = do A` and `B`; the inner singleton do does not consume the
+semicolon. General do patterns remain unimplemented.
 
 Lightweight effects are supported: we desugar `.name` to `eff:(\api -> api.name)`, and we support application `(eff:f) x = eff:(\api -> f api x)`. This enables us to work with APIs concisely without redefining things:
 

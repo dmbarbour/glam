@@ -1112,6 +1112,44 @@ fn parses_layout_do_in_definition_lambda_and_application_positions() {
 }
 
 #[test]
+fn braced_do_evaluates_like_layout_do_and_supports_empty_blocks() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "braced = do { first <- .r 70; second = first + 2; .r second }\n",
+        "nested = do { value <- do .r 72; .r value }\n",
+        "empty = do {}\n",
+        "commented = do {\n",
+        "  # comments do not make an empty block non-empty\n",
+        "}\n",
+        "asm.braced = list.head (list.pure braced)\n",
+        "asm.nested = list.head (list.pure nested)\n",
+        "asm.empty = list.head (list.pure empty)\n",
+        "asm.commented = list.head (list.pure commented)\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+    let value = evaluated_module_value(&context, &lowered);
+    for path in ["braced", "nested"] {
+        assert_eq!(
+            fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
+            Value::Number(n(72)),
+            "{path}"
+        );
+    }
+    for path in ["empty", "commented"] {
+        assert_eq!(
+            fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
+            (*crate::core::keys::UNIT_VALUE).clone(),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn do_bindings_follow_sequential_unused_local_rules() {
     let parsed = parse(concat!(
         "language g0\n",

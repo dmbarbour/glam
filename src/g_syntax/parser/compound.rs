@@ -2,7 +2,7 @@ use chumsky::prelude::*;
 
 use super::super::{Diagnostic, ObjectExpr, SyntaxExpr, SyntaxOperator};
 use super::declaration::{parse_object_body, take_header_word};
-use super::do_expr::parse_do_expr_result;
+use super::do_expr::{parse_braced_do_atoms_result, parse_do_expr_result};
 use super::expression::syntax_expr_parser;
 use super::layout::{indentation_width, is_glam_whitespace, local_name, split_layout_statements};
 
@@ -67,6 +67,9 @@ pub(in crate::g_syntax) fn parse_expr_result_with_diagnostics(
         return result;
     }
     if let Some(result) = parse_with_expr_result(text, line, diagnostics) {
+        return result;
+    }
+    if let Some(result) = parse_braced_do_atoms_result(text, line, diagnostics) {
         return result;
     }
 
@@ -432,6 +435,66 @@ pub(super) fn split_top_level_binding_equals(text: &str) -> Option<(&str, &str)>
 
 pub(super) fn top_level_char_indices(text: &str, needle: char) -> Vec<usize> {
     top_level_matching_indices(text, |_, ch| ch == needle)
+}
+
+pub(super) fn matching_closing_delimiter(text: &str, open_index: usize) -> Option<usize> {
+    let open = text[open_index..].chars().next()?;
+    let expected_close = match open {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        _ => return None,
+    };
+    let mut stack = vec![expected_close];
+    let mut inline_text = false;
+    let mut multiline_text = false;
+    let mut index = open_index + open.len_utf8();
+
+    while index < text.len() {
+        if multiline_text {
+            if text[index..].starts_with("\"\"\"")
+                && text[line_start(text, index)..index]
+                    .chars()
+                    .all(|ch| ch == ' ')
+            {
+                multiline_text = false;
+                index += 3;
+            } else {
+                index += text[index..].chars().next()?.len_utf8();
+            }
+            continue;
+        }
+        if inline_text {
+            let ch = text[index..].chars().next()?;
+            inline_text = ch != '"';
+            index += ch.len_utf8();
+            continue;
+        }
+        if text[index..].starts_with("\"\"\"") {
+            multiline_text = true;
+            index += 3;
+            continue;
+        }
+
+        let ch = text[index..].chars().next()?;
+        match ch {
+            '"' => inline_text = true,
+            '(' => stack.push(')'),
+            '[' => stack.push(']'),
+            '{' => stack.push('}'),
+            ')' | ']' | '}' if stack.last() == Some(&ch) => {
+                stack.pop();
+                if stack.is_empty() {
+                    return Some(index);
+                }
+            }
+            ')' | ']' | '}' => return None,
+            _ => {}
+        }
+        index += ch.len_utf8();
+    }
+
+    None
 }
 
 pub(super) fn parse_object_expr_result(

@@ -225,8 +225,13 @@ my_proc = do
     .movl 'eax z            # bare intermediate op must return unit
     .r z                    # final expression is continuation effect
 
+inline = do .r 1            # singleton do
+braced = do { x <- .r 1; .r x }
+empty = do {}               # exactly .r ()
+nested = f [do { .r 1 }, do {; .r 2; }]
+
 # Current bootstrap rules:
-# - `do` introduces a non-empty newline-delimited layout block.
+# - Layout `do` introduces a non-empty newline-delimited block; braces use `;`.
 # - A binding scopes only over later statements; its producer is outside it.
 # - `_name` suppresses its unused warning; `op -> _` discards any result.
 # - A bare intermediate op uses `=>>` semantics and therefore requires unit.
@@ -234,7 +239,9 @@ my_proc = do
 #   it may express an effect to return a value)
 # - The layout block must be the trailing part of its containing expression;
 #   in an application it can therefore only be the final argument.
-# - Patterns and braced/semicolon blocks are not implemented yet.
+# - Braced do is an expression atom. One leading/trailing `;` is ignored;
+#   interior empty statements and `do {;}` are invalid.
+# - Patterns are not implemented yet.
 
 op1 >>= k           # bind        k1 >=> k2   # Kleisli
 op1 =>> op2         # sequence, dropping unit result
