@@ -5,8 +5,9 @@ use std::path::Path;
 use crate::Assembler;
 
 use super::{
-    CompletionKind, CompletionRequest, ParseVerbosity, TopLevelCommand, complete_configured,
-    dispatch_bootstrap, expand_configured, format_configured_arguments,
+    CompletionKind, CompletionRequest, CompletionRoute, ParseVerbosity, TopLevelCommand,
+    complete_basic, complete_configured, dispatch_bootstrap, expand_configured,
+    format_completion_replacements, format_configured_arguments, route_completion,
 };
 
 fn dispatch(arguments: &[&str]) -> Result<TopLevelCommand, String> {
@@ -164,6 +165,147 @@ fn configured_inspection_has_an_explicit_bare_arity() {
     );
 }
 
+#[test]
+fn completion_protocol_has_exact_versioned_arity() {
+    let command = dispatch(&[
+        "--completions",
+        "v0",
+        "active",
+        "1",
+        "1",
+        "build",
+        "bu",
+        "ndle",
+        "tail",
+    ])
+    .expect("active completion request should dispatch");
+    let TopLevelCommand::Complete(request) = command else {
+        panic!("expected a completion request");
+    };
+    assert_eq!(request.arguments_before(), [OsString::from("build")]);
+    let active = request
+        .active_argument()
+        .expect("active mode should retain its active argument");
+    assert_eq!(active.prefix(), "bu");
+    assert_eq!(active.suffix(), "ndle");
+    assert_eq!(request.arguments_after(), [OsString::from("tail")]);
+    assert_eq!(
+        request.arguments().as_ref(),
+        [
+            OsString::from("build"),
+            OsString::from("bundle"),
+            OsString::from("tail")
+        ]
+    );
+
+    let command = dispatch(&["--completions", "v0", "absent", "0", "0"])
+        .expect("absent completion request should dispatch");
+    let TopLevelCommand::Complete(request) = command else {
+        panic!("expected an absent completion request");
+    };
+    assert!(request.active_argument().is_none());
+    assert!(request.arguments().is_empty());
+
+    assert!(dispatch(&["--completions", "v1", "absent", "0", "0"]).is_err());
+    assert!(dispatch(&["--completions", "v0", "missing", "0", "0"]).is_err());
+    assert!(dispatch(&["--completions", "v0", "absent", "00", "0"]).is_err());
+    assert!(dispatch(&["--completions", "v0", "active", "0", "0", "only-prefix"]).is_err());
+    assert!(dispatch(&["--completions", "v0", "absent", "0", "0", "extra"]).is_err());
+}
+
+#[test]
+fn completion_routing_preserves_missing_empty_and_configured_boundaries() {
+    assert!(matches!(
+        route_completion(CompletionRequest::without_active([], [])),
+        CompletionRoute::Basic(_)
+    ));
+    assert!(matches!(
+        route_completion(CompletionRequest::with_active([], "", "", [])),
+        CompletionRoute::Configured(_)
+    ));
+    assert!(matches!(
+        route_completion(CompletionRequest::with_active([], "--pa", "", [])),
+        CompletionRoute::Basic(_)
+    ));
+
+    let CompletionRoute::Configured(rebased) = route_completion(CompletionRequest::with_active(
+        [OsString::from("--parse_cli")],
+        "",
+        "",
+        [],
+    )) else {
+        panic!("a complete inspection prefix should delegate to configured completion");
+    };
+    assert!(rebased.arguments_before().is_empty());
+    assert_eq!(
+        rebased
+            .active_argument()
+            .expect("the empty configured argument should remain present")
+            .value(),
+        ""
+    );
+}
+
+#[test]
+fn basic_completion_uses_whole_argument_replacements_and_minimal_output() {
+    let completion = complete_basic(&CompletionRequest::without_active([], []));
+    let root_replacements = replacements(&completion);
+    assert!(root_replacements.contains(&"--file".to_owned()));
+    assert!(root_replacements.contains(&"--completion_script".to_owned()));
+
+    let completion = complete_basic(&CompletionRequest::with_active([], "--par", "se", []));
+    assert_eq!(replacements(&completion), ["--parse"]);
+    assert_eq!(format_completion_replacements(&completion), b"--parse\0");
+}
+
+#[cfg(unix)]
+#[test]
+fn completion_output_preserves_non_utf8_path_replacements() {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let root = std::env::temp_dir().join(format!(
+        "glam-cli-opaque-completion-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    fs::create_dir_all(&root).expect("opaque completion folder should be created");
+    let mut path_bytes = root.as_os_str().as_bytes().to_vec();
+    path_bytes.push(b'/');
+    path_bytes.extend_from_slice(b"f\xff");
+    let path = OsString::from_vec(path_bytes);
+    fs::write(Path::new(&path), "source").expect("opaque completion file should be created");
+    let prefix = root.join("f").into_os_string();
+
+    let completion = complete_basic(&CompletionRequest::with_active(
+        [OsString::from("--file")],
+        prefix,
+        "",
+        [],
+    ));
+    let mut expected = path.as_os_str().as_bytes().to_vec();
+    expected.push(0);
+    assert_eq!(format_completion_replacements(&completion), expected);
+
+    fs::remove_dir_all(root).expect("opaque completion folder should be removed");
+}
+
+#[test]
+fn completion_script_dispatch_has_exact_arity() {
+    let command = dispatch(&["--completion_script", "bash"])
+        .expect("completion script request should dispatch");
+    let TopLevelCommand::CompletionScript {
+        name,
+        cli_arguments,
+    } = command
+    else {
+        panic!("expected a completion script request");
+    };
+    assert_eq!(name, "bash");
+    assert_eq!(cli_arguments.args(), ["--completion_script", "bash"]);
+    assert!(dispatch(&["--completion_script"]).is_err());
+    assert!(dispatch(&["--completion_script", "bash", "extra"]).is_err());
+}
+
 fn configuration(source: &str) -> (Assembler, crate::Value) {
     let assembler = Assembler::new();
     let module = assembler
@@ -288,7 +430,7 @@ fn configured_completion_combines_only_furthest_viable_keywords() {
     let completion = complete_configured(
         &assembler,
         &configuration,
-        CompletionRequest::new([], "bu", "", []),
+        CompletionRequest::with_active([], "bu", "", []),
     )
     .expect("configured completion should run");
     assert_eq!(replacements(&completion), ["build", "bundle"]);
@@ -297,7 +439,7 @@ fn configured_completion_combines_only_furthest_viable_keywords() {
     let completion = complete_configured(
         &assembler,
         &configuration,
-        CompletionRequest::new([], "bu", "", [OsString::from("x")]),
+        CompletionRequest::with_active([], "bu", "", [OsString::from("x")]),
     )
     .expect("later arguments should validate otherwise local candidates");
     assert_eq!(replacements(&completion), ["build"]);
@@ -305,7 +447,7 @@ fn configured_completion_combines_only_furthest_viable_keywords() {
     let completion = complete_configured(
         &assembler,
         &configuration,
-        CompletionRequest::new([], "bu", "ld", [OsString::from("x")]),
+        CompletionRequest::with_active([], "bu", "ld", [OsString::from("x")]),
     )
     .expect("the unchanged suffix should participate in completion");
     assert_eq!(replacements(&completion), ["build"]);
@@ -319,7 +461,7 @@ fn configured_completion_derives_literals_but_not_regex_languages() {
     let completion = complete_configured(
         &assembler,
         &configuration,
-        CompletionRequest::new([], "--scr", "", []),
+        CompletionRequest::with_active([], "--scr", "", []),
     )
     .expect("literal token completion should run");
     assert_eq!(replacements(&completion), ["--script."]);
@@ -327,7 +469,7 @@ fn configured_completion_derives_literals_but_not_regex_languages() {
     let completion = complete_configured(
         &assembler,
         &configuration,
-        CompletionRequest::new([], "--script.", "", []),
+        CompletionRequest::with_active([], "--script.", "", []),
     )
     .expect("regex frontier should remain a non-enumerated expectation");
     assert!(completion.candidates().is_empty());
@@ -356,7 +498,7 @@ fn configured_completion_filters_filesystem_candidates_by_path_kind() {
     let completion = complete_configured(
         &assembler,
         &configuration,
-        CompletionRequest::new([OsString::from("open")], prefix, "", []),
+        CompletionRequest::with_active([OsString::from("open")], prefix, "", []),
     )
     .expect("filesystem completion should run");
     assert_eq!(
@@ -374,7 +516,7 @@ fn missing_configured_cli_has_no_completion_candidates() {
     let completion = complete_configured(
         &assembler,
         &configuration,
-        CompletionRequest::new([], "build", "", []),
+        CompletionRequest::with_active([], "build", "", []),
     )
     .expect("undefined conf.cli should behave like failure during completion");
     assert!(completion.candidates().is_empty());

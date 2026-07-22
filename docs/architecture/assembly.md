@@ -149,12 +149,21 @@ scalar, and end readers advance its byte cursor, and every complete nested
 result resumes the outer continuation. Regex matching is anchored at the
 current token cursor and follows `regex-lite`'s leftmost-first preference.
 
-`cli::complete_configured` runs the same outer parser with an active argument
-split into prefix and suffix. Readers at that frontier record candidates and
-expectations, then fail so sibling alternatives remain visible. Candidates at
-shallower frontiers are discarded. Complete keyword, path, and token
-candidates are replayed against the unchanged suffix and later arguments;
-command edits remain isolated throughout. Filesystem completion preserves OS
-path values, offers folders for navigation, and filters terminal entries by
-the path reader's kind. The bootstrap `--completions` protocol and basic-option
-completion remain a later layer.
+`cli::complete_configured` runs the same outer parser with an optional active
+argument split into prefix and suffix. Readers at that frontier record
+candidates and expectations, then fail so sibling alternatives remain visible.
+Candidates at shallower frontiers are discarded. Complete keyword, path, and
+token candidates are replayed against the unchanged suffix and later
+arguments; command edits remain isolated throughout. Filesystem completion
+preserves OS path values, offers folders for navigation, and filters terminal
+entries by the path reader's kind.
+
+`--completions v0` carries mode plus counted arguments before and after the
+cursor as ordinary OS arguments. `active` mode additionally carries prefix and
+suffix; `absent` preserves the distinction between no argument and an empty
+argument. Lexical routing sends bootstrap options to the Rust basic completer
+and bare commands to `conf.cli`; a complete `--parse_cli` or `--parse_cli.0`
+prefix explicitly delegates its tail. Successful output is only the complete
+replacement arguments separated by NUL. `--completion_script NAME` prefers
+`conf.completion_script.[NAME]` and otherwise offers minimal Bash and Zsh
+bindings; shell-specific quoting remains outside the completion protocol.

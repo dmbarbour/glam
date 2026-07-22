@@ -1113,6 +1113,191 @@ fn configured_cli_inspection_uses_line_or_nul_delimiters_without_execution() {
     }
 }
 
+#[test]
+fn completion_protocol_emits_only_nul_terminated_replacements() {
+    let root = glam_command()
+        .args(["--completions", "v0", "absent", "0", "0"])
+        .output()
+        .expect("root completion should run");
+    assert!(
+        root.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&root.stderr)
+    );
+    assert!(root.stderr.is_empty());
+    let candidates = root
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|candidate| !candidate.is_empty())
+        .collect::<Vec<_>>();
+    assert!(candidates.contains(&b"--file".as_slice()));
+    assert!(candidates.contains(&b"--script.".as_slice()));
+    assert!(candidates.contains(&b"--completion_script".as_slice()));
+
+    let infix = glam_command()
+        .args(["--completions", "v0", "active", "0", "0", "--par", "se"])
+        .output()
+        .expect("infix completion should run");
+    assert!(infix.status.success());
+    assert_eq!(infix.stdout, b"--parse\0");
+    assert!(infix.stderr.is_empty());
+}
+
+#[test]
+fn completion_protocol_delegates_bare_and_inspection_commands_to_conf_cli() {
+    let directory = unique_temp_dir("glam-configured-completion");
+    fs::create_dir_all(&directory).expect("configured completion directory should be created");
+    let configuration = directory.join("conf.g");
+    fs::write(
+        &configuration,
+        "language g0\nimport 'std\nobject conf.env\nconf.cli = .alt (.read.keyword \"build\" =>> .read.end =>> .write.script \"g\" \"ok\") (.read.keyword \"bundle\" =>> .read.end =>> .write.script \"g\" \"ok\")\n",
+    )
+    .expect("configured completion source should be written");
+
+    let complete = |payload: &[&str]| {
+        glam_command()
+            .env("GLAM_CONF", &configuration)
+            .args(payload)
+            .output()
+            .expect("configured completion should run")
+    };
+    let bare = complete(&["--completions", "v0", "active", "0", "0", "bu", ""]);
+    assert!(
+        bare.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
+    assert_eq!(bare.stdout, b"build\0bundle\0");
+    assert!(bare.stderr.is_empty());
+
+    let inspection = complete(&[
+        "--completions",
+        "v0",
+        "active",
+        "1",
+        "0",
+        "--parse_cli",
+        "bu",
+        "",
+    ]);
+    assert!(inspection.status.success());
+    assert_eq!(inspection.stdout, bare.stdout);
+    assert!(inspection.stderr.is_empty());
+
+    fs::remove_dir_all(directory).expect("configured completion directory should be removed");
+}
+
+#[test]
+fn completion_protocol_rejects_malformed_requests_without_loading_configuration() {
+    let output = glam_command()
+        .env("GLAM_CONF", "this-configuration-must-not-be-loaded.g")
+        .args(["--completions", "v0", "active", "0", "0", "prefix"])
+        .output()
+        .expect("malformed completion should be rejected");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("expected 2"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn completion_scripts_prefer_configuration_then_fall_back_to_bash() {
+    let builtin = glam_command()
+        .arg("--completion_script")
+        .arg("bash")
+        .output()
+        .expect("built-in Bash adapter should render");
+    assert!(
+        builtin.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&builtin.stderr)
+    );
+    assert!(String::from_utf8_lossy(&builtin.stdout).contains("--completions v0 active"));
+
+    let zsh = glam_command()
+        .arg("--completion_script")
+        .arg("zsh")
+        .output()
+        .expect("built-in Zsh adapter should render");
+    assert!(zsh.status.success());
+    assert!(String::from_utf8_lossy(&zsh.stdout).contains("#compdef glam"));
+
+    let directory = unique_temp_dir("glam-configured-completion-script");
+    fs::create_dir_all(&directory).expect("completion script directory should be created");
+    let configuration = directory.join("conf.g");
+    fs::write(
+        &configuration,
+        "language g0\nobject conf.env\nconf.completion_script = {bash:(\\context -> context.protocol ++ \" CONFIGURED ADAPTER\")}\n",
+    )
+    .expect("configured completion script source should be written");
+    let configured = glam_command()
+        .env("GLAM_CONF", &configuration)
+        .arg("--completion_script")
+        .arg("bash")
+        .output()
+        .expect("configured completion adapter should render");
+    assert!(
+        configured.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+    assert_eq!(configured.stdout, b"v0 CONFIGURED ADAPTER");
+    assert!(configured.stderr.is_empty());
+
+    let unknown = glam_command()
+        .env("GLAM_CONF", &configuration)
+        .arg("--completion_script")
+        .arg("unknown")
+        .output()
+        .expect("unknown completion adapter should be rejected");
+    assert!(!unknown.status.success());
+    assert!(unknown.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr)
+            .contains("unknown completion script binding `unknown`")
+    );
+
+    fs::remove_dir_all(directory).expect("completion script directory should be removed");
+}
+
+#[test]
+fn basic_completion_filters_source_paths() {
+    let directory = unique_temp_dir("glam-basic-path-completion");
+    fs::create_dir_all(directory.join("folder"))
+        .expect("basic completion folder should be created");
+    let source = directory.join("source.g");
+    fs::write(&source, "language g0\n").expect("basic completion source should be written");
+    let prefix = directory.join("sou");
+
+    let output = glam_command()
+        .args([
+            std::ffi::OsStr::new("--completions"),
+            std::ffi::OsStr::new("v0"),
+            std::ffi::OsStr::new("active"),
+            std::ffi::OsStr::new("1"),
+            std::ffi::OsStr::new("0"),
+            std::ffi::OsStr::new("--file"),
+            prefix.as_os_str(),
+            std::ffi::OsStr::new(""),
+        ])
+        .output()
+        .expect("source path completion should run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut expected = source.as_os_str().as_encoded_bytes().to_vec();
+    expected.push(0);
+    assert_eq!(output.stdout, expected);
+    assert!(output.stderr.is_empty());
+
+    fs::remove_dir_all(directory).expect("basic completion directory should be removed");
+}
+
 fn hello_sample_files() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/assembly");
     let mut files = fs::read_dir(&root)

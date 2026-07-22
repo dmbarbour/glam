@@ -6,13 +6,12 @@ use crate::Diagnostic;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionRequest {
     arguments_before: Arc<[OsString]>,
-    active_prefix: OsString,
-    active_suffix: OsString,
+    active_argument: Option<ActiveArgument>,
     arguments_after: Arc<[OsString]>,
 }
 
 impl CompletionRequest {
-    pub fn new<B, A>(
+    pub fn with_active<B, A>(
         arguments_before: B,
         active_prefix: impl Into<OsString>,
         active_suffix: impl Into<OsString>,
@@ -24,8 +23,22 @@ impl CompletionRequest {
     {
         Self {
             arguments_before: arguments_before.into_iter().collect(),
-            active_prefix: active_prefix.into(),
-            active_suffix: active_suffix.into(),
+            active_argument: Some(ActiveArgument {
+                prefix: active_prefix.into(),
+                suffix: active_suffix.into(),
+            }),
+            arguments_after: arguments_after.into_iter().collect(),
+        }
+    }
+
+    pub fn without_active<B, A>(arguments_before: B, arguments_after: A) -> Self
+    where
+        B: IntoIterator<Item = OsString>,
+        A: IntoIterator<Item = OsString>,
+    {
+        Self {
+            arguments_before: arguments_before.into_iter().collect(),
+            active_argument: None,
             arguments_after: arguments_after.into_iter().collect(),
         }
     }
@@ -34,32 +47,48 @@ impl CompletionRequest {
         &self.arguments_before
     }
 
-    pub fn active_prefix(&self) -> &OsStr {
-        &self.active_prefix
-    }
-
-    pub fn active_suffix(&self) -> &OsStr {
-        &self.active_suffix
+    pub fn active_argument(&self) -> Option<&ActiveArgument> {
+        self.active_argument.as_ref()
     }
 
     pub fn arguments_after(&self) -> &[OsString] {
         &self.arguments_after
     }
 
-    pub(super) fn active_argument(&self) -> OsString {
-        let mut active = self.active_prefix.clone();
-        active.push(&self.active_suffix);
-        active
+    pub fn arguments(&self) -> Arc<[OsString]> {
+        let mut arguments = Vec::with_capacity(
+            self.arguments_before.len()
+                + usize::from(self.active_argument.is_some())
+                + self.arguments_after.len(),
+        );
+        arguments.extend(self.arguments_before.iter().cloned());
+        if let Some(active) = &self.active_argument {
+            arguments.push(active.value());
+        }
+        arguments.extend(self.arguments_after.iter().cloned());
+        arguments.into()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveArgument {
+    prefix: OsString,
+    suffix: OsString,
+}
+
+impl ActiveArgument {
+    pub fn prefix(&self) -> &OsStr {
+        &self.prefix
     }
 
-    pub(super) fn flattened(&self) -> (Arc<[OsString]>, usize) {
-        let active = self.arguments_before.len();
-        let mut arguments =
-            Vec::with_capacity(self.arguments_before.len() + 1 + self.arguments_after.len());
-        arguments.extend(self.arguments_before.iter().cloned());
-        arguments.push(self.active_argument());
-        arguments.extend(self.arguments_after.iter().cloned());
-        (arguments.into(), active)
+    pub fn suffix(&self) -> &OsStr {
+        &self.suffix
+    }
+
+    pub fn value(&self) -> OsString {
+        let mut value = self.prefix.clone();
+        value.push(&self.suffix);
+        value
     }
 }
 
@@ -80,6 +109,16 @@ pub struct CompletionCandidate {
 }
 
 impl CompletionCandidate {
+    pub(super) fn new(replacement: impl Into<OsString>, kind: CompletionKind) -> Self {
+        let replacement = replacement.into();
+        let display = replacement.to_string_lossy().into_owned();
+        Self {
+            replacement,
+            display,
+            kind,
+        }
+    }
+
     pub fn replacement(&self) -> &OsStr {
         &self.replacement
     }
@@ -183,14 +222,9 @@ impl CompletionEvidence {
         kind: CompletionKind,
         complete_reader: bool,
     ) -> Self {
-        let display = replacement.to_string_lossy().into_owned();
         Self {
             frontier,
-            candidate: CompletionCandidate {
-                replacement,
-                display,
-                kind,
-            },
+            candidate: CompletionCandidate::new(replacement, kind),
             complete_reader,
         }
     }

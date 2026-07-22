@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::ModuleInput;
 
+use super::CompletionRequest;
 use super::model::{
     CliArguments, CliError, CommandEdit, CommandPlanBuilder, ParseVerbosity, TopLevelCommand,
 };
@@ -23,6 +24,8 @@ pub fn dispatch_bootstrap(
         Some("--parse") => parse_inspection(&user_args[1..]),
         Some("--parse_cli") => parse_configured_inspection(&user_args[1..], false),
         Some("--parse_cli.0") => parse_configured_inspection(&user_args[1..], true),
+        Some("--completions") => parse_completion_request(&user_args[1..]),
+        Some("--completion_script") => parse_completion_script(&user_args[1..], cli_arguments),
         Some("--check_manifest") => parse_manifest_check(&user_args[1..], false),
         Some("--quiet")
             if user_args
@@ -51,6 +54,103 @@ pub fn dispatch_bootstrap(
         ))),
         None => Ok(TopLevelCommand::ConfiguredCli(cli_arguments)),
     }
+}
+
+fn parse_completion_request(args: &[OsString]) -> Result<TopLevelCommand, CliError> {
+    let Some(version) = args.first() else {
+        return Err(CliError::new("`--completions` needs protocol version `v0`"));
+    };
+    if !os_eq(version, "v0") {
+        return Err(CliError::new(format!(
+            "unsupported completion protocol `{}`; expected `v0`",
+            version.to_string_lossy()
+        )));
+    }
+    let Some(mode) = args.get(1) else {
+        return Err(CliError::new(
+            "`--completions v0` needs mode `active` or `absent`",
+        ));
+    };
+    let active = if os_eq(mode, "active") {
+        true
+    } else if os_eq(mode, "absent") {
+        false
+    } else {
+        return Err(CliError::new(format!(
+            "invalid completion mode `{}`; expected `active` or `absent`",
+            mode.to_string_lossy()
+        )));
+    };
+    let before_count = args
+        .get(2)
+        .ok_or_else(|| CliError::new("completion request is missing BEFORE_COUNT"))
+        .and_then(|count| parse_completion_count(count, "BEFORE_COUNT"))?;
+    let after_count = args
+        .get(3)
+        .ok_or_else(|| CliError::new("completion request is missing AFTER_COUNT"))
+        .and_then(|count| parse_completion_count(count, "AFTER_COUNT"))?;
+    let payload = args.get(4..).unwrap_or_default();
+    let active_fields = if active { 2 } else { 0 };
+    let expected = before_count
+        .checked_add(active_fields)
+        .and_then(|count| count.checked_add(after_count))
+        .ok_or_else(|| CliError::new("completion request payload size is unsupported"))?;
+    if payload.len() != expected {
+        return Err(CliError::new(format!(
+            "completion request declares {before_count} argument(s) before and {after_count} after but supplies {} payload argument(s); expected {expected}",
+            payload.len()
+        )));
+    }
+    let before = payload[..before_count].iter().cloned();
+    let after_start = before_count + active_fields;
+    let after = payload[after_start..].iter().cloned();
+    let request = if active {
+        CompletionRequest::with_active(
+            before,
+            payload[before_count].clone(),
+            payload[before_count + 1].clone(),
+            after,
+        )
+    } else {
+        CompletionRequest::without_active(before, after)
+    };
+    Ok(TopLevelCommand::Complete(request))
+}
+
+fn parse_completion_count(value: &OsStr, label: &str) -> Result<usize, CliError> {
+    let Some(value) = value.to_str() else {
+        return Err(CliError::new(format!(
+            "completion {label} must be a canonical non-negative integer"
+        )));
+    };
+    if value.is_empty()
+        || value.len() > 1 && value.starts_with('0')
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(CliError::new(format!(
+            "completion {label} must be a canonical non-negative integer, got `{value}`"
+        )));
+    }
+    value.parse().map_err(|_| {
+        CliError::new(format!(
+            "completion {label} is too large for this implementation"
+        ))
+    })
+}
+
+fn parse_completion_script(
+    args: &[OsString],
+    cli_arguments: CliArguments,
+) -> Result<TopLevelCommand, CliError> {
+    let [name] = args else {
+        return Err(CliError::new(
+            "`--completion_script` accepts exactly one binding name",
+        ));
+    };
+    Ok(TopLevelCommand::CompletionScript {
+        name: name.clone(),
+        cli_arguments,
+    })
 }
 
 fn parse_configured_inspection(
@@ -259,15 +359,15 @@ fn option(argument: &OsStr) -> Option<&str> {
         .flatten()
 }
 
-fn is_option_like(argument: &OsStr) -> bool {
+pub(super) fn is_option_like(argument: &OsStr) -> bool {
     argument.as_encoded_bytes().first() == Some(&b'-')
 }
 
-fn os_eq(argument: &OsStr, expected: &str) -> bool {
+pub(super) fn os_eq(argument: &OsStr, expected: &str) -> bool {
     argument.as_encoded_bytes() == expected.as_bytes()
 }
 
-fn script_extension(option: &str) -> Option<&str> {
+pub(super) fn script_extension(option: &str) -> Option<&str> {
     option
         .strip_prefix("--script.")
         .or_else(|| option.strip_prefix("-s."))

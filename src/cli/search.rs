@@ -34,15 +34,19 @@ pub(super) fn run_cli_completion(
     effect: &Value,
     request: CompletionRequest,
 ) -> Result<CliCompletion, CliError> {
-    let (arguments, active) = request.flattened();
+    let Some(active_argument) = request.active_argument() else {
+        return Ok(CliCompletion::new(Vec::new(), Vec::new(), Vec::new()));
+    };
+    let active = request.arguments_before().len();
+    let arguments = request.arguments();
     let branches = run_search(
         assembler,
         effect,
         CliInvocation::for_completion(
             arguments.clone(),
             active,
-            request.active_prefix().to_owned(),
-            request.active_suffix().to_owned(),
+            active_argument.prefix().to_owned(),
+            active_argument.suffix().to_owned(),
         ),
     )?;
     let furthest = branches

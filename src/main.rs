@@ -9,8 +9,10 @@ use std::thread;
 
 use bytes::Bytes;
 use glam::cli::{
-    CliArguments, CommandPlan, CommandPlanParts, HELP_TEXT, TopLevelCommand, dispatch_bootstrap,
-    expand_configured, format_configured_arguments, format_parse_summary, parse_worker_count,
+    CliArguments, CommandPlan, CommandPlanParts, CompletionRoute, HELP_TEXT, TopLevelCommand,
+    builtin_completion_script, complete_basic, complete_configured, dispatch_bootstrap,
+    expand_configured, format_completion_replacements, format_configured_arguments,
+    format_parse_summary, parse_worker_count, route_completion,
 };
 use glam::reflection::{
     CommitResult, ConflictAnalysisStrategy, EffectRequestSpec, EffectRun, ExactConflictAnalysis,
@@ -53,7 +55,137 @@ fn main() -> ExitCode {
             arguments,
             nul_terminated,
         } => configured_cli(arguments, Some(nul_terminated)),
+        TopLevelCommand::Complete(request) => completion_command(request),
+        TopLevelCommand::CompletionScript {
+            name,
+            cli_arguments,
+        } => completion_script_command(&name, cli_arguments),
     }
+}
+
+fn completion_command(request: glam::cli::CompletionRequest) -> ExitCode {
+    match route_completion(request) {
+        CompletionRoute::Basic(request) => write_completion(&complete_basic(&request)).map_or_else(
+            |error| {
+                eprintln!("error: {error}");
+                ExitCode::from(1)
+            },
+            |()| ExitCode::SUCCESS,
+        ),
+        CompletionRoute::Configured(request) => configured_completion(request),
+    }
+}
+
+fn configured_completion(request: glam::cli::CompletionRequest) -> ExitCode {
+    let cli_arguments = CliArguments::from_args(request.arguments().iter().cloned());
+    let prepared = match prepare_assembly(cli_arguments, None, None) {
+        Ok(prepared) => prepared,
+        Err(exit) => return exit,
+    };
+    let completion =
+        match complete_configured(&prepared.assembler, &prepared.configuration.value, request) {
+            Ok(completion) => completion,
+            Err(error) => {
+                for diagnostic in error.diagnostics() {
+                    prepared
+                        .assembler
+                        .diagnostic_bus()
+                        .publish(diagnostic.clone());
+                }
+                prepared
+                    .assembler
+                    .diagnostic_bus()
+                    .publish(Diagnostic::new(Severity::Error, error.to_string()));
+                return finish_without_logger(prepared, None, true);
+            }
+        };
+    for diagnostic in completion.diagnostics() {
+        prepared
+            .assembler
+            .diagnostic_bus()
+            .publish(diagnostic.clone());
+    }
+    let failed = write_completion(&completion).is_err_and(|error| {
+        prepared
+            .assembler
+            .diagnostic_bus()
+            .publish(Diagnostic::new(Severity::Error, error));
+        true
+    });
+    finish_without_logger(prepared, None, failed)
+}
+
+fn write_completion(completion: &glam::cli::CliCompletion) -> Result<(), String> {
+    io::stdout()
+        .write_all(&format_completion_replacements(completion))
+        .map_err(|error| format!("could not write completions to stdout: {error}"))
+}
+
+fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments) -> ExitCode {
+    let Some(name) = name
+        .to_str()
+        .filter(|name| !name.is_empty() && !name.contains('.'))
+    else {
+        eprintln!("error: completion script binding name must be nonempty UTF-8 without `.`");
+        return ExitCode::from(2);
+    };
+    let initial_environment = Some((
+        argument_values(cli_arguments.args()),
+        Value::list(std::iter::empty()),
+    ));
+    let prepared = match prepare_assembly(cli_arguments, None, initial_environment) {
+        Ok(prepared) => prepared,
+        Err(exit) => return exit,
+    };
+    let path = format!("conf.completion_script.{name}");
+    let configured = prepared
+        .assembler
+        .get(&prepared.configuration.value, &path)
+        .ok()
+        .filter(|value| !value.is_undefined());
+    let output: Result<Vec<u8>, String> = match configured {
+        Some(function) => configured_completion_script(&prepared.assembler, &function),
+        None => builtin_completion_script(name)
+            .map(|script| script.as_bytes().to_vec())
+            .ok_or_else(|| format!("unknown completion script binding `{name}`")),
+    };
+    let failed = match output {
+        Ok(output) => io::stdout().write_all(&output).is_err_and(|error| {
+            prepared.assembler.diagnostic_bus().publish(Diagnostic::new(
+                Severity::Error,
+                format!("could not write completion script to stdout: {error}"),
+            ));
+            true
+        }),
+        Err(error) => {
+            prepared
+                .assembler
+                .diagnostic_bus()
+                .publish(Diagnostic::new(Severity::Error, error));
+            true
+        }
+    };
+    finish_without_logger(prepared, None, failed)
+}
+
+fn configured_completion_script(
+    assembler: &Assembler,
+    function: &Value,
+) -> Result<Vec<u8>, String> {
+    let executable = env::args_os().next().unwrap_or_else(|| "glam".into());
+    let context = Value::record([
+        (
+            "executable",
+            Value::binary(executable.as_encoded_bytes().to_vec()),
+        ),
+        ("protocol", Value::text("v0")),
+        ("request", Value::text("--completions")),
+    ]);
+    assembler
+        .apply(function, [context])
+        .and_then(|value| assembler.to_binary(&value))
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| error.to_string())
 }
 
 fn check_manifest_command(manifest: &Path, quiet: bool) -> ExitCode {

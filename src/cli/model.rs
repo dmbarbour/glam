@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use crate::{Diagnostic, ModuleInput};
 
+use super::completion::CompletionRequest;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
     message: String,
@@ -43,6 +45,12 @@ pub struct CliArguments {
 }
 
 impl CliArguments {
+    pub fn from_args(arguments: impl IntoIterator<Item = OsString>) -> Self {
+        Self {
+            args: arguments.into_iter().collect(),
+        }
+    }
+
     pub(super) fn new(args: Arc<[OsString]>) -> Self {
         Self { args }
     }
@@ -80,6 +88,11 @@ pub enum TopLevelCommand {
     InspectConfiguredCli {
         arguments: CliArguments,
         nul_terminated: bool,
+    },
+    Complete(CompletionRequest),
+    CompletionScript {
+        name: OsString,
+        cli_arguments: CliArguments,
     },
 }
 

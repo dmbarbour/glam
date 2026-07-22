@@ -17,10 +17,11 @@ not define future language semantics or collect subsystem invariants.
 | --- | --- |
 | `main.rs` | Executes typed top-level commands, chooses configuration/assembly roots, owns logger policy, process I/O, and exit status |
 | `cli.rs`, `cli/model.rs` | Public CLI facade plus validated bootstrap/configured command and argument models |
-| `cli/bootstrap.rs`, `cli/output.rs` | OS-string bootstrap dispatch, standalone-option validation, help text, and inspection formatting |
+| `cli/bootstrap.rs`, `cli/output.rs` | OS-string bootstrap dispatch, standalone-option validation, help text, and inspection/completion formatting |
 | `cli/configured.rs`, `cli/search.rs` | `conf.cli` lookup, isolated all-results execution, branch validation, and semantic-plan selection |
 | `cli/effects.rs`, `cli/host.rs` | Serial CLI reader/writer effect specialization and immutable invocation host |
-| `cli/completion.rs` | Shell-neutral configured-completion requests, candidates, expectations, and argument/token frontiers |
+| `cli/completion.rs`, `cli/basic.rs` | Optional-cursor completion requests, candidates/frontiers, lexical routing, and bootstrap-option completion |
+| `cli/path.rs`, `cli/adapters.rs` | Shared filesystem completion plus replaceable minimal Bash/Zsh bindings over the shell-neutral protocol |
 | `cli/token.rs`, `cli/token/` | Restricted nested token-effect search plus literal, Unicode-scalar, end, and capture-free regex readers |
 | `source.rs` | Immutable source artifacts, identities and digests, relative resolvers, host compatibility, and tracked local files |
 | `lib.rs`, `api.rs` | Embedding facade: staged assembler construction, opaque values, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
@@ -74,11 +75,14 @@ local file tracking, and closes configured logging. See the
 behavior.
 
 The same configured interpreter has a non-committing completion mode. It
-preserves the active argument's prefix and suffix plus later arguments, retains
-only evidence at the furthest argument/token frontier, and validates complete
-candidates by replaying ordinary isolated parsing. `.read.token` delegates one
-UTF-8 argument to a second restricted all-results effect machine; its ordinary
-result resumes the enclosing CLI continuation once per token alternative.
+preserves an optional active argument's prefix and suffix plus later arguments,
+retains only evidence at the furthest argument/token frontier, and validates
+complete candidates by replaying ordinary isolated parsing. Bootstrap and
+configured completion share that request/result model. `--completions v0`
+accepts a count-framed OS-argument request and emits only NUL-terminated whole
+argument replacements. `.read.token` delegates one UTF-8 argument to a second
+restricted all-results effect machine; its ordinary result resumes the
+enclosing CLI continuation once per token alternative.
 
 ## Front-End Dataflow
 

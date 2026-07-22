@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::api::{ModuleInput, Value};
@@ -12,6 +12,7 @@ use crate::reflection::{
 use super::completion::{CompletionEvidence, CompletionKind, ExpectationEvidence, Frontier};
 use super::host::{CliHost, CliJournal};
 use super::model::CommandEdit;
+use super::path::{self, PathAccess, PathKind};
 use super::token;
 
 #[derive(Clone, Copy)]
@@ -363,19 +364,6 @@ fn read_end(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PathKind {
-    File,
-    Folder,
-    Any,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PathAccess {
-    Read,
-    Write,
-}
-
 struct PathHandle {
     invocation: u64,
     argument: usize,
@@ -406,7 +394,7 @@ fn read_path(
         .ok_or_else(|| TaskError::new("CLI reader escaped its isolated search transaction"))?;
     let (snapshot, journal) = transaction.parts();
     let argument_index = journal.cursor;
-    let expectation = path_expectation(kind, access);
+    let expectation = path::expectation(kind, access);
     if let Some(completion) = snapshot
         .invocation
         .completion
@@ -419,7 +407,7 @@ fn read_path(
         };
         record_expectation(journal, argument_index, frontier.token_offset, expectation);
         for (replacement, candidate_kind, complete_reader) in
-            path_completions(completion, kind, access)
+            path::completions(&completion.prefix, &completion.suffix, kind, access)
         {
             journal.candidates.push(CompletionEvidence::new(
                 frontier,
@@ -435,7 +423,7 @@ fn read_path(
         return Ok(RequestResult::Fail);
     };
     let path = PathBuf::from(argument);
-    if !path_matches(&path, kind, access) {
+    if !path::matches(&path, kind, access) {
         record_expectation(journal, argument_index, 0, expectation);
         return Ok(RequestResult::Fail);
     }
@@ -448,133 +436,6 @@ fn read_path(
             access,
         })),
     ))))
-}
-
-fn path_matches(path: &Path, kind: PathKind, access: PathAccess) -> bool {
-    match (std::fs::metadata(path), access) {
-        (Ok(metadata), access) => {
-            let kind_matches = match kind {
-                PathKind::File => metadata.is_file(),
-                PathKind::Folder => metadata.is_dir(),
-                PathKind::Any => metadata.is_file() || metadata.is_dir(),
-            };
-            kind_matches && path_access_appears_usable(path, &metadata, access)
-        }
-        (Err(_), PathAccess::Read) => false,
-        (Err(_), PathAccess::Write) => {
-            let parent = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            std::fs::metadata(parent)
-                .is_ok_and(|metadata| metadata.is_dir() && !metadata.permissions().readonly())
-        }
-    }
-}
-
-fn path_access_appears_usable(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-    access: PathAccess,
-) -> bool {
-    match (metadata.is_file(), access) {
-        (true, PathAccess::Read) => std::fs::File::open(path).is_ok(),
-        (true, PathAccess::Write) => {
-            !metadata.permissions().readonly()
-                && std::fs::OpenOptions::new().write(true).open(path).is_ok()
-        }
-        (false, PathAccess::Read) => std::fs::read_dir(path).is_ok(),
-        (false, PathAccess::Write) => !metadata.permissions().readonly(),
-    }
-}
-
-fn path_expectation(kind: PathKind, access: PathAccess) -> &'static str {
-    match (kind, access) {
-        (PathKind::File, PathAccess::Read) => "readable file path",
-        (PathKind::Folder, PathAccess::Read) => "readable folder path",
-        (PathKind::Any, PathAccess::Read) => "readable path",
-        (PathKind::File, PathAccess::Write) => "writable file path",
-        (PathKind::Folder, PathAccess::Write) => "writable folder path",
-        (PathKind::Any, PathAccess::Write) => "writable path",
-    }
-}
-
-fn path_completions(
-    completion: &super::host::CompletionPoint,
-    kind: PathKind,
-    access: PathAccess,
-) -> Vec<(std::ffi::OsString, CompletionKind, bool)> {
-    let prefix_path = Path::new(&completion.prefix);
-    let ends_with_separator = completion
-        .prefix
-        .as_encoded_bytes()
-        .ends_with(std::path::MAIN_SEPARATOR_STR.as_bytes());
-    let (folder, name_prefix, explicit_parent) = if ends_with_separator {
-        (prefix_path, std::ffi::OsStr::new(""), Some(prefix_path))
-    } else {
-        (
-            prefix_path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new(".")),
-            prefix_path.file_name().unwrap_or_default(),
-            prefix_path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty()),
-        )
-    };
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return Vec::new();
-    };
-    let mut candidates = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if !name
-            .as_encoded_bytes()
-            .starts_with(name_prefix.as_encoded_bytes())
-        {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        if !path_access_appears_usable(&entry.path(), &metadata, access) {
-            continue;
-        }
-        let is_folder = metadata.is_dir();
-        if !is_folder && !matches!(kind, PathKind::File | PathKind::Any)
-            || !is_folder && !metadata.is_file()
-        {
-            continue;
-        }
-        let mut replacement = explicit_parent
-            .map(|parent| parent.join(&name).into_os_string())
-            .unwrap_or_else(|| name.clone());
-        if is_folder {
-            replacement.push(std::path::MAIN_SEPARATOR_STR);
-        }
-        if !replacement
-            .as_encoded_bytes()
-            .ends_with(completion.suffix.as_encoded_bytes())
-        {
-            continue;
-        }
-        let complete_reader = match kind {
-            PathKind::File => !is_folder,
-            PathKind::Folder => is_folder,
-            PathKind::Any => true,
-        };
-        let candidate_kind = if is_folder {
-            CompletionKind::Folder
-        } else if kind == PathKind::Any {
-            CompletionKind::Path
-        } else {
-            CompletionKind::File
-        };
-        candidates.push((replacement, candidate_kind, complete_reader));
-    }
-    candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    candidates
 }
 
 enum PathWriter {
