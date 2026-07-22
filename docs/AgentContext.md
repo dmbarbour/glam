@@ -186,3 +186,7 @@ their detailed scheduling and representation contracts.
   canonical name `name` for this check; repeated `_` binders remain valid
   because they cannot be referenced. Compiler-generated bindings are not
   source locals.
+- Layout `do` is front-end sugar and must disappear during g-syntax
+  resolution. A bare intermediate statement reuses `=>>` and therefore
+  requires unit; the final expression is the continuation itself and is not
+  implicitly wrapped in `.r`.

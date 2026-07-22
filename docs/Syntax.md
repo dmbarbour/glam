@@ -164,7 +164,37 @@ This is a compiler feature: it does not implicitly extend to other languages or 
 
 ## Effects
 
-We'll adopt Haskell's do notation. For aesthetic reasons, we'll support both `Pattern <- op` and `op -> Pattern`. The latter is a lot more convenient for vertical columns of assembly mnemonics. We support `Pattern = Expr` (no `let`). Pattern matching either captures locals or evaluates to `.fail`. 
+The target design adopts Haskell's do notation. For aesthetic reasons, it
+supports both `Pattern <- op` and `op -> Pattern`; the latter is convenient for
+vertical columns of assembly mnemonics. `Pattern = Expr` is the pure guard form
+and does not use `let`. General pattern matching either captures locals or
+evaluates to `.fail`.
+
+The current Rust bootstrap implements the name-only, non-recursive subset as a
+newline-delimited layout block:
+
+        my_effect = do
+            .read 'left -> left
+            right <- .read 'right
+            unit_op
+            total = left + right
+            .write total
+            .r total
+
+`Name <- Operation` and `Operation -> Name` are equivalent monadic binds.
+`Name = Value` is currently an irrefutable lazy binding, optimized to ordinary
+lambda application. `_name` suppresses its unused-local warning and
+`Operation -> _` explicitly discards any result. A producing expression is
+resolved before its new name enters scope, and active source locals cannot be
+shadowed.
+
+A non-final bare operation uses the existing `=>>` behavior, including its
+requirement that the discarded result be unit. The final statement should
+express an effect and is not implicitly wrapped with `.r`. The current layout
+form must be non-empty and occupy the trailing position of its containing 
+definition, lambda body, or enclosing do statement; in an application it can
+therefore only be the final argument. General patterns, `abstract` recursive 
+declarations, and braced/semicolon do blocks remain unimplemented.
 
 Lightweight effects are supported: we desugar `.name` to `eff:(\api -> api.name)`, and we support application `(eff:f) x = eff:(\api -> f api x)`. This enables us to work with APIs concisely without redefining things:
 
@@ -185,6 +215,9 @@ Use of fixpoint within do notation is not implicit. It's problematic for it to b
             ... at this point foo is no longer abstract ...
 
 The compiler will leverage `.fix` to capture the name. Haskell already does this with `mdo`, so we can reference that implementation.
+
+This subsection describes target semantics; the current Rust bootstrap does
+not yet accept `abstract` inside a do block.
 
 ### Applicatives
 
@@ -555,9 +588,10 @@ or `net_arity` does not itself demand the net.
 `import 'std`. The construction program receives `.bind`, `.copy`, `.data`,
 and `.wire` plus the standard task-local effects. Construction requires exactly
 one successful branch; use `.cut` when search could otherwise return several.
-The current bootstrap can express these programs with `>>=` and `=>>`; the
-`do` form shown in the *Design* doc remains future syntax. Eventually, we may
-also want a macro DSL or user-defined syntax for direct expression of nets.
+The current bootstrap can express construction programs either explicitly with
+`>>=` and `=>>` or with the implemented name-only layout `do` form described
+above. Eventually, we may also want a macro DSL or user-defined syntax for
+direct expression of nets.
 
 ## Errors
 

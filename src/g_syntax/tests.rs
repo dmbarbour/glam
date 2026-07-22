@@ -3242,7 +3242,9 @@ fn constructs_and_observes_an_interaction_net_from_source_effects() {
         parse(concat!(
             "language g0\n",
             "import 'std\n",
-            "answer_net = interaction_net (.data \"Hello, World!\" >>= (\\ports -> .r (list.head ports)))\n",
+            "answer_net = interaction_net do\n",
+            "  .data \"Hello, World!\" -> ports\n",
+            "  .r (list.head ports)\n",
             "asm.result = net_arity 0 answer_net\n",
         )),
         &context,

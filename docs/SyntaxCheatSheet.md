@@ -219,11 +219,23 @@ f x                 # application; ad hoc polymorphism:
 .movl 'eax 42       # applied effect: eff:(\api -> api.movl 'eax 42)
 
 my_proc = do
-    .read 'port -> x        # BOTH directions supported:
-    y <- .read 'port        #   op -> Pattern  and  Pattern <- op
-    z = x + y               # pure bind, no 'let'; pattern may .fail
-    .movl 'eax z
-    .r z                    # return result
+    .read 'port -> x        # BOTH name-bind directions are supported:
+    y <- .read 'port        #   op -> Name  and  Name <- op
+    z = x + y               # lazy pure name binding, no 'let'
+    .movl 'eax z            # bare intermediate op must return unit
+    .r z                    # final expression is continuation effect
+
+# Current bootstrap rules:
+# - `do` introduces a non-empty newline-delimited layout block.
+# - A binding scopes only over later statements; its producer is outside it.
+# - `_name` suppresses its unused warning; `op -> _` discards any result.
+# - A bare intermediate op uses `=>>` semantics and therefore requires unit.
+# - The final statement must express an effect, not a returned value (though
+#   it may express an effect to return a value)
+# - The layout block must be the trailing part of its containing expression;
+#   in an application it can therefore only be the final argument.
+# - Patterns, recursive `abstract` statements, and braced/semicolon blocks are
+#   not implemented yet.
 
 op1 >>= k           # bind        k1 >=> k2   # Kleisli
 op1 =>> op2         # sequence, dropping unit result
@@ -235,11 +247,8 @@ op1 !> op2 !> .r f          # right-assoc; always run left-to-right
 # mx !> mf = mx >>= (\x -> mf >>= (\f -> .r (f x)))
 # Opposing directions require parentheses.
 
-# Recursive do: forward-declare with abstract (compiler uses .fix)
-do
-    abstract loop_top
-    .jmp loop_top           # wire it up, don't observe it
-    .label -> loop_top      # now defined
+# Target design reserves explicit `abstract` statements for recursive do;
+# ordinary do blocks never acquire an implicit fixpoint.
 ```
 
 ## Conditionals & Patterns

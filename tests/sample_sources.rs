@@ -25,10 +25,6 @@ fn hello_samples_parse_without_errors() {
 
 fn assert_samples_parse_without_errors(relative_dir: &str) {
     for path in sample_files(relative_dir) {
-        if is_aspirational_syntax_sample(&path) {
-            continue;
-        }
-
         let bytes = fs::read(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
         let parsed = inspect_g_source(&bytes);
@@ -44,13 +40,6 @@ fn assert_samples_parse_without_errors(relative_dir: &str) {
             path.display()
         );
     }
-}
-
-fn is_aspirational_syntax_sample(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some("do_block.g")
-    )
 }
 
 fn sample_files(relative_dir: &str) -> Vec<PathBuf> {
