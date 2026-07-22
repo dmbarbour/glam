@@ -97,8 +97,9 @@ Dict as self with           # object-style scope: _x prior, ^a escapes to host
 xs ++ ys            # append (no cons operator; lists are finger-tree ropes)
 [x] ++ xs           # "cons" via append; also valid in patterns
 
-(a,b)               # tuple: sugar for tuple:[a,b]
-tuple:[a]           # singleton/empty tuples need explicit form
+(,)                 # empty tuple: tuple:[]
+(a,)   (,a)         # singleton tuple: tuple:[a]
+(a,b)   (,a,b,)     # tuple; boundary commas are optional
 
 "inline text"       # raw — NO escape characters, ever
 """
@@ -283,7 +284,7 @@ tag:P    :tag    'name    [KeyA,KeyB]:P    (PathExpr):P
 []   [a,b,c]
 [x]++xs   xs++[x]   [x0]++mid++[xN]     # ONE variable segment max
 "foo"    "foo"++rest                    # texts are lists
-(P1,P2)             # tuple
+(,)   (P,)   (P1,P2) # tuple patterns
 42   _1.23   1/6    # exact constants
 (View -> P)         # view pattern — MUST be parenthesized; view runs first
 (P <- View)

@@ -568,19 +568,25 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
                 left: None,
                 right: None,
             });
-        let tuple_tail = just(',').padded().ignore_then(
+        let tuple_separator = just(',').padded();
+        let tuple_items_after_comma = || {
             expr.clone()
                 .padded()
-                .separated_by(just(',').padded())
-                .at_least(1)
+                .separated_by(tuple_separator)
                 .allow_trailing()
-                .collect::<Vec<_>>(),
-        );
-        let parenthesized = expr
+                .collect::<Vec<_>>()
+        };
+        let leading_tuple = tuple_separator
+            .ignore_then(tuple_items_after_comma())
+            .map(SyntaxExpr::Tuple);
+        let grouped_or_trailing_tuple = expr
             .clone()
             .padded()
-            .then(tuple_tail.or_not())
-            .delimited_by(just('('), just(')'))
+            .then(
+                tuple_separator
+                    .ignore_then(tuple_items_after_comma())
+                    .or_not(),
+            )
             .map(|(first, tail)| match tail {
                 Some(tail) => {
                     let mut items = Vec::with_capacity(tail.len() + 1);
@@ -590,6 +596,8 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
                 }
                 None => first,
             });
+        let parenthesized =
+            choice((leading_tuple, grouped_or_trailing_tuple)).delimited_by(just('('), just(')'));
         let lambda = just('\\')
             .padded()
             .ignore_then(

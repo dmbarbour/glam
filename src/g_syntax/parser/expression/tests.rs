@@ -230,12 +230,40 @@ fn parses_tuple_expressions_without_changing_grouping_or_unit() {
             SyntaxExpr::Name("second".to_owned()),
         ]))
     );
+    assert_eq!(parse_expr("(,)"), Some(SyntaxExpr::Tuple(vec![])));
+    assert_eq!(
+        parse_expr("(singleton,)"),
+        Some(SyntaxExpr::Tuple(vec![SyntaxExpr::Name(
+            "singleton".to_owned()
+        )]))
+    );
+    assert_eq!(
+        parse_expr("(,singleton)"),
+        Some(SyntaxExpr::Tuple(vec![SyntaxExpr::Name(
+            "singleton".to_owned()
+        )]))
+    );
+    assert_eq!(
+        parse_expr("(,singleton,)"),
+        Some(SyntaxExpr::Tuple(vec![SyntaxExpr::Name(
+            "singleton".to_owned()
+        )]))
+    );
+    assert_eq!(
+        parse_expr("(\n, first\n, second\n,)"),
+        Some(SyntaxExpr::Tuple(vec![
+            SyntaxExpr::Name("first".to_owned()),
+            SyntaxExpr::Name("second".to_owned()),
+        ]))
+    );
     assert_eq!(
         parse_expr("(grouped)"),
         Some(SyntaxExpr::Name("grouped".to_owned()))
     );
     assert_eq!(parse_expr("()"), Some(SyntaxExpr::Unit));
-    assert_eq!(parse_expr("(singleton,)"), None);
+    assert_eq!(parse_expr("(,,)"), None);
+    assert_eq!(parse_expr("(first,,second)"), None);
+    assert_eq!(parse_expr("(,,first)"), None);
 }
 
 #[test]

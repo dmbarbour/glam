@@ -452,10 +452,28 @@ We can introduce a few term annotations to manage representations, e.g. flatteni
 
 ## Tuples
 
+        (,)         tuple:[]
+        (a,)        tuple:[a]
+        (,a)        tuple:[a]
         (a,b)       tuple:[a,b]
+        (,a,b,)     tuple:[a,b]
         (x,y,z)     tuple:[x,y,z]
 
-A tuple is essentially list with different connotations. Lists tend to be variable-size but homogeneous. Tuples tend to be fixed-size but non-homogeneous. We append lists, but we tend to simply construct or match on tuples inline. There is no dedicated syntax for empty or singleton tuples, but users are always free to use the `tuple:[a]` syntax.
+A comma inside parentheses distinguishes a tuple from unit or grouping: `()` is
+unit and `(a)` is simply `a`, while `(,)` is an empty tuple and `(a,)` is a
+singleton tuple. Like lists and dictionaries, tuples accept one leading and one
+trailing comma for consistent multiline editing:
+
+        value = (
+          , first
+          , second
+          )
+
+Missing internal elements remain invalid, so `(a,,b)` is not a tuple. Commas
+are literal separators rather than Haskell-style tuple-section operators; write
+an explicit lambda such as `\b -> (a,b)` for partial construction.
+
+A tuple is essentially list with different connotations. Lists tend to be variable-size but homogeneous. Tuples tend to be fixed-size but non-homogeneous. We append lists, but we tend to simply construct or match on tuples inline.
 
 Tuples are concise, but they negatively impact extensibility and scalability. This is mitigated by ad hoc polymorphism, e.g. we can easily match both `(X,Y,Z)` and `{x:X, y:Y, z:Z}` within a context. But, in practice, it's best to use tuples only for private intermediate representations or stable public interfaces.
 
@@ -909,6 +927,8 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         "foo"                       # match text
         "foo"++xs                   # texts are just lists
 
+        (,)                         # empty tuple
+        (P,)                        # singleton tuple
         (P1,P2,...,PN)              # same as tuple:[P1,P2,...,PN]
 
         42                          # match exact number
