@@ -269,6 +269,7 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             SyntaxOperator::Builtin(crate::core::Builtin::ListLen) => "list.len",
             SyntaxOperator::Builtin(crate::core::Builtin::ListSplit) => "list.split",
             SyntaxOperator::Builtin(crate::core::Builtin::ListSplitEnd) => "list.split_end",
+            SyntaxOperator::Builtin(crate::core::Builtin::ListAt) => "list.at",
             SyntaxOperator::Builtin(crate::core::Builtin::ListHead) => "list.head",
             SyntaxOperator::Builtin(crate::core::Builtin::ListTail) => "list.tail",
             SyntaxOperator::Builtin(crate::core::Builtin::TextLines) => "text.lines",

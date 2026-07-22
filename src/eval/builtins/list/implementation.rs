@@ -1,4 +1,5 @@
 use super::super::super::*;
+use crate::list::ListItem;
 
 pub(in crate::eval::builtins) fn list_like_value(
     context: &EvalContext,
@@ -171,6 +172,29 @@ pub(super) fn eval_list_split_end_builtin(
             "split_end builtin requires a list or binary value",
         )),
     }
+}
+
+pub(super) fn eval_list_at_builtin(
+    context: &EvalContext,
+    index: &Value,
+    value: &Value,
+) -> Result<Value, EvalError> {
+    let index = eval_index_number(context, index, "list at")?;
+    let item = match eval_value(context, value)? {
+        Value::Binary(bytes) => bytes.get(index).copied().map(ListItem::Byte),
+        Value::List(list) => list.try_at(index, &mut |thunk| force_list_thunk(context, thunk))?,
+        _ => {
+            return Err(EvalError::new(
+                "list at builtin requires a list or binary value",
+            ));
+        }
+    }
+    .ok_or_else(|| EvalError::new("list at builtin index is out of bounds"))?;
+
+    Ok(match item {
+        ListItem::Byte(byte) => Value::Number(Number::from_u8(byte)),
+        ListItem::Value(value) => value,
+    })
 }
 
 pub(super) fn eval_list_head_builtin(

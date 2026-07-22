@@ -751,6 +751,7 @@ pub enum Builtin {
     ListLen,
     ListSplit,
     ListSplitEnd,
+    ListAt,
     ListHead,
     ListTail,
     /// Splits binary-compatible text into shared line segments without their
@@ -812,6 +813,7 @@ impl Builtin {
             Self::ListLen => 1,
             Self::ListSplit => 2,
             Self::ListSplitEnd => 2,
+            Self::ListAt => 2,
             Self::ListHead => 1,
             Self::ListTail => 1,
             Self::TextLines => 1,

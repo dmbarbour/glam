@@ -96,6 +96,7 @@ Dict as self with           # object-style scope: _x prior, ^a escapes to host
 ]
 xs ++ ys            # append (no cons operator; lists are finger-tree ropes)
 [x] ++ xs           # "cons" via append; also valid in patterns
+list.at n xs         # zero-based element lookup; errors when out of bounds
 
 (,)                 # empty tuple: tuple:[]
 (a,)   (,a)         # singleton tuple: tuple:[a]

@@ -50,6 +50,7 @@ pub(super) fn apply_builtin(
         | Builtin::ListLen
         | Builtin::ListSplit
         | Builtin::ListSplitEnd
+        | Builtin::ListAt
         | Builtin::ListHead
         | Builtin::ListTail
         | Builtin::TextLines => list::apply(context, builtin, arguments),

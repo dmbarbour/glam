@@ -39,6 +39,10 @@ pub(super) fn apply(
             let [count, value] = super::exact(arguments, "list split_end")?;
             eval_list_split_end_builtin(context, &count, &value)
         }
+        Builtin::ListAt => {
+            let [index, value] = super::exact(arguments, "list at")?;
+            eval_list_at_builtin(context, &index, &value)
+        }
         Builtin::ListHead => {
             let [value] = super::exact(arguments, "list head")?;
             eval_list_head_builtin(context, &value)

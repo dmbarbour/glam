@@ -1247,6 +1247,50 @@ fn evaluates_slice_and_map_builtins() {
 }
 
 #[test]
+fn evaluates_zero_based_list_at_for_lists_and_compact_binaries() {
+    let binary_item = eval_closed_expr(&builtin2_expr(
+        Builtin::ListAt,
+        TestExpr::Value(n(1)),
+        TestExpr::Value(Value::binary_from_text("ABC")),
+    ))
+    .expect("list at should index compact binary data");
+    let mixed_item = eval_closed_expr(&builtin2_expr(
+        Builtin::ListAt,
+        TestExpr::Value(n(2)),
+        TestExpr::Value(Value::List(List::concat(
+            List::from_values(vec![n(10)]),
+            List::from_bytes(Bytes::from_static(b"AB")),
+        ))),
+    ))
+    .expect("list at should index mixed list segments");
+
+    assert_eq!(binary_item, n(i64::from(b'B')));
+    assert_eq!(mixed_item, n(i64::from(b'B')));
+
+    let out_of_bounds = eval_closed_expr(&builtin2_expr(
+        Builtin::ListAt,
+        TestExpr::Value(n(3)),
+        TestExpr::Value(Value::binary_from_text("ABC")),
+    ))
+    .expect_err("list at should reject an index at the list length");
+    assert_eq!(
+        out_of_bounds.to_string(),
+        "list at builtin index is out of bounds"
+    );
+
+    let negative = eval_closed_expr(&builtin2_expr(
+        Builtin::ListAt,
+        TestExpr::Value(n(-1)),
+        TestExpr::Value(Value::binary_from_text("ABC")),
+    ))
+    .expect_err("list at should reject negative indices");
+    assert_eq!(
+        negative.to_string(),
+        "list at builtin requires non-negative integer indices"
+    );
+}
+
+#[test]
 fn text_lines_preserves_empty_and_trailing_lines() {
     let lines = eval_closed_expr(&builtin1_expr(
         Builtin::TextLines,

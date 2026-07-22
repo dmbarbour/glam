@@ -18,6 +18,11 @@ pub enum ListItem<V> {
     Value(V),
 }
 
+enum ListLookup<V> {
+    Found(ListItem<V>),
+    Exhausted(usize),
+}
+
 #[derive(Debug, Clone)]
 pub struct List<V: Clone, T: Clone>(Arc<ListNode<V, T>>);
 
@@ -107,6 +112,13 @@ impl<V: Clone> ListChunk<V> {
                 Self::Bytes(bytes) => Self::Bytes(bytes.slice(start..end)),
                 Self::Values(values) => Self::Values(values.slice(start, end)),
             })
+        }
+    }
+
+    fn item_at(&self, index: usize) -> Option<ListItem<V>> {
+        match self {
+            Self::Bytes(bytes) => bytes.get(index).copied().map(ListItem::Byte),
+            Self::Values(values) => values.as_slice().get(index).cloned().map(ListItem::Value),
         }
     }
 
@@ -277,6 +289,19 @@ impl<V: Clone, T: Clone> List<V, T> {
         self.split_from_end_checked_with(count, force_thunk)
     }
 
+    /// Returns the zero-based item at `index`, forcing only lazy chunks which
+    /// must be crossed to reach it.
+    pub fn try_at<E>(
+        &self,
+        index: usize,
+        force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
+    ) -> Result<Option<ListItem<V>>, E> {
+        Ok(match self.lookup_at_with(index, force_thunk)? {
+            ListLookup::Found(item) => Some(item),
+            ListLookup::Exhausted(_) => None,
+        })
+    }
+
     pub fn try_pop_front<E>(
         &self,
         force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
@@ -306,19 +331,67 @@ impl<V: Clone, T: Clone> List<V, T> {
                 }
             }
             ListNode::Finger(finger) => {
-                if finger.measure().0 == 0 {
-                    Ok(None)
-                } else {
-                    let (first, rest) = Self::split_finger_at(finger, 1);
-                    let Some((value, _)) = Self::from_finger(first).try_pop_front(force_thunk)?
-                    else {
-                        unreachable!("non-empty one-item finger tree should have a front value");
-                    };
-                    Ok(Some((value, Self::from_finger(rest))))
+                let Some((chunk, mut rest)) = finger.view_left() else {
+                    return Ok(None);
+                };
+                let Some(value) = chunk.item_at(0) else {
+                    unreachable!("finger trees do not store empty chunks");
+                };
+                if let Some(chunk_tail) = chunk.slice(1, chunk.len()) {
+                    rest = rest.push_left(chunk_tail);
                 }
+                Ok(Some((value, Self::from_finger(rest))))
             }
             ListNode::Thunk(thunk) => force_thunk(thunk)?.try_pop_front(force_thunk),
         }
+    }
+
+    fn lookup_at_with<E>(
+        &self,
+        index: usize,
+        force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
+    ) -> Result<ListLookup<V>, E> {
+        Ok(match self.0.as_ref() {
+            ListNode::Empty => ListLookup::Exhausted(0),
+            ListNode::Bytes(bytes) => bytes
+                .get(index)
+                .copied()
+                .map(|byte| ListLookup::Found(ListItem::Byte(byte)))
+                .unwrap_or_else(|| ListLookup::Exhausted(bytes.len())),
+            ListNode::Values(values) => values
+                .as_slice()
+                .get(index)
+                .cloned()
+                .map(|value| ListLookup::Found(ListItem::Value(value)))
+                .unwrap_or_else(|| ListLookup::Exhausted(values.len())),
+            ListNode::Concat(left, right) => match left.lookup_at_with(index, force_thunk)? {
+                found @ ListLookup::Found(_) => found,
+                ListLookup::Exhausted(left_len) => {
+                    match right.lookup_at_with(index - left_len, force_thunk)? {
+                        found @ ListLookup::Found(_) => found,
+                        ListLookup::Exhausted(right_len) => {
+                            ListLookup::Exhausted(left_len + right_len)
+                        }
+                    }
+                }
+            },
+            ListNode::Finger(finger) => {
+                let len = finger.measure().0;
+                if index >= len {
+                    ListLookup::Exhausted(len)
+                } else {
+                    let (_, right) = Self::split_finger_at(finger, index);
+                    let Some((chunk, _)) = right.view_left() else {
+                        unreachable!("an in-bounds finger-tree index leaves a right chunk");
+                    };
+                    let Some(item) = chunk.item_at(0) else {
+                        unreachable!("finger trees do not store empty chunks");
+                    };
+                    ListLookup::Found(item)
+                }
+            }
+            ListNode::Thunk(thunk) => force_thunk(thunk)?.lookup_at_with(index, force_thunk)?,
+        })
     }
 
     pub fn for_each_segment<E>(
@@ -734,5 +807,52 @@ mod tests {
             ListItem::Value(2)
         );
         assert_eq!(forces.get(), 1);
+    }
+
+    #[test]
+    fn indexed_lookup_forces_only_lazy_holes_before_the_item() {
+        let list = TestList::concat(
+            TestList::from_values(vec![1]),
+            TestList::concat(
+                TestList::from_thunk("middle"),
+                TestList::from_thunk("unused tail"),
+            ),
+        );
+        let forced = std::cell::RefCell::new(Vec::new());
+        let mut force = |name: &&str| {
+            forced.borrow_mut().push((*name).to_owned());
+            Ok::<_, ()>(match *name {
+                "middle" => TestList::from_values(vec![2, 3]),
+                "unused tail" => TestList::from_values(vec![4]),
+                _ => unreachable!(),
+            })
+        };
+
+        assert_eq!(
+            list.try_at(2, &mut force).unwrap(),
+            Some(ListItem::Value(3))
+        );
+        assert_eq!(*forced.borrow(), ["middle"]);
+    }
+
+    #[test]
+    fn indexed_lookup_preserves_compact_byte_items_and_reports_bounds() {
+        let list = TestList::concat(
+            TestList::from_bytes(Bytes::from_static(b"AB")),
+            TestList::from_values(vec![3]),
+        )
+        .balanced();
+        let mut force =
+            |_: &&str| -> Result<TestList, ()> { unreachable!("balanced list has no lazy holes") };
+
+        assert_eq!(
+            list.try_at(1, &mut force).unwrap(),
+            Some(ListItem::Byte(b'B'))
+        );
+        assert_eq!(
+            list.try_at(2, &mut force).unwrap(),
+            Some(ListItem::Value(3))
+        );
+        assert_eq!(list.try_at(3, &mut force).unwrap(), None);
     }
 }

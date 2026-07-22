@@ -2912,6 +2912,32 @@ fn lowers_builtin_imports_to_module_dictionaries() {
 }
 
 #[test]
+fn builtin_list_at_is_exposed_by_list_and_std_modules() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std as std\n",
+            "import 'list as list\n",
+            "from_std = std.list.at 1 \"ABC\"\n",
+            "from_list = list.at 1 [10,20,30]\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        fully_evaluated_value(resolved_value_at_path(&value, &["from_std"])),
+        Value::Number(n(i64::from(b'B')))
+    );
+    assert_eq!(
+        fully_evaluated_value(resolved_value_at_path(&value, &["from_list"])),
+        Value::Number(n(20))
+    );
+}
+
+#[test]
 fn constructs_and_observes_an_interaction_net_from_source_effects() {
     let context = CompileContext::default();
     let lowered = lower_parsed_source(
