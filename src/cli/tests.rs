@@ -1038,10 +1038,17 @@ fn configured_cli_returns_only_selected_branch_diagnostics() {
 
 #[test]
 fn configured_argument_output_preserves_boundaries() {
-    let arguments = [OsString::from("one"), OsString::from("two")];
+    let arguments = [
+        OsString::from("one"),
+        OsString::from("two\ncontinued"),
+        OsString::from(""),
+    ];
     assert_eq!(
         format_configured_arguments(&arguments, false),
-        b"one\ntwo\n"
+        b"[1]: one\n[2]: two\n  continued\n[3]: \n"
     );
-    assert_eq!(format_configured_arguments(&arguments, true), b"one\0two\0");
+    assert_eq!(
+        format_configured_arguments(&arguments, true),
+        b"one\0two\ncontinued\0\0"
+    );
 }

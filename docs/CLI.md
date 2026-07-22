@@ -298,7 +298,15 @@ Inspect a bare command without running its assembly:
 glam --parse_cli build program.g
 ```
 
-The output is the canonical bootstrap-style command, one argument per line.
+The output is the canonical bootstrap-style command with each argument labeled
+`[N]:`. Embedded newlines continue on lines indented by two spaces:
+
+```text
+[1]: --script.g
+[2]: asm.result = "hello"
+  ++ " world"
+```
+
 This is intended for people and deliberately has no escaping convention. For
 machine-safe argument boundaries, use NUL-terminated output:
 

@@ -1083,7 +1083,7 @@ fn configured_bare_cli_rewrites_and_executes_in_the_prepared_session() {
 }
 
 #[test]
-fn configured_cli_inspection_uses_line_or_nul_delimiters_without_execution() {
+fn configured_cli_inspection_uses_human_or_nul_format_without_execution() {
     let directory = unique_temp_dir("glam-configured-cli-inspection");
     fs::create_dir_all(&directory).expect("configured CLI directory should be created");
     let configuration = directory.join("conf.g");
@@ -1094,7 +1094,10 @@ fn configured_cli_inspection_uses_line_or_nul_delimiters_without_execution() {
     .expect("configured CLI source should be written");
 
     for (option, expected) in [
-        ("--parse_cli", b"--script.g\nasm.result = 1\n".as_slice()),
+        (
+            "--parse_cli",
+            b"[1]: --script.g\n[2]: asm.result = 1\n".as_slice(),
+        ),
         ("--parse_cli.0", b"--script.g\0asm.result = 1\0".as_slice()),
     ] {
         let output = glam_command()

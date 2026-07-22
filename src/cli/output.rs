@@ -27,7 +27,7 @@ Assembly inputs are applied as mixins; earlier inputs override later inputs.
 --quiet suppresses changed-file output from --check_manifest.
 --parse inspects one built-in .g source without compiling or loading imports.
 --parse --quiet reports only through its exit status; --verbose lists declarations.
---parse_cli prints configured rewriting as one canonical argument per line.
+--parse_cli prints numbered canonical arguments with indented continuation lines.
 --parse_cli.0 prints the same arguments separated by NUL bytes.
 --completions writes complete replacement arguments separated by NUL bytes.
 --completion_script prints a configured or built-in shell adapter.
@@ -75,13 +75,31 @@ pub fn format_parse_summary(
 }
 
 /// Renders configured CLI inspection without inventing an escaping format.
-/// Line mode is intended for people; NUL mode preserves argument boundaries.
+/// Human mode numbers arguments and indents continuation lines; NUL mode
+/// preserves the raw argument boundaries.
 pub fn format_configured_arguments(arguments: &[OsString], nul_terminated: bool) -> Vec<u8> {
-    let separator = if nul_terminated { b'\0' } else { b'\n' };
     let mut output = Vec::new();
-    for argument in arguments {
-        output.extend_from_slice(argument.as_encoded_bytes());
-        output.push(separator);
+    if nul_terminated {
+        for argument in arguments {
+            output.extend_from_slice(argument.as_encoded_bytes());
+            output.push(0);
+        }
+        return output;
+    }
+
+    for (index, argument) in arguments.iter().enumerate() {
+        output.push(b'[');
+        output.extend_from_slice((index + 1).to_string().as_bytes());
+        output.extend_from_slice(b"]: ");
+        let mut lines = argument.as_encoded_bytes().split(|byte| *byte == b'\n');
+        if let Some(first) = lines.next() {
+            output.extend_from_slice(first);
+        }
+        for continuation in lines {
+            output.extend_from_slice(b"\n  ");
+            output.extend_from_slice(continuation);
+        }
+        output.push(b'\n');
     }
     output
 }
