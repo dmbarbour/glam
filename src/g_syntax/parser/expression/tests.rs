@@ -14,6 +14,12 @@ fn parses_multiline_text_blocks_without_a_final_line_feed() {
         ))
     );
     assert_eq!(
+        parse_expr("\"\"\"\n\" ordinary \"quotes\" are retained\n\"\"\""),
+        Some(SyntaxExpr::Text(
+            "ordinary \"quotes\" are retained".to_owned()
+        ))
+    );
+    assert_eq!(
         parse_expr("\"\"\"\n\"\"\""),
         Some(SyntaxExpr::Text(String::new()))
     );
