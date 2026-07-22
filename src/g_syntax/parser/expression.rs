@@ -369,19 +369,21 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just('['), just(']'))
-            .map(PathSuffix::Expand);
+            .map(PathSuffix::Expand)
+            .boxed();
         let path_list_expr = expr
             .clone()
             .padded()
             .delimited_by(just('('), just(')'))
-            .map(|expr| PathSuffix::Single(SyntaxKeyExpr::PathIndex(Box::new(expr))));
+            .map(|expr| PathSuffix::Single(SyntaxKeyExpr::PathIndex(Box::new(expr))))
+            .boxed();
 
         // Dotted paths stay lexically tight because `.` has other roles in the
         // language surface, such as future effect sugar like `.bar`.
         let path_suffix_item = just('.')
             .ignore_then(choice((
-                path_list_shorthand,
-                path_list_expr,
+                path_list_shorthand.clone(),
+                path_list_expr.clone(),
                 expr_name
                     .clone()
                     .map(SyntaxKeyExpr::Atom)
@@ -474,17 +476,30 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             .delimited_by(just('['), just(']'))
             .map(SyntaxExpr::List);
 
-        let dict_item_key = choice((
-            name.clone().map(SyntaxKeyExpr::Atom),
-            single_key_expr()
-                .padded()
-                .delimited_by(just('['), just(']')),
-        ));
+        let named_dict_path = name
+            .clone()
+            .map(SyntaxKeyExpr::Atom)
+            .then(path_suffix.clone())
+            .map(|(head, suffixes)| {
+                let mut path = vec![head];
+                path.extend(flatten_path_suffixes(suffixes));
+                path
+            });
+        let computed_dict_path = choice((path_list_shorthand.clone(), path_list_expr.clone()))
+            .map(|suffix| flatten_path_suffixes(vec![suffix]))
+            .try_map(|path, span| {
+                if path.is_empty() {
+                    Err(Rich::custom(span, "dictionary paths cannot be empty"))
+                } else {
+                    Ok(path)
+                }
+            });
+        let dict_item_path = choice((named_dict_path, computed_dict_path));
         let dict_item = choice((
-            dict_item_key
+            dict_item_path
                 .then_ignore(just(':').padded())
                 .then(expr.clone())
-                .map(|(key, value)| SyntaxExpr::SingletonDict(key, Box::new(value))),
+                .map(|(path, value)| SyntaxExpr::DictEntry(path, Box::new(value))),
             expr.clone(),
         ));
         let dict = dict_item

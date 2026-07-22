@@ -1077,12 +1077,12 @@ fn parses_dictionary_literals() {
             kind: DefinitionKind::Introduce,
             body: "{ hello:\"Hello\", world:\"World\" }".to_owned(),
             expr: Some(SyntaxExpr::DictUnion(vec![
-                SyntaxExpr::SingletonDict(
-                    SyntaxKeyExpr::Atom("hello".to_owned()),
+                SyntaxExpr::DictEntry(
+                    vec![SyntaxKeyExpr::Atom("hello".to_owned())],
                     Box::new(SyntaxExpr::Text("Hello".to_owned())),
                 ),
-                SyntaxExpr::SingletonDict(
-                    SyntaxKeyExpr::Atom("world".to_owned()),
+                SyntaxExpr::DictEntry(
+                    vec![SyntaxKeyExpr::Atom("world".to_owned())],
                     Box::new(SyntaxExpr::Text("World".to_owned())),
                 ),
             ])),
@@ -1104,8 +1104,8 @@ fn parses_dictionary_unions() {
             expr: Some(SyntaxExpr::DictUnion(vec![
                 SyntaxExpr::Name("left".to_owned()),
                 SyntaxExpr::Name("right".to_owned()),
-                SyntaxExpr::SingletonDict(
-                    SyntaxKeyExpr::Atom("hello".to_owned()),
+                SyntaxExpr::DictEntry(
+                    vec![SyntaxKeyExpr::Atom("hello".to_owned())],
                     Box::new(SyntaxExpr::Text("Hello".to_owned())),
                 ),
             ])),
@@ -1139,12 +1139,12 @@ fn parses_multiline_literals_with_leading_commas() {
             kind: DefinitionKind::Introduce,
             body: "{\n, hello:\"Hello\"\n, world:\"World\"\n}".to_owned(),
             expr: Some(SyntaxExpr::DictUnion(vec![
-                SyntaxExpr::SingletonDict(
-                    SyntaxKeyExpr::Atom("hello".to_owned()),
+                SyntaxExpr::DictEntry(
+                    vec![SyntaxKeyExpr::Atom("hello".to_owned())],
                     Box::new(SyntaxExpr::Text("Hello".to_owned())),
                 ),
-                SyntaxExpr::SingletonDict(
-                    SyntaxKeyExpr::Atom("world".to_owned()),
+                SyntaxExpr::DictEntry(
+                    vec![SyntaxKeyExpr::Atom("world".to_owned())],
                     Box::new(SyntaxExpr::Text("World".to_owned())),
                 ),
             ])),
@@ -1163,8 +1163,8 @@ fn parses_expression_indexed_names_and_keys() {
             target: "d".to_owned(),
             kind: DefinitionKind::Introduce,
             body: "{ [42]:\"World\" }".to_owned(),
-            expr: Some(SyntaxExpr::DictUnion(vec![SyntaxExpr::SingletonDict(
-                SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(42)))),
+            expr: Some(SyntaxExpr::DictUnion(vec![SyntaxExpr::DictEntry(
+                vec![SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(42))))],
                 Box::new(SyntaxExpr::Text("World".to_owned())),
             )])),
         })
@@ -2584,6 +2584,23 @@ fn lowers_dictionary_literals_to_lazy_values() {
         ))),
         b"World!"
     );
+}
+
+#[test]
+fn lowers_general_dictionary_entry_paths() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "path = [1] ++ [3,4]\n",
+        "d = { [0]:\"A\", [1,2]:\"B\", (path):\"C\", named.deep:\"D\" }\n",
+        "asm.result = d.[0] ++ d.[1,2] ++ d.[1,3,4] ++ d.named.deep\n",
+    ));
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    let result = resolved_value_at_path(&value, &["asm", "result"]);
+    assert_eq!(output_bytes(&fully_evaluated_value(result)), b"ABCD");
 }
 
 #[test]

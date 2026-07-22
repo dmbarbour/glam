@@ -63,7 +63,7 @@ tag:Data            # tagged data: sugar for { tag:Data }
 
 {}                  # empty dict; ALSO the 'undefined' value
 {foo:1, bar.baz:2}  # literal; paths ok; {foo:{}} ≡ {}
-{ [0]:'a, [1]:'b }  # computed keys
+{ [0]:'a, [1,2]:'b, ([1] ++ [3,4]):'c } # computed paths
 { D1, D2 }          # union; ERROR if defined keys overlap
 {                   # multi-line: leading commas
 , name1:Expr1

@@ -500,8 +500,8 @@ fn parses_dotted_paths_on_literal_expressions() {
     assert_eq!(
         parse_expr("{ hello:\"Hello\" }.hello"),
         Some(SyntaxExpr::Access(
-            Box::new(SyntaxExpr::DictUnion(vec![SyntaxExpr::SingletonDict(
-                SyntaxKeyExpr::Atom("hello".to_owned()),
+            Box::new(SyntaxExpr::DictUnion(vec![SyntaxExpr::DictEntry(
+                vec![SyntaxKeyExpr::Atom("hello".to_owned())],
                 Box::new(SyntaxExpr::Text("Hello".to_owned())),
             )])),
             vec![SyntaxKeyExpr::Atom("hello".to_owned())],
@@ -520,6 +520,50 @@ fn parses_dotted_paths_on_literal_expressions() {
             Box::new(SyntaxExpr::Name("foo".to_owned())),
             vec![SyntaxKeyExpr::Atom("bar".to_owned())],
         ))
+    );
+}
+
+#[test]
+fn parses_general_dictionary_entry_paths() {
+    assert_eq!(
+        parse_expr("{ [0]:zero, [1,2]:deep, ([1] ++ [3,4]):computed, named.path:value }"),
+        Some(SyntaxExpr::DictUnion(vec![
+            SyntaxExpr::DictEntry(
+                vec![SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(0))))],
+                Box::new(SyntaxExpr::Name("zero".to_owned())),
+            ),
+            SyntaxExpr::DictEntry(
+                vec![
+                    SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(1)))),
+                    SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(2)))),
+                ],
+                Box::new(SyntaxExpr::Name("deep".to_owned())),
+            ),
+            SyntaxExpr::DictEntry(
+                vec![SyntaxKeyExpr::PathIndex(Box::new(SyntaxExpr::Append(
+                    Box::new(SyntaxExpr::List(vec![SyntaxExpr::Number(n(1))])),
+                    Box::new(SyntaxExpr::List(vec![
+                        SyntaxExpr::Number(n(3)),
+                        SyntaxExpr::Number(n(4)),
+                    ])),
+                )))],
+                Box::new(SyntaxExpr::Name("computed".to_owned())),
+            ),
+            SyntaxExpr::DictEntry(
+                vec![
+                    SyntaxKeyExpr::Atom("named".to_owned()),
+                    SyntaxKeyExpr::Atom("path".to_owned()),
+                ],
+                Box::new(SyntaxExpr::Name("value".to_owned())),
+            ),
+        ])),
+    );
+    assert_eq!(
+        parse_expr("{ [1,2], (path) }"),
+        Some(SyntaxExpr::DictUnion(vec![
+            SyntaxExpr::List(vec![SyntaxExpr::Number(n(1)), SyntaxExpr::Number(n(2))]),
+            SyntaxExpr::Name("path".to_owned()),
+        ])),
     );
 }
 

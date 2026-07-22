@@ -39,6 +39,12 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
             }
             analyze_object_body_locals(body, diagnostics);
         }
+        SyntaxExpr::DictEntry(path, value) => {
+            for key in path {
+                analyze_key_expr_locals(key, line, diagnostics);
+            }
+            analyze_expr_locals(value, line, diagnostics);
+        }
         SyntaxExpr::SingletonDict(key, value) => {
             analyze_key_expr_locals(key, line, diagnostics);
             analyze_expr_locals(value, line, diagnostics);
@@ -198,6 +204,12 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
                 mark_used_body_item_prior_alias(item, alias, used);
             }
         }
+        SyntaxExpr::DictEntry(path, value) => {
+            for key in path {
+                mark_used_prior_alias_in_key(key, alias, used);
+            }
+            mark_used_prior_alias(value, alias, used);
+        }
         SyntaxExpr::SingletonDict(key, value) => {
             mark_used_prior_alias_in_key(key, alias, used);
             mark_used_prior_alias(value, alias, used);
@@ -309,6 +321,12 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             for item in body {
                 mark_used_body_item_locals(item, locals, used);
             }
+        }
+        SyntaxExpr::DictEntry(path, value) => {
+            for key in path {
+                mark_used_key_expr(key, locals, used);
+            }
+            mark_used_locals(value, locals, used);
         }
         SyntaxExpr::SingletonDict(key, value) => {
             mark_used_key_expr(key, locals, used);

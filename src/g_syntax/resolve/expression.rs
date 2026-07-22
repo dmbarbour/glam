@@ -50,6 +50,9 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::Effect(path) => ResolvedExpr::Embedded(compiler_values::effect_path_value(
             &path.iter().map(String::as_str).collect::<Vec<_>>(),
         )),
+        SyntaxExpr::DictEntry(path, value) => {
+            lower_dict_entry_resolved(path, value, line, context, scope, locals)?
+        }
         SyntaxExpr::SingletonDict(key, value) => ResolvedExpr::apply(
             ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
             [
@@ -150,6 +153,36 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
             lower_builtin_expr_resolved(Builtin::Append, left, right, line, context, scope, locals)?
         }
     })
+}
+
+fn lower_dict_entry_resolved(
+    path: &[SyntaxKeyExpr],
+    value: &SyntaxExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    if let [key] = path
+        && !matches!(key, SyntaxKeyExpr::PathIndex(_))
+    {
+        return Ok(ResolvedExpr::apply(
+            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
+            [
+                syntax_key_expr_to_resolved_value(key, line, context, scope, locals)?,
+                syntax_expr_to_resolved_in_semantic_scope(value, line, context, scope, locals)?,
+            ],
+        ));
+    }
+
+    Ok(ResolvedExpr::apply(
+        ResolvedExpr::Embedded(Value::Builtin(Builtin::DictUpdate)),
+        [
+            syntax_path_resolved(path, line, context, scope, locals)?,
+            syntax_expr_to_resolved_in_semantic_scope(value, line, context, scope, locals)?,
+            ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
+        ],
+    ))
 }
 
 fn lower_tagged_constructor_resolved(
@@ -614,6 +647,44 @@ pub(in crate::g_syntax) fn syntax_key_expr_to_resolved_path(
         SyntaxKeyExpr::PathIndex(expr) => ResolvedPathPart::PathIndex(Box::new(
             syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?,
         )),
+    })
+}
+
+pub(in crate::g_syntax) fn syntax_path_resolved(
+    parts: &[SyntaxKeyExpr],
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let mut result: Option<ResolvedExpr<Value>> = None;
+    let mut pending = Vec::new();
+
+    for part in parts {
+        match part {
+            SyntaxKeyExpr::PathIndex(expr) => {
+                let prefix = ResolvedExpr::List(std::mem::take(&mut pending));
+                let combined = match result {
+                    Some(result) => apply_builtin_resolved(Builtin::Append, [result, prefix]),
+                    None => prefix,
+                };
+                let splice =
+                    syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?;
+                result = Some(apply_builtin_resolved(Builtin::Append, [combined, splice]));
+            }
+            SyntaxKeyExpr::Atom(name) => {
+                pending.push(ResolvedExpr::Embedded(Value::Atom(atom_from_str(name))))
+            }
+            SyntaxKeyExpr::Index(expr) => pending.push(syntax_expr_to_resolved_in_semantic_scope(
+                expr, line, context, scope, locals,
+            )?),
+        }
+    }
+
+    let tail = ResolvedExpr::List(pending);
+    Ok(match result {
+        Some(result) => apply_builtin_resolved(Builtin::Append, [result, tail]),
+        None => tail,
     })
 }
 

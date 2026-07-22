@@ -292,44 +292,6 @@ pub(in crate::g_syntax) fn definition_target_path_resolved(
     )
 }
 
-pub(in crate::g_syntax) fn syntax_path_resolved(
-    parts: &[SyntaxKeyExpr],
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope<ResolvedRoot>,
-    locals: &mut ResolverContext,
-) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let mut result: Option<ResolvedExpr<Value>> = None;
-    let mut pending = Vec::new();
-
-    for part in parts {
-        match part {
-            SyntaxKeyExpr::PathIndex(expr) => {
-                let prefix = ResolvedExpr::List(std::mem::take(&mut pending));
-                let combined = match result {
-                    Some(result) => apply_builtin_resolved(Builtin::Append, [result, prefix]),
-                    None => prefix,
-                };
-                let splice =
-                    syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?;
-                result = Some(apply_builtin_resolved(Builtin::Append, [combined, splice]));
-            }
-            SyntaxKeyExpr::Atom(name) => {
-                pending.push(ResolvedExpr::Embedded(Value::Atom(atom_from_str(name))))
-            }
-            SyntaxKeyExpr::Index(expr) => pending.push(syntax_expr_to_resolved_in_semantic_scope(
-                expr, line, context, scope, locals,
-            )?),
-        }
-    }
-
-    let tail = ResolvedExpr::List(pending);
-    Ok(match result {
-        Some(result) => apply_builtin_resolved(Builtin::Append, [result, tail]),
-        None => tail,
-    })
-}
-
 pub(in crate::g_syntax) fn static_path_resolved(target: &str) -> ResolvedExpr<Value> {
     ResolvedExpr::List(
         target
