@@ -107,8 +107,8 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
     declared_reflection: bool,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let base_len = locals.len();
-    let prior_self = locals.push_binding("<object-prior-self>");
-    let final_self = locals.push_binding("<object-final-self>");
+    let prior_self = locals.push_internal_binding("<object-prior-self>");
+    let final_self = locals.push_internal_binding("<object-final-self>");
     let object_final_defs = ResolvedRoot::Local(final_self);
     let mut bindings = ResolvedBindings::default();
     let reflection_guard = declared_reflection.then(|| {
@@ -321,8 +321,8 @@ pub(in crate::g_syntax) fn lower_extend(
         path: vec![ResolvedPathPart::Key(name_as_key(name))],
     };
     let prior_defs = spec_member("defs");
-    let base = locals.push_binding("<extension-base>");
-    let self_value = locals.push_binding("<extension-self>");
+    let base = locals.push_internal_binding("<extension-base>");
+    let self_value = locals.push_internal_binding("<extension-self>");
     let prior_result = ResolvedExpr::apply(
         prior_defs,
         [ResolvedExpr::Local(base), ResolvedExpr::Local(self_value)],
@@ -369,8 +369,8 @@ pub(in crate::g_syntax) fn extend_object_with_defs(
         base: Box::new(prior_spec.expr()),
         path: vec![ResolvedPathPart::Key(name_as_key(name))],
     };
-    let base = locals.push_binding("<extension-base>");
-    let self_value = locals.push_binding("<extension-self>");
+    let base = locals.push_internal_binding("<extension-base>");
+    let self_value = locals.push_internal_binding("<extension-self>");
     let prior_result = ResolvedExpr::apply(
         spec_member("defs"),
         [ResolvedExpr::Local(base), ResolvedExpr::Local(self_value)],

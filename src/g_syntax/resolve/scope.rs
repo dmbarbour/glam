@@ -28,7 +28,7 @@ impl ResolverContext {
         binding
     }
 
-    pub(in crate::g_syntax) fn push_binding(&mut self, raw: &str) -> BindingId {
+    pub(in crate::g_syntax) fn push_internal_binding(&mut self, raw: &str) -> BindingId {
         let binding = self.fresh_binding();
         let mut local = local_name_metadata(raw);
         local.binding = Some(binding);
@@ -36,14 +36,45 @@ impl ResolverContext {
         binding
     }
 
-    pub(in crate::g_syntax) fn extend_bindings<'a>(
+    pub(in crate::g_syntax) fn extend_source_bindings<'a>(
         &mut self,
         names: impl IntoIterator<Item = &'a str>,
-    ) -> Vec<BindingId> {
-        names
+        line: usize,
+    ) -> Result<Vec<BindingId>, Diagnostic> {
+        let pending = names
             .into_iter()
-            .map(|name| self.push_binding(name))
-            .collect()
+            .map(local_name_metadata)
+            .collect::<Vec<_>>();
+
+        for (index, local) in pending.iter().enumerate() {
+            let Some(canonical) = local.canonical.as_deref() else {
+                continue;
+            };
+            let conflict = self
+                .locals
+                .iter()
+                .chain(&pending[..index])
+                .find(|existing| existing.canonical.as_deref() == Some(canonical));
+            if let Some(existing) = conflict {
+                return Err(Diagnostic::error(
+                    line,
+                    format!(
+                        "local `{}` shadows existing local `{}`; local name shadowing is not allowed",
+                        local.raw, existing.raw
+                    ),
+                ));
+            }
+        }
+
+        Ok(pending
+            .into_iter()
+            .map(|mut local| {
+                let binding = self.fresh_binding();
+                local.binding = Some(binding);
+                self.locals.push(local);
+                binding
+            })
+            .collect())
     }
 }
 
@@ -81,6 +112,35 @@ mod resolver_context_tests {
 
         assert_eq!(left_first, right_first);
         assert_ne!(left_first, left_second);
+    }
+
+    #[test]
+    fn source_bindings_reject_canonical_shadowing_without_partial_extension() {
+        let mut resolver = ResolverContext::default();
+        resolver
+            .extend_source_bindings(["outer"], 1)
+            .expect("first local should bind");
+
+        let error = resolver
+            .extend_source_bindings(["fresh", "_outer"], 2)
+            .expect_err("suppressed local spelling should not evade shadow checks");
+
+        assert_eq!(
+            error.message,
+            "local `_outer` shadows existing local `outer`; local name shadowing is not allowed"
+        );
+        assert_eq!(resolver.len(), 1);
+    }
+
+    #[test]
+    fn source_bindings_allow_repeated_inaccessible_drops() {
+        let mut resolver = ResolverContext::default();
+        let bindings = resolver
+            .extend_source_bindings(["_", "_"], 1)
+            .expect("drop binders do not introduce names that can shadow");
+
+        assert_eq!(bindings.len(), 2);
+        assert!(resolver.iter().all(|local| local.canonical.is_none()));
     }
 
     #[test]
@@ -372,7 +432,7 @@ impl ResolvedBindings {
         label: &str,
         value: ResolvedExpr<Value>,
     ) -> ResolvedRoot {
-        let binding = locals.push_binding(label);
+        let binding = locals.push_internal_binding(label);
         self.bindings.push((binding, value));
         ResolvedRoot::Local(binding)
     }

@@ -182,3 +182,7 @@ their detailed scheduling and representation contracts.
   explicit `++` or `list.concat` flattens structure.
 - Multiline `let`/`where` bindings align under the first binding and do not
   accept `in`. Keep valid and invalid samples synchronized with parser tests.
+- Source local variables may not shadow another active local. `_name` has the
+  canonical name `name` for this check; repeated `_` binders remain valid
+  because they cannot be referenced. Compiler-generated bindings are not
+  source locals.

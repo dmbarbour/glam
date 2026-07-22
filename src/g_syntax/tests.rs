@@ -1066,6 +1066,69 @@ fn underscore_locals_suppress_unused_warnings_and_drop_is_allowed() {
 }
 
 #[test]
+fn lowering_rejects_duplicate_and_nested_local_shadowing() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "duplicate x x = x\n",
+        "nested x = (\\x -> x)\n",
+        "nested_let = let x = 1 in let x = 2 in x\n",
+        "suppressed x _x = x\n",
+    ));
+    let lowered = lower_parsed_source(parsed, &CompileContext::default());
+    let errors = lowered
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .collect::<Vec<_>>();
+
+    assert_eq!(errors.len(), 4);
+    assert_eq!(errors[0].line, 2);
+    assert!(
+        errors[0]
+            .message
+            .contains("local `x` shadows existing local `x`")
+    );
+    assert_eq!(errors[1].line, 3);
+    assert!(
+        errors[1]
+            .message
+            .contains("local `x` shadows existing local `x`")
+    );
+    assert_eq!(errors[2].line, 4);
+    assert!(
+        errors[2]
+            .message
+            .contains("local `x` shadows existing local `x`")
+    );
+    assert_eq!(errors[3].line, 5);
+    assert!(
+        errors[3]
+            .message
+            .contains("local `_x` shadows existing local `x`")
+    );
+}
+
+#[test]
+fn lowering_allows_local_reuse_in_disjoint_scopes_and_repeated_drops() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "left = (\\x -> x) 1\n",
+        "right = (\\x -> x) 2\n",
+        "drop_both _ _ = ()\n",
+    ));
+    let lowered = lower_parsed_source(parsed, &CompileContext::default());
+
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != Severity::Error),
+        "unexpected diagnostics: {:?}",
+        lowered.diagnostics
+    );
+}
+
+#[test]
 fn parses_dictionary_literals() {
     let parsed = parse("language g0\nd = { hello:\"Hello\", world:\"World\" }\n");
 

@@ -82,9 +82,9 @@ fn build() -> Value {
     );
 
     let mut locals = ResolverContext::default();
-    let diagnostic = locals.push_binding("<diagnostic>");
-    let lines = locals.push_binding("<diagnostic-lines>");
-    let continuation_line = locals.push_binding("<diagnostic-continuation-line>");
+    let diagnostic = locals.push_internal_binding("<diagnostic>");
+    let lines = locals.push_internal_binding("<diagnostic-lines>");
+    let continuation_line = locals.push_internal_binding("<diagnostic-continuation-line>");
 
     let severity = || field(diagnostic, &["msg", "severity"]);
     let color = || field(diagnostic, &["viewer", "color"]);

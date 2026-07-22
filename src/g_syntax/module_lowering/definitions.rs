@@ -70,7 +70,8 @@ impl<'a> DefinitionTargetContext<'a> {
         }
 
         let base_len = locals.len();
-        let parameters = locals.extend_bindings(params.iter().map(String::as_str));
+        let parameters =
+            locals.extend_source_bindings(params.iter().map(String::as_str), self.line)?;
         let lowered = syntax_expr_to_resolved_in_semantic_scope(
             body,
             self.line,

@@ -216,7 +216,7 @@ fn effect_then(
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
     let base_len = locals.len();
-    let result = locals.push_binding("<effect-result>");
+    let result = locals.push_internal_binding("<effect-result>");
     let continuation =
         ResolvedExpr::lambda(vec![result], assert_unit(ResolvedExpr::Local(result), next));
     locals.truncate(base_len);
@@ -225,7 +225,7 @@ fn effect_then(
 
 fn build_effect_path_value(path: Arc<[Key]>) -> Value {
     let mut locals = ResolverContext::default();
-    let api = locals.push_binding("<effect-api>");
+    let api = locals.push_internal_binding("<effect-api>");
     let body = ResolvedExpr::Access {
         base: Box::new(ResolvedExpr::Local(api)),
         path: path.iter().cloned().map(ResolvedPathPart::Key).collect(),
@@ -242,7 +242,7 @@ fn build_effect_path_value(path: Arc<[Key]>) -> Value {
 
 fn build_not() -> Value {
     let mut locals = ResolverContext::default();
-    let condition = locals.push_binding("<not-condition>");
+    let condition = locals.push_internal_binding("<not-condition>");
     let fail_operation = ResolvedExpr::Embedded(effect_value("fail"));
     let true_operation = effect_call("r", [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())]);
     let returned_failure = effect_call("r", [fail_operation]);
@@ -257,7 +257,7 @@ fn build_not() -> Value {
         [fail_if_condition_succeeds, succeed_if_condition_fails],
     );
     let select_operation = effect_call("cut", [alternate]);
-    let selected = locals.push_binding("<selected-operation>");
+    let selected = locals.push_internal_binding("<selected-operation>");
     let run_selected_operation =
         ResolvedExpr::lambda(vec![selected], ResolvedExpr::Local(selected));
     let body = effect_call("seq", [select_operation, run_selected_operation]);
@@ -266,7 +266,7 @@ fn build_not() -> Value {
 
 fn build_could(not: Value) -> Value {
     let mut locals = ResolverContext::default();
-    let condition = locals.push_binding("<could-condition>");
+    let condition = locals.push_internal_binding("<could-condition>");
     let inner = ResolvedExpr::apply(
         ResolvedExpr::Embedded(not.clone()),
         [ResolvedExpr::Local(condition)],
@@ -279,8 +279,8 @@ fn build_could(not: Value) -> Value {
 
 fn build_empty_object_defs() -> Value {
     let mut locals = ResolverContext::default();
-    let prior_self = locals.push_binding("<object-prior-self>");
-    let final_self = locals.push_binding("<object-final-self>");
+    let prior_self = locals.push_internal_binding("<object-prior-self>");
+    let final_self = locals.push_internal_binding("<object-final-self>");
     let without_spec = apply_builtin(
         Builtin::DictUpdate,
         [
@@ -299,9 +299,9 @@ fn build_empty_object_defs() -> Value {
 
 fn build_constant_object_defs() -> Value {
     let mut locals = ResolverContext::default();
-    let value = locals.push_binding("<constant-object-definitions>");
-    let prior_self = locals.push_binding("<object-prior-self>");
-    let final_self = locals.push_binding("<object-final-self>");
+    let value = locals.push_internal_binding("<constant-object-definitions>");
+    let prior_self = locals.push_internal_binding("<object-prior-self>");
+    let final_self = locals.push_internal_binding("<object-final-self>");
     evaluate_closed(ResolvedExpr::lambda(
         vec![value, prior_self, final_self],
         ResolvedExpr::Local(value),
@@ -310,9 +310,9 @@ fn build_constant_object_defs() -> Value {
 
 fn build_reflection_annotator() -> Value {
     let mut locals = ResolverContext::default();
-    let guard = locals.push_binding("<reflection-guard>");
-    let final_defs = locals.push_binding("<reflection-final-definitions>");
-    let target = locals.push_binding("<reflection-target>");
+    let guard = locals.push_internal_binding("<reflection-guard>");
+    let final_defs = locals.push_internal_binding("<reflection-final-definitions>");
+    let target = locals.push_internal_binding("<reflection-target>");
 
     let state_path = |field: &str| {
         ResolvedExpr::List(vec![
@@ -325,7 +325,7 @@ fn build_reflection_annotator() -> Value {
         path: vec![ResolvedPathPart::Key(name_as_key("refl"))],
     };
 
-    let item = locals.push_binding("<reflection-item>");
+    let item = locals.push_internal_binding("<reflection-item>");
     let item_field = |name| ResolvedExpr::Access {
         base: Box::new(ResolvedExpr::Local(item)),
         path: vec![ResolvedPathPart::Key(name_as_key(name))],
@@ -335,7 +335,7 @@ fn build_reflection_annotator() -> Value {
         effect_call("r", [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())]),
         &mut locals,
     );
-    let handle = locals.push_binding("<reflection-task-handle>");
+    let handle = locals.push_internal_binding("<reflection-task-handle>");
     let task_record = apply_builtin(
         Builtin::DictUnion,
         [
@@ -364,12 +364,12 @@ fn build_reflection_annotator() -> Value {
     );
     let launcher = ResolvedExpr::lambda(vec![item], launch_item);
 
-    let items = locals.push_binding("<reflection-items>");
+    let items = locals.push_internal_binding("<reflection-items>");
     let mapped = ResolvedExpr::apply(
         ResolvedExpr::Embedded(Value::Builtin(Builtin::EffectMap)),
         [launcher, ResolvedExpr::Local(items)],
     );
-    let records = locals.push_binding("<reflection-task-records>");
+    let records = locals.push_internal_binding("<reflection-task-records>");
     let store_records = effect_path_call(
         &["heap", "set"],
         [state_path("tasks"), ResolvedExpr::Local(records)],
@@ -389,7 +389,7 @@ fn build_reflection_annotator() -> Value {
         ],
     );
 
-    let scanner_handle = locals.push_binding("<reflection-scanner-handle>");
+    let scanner_handle = locals.push_internal_binding("<reflection-scanner-handle>");
     let launch_and_remember = effect_call(
         "seq",
         [
@@ -403,7 +403,7 @@ fn build_reflection_annotator() -> Value {
             ),
         ],
     );
-    let existing = locals.push_binding("<reflection-claim>");
+    let existing = locals.push_internal_binding("<reflection-claim>");
     let guard_is_empty = ResolvedExpr::apply(
         ResolvedExpr::Embedded(Value::Builtin(Builtin::Equal)),
         [

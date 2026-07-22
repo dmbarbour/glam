@@ -289,7 +289,7 @@ pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
     let prior_value =
         syntax_expr_to_resolved_in_semantic_scope(base, line, context, scope, locals)?;
     let prior_defs = outer_bindings.bind(locals, "<with-prior-defs>", prior_value);
-    let final_binding = locals.push_binding("<with-final-defs>");
+    let final_binding = locals.push_internal_binding("<with-final-defs>");
     let final_defs = ResolvedRoot::Local(final_binding);
     let mut definitions = prior_defs;
     let mut body_bindings = ResolvedBindings::default();
@@ -395,7 +395,7 @@ pub(in crate::g_syntax) fn lower_operator_section_resolved(
     }
 
     let base_len = locals.len();
-    let parameter = locals.push_binding("<operator-section>");
+    let parameter = locals.push_internal_binding("<operator-section>");
     let left = left
         .as_deref()
         .map(|expr| syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals))
@@ -443,8 +443,8 @@ pub(in crate::g_syntax) fn lower_syntax_operator_function_resolved(
     }
 
     let base_len = locals.len();
-    let left = locals.push_binding("<operator-left>");
-    let right = locals.push_binding("<operator-right>");
+    let left = locals.push_internal_binding("<operator-left>");
+    let right = locals.push_internal_binding("<operator-right>");
     let body = lower_syntax_operator_values_resolved(
         operator,
         ResolvedExpr::Local(left),
@@ -489,8 +489,8 @@ pub(in crate::g_syntax) fn applicative_resolved(
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
     let base_len = locals.len();
-    let first_result = locals.push_binding("<applicative-first>");
-    let second_result = locals.push_binding("<applicative-second>");
+    let first_result = locals.push_internal_binding("<applicative-first>");
+    let second_result = locals.push_internal_binding("<applicative-second>");
     let (function, argument) = if first_is_function {
         (
             ResolvedExpr::Local(first_result),
@@ -517,7 +517,7 @@ pub(in crate::g_syntax) fn compose_resolved(
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
     let base_len = locals.len();
-    let input = locals.push_binding("<composition-input>");
+    let input = locals.push_internal_binding("<composition-input>");
     let body = ResolvedExpr::apply(
         second,
         [ResolvedExpr::apply(first, [ResolvedExpr::Local(input)])],
@@ -532,7 +532,7 @@ pub(in crate::g_syntax) fn kleisli_compose_resolved(
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
     let base_len = locals.len();
-    let input = locals.push_binding("<kleisli-input>");
+    let input = locals.push_internal_binding("<kleisli-input>");
     let operation = ResolvedExpr::apply(first, [ResolvedExpr::Local(input)]);
     let body = effect_call_resolved("seq", [operation, second]);
     locals.truncate(base_len);
@@ -545,7 +545,7 @@ pub(in crate::g_syntax) fn effect_then_resolved(
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
     let base_len = locals.len();
-    let result = locals.push_binding("<effect-result>");
+    let result = locals.push_internal_binding("<effect-result>");
     let body = annotate_assert_unit_resolved(ResolvedExpr::Local(result), next);
     let continuation = ResolvedExpr::lambda(vec![result], body);
     locals.truncate(base_len);
@@ -628,7 +628,7 @@ pub(in crate::g_syntax) fn lower_comparison_chain_values_resolved(
     }
 
     let base_len = locals.len();
-    let right_binding = locals.push_binding("<comparison-right>");
+    let right_binding = locals.push_internal_binding("<comparison-right>");
     let first_condition = lower_syntax_operator_values_resolved(
         operator,
         left,
@@ -756,7 +756,7 @@ pub(in crate::g_syntax) fn lower_lambda_expr_resolved(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let base_len = locals.len();
-    let parameters = locals.extend_bindings(params.iter().map(String::as_str));
+    let parameters = locals.extend_source_bindings(params.iter().map(String::as_str), line)?;
     let lowered = syntax_expr_to_resolved_in_semantic_scope(body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
@@ -810,7 +810,8 @@ pub(in crate::g_syntax) fn lower_let_expr_resolved(
         .collect::<Result<Vec<_>, _>>()?;
 
     let base_len = locals.len();
-    let parameters = locals.extend_bindings(bindings.iter().map(|(name, _)| name.as_str()));
+    let parameters =
+        locals.extend_source_bindings(bindings.iter().map(|(name, _)| name.as_str()), line)?;
     let lowered = syntax_expr_to_resolved_in_semantic_scope(body, line, context, scope, locals)?;
     locals.truncate(base_len);
 

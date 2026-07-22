@@ -30,7 +30,7 @@
 - Names: `[a-zA-Z][a-zA-Z0-9]*` parts joined by `_`; paths dotted; expression-indexed paths `.[Expr]` / `.(ListExpr)`. 
 - Keywords: `import as module abstract using unique with without do let in where object extend self if then else match try when and or` etc. 
 - `abstract Name, ...` declares externally-provided names (also enables recursive-do forward references). `unique Foo, Bar` declares scope-unique atoms from namespace paths.
-- **Object scoping**: inside objects, names bind to `self` by default; `^name` escapes one lexical level (composes: `^^name`); `as Name` gives the object a local alias instead. Shadowing warns by default. `using Dict in Expr` treats any dict as a temporary object scope. Prior definitions via `_name` (or `_self.name`).
+- **Object scoping**: inside objects, names bind to `self` by default; `^name` escapes one lexical level (composes: `^^name`); `as Name` gives the object a local alias instead. Local-to-local shadowing is forbidden; namespace shadowing may warn. `using Dict in Expr` treats any dict as a temporary object scope. Prior definitions via `_name` (or `_self.name`).
 - **Do notation**: supports both `Pattern <- op` and `op -> Pattern` (the latter suits vertical assembly columns); `Pattern = Expr` without `let`; applicatives `!>` / `<!`; pure pipes `|>` `<|`, function composition `>>` `<<`; no mixing opposing directions without parens.
 - **Numbers**: `_42` is negative (prefix underscore is part of the literal); `1_000_000`, `1.23e_7`, `0xc0de`, `0b1010`.
 - **Texts**: raw, no escape characters; multi-line via `"""` blocks with `"`-prefixed lines, LF-separated, no trailing LF; postprocess explicitly (e.g. `|> hex2bin`). Prefer `import "file" binary as x` for large data.
