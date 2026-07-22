@@ -193,4 +193,6 @@ their detailed scheduling and representation contracts.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   a region through its last fulfillment and lowers through the standard-effect
   `.fix`; the resolved values and continuation use a compiler-private payload,
-  with no dedicated recursive-do representation in core or evaluation.
+  with no dedicated recursive-do representation in core or evaluation. Direct
+  sibling regions in one do block must be disjoint; nested do expressions may
+  introduce lexically nested recursive regions.

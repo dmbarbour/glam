@@ -205,7 +205,7 @@ fn recursive_region(
                 }
                 return Err(Diagnostic::error(
                     step.line,
-                    "overlapping recursive do abstract regions are not supported",
+                    "overlapping direct recursive regions in one do block are not supported; use a nested do expression for a nested fixpoint",
                 ));
             }
             DoStepKind::Bind { name, .. } | DoStepKind::ValueBind { name, .. } => {

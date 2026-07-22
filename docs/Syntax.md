@@ -211,10 +211,10 @@ Use of fixpoint within do notation is not implicit. It's problematic for it to b
         do
             abstract foo
             ... wire foo up, but don't observe foo ...
-            op -> foo 
+            op -> foo
             ... at this point foo is no longer abstract ...
 
-The compiler will leverage `.fix` to capture the name. Haskell already does this with `mdo`, so we can reference that implementation.
+The compiler will leverage `.fix` to capture the name.
 
 The current Rust bootstrap implements this explicitly declared, name-only
 form. `abstract Name, ...` is valid only as a non-final do statement and makes
@@ -228,13 +228,20 @@ fulfillments. The compiler privately returns the resolved values plus a
 continuation closing over locals created within the region, then resumes that
 continuation outside `.fix`. This payload is a compiler-private protocol, not
 a stable source-level data shape.
-Sequential regions are supported. Missing fulfillment, duplicate declarations,
-source-scope conflicts, and overlapping regions are diagnosed; a later region
-must begin only after the current region is fulfilled. Strictly observing an
-unresolved forward value follows the standard fixpoint failure behavior. The
-selected effect handler must provide `.fix` just as it must for an explicitly
-written `.fix` request. `_name` retains warning suppression, but the
-inaccessible `_` cannot be declared abstract.
+
+Direct recursive regions within one do block must be disjoint. A second direct
+`abstract` statement before the current region is fulfilled is rejected as an
+overlapping sibling region; after fulfillment, another direct region may begin
+sequentially. This does not prohibit hierarchical fixpoints: an expression in
+the region may contain a nested do block with its own `abstract` region, which
+lowers to a lexically nested `.fix` and may close over visible outer names.
+
+Missing fulfillment, duplicate declarations, and source-scope conflicts are
+also diagnosed. Strictly observing an unresolved forward value follows the
+standard fixpoint failure behavior. The selected effect handler must provide
+`.fix` just as it must for an explicitly written `.fix` request. `_name`
+retains warning suppression, but the inaccessible `_` cannot be declared
+abstract.
 
 ### Applicatives
 

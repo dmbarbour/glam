@@ -255,9 +255,10 @@ do
     .r loop_exit
 
 # The region runs through the last fulfillment and requires standard `.fix`.
-# Missing/duplicate declarations, overlapping regions, and strict premature
-# observations are errors. `_name` may suppress a warning; bare `_` cannot be
-# abstract because it is inaccessible.
+# Direct regions in one do block must be disjoint, but nested do expressions
+# may introduce lexically nested `.fix` regions. Missing/duplicate declarations
+# and strict premature observations are errors. `_name` may suppress a warning;
+# bare `_` cannot be abstract because it is inaccessible.
 ```
 
 ## Conditionals & Patterns

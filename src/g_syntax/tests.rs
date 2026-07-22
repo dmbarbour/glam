@@ -1196,7 +1196,7 @@ fn recursive_do_reports_invalid_regions() {
                 "  .r first\n",
             ),
             4,
-            "overlapping recursive do abstract regions are not supported",
+            "overlapping direct recursive regions in one do block are not supported",
         ),
         (
             concat!(
@@ -1242,9 +1242,18 @@ fn recursive_do_uses_standard_fix_and_preserves_region_locals() {
         "  abstract second\n",
         "  second = first + 2\n",
         "  .r second\n",
+        "hierarchical = do\n",
+        "  abstract outer\n",
+        "  inner = do\n",
+        "    abstract nested\n",
+        "    nested = outer + 2\n",
+        "    .r nested\n",
+        "  outer = 70\n",
+        "  inner\n",
         "asm.single = list.head (list.pure single)\n",
         "asm.mutual = list.head (list.pure mutual)\n",
         "asm.sequential = list.head (list.pure sequential)\n",
+        "asm.hierarchical = list.head (list.pure hierarchical)\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -1252,7 +1261,7 @@ fn recursive_do_uses_standard_fix_and_preserves_region_locals() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    for path in ["single", "mutual", "sequential"] {
+    for path in ["single", "mutual", "sequential", "hierarchical"] {
         assert_eq!(
             fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
             Value::Number(n(72)),
