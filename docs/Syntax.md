@@ -323,9 +323,11 @@ For access control and conflict avoidance, we can leverage the namespace as a st
 
 ## Dicts
 
-In expression contexts, `{}` is the empty dictionary, and `{ Path1:Expr1, Path2:Expr2, ...}` expresses a literal dictionary. Computed paths are expressed as list literals or parenthetical expressions of lists. `{ [0]:A, [1,2]:B, ([1] ++ [3,4]):C }`.
+In expression contexts, `{}` is the empty dictionary, and `{ Path1:Expr1, Path2:Expr2, ...}` expresses a literal dictionary. Computed paths are expressed as list literals or parenthetical expressions of lists. `{ [0]:A, [1,2]:B, ([1] ++ [3,4]):C }`. 
 
-Within a dictionary, `{}` serves as the 'undefined' value. For example, `{foo:{}}` is equivalent to `{}`. Only a finite subset of dictionary elements may be defined. In general, we can compose dictionaries: `{ D1, D2, D3 }` is a hierarchical union of three dictionaries. For example: `{{foo:{bar:0}}, {foo:{baz:1}}}` evaluates as `{foo:{bar:0, baz:1}}`. However, it is an error the dictionaries share any defined elements.
+Within a dictionary, `{}` serves as the 'undefined' value. For example, `{foo:{}}` is equivalent to `{}`. Only a finite subset of dictionary elements may be defined. In general, we can compose dictionaries: `{ D1, D2, D3 }` is a hierarchical union of three dictionaries. For example: `{{foo:{bar:0}}, {foo:{baz:1}}}` evaluates as `{foo:{bar:0, baz:1}}`. We can also write this as `{:foo {:bar 0, :baz 1}}`, leveraging the `:Path` tagged data constructors as singleton dictionaries. 
+
+However, it is an error the dictionaries share any defined elements. Even `{foo:1, foo:1}` is an error: there is no generalized unification, and hierarchical union applies only to dictionaries. This error is lazy and only applies to the specific overlapping elements, thus in `D = {foo:1, {foo:1, bar:2}}`, we'd have an error when observing `D.foo` but not for `D.bar`. 
 
 Multi-line literal dictionaries accept a leading comma for convenient line-editing, consistent with lists:
 
@@ -369,7 +371,7 @@ Syntax:
 
         """
         " first line
-        "
+        " "quotes are permitted"
         # source-only comment and blank lines are erased
         " second line with # retained as text
         """ |> postprocessing
