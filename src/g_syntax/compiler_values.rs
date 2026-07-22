@@ -60,6 +60,10 @@ impl GCompilerValues {
                 .insert(name_as_key("anno"), Value::Builtin(Builtin::Anno))
                 .insert(name_as_key("seq"), Value::Builtin(Builtin::Seq))
                 .insert(name_as_key("spark"), Value::Builtin(Builtin::Spark))
+                .insert(
+                    name_as_key("interaction_net"),
+                    Value::Builtin(Builtin::InteractionNet),
+                )
                 .insert(name_as_key("net_arity"), Value::Builtin(Builtin::NetArity))
                 .insert(name_as_key("not"), not.clone())
                 .insert(name_as_key("could"), could.clone())

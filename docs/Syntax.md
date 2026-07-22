@@ -285,7 +285,7 @@ Tagged data is modeled as singleton dictionaries. As a syntactic convenience, br
         tag:Data            # same as { tag:Data }
         :tag                # same as (\ Data -> tag:Data)
 
-This extends to computed tags, but only for a list of exactly one element.
+This extends to computed tags. But for tags, it's limited to one element, not a path.
 
         [TagExpr]:Data      # same as { [TagExpr]:Data } 
         :[TagExpr]          # same as (\ Data -> [TagExpr]:Data )
@@ -311,7 +311,7 @@ For access control and conflict avoidance, we can leverage the namespace as a st
 
 ## Dicts
 
-In expression contexts, `{}` is the empty dictionary, and `{ Path1:Expr1, Path2:Expr2, ...}` expresses a literal dictionary. Note that computed paths require the `.` prefix, e.g. `{ [0]:A, [1]:B }`.
+In expression contexts, `{}` is the empty dictionary, and `{ Path1:Expr1, Path2:Expr2, ...}` expresses a literal dictionary. Computed paths are expressed as list literals or parenthetical expressions of lists. `{ [0]:A, ([1] ++ [2]):B }`. 
 
 Within a dictionary, `{}` serves as the 'undefined' value. For example, `{foo:{}}` is equivalent to `{}`. Only a finite subset of dictionary elements may be defined. In general, we can compose dictionaries: `{ D1, D2, D3 }` is a hierarchical union of three dictionaries. For example: `{{foo:{bar:0}}, {foo:{baz:1}}}` evaluates as `{foo:{bar:0, baz:1}}`. However, it is an error the dictionaries share any defined elements.
 
@@ -516,9 +516,13 @@ saturation is an error; data produced before saturation is left to ordinary
 interaction rules and may become stuck. Constructing either `interaction_net`
 or `net_arity` does not itself demand the net.
 
-The construction effects API is detailed in the *Design* doc. Eventually, we
-may want a macro DSL or user-defined syntax to support direct expression of
-interaction nets.
+`interaction_net` and `net_arity` are ordinary builtins provided by
+`import 'std`. The construction program receives `.bind`, `.copy`, `.data`,
+and `.wire` plus the standard task-local effects. Construction requires exactly
+one successful branch; use `.cut` when search could otherwise return several.
+The current bootstrap can express these programs with `>>=` and `=>>`; the
+`do` form shown in the *Design* doc remains future syntax. Eventually, we may
+also want a macro DSL or user-defined syntax for direct expression of nets.
 
 ## Errors
 
@@ -871,7 +875,7 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         {x:Pattern, y:Pattern, rem} # dict of at least x,y with matching data
         {:x,:y,:z}                  # same as {x:x, y:y, z:z} (as tag:Name)
         {foo.bar.baz:Pattern, _}    # deep refs
-        {.(Expr):Pattern, _}        # eval list-path expr, extract, match Pattern
+        { (Expr):Pattern, _}        # eval list-path expr, extract, match Pattern
 
         tag:Pattern                 # same as {tag:Pattern}
         :tag                        # same as tag:tag 

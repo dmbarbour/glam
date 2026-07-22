@@ -13,6 +13,7 @@ mod strategy;
 
 use super::*;
 pub(super) use annotation::is_undefined_value;
+pub(super) use net::NetConstructionMachine;
 pub(super) use object::construct_fixpoint_object;
 
 pub(super) fn apply_builtin(
@@ -78,7 +79,7 @@ pub(super) fn apply_builtin(
         | Builtin::EffectMapRun
         | Builtin::EffectMapContinue => effect::apply(context, builtin, arguments),
         Builtin::Seq | Builtin::Spark => strategy::apply(context, builtin, arguments),
-        Builtin::NetArity => net::apply(context, arguments),
+        Builtin::InteractionNet | Builtin::NetArity => net::apply(context, builtin, arguments),
         Builtin::Anno => annotation::apply(context, arguments),
     }
 }

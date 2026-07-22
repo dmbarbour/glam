@@ -601,6 +601,9 @@ pub(crate) enum LazySource {
     },
     Application(Arc<LazyApplication>),
     Builtin(BuiltinCall),
+    /// A closed freer-effect program that constructs one interaction net.
+    /// Mutable interpreter state belongs to the observing evaluation task.
+    NetConstruction(Arc<Value>),
     NetComputation(NetValue),
     FunctionCall {
         function: FunctionValue,
@@ -687,6 +690,13 @@ impl LazyValue {
         Self::with_source("builtin call", LazySource::Builtin(call))
     }
 
+    pub(crate) fn from_net_construction(effect: Value) -> Self {
+        Self::with_source(
+            "interaction-net construction",
+            LazySource::NetConstruction(Arc::new(effect)),
+        )
+    }
+
     pub(crate) fn from_function_call(function: FunctionValue, arguments: Arc<[Value]>) -> Self {
         Self::with_source(
             "function call",
@@ -730,6 +740,7 @@ pub enum Builtin {
     Anno,
     Seq,
     Spark,
+    InteractionNet,
     NetArity,
     MergeDuplicate,
     Floor,
@@ -790,6 +801,7 @@ impl Builtin {
             Self::Anno => 2,
             Self::Seq => 2,
             Self::Spark => 2,
+            Self::InteractionNet => 1,
             Self::NetArity => 2,
             Self::MergeDuplicate => 3,
             Self::Floor => 1,

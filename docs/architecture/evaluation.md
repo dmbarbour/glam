@@ -58,12 +58,15 @@ bridge. Partial application only attaches arguments and returns another shared
 stage; it does not evaluate the net to verify an intermediate bind. Saturation
 demands data from the fully applied stage.
 
-The built-in `std` module exposes `net_arity`, `seq`, and `spark` as ordinary
-curried values. `net_arity 0 Net` constructs a net computation; a positive
-arity constructs a `FunctionValue`. The source language does not yet expose
-the `interaction_net` construction effect. Ordinary evaluation is one WHNF
-demand: it follows top-level lazy aliases, but returns a raw `Value::Net`
-unchanged and does not inspect its interface.
+The built-in `std` module exposes `interaction_net`, `net_arity`, `seq`, and
+`spark` as ordinary curried values. `interaction_net Effect` is a memoized lazy
+construction task. It runs an isolated standard-effect search, accumulates one
+write-only graph journal per alternative, requires exactly one successful
+exposed-port result, then replays that journal once through checked
+`NetBuilder`. `net_arity 0 Net` constructs a net computation; a positive arity
+constructs a `FunctionValue`. Ordinary evaluation is one WHNF demand: it
+follows top-level lazy aliases, but returns a raw `Value::Net` unchanged and
+does not inspect its interface.
 
 Compact persistent lists live in `list.rs`. Their `ListThunk` holes distinguish
 computed lazies from named promises but remain opaque to list structure; range
@@ -103,6 +106,13 @@ runtime with a stable interface. Evaluation repeatedly claims one exact
 principal-principal active pair. Pure topology rules rewrite under the runtime
 lock; core callable, operator, or cursor work runs after releasing it and then
 updates the same pair.
+
+The construction effect exposes `.bind`, `.copy`, `.data`, and `.wire` plus
+the standard task-local effects. Its opaque ports carry an invocation-local
+brand, so handles cannot cross construction boundaries. `.data` journals its
+payload without forcing it. Failed search alternatives retain no graph; only
+the selected journal is replayed, and finalization remains authoritative for
+linearity and topology errors.
 
 Logical copies use target-owned one-way cursors into stable source frontiers.
 A source active pair reduces in the source and never crosses a cursor boundary.

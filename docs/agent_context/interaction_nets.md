@@ -1,8 +1,8 @@
 # Interaction-Net Implementation Invariants
 
-This note is the current contract for the generic net implementation and its
-core specialization. It is not a chronology of the interaction-net migration
-and does not define the future `interaction_net` source effects API.
+This note is the current contract for the generic net implementation, its core
+specialization, and the source construction boundary. It is not a chronology
+of the interaction-net migration.
 
 ## Ownership
 
@@ -13,6 +13,8 @@ and does not define the future `interaction_net` source effects API.
   reduction, cursors, and runtime tests.
 - `src/core_net.rs` supplies core `Value` and `CoreOperator` semantics.
 - `src/g_syntax/net_lowering.rs` lowers front-end functions and applications.
+- `src/eval/builtins/net/construction.rs` interprets source construction
+  effects and replays the selected journal.
 - `src/eval/net.rs` and `src/eval/operator.rs` drive specialization work.
 
 Keep syntax and core policy out of the generic interaction-net modules.
@@ -39,8 +41,22 @@ that finalization splices into a direct wire, and larger copies use a balanced
 binary fan tree. Tunnels never enter a template or runtime.
 
 `Assembler::net` is a lifetime-scoped, core-specialized facade over this same
-builder. A future source effects API should replay write-only operations into
-it rather than introduce a redundant net IR.
+builder. Source `interaction_net` also ends at this builder: its branch-local
+write-only operation journal is transaction state, not a second graph IR.
+
+`interaction_net Effect` is lazy and memoized. Its isolated freer machine
+provides `.bind`, `.copy`, `.data`, and `.wire` together with the standard
+task-local effects, but no reflection, shared heap, environment, logging, or
+task capabilities. Each invocation brands its opaque logical port handles;
+operations reject handles from another invocation. Alternatives cheaply share
+a persistent journal prefix. No partial graph is built while searching.
+
+At completion, zero successful branches fail, more than one is ambiguous, and
+exactly one must return a branded port to expose. Only that branch is replayed
+in order through `NetBuilder`, then instantiated once as the runtime memoized
+by the construction lazy. Failed alternatives are never finalized, so their
+partial topology cannot produce spurious build errors. `.data` records its
+payload without forcing it.
 
 ## Runtime Identity and Graph State
 
@@ -172,8 +188,9 @@ attaches arguments and never inspects the intermediate interface. Saturation
 must produce `Data`; an early `Data` is left to ordinary interaction rules and
 may become stuck as later arguments are attached. The provisional source form
 for both bridges is `net_arity N Net` and is available through `import 'std`.
-The `interaction_net` construction effect is not yet implemented by `.g`
-syntax.
+The same module provides the ordinary `interaction_net` construction builtin;
+the bootstrap currently writes its effect programs with explicit `>>=` and
+`=>>` while `do` notation remains future syntax.
 
 Shared runtime mutation increments a condition-variable generation. If one
 observer encounters an active pair already claimed by another evaluator, it
@@ -191,7 +208,5 @@ frontier.
 - Direct fan histories remain potentially large.
 - Stuck pairs are retained for inspection but reflection does not yet expose
   them.
-- The checked construction facade exists, but the `.g` `interaction_net`
-  keyword and effect operation list do not.
 - Dictionary applicability remains a compatibility path pending a persistent
   lazy dictionary design.

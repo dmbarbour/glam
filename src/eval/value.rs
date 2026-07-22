@@ -14,7 +14,9 @@ use crate::list::ListItem;
 use crate::number::Number;
 
 use super::application::{apply_value, apply_values};
-use super::builtins::{apply_builtin, construct_fixpoint_object, is_undefined_value};
+use super::builtins::{
+    NetConstructionMachine, apply_builtin, construct_fixpoint_object, is_undefined_value,
+};
 use super::net::*;
 use super::sequence::list_to_key_items;
 
@@ -104,6 +106,7 @@ pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvalErr
 enum LazyTaskWork {
     Produce,
     Follow(Value),
+    NetConstruction(Box<NetConstructionMachine>),
 }
 
 struct LazyTaskMachine {
@@ -117,6 +120,9 @@ impl LazyTaskMachine {
         match &self.work {
             LazyTaskWork::Produce => produce_lazy_source(&self.context, &self.lazy),
             LazyTaskWork::Follow(target) => eval_value(&self.context, target),
+            LazyTaskWork::NetConstruction(_) => {
+                unreachable!("net construction has a dedicated poll path")
+            }
         }
     }
 
@@ -131,11 +137,31 @@ impl LazyTaskMachine {
 }
 
 impl EvaluationTaskMachine for LazyTaskMachine {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
         if let Some(result) = self.lazy.cached() {
             return match result {
                 Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
                 Err(error) => EvaluationMachinePoll::LazyFailed(error),
+            };
+        }
+
+        if matches!(self.work, LazyTaskWork::Produce)
+            && let LazySource::NetConstruction(effect) = self.lazy.source()
+        {
+            let machine =
+                match NetConstructionMachine::new(self.context.clone(), effect.as_ref().clone()) {
+                    Ok(machine) => machine,
+                    Err(error) => return self.fail(error),
+                };
+            self.work = LazyTaskWork::NetConstruction(Box::new(machine));
+            return EvaluationMachinePoll::Yielded;
+        }
+
+        if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
+            return match machine.poll(&self.context, step_budget) {
+                Ok(Some(value)) => self.complete(value),
+                Ok(None) => EvaluationMachinePoll::Yielded,
+                Err(error) => self.fail(error),
             };
         }
 
@@ -145,31 +171,35 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 EvaluationMachinePoll::Yielded
             }
             Ok(value) => self.complete(value),
-            Err(error) => {
-                if let Some(wait) = error.blocked_on() {
-                    return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                        lazy: Some(wait.0),
-                        observed_generation: None,
-                        error: None,
-                    });
-                }
-                if let Some(promise) = error.unassigned_promise() {
-                    let wait = match promise_wait(&self.context, promise) {
-                        Ok(wait) => wait,
-                        Err(error) => return EvaluationMachinePoll::Failed(error),
-                    };
-                    return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                        lazy: Some(wait),
-                        observed_generation: None,
-                        error: None,
-                    });
-                }
-                let failure = error.into_lazy_failure();
-                match self.lazy.cache(Err(failure)) {
-                    Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
-                    Err(error) => EvaluationMachinePoll::LazyFailed(error),
-                }
-            }
+            Err(error) => self.fail(error),
+        }
+    }
+}
+
+impl LazyTaskMachine {
+    fn fail(&self, error: EvalError) -> EvaluationMachinePoll {
+        if let Some(wait) = error.blocked_on() {
+            return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                lazy: Some(wait.0),
+                observed_generation: None,
+                error: None,
+            });
+        }
+        if let Some(promise) = error.unassigned_promise() {
+            let wait = match promise_wait(&self.context, promise) {
+                Ok(wait) => wait,
+                Err(error) => return EvaluationMachinePoll::Failed(error),
+            };
+            return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                lazy: Some(wait),
+                observed_generation: None,
+                error: None,
+            });
+        }
+        let failure = error.into_lazy_failure();
+        match self.lazy.cache(Err(failure)) {
+            Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
+            Err(error) => EvaluationMachinePoll::LazyFailed(error),
         }
     }
 }
@@ -391,6 +421,9 @@ fn produce_lazy_source(context: &EvalContext, lazy: &LazyValue) -> Result<Value,
                 .pop()
                 .expect("saturated builtin thunk must contain an argument");
             apply_builtin(context, call.builtin, arguments, argument)
+        }
+        LazySource::NetConstruction(_) => {
+            unreachable!("net construction must retain its pollable effect machine")
         }
         LazySource::NetComputation(net) => {
             let runtime = net.runtime().clone();

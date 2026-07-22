@@ -3192,7 +3192,7 @@ fn evaluate(context: &EvalContext, value: Value) -> Result<Value, TaskError> {
     Ok(value)
 }
 
-fn task_eval_error(error: eval::EvalError) -> TaskError {
+pub(crate) fn task_eval_error(error: eval::EvalError) -> TaskError {
     match error.blocked_on() {
         Some(wait) => TaskError::blocked(wait.0),
         None => TaskError::new(error.to_string()),

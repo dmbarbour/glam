@@ -2681,6 +2681,10 @@ fn lowers_builtin_imports_to_module_dictionaries() {
     ) = match &std {
         Value::Dict(std) => {
             assert!(matches!(
+                std.get(&Key::atom_from_text("interaction_net")),
+                Some(Value::Builtin(crate::core::Builtin::InteractionNet))
+            ));
+            assert!(matches!(
                 std.get(&Key::atom_from_text("net_arity")),
                 Some(Value::Builtin(crate::core::Builtin::NetArity))
             ));
@@ -2844,6 +2848,237 @@ fn lowers_builtin_imports_to_module_dictionaries() {
         list_spec,
         Value::Dict(dict) if dict.is_empty()
     ));
+}
+
+#[test]
+fn constructs_and_observes_an_interaction_net_from_source_effects() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "answer_net = interaction_net (.data \"Hello, World!\" >>= (\\ports -> .r (list.head ports)))\n",
+            "asm.result = net_arity 0 answer_net\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    let result = resolved_value_at_path(&definitions, &["asm", "result"]);
+    assert_eq!(output_bytes(&result), b"Hello, World!");
+}
+
+#[test]
+fn interaction_net_bind_builds_an_ordinary_identity_function() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "identity_net = interaction_net (.bind >>= (\\ports -> .wire (list.head (list.tail ports)) (list.head (list.tail (list.tail ports))) =>> .r (list.head ports)))\n",
+            "asm.result = net_arity 1 identity_net \"Hello, World!\"\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    let result = resolved_value_at_path(&definitions, &["asm", "result"]);
+    assert_eq!(output_bytes(&result), b"Hello, World!");
+}
+
+#[test]
+fn interaction_net_construction_is_memoized_and_preserves_initial_active_pairs() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "raw = interaction_net (.bind >>= (\\bind -> .data 0 >>= (\\data -> .copy 0 >>= (\\erase -> .wire (list.head bind) (list.head data) =>> .wire (list.head (list.tail (list.tail bind))) (list.head erase) =>> .r (list.head (list.tail bind))))))\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    let first = resolved_value_at_path(&definitions, &["raw"]);
+    let second = resolved_value_at_path(&definitions, &["raw"]);
+    let (Value::Net(first), Value::Net(second)) = (first, second) else {
+        panic!("interaction_net should produce a net")
+    };
+    assert!(first.runtime().ptr_eq(second.runtime()));
+    assert_eq!(
+        first.runtime().with(|runtime| runtime.active_pairs().len()),
+        1
+    );
+}
+
+#[test]
+fn interaction_net_construction_supports_local_effect_state() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "answer_net = interaction_net (.data \"state\" >>= (\\ports -> .set '.port (list.head ports) =>> .get '.port >>= (\\port -> .r port)))\n",
+            "asm.result = net_arity 0 answer_net\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    let result = resolved_value_at_path(&definitions, &["asm", "result"]);
+    assert_eq!(output_bytes(&result), b"state");
+}
+
+#[test]
+fn interaction_net_construction_backtracks_and_requires_one_result() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "fallback = interaction_net (.alt (.bind >>= (\\_ports -> .fail)) (.data \"fallback\" >>= (\\ports -> .r (list.head ports))))\n",
+            "selected = interaction_net (.cut (.alt (.data \"left\" >>= (\\ports -> .r (list.head ports))) (.data \"right\" >>= (\\ports -> .r (list.head ports)))))\n",
+            "ambiguous = interaction_net (.alt (.data \"left\" >>= (\\ports -> .r (list.head ports))) (.data \"right\" >>= (\\ports -> .r (list.head ports))))\n",
+            "missing = interaction_net .fail\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    let fallback = resolved_value_at_path(&definitions, &["fallback"]);
+    let selected = resolved_value_at_path(&definitions, &["selected"]);
+    assert!(matches!(fallback, Value::Net(_)));
+    assert!(matches!(selected, Value::Net(_)));
+
+    let ambiguous = value_at_atom_path(&definitions, &["ambiguous"]).unwrap();
+    assert!(
+        fully_evaluated_error(ambiguous)
+            .to_string()
+            .contains("produced multiple results")
+    );
+    let missing = value_at_atom_path(&definitions, &["missing"]).unwrap();
+    assert!(
+        fully_evaluated_error(missing)
+            .to_string()
+            .contains("produced no successful result")
+    );
+}
+
+#[test]
+fn interaction_net_data_does_not_force_its_payload_during_construction() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "bad = 1 / 0\n",
+            "raw = interaction_net (.data bad >>= (\\ports -> .r (list.head ports)))\n",
+            "observed = net_arity 0 raw\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    assert!(matches!(
+        resolved_value_at_path(&definitions, &["raw"]),
+        Value::Net(_)
+    ));
+    let observed = value_at_atom_path(&definitions, &["observed"]).unwrap();
+    let error = fully_evaluated_error(observed).to_string();
+    assert!(
+        error.contains("divide by zero"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn interaction_net_finalization_reports_invalid_topology() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "not_port = interaction_net (.r 42)\n",
+            "unwired = interaction_net (.bind >>= (\\ports -> .r (list.head ports)))\n",
+            "duplicate = interaction_net (.bind >>= (\\ports -> .wire (list.head (list.tail ports)) (list.head (list.tail (list.tail ports))) =>> .wire (list.head (list.tail ports)) (list.head (list.tail (list.tail ports))) =>> .r (list.head ports)))\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    for (name, expected) in [
+        ("not_port", "requires a construction port"),
+        ("unwired", "is unwired"),
+        ("duplicate", "is wired more than once"),
+    ] {
+        let value = value_at_atom_path(&definitions, &[name]).unwrap();
+        assert!(
+            fully_evaluated_error(value).to_string().contains(expected),
+            "{name} should report `{expected}`"
+        );
+    }
+}
+
+#[test]
+fn interaction_net_copy_effect_covers_erase_tunnel_and_balanced_fans() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "erase = interaction_net (.copy 0 >>= (\\ports -> .r (list.head ports)))\n",
+            "tunnel = interaction_net (.copy 1 >>= (\\copy -> .data \"through\" >>= (\\data -> .wire (list.head (list.tail copy)) (list.head data) =>> .r (list.head copy))))\n",
+            "fan = interaction_net (.copy 3 >>= (\\copy -> .copy 0 >>= (\\e1 -> .copy 0 >>= (\\e2 -> .copy 0 >>= (\\e3 -> .wire (list.head (list.tail copy)) (list.head e1) =>> .wire (list.head (list.tail (list.tail copy))) (list.head e2) =>> .wire (list.head (list.tail (list.tail (list.tail copy)))) (list.head e3) =>> .r (list.head copy))))))\n",
+            "asm.result = net_arity 0 tunnel\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    assert!(matches!(
+        resolved_value_at_path(&definitions, &["erase"]),
+        Value::Net(_)
+    ));
+    assert!(matches!(
+        resolved_value_at_path(&definitions, &["fan"]),
+        Value::Net(_)
+    ));
+    let result = resolved_value_at_path(&definitions, &["asm", "result"]);
+    assert_eq!(output_bytes(&result), b"through");
+}
+
+#[test]
+fn interaction_net_copy_requires_a_representable_nonnegative_integer() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "negative = interaction_net (.copy _1 >>= (\\ports -> .r (list.head ports)))\n",
+            "fractional = interaction_net (.copy (1/2) >>= (\\ports -> .r (list.head ports)))\n",
+            "overflow = interaction_net (.copy 18446744073709551616 >>= (\\ports -> .r (list.head ports)))\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    for name in ["negative", "fractional", "overflow"] {
+        let value = value_at_atom_path(&definitions, &[name]).unwrap();
+        let error = fully_evaluated_error(value).to_string();
+        assert!(
+            error.contains("requires non-negative integer indices"),
+            "unexpected {name} error: {error}"
+        );
+    }
 }
 
 #[test]

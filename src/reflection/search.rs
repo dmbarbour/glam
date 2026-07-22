@@ -119,14 +119,18 @@ impl<S: TaskSpecialization> IsolatedSearchBranch<S> {
 
 #[doc(hidden)]
 pub struct IsolatedSearchBlock {
-    waiting_on_dependency: bool,
+    dependency: Option<super::EvaluationWaitToken>,
     observed_generation: Option<u64>,
     error: Option<Arc<str>>,
 }
 
 impl IsolatedSearchBlock {
     pub fn waiting_on_dependency(&self) -> bool {
-        self.waiting_on_dependency
+        self.dependency.is_some()
+    }
+
+    pub(crate) fn dependency(&self) -> Option<&super::EvaluationWaitToken> {
+        self.dependency.as_ref()
     }
 
     pub fn observed_generation(&self) -> Option<u64> {
@@ -184,7 +188,7 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
         match self.task.poll(step_budget) {
             EffectTaskPoll::Yielded => IsolatedSearchPoll::Yielded,
             EffectTaskPoll::Blocked(blocked) => IsolatedSearchPoll::Blocked(IsolatedSearchBlock {
-                waiting_on_dependency: blocked.lazy.is_some(),
+                dependency: blocked.lazy,
                 observed_generation: blocked.observed_generation,
                 error: blocked.error,
             }),

@@ -41,6 +41,7 @@ not define future language semantics or collect subsystem invariants.
 | `evaluation.rs`, `evaluation/executor.rs` | Sessions, contexts, task scheduling, workers, and sparks |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing, application, operator staging, and net driving |
 | `eval/builtins/` | Builtin implementations split by semantic family |
+| `eval/builtins/net/construction.rs` | Lazy `interaction_net` effect search, branch-local construction journals, opaque port capabilities, and checked replay |
 | `eval/sequence.rs` | Lazy list-to-binary observation and ranged extraction |
 | `list.rs`, `number.rs` | Compact persistent list ropes and exact-number boundary |
 | `diagnostic.rs`, `api.rs` diagnostic facade | Diagnostic values, enrichment metadata, session buses, subscriptions, and severity counts |
@@ -123,6 +124,20 @@ effects remain external freer-monad tasks. Generic interaction-net reduction
 knows topology; `core_net` and `eval` supply core semantics. See the
 [evaluation](../docs/architecture/evaluation.md) and
 [reflection](../docs/architecture/reflection.md) notes for the handoffs.
+
+Source-level net construction follows a separate lazy path:
+
+```text
+interaction_net Effect
+  -> isolated standard-effect search
+  -> persistent write-only journal per alternative
+  -> exactly one successful exposed-port result
+  -> checked replay through NetBuilder
+  -> one memoized shared Value::Net runtime
+```
+
+Construction never exposes raw graph identities. Branded opaque port handles
+exist only while the effect runs, and failed alternatives are never replayed.
 
 ## Interaction-Net Reduction
 
