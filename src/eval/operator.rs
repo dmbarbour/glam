@@ -268,7 +268,7 @@ pub(super) fn apply_core_operator(
     }
 }
 
-fn constant_effect(request: Value) -> Value {
+pub(crate) fn constant_effect(request: Value) -> Value {
     let mut net = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
     let [input, argument, result] = net.bind();
     let erase = net.copy(0).input;

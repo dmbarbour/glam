@@ -93,6 +93,9 @@ impl<R> EffectRequestSpec<R> {
 /// Result of handling one specialization-owned request.
 pub enum RequestResult {
     Return(PublicValue),
+    /// Resumes the current continuation once per value, preserving order.
+    /// An empty collection is an ordinary effect failure.
+    Alternatives(Vec<PublicValue>),
     ReturnUnit,
     Fail,
     Cancelled,
@@ -1386,6 +1389,27 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         branch,
                         scope_depth,
                     },
+                    RequestResult::Alternatives(values) => {
+                        let values = values
+                            .into_iter()
+                            .map(PublicValue::into_core)
+                            .collect::<Vec<_>>();
+                        match values.as_slice() {
+                            [] => MachineWork::Outcome {
+                                outcome: branch.into_failure(),
+                                scope_depth,
+                            },
+                            [value] => MachineWork::Deliver {
+                                value: value.clone(),
+                                branch,
+                                scope_depth,
+                            },
+                            _ => MachineWork::Drive {
+                                branch: branch.with_effect(alternative_returns(&self.tags, values)),
+                                scope_depth,
+                            },
+                        }
+                    }
                     RequestResult::ReturnUnit => MachineWork::Deliver {
                         value: unit_value(),
                         branch,
@@ -3069,6 +3093,19 @@ fn nullary_request(tag: Key) -> Value {
     Value::Dict(Dict::new_sync().insert(tag, Value::List(List::empty())))
 }
 
+fn request_value(tag: &Key, arguments: Vec<Value>) -> Value {
+    Value::Dict(Dict::new_sync().insert(tag.clone(), Value::List(List::from_values(arguments))))
+}
+
+fn alternative_returns(tags: &Tags, values: Vec<Value>) -> Value {
+    values
+        .into_iter()
+        .rev()
+        .map(|value| eval::constant_effect(request_value(&tags.r, vec![value])))
+        .reduce(|right, left| eval::constant_effect(request_value(&tags.alt, vec![left, right])))
+        .expect("alternative return construction requires at least two values")
+}
+
 fn apply(
     context: &EvalContext,
     function: Value,
@@ -3339,6 +3376,7 @@ mod tests {
         Reflection(ReflectionRequest),
         ReadLog,
         WriteStderr,
+        Alternatives,
     }
 
     #[derive(Clone)]
@@ -3383,6 +3421,12 @@ mod tests {
                         1,
                         TestRequest::WriteStderr,
                     ),
+                    EffectRequestSpec::new(
+                        "alternatives",
+                        ["reflection_test", "request", "alternatives"],
+                        0,
+                        TestRequest::Alternatives,
+                    ),
                 ])
                 .collect()
         }
@@ -3411,6 +3455,10 @@ mod tests {
                     }
                     Ok(RequestResult::ReturnUnit)
                 }
+                TestRequest::Alternatives => Ok(RequestResult::Alternatives(vec![
+                    PublicValue::text("first"),
+                    PublicValue::text("second"),
+                ])),
             }
         }
     }
@@ -3891,6 +3939,22 @@ mod tests {
             ".alt (.reset \"prompt\" (.shift \"prompt\" (\\continuation -> continuation \"resumed\"))) (.r \"outer\")",
             &[b"resumed", b"outer"],
         );
+    }
+
+    #[test]
+    fn specialized_requests_can_resume_each_ordered_alternative() {
+        let (assembler, effect) =
+            compile_effect(".alternatives >>= (\\value -> .r (value ++ \" result\"))");
+        let host = Arc::new(TestHost::default());
+        let mut search = IsolatedEffectSearch::new(&effect, TestEffects, host)
+            .expect("isolated effect should initialize");
+        let results = poll_isolated_search(&mut search);
+        let values = results
+            .iter()
+            .filter_map(IsolatedSearchBranch::value)
+            .map(|value| assembler.to_binary(value).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values, [b"first result".as_slice(), b"second result"]);
     }
 
     #[test]

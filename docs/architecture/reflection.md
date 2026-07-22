@@ -58,6 +58,13 @@ an observed-state change conservatively restarts the complete isolated search.
 Ordinary `EffectRun` retains its explicit-cut requirement and single-result
 behavior.
 
+A specialization request may return an ordered collection of alternatives.
+The machine resumes the current continuation once for each value using the
+same ordinary choice machinery; an empty collection is effect failure. This is
+used by nested configured-CLI token parsing so distinct structured token
+results remain distinct outer parse branches rather than being collapsed in
+host code.
+
 Both outer policies use the same standard-effect machine. The machine separates
 deterministic effect failure, current dependency waits,
 and evaluation errors. A dependency becoming terminal reruns the unchanged

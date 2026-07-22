@@ -20,6 +20,8 @@ not define future language semantics or collect subsystem invariants.
 | `cli/bootstrap.rs`, `cli/output.rs` | OS-string bootstrap dispatch, standalone-option validation, help text, and inspection formatting |
 | `cli/configured.rs`, `cli/search.rs` | `conf.cli` lookup, isolated all-results execution, branch validation, and semantic-plan selection |
 | `cli/effects.rs`, `cli/host.rs` | Serial CLI reader/writer effect specialization and immutable invocation host |
+| `cli/completion.rs` | Shell-neutral configured-completion requests, candidates, expectations, and argument/token frontiers |
+| `cli/token.rs`, `cli/token/` | Restricted nested token-effect search plus literal, Unicode-scalar, end, and capture-free regex readers |
 | `source.rs` | Immutable source artifacts, identities and digests, relative resolvers, host compatibility, and tracked local files |
 | `lib.rs`, `api.rs` | Embedding facade: staged assembler construction, opaque values, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
 | `g_source.rs` | Narrow public inspection report for the built-in `.g` parser; no syntax tree or lowering context escapes |
@@ -70,6 +72,13 @@ count. It then extracts `asm.result`, drains reflection reasoning, finalizes
 local file tracking, and closes configured logging. See the
 [assembly flow](../docs/architecture/assembly.md) for ordering and failure
 behavior.
+
+The same configured interpreter has a non-committing completion mode. It
+preserves the active argument's prefix and suffix plus later arguments, retains
+only evidence at the furthest argument/token frontier, and validates complete
+candidates by replaying ordinary isolated parsing. `.read.token` delegates one
+UTF-8 argument to a second restricted all-results effect machine; its ordinary
+result resumes the enclosing CLI continuation once per token alternative.
 
 ## Front-End Dataflow
 

@@ -5,8 +5,8 @@ use std::path::Path;
 use crate::Assembler;
 
 use super::{
-    ParseVerbosity, TopLevelCommand, dispatch_bootstrap, expand_configured,
-    format_configured_arguments,
+    CompletionKind, CompletionRequest, ParseVerbosity, TopLevelCommand, complete_configured,
+    dispatch_bootstrap, expand_configured, format_configured_arguments,
 };
 
 fn dispatch(arguments: &[&str]) -> Result<TopLevelCommand, String> {
@@ -211,6 +211,251 @@ fn configured_cli_builds_one_canonical_command_plan() {
 }
 
 #[test]
+fn configured_cli_parses_structured_utf8_tokens() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli =\n    .read.token \"script option\" (.token.text \"--script.\" =>> .token.regex \"[A-Za-z0-9_+-]+\") >>= (\\extension ->\n    .read.text \"script body\" >>= (\\body ->\n    .read.end =>> .write.script extension body))\n",
+    );
+    let expansion = expand_configured(
+        &assembler,
+        &configuration,
+        super::CliArguments::new(
+            ["--script.g", "asm.result = 7"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        ),
+    )
+    .expect("nested token parser should return its regex span");
+    assert_eq!(
+        expansion.plan().process_args(),
+        ["--script.g", "asm.result = 7"]
+    );
+
+    let error = expand_configured(
+        &assembler,
+        &configuration,
+        super::CliArguments::new(
+            ["--script.g!", "asm.result = 7"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        ),
+    )
+    .expect_err("nested parser must consume the complete token");
+    assert!(error.to_string().contains("did not match"), "{error}");
+}
+
+#[test]
+fn configured_cli_token_alternatives_reenter_outer_search() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.token \"choice\" (.alt (.token.text \"x\" =>> .r \"one\") (.token.text \"x\" =>> .r \"two\")) >>= (\\choice -> .read.end =>> .write.script \"g\" choice)\n",
+    );
+    let error = expand_configured(&assembler, &configuration, configured_arguments(&["x"]))
+        .expect_err("distinct nested results should remain ambiguous outside the token parser");
+    assert!(
+        error.to_string().contains("more than one distinct command"),
+        "{error}"
+    );
+}
+
+#[test]
+fn configured_token_parser_returns_user_structured_values() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.token \"field\" (.token.regex \"[A-Za-z]+\" >>= (\\key -> .token.text \"=\" =>> .token.regex \"[0-9]+\" >>= (\\value -> .r {key:key, value:value}))) >>= (\\field -> (field == {key:\"answer\", value:\"42\"}) =>> .read.end =>> .write.script \"g\" \"ok\")\n",
+    );
+    let expansion = expand_configured(
+        &assembler,
+        &configuration,
+        configured_arguments(&["answer=42"]),
+    )
+    .expect("nested token results should retain user-constructed structure");
+    assert_eq!(expansion.plan().process_args(), ["--script.g", "ok"]);
+}
+
+fn replacements(completion: &super::CliCompletion) -> Vec<String> {
+    completion
+        .candidates()
+        .iter()
+        .map(|candidate| candidate.replacement().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn configured_completion_combines_only_furthest_viable_keywords() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .alt (.read.keyword \"build\" =>> .read.keyword \"x\" =>> .read.end =>> .write.script \"g\" \"build\") (.alt (.read.keyword \"bundle\" =>> .read.keyword \"y\" =>> .read.end =>> .write.script \"g\" \"bundle\") (.read.keyword \"other\" =>> .read.end =>> .write.script \"g\" \"other\"))\n",
+    );
+    let completion = complete_configured(
+        &assembler,
+        &configuration,
+        CompletionRequest::new([], "bu", "", []),
+    )
+    .expect("configured completion should run");
+    assert_eq!(replacements(&completion), ["build", "bundle"]);
+    assert_eq!(completion.candidates()[0].kind(), CompletionKind::Keyword);
+
+    let completion = complete_configured(
+        &assembler,
+        &configuration,
+        CompletionRequest::new([], "bu", "", [OsString::from("x")]),
+    )
+    .expect("later arguments should validate otherwise local candidates");
+    assert_eq!(replacements(&completion), ["build"]);
+
+    let completion = complete_configured(
+        &assembler,
+        &configuration,
+        CompletionRequest::new([], "bu", "ld", [OsString::from("x")]),
+    )
+    .expect("the unchanged suffix should participate in completion");
+    assert_eq!(replacements(&completion), ["build"]);
+}
+
+#[test]
+fn configured_completion_derives_literals_but_not_regex_languages() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.token \"script option\" (.token.text \"--script.\" =>> .token.regex \"[A-Za-z]+\") >>= (\\_ -> .read.text \"body\" =>> .read.end =>> .write.script \"g\" \"body\")\n",
+    );
+    let completion = complete_configured(
+        &assembler,
+        &configuration,
+        CompletionRequest::new([], "--scr", "", []),
+    )
+    .expect("literal token completion should run");
+    assert_eq!(replacements(&completion), ["--script."]);
+
+    let completion = complete_configured(
+        &assembler,
+        &configuration,
+        CompletionRequest::new([], "--script.", "", []),
+    )
+    .expect("regex frontier should remain a non-enumerated expectation");
+    assert!(completion.candidates().is_empty());
+    assert!(
+        completion
+            .expectations()
+            .iter()
+            .any(|expectation| expectation.label() == "matching text")
+    );
+}
+
+#[test]
+fn configured_completion_filters_filesystem_candidates_by_path_kind() {
+    let root = std::env::temp_dir().join(format!(
+        "glam-cli-completion-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    fs::create_dir_all(root.join("folder")).expect("completion folder should be created");
+    fs::write(root.join("file.g"), "source").expect("completion file should be created");
+    let prefix = root.join("fi").into_os_string();
+
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.keyword \"open\" =>> .read.path 'file 'r >>= (\\_ -> .read.end =>> .write.script \"g\" \"ok\")\n",
+    );
+    let completion = complete_configured(
+        &assembler,
+        &configuration,
+        CompletionRequest::new([OsString::from("open")], prefix, "", []),
+    )
+    .expect("filesystem completion should run");
+    assert_eq!(
+        replacements(&completion),
+        [root.join("file.g").display().to_string()]
+    );
+    assert_eq!(completion.candidates()[0].kind(), CompletionKind::File);
+
+    fs::remove_dir_all(root).expect("completion fixture should be removed");
+}
+
+#[test]
+fn missing_configured_cli_has_no_completion_candidates() {
+    let (assembler, configuration) = configuration("language g0\nobject conf.env\n");
+    let completion = complete_configured(
+        &assembler,
+        &configuration,
+        CompletionRequest::new([], "build", "", []),
+    )
+    .expect("undefined conf.cli should behave like failure during completion");
+    assert!(completion.candidates().is_empty());
+}
+
+#[test]
+fn token_regex_rejects_captures_and_any_consumes_one_unicode_scalar() {
+    let (assembler, unicode_configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.token \"unicode pair\" (.token.any >>= (\\a -> .token.any >>= (\\_ -> .token.end =>> .r a))) >>= (\\body -> .read.end =>> .write.script \"g\" body)\n",
+    );
+    let expansion = expand_configured(
+        &assembler,
+        &unicode_configuration,
+        configured_arguments(&["λx"]),
+    )
+    .expect("token any should consume Unicode scalar values rather than bytes");
+    assert_eq!(expansion.plan().process_args(), ["--script.g", "λ"]);
+
+    let (assembler, regex_configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.token \"capture-free text\" (.token.regex \"(x)\") =>> .read.end =>> .write.script \"g\" \"ok\"\n",
+    );
+    let error = expand_configured(
+        &assembler,
+        &regex_configuration,
+        configured_arguments(&["x"]),
+    )
+    .expect_err("capturing token regex should be rejected");
+    assert!(
+        error.to_string().contains("does not permit capture"),
+        "{error}"
+    );
+}
+
+#[test]
+fn token_regex_is_anchored_capture_free_and_leftmost_first() {
+    let source = |pattern: &str| {
+        format!(
+            "language g0\nimport 'std\nconf.cli = .read.token \"choice\" (.token.regex \"{pattern}\") >>= (\\_ -> .read.end =>> .write.script \"g\" \"ok\")\n"
+        )
+    };
+    let (assembler, longest_configuration) = configuration(&source("(?:foofoo|foo)"));
+    expand_configured(
+        &assembler,
+        &longest_configuration,
+        configured_arguments(&["foofoo"]),
+    )
+    .expect("non-capturing groups should be accepted");
+
+    let (assembler, shortest_configuration) = configuration(&source("(?:foo|foofoo)"));
+    expand_configured(
+        &assembler,
+        &shortest_configuration,
+        configured_arguments(&["foofoo"]),
+    )
+    .expect_err("leftmost-first matching should leave the longer suffix unconsumed");
+
+    let (assembler, anchored_configuration) = configuration(&source("foo"));
+    expand_configured(
+        &assembler,
+        &anchored_configuration,
+        configured_arguments(&["xfoo"]),
+    )
+    .expect_err("token regex must be anchored at the current cursor");
+}
+
+#[test]
+fn configured_parse_errors_report_the_furthest_expectation() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .alt (.read.keyword \"build\" =>> .read.token \"script option\" (.token.text \"--script.\" =>> .token.regex \"[A-Za-z]+\") =>> .read.end =>> .write.script \"g\" \"ok\") (.read.keyword \"bundle\" =>> .read.end =>> .write.script \"g\" \"other\")\n",
+    );
+    let error = expand_configured(
+        &assembler,
+        &configuration,
+        configured_arguments(&["build", "--script."]),
+    )
+    .expect_err("incomplete regex span should fail at its token frontier");
+    assert!(error.to_string().contains("argument 2, byte 9"), "{error}");
+    assert!(error.to_string().contains("matching text"), "{error}");
+}
+
+#[test]
 fn configured_cli_reads_its_immutable_environment() {
     let assembler = Assembler::builder()
         .reflection_environment(|_| {
@@ -371,6 +616,86 @@ fn configured_cli_path_handles_are_invocation_scoped_writer_inputs() {
         [OsString::from("--file"), path.as_os_str().to_owned()]
     );
     fs::remove_file(path).expect("temporary CLI input should be removed");
+}
+
+#[test]
+fn configured_path_readers_distinguish_kind_and_access_intent() {
+    let root = std::env::temp_dir().join(format!(
+        "glam-cli-path-matrix-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos()
+    ));
+    let file = root.join("input.g");
+    let readonly_file = root.join("readonly.g");
+    let folder = root.join("folder");
+    let missing = root.join("new-target");
+    let missing_parent = root.join("absent").join("target");
+    fs::create_dir_all(&folder).expect("path fixture folder should be created");
+    fs::write(&file, "source").expect("path fixture file should be created");
+    fs::write(&readonly_file, "source").expect("read-only path fixture should be created");
+    let original_permissions = fs::metadata(&readonly_file)
+        .expect("read-only fixture should have metadata")
+        .permissions();
+    let mut readonly_permissions = original_permissions.clone();
+    readonly_permissions.set_readonly(true);
+    fs::set_permissions(&readonly_file, readonly_permissions)
+        .expect("read-only fixture permissions should be installed");
+
+    let cases = [
+        ("file", "r", file.as_path(), true),
+        ("file", "r", folder.as_path(), false),
+        ("folder", "r", folder.as_path(), true),
+        ("folder", "r", file.as_path(), false),
+        ("file", "w", file.as_path(), true),
+        ("file", "r", readonly_file.as_path(), true),
+        ("file", "w", readonly_file.as_path(), false),
+        ("file", "w", folder.as_path(), false),
+        ("folder", "w", folder.as_path(), true),
+        ("folder", "w", file.as_path(), false),
+        ("file", "w", missing.as_path(), true),
+        ("folder", "w", missing.as_path(), true),
+        ("any", "r", file.as_path(), true),
+        ("any", "w", missing.as_path(), true),
+        ("any", "w", missing_parent.as_path(), false),
+    ];
+    for (kind, access, path, should_match) in cases {
+        let source = format!(
+            "language g0\nimport 'std\nconf.cli = .read.keyword \"path\" =>> .read.path '{kind} '{access} >>= (\\_ -> .read.end =>> .write.script \"g\" \"ok\")\n"
+        );
+        let (assembler, configuration) = configuration(&source);
+        let result = expand_configured(
+            &assembler,
+            &configuration,
+            super::CliArguments::new([OsString::from("path"), path.as_os_str().to_owned()].into()),
+        );
+        assert_eq!(
+            result.is_ok(),
+            should_match,
+            "unexpected path result for {kind}/{access}: {}",
+            path.display()
+        );
+    }
+
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.keyword \"path\" =>> .read.path 'folder 'r >>= (\\path -> .read.end =>> .write.file path)\n",
+    );
+    let error = expand_configured(
+        &assembler,
+        &configuration,
+        super::CliArguments::new([OsString::from("path"), folder.as_os_str().to_owned()].into()),
+    )
+    .expect_err("file writer must reject a folder path handle");
+    assert!(
+        error.to_string().contains("requires a readable file path"),
+        "{error}"
+    );
+
+    fs::set_permissions(&readonly_file, original_permissions)
+        .expect("read-only fixture should be made removable");
+    fs::remove_dir_all(root).expect("path fixture should be removed");
 }
 
 #[test]

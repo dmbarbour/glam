@@ -128,6 +128,15 @@ their detailed scheduling and representation contracts.
   Its API contains standard control, `.env`, CLI-local `.log`, and CLI
   readers/writers, but deliberately omits `.heap.*` and `.task.*`; it therefore
   makes no retryable state observations. Branch journals never commit.
+- `.read.token Expectation Parser` runs `Parser` in a separate restricted
+  all-results machine against exactly one UTF-8 argument and requires complete
+  token consumption. Token requests that escape this boundary are errors;
+  token alternatives resume the enclosing CLI continuation independently.
+- `complete_configured` is shell-neutral analysis, not bootstrap dispatch. It
+  retains the active prefix, suffix, and following arguments, keeps only the
+  furthest candidate/expectation frontier, and never commits command writers.
+  Capture-free token regexes report expectations but do not enumerate their
+  languages.
 - `process.cli.args` is concrete while configuration loads. For bare dispatch,
   canonical `process.args` and `process.refl_args` are builder-created promises
   resolved only after one semantic command plan is selected. Bootstrap plans

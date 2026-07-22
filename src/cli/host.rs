@@ -8,6 +8,7 @@ use crate::reflection::{
     ReflectionStore, ReflectionTransaction, StoreSnapshot, TaskCommit, TaskEnvironment, TaskHost,
 };
 
+use super::completion::{CompletionEvidence, ExpectationEvidence};
 use super::effects::CliEffects;
 use super::model::CommandEdit;
 
@@ -17,15 +18,47 @@ static NEXT_CLI_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
 pub(super) struct CliInvocation {
     pub(super) id: u64,
     pub(super) args: Arc<[OsString]>,
+    pub(super) completion: Option<CompletionPoint>,
 }
 
 impl CliInvocation {
     pub(super) fn new(args: Arc<[OsString]>) -> Self {
+        Self::from_parts(args, None)
+    }
+
+    pub(super) fn for_completion(
+        args: Arc<[OsString]>,
+        argument: usize,
+        prefix: OsString,
+        suffix: OsString,
+    ) -> Self {
+        Self::from_parts(
+            args,
+            Some(CompletionPoint {
+                argument,
+                prefix,
+                suffix,
+            }),
+        )
+    }
+
+    fn from_parts(args: Arc<[OsString]>, completion: Option<CompletionPoint>) -> Self {
         let id = NEXT_CLI_INVOCATION_ID
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .expect("CLI invocation IDs exhausted");
-        Self { id, args }
+        Self {
+            id,
+            args,
+            completion,
+        }
     }
+}
+
+#[derive(Clone)]
+pub(super) struct CompletionPoint {
+    pub(super) argument: usize,
+    pub(super) prefix: OsString,
+    pub(super) suffix: OsString,
 }
 
 #[derive(Clone)]
@@ -38,6 +71,8 @@ pub(super) struct CliJournal {
     pub(super) reflection: ReflectionJournal,
     pub(super) cursor: usize,
     pub(super) edits: Vec<CommandEdit>,
+    pub(super) expectations: Vec<ExpectationEvidence>,
+    pub(super) candidates: Vec<CompletionEvidence>,
 }
 
 impl ReflectionTransaction for CliJournal {

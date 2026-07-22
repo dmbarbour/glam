@@ -141,3 +141,20 @@ shared heap nor reflection-task operations, and its outer branch journals are
 inspected rather than committed. `--parse_cli` prints the selected canonical
 arguments one per line; `--parse_cli.0` uses NUL delimiters. Neither executes
 the command nor activates workers.
+
+Configured parsing records an argument index and token-relative byte offset for
+failed reader expectations. `.read.token` starts a nested restricted effect
+search over one UTF-8 argument; literal, capture-free `regex-lite`, Unicode
+scalar, and end readers advance its byte cursor, and every complete nested
+result resumes the outer continuation. Regex matching is anchored at the
+current token cursor and follows `regex-lite`'s leftmost-first preference.
+
+`cli::complete_configured` runs the same outer parser with an active argument
+split into prefix and suffix. Readers at that frontier record candidates and
+expectations, then fail so sibling alternatives remain visible. Candidates at
+shallower frontiers are discarded. Complete keyword, path, and token
+candidates are replayed against the unchanged suffix and later arguments;
+command edits remain isolated throughout. Filesystem completion preserves OS
+path values, offers folders for navigation, and filters terminal entries by
+the path reader's kind. The bootstrap `--completions` protocol and basic-option
+completion remain a later layer.

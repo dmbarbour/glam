@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use crate::api::{Assembler, Diagnostic, Value};
 use crate::core::keys;
-use crate::reflection::{IsolatedEffectSearch, IsolatedSearchPoll};
+use crate::reflection::{IsolatedEffectSearch, IsolatedSearchBranch, IsolatedSearchPoll};
 
+use super::completion::{CliCompletion, CompletionCandidate, CompletionRequest, Frontier};
 use super::effects::CliEffects;
 use super::host::{CliHost, CliInvocation, CliJournal};
 use super::model::{CliArguments, CliError, CommandPlan, CommandPlanBuilder};
@@ -20,10 +21,94 @@ pub(super) fn run_cli_search(
     effect: &Value,
     arguments: CliArguments,
 ) -> Result<CliSearchResult, CliError> {
-    let host = Arc::new(CliHost::new(
-        assembler.reflection_environment(),
+    let branches = run_search(
+        assembler,
+        effect,
         CliInvocation::new(arguments.shared_args()),
-    ));
+    )?;
+    select_branch(arguments, &branches)
+}
+
+pub(super) fn run_cli_completion(
+    assembler: &Assembler,
+    effect: &Value,
+    request: CompletionRequest,
+) -> Result<CliCompletion, CliError> {
+    let (arguments, active) = request.flattened();
+    let branches = run_search(
+        assembler,
+        effect,
+        CliInvocation::for_completion(
+            arguments.clone(),
+            active,
+            request.active_prefix().to_owned(),
+            request.active_suffix().to_owned(),
+        ),
+    )?;
+    let furthest = branches
+        .iter()
+        .flat_map(|branch| {
+            let journal = branch.journal();
+            journal
+                .candidates
+                .iter()
+                .map(|item| item.frontier)
+                .chain(journal.expectations.iter().map(|item| item.frontier))
+        })
+        .max();
+    let Some(furthest) = furthest else {
+        return Ok(CliCompletion::new(Vec::new(), Vec::new(), Vec::new()));
+    };
+
+    let mut evidence = branches
+        .iter()
+        .flat_map(|branch| branch.journal().candidates.iter())
+        .filter(|item| item.frontier == furthest)
+        .cloned()
+        .collect::<Vec<_>>();
+    evidence.retain(|item| {
+        !item.complete_reader
+            || completion_candidate_viable(
+                assembler,
+                effect,
+                &arguments,
+                active,
+                item.candidate.replacement(),
+            )
+            .unwrap_or(false)
+    });
+
+    let mut candidates = Vec::<CompletionCandidate>::new();
+    for item in evidence {
+        if !candidates.contains(&item.candidate) {
+            candidates.push(item.candidate);
+        }
+    }
+    let mut expectations = Vec::new();
+    for item in branches
+        .iter()
+        .flat_map(|branch| branch.journal().expectations.iter())
+        .filter(|item| item.frontier == furthest)
+    {
+        let item = item.public();
+        if !expectations.contains(&item) {
+            expectations.push(item);
+        }
+    }
+    let diagnostics = branches
+        .iter()
+        .filter(|branch| journal_frontier(branch.journal()) == furthest)
+        .flat_map(|branch| branch.journal().reflection.diagnostics().iter().cloned())
+        .collect();
+    Ok(CliCompletion::new(candidates, expectations, diagnostics))
+}
+
+fn run_search(
+    assembler: &Assembler,
+    effect: &Value,
+    invocation: CliInvocation,
+) -> Result<Arc<[IsolatedSearchBranch<CliEffects>]>, CliError> {
+    let host = Arc::new(CliHost::new(assembler.reflection_environment(), invocation));
     let mut search =
         IsolatedEffectSearch::new_in_context(effect, CliEffects, host, assembler.eval_context())
             .map_err(|error| CliError::new(format!("configured CLI could not start: {error}")))?;
@@ -44,7 +129,7 @@ pub(super) fn run_cli_search(
                 )));
             }
             IsolatedSearchPoll::Complete(branches) => {
-                return select_branch(arguments, &branches);
+                return Ok(branches);
             }
             IsolatedSearchPoll::Failed(error) => {
                 return Err(CliError::new(format!("configured CLI failed: {error}")));
@@ -56,18 +141,53 @@ pub(super) fn run_cli_search(
     }
 }
 
+fn completion_candidate_viable(
+    assembler: &Assembler,
+    effect: &Value,
+    arguments: &[std::ffi::OsString],
+    active: usize,
+    replacement: &std::ffi::OsStr,
+) -> Result<bool, CliError> {
+    let mut arguments = arguments.to_vec();
+    arguments[active] = replacement.to_owned();
+    let argument_count = arguments.len();
+    let cli_arguments = CliArguments::new(arguments.clone().into());
+    let branches = run_search(assembler, effect, CliInvocation::new(arguments.into()))?;
+    Ok(branches.iter().any(|branch| {
+        let journal = branch.journal();
+        branch.value().is_some_and(|value| {
+            value.as_core() == &*keys::UNIT_VALUE
+                && journal.cursor == argument_count
+                && plan_is_valid(journal, cli_arguments.clone())
+        }) || journal
+            .expectations
+            .iter()
+            .any(|item| item.frontier.argument >= argument_count)
+    }))
+}
+
+fn plan_is_valid(journal: &CliJournal, arguments: CliArguments) -> bool {
+    let mut builder = CommandPlanBuilder::default();
+    journal
+        .edits
+        .iter()
+        .cloned()
+        .all(|edit| builder.push(edit).is_ok())
+        && builder.finish_configured(arguments).is_ok()
+}
+
 fn select_branch(
     arguments: CliArguments,
     branches: &[crate::reflection::IsolatedSearchBranch<CliEffects>],
 ) -> Result<CliSearchResult, CliError> {
     let mut successful = Vec::<CliSearchResult>::new();
     let mut best_failure: Option<&CliJournal> = None;
-    let mut best_invalid: Option<(usize, CliError)> = None;
+    let mut best_invalid: Option<(Frontier, CliError)> = None;
 
     for branch in branches {
         let journal = branch.journal();
         let Some(value) = branch.value() else {
-            if best_failure.is_none_or(|best| journal.cursor > best.cursor) {
+            if best_failure.is_none_or(|best| journal_frontier(journal) > journal_frontier(best)) {
                 best_failure = Some(journal);
             }
             continue;
@@ -120,10 +240,13 @@ fn select_branch(
         let diagnostics = best_failure
             .map(|journal| journal.reflection.diagnostics().to_vec())
             .unwrap_or_default();
-        return Err(
-            CliError::new("configured `conf.cli` did not match the command line")
-                .with_diagnostics(diagnostics),
-        );
+        let detail = best_failure
+            .and_then(expectation_detail)
+            .unwrap_or_default();
+        return Err(CliError::new(format!(
+            "configured `conf.cli` did not match the command line{detail}"
+        ))
+        .with_diagnostics(diagnostics));
     };
     if successful
         .iter()
@@ -138,14 +261,49 @@ fn select_branch(
     Ok(successful.remove(0))
 }
 
-fn retain_invalid(best: &mut Option<(usize, CliError)>, journal: &CliJournal, error: CliError) {
+fn retain_invalid(best: &mut Option<(Frontier, CliError)>, journal: &CliJournal, error: CliError) {
+    let frontier = journal_frontier(journal);
     if best
         .as_ref()
-        .is_none_or(|(cursor, _)| journal.cursor > *cursor)
+        .is_none_or(|(existing, _)| frontier > *existing)
     {
         *best = Some((
-            journal.cursor,
+            frontier,
             error.with_diagnostics(journal.reflection.diagnostics().to_vec()),
         ));
     }
+}
+
+fn journal_frontier(journal: &CliJournal) -> Frontier {
+    journal
+        .expectations
+        .iter()
+        .map(|item| item.frontier)
+        .chain(journal.candidates.iter().map(|item| item.frontier))
+        .max()
+        .unwrap_or(Frontier {
+            argument: journal.cursor,
+            token_offset: 0,
+        })
+}
+
+fn expectation_detail(journal: &CliJournal) -> Option<String> {
+    let frontier = journal_frontier(journal);
+    let mut labels = journal
+        .expectations
+        .iter()
+        .filter(|item| item.frontier == frontier)
+        .map(|item| item.label.as_str())
+        .collect::<Vec<_>>();
+    labels.sort_unstable();
+    labels.dedup();
+    if labels.is_empty() {
+        return None;
+    }
+    Some(format!(
+        " at argument {}, byte {}: expected {}",
+        frontier.argument + 1,
+        frontier.token_offset,
+        labels.join(" or ")
+    ))
 }

@@ -9,8 +9,10 @@ use crate::reflection::{
     TaskSpecialization, environment_log_request_specs, handle_reflection_request,
 };
 
+use super::completion::{CompletionEvidence, CompletionKind, ExpectationEvidence, Frontier};
 use super::host::{CliHost, CliJournal};
 use super::model::CommandEdit;
+use super::token;
 
 #[derive(Clone, Copy)]
 pub(super) struct CliEffects;
@@ -20,6 +22,7 @@ pub(super) enum CliRequest {
     Reflection(ReflectionRequest),
     ReadKeyword,
     ReadText,
+    ReadToken,
     ReadPath,
     ReadEnd,
     WriteFile,
@@ -28,6 +31,7 @@ pub(super) enum CliRequest {
     WriteReflectionArgument,
     WriteAssemblyArgument,
     WriteWorkerCount,
+    EscapedToken,
 }
 
 impl TaskSpecialization for CliEffects {
@@ -52,6 +56,7 @@ impl TaskSpecialization for CliEffects {
                     CliRequest::ReadKeyword,
                 ),
                 request(["read", "text"], "read_text", 1, CliRequest::ReadText),
+                request(["read", "token"], "read_token", 2, CliRequest::ReadToken),
                 request(["read", "path"], "read_path", 2, CliRequest::ReadPath),
                 request(["read", "end"], "read_end", 0, CliRequest::ReadEnd),
                 request(["write", "file"], "write_file", 1, CliRequest::WriteFile),
@@ -86,6 +91,11 @@ impl TaskSpecialization for CliEffects {
                     CliRequest::WriteWorkerCount,
                 ),
             ])
+            .chain(
+                token::request_specs()
+                    .into_iter()
+                    .map(|spec| spec.map_request(|_| CliRequest::EscapedToken)),
+            )
             .collect()
     }
 
@@ -101,6 +111,7 @@ impl TaskSpecialization for CliEffects {
             }
             CliRequest::ReadKeyword => read_keyword(arguments, context),
             CliRequest::ReadText => read_text(arguments, context),
+            CliRequest::ReadToken => read_token(arguments, context),
             CliRequest::ReadPath => read_path(arguments, context),
             CliRequest::ReadEnd => read_end(arguments, context),
             CliRequest::WriteFile => write_path(arguments, context, PathWriter::File),
@@ -113,6 +124,9 @@ impl TaskSpecialization for CliEffects {
                 write_text_argument(arguments, context, TextWriter::Assembly)
             }
             CliRequest::WriteWorkerCount => write_worker_count(arguments, context),
+            CliRequest::EscapedToken => Err(TaskError::new(
+                "token parser operation escaped `.read.token`",
+            )),
         }
     }
 }
@@ -143,10 +157,45 @@ fn read_keyword(
         .transaction()
         .ok_or_else(|| TaskError::new("CLI reader escaped its isolated search transaction"))?;
     let (snapshot, journal) = transaction.parts();
+    if let Some(completion) = snapshot
+        .invocation
+        .completion
+        .as_ref()
+        .filter(|completion| completion.argument == journal.cursor)
+    {
+        let offset = completion.prefix.as_encoded_bytes().len();
+        record_expectation(journal, journal.cursor, offset, format!("`{expected}`"));
+        if completion
+            .prefix
+            .to_str()
+            .is_some_and(|prefix| expected.starts_with(prefix))
+            && completion
+                .suffix
+                .to_str()
+                .is_some_and(|suffix| expected.ends_with(suffix))
+        {
+            journal.candidates.push(CompletionEvidence::new(
+                Frontier {
+                    argument: journal.cursor,
+                    token_offset: offset,
+                },
+                expected.into(),
+                CompletionKind::Keyword,
+                true,
+            ));
+        }
+        return Ok(RequestResult::Fail);
+    }
     let Some(argument) = snapshot.invocation.args.get(journal.cursor) else {
+        record_expectation(journal, journal.cursor, 0, format!("`{expected}`"));
         return Ok(RequestResult::Fail);
     };
     if argument.to_str() != Some(expected.as_str()) {
+        let matched = argument
+            .to_str()
+            .map(|argument| common_prefix_bytes(argument, &expected))
+            .unwrap_or(0);
+        record_expectation(journal, journal.cursor, matched, format!("`{expected}`"));
         return Ok(RequestResult::Fail);
     }
     journal.cursor += 1;
@@ -157,21 +206,142 @@ fn read_text(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, CliEffects>,
 ) -> Result<RequestResult, TaskError> {
-    let [_expectation]: [Value; 1] = arguments
+    let [expectation]: [Value; 1] = arguments
         .try_into()
         .map_err(|_| TaskError::new("`.read.text` received the wrong number of arguments"))?;
+    let expectation = text_value(context, expectation, "`.read.text` expectation")?;
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskError::new("CLI reader escaped its isolated search transaction"))?;
     let (snapshot, journal) = transaction.parts();
+    if let Some(completion) = snapshot
+        .invocation
+        .completion
+        .as_ref()
+        .filter(|completion| completion.argument == journal.cursor)
+    {
+        record_expectation(
+            journal,
+            journal.cursor,
+            completion.prefix.as_encoded_bytes().len(),
+            expectation,
+        );
+        return Ok(RequestResult::Fail);
+    }
     let Some(argument) = snapshot.invocation.args.get(journal.cursor) else {
+        record_expectation(journal, journal.cursor, 0, expectation);
         return Ok(RequestResult::Fail);
     };
     let Some(argument) = argument.to_str() else {
+        record_expectation(journal, journal.cursor, 0, expectation);
         return Ok(RequestResult::Fail);
     };
     journal.cursor += 1;
     Ok(RequestResult::Return(Value::text(argument)))
+}
+
+fn read_token(
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, CliEffects>,
+) -> Result<RequestResult, TaskError> {
+    let [expectation, parser]: [Value; 2] = arguments
+        .try_into()
+        .map_err(|_| TaskError::new("`.read.token` received the wrong number of arguments"))?;
+    let expectation = text_value(context, expectation, "`.read.token` expectation")?;
+    let eval_context = context.eval_context().clone();
+    let (argument_index, argument, completion_offset) = {
+        let mut transaction = context
+            .transaction()
+            .ok_or_else(|| TaskError::new("CLI reader escaped its isolated search transaction"))?;
+        let (snapshot, journal) = transaction.parts();
+        let argument_index = journal.cursor;
+        let Some(argument) = snapshot.invocation.args.get(argument_index) else {
+            record_expectation(journal, argument_index, 0, expectation);
+            return Ok(RequestResult::Fail);
+        };
+        let Some(argument) = argument.to_str() else {
+            record_expectation(journal, argument_index, 0, expectation);
+            return Ok(RequestResult::Fail);
+        };
+        let completion_offset = snapshot
+            .invocation
+            .completion
+            .as_ref()
+            .filter(|completion| completion.argument == argument_index)
+            .and_then(|completion| completion.prefix.to_str().map(str::len));
+        (
+            argument_index,
+            Arc::<str>::from(argument),
+            completion_offset,
+        )
+    };
+
+    let result = token::run(&parser, argument, completion_offset, eval_context.clone())
+        .map_err(TaskError::new)?;
+    let completion_candidates = if completion_offset.is_some() {
+        result
+            .candidates
+            .iter()
+            .filter_map(|candidate| {
+                let verification = token::run(
+                    &parser,
+                    Arc::from(candidate.replacement.as_str()),
+                    None,
+                    eval_context.clone(),
+                )
+                .ok()?;
+                let complete_reader = !verification.values.is_empty();
+                (complete_reader || verification.furthest == candidate.replacement.len())
+                    .then(|| (candidate.clone(), complete_reader))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let mut transaction = context
+        .transaction()
+        .ok_or_else(|| TaskError::new("CLI reader escaped its isolated search transaction"))?;
+    let (_, journal) = transaction.parts();
+    if completion_offset.is_some() {
+        for (candidate, complete_reader) in completion_candidates {
+            journal
+                .candidates
+                .push(super::completion::CompletionEvidence::new(
+                    super::completion::Frontier {
+                        argument: argument_index,
+                        token_offset: candidate.offset,
+                    },
+                    candidate.replacement.into(),
+                    super::completion::CompletionKind::Value,
+                    complete_reader,
+                ));
+        }
+        let labels = if result.expectations.is_empty() {
+            vec![expectation]
+        } else {
+            result
+                .expectations
+                .into_iter()
+                .map(|item| item.label)
+                .collect()
+        };
+        for label in labels {
+            record_expectation(journal, argument_index, result.furthest, label);
+        }
+        return Ok(RequestResult::Fail);
+    }
+    if result.values.is_empty() {
+        if result.expectations.is_empty() {
+            record_expectation(journal, argument_index, result.furthest, expectation);
+        } else {
+            for item in result.expectations {
+                record_expectation(journal, argument_index, item.offset, item.label);
+            }
+        }
+        return Ok(RequestResult::Fail);
+    }
+    journal.cursor += 1;
+    Ok(RequestResult::Alternatives(result.values))
 }
 
 fn read_end(
@@ -188,6 +358,7 @@ fn read_end(
     if journal.cursor == snapshot.invocation.args.len() {
         Ok(RequestResult::ReturnUnit)
     } else {
+        record_expectation(journal, journal.cursor, 0, "end of command");
         Ok(RequestResult::Fail)
     }
 }
@@ -235,11 +406,37 @@ fn read_path(
         .ok_or_else(|| TaskError::new("CLI reader escaped its isolated search transaction"))?;
     let (snapshot, journal) = transaction.parts();
     let argument_index = journal.cursor;
+    let expectation = path_expectation(kind, access);
+    if let Some(completion) = snapshot
+        .invocation
+        .completion
+        .as_ref()
+        .filter(|completion| completion.argument == argument_index)
+    {
+        let frontier = Frontier {
+            argument: argument_index,
+            token_offset: completion.prefix.as_encoded_bytes().len(),
+        };
+        record_expectation(journal, argument_index, frontier.token_offset, expectation);
+        for (replacement, candidate_kind, complete_reader) in
+            path_completions(completion, kind, access)
+        {
+            journal.candidates.push(CompletionEvidence::new(
+                frontier,
+                replacement,
+                candidate_kind,
+                complete_reader,
+            ));
+        }
+        return Ok(RequestResult::Fail);
+    }
     let Some(argument) = snapshot.invocation.args.get(argument_index) else {
+        record_expectation(journal, argument_index, 0, expectation);
         return Ok(RequestResult::Fail);
     };
     let path = PathBuf::from(argument);
     if !path_matches(&path, kind, access) {
+        record_expectation(journal, argument_index, 0, expectation);
         return Ok(RequestResult::Fail);
     }
     journal.cursor += 1;
@@ -255,18 +452,129 @@ fn read_path(
 
 fn path_matches(path: &Path, kind: PathKind, access: PathAccess) -> bool {
     match (std::fs::metadata(path), access) {
-        (Ok(metadata), _) => match kind {
-            PathKind::File => metadata.is_file(),
-            PathKind::Folder => metadata.is_dir(),
-            PathKind::Any => true,
-        },
+        (Ok(metadata), access) => {
+            let kind_matches = match kind {
+                PathKind::File => metadata.is_file(),
+                PathKind::Folder => metadata.is_dir(),
+                PathKind::Any => metadata.is_file() || metadata.is_dir(),
+            };
+            kind_matches && path_access_appears_usable(path, &metadata, access)
+        }
         (Err(_), PathAccess::Read) => false,
-        (Err(_), PathAccess::Write) => path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."))
-            .is_dir(),
+        (Err(_), PathAccess::Write) => {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            std::fs::metadata(parent)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.permissions().readonly())
+        }
     }
+}
+
+fn path_access_appears_usable(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    access: PathAccess,
+) -> bool {
+    match (metadata.is_file(), access) {
+        (true, PathAccess::Read) => std::fs::File::open(path).is_ok(),
+        (true, PathAccess::Write) => {
+            !metadata.permissions().readonly()
+                && std::fs::OpenOptions::new().write(true).open(path).is_ok()
+        }
+        (false, PathAccess::Read) => std::fs::read_dir(path).is_ok(),
+        (false, PathAccess::Write) => !metadata.permissions().readonly(),
+    }
+}
+
+fn path_expectation(kind: PathKind, access: PathAccess) -> &'static str {
+    match (kind, access) {
+        (PathKind::File, PathAccess::Read) => "readable file path",
+        (PathKind::Folder, PathAccess::Read) => "readable folder path",
+        (PathKind::Any, PathAccess::Read) => "readable path",
+        (PathKind::File, PathAccess::Write) => "writable file path",
+        (PathKind::Folder, PathAccess::Write) => "writable folder path",
+        (PathKind::Any, PathAccess::Write) => "writable path",
+    }
+}
+
+fn path_completions(
+    completion: &super::host::CompletionPoint,
+    kind: PathKind,
+    access: PathAccess,
+) -> Vec<(std::ffi::OsString, CompletionKind, bool)> {
+    let prefix_path = Path::new(&completion.prefix);
+    let ends_with_separator = completion
+        .prefix
+        .as_encoded_bytes()
+        .ends_with(std::path::MAIN_SEPARATOR_STR.as_bytes());
+    let (folder, name_prefix, explicit_parent) = if ends_with_separator {
+        (prefix_path, std::ffi::OsStr::new(""), Some(prefix_path))
+    } else {
+        (
+            prefix_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new(".")),
+            prefix_path.file_name().unwrap_or_default(),
+            prefix_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty()),
+        )
+    };
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name
+            .as_encoded_bytes()
+            .starts_with(name_prefix.as_encoded_bytes())
+        {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !path_access_appears_usable(&entry.path(), &metadata, access) {
+            continue;
+        }
+        let is_folder = metadata.is_dir();
+        if !is_folder && !matches!(kind, PathKind::File | PathKind::Any)
+            || !is_folder && !metadata.is_file()
+        {
+            continue;
+        }
+        let mut replacement = explicit_parent
+            .map(|parent| parent.join(&name).into_os_string())
+            .unwrap_or_else(|| name.clone());
+        if is_folder {
+            replacement.push(std::path::MAIN_SEPARATOR_STR);
+        }
+        if !replacement
+            .as_encoded_bytes()
+            .ends_with(completion.suffix.as_encoded_bytes())
+        {
+            continue;
+        }
+        let complete_reader = match kind {
+            PathKind::File => !is_folder,
+            PathKind::Folder => is_folder,
+            PathKind::Any => true,
+        };
+        let candidate_kind = if is_folder {
+            CompletionKind::Folder
+        } else if kind == PathKind::Any {
+            CompletionKind::Path
+        } else {
+            CompletionKind::File
+        };
+        candidates.push((replacement, candidate_kind, complete_reader));
+    }
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    candidates
 }
 
 enum PathWriter {
@@ -435,4 +743,28 @@ fn evaluated(
 ) -> Result<CoreValue, TaskError> {
     eval::eval_value(context.eval_context(), value.as_core())
         .map_err(|error| TaskError::new(error.to_string()))
+}
+
+fn record_expectation(
+    journal: &mut CliJournal,
+    argument: usize,
+    token_offset: usize,
+    label: impl Into<String>,
+) {
+    journal.expectations.push(ExpectationEvidence {
+        frontier: Frontier {
+            argument,
+            token_offset,
+        },
+        label: label.into(),
+    });
+}
+
+fn common_prefix_bytes(left: &str, right: &str) -> usize {
+    left.char_indices()
+        .zip(right.chars())
+        .take_while(|((_, left), right)| left == right)
+        .map(|((offset, character), _)| offset + character.len_utf8())
+        .last()
+        .unwrap_or(0)
 }
