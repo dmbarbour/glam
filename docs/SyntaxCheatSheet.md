@@ -58,6 +58,8 @@ _42                 # NEGATIVE 42 — prefix '_' is part of the literal
 tag:Data            # tagged data: sugar for { tag:Data }
 :tag                # constructor: \ Data -> tag:Data
 [TagExpr]:Data      # computed tag (list of exactly one element)
+:[TagExpr]          # computed-tag constructor
+# Colons are tight; tag:f x ≡ (tag:f) x. Use tag:(f x) to tag the call.
 
 {}                  # empty dict; ALSO the 'undefined' value
 {foo:1, bar.baz:2}  # literal; paths ok; {foo:{}} ≡ {}

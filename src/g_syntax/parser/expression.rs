@@ -570,13 +570,31 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             .then(path_suffix.clone())
             .map(|(base, suffixes)| access_if_path(base, suffixes))
             .boxed();
-        let atom = choice((
+        let base_atom = choice((
             literal_expr,
             escaped_expr,
             effect_expr,
             prior_name,
             name_expr,
         ))
+        .boxed();
+        let atom = recursive(|atom| {
+            let tag_key = choice((
+                name.clone().map(SyntaxKeyExpr::Atom),
+                single_key_expr()
+                    .padded()
+                    .delimited_by(just('['), just(']')),
+            ));
+            let constructor = just(':')
+                .ignore_then(tag_key.clone())
+                .map(SyntaxExpr::TaggedConstructor);
+            let tagged = tag_key
+                .then_ignore(just(':'))
+                .then(atom)
+                .map(|(key, payload)| SyntaxExpr::SingletonDict(key, Box::new(payload)));
+
+            choice((constructor, tagged, base_atom.clone()))
+        })
         .boxed();
         let application = atom
             .clone()

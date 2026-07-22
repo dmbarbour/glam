@@ -290,11 +290,12 @@ This extends to computed tags, but only for a list of exactly one element.
         [TagExpr]:Data      # same as { [TagExpr]:Data } 
         :[TagExpr]          # same as (\ Data -> [TagExpr]:Data )
 
-Of course, there are many contexts where this won't help much.
+The colon in a tagged value or tagged constructor is lexically tight. A tagged
+payload is one application atom; use parentheses when the payload is a compound
+expression.
 
-        g {tag:f x y} z     # remove braces?
-        g tag:f x y z       # oops, parses as g (tag:f) x y z
-        g tag:(f x y) z     # I favor this form aesthetically
+        g tag:f x y z       # parses as g (tag:f) x y z
+        g tag:(f x y) z     # clear coupling of arguments
 
 In contrast, `:tag` always parses as a function expression. 
 
@@ -365,9 +366,7 @@ Proposed syntax:
         "  "   - no implicit final LF
         "  "   - LF even if source uses CR or CRLF
         "  """ |> postprocessing here is convenient
-        " 
-        # consistent indentation of '"' is NOT optional
-          # but that does not extend to comment lines
+          " consistent indentation is optional (but recommended!)
         """
 
 Texts concretely translate to binaries, using ASCII encoding (or utf8 under some extensions). There are no escape characters, i.e. texts are raw and postprocessing is explicit. If users want to embed a binary, that might be expressed as something like:

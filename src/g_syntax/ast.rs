@@ -139,6 +139,7 @@ pub enum SyntaxExpr {
         body: Vec<ObjectBodyDefinition>,
     },
     SingletonDict(SyntaxKeyExpr, Box<SyntaxExpr>),
+    TaggedConstructor(SyntaxKeyExpr),
     DictUnion(Vec<SyntaxExpr>),
     List(Vec<SyntaxExpr>),
     Lambda(Vec<String>, Box<SyntaxExpr>),

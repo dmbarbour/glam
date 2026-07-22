@@ -6,6 +6,75 @@ fn n(value: i64) -> Number {
 }
 
 #[test]
+fn parses_tagged_data_and_constructors() {
+    assert_eq!(
+        parse_expr("tag:value"),
+        Some(SyntaxExpr::SingletonDict(
+            SyntaxKeyExpr::Atom("tag".to_owned()),
+            Box::new(SyntaxExpr::Name("value".to_owned())),
+        ))
+    );
+    assert_eq!(
+        parse_expr("[tag]:value"),
+        Some(SyntaxExpr::SingletonDict(
+            SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Name("tag".to_owned()))),
+            Box::new(SyntaxExpr::Name("value".to_owned())),
+        ))
+    );
+    assert_eq!(
+        parse_expr(":tag"),
+        Some(SyntaxExpr::TaggedConstructor(SyntaxKeyExpr::Atom(
+            "tag".to_owned()
+        )))
+    );
+    assert_eq!(
+        parse_expr(":[tag]"),
+        Some(SyntaxExpr::TaggedConstructor(SyntaxKeyExpr::Index(
+            Box::new(SyntaxExpr::Name("tag".to_owned()))
+        )))
+    );
+    assert_eq!(
+        parse_expr("outer:inner:value"),
+        Some(SyntaxExpr::SingletonDict(
+            SyntaxKeyExpr::Atom("outer".to_owned()),
+            Box::new(SyntaxExpr::SingletonDict(
+                SyntaxKeyExpr::Atom("inner".to_owned()),
+                Box::new(SyntaxExpr::Name("value".to_owned())),
+            )),
+        ))
+    );
+}
+
+#[test]
+fn tagged_payloads_are_single_application_atoms() {
+    assert_eq!(
+        parse_expr("g tag:f x"),
+        Some(SyntaxExpr::Apply(
+            Box::new(SyntaxExpr::Apply(
+                Box::new(SyntaxExpr::Name("g".to_owned())),
+                Box::new(SyntaxExpr::SingletonDict(
+                    SyntaxKeyExpr::Atom("tag".to_owned()),
+                    Box::new(SyntaxExpr::Name("f".to_owned())),
+                )),
+            )),
+            Box::new(SyntaxExpr::Name("x".to_owned())),
+        ))
+    );
+    assert_eq!(
+        parse_expr("tag:(f x)"),
+        Some(SyntaxExpr::SingletonDict(
+            SyntaxKeyExpr::Atom("tag".to_owned()),
+            Box::new(SyntaxExpr::Apply(
+                Box::new(SyntaxExpr::Name("f".to_owned())),
+                Box::new(SyntaxExpr::Name("x".to_owned())),
+            )),
+        ))
+    );
+    assert_eq!(parse_expr("tag: value"), None);
+    assert_eq!(parse_expr(": tag"), None);
+}
+
+#[test]
 fn parses_escaped_object_scope_names() {
     assert_eq!(
         parse_expr("^prefix.value"),

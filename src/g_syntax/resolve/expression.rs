@@ -54,6 +54,9 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
                 syntax_expr_to_resolved_in_semantic_scope(value, line, context, scope, locals)?,
             ],
         ),
+        SyntaxExpr::TaggedConstructor(key) => {
+            lower_tagged_constructor_resolved(key, line, context, scope, locals)?
+        }
         SyntaxExpr::DictUnion(items) => {
             lower_dict_union_resolved(items, line, context, scope, locals)?
         }
@@ -144,6 +147,24 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
             lower_builtin_expr_resolved(Builtin::Append, left, right, line, context, scope, locals)?
         }
     })
+}
+
+fn lower_tagged_constructor_resolved(
+    key: &SyntaxKeyExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    // Resolve the tag in the surrounding scope before introducing the
+    // constructor's inaccessible, hygienic argument binding.
+    let key = syntax_key_expr_to_resolved_value(key, line, context, scope, locals)?;
+    let payload = locals.fresh_binding();
+    let body = ResolvedExpr::apply(
+        ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
+        [key, ResolvedExpr::Local(payload)],
+    );
+    Ok(ResolvedExpr::lambda(vec![payload], body))
 }
 
 pub(in crate::g_syntax) fn lower_object_expr_resolved(
