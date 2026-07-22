@@ -1,4 +1,5 @@
 mod api;
+pub mod cli;
 mod compiler;
 mod core;
 mod core_net;

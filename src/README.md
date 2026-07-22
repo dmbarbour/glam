@@ -15,7 +15,9 @@ not define future language semantics or collect subsystem invariants.
 
 | Path | Responsibility |
 | --- | --- |
-| `main.rs` | CLI policy, configuration/assembly roots, diagnostic-bus subscriptions, logger host, and process output |
+| `main.rs` | Executes typed top-level commands, chooses configuration/assembly roots, owns logger policy, process I/O, and exit status |
+| `cli.rs`, `cli/model.rs` | Public CLI facade plus validated bootstrap command and argument models |
+| `cli/bootstrap.rs`, `cli/output.rs` | OS-string bootstrap dispatch, standalone-option validation, help text, and parser-report formatting |
 | `source.rs` | Immutable source artifacts, identities and digests, relative resolvers, host compatibility, and tracked local files |
 | `lib.rs`, `api.rs` | Embedding facade: staged assembler construction, opaque values, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
 | `g_source.rs` | Narrow public inspection report for the built-in `.g` parser; no syntax tree or lowering context escapes |

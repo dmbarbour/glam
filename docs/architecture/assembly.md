@@ -14,9 +14,12 @@ attachment to the shared evaluation runtime. Clients
 choose module paths and inputs; the library does not assign special meaning to
 `configuration` or `assembly`.
 
-`main` is one client. It chooses those two roots, supplies CLI-derived values,
-installs a `FileSourceSystem` and subscribes a diagnostic queue, requests
-`asm.result`, and decides process output and exit status.
+`main` is one client. `cli::dispatch_bootstrap` first turns raw `OsString`
+arguments into a typed `TopLevelCommand`; `main` performs the requested I/O but
+does not interpret individual assembly flags. For assembly it chooses the two
+module roots, supplies CLI-derived values, installs a `FileSourceSystem` and
+subscribes a diagnostic queue, requests `asm.result`, and decides process output
+and exit status.
 
 ## Module Construction
 
@@ -116,6 +119,9 @@ diagnostics and summaries go to stdout; `--quiet` keeps only the exit status
 and `--verbose` includes declaration rows.
 
 For assembly, `--workers` overrides `GLAM_WORKERS`; zero workers is the default.
-Raw process arguments remain in `process.args`; repeated `--refl` values are
-additionally collected in `process.refl_args` and excluded from `asm.args`,
-while arguments after `--` form `asm.args`.
+Bootstrap parsing retains paths and unrelated arguments as OS strings instead
+of requiring process-wide UTF-8. Raw process arguments remain in
+`process.args`; repeated `--refl` values are additionally collected in
+`process.refl_args` and excluded from `asm.args`, while arguments after `--`
+form `asm.args`. `process.cli.user_args` and `process.cli.args` both exclude the
+executable name and are identical until configured rewriting is introduced.

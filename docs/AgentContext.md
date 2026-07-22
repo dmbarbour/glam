@@ -130,6 +130,10 @@ their detailed scheduling and representation contracts.
   diagnostics and declaration summaries. The syntax AST, compile context, and
   lowering implementation stay private. Standalone `--parse` writes this
   report to stdout and does not enter assembly or load imports.
+- Bootstrap CLI parsing lives in the library `cli` facade and consumes
+  `OsString`; `main` executes its typed `TopLevelCommand` without interpreting
+  individual assembly flags. Keep opaque paths and arguments out of UTF-8
+  conversion until a typed operation explicitly requires text.
 
 ## Source-Surface Regressions
 

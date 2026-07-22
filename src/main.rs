@@ -8,6 +8,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use bytes::Bytes;
+use glam::cli::{
+    CliArguments, CommandPlan, CommandPlanParts, HELP_TEXT, TopLevelCommand, dispatch_bootstrap,
+    format_parse_summary, parse_worker_count,
+};
 use glam::reflection::{
     CommitResult, ConflictAnalysisStrategy, EffectRequestSpec, EffectRun, ExactConflictAnalysis,
     HostSnapshot, ReflectionEffects, ReflectionHost, ReflectionJournal, ReflectionRequest,
@@ -17,126 +21,34 @@ use glam::reflection::{
 };
 use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, Error,
-    EvaluationRuntime, FileSourceSystem, GSourceInspection, ModuleInput, ReasoningReport,
-    ReasoningStatus, ReasoningTaskState, Severity, Value, check_local_manifest, inspect_g_source,
+    EvaluationRuntime, FileSourceSystem, ModuleInput, ReasoningReport, ReasoningStatus,
+    ReasoningTaskState, Severity, Value, check_local_manifest, inspect_g_source,
 };
 
-#[derive(Default)]
-struct AssemblyCommand {
-    inputs: Vec<ModuleInput>,
-    arguments: Vec<String>,
-    reflection_arguments: Vec<String>,
-    manifest: Option<PathBuf>,
-    worker_threads: Option<usize>,
-}
-
 fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
-    let Some(first) = args.next() else {
-        print_help();
-        return ExitCode::SUCCESS;
+    let command = match dispatch_bootstrap(env::args_os().skip(1)) {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(2);
+        }
     };
 
-    match first.as_str() {
-        "-h" | "--help" => {
-            print_help();
+    match command {
+        TopLevelCommand::Help => {
+            print!("{HELP_TEXT}");
             ExitCode::SUCCESS
         }
-        "-V" | "--version" => {
+        TopLevelCommand::Version => {
             println!("glam {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        "--parse" => parse_command(args),
-        "--check_manifest" => check_manifest_command(args, false),
-        "--quiet" => match args.next().as_deref() {
-            Some("--check_manifest") => check_manifest_command(args, true),
-            Some(option) => {
-                eprintln!(
-                    "error: `--quiet` is currently supported only with `--check_manifest`, got `{option}`"
-                );
-                ExitCode::from(2)
-            }
-            None => {
-                eprintln!("error: `--quiet` needs `--check_manifest <PATH>`");
-                ExitCode::from(2)
-            }
-        },
-        "-f" | "--file" => {
-            let Some(path) = args.next() else {
-                eprintln!("error: `{}` needs a source path", first);
-                return ExitCode::from(2);
-            };
-
-            run_assembly(
-                args,
-                AssemblyCommand {
-                    inputs: vec![ModuleInput::file(path)],
-                    ..AssemblyCommand::default()
-                },
-            )
+        TopLevelCommand::InspectGSource { path, verbosity } => {
+            inspect_g_source_command(&path, verbosity)
         }
-        option if script_extension(option).is_some() => {
-            let extension = script_extension(option).expect("checked above").to_owned();
-            let Some(body) = args.next() else {
-                eprintln!("error: `{option}` needs a script body");
-                return ExitCode::from(2);
-            };
-
-            run_assembly(
-                args,
-                AssemblyCommand {
-                    inputs: vec![ModuleInput::script(extension, body)],
-                    ..AssemblyCommand::default()
-                },
-            )
-        }
-        "--manifest" => {
-            let Some(path) = args.next() else {
-                eprintln!("error: `--manifest` needs an output path");
-                return ExitCode::from(2);
-            };
-            run_assembly(
-                args,
-                AssemblyCommand {
-                    manifest: Some(PathBuf::from(path)),
-                    ..AssemblyCommand::default()
-                },
-            )
-        }
-        "--refl" => {
-            let Some(argument) = args.next() else {
-                eprintln!("error: `--refl` needs an argument");
-                return ExitCode::from(2);
-            };
-            run_assembly(
-                args,
-                AssemblyCommand {
-                    reflection_arguments: vec![argument],
-                    ..AssemblyCommand::default()
-                },
-            )
-        }
-        "--workers" => {
-            let Some(count) = args.next() else {
-                eprintln!("error: `--workers` needs a non-negative integer");
-                return ExitCode::from(2);
-            };
-            let Ok(worker_threads) = parse_worker_count(&count, "--workers") else {
-                return ExitCode::from(2);
-            };
-            run_assembly(
-                args,
-                AssemblyCommand {
-                    worker_threads: Some(worker_threads),
-                    ..AssemblyCommand::default()
-                },
-            )
-        }
-        option if option.starts_with('-') => {
-            eprintln!("error: unknown option `{option}`");
-            ExitCode::from(2)
-        }
-        _arg => {
+        TopLevelCommand::CheckManifest { path, quiet } => check_manifest_command(&path, quiet),
+        TopLevelCommand::Assembly(plan) => assemble_inputs(plan),
+        TopLevelCommand::ConfiguredCli(_) => {
             eprintln!(
                 "error: bare command-line arguments are reserved for configured `conf.cli` rewriting; use `--parse <PATH>` to inspect a source file"
             );
@@ -145,40 +57,8 @@ fn main() -> ExitCode {
     }
 }
 
-fn check_manifest_command(mut args: impl Iterator<Item = String>, leading_quiet: bool) -> ExitCode {
-    let Some(manifest) = args.next() else {
-        eprintln!("error: `--check_manifest` needs a manifest path");
-        return ExitCode::from(2);
-    };
-    if manifest.starts_with('-') {
-        eprintln!("error: `--check_manifest` needs a manifest path before any options");
-        return ExitCode::from(2);
-    }
-    let quiet = match args.next().as_deref() {
-        None => leading_quiet,
-        Some("--quiet") if !leading_quiet => true,
-        Some("--quiet") => {
-            eprintln!("error: `--quiet` may be specified only once");
-            return ExitCode::from(2);
-        }
-        Some(option) if option.starts_with('-') => {
-            eprintln!("error: unknown `--check_manifest` option `{option}`");
-            return ExitCode::from(2);
-        }
-        Some(_) => {
-            eprintln!(
-                "error: `--check_manifest` accepts only a manifest path and optional `--quiet`"
-            );
-            return ExitCode::from(2);
-        }
-    };
-    if args.next().is_some() {
-        eprintln!("error: `--check_manifest` accepts only a manifest path and optional `--quiet`");
-        return ExitCode::from(2);
-    }
-    let manifest = PathBuf::from(manifest);
-
-    match check_local_manifest(&manifest) {
+fn check_manifest_command(manifest: &Path, quiet: bool) -> ExitCode {
+    match check_local_manifest(manifest) {
         Ok(mismatches) if mismatches.is_empty() => ExitCode::SUCCESS,
         Ok(mismatches) => {
             if !quiet {
@@ -199,93 +79,6 @@ fn check_manifest_command(mut args: impl Iterator<Item = String>, leading_quiet:
     }
 }
 
-fn run_assembly(args: impl Iterator<Item = String>, mut command: AssemblyCommand) -> ExitCode {
-    if let Err(exit_code) = collect_assembly_inputs(args, &mut command) {
-        return exit_code;
-    }
-    if command.inputs.is_empty() {
-        eprintln!("error: assembly needs at least one `--file` or `--script.<ext>` input");
-        return ExitCode::from(2);
-    }
-    assemble_inputs(command)
-}
-
-fn collect_assembly_inputs(
-    mut args: impl Iterator<Item = String>,
-    command: &mut AssemblyCommand,
-) -> Result<(), ExitCode> {
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--" => {
-                command.arguments.extend(args);
-                return Ok(());
-            }
-            "-f" | "--file" => {
-                let Some(path) = args.next() else {
-                    eprintln!("error: `{arg}` needs a source path");
-                    return Err(ExitCode::from(2));
-                };
-                command.inputs.push(ModuleInput::file(path));
-            }
-            "--manifest" => {
-                let Some(path) = args.next() else {
-                    eprintln!("error: `--manifest` needs an output path");
-                    return Err(ExitCode::from(2));
-                };
-                if command.manifest.replace(PathBuf::from(path)).is_some() {
-                    eprintln!("error: `--manifest` may be specified only once");
-                    return Err(ExitCode::from(2));
-                }
-            }
-            "--refl" => {
-                let Some(argument) = args.next() else {
-                    eprintln!("error: `--refl` needs an argument");
-                    return Err(ExitCode::from(2));
-                };
-                command.reflection_arguments.push(argument);
-            }
-            "--workers" => {
-                let Some(count) = args.next() else {
-                    eprintln!("error: `--workers` needs a non-negative integer");
-                    return Err(ExitCode::from(2));
-                };
-                let worker_threads = parse_worker_count(&count, "--workers")?;
-                if command.worker_threads.replace(worker_threads).is_some() {
-                    eprintln!("error: `--workers` may be specified only once");
-                    return Err(ExitCode::from(2));
-                }
-            }
-            option if script_extension(option).is_some() => {
-                let extension = script_extension(option).expect("checked above").to_owned();
-                let Some(body) = args.next() else {
-                    eprintln!("error: `{option}` needs a script body");
-                    return Err(ExitCode::from(2));
-                };
-                command.inputs.push(ModuleInput::script(extension, body));
-            }
-            option if option.starts_with('-') => {
-                eprintln!("error: unknown option `{option}`");
-                return Err(ExitCode::from(2));
-            }
-            _arg => {
-                eprintln!(
-                    "error: bare command-line arguments are reserved for configured `conf.cli` rewriting"
-                );
-                return Err(ExitCode::from(2));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn parse_worker_count(value: &str, source: &str) -> Result<usize, ExitCode> {
-    value.parse::<usize>().map_err(|_| {
-        eprintln!("error: `{source}` requires a non-negative integer, got `{value}`");
-        ExitCode::from(2)
-    })
-}
-
 fn configured_worker_count(command_line: Option<usize>) -> Result<usize, ExitCode> {
     if let Some(worker_threads) = command_line {
         return Ok(worker_threads);
@@ -293,40 +86,58 @@ fn configured_worker_count(command_line: Option<usize>) -> Result<usize, ExitCod
     let Some(value) = env::var_os("GLAM_WORKERS") else {
         return Ok(0);
     };
-    let Some(value) = value.to_str() else {
-        eprintln!("error: `GLAM_WORKERS` must be a non-negative integer");
-        return Err(ExitCode::from(2));
-    };
-    parse_worker_count(value, "GLAM_WORKERS")
+    parse_worker_count(&value, "GLAM_WORKERS").map_err(|error| {
+        eprintln!("error: {error}");
+        ExitCode::from(2)
+    })
 }
 
-fn script_extension(option: &str) -> Option<&str> {
-    option
-        .strip_prefix("--script.")
-        .or_else(|| option.strip_prefix("-s."))
-        .filter(|extension| !extension.is_empty())
-}
-
-fn process_reflection_environment(reflection_arguments: Vec<String>) -> Value {
-    fn os_value(value: std::ffi::OsString) -> Value {
+fn process_reflection_environment(
+    reflection_arguments: Vec<std::ffi::OsString>,
+    cli_arguments: CliArguments,
+) -> Value {
+    fn os_value(value: &std::ffi::OsStr) -> Value {
         Value::binary(value.as_encoded_bytes().to_vec())
     }
 
     let variables = Value::dictionary(env::vars_os().map(|(name, value)| {
         (
             Value::binary(name.as_encoded_bytes().to_vec()),
-            os_value(value),
+            os_value(&value),
         )
     }))
     .expect("OS environment names must be keyable binary values");
-    let arguments = Value::list(env::args_os().map(os_value));
-    let reflection_arguments = Value::list(reflection_arguments.into_iter().map(Value::text));
+    let arguments = Value::list(env::args_os().map(|argument| os_value(&argument)));
+    let reflection_arguments = Value::list(
+        reflection_arguments
+            .iter()
+            .map(|argument| os_value(argument)),
+    );
+    let user_cli_arguments = Value::list(
+        cli_arguments
+            .user_args()
+            .iter()
+            .map(|argument| os_value(argument)),
+    );
+    let effective_cli_arguments = Value::list(
+        cli_arguments
+            .args()
+            .iter()
+            .map(|argument| os_value(argument)),
+    );
     Value::record([(
         "process",
         Value::record([
             ("args", arguments),
             ("env", variables),
             ("refl_args", reflection_arguments),
+            (
+                "cli",
+                Value::record([
+                    ("user_args", user_cli_arguments),
+                    ("args", effective_cli_arguments),
+                ]),
+            ),
         ]),
     )])
 }
@@ -349,15 +160,16 @@ fn finish_local_files(
     failed
 }
 
-fn assemble_inputs(command: AssemblyCommand) -> ExitCode {
-    let AssemblyCommand {
+fn assemble_inputs(command: CommandPlan) -> ExitCode {
+    let CommandPlanParts {
         inputs,
-        arguments,
-        reflection_arguments,
+        assembly_args,
+        reflection_args,
         manifest,
-        worker_threads,
-    } = command;
-    let worker_threads = match configured_worker_count(worker_threads) {
+        worker_count,
+        cli_arguments,
+    } = command.into_parts();
+    let worker_threads = match configured_worker_count(worker_count) {
         Ok(worker_threads) => worker_threads,
         Err(exit_code) => return exit_code,
     };
@@ -376,7 +188,12 @@ fn assemble_inputs(command: AssemblyCommand) -> ExitCode {
         .evaluation_runtime(runtime)
         .conflict_analysis(conflict_analysis)
         .diagnostic_subscriber(log_host.clone())
-        .reflection_environment(|_| Ok(process_reflection_environment(reflection_arguments)))
+        .reflection_environment(|_| {
+            Ok(process_reflection_environment(
+                reflection_args,
+                cli_arguments,
+            ))
+        })
         .expect("main's reflection environment must be a dictionary")
         .build()
         .expect("main's assembler configuration must be valid");
@@ -392,7 +209,7 @@ fn assemble_inputs(command: AssemblyCommand) -> ExitCode {
         }
     };
     let logger = start_logger(&assembler, &configuration.value, log_host.clone());
-    let result = assemble(&assembler, inputs, arguments, configuration.environment);
+    let result = assemble(&assembler, inputs, assembly_args, configuration.environment);
     let mut operation_failed = false;
     match result {
         Ok(bytes) => {
@@ -505,10 +322,14 @@ fn report_reasoning(diagnostics: &DiagnosticBus, report: &ReasoningReport) {
 fn assemble(
     assembler: &Assembler,
     inputs: Vec<ModuleInput>,
-    cli_args: Vec<String>,
+    cli_args: Vec<std::ffi::OsString>,
     environment: Value,
 ) -> Result<Bytes, Error> {
-    let arguments = Value::list(cli_args.into_iter().map(Value::text));
+    let arguments = Value::list(
+        cli_args
+            .iter()
+            .map(|argument| Value::binary(argument.as_encoded_bytes().to_vec())),
+    );
     let initial_definitions = Value::record([
         ("asm", Value::record([("args", arguments)])),
         ("env", environment),
@@ -1323,98 +1144,17 @@ impl TerminalColor {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ParseVerbosity {
-    Quiet,
-    Normal,
-    Verbose,
-}
-
-fn parse_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let mut path = None;
-    let mut verbosity = ParseVerbosity::Normal;
-    for argument in args {
-        match argument.as_str() {
-            "-q" | "--quiet" if verbosity != ParseVerbosity::Verbose => {
-                verbosity = ParseVerbosity::Quiet;
-            }
-            "-v" | "--verbose" if verbosity != ParseVerbosity::Quiet => {
-                verbosity = ParseVerbosity::Verbose;
-            }
-            "-q" | "--quiet" | "-v" | "--verbose" => {
-                eprintln!("error: `--quiet` and `--verbose` cannot be combined with `--parse`");
-                return ExitCode::from(2);
-            }
-            option if option.starts_with('-') => {
-                eprintln!("error: unknown `--parse` option `{option}`");
-                return ExitCode::from(2);
-            }
-            _ if path.is_some() => {
-                eprintln!("error: `glam --parse` accepts exactly one source path");
-                return ExitCode::from(2);
-            }
-            _ => path = Some(argument),
-        }
-    }
-
-    let Some(path) = path else {
-        eprintln!("error: `glam --parse` needs a source path");
-        return ExitCode::from(2);
-    };
-
-    let parsed = match inspect_g_source_path(&path) {
-        Ok(parsed) => parsed,
-        Err(exit_code) => return exit_code,
-    };
-
-    print_parse_summary(&path, &parsed, verbosity)
-}
-
-fn inspect_g_source_path(path: &str) -> Result<GSourceInspection, ExitCode> {
+fn inspect_g_source_command(path: &Path, verbosity: glam::cli::ParseVerbosity) -> ExitCode {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            eprintln!("error: could not read `{path}`: {error}");
-            return Err(ExitCode::from(1));
+            eprintln!("error: could not read `{}`: {error}", path.display());
+            return ExitCode::from(1);
         }
     };
-
-    Ok(inspect_g_source(&bytes))
-}
-
-fn print_parse_summary(
-    path: &str,
-    parsed: &GSourceInspection,
-    verbosity: ParseVerbosity,
-) -> ExitCode {
-    let mut out = io::stdout().lock();
-    let result = (|| -> io::Result<()> {
-        if verbosity != ParseVerbosity::Quiet {
-            for diagnostic in parsed.diagnostics() {
-                writeln!(
-                    out,
-                    "{path}:{}: {}: {}",
-                    diagnostic.line(),
-                    severity_label(diagnostic.severity()),
-                    diagnostic.message()
-                )?;
-            }
-            writeln!(out, "{} declarations", parsed.declarations().len())?;
-        }
-        if verbosity == ParseVerbosity::Verbose {
-            for declaration in parsed.declarations() {
-                writeln!(
-                    out,
-                    "{:>4}: {:<12} {}",
-                    declaration.line(),
-                    declaration.kind().as_str(),
-                    declaration.preview()
-                )?;
-            }
-        }
-        Ok(())
-    })();
-    if result.is_err() {
+    let parsed = inspect_g_source(&bytes);
+    let output = format_parse_summary(path, &parsed, verbosity);
+    if io::stdout().write_all(output.as_bytes()).is_err() {
         eprintln!("error: could not write parse inspection to stdout");
         return ExitCode::from(1);
     }
@@ -1424,41 +1164,6 @@ fn print_parse_summary(
     } else {
         ExitCode::SUCCESS
     }
-}
-
-fn severity_label(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Info => "info",
-        Severity::Warning => "warning",
-        Severity::Error => "error",
-    }
-}
-
-fn print_help() {
-    const HELP: &str = "\
-Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...
-            [--manifest <PATH>]
-            [--refl <ARG>]...
-            [--workers <N>]
-       glam --parse <PATH> [--quiet|--verbose]
-       glam --check_manifest <PATH> [--quiet]
-       glam --help
-       glam --version
-
-Assembly inputs are applied as mixins; earlier inputs override later inputs.
---manifest records every local input path and its SHA-256 digest.
---check_manifest verifies every local file recorded by a manifest.
---quiet suppresses changed-file output from --check_manifest.
---parse inspects one built-in .g source without compiling or loading imports.
---parse --quiet reports only through its exit status; --verbose lists declarations.
---refl appends an argument visible only as reflection environment process.refl_args.
---workers sets the shared background evaluator thread count; zero disables sparks.
-GLAM_WORKERS provides the default worker count when --workers is absent.
-Configuration is loaded from GLAM_CONF as an OS path-list, or from the user config/default fixture.
-Bare arguments are reserved for configured `conf.cli` rewriting.
-";
-
-    print!("{HELP}");
 }
 
 #[cfg(test)]

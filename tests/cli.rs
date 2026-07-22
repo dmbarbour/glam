@@ -712,6 +712,37 @@ fn reflection_arguments_are_ordered_and_do_not_enter_assembly_arguments() {
 }
 
 #[test]
+fn bootstrap_cli_arguments_are_exposed_as_identical_user_and_effective_views() {
+    let dir = unique_temp_dir("glam-cli-args");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = .env ['process,'cli] >>= (\\cli -> (cli.user_args == cli.args) =>> .write_stderr (\"CLI ARGS\" ++ [10]))\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--script.g")
+        .arg("language g0\nasm.result = \"ok\"\n")
+        .arg("--")
+        .arg("assembly argument")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ok");
+    assert_eq!(output.stderr, b"CLI ARGS\n");
+}
+
+#[test]
 fn configured_logger_output_precedes_a_later_logger_failure() {
     let dir = unique_temp_dir("glam-conf-log-failure");
     fs::create_dir_all(&dir)
