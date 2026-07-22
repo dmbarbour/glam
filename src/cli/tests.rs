@@ -29,10 +29,7 @@ fn assembly_plan_preserves_input_and_argument_order() {
     let TopLevelCommand::Assembly(plan) = command else {
         panic!("expected an assembly plan");
     };
-    assert_eq!(
-        plan.cli_arguments().user_args(),
-        plan.cli_arguments().args()
-    );
+    assert_eq!(plan.process_args(), plan.cli_arguments().args());
     let parts = plan.into_parts();
     assert_eq!(parts.inputs.len(), 2);
     assert_eq!(parts.reflection_args, [OsString::from("explain")]);
@@ -137,8 +134,7 @@ fn a_bare_first_argument_is_deferred_to_configured_cli() {
         panic!("expected configured CLI dispatch");
     };
     assert_eq!(
-        arguments.user_args(),
+        arguments.args(),
         [OsString::from("build"), OsString::from("input.g")]
     );
-    assert_eq!(arguments.user_args(), arguments.args());
 }

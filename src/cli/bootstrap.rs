@@ -12,7 +12,7 @@ pub fn dispatch_bootstrap(
     user_args: impl IntoIterator<Item = OsString>,
 ) -> Result<TopLevelCommand, CliError> {
     let user_args = Arc::<[OsString]>::from(user_args.into_iter().collect::<Vec<_>>());
-    let cli_arguments = CliArguments::unchanged(user_args.clone());
+    let cli_arguments = CliArguments::new(user_args.clone());
     let Some(first) = user_args.first() else {
         return Ok(TopLevelCommand::Help);
     };

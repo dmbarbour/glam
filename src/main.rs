@@ -94,6 +94,7 @@ fn configured_worker_count(command_line: Option<usize>) -> Result<usize, ExitCod
 
 fn process_reflection_environment(
     reflection_arguments: Vec<std::ffi::OsString>,
+    process_arguments: &[std::ffi::OsString],
     cli_arguments: CliArguments,
 ) -> Value {
     fn os_value(value: &std::ffi::OsStr) -> Value {
@@ -107,19 +108,13 @@ fn process_reflection_environment(
         )
     }))
     .expect("OS environment names must be keyable binary values");
-    let arguments = Value::list(env::args_os().map(|argument| os_value(&argument)));
+    let arguments = Value::list(process_arguments.iter().map(|argument| os_value(argument)));
     let reflection_arguments = Value::list(
         reflection_arguments
             .iter()
             .map(|argument| os_value(argument)),
     );
-    let user_cli_arguments = Value::list(
-        cli_arguments
-            .user_args()
-            .iter()
-            .map(|argument| os_value(argument)),
-    );
-    let effective_cli_arguments = Value::list(
+    let cli_arguments = Value::list(
         cli_arguments
             .args()
             .iter()
@@ -131,13 +126,7 @@ fn process_reflection_environment(
             ("args", arguments),
             ("env", variables),
             ("refl_args", reflection_arguments),
-            (
-                "cli",
-                Value::record([
-                    ("user_args", user_cli_arguments),
-                    ("args", effective_cli_arguments),
-                ]),
-            ),
+            ("cli", Value::record([("args", cli_arguments)])),
         ]),
     )])
 }
@@ -167,6 +156,7 @@ fn assemble_inputs(command: CommandPlan) -> ExitCode {
         reflection_args,
         manifest,
         worker_count,
+        process_args,
         cli_arguments,
     } = command.into_parts();
     let worker_threads = match configured_worker_count(worker_count) {
@@ -191,6 +181,7 @@ fn assemble_inputs(command: CommandPlan) -> ExitCode {
         .reflection_environment(|_| {
             Ok(process_reflection_environment(
                 reflection_args,
+                &process_args,
                 cli_arguments,
             ))
         })

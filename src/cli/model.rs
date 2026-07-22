@@ -28,24 +28,20 @@ impl std::error::Error for CliError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliArguments {
-    user_args: Arc<[OsString]>,
     args: Arc<[OsString]>,
 }
 
 impl CliArguments {
-    pub(super) fn unchanged(user_args: Arc<[OsString]>) -> Self {
-        Self {
-            user_args: user_args.clone(),
-            args: user_args,
-        }
-    }
-
-    pub fn user_args(&self) -> &[OsString] {
-        &self.user_args
+    pub(super) fn new(args: Arc<[OsString]>) -> Self {
+        Self { args }
     }
 
     pub fn args(&self) -> &[OsString] {
         &self.args
+    }
+
+    pub(super) fn shared_args(&self) -> Arc<[OsString]> {
+        self.args.clone()
     }
 }
 
@@ -79,12 +75,17 @@ pub struct CommandPlan {
     reflection_args: Vec<OsString>,
     manifest: Option<PathBuf>,
     worker_count: Option<usize>,
+    process_args: Arc<[OsString]>,
     cli_arguments: CliArguments,
 }
 
 impl CommandPlan {
     pub fn cli_arguments(&self) -> &CliArguments {
         &self.cli_arguments
+    }
+
+    pub fn process_args(&self) -> &[OsString] {
+        &self.process_args
     }
 
     pub fn into_parts(self) -> CommandPlanParts {
@@ -94,6 +95,7 @@ impl CommandPlan {
             reflection_args: self.reflection_args,
             manifest: self.manifest,
             worker_count: self.worker_count,
+            process_args: self.process_args,
             cli_arguments: self.cli_arguments,
         }
     }
@@ -106,6 +108,7 @@ pub struct CommandPlanParts {
     pub reflection_args: Vec<OsString>,
     pub manifest: Option<PathBuf>,
     pub worker_count: Option<usize>,
+    pub process_args: Arc<[OsString]>,
     pub cli_arguments: CliArguments,
 }
 
@@ -164,12 +167,14 @@ impl CommandPlanBuilder {
             ));
         }
 
+        let process_args = cli_arguments.shared_args();
         Ok(CommandPlan {
             inputs,
             assembly_args,
             reflection_args,
             manifest,
             worker_count,
+            process_args,
             cli_arguments,
         })
     }

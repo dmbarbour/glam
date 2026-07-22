@@ -120,8 +120,9 @@ and `--verbose` includes declaration rows.
 
 For assembly, `--workers` overrides `GLAM_WORKERS`; zero workers is the default.
 Bootstrap parsing retains paths and unrelated arguments as OS strings instead
-of requiring process-wide UTF-8. Raw process arguments remain in
-`process.args`; repeated `--refl` values are additionally collected in
+of requiring process-wide UTF-8. `process.cli.args` records the arguments the
+user supplied, while `process.args` is their final canonical interpretation;
+both exclude the executable name and are identical before configured rewriting
+is introduced. Repeated `--refl` values are additionally collected in
 `process.refl_args` and excluded from `asm.args`, while arguments after `--`
-form `asm.args`. `process.cli.user_args` and `process.cli.args` both exclude the
-executable name and are identical until configured rewriting is introduced.
+form `asm.args`.

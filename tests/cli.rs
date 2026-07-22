@@ -712,14 +712,14 @@ fn reflection_arguments_are_ordered_and_do_not_enter_assembly_arguments() {
 }
 
 #[test]
-fn bootstrap_cli_arguments_are_exposed_as_identical_user_and_effective_views() {
+fn bootstrap_cli_arguments_are_exposed_as_user_and_canonical_views() {
     let dir = unique_temp_dir("glam-cli-args");
     fs::create_dir_all(&dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .env ['process,'cli] >>= (\\cli -> (cli.user_args == cli.args) =>> .write_stderr (\"CLI ARGS\" ++ [10]))\n",
+        "language g0\nobject conf.env\nconf.log = .env ['process] >>= (\\process -> (process.args == process.cli.args) =>> .write_stderr (\"CLI ARGS\" ++ [10]))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 
