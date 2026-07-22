@@ -2,6 +2,7 @@ use chumsky::prelude::*;
 
 use super::super::{Diagnostic, ObjectExpr, SyntaxExpr, SyntaxOperator};
 use super::declaration::{parse_object_body, take_header_word};
+use super::do_expr::parse_do_expr_result;
 use super::expression::syntax_expr_parser;
 use super::layout::{indentation_width, is_glam_whitespace, local_name, split_layout_statements};
 
@@ -53,6 +54,9 @@ pub(in crate::g_syntax) fn parse_expr_result_with_diagnostics(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<SyntaxExpr, String> {
     let text = text.trim();
+    if let Some(result) = parse_do_expr_result(text, line, diagnostics) {
+        return result;
+    }
     if let Some(result) = parse_let_expr_result(text, line, diagnostics) {
         return result;
     }
@@ -315,28 +319,79 @@ pub(super) fn split_top_level_keyword<'a>(
 }
 
 pub(super) fn top_level_keyword_indices(text: &str, keyword: &str) -> Vec<usize> {
+    top_level_matching_indices(text, |index, _| keyword_starts_at(text, index, keyword))
+}
+
+pub(super) fn top_level_token_indices(text: &str, token: &str) -> Vec<usize> {
+    top_level_matching_indices(text, |index, _| text[index..].starts_with(token))
+}
+
+fn top_level_matching_indices(
+    text: &str,
+    mut matches: impl FnMut(usize, char) -> bool,
+) -> Vec<usize> {
     let mut indices = Vec::new();
     let mut depth = 0usize;
-    let mut in_string = false;
+    let mut inline_text = false;
+    let mut multiline_text = false;
+    let mut index = 0;
 
-    for (index, ch) in text.char_indices() {
-        if in_string {
-            if ch == '"' {
-                in_string = false;
+    while index < text.len() {
+        if multiline_text {
+            if text[index..].starts_with("\"\"\"")
+                && text[line_start(text, index)..index]
+                    .chars()
+                    .all(|ch| ch == ' ')
+            {
+                multiline_text = false;
+                index += 3;
+            } else {
+                index += text[index..]
+                    .chars()
+                    .next()
+                    .expect("index should remain on a character boundary")
+                    .len_utf8();
             }
             continue;
         }
+        if inline_text {
+            let ch = text[index..]
+                .chars()
+                .next()
+                .expect("index should remain on a character boundary");
+            if ch == '"' {
+                inline_text = false;
+            }
+            index += ch.len_utf8();
+            continue;
+        }
+        if text[index..].starts_with("\"\"\"") {
+            multiline_text = true;
+            index += 3;
+            continue;
+        }
 
+        let ch = text[index..]
+            .chars()
+            .next()
+            .expect("index should remain on a character boundary");
         match ch {
-            '"' => in_string = true,
+            '"' => inline_text = true,
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            _ if depth == 0 && keyword_starts_at(text, index, keyword) => indices.push(index),
+            _ if depth == 0 && matches(index, ch) => indices.push(index),
             _ => {}
         }
+        index += ch.len_utf8();
     }
 
     indices
+}
+
+fn line_start(text: &str, index: usize) -> usize {
+    text[..index]
+        .rfind(['\r', '\n'])
+        .map_or(0, |line_ending| line_ending + 1)
 }
 
 pub(super) fn keyword_starts_at(text: &str, index: usize, keyword: &str) -> bool {
@@ -376,28 +431,7 @@ pub(super) fn split_top_level_binding_equals(text: &str) -> Option<(&str, &str)>
 }
 
 pub(super) fn top_level_char_indices(text: &str, needle: char) -> Vec<usize> {
-    let mut indices = Vec::new();
-    let mut depth = 0usize;
-    let mut in_string = false;
-
-    for (index, ch) in text.char_indices() {
-        if in_string {
-            if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => in_string = true,
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            _ if depth == 0 && ch == needle => indices.push(index),
-            _ => {}
-        }
-    }
-
-    indices
+    top_level_matching_indices(text, |_, ch| ch == needle)
 }
 
 pub(super) fn parse_object_expr_result(

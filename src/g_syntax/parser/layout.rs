@@ -172,6 +172,42 @@ pub(super) fn split_layout_statements(text: &str) -> Result<Vec<LayoutStatement<
     Ok(statements)
 }
 
+/// Removes the indentation established by the first non-empty block line.
+/// This is needed when one layout expression is nested inside another
+/// statement; top-level declaration collection has already performed the same
+/// normalization for the outermost expression.
+pub(super) fn dedent_layout_block(text: &str) -> Result<String, String> {
+    let lines = split_lines(text);
+    let base_indent = lines
+        .iter()
+        .find(|line| !line.text.trim().is_empty())
+        .map_or(0, |line| indentation_width(line.text));
+    let mut normalized = String::with_capacity(text.len());
+    let mut in_multiline_text = false;
+
+    for (index, line) in lines.into_iter().enumerate() {
+        if index > 0 {
+            normalized.push('\n');
+        }
+        let trimmed = line.text.trim();
+        if !trimmed.is_empty() && !in_multiline_text && indentation_width(line.text) < base_indent {
+            return Err(format!(
+                "layout line {} is indented less than the first statement",
+                line.number
+            ));
+        }
+        normalized.push_str(strip_indent_width(line.text, base_indent));
+
+        if in_multiline_text {
+            in_multiline_text = !closes_multiline_text(line.text);
+        } else if opens_multiline_text(line.text) {
+            in_multiline_text = true;
+        }
+    }
+
+    Ok(normalized)
+}
+
 pub(super) fn line_ending_diagnostics(text: &str) -> Vec<Diagnostic> {
     let mut has_lf = false;
     let mut has_crlf = false;

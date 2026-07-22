@@ -72,6 +72,20 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
             }
             analyze_expr_locals(body, line, diagnostics);
         }
+        SyntaxExpr::Do(do_expr) => {
+            // Phase 3 adds sequential binder analysis. For now, still visit
+            // every nested expression so outer locals and nested constructs
+            // retain their existing warning behavior.
+            for step in &do_expr.steps {
+                let expr = match &step.kind {
+                    DoStepKind::Bind { operation, .. } => operation,
+                    DoStepKind::ValueBind { value, .. } => value,
+                    DoStepKind::Then(expr) => expr,
+                };
+                analyze_expr_locals(expr, step.line, diagnostics);
+            }
+            analyze_expr_locals(&do_expr.result, do_expr.result_line, diagnostics);
+        }
         SyntaxExpr::Let { bindings, body } => {
             let params = bindings
                 .iter()
@@ -219,6 +233,17 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
             }
         }
         SyntaxExpr::Lambda(_, body) => mark_used_prior_alias(body, alias, used),
+        SyntaxExpr::Do(do_expr) => {
+            for step in &do_expr.steps {
+                let expr = match &step.kind {
+                    DoStepKind::Bind { operation, .. } => operation,
+                    DoStepKind::ValueBind { value, .. } => value,
+                    DoStepKind::Then(expr) => expr,
+                };
+                mark_used_prior_alias(expr, alias, used);
+            }
+            mark_used_prior_alias(&do_expr.result, alias, used);
+        }
         SyntaxExpr::Let { bindings, body } => {
             for (_, value) in bindings {
                 mark_used_prior_alias(value, alias, used);
@@ -346,6 +371,17 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             nested_used[..locals.len()].copy_from_slice(used);
             mark_used_locals(body, &combined, &mut nested_used);
             used.copy_from_slice(&nested_used[..locals.len()]);
+        }
+        SyntaxExpr::Do(do_expr) => {
+            for step in &do_expr.steps {
+                let expr = match &step.kind {
+                    DoStepKind::Bind { operation, .. } => operation,
+                    DoStepKind::ValueBind { value, .. } => value,
+                    DoStepKind::Then(expr) => expr,
+                };
+                mark_used_locals(expr, locals, used);
+            }
+            mark_used_locals(&do_expr.result, locals, used);
         }
         SyntaxExpr::Let { bindings, body } => {
             for (_, value) in bindings {

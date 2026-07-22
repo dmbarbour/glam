@@ -2,6 +2,7 @@
 
 mod compound;
 mod declaration;
+mod do_expr;
 mod expression;
 mod layout;
 mod source;

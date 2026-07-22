@@ -1068,6 +1068,50 @@ fn parameterized_definitions_parse_compound_bodies_before_lambda_wrapping() {
 }
 
 #[test]
+fn parses_layout_do_in_definition_lambda_and_application_positions() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "main api = do\n",
+        "  .prepare api\n",
+        "  .r api\n",
+        "wrapped = \\api -> do\n",
+        "  .r api\n",
+        "identity_net = interaction_net do\n",
+        "  .bind -> ports\n",
+        "  .r ports\n",
+    ));
+
+    assert_eq!(parsed.diagnostics, []);
+    let DeclarationKind::Definition(main) = &parsed.declarations[1].kind else {
+        panic!("main should be a definition");
+    };
+    assert_eq!(main.parameters, ["api"]);
+    assert!(matches!(
+        &main.expr,
+        Some(SyntaxExpr::Lambda(parameters, body))
+            if parameters == &["api"] && matches!(body.as_ref(), SyntaxExpr::Do(_))
+    ));
+
+    let DeclarationKind::Definition(wrapped) = &parsed.declarations[2].kind else {
+        panic!("wrapped should be a definition");
+    };
+    assert!(matches!(
+        &wrapped.expr,
+        Some(SyntaxExpr::Lambda(parameters, body))
+            if parameters == &["api"] && matches!(body.as_ref(), SyntaxExpr::Do(_))
+    ));
+
+    let DeclarationKind::Definition(identity_net) = &parsed.declarations[3].kind else {
+        panic!("identity_net should be a definition");
+    };
+    assert!(matches!(
+        &identity_net.expr,
+        Some(SyntaxExpr::Apply(_, argument))
+            if matches!(argument.as_ref(), SyntaxExpr::Do(_))
+    ));
+}
+
+#[test]
 fn warns_on_unused_locals_without_underscore_prefix() {
     let parsed = parse("language g0\nid x = 42\nasm.result = (\\y -> \"ok\") 1\n");
 

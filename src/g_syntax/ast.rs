@@ -93,6 +93,26 @@ pub struct ObjectExpr {
     pub body: Vec<ObjectBodyDefinition>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct DoExpr {
+    pub steps: Vec<DoStep>,
+    pub result_line: usize,
+    pub result: Box<SyntaxExpr>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct DoStep {
+    pub line: usize,
+    pub kind: DoStepKind,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DoStepKind {
+    Bind { name: String, operation: SyntaxExpr },
+    ValueBind { name: String, value: SyntaxExpr },
+    Then(SyntaxExpr),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportReference {
     Local(String),
@@ -148,6 +168,7 @@ pub enum SyntaxExpr {
     List(Vec<SyntaxExpr>),
     Tuple(Vec<SyntaxExpr>),
     Lambda(Vec<String>, Box<SyntaxExpr>),
+    Do(DoExpr),
     Let {
         bindings: Vec<(String, SyntaxExpr)>,
         body: Box<SyntaxExpr>,
