@@ -73,18 +73,7 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
             analyze_expr_locals(body, line, diagnostics);
         }
         SyntaxExpr::Do(do_expr) => {
-            // Phase 3 adds sequential binder analysis. For now, still visit
-            // every nested expression so outer locals and nested constructs
-            // retain their existing warning behavior.
-            for step in &do_expr.steps {
-                let expr = match &step.kind {
-                    DoStepKind::Bind { operation, .. } => operation,
-                    DoStepKind::ValueBind { value, .. } => value,
-                    DoStepKind::Then(expr) => expr,
-                };
-                analyze_expr_locals(expr, step.line, diagnostics);
-            }
-            analyze_expr_locals(&do_expr.result, do_expr.result_line, diagnostics);
+            analyze_do_expr_locals(do_expr, diagnostics);
         }
         SyntaxExpr::Let { bindings, body } => {
             let params = bindings
@@ -235,12 +224,7 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
         SyntaxExpr::Lambda(_, body) => mark_used_prior_alias(body, alias, used),
         SyntaxExpr::Do(do_expr) => {
             for step in &do_expr.steps {
-                let expr = match &step.kind {
-                    DoStepKind::Bind { operation, .. } => operation,
-                    DoStepKind::ValueBind { value, .. } => value,
-                    DoStepKind::Then(expr) => expr,
-                };
-                mark_used_prior_alias(expr, alias, used);
+                mark_used_prior_alias(do_step_expr(step), alias, used);
             }
             mark_used_prior_alias(&do_expr.result, alias, used);
         }
@@ -373,15 +357,7 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             used.copy_from_slice(&nested_used[..locals.len()]);
         }
         SyntaxExpr::Do(do_expr) => {
-            for step in &do_expr.steps {
-                let expr = match &step.kind {
-                    DoStepKind::Bind { operation, .. } => operation,
-                    DoStepKind::ValueBind { value, .. } => value,
-                    DoStepKind::Then(expr) => expr,
-                };
-                mark_used_locals(expr, locals, used);
-            }
-            mark_used_locals(&do_expr.result, locals, used);
+            mark_used_do_locals(do_expr, locals, used);
         }
         SyntaxExpr::Let { bindings, body } => {
             for (_, value) in bindings {
@@ -423,6 +399,69 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             mark_used_locals(left, locals, used);
             mark_used_locals(right, locals, used);
         }
+    }
+}
+
+fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {
+    let mut locals = Vec::new();
+    let mut used = Vec::new();
+    let mut binding_lines = Vec::new();
+
+    for step in &do_expr.steps {
+        let expr = do_step_expr(step);
+        mark_used_locals(expr, &locals, &mut used);
+        analyze_expr_locals(expr, step.line, diagnostics);
+
+        if let Some(name) = do_step_binder(step) {
+            locals.push(local_name_metadata(name));
+            used.push(false);
+            binding_lines.push(step.line);
+        }
+    }
+
+    mark_used_locals(&do_expr.result, &locals, &mut used);
+    analyze_expr_locals(&do_expr.result, do_expr.result_line, diagnostics);
+
+    for ((local, used), line) in locals.iter().zip(used).zip(binding_lines) {
+        if !used && local.canonical.is_some() && !local.suppress_unused_warning {
+            diagnostics.push(Diagnostic::warn(
+                line,
+                format!("unused local `{}`", local.raw),
+            ));
+        }
+    }
+}
+
+fn mark_used_do_locals(do_expr: &DoExpr, locals: &[LocalName], used: &mut [bool]) {
+    let outer_len = locals.len();
+    let mut combined = Vec::with_capacity(outer_len + do_expr.steps.len());
+    combined.extend_from_slice(locals);
+    let mut combined_used = Vec::with_capacity(outer_len + do_expr.steps.len());
+    combined_used.extend_from_slice(used);
+
+    for step in &do_expr.steps {
+        mark_used_locals(do_step_expr(step), &combined, &mut combined_used);
+        if let Some(name) = do_step_binder(step) {
+            combined.push(local_name_metadata(name));
+            combined_used.push(false);
+        }
+    }
+    mark_used_locals(&do_expr.result, &combined, &mut combined_used);
+    used.copy_from_slice(&combined_used[..outer_len]);
+}
+
+fn do_step_expr(step: &DoStep) -> &SyntaxExpr {
+    match &step.kind {
+        DoStepKind::Bind { operation, .. } => operation,
+        DoStepKind::ValueBind { value, .. } => value,
+        DoStepKind::Then(expr) => expr,
+    }
+}
+
+fn do_step_binder(step: &DoStep) -> Option<&str> {
+    match &step.kind {
+        DoStepKind::Bind { name, .. } | DoStepKind::ValueBind { name, .. } => Some(name),
+        DoStepKind::Then(_) => None,
     }
 }
 

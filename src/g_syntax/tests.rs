@@ -1112,6 +1112,123 @@ fn parses_layout_do_in_definition_lambda_and_application_positions() {
 }
 
 #[test]
+fn do_bindings_follow_sequential_unused_local_rules() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "outer prior = do\n",
+        "  current <- .r prior\n",
+        "  unused = current\n",
+        "  _quiet <- .r current\n",
+        "  .r current\n",
+        "nested = do\n",
+        "  outer <- .r ()\n",
+        "  inner <- do\n",
+        "    nested <- .r outer\n",
+        "    .r nested\n",
+        "  .r inner\n",
+    ));
+
+    let warnings = parsed
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Warning)
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].line, 4);
+    assert_eq!(warnings[0].message, "unused local `unused`");
+}
+
+#[test]
+fn do_lowering_rejects_shadowing_at_the_binding_statement() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "bad outer = do\n",
+        "  inner <- .r outer\n",
+        "  outer <- .r inner\n",
+        "  .r outer\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+
+    let lowered = lower_parsed_source(parsed, &CompileContext::default());
+    assert_eq!(lowered.diagnostics.len(), 1);
+    assert_eq!(lowered.diagnostics[0].line, 4);
+    assert!(
+        lowered.diagnostics[0]
+            .message
+            .contains("local `outer` shadows existing local `outer`")
+    );
+}
+
+#[test]
+fn do_lowering_sequences_binds_value_guards_and_bare_operations() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "source_value = 70\n",
+        "asm.backward = list.pure do\n",
+        "  left <- .r \"A\"\n",
+        "  right = \"B\"\n",
+        "  .r ()\n",
+        "  ((left == \"A\") and (right == \"B\")) =>> .r 65\n",
+        "asm.forward = list.pure do\n",
+        "  .r \"C\" -> left\n",
+        "  .r \"D\" -> right\n",
+        "  ((left == \"C\") and (right == \"D\")) =>> .r 67\n",
+        "asm.drop = list.pure do\n",
+        "  .r \"ignored\" -> _\n",
+        "  .r 69\n",
+        "asm.scope = list.pure do\n",
+        "  source_value <- .r source_value\n",
+        "  .r source_value\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("backward", b"A".as_slice()),
+        ("forward", b"C".as_slice()),
+        ("drop", b"E".as_slice()),
+        ("scope", b"F".as_slice()),
+    ] {
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", path]
+            ))),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn bare_do_operations_reuse_the_effect_then_unit_policy() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "api = { r:(\\x -> x), seq:(\\op k -> (k (op.eff api)).eff api) }\n",
+        "bad = do\n",
+        "  .r \"not unit\"\n",
+        "  .r \"unreachable\"\n",
+        "asm.result = bad.eff api\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    let result = value_at_atom_path(&value, &["asm", "result"]).expect("result should exist");
+    assert!(
+        fully_evaluated_error(result)
+            .to_string()
+            .contains("requires discarded effect results to be unit")
+    );
+}
+
+#[test]
 fn warns_on_unused_locals_without_underscore_prefix() {
     let parsed = parse("language g0\nid x = 42\nasm.result = (\\y -> \"ok\") 1\n");
 

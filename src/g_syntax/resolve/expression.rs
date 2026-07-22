@@ -89,12 +89,7 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::Lambda(params, body) => {
             lower_lambda_expr_resolved(params, body, line, context, scope, locals)?
         }
-        SyntaxExpr::Do(_) => {
-            return Err(Diagnostic::error(
-                line,
-                "do notation resolution is not implemented by this parser spike",
-            ));
-        }
+        SyntaxExpr::Do(do_expr) => lower_do_expr_resolved(do_expr, context, scope, locals)?,
         SyntaxExpr::Let { bindings, body } => {
             lower_let_expr_resolved(bindings, body, line, context, scope, locals)?
         }
