@@ -3,7 +3,7 @@ use chumsky::prelude::*;
 use super::super::{
     Declaration, DeclarationKind, DefinitionDecl, DefinitionKind, Diagnostic, ImportDecl,
     ImportPlacement, ImportReference, LanguageDecl, ObjectBodyDefinition, ObjectBodyDefinitionKind,
-    ObjectDecl, ObjectExtendDecl, PathSuffix, SyntaxKeyExpr, flatten_path_suffixes,
+    ObjectDecl, ObjectExtendDecl, PathSuffix, SyntaxExpr, SyntaxKeyExpr, flatten_path_suffixes,
     warn_unused_locals, warn_unused_with_alias,
 };
 use super::layout::{
@@ -542,8 +542,9 @@ pub(in crate::g_syntax) fn definition_decl<'src>()
             } else {
                 Ok(DefinitionDecl {
                     target,
+                    parameters: params,
                     kind,
-                    body: desugar_definition_body(kind, &params, body),
+                    body,
                     expr: None,
                 })
             }
@@ -663,22 +664,18 @@ fn rest_of_declaration<'src>() -> impl Parser<'src, &'src str, String, extra::Er
         .map(|text: &str| text.trim().to_owned())
 }
 
-fn desugar_definition_body(kind: DefinitionKind, params: &[String], body: String) -> String {
-    let _ = kind;
-    if params.is_empty() {
-        body
-    } else {
-        format!("\\ {} -> {}", params.join(" "), body)
-    }
-}
-
 fn finalize_definition_expr(
     mut definition: DefinitionDecl,
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> DefinitionDecl {
     match parse_expr_result_with_diagnostics(definition.body.as_str(), line, diagnostics) {
-        Ok(expr) => {
+        Ok(body) => {
+            let expr = if definition.parameters.is_empty() {
+                body
+            } else {
+                SyntaxExpr::Lambda(definition.parameters.clone(), Box::new(body))
+            };
             warn_unused_locals(&expr, line, diagnostics);
             definition.expr = Some(expr);
         }

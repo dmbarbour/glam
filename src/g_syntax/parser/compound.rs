@@ -3,7 +3,7 @@ use chumsky::prelude::*;
 use super::super::{Diagnostic, ObjectExpr, SyntaxExpr, SyntaxOperator};
 use super::declaration::{parse_object_body, take_header_word};
 use super::expression::syntax_expr_parser;
-use super::layout::{indentation_width, is_glam_whitespace, is_indented, local_name};
+use super::layout::{indentation_width, is_glam_whitespace, local_name, split_layout_statements};
 
 pub(super) fn syntax_binary_expr(
     operator: SyntaxOperator,
@@ -281,29 +281,21 @@ pub(super) fn split_multiline_let(text: &str) -> Result<(Vec<&str>, &str), Strin
 }
 
 pub(super) fn parse_multiline_binding_texts(text: &str) -> Result<Vec<&str>, String> {
-    let mut starts = Vec::new();
-    let mut offset = 0;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty()
-            && !is_indented(line)
-            && split_top_level_binding_equals(trimmed).is_some()
-        {
-            starts.push(offset);
-        }
-        offset += line.len() + 1;
-    }
-
-    if starts.is_empty() {
+    let statements = split_layout_statements(text)?;
+    if statements.is_empty() {
         return Err("local binding block requires at least one binding".to_owned());
     }
-    starts.push(text.len() + 1);
 
-    let mut bindings = Vec::new();
-    for pair in starts.windows(2) {
-        let start = pair[0];
-        let end = pair[1].saturating_sub(1).min(text.len());
-        bindings.push(text[start..end].trim());
+    let mut bindings = Vec::with_capacity(statements.len());
+    for statement in statements {
+        let binding = statement.text.trim();
+        if split_top_level_binding_equals(binding).is_none() {
+            return Err(format!(
+                "local binding on line {} must use `=`",
+                statement.line_offset + 1
+            ));
+        }
+        bindings.push(binding);
     }
     Ok(bindings)
 }

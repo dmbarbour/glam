@@ -1,29 +1,5 @@
 use super::super::*;
 
-pub(in crate::g_syntax) fn definition_param_count(
-    definition: &DefinitionDecl,
-    declaration_text: &str,
-    line: usize,
-) -> Result<usize, Diagnostic> {
-    let operator = match definition.kind {
-        DefinitionKind::Introduce => "=",
-        DefinitionKind::Override => ":=",
-        DefinitionKind::Update => "::=",
-    };
-    let suffix = declaration_text
-        .strip_prefix(definition.target.as_str())
-        .ok_or_else(|| {
-            Diagnostic::error(line, "internal error extracting definition parameters")
-        })?;
-    let (params, _) = suffix.split_once(operator).ok_or_else(|| {
-        Diagnostic::error(line, "internal error extracting definition parameters")
-    })?;
-    Ok(params
-        .split([' ', '\r', '\n'])
-        .filter(|param| !param.is_empty())
-        .count())
-}
-
 #[cfg(test)]
 pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_scope(
     expr: &SyntaxExpr,

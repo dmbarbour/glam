@@ -109,6 +109,7 @@ pub enum ImportPlacement {
 #[derive(Debug, PartialEq, Eq)]
 pub struct DefinitionDecl {
     pub target: String,
+    pub parameters: Vec<String>,
     pub kind: DefinitionKind,
     pub body: String,
     pub expr: Option<SyntaxExpr>,

@@ -49,7 +49,6 @@ pub(in crate::g_syntax) fn lower_parsed_source(
                 );
                 if let Err(diagnostic) = lower_definition(
                     definition,
-                    declaration.text.as_str(),
                     declaration.line,
                     context,
                     &mut definitions,
@@ -94,7 +93,6 @@ pub(in crate::g_syntax) fn lower_parsed_source(
 
 pub(super) fn lower_definition(
     definition: &DefinitionDecl,
-    declaration_text: &str,
     line: usize,
     context: &CompileContext,
     definitions: &mut Value,
@@ -104,7 +102,6 @@ pub(super) fn lower_definition(
     let definitions_root = ResolvedRoot::Provided(definitions.clone());
     let resolved = lower_definition_resolved(
         definition,
-        declaration_text,
         line,
         context,
         &definitions_root,

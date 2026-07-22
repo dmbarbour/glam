@@ -120,6 +120,58 @@ pub(super) fn is_dedent_closer(trimmed: &str) -> bool {
     !trimmed.is_empty() && trimmed.chars().all(|ch| matches!(ch, '}' | ']' | ')'))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LayoutStatement<'a> {
+    pub(super) text: &'a str,
+    /// Zero-based line offset within the supplied block text.
+    pub(super) line_offset: usize,
+}
+
+/// Splits a normalized layout block without interpreting its statements.
+///
+/// Each non-empty, unindented line begins a statement. Indented lines,
+/// dedented delimiter-only closers, and multiline text remain attached to the
+/// preceding statement. Source parsing removes comment-only lines before this
+/// helper receives a declaration body.
+pub(super) fn split_layout_statements(text: &str) -> Result<Vec<LayoutStatement<'_>>, String> {
+    let lines = split_lines(text);
+    let mut starts = Vec::new();
+    let mut in_multiline_text = false;
+
+    for line in lines {
+        let trimmed = line.text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if in_multiline_text {
+            in_multiline_text = !closes_multiline_text(line.text);
+            continue;
+        }
+        if opens_multiline_text(line.text) {
+            in_multiline_text = true;
+        }
+        if is_indented(line.text) || is_dedent_closer(trimmed) {
+            if starts.is_empty() {
+                return Err("layout block begins with a continuation line".to_owned());
+            }
+            continue;
+        }
+        starts.push((line.start, line.number - 1));
+    }
+
+    let mut statements = Vec::with_capacity(starts.len());
+    for (index, &(start, line_offset)) in starts.iter().enumerate() {
+        let end = starts
+            .get(index + 1)
+            .map_or(text.len(), |&(next_start, _)| next_start);
+        statements.push(LayoutStatement {
+            text: text[start..end].trim_end(),
+            line_offset,
+        });
+    }
+    Ok(statements)
+}
+
 pub(super) fn line_ending_diagnostics(text: &str) -> Vec<Diagnostic> {
     let mut has_lf = false;
     let mut has_crlf = false;
@@ -160,6 +212,7 @@ pub(super) fn line_ending_diagnostics(text: &str) -> Vec<Diagnostic> {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PhysicalLine<'a> {
     pub(super) number: usize,
+    pub(super) start: usize,
     pub(super) text: &'a str,
 }
 
@@ -175,6 +228,7 @@ pub(super) fn split_lines(text: &str) -> Vec<PhysicalLine<'_>> {
             b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
                 lines.push(PhysicalLine {
                     number,
+                    start,
                     text: &text[start..index],
                 });
                 index += 2;
@@ -184,6 +238,7 @@ pub(super) fn split_lines(text: &str) -> Vec<PhysicalLine<'_>> {
             b'\r' | b'\n' => {
                 lines.push(PhysicalLine {
                     number,
+                    start,
                     text: &text[start..index],
                 });
                 index += 1;
@@ -197,9 +252,58 @@ pub(super) fn split_lines(text: &str) -> Vec<PhysicalLine<'_>> {
     if start < text.len() || text.is_empty() {
         lines.push(PhysicalLine {
             number,
+            start,
             text: &text[start..],
         });
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_statements_keep_continuations_and_line_offsets() {
+        let text = ".first {\r\n  value\r\n}\r\n.second\r\n  continuation";
+        let statements = split_layout_statements(text).unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                LayoutStatement {
+                    text: ".first {\r\n  value\r\n}",
+                    line_offset: 0,
+                },
+                LayoutStatement {
+                    text: ".second\r\n  continuation",
+                    line_offset: 3,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn layout_statements_do_not_split_multiline_text() {
+        let text = ".write \"\"\"\ntext at column zero\n\"\"\"\n.next";
+        let statements = split_layout_statements(text).unwrap();
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(
+            statements[0].text,
+            ".write \"\"\"\ntext at column zero\n\"\"\""
+        );
+        assert_eq!(statements[0].line_offset, 0);
+        assert_eq!(statements[1].text, ".next");
+        assert_eq!(statements[1].line_offset, 3);
+    }
+
+    #[test]
+    fn layout_statements_reject_an_initial_continuation() {
+        assert_eq!(
+            split_layout_statements("  continuation").unwrap_err(),
+            "layout block begins with a continuation line"
+        );
+    }
 }

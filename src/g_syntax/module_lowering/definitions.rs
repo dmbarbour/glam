@@ -133,7 +133,6 @@ impl<'a> DefinitionTargetContext<'a> {
 
 pub(in crate::g_syntax) fn lower_definition_resolved(
     definition: &DefinitionDecl,
-    declaration_text: &str,
     line: usize,
     context: &CompileContext,
     definitions: &ResolvedRoot,
@@ -162,7 +161,7 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
             target_context.lower_update(
                 &definition.target,
                 expr,
-                definition_param_count(definition, declaration_text, line)?,
+                definition.parameters.len(),
                 locals,
             )?,
         ),

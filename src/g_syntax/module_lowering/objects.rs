@@ -166,15 +166,9 @@ pub(in crate::g_syntax) fn lower_object_body_item_resolved(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     match &item.kind {
-        ObjectBodyDefinitionKind::Definition(definition) => lower_definition_resolved(
-            definition,
-            item.text.as_str(),
-            item.line,
-            context,
-            definitions,
-            scope,
-            locals,
-        ),
+        ObjectBodyDefinitionKind::Definition(definition) => {
+            lower_definition_resolved(definition, item.line, context, definitions, scope, locals)
+        }
         ObjectBodyDefinitionKind::Object(object) => {
             lower_nested_object_resolved(object, item.line, context, definitions, scope, locals)
         }
