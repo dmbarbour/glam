@@ -101,20 +101,13 @@ To this end, we might use a pattern such as defining `final_of.foo = _foo`. We c
 
 ### Forbidden Shadows
 
-Name shadowing, where a function argument or local variable accidentally masks another name defined or declared in lexical scope, is a common source of subtle bugs. Humans are a lot more flexible about referential context than our compiler, thus easily overlook the error when reading code. To resist this bug, we'll report an error for local name shadowing, and warn on toplevel name shadowing.
+Name shadowing, where a function argument or local variable accidentally masks another name defined or declared in lexical scope, is a common source of subtle bugs. Humans are a lot more flexible about referential context than our compiler, thus easily overlook the error when reading code. To resist this bug, we'll report an error for local name shadowing.
 
-The bootstrap compiler rejects shadowing between local variables. This includes
-duplicate parameters, nested lambda or `let` bindings, and suppressed spellings
-such as `_name` shadowing `name`; both spellings have the same canonical local
-name. The inaccessible `_` binder may be repeated because it introduces no
+The bootstrap compiler rejects shadowing between local variables. This includes duplicate parameters, nested lambda or `let` bindings, and suppressed spellings
+such as `_name` shadowing `name`; both spellings have the same canonical local name. The inaccessible `_` binder may be repeated because it introduces no
 referable name. Reusing a name in disjoint lexical scopes is valid.
 
-A special exception is object namespaces. Names are localized to `self` by default. Users may write `^name` (or `^(Expr)`) to escape the scope. This enables very coarse-grained shadowing. The `using` scope is an example of this.
-
-Detecting every collision between a local and a lazily constructed module or
-object namespace requires broader namespace analysis. Such namespace
-shadowing may initially remain a warning or linter concern; it does not weaken
-the local-to-local compiler error.
+Detecting every collision between a local and a lazily constructed module or object namespace requires broader namespace analysis. Such namespace shadowing may initially remain a warning or linter concern; this does not weaken the local-to-local compiler error.
 
 ### Using Scopes
 
