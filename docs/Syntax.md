@@ -193,6 +193,15 @@ I propose `!>` and `<!` to support applicative style programming. These correspo
 
 We always 'run' these effects from left to right, preserving order. 
 
+Their monadic expansions make that order explicit:
+
+        mf <! mx = mf >>= (\f -> mx >>= (\x -> .r (f x)))
+        mx !> mf = mx >>= (\x -> mf >>= (\f -> .r (f x)))
+
+`<!` is left-associative and `!>` is right-associative. The opposing
+directions have no implicit precedence relationship, so mixing them requires
+parentheses.
+
 Because `.r` is concise, users can directly write `.r f <! op1 <! op2`. No need for a `<$>` equivalent.
 
 ## Macros

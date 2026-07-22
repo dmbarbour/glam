@@ -379,12 +379,45 @@ pub(in crate::g_syntax) fn lower_syntax_operator_values_resolved(
         SyntaxOperator::BoolOr => effect_call_resolved("alt", [left, right]),
         SyntaxOperator::PipeForward => ResolvedExpr::apply(right, [left]),
         SyntaxOperator::PipeBackward => ResolvedExpr::apply(left, [right]),
+        SyntaxOperator::ApplicativeForward => applicative_resolved(left, right, false, locals),
+        SyntaxOperator::ApplicativeBackward => applicative_resolved(left, right, true, locals),
         SyntaxOperator::ComposeForward => compose_resolved(left, right, locals),
         SyntaxOperator::ComposeBackward => compose_resolved(right, left, locals),
         SyntaxOperator::EffectBind => effect_call_resolved("seq", [left, right]),
         SyntaxOperator::KleisliCompose => kleisli_compose_resolved(left, right, locals),
         SyntaxOperator::EffectThen => effect_then_resolved(left, right, locals),
     }
+}
+
+/// Sequences two effects in source order, then applies the function produced
+/// by one to the value produced by the other and returns that result.
+pub(in crate::g_syntax) fn applicative_resolved(
+    first_operation: ResolvedExpr<Value>,
+    second_operation: ResolvedExpr<Value>,
+    first_is_function: bool,
+    locals: &mut ResolverContext,
+) -> ResolvedExpr<Value> {
+    let base_len = locals.len();
+    let first_result = locals.push_binding("<applicative-first>");
+    let second_result = locals.push_binding("<applicative-second>");
+    let (function, argument) = if first_is_function {
+        (
+            ResolvedExpr::Local(first_result),
+            ResolvedExpr::Local(second_result),
+        )
+    } else {
+        (
+            ResolvedExpr::Local(second_result),
+            ResolvedExpr::Local(first_result),
+        )
+    };
+    let result = ResolvedExpr::apply(function, [argument]);
+    let returned = effect_call_resolved("r", [result]);
+    let second_continuation = ResolvedExpr::lambda(vec![second_result], returned);
+    let after_first = effect_call_resolved("seq", [second_operation, second_continuation]);
+    let first_continuation = ResolvedExpr::lambda(vec![first_result], after_first);
+    locals.truncate(base_len);
+    effect_call_resolved("seq", [first_operation, first_continuation])
 }
 
 pub(in crate::g_syntax) fn compose_resolved(

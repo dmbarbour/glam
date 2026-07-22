@@ -175,6 +175,8 @@ pub enum SyntaxOperator {
     BoolOr,
     PipeForward,
     PipeBackward,
+    ApplicativeForward,
+    ApplicativeBackward,
     ComposeForward,
     ComposeBackward,
     EffectBind,

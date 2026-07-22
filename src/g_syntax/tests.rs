@@ -1213,7 +1213,9 @@ fn reports_mixed_add_subtract_chains_as_parse_errors() {
 
 #[test]
 fn reports_mixed_pipe_and_composition_directions_as_parse_errors() {
-    let parsed = parse("language g0\npipe = value |> f <| g\ncompose = f >> g << h\n");
+    let parsed = parse(
+        "language g0\npipe = value |> f <| g\ncompose = f >> g << h\napplicative = op !> function <! argument\n",
+    );
 
     assert!(parsed.diagnostics.iter().any(|diag| {
         diag.line == 2
@@ -1226,6 +1228,12 @@ fn reports_mixed_pipe_and_composition_directions_as_parse_errors() {
             && diag
                 .message
                 .contains("operators `>>` and `<<` have no precedence relationship")
+    }));
+    assert!(parsed.diagnostics.iter().any(|diag| {
+        diag.line == 4
+            && diag
+                .message
+                .contains("operators `!>` and `<!` have no precedence relationship")
     }));
 }
 
@@ -2197,6 +2205,47 @@ fn effect_operators_evaluate_as_syntax_sugar() {
                 &["asm", path]
             ))),
             b"Hello, World!",
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn applicative_operators_apply_and_sequence_in_source_order() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "api = { r:(\\value -> {value:value, trace:\"R\"}), seq:(\\operation continuation -> (\\first -> (\\second -> {value:second.value, trace:first.trace ++ second.trace}) ((continuation first.value).eff api)) (operation.eff api)) }\n",
+        "marked tag value = {eff:(\\_api -> {value:value, trace:tag})}\n",
+        "backward = (marked \"F\" (\\x -> x ++ \"!\") <! marked \"A\" \"Hello\").eff api\n",
+        "forward = (marked \"A\" \"Hello\" !> marked \"F\" (\\x -> x ++ \"!\")).eff api\n",
+        "backward_chain = (.r (\\x y -> x ++ y) <! marked \"A\" \"A\" <! marked \"B\" \"B\").eff api\n",
+        "forward_chain = (marked \"A\" \"A\" !> marked \"B\" \"B\" !> .r (\\y x -> x ++ y)).eff api\n",
+        "asm.backward_value = backward.value\n",
+        "asm.backward_trace = backward.trace\n",
+        "asm.forward_value = forward.value\n",
+        "asm.forward_trace = forward.trace\n",
+        "asm.backward_chain = backward_chain.value\n",
+        "asm.forward_chain = forward_chain.value\n",
+    ));
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("backward_value", b"Hello!".as_slice()),
+        ("backward_trace", b"FAR".as_slice()),
+        ("forward_value", b"Hello!".as_slice()),
+        ("forward_trace", b"AFR".as_slice()),
+        ("backward_chain", b"AB".as_slice()),
+        ("forward_chain", b"AB".as_slice()),
+    ] {
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", path]
+            ))),
+            expected,
             "{path}"
         );
     }

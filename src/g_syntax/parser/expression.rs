@@ -153,8 +153,8 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             Subtract,
         };
         use SyntaxOperator::{
-            BoolAnd, BoolOr, Builtin, ComposeBackward, ComposeForward, EffectBind, EffectThen,
-            KleisliCompose, PipeBackward, PipeForward,
+            ApplicativeBackward, ApplicativeForward, BoolAnd, BoolOr, Builtin, ComposeBackward,
+            ComposeForward, EffectBind, EffectThen, KleisliCompose, PipeBackward, PipeForward,
         };
 
         match (left, right) {
@@ -171,6 +171,14 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             (PipeForward, PipeBackward) | (PipeBackward, PipeForward) => {
                 OperatorRelation::Unrelated
             }
+            (ApplicativeForward, ApplicativeForward) => {
+                OperatorRelation::Same(Associativity::Right)
+            }
+            (ApplicativeBackward, ApplicativeBackward) => {
+                OperatorRelation::Same(Associativity::Left)
+            }
+            (ApplicativeForward, ApplicativeBackward)
+            | (ApplicativeBackward, ApplicativeForward) => OperatorRelation::Unrelated,
             (ComposeForward, ComposeForward) => OperatorRelation::Same(Associativity::Left),
             (ComposeBackward, ComposeBackward) => OperatorRelation::Same(Associativity::Right),
             (ComposeForward, ComposeBackward) | (ComposeBackward, ComposeForward) => {
@@ -204,15 +212,15 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             Subtract,
         };
         use SyntaxOperator::{
-            BoolAnd, BoolOr, Builtin, ComposeBackward, ComposeForward, EffectBind, EffectThen,
-            KleisliCompose, PipeBackward, PipeForward,
+            ApplicativeBackward, ApplicativeForward, BoolAnd, BoolOr, Builtin, ComposeBackward,
+            ComposeForward, EffectBind, EffectThen, KleisliCompose, PipeBackward, PipeForward,
         };
 
         match operator {
             BoolOr => 0,
             BoolAnd => 1,
             EffectBind | EffectThen => 2,
-            PipeForward | PipeBackward => 3,
+            PipeForward | PipeBackward | ApplicativeForward | ApplicativeBackward => 3,
             ComposeForward | ComposeBackward | KleisliCompose => 4,
             Builtin(Greater | GreaterEqual | Equal | NotEqual | LessEqual | Less) => 5,
             Builtin(Append) => 6,
@@ -239,6 +247,8 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             SyntaxOperator::Builtin(crate::core::Builtin::Less) => "<",
             SyntaxOperator::PipeForward => "|>",
             SyntaxOperator::PipeBackward => "<|",
+            SyntaxOperator::ApplicativeForward => "!>",
+            SyntaxOperator::ApplicativeBackward => "<!",
             SyntaxOperator::ComposeForward => ">>",
             SyntaxOperator::ComposeBackward => "<<",
             SyntaxOperator::EffectBind => ">>=",
@@ -478,6 +488,8 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             just(">>=").to(SyntaxOperator::EffectBind),
             just(">=>").to(SyntaxOperator::KleisliCompose),
             just("=>>").to(SyntaxOperator::EffectThen),
+            just("!>").to(SyntaxOperator::ApplicativeForward),
+            just("<!").to(SyntaxOperator::ApplicativeBackward),
             just(">=").to(SyntaxOperator::Builtin(crate::core::Builtin::GreaterEqual)),
             just("==").to(SyntaxOperator::Builtin(crate::core::Builtin::Equal)),
             just("<>").to(SyntaxOperator::Builtin(crate::core::Builtin::NotEqual)),

@@ -223,6 +223,9 @@ op1 =>> op2         # sequence, dropping unit result
 # Applicatives (≡ Haskell <**> and <*>):
 .r f <! op1 <! op2          # left-assoc
 op1 !> op2 !> .r f          # right-assoc; always run left-to-right
+# mf <! mx = mf >>= (\f -> mx >>= (\x -> .r (f x)))
+# mx !> mf = mx >>= (\x -> mf >>= (\f -> .r (f x)))
+# Opposing directions require parentheses.
 
 # Recursive do: forward-declare with abstract (compiler uses .fix)
 do

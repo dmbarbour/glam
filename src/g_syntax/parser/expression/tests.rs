@@ -209,6 +209,56 @@ fn parses_pipe_and_composition_operators() {
             right: Some(Box::new(SyntaxExpr::Name("k".to_owned()))),
         })
     );
+    assert_eq!(
+        parse_expr("(!>)"),
+        Some(SyntaxExpr::OperatorSection {
+            operator: SyntaxOperator::ApplicativeForward,
+            left: None,
+            right: None,
+        })
+    );
+    assert_eq!(
+        parse_expr("(<!)"),
+        Some(SyntaxExpr::OperatorSection {
+            operator: SyntaxOperator::ApplicativeBackward,
+            left: None,
+            right: None,
+        })
+    );
+}
+
+#[test]
+fn parses_applicatives_in_their_written_directions() {
+    let named = |name: &str| SyntaxExpr::Name(name.to_owned());
+    assert_eq!(
+        parse_expr("function <! first <! second"),
+        Some(SyntaxExpr::OperatorApply {
+            operator: SyntaxOperator::ApplicativeBackward,
+            left: Box::new(SyntaxExpr::OperatorApply {
+                operator: SyntaxOperator::ApplicativeBackward,
+                left: Box::new(named("function")),
+                right: Box::new(named("first")),
+            }),
+            right: Box::new(named("second")),
+        })
+    );
+    assert_eq!(
+        parse_expr("first !> second !> function"),
+        Some(SyntaxExpr::OperatorApply {
+            operator: SyntaxOperator::ApplicativeForward,
+            left: Box::new(named("first")),
+            right: Box::new(SyntaxExpr::OperatorApply {
+                operator: SyntaxOperator::ApplicativeForward,
+                left: Box::new(named("second")),
+                right: Box::new(named("function")),
+            }),
+        })
+    );
+    assert!(
+        parse_expr_result("first !> function <! argument")
+            .expect_err("opposing applicative directions need parentheses")
+            .contains("no precedence relationship")
+    );
 }
 
 #[test]

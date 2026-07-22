@@ -27,6 +27,8 @@ pub(super) fn syntax_binary_expr(
         | SyntaxOperator::BoolOr
         | SyntaxOperator::PipeForward
         | SyntaxOperator::PipeBackward
+        | SyntaxOperator::ApplicativeForward
+        | SyntaxOperator::ApplicativeBackward
         | SyntaxOperator::ComposeForward
         | SyntaxOperator::ComposeBackward
         | SyntaxOperator::EffectBind
