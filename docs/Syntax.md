@@ -585,12 +585,15 @@ Remote modules include a reference, a folder revision hash, and search hints for
 
 ### Binary Mode
 
-Sometimes we just want the raw data. We can indicate binary mode via tag on the reference.
+Sometimes we just want the raw data. 
 
-        import :binary ModuleRef as Name
+        # local binary
+        import ModulePath binary as Name
 
+        # remote binary
         import as Name from {
             , ref:binary:ModuleRef
+            , rev:...
             , ...
             }
 
