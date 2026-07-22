@@ -1,8 +1,8 @@
 use super::super::{Declaration, Diagnostic, ParsedSource};
 use super::declaration::{classify_declaration, validate_language_position};
 use super::layout::{
-    indentation_width, is_dedent_closer, is_indented, line_ending_diagnostics, split_lines,
-    strip_comment, strip_indent_width,
+    closes_multiline_text, indentation_width, is_dedent_closer, is_indented,
+    line_ending_diagnostics, opens_multiline_text, split_lines, strip_comment, strip_indent_width,
 };
 
 pub fn parse_source(source: &[u8]) -> ParsedSource {
@@ -46,9 +46,37 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
         let mut text = String::from(trimmed);
         index += 1;
         let mut continuation_indent = None;
+        let mut in_multiline_text = opens_multiline_text(&text);
 
         while index < physical_lines.len() {
             let next = physical_lines[index];
+            let raw_trimmed = next.text.trim();
+
+            if in_multiline_text {
+                if raw_trimmed.is_empty() || raw_trimmed.starts_with('#') {
+                    index += 1;
+                    continue;
+                }
+                if !is_indented(next.text) {
+                    break;
+                }
+
+                let closes_text = closes_multiline_text(next.text);
+                let source_line = if closes_text {
+                    strip_comment(next.text).trim_end()
+                } else {
+                    next.text
+                };
+                let next_text = continuation_indent
+                    .map(|indent| strip_indent_width(source_line, indent))
+                    .unwrap_or_else(|| source_line.trim_start());
+                text.push('\n');
+                text.push_str(next_text);
+                in_multiline_text = !closes_text;
+                index += 1;
+                continue;
+            }
+
             let next_trimmed = strip_comment(next.text).trim();
 
             if next_trimmed.is_empty() {
@@ -80,6 +108,7 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
                 .unwrap_or(next_trimmed);
             text.push('\n');
             text.push_str(next_text.trim_end());
+            in_multiline_text = opens_multiline_text(next_text);
             index += 1;
         }
 

@@ -439,7 +439,20 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
                 Rich::custom(span, format!("invalid number literal `{text}`: {err}"))
             })
         });
-        let text = quoted_text().map(SyntaxExpr::Text);
+        let multiline_indent = one_of(" \t").repeated().ignored();
+        let multiline_content = multiline_indent.ignore_then(just('"')).ignore_then(choice((
+            just('\n').to(String::new()),
+            just(' ')
+                .ignore_then(none_of('\n').repeated().to_slice())
+                .then_ignore(just('\n'))
+                .map(ToOwned::to_owned),
+        )));
+        let multiline_text = just("\"\"\"")
+            .then_ignore(just('\n'))
+            .ignore_then(multiline_content.repeated().collect::<Vec<_>>())
+            .then_ignore(multiline_indent.ignore_then(just("\"\"\"")))
+            .map(|lines| SyntaxExpr::Text(lines.join("\n")));
+        let text = choice((multiline_text, quoted_text().map(SyntaxExpr::Text)));
         let quoted_literal = just('\'').ignore_then(choice((
             path_suffix_item
                 .repeated()

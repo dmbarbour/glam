@@ -23,7 +23,7 @@ In practice, if a compiler halts on language version, we must be using different
 
 ## Character Set
 
-We'll start with printable ASCII and whitespace (0x21-0x7E, SP, CR, LF). It is not difficult to extend to UTF-8, though I'm concerned about legibility. We'll recognize CR, LF, and CRLF as line endings. The compiler shall emit a warning if the file uses inconsistent line endings.
+We'll start with printable ASCII and some whitespace (0x21-0x7E, SP, CR, LF). It is not difficult to extend to UTF-8, though I'm concerned about legibility. We'll recognize CR, LF, and CRLF as line endings. The compiler shall emit a warning if the file uses inconsistent line endings.
 
 ## Comments
 
@@ -351,23 +351,24 @@ Pattern matching on dictionaries generally have the form `{Path1:Pattern1, Path2
 
 ## Embedded Texts
 
-Proposed syntax:
+Syntax:
 
         "inline text"
 
         """
-        " multi-line texts have the form:
+        " first line
         "
-        "  """  <- three quotes followed by newline
-        "  " <- one SP before text; optional for empty lines
-        "
-        "  # comment and blank lines are permitted and erased
-        "  " lines are *separated* by LF, i.e.
-        "  "   - no implicit final LF
-        "  "   - LF even if source uses CR or CRLF
-        "  """ |> postprocessing here is convenient
-          " consistent indentation is optional (but recommended!)
-        """
+        # source-only comment and blank lines are erased
+        " second line with # retained as text
+        """ |> postprocessing
+
+The opening delimiter is followed by a newline. Each content line begins with
+`"` and either a newline (an empty content line) or one separator space, which
+is not part of the text. Source indentation before these prefixes may vary.
+Source-only blank and comment lines are erased rather than producing content
+lines. Content lines are joined with `LF`, regardless of source line endings,
+and no final `LF` is added implicitly. Quotes, `#`, and trailing spaces after
+the prefix are raw text.
 
 Texts concretely translate to binaries, using ASCII encoding (or utf8 under some extensions). There are no escape characters, i.e. texts are raw and postprocessing is explicit. If users want to embed a binary, that might be expressed as something like:
 

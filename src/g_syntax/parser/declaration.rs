@@ -7,8 +7,8 @@ use super::super::{
     warn_unused_locals, warn_unused_with_alias,
 };
 use super::layout::{
-    first_word, glam_name, indentation_width, is_indented, local_name, strip_indent_width,
-    whitespace0, whitespace1,
+    closes_multiline_text, first_word, glam_name, indentation_width, is_indented, local_name,
+    opens_multiline_text, strip_comment, strip_indent_width, whitespace0, whitespace1,
 };
 use super::{parse_expr_result_with_diagnostics, syntax_expr_parser};
 
@@ -278,9 +278,36 @@ pub(super) fn parse_object_body(
         let mut text = trimmed.to_owned();
         index += 1;
         let mut continuation_indent = None;
+        let mut in_multiline_text = opens_multiline_text(&text);
         while index < lines.len() {
             let next = lines[index];
             let next_trimmed = next.trim();
+
+            if in_multiline_text {
+                if next_trimmed.is_empty() || next_trimmed.starts_with('#') {
+                    index += 1;
+                    continue;
+                }
+                if !is_indented(next) {
+                    break;
+                }
+
+                let closes_text = closes_multiline_text(next);
+                let source_line = if closes_text {
+                    strip_comment(next).trim_end()
+                } else {
+                    next
+                };
+                let next_text = continuation_indent
+                    .map(|indent| strip_indent_width(source_line, indent))
+                    .unwrap_or_else(|| source_line.trim_start());
+                text.push('\n');
+                text.push_str(next_text);
+                in_multiline_text = !closes_text;
+                index += 1;
+                continue;
+            }
+
             if next_trimmed.is_empty() {
                 index += 1;
                 continue;
@@ -296,6 +323,7 @@ pub(super) fn parse_object_body(
                 .unwrap_or(next_trimmed);
             text.push('\n');
             text.push_str(next_text.trim_end());
+            in_multiline_text = opens_multiline_text(next_text);
             index += 1;
         }
 

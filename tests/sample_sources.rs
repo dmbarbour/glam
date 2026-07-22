@@ -44,7 +44,7 @@ fn assert_samples_parse_without_errors(relative_dir: &str) {
 fn is_aspirational_syntax_sample(path: &Path) -> bool {
     matches!(
         path.file_name().and_then(|name| name.to_str()),
-        Some("do_block.g" | "multi_line_text.g")
+        Some("do_block.g")
     )
 }
 

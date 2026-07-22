@@ -6,6 +6,21 @@ fn n(value: i64) -> Number {
 }
 
 #[test]
+fn parses_multiline_text_blocks_without_a_final_line_feed() {
+    assert_eq!(
+        parse_expr("\"\"\"\n\" first  \n\" second # retained\n\" \"\"\" retained\n\"\"\""),
+        Some(SyntaxExpr::Text(
+            "first  \nsecond # retained\n\"\"\" retained".to_owned()
+        ))
+    );
+    assert_eq!(
+        parse_expr("\"\"\"\n\"\"\""),
+        Some(SyntaxExpr::Text(String::new()))
+    );
+    assert_eq!(parse_expr("\"\"\"\n\"missing separator\n\"\"\""), None);
+}
+
+#[test]
 fn parses_tagged_data_and_constructors() {
     assert_eq!(
         parse_expr("tag:value"),

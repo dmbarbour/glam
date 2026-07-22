@@ -43,7 +43,34 @@ pub(super) fn first_word(text: &str) -> Option<&str> {
 }
 
 pub(super) fn strip_comment(line: &str) -> &str {
-    line.split_once('#').map_or(line, |(before, _)| before)
+    let bytes = line.as_bytes();
+    let mut quoted = false;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"\"\"\"") {
+            // A multiline delimiter does not turn the remainder of its own
+            // source line into text.
+            index += 3;
+            continue;
+        }
+        match bytes[index] {
+            b'"' => quoted = !quoted,
+            b'#' if !quoted => return &line[..index],
+            _ => {}
+        }
+        index += 1;
+    }
+
+    line
+}
+
+pub(super) fn opens_multiline_text(line: &str) -> bool {
+    line.trim_end().ends_with("\"\"\"")
+}
+
+pub(super) fn closes_multiline_text(line: &str) -> bool {
+    line.trim_start().starts_with("\"\"\"")
 }
 
 pub(super) fn is_indented(line: &str) -> bool {

@@ -252,6 +252,54 @@ fn groups_indented_continuation_lines() {
 }
 
 #[test]
+fn multiline_texts_preserve_content_and_ignore_source_only_lines() {
+    let source = concat!(
+        "language g0\n",
+        "inline = \"hash # retained\" # erased comment\n",
+        "text =\n",
+        "    \"\"\"\n",
+        "      \" first  \n",
+        "  # erased comment\n",
+        "\n",
+        "  \" second # retained\n",
+        "      \" \"\"\" retained\n",
+        "    \"\"\"\n",
+        "object holder with\n",
+        "  text =\n",
+        "    \"\"\"\n",
+        "      \" nested\n",
+        "    \"\"\"\n",
+    )
+    .replace('\n', "\r\n");
+    let parsed = parse(&source);
+
+    assert_eq!(parsed.diagnostics, []);
+    let DeclarationKind::Definition(inline) = &parsed.declarations[1].kind else {
+        panic!("inline text should be a definition");
+    };
+    assert_eq!(
+        inline.expr,
+        Some(SyntaxExpr::Text("hash # retained".to_owned()))
+    );
+    let DeclarationKind::Definition(text) = &parsed.declarations[2].kind else {
+        panic!("multiline text should be a definition");
+    };
+    assert_eq!(
+        text.expr,
+        Some(SyntaxExpr::Text(
+            "first  \nsecond # retained\n\"\"\" retained".to_owned()
+        ))
+    );
+    let DeclarationKind::Object(holder) = &parsed.declarations[3].kind else {
+        panic!("holder should be an object declaration");
+    };
+    let nested = holder.body[0]
+        .definition()
+        .expect("holder member should be a definition");
+    assert_eq!(nested.expr, Some(SyntaxExpr::Text("nested".to_owned())));
+}
+
+#[test]
 fn parses_local_imports() {
     let parsed = parse("language g0\nimport \"minimal.g\" as conf\n");
 
