@@ -748,7 +748,9 @@ A named object may extend anonymous objects. Logically, `spec.defs` updates from
 
 ### Abstract Objects
 
-An abstract object has a full specification but the rest of the body missing, i.e. a singleton `spec:{:name, :defs, :deps}`. This is be expressed via `abstract object ...`, as declaration or expression. Note that declaring `abstract` methods does not make the object itself abstract.
+An abstract object has a full specification but the rest of the body missing, i.e. a singleton `spec:{:name, :defs, :deps}`. This is be expressed via `abstract object ...`, as declaration or expression. Note that declaring `abstract` methods does not make the object itself abstract. 
+
+For `extend Object` this is expressed as `extend abstract Object ...`. This results in an abstract object regardless of whether the original object was abstract.
 
 ### Lightweight Extension
 
