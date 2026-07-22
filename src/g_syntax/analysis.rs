@@ -405,6 +405,10 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
 }
 
 fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {
+    if let Ok(plan) = recursive_do::RecursiveDoPlan::build(do_expr) {
+        diagnostics.extend(plan.promotion_warnings(do_expr));
+    }
+
     let mut locals = Vec::new();
     let mut used = Vec::new();
     let mut binding_lines = Vec::new();

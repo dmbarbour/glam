@@ -13,6 +13,7 @@ mod diagnostic_formatter;
 mod module_lowering;
 mod net_lowering;
 mod parser;
+mod recursive_do;
 mod resolve;
 mod resolved;
 

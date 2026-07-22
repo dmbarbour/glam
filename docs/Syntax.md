@@ -223,18 +223,23 @@ pure name binding with the same canonical name fulfills each declaration.
 References before fulfillment use the `.fix` future; references afterward use
 the ordinary resolved local.
 
-One recursive region runs from an `abstract` statement through the last of its
-fulfillments. The compiler privately returns the resolved values plus a
-continuation closing over locals created within the region, then resumes that
-continuation outside `.fix`. This payload is a compiler-private protocol, not
-a stable source-level data shape.
+Each abstract name has its own recursive interval from its declaration through
+its fulfillment and lowers to an independently completable `.fix`. Thus
+`abstract X, Y, Z` creates three fixpoints with the same source start. The
+compiler may reorder their nesting by fulfillment point without warning: a
+name fulfilled earlier becomes observable through old captures of its future
+while later names remain pending. Each `.fix` privately returns that one
+resolved value plus a continuation; this payload is a compiler protocol, not a
+stable source-level data shape.
 
-Direct recursive regions within one do block must be disjoint. A second direct
-`abstract` statement before the current region is fulfilled is rejected as an
-overlapping sibling region; after fulfillment, another direct region may begin
-sequentially. This does not prohibit hierarchical fixpoints: an expression in
-the region may contain a nested do block with its own `abstract` region, which
-lowers to a lexically nested `.fix` and may close over visible outer names.
+Direct declarations in one do block may be disjoint, hierarchically contained,
+or syntactically crossing. Disjoint intervals lower sequentially and contained
+intervals lower as nested `.fix` requests. For crossing intervals, the later
+ending fixpoint starts earlier so the resulting scopes are hierarchical. The
+name remains unavailable to source expressions until its written `abstract`
+statement, but the compiler emits a warning because moving `.fix` changes its
+scope relative to shift/reset. Reordering names declared together does not move
+their shared source boundary and does not warn.
 
 Missing fulfillment, duplicate declarations, and source-scope conflicts are
 also diagnosed. Strictly observing an unresolved forward value follows the

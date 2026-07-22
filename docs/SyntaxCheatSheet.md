@@ -254,11 +254,12 @@ do
     .exit_label -> loop_exit
     .r loop_exit
 
-# The region runs through the last fulfillment and requires standard `.fix`.
-# Direct regions in one do block must be disjoint, but nested do expressions
-# may introduce lexically nested `.fix` regions. Missing/duplicate declarations
-# and strict premature observations are errors. `_name` may suppress a warning;
-# bare `_` cannot be abstract because it is inaccessible.
+# Each name has an independent `.fix` through its own fulfillment. Same-line
+# names may be reordered by completion without warning. Contained declarations
+# nest directly; crossing intervals move the later-ending `.fix` outward and
+# warn because its shift/reset scope changed. Missing/duplicate declarations
+# and strict premature observations are errors. `_name` suppresses only unused
+# warnings; bare `_` cannot be abstract because it is inaccessible.
 ```
 
 ## Conditionals & Patterns

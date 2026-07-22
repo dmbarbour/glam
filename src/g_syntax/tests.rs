@@ -1188,19 +1188,6 @@ fn recursive_do_reports_invalid_regions() {
         (
             concat!(
                 "language g0\n",
-                "bad = do\n",
-                "  abstract first\n",
-                "  abstract second\n",
-                "  first = 1\n",
-                "  second = 2\n",
-                "  .r first\n",
-            ),
-            4,
-            "overlapping direct recursive regions in one do block are not supported",
-        ),
-        (
-            concat!(
-                "language g0\n",
                 "bad outer = do\n",
                 "  abstract outer\n",
                 "  outer = 1\n",
@@ -1242,6 +1229,20 @@ fn recursive_do_uses_standard_fix_and_preserves_region_locals() {
         "  abstract second\n",
         "  second = first + 2\n",
         "  .r second\n",
+        "direct_hierarchy = do\n",
+        "  abstract outer\n",
+        "  abstract inner\n",
+        "  inner = 2\n",
+        "  outer = inner + 70\n",
+        "  .r outer\n",
+        "independent = do\n",
+        "  abstract _x, y, _z\n",
+        "  early_y = \\_ -> y\n",
+        "  y = 72\n",
+        "  (early_y () == 72) =>> .r ()\n",
+        "  x = 70\n",
+        "  z = 74\n",
+        "  .r y\n",
         "hierarchical = do\n",
         "  abstract outer\n",
         "  inner = do\n",
@@ -1253,6 +1254,8 @@ fn recursive_do_uses_standard_fix_and_preserves_region_locals() {
         "asm.single = list.head (list.pure single)\n",
         "asm.mutual = list.head (list.pure mutual)\n",
         "asm.sequential = list.head (list.pure sequential)\n",
+        "asm.direct_hierarchy = list.head (list.pure direct_hierarchy)\n",
+        "asm.independent = list.head (list.pure independent)\n",
         "asm.hierarchical = list.head (list.pure hierarchical)\n",
     ));
     assert_eq!(parsed.diagnostics, []);
@@ -1261,13 +1264,62 @@ fn recursive_do_uses_standard_fix_and_preserves_region_locals() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    for path in ["single", "mutual", "sequential", "hierarchical"] {
+    for path in [
+        "single",
+        "mutual",
+        "sequential",
+        "direct_hierarchy",
+        "independent",
+        "hierarchical",
+    ] {
         assert_eq!(
             fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
             Value::Number(n(72)),
             "{path}"
         );
     }
+}
+
+#[test]
+fn crossing_recursive_do_promotes_fix_scope_without_leaking_name_visibility() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "inner = 1\n",
+        "crossing = do\n",
+        "  abstract outer\n",
+        "  prior = inner\n",
+        "  abstract _inner\n",
+        "  outer = prior\n",
+        "  inner = 2\n",
+        "  .r outer\n",
+        "asm.crossing = list.head (list.pure crossing)\n",
+    ));
+    let warnings = parsed
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Warning)
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].line, 7);
+    assert!(warnings[0].message.contains("`_inner`"));
+    assert!(warnings[0].message.contains("begun on line 5"));
+
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(
+        lowered
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .count(),
+        0
+    );
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        fully_evaluated_value(resolved_value_at_path(&value, &["asm", "crossing"])),
+        Value::Number(n(1))
+    );
 }
 
 #[test]
