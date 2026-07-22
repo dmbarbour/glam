@@ -441,6 +441,64 @@ fn token_regex_is_anchored_capture_free_and_leftmost_first() {
 }
 
 #[test]
+fn token_parser_rejects_outer_cli_and_host_effects() {
+    let effects = [
+        ".env []",
+        ".log 'info {msg:{text:\"not emitted\"}}",
+        ".read.text \"nested argument\"",
+        ".write.script \"g\" \"not emitted\"",
+        ".heap.get []",
+        ".task.status 0",
+    ];
+    for effect in effects {
+        let source = format!(
+            "language g0\nimport 'std\nconf.cli = .read.token \"isolated token\" (.token.text \"x\" =>> ({effect})) >>= (\\_ -> .read.end =>> .write.script \"g\" \"ok\")\n"
+        );
+        let (assembler, configuration) = configuration(&source);
+        let error = expand_configured(&assembler, &configuration, configured_arguments(&["x"]))
+            .expect_err("token parsers must not inherit host or outer CLI effects");
+        assert!(
+            error.to_string().contains("configured CLI failed"),
+            "unexpected token effect result for `{effect}`: {error}"
+        );
+    }
+}
+
+#[test]
+fn token_task_local_state_is_isolated_from_outer_cli_state() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .set ['scope] \"outer\" =>> .read.token \"stateful token\" (.token.text \"x\" =>> .get ['scope] >>= (\\before -> (before == {}) =>> .set ['scope] \"inner\" =>> .get ['scope])) >>= (\\inside -> (inside == \"inner\") =>> .get ['scope] >>= (\\outside -> (outside == \"outer\") =>> .read.end =>> .write.script \"g\" \"ok\"))\n",
+    );
+    let expansion = expand_configured(&assembler, &configuration, configured_arguments(&["x"]))
+        .expect("token and outer CLI local states should not observe each other");
+    assert_eq!(expansion.plan().process_args(), ["--script.g", "ok"]);
+}
+
+#[test]
+fn each_token_parse_starts_with_fresh_task_local_state() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.token \"first token\" (.token.text \"x\" =>> .set ['scope] \"first\") =>> .read.token \"second token\" (.token.text \"y\" =>> .get ['scope] >>= (\\state -> (state == {}) =>> .r ())) =>> .read.end =>> .write.script \"g\" \"ok\"\n",
+    );
+    let expansion = expand_configured(
+        &assembler,
+        &configuration,
+        configured_arguments(&["x", "y"]),
+    )
+    .expect("separate token parsers should not share task-local state");
+    assert_eq!(expansion.plan().process_args(), ["--script.g", "ok"]);
+}
+
+#[test]
+fn failed_token_alternatives_discard_their_task_local_state() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.token \"choice\" (.token.text \"x\" =>> .alt (.set ['leak] \"bad\" =>> .fail) (.get ['leak] >>= (\\state -> (state == {}) =>> .r ()))) =>> .read.end =>> .write.script \"g\" \"ok\"\n",
+    );
+    let expansion = expand_configured(&assembler, &configuration, configured_arguments(&["x"]))
+        .expect("failed token alternatives should not leak local writes");
+    assert_eq!(expansion.plan().process_args(), ["--script.g", "ok"]);
+}
+
+#[test]
 fn configured_parse_errors_report_the_furthest_expectation() {
     let (assembler, configuration) = configuration(
         "language g0\nimport 'std\nconf.cli = .alt (.read.keyword \"build\" =>> .read.token \"script option\" (.token.text \"--script.\" =>> .token.regex \"[A-Za-z]+\") =>> .read.end =>> .write.script \"g\" \"ok\") (.read.keyword \"bundle\" =>> .read.end =>> .write.script \"g\" \"other\")\n",
