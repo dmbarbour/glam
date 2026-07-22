@@ -2628,6 +2628,26 @@ fn lowers_general_tagged_paths_and_constructors() {
 }
 
 #[test]
+fn lowers_tuple_syntax_to_a_tagged_list() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std as std\n",
+        "pair = (\"Hello, World!\", 42)\n",
+        "asm.result = std.list.head pair.tuple\n",
+    ));
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    let result = resolved_value_at_path(&value, &["asm", "result"]);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(result)),
+        b"Hello, World!"
+    );
+}
+
+#[test]
 fn lowering_starts_from_prior_dictionary() {
     let parsed = parse("language g0\nworld = \"World\"\n");
     let context = CompileContext::default().with_prior_defs(Value::Dict(

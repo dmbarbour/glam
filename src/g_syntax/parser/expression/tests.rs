@@ -215,6 +215,30 @@ fn parses_effect_shorthand_expressions() {
 }
 
 #[test]
+fn parses_tuple_expressions_without_changing_grouping_or_unit() {
+    assert_eq!(
+        parse_expr("(first, second)"),
+        Some(SyntaxExpr::Tuple(vec![
+            SyntaxExpr::Name("first".to_owned()),
+            SyntaxExpr::Name("second".to_owned()),
+        ]))
+    );
+    assert_eq!(
+        parse_expr("(first, second,)"),
+        Some(SyntaxExpr::Tuple(vec![
+            SyntaxExpr::Name("first".to_owned()),
+            SyntaxExpr::Name("second".to_owned()),
+        ]))
+    );
+    assert_eq!(
+        parse_expr("(grouped)"),
+        Some(SyntaxExpr::Name("grouped".to_owned()))
+    );
+    assert_eq!(parse_expr("()"), Some(SyntaxExpr::Unit));
+    assert_eq!(parse_expr("(singleton,)"), None);
+}
+
+#[test]
 fn parses_quoted_paths_as_list_expressions() {
     assert_eq!(
         parse_expr("'.foo.[42]"),

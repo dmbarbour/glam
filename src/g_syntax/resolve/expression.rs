@@ -94,6 +94,22 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
+        SyntaxExpr::Tuple(items) => ResolvedExpr::apply(
+            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
+            [
+                ResolvedExpr::Embedded((*keys::TUPLE_VALUE).clone()),
+                ResolvedExpr::List(
+                    items
+                        .iter()
+                        .map(|expr| {
+                            syntax_expr_to_resolved_in_semantic_scope(
+                                expr, line, context, scope, locals,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+            ],
+        ),
         SyntaxExpr::Lambda(params, body) => {
             lower_lambda_expr_resolved(params, body, line, context, scope, locals)?
         }

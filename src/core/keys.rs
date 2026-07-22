@@ -60,6 +60,7 @@ protocol_key!(CANCELED, "canceled");
 protocol_key!(LEFT, "left");
 protocol_key!(RIGHT, "right");
 protocol_key!(TUPLE, "tuple");
+pub(crate) static TUPLE_VALUE: LazyLock<Value> = LazyLock::new(|| atom_value(&TUPLE));
 
 protocol_key!(R, "r");
 protocol_key!(SEQ, "seq");
@@ -93,11 +94,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn severity_values_convert_back_to_their_cached_keys() {
+    fn atom_values_convert_back_to_their_cached_keys() {
         for (value, key) in [
             (&*INFO_VALUE, &*INFO),
             (&*WARN_VALUE, &*WARN),
             (&*ERROR_VALUE, &*ERROR),
+            (&*TUPLE_VALUE, &*TUPLE),
         ] {
             assert_eq!(Key::from_value(value).as_ref(), Some(key));
         }

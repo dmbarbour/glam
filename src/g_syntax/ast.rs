@@ -145,6 +145,7 @@ pub enum SyntaxExpr {
     TaggedConstructor(Vec<SyntaxKeyExpr>),
     DictUnion(Vec<SyntaxExpr>),
     List(Vec<SyntaxExpr>),
+    Tuple(Vec<SyntaxExpr>),
     Lambda(Vec<String>, Box<SyntaxExpr>),
     Let {
         bindings: Vec<(String, SyntaxExpr)>,

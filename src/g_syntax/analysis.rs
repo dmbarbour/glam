@@ -50,7 +50,7 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
                 analyze_key_expr_locals(key, line, diagnostics);
             }
         }
-        SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) => {
+        SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) | SyntaxExpr::Tuple(items) => {
             for item in items {
                 analyze_expr_locals(item, line, diagnostics);
             }
@@ -213,7 +213,7 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
                 mark_used_prior_alias_in_key(key, alias, used);
             }
         }
-        SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) => {
+        SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) | SyntaxExpr::Tuple(items) => {
             for item in items {
                 mark_used_prior_alias(item, alias, used);
             }
@@ -329,7 +329,7 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
                 mark_used_key_expr(key, locals, used);
             }
         }
-        SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) => {
+        SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) | SyntaxExpr::Tuple(items) => {
             for item in items {
                 mark_used_locals(item, locals, used);
             }

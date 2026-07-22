@@ -373,7 +373,8 @@ Syntax:
         " first line
         " "quotes are permitted"
         # source-only comment and blank lines are erased
-        " second line with # retained as text
+
+        " line with # retained as text
         """ |> postprocessing
 
 The opening delimiter is followed by a newline. Each content line begins with
@@ -452,7 +453,7 @@ We can introduce a few term annotations to manage representations, e.g. flatteni
 ## Tuples
 
         (a,b)       tuple:[a,b]
-        (x,y,z)     tuple:[a,b,c]
+        (x,y,z)     tuple:[x,y,z]
 
 A tuple is essentially list with different connotations. Lists tend to be variable-size but homogeneous. Tuples tend to be fixed-size but non-homogeneous. We append lists, but we tend to simply construct or match on tuples inline. There is no dedicated syntax for empty or singleton tuples, but users are always free to use the `tuple:[a]` syntax.
 

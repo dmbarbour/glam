@@ -568,7 +568,28 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
                 left: None,
                 right: None,
             });
-        let parenthesized = expr.clone().padded().delimited_by(just('('), just(')'));
+        let tuple_tail = just(',').padded().ignore_then(
+            expr.clone()
+                .padded()
+                .separated_by(just(',').padded())
+                .at_least(1)
+                .allow_trailing()
+                .collect::<Vec<_>>(),
+        );
+        let parenthesized = expr
+            .clone()
+            .padded()
+            .then(tuple_tail.or_not())
+            .delimited_by(just('('), just(')'))
+            .map(|(first, tail)| match tail {
+                Some(tail) => {
+                    let mut items = Vec::with_capacity(tail.len() + 1);
+                    items.push(first);
+                    items.extend(tail);
+                    SyntaxExpr::Tuple(items)
+                }
+                None => first,
+            });
         let lambda = just('\\')
             .padded()
             .ignore_then(
