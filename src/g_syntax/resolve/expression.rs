@@ -50,18 +50,11 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::Effect(path) => ResolvedExpr::Embedded(compiler_values::effect_path_value(
             &path.iter().map(String::as_str).collect::<Vec<_>>(),
         )),
-        SyntaxExpr::DictEntry(path, value) => {
-            lower_dict_entry_resolved(path, value, line, context, scope, locals)?
+        SyntaxExpr::PathDict(path, value) => {
+            lower_path_dict_resolved(path, value, line, context, scope, locals)?
         }
-        SyntaxExpr::SingletonDict(key, value) => ResolvedExpr::apply(
-            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
-            [
-                syntax_key_expr_to_resolved_value(key, line, context, scope, locals)?,
-                syntax_expr_to_resolved_in_semantic_scope(value, line, context, scope, locals)?,
-            ],
-        ),
-        SyntaxExpr::TaggedConstructor(key) => {
-            lower_tagged_constructor_resolved(key, line, context, scope, locals)?
+        SyntaxExpr::TaggedConstructor(path) => {
+            lower_tagged_constructor_resolved(path, line, context, scope, locals)?
         }
         SyntaxExpr::DictUnion(items) => {
             lower_dict_union_resolved(items, line, context, scope, locals)?
@@ -155,7 +148,12 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
     })
 }
 
-fn lower_dict_entry_resolved(
+enum ResolvedDictPath {
+    Key(ResolvedExpr<Value>),
+    Path(ResolvedExpr<Value>),
+}
+
+fn lower_path_dict_resolved(
     path: &[SyntaxKeyExpr],
     value: &SyntaxExpr,
     line: usize,
@@ -163,43 +161,63 @@ fn lower_dict_entry_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let path = resolve_dict_path(path, line, context, scope, locals)?;
+    let value = syntax_expr_to_resolved_in_semantic_scope(value, line, context, scope, locals)?;
+    Ok(build_path_dict_resolved(path, value))
+}
+
+fn resolve_dict_path(
+    path: &[SyntaxKeyExpr],
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedDictPath, Diagnostic> {
     if let [key] = path
         && !matches!(key, SyntaxKeyExpr::PathIndex(_))
     {
-        return Ok(ResolvedExpr::apply(
-            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
-            [
-                syntax_key_expr_to_resolved_value(key, line, context, scope, locals)?,
-                syntax_expr_to_resolved_in_semantic_scope(value, line, context, scope, locals)?,
-            ],
-        ));
+        return Ok(ResolvedDictPath::Key(syntax_key_expr_to_resolved_value(
+            key, line, context, scope, locals,
+        )?));
     }
 
-    Ok(ResolvedExpr::apply(
-        ResolvedExpr::Embedded(Value::Builtin(Builtin::DictUpdate)),
-        [
-            syntax_path_resolved(path, line, context, scope, locals)?,
-            syntax_expr_to_resolved_in_semantic_scope(value, line, context, scope, locals)?,
-            ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
-        ],
-    ))
+    Ok(ResolvedDictPath::Path(syntax_path_resolved(
+        path, line, context, scope, locals,
+    )?))
+}
+
+fn build_path_dict_resolved(
+    path: ResolvedDictPath,
+    value: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
+    match path {
+        ResolvedDictPath::Key(key) => ResolvedExpr::apply(
+            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
+            [key, value],
+        ),
+        ResolvedDictPath::Path(path) => ResolvedExpr::apply(
+            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictUpdate)),
+            [
+                path,
+                value,
+                ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
+            ],
+        ),
+    }
 }
 
 fn lower_tagged_constructor_resolved(
-    key: &SyntaxKeyExpr,
+    path: &[SyntaxKeyExpr],
     line: usize,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    // Resolve the tag in the surrounding scope before introducing the
+    // Resolve the path in the surrounding scope before introducing the
     // constructor's inaccessible, hygienic argument binding.
-    let key = syntax_key_expr_to_resolved_value(key, line, context, scope, locals)?;
+    let path = resolve_dict_path(path, line, context, scope, locals)?;
     let payload = locals.fresh_binding();
-    let body = ResolvedExpr::apply(
-        ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
-        [key, ResolvedExpr::Local(payload)],
-    );
+    let body = build_path_dict_resolved(path, ResolvedExpr::Local(payload));
     Ok(ResolvedExpr::lambda(vec![payload], body))
 }
 

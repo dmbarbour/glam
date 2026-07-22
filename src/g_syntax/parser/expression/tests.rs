@@ -24,39 +24,98 @@ fn parses_multiline_text_blocks_without_a_final_line_feed() {
 fn parses_tagged_data_and_constructors() {
     assert_eq!(
         parse_expr("tag:value"),
-        Some(SyntaxExpr::SingletonDict(
-            SyntaxKeyExpr::Atom("tag".to_owned()),
+        Some(SyntaxExpr::PathDict(
+            vec![SyntaxKeyExpr::Atom("tag".to_owned())],
             Box::new(SyntaxExpr::Name("value".to_owned())),
         ))
     );
     assert_eq!(
         parse_expr("[tag]:value"),
-        Some(SyntaxExpr::SingletonDict(
-            SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Name("tag".to_owned()))),
+        Some(SyntaxExpr::PathDict(
+            vec![SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Name(
+                "tag".to_owned(),
+            )))],
             Box::new(SyntaxExpr::Name("value".to_owned())),
         ))
     );
     assert_eq!(
         parse_expr(":tag"),
-        Some(SyntaxExpr::TaggedConstructor(SyntaxKeyExpr::Atom(
-            "tag".to_owned()
-        )))
+        Some(SyntaxExpr::TaggedConstructor(vec![SyntaxKeyExpr::Atom(
+            "tag".to_owned(),
+        )]))
     );
     assert_eq!(
         parse_expr(":[tag]"),
-        Some(SyntaxExpr::TaggedConstructor(SyntaxKeyExpr::Index(
-            Box::new(SyntaxExpr::Name("tag".to_owned()))
-        )))
+        Some(SyntaxExpr::TaggedConstructor(vec![SyntaxKeyExpr::Index(
+            Box::new(SyntaxExpr::Name("tag".to_owned())),
+        )]))
     );
     assert_eq!(
         parse_expr("outer:inner:value"),
-        Some(SyntaxExpr::SingletonDict(
-            SyntaxKeyExpr::Atom("outer".to_owned()),
-            Box::new(SyntaxExpr::SingletonDict(
-                SyntaxKeyExpr::Atom("inner".to_owned()),
+        Some(SyntaxExpr::PathDict(
+            vec![SyntaxKeyExpr::Atom("outer".to_owned())],
+            Box::new(SyntaxExpr::PathDict(
+                vec![SyntaxKeyExpr::Atom("inner".to_owned())],
                 Box::new(SyntaxExpr::Name("value".to_owned())),
             )),
         ))
+    );
+    assert_eq!(
+        parse_expr("foo.bar:value"),
+        Some(SyntaxExpr::PathDict(
+            vec![
+                SyntaxKeyExpr::Atom("foo".to_owned()),
+                SyntaxKeyExpr::Atom("bar".to_owned()),
+            ],
+            Box::new(SyntaxExpr::Name("value".to_owned())),
+        ))
+    );
+    assert_eq!(
+        parse_expr("[first,second]:value"),
+        Some(SyntaxExpr::PathDict(
+            vec![
+                SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Name("first".to_owned()))),
+                SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Name("second".to_owned()))),
+            ],
+            Box::new(SyntaxExpr::Name("value".to_owned())),
+        ))
+    );
+    assert_eq!(
+        parse_expr("([first] ++ tail):value"),
+        Some(SyntaxExpr::PathDict(
+            vec![SyntaxKeyExpr::PathIndex(Box::new(SyntaxExpr::Append(
+                Box::new(SyntaxExpr::List(vec![
+                    SyntaxExpr::Name("first".to_owned(),)
+                ])),
+                Box::new(SyntaxExpr::Name("tail".to_owned())),
+            )))],
+            Box::new(SyntaxExpr::Name("value".to_owned())),
+        ))
+    );
+    assert_eq!(
+        parse_expr(":foo.bar"),
+        Some(SyntaxExpr::TaggedConstructor(vec![
+            SyntaxKeyExpr::Atom("foo".to_owned()),
+            SyntaxKeyExpr::Atom("bar".to_owned()),
+        ]))
+    );
+    assert_eq!(
+        parse_expr(":[first,second]"),
+        Some(SyntaxExpr::TaggedConstructor(vec![
+            SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Name("first".to_owned()))),
+            SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Name("second".to_owned()))),
+        ]))
+    );
+    assert_eq!(
+        parse_expr(":([first] ++ tail)"),
+        Some(SyntaxExpr::TaggedConstructor(vec![
+            SyntaxKeyExpr::PathIndex(Box::new(SyntaxExpr::Append(
+                Box::new(SyntaxExpr::List(vec![
+                    SyntaxExpr::Name("first".to_owned(),)
+                ])),
+                Box::new(SyntaxExpr::Name("tail".to_owned())),
+            ))),
+        ]))
     );
 }
 
@@ -67,8 +126,8 @@ fn tagged_payloads_are_single_application_atoms() {
         Some(SyntaxExpr::Apply(
             Box::new(SyntaxExpr::Apply(
                 Box::new(SyntaxExpr::Name("g".to_owned())),
-                Box::new(SyntaxExpr::SingletonDict(
-                    SyntaxKeyExpr::Atom("tag".to_owned()),
+                Box::new(SyntaxExpr::PathDict(
+                    vec![SyntaxKeyExpr::Atom("tag".to_owned())],
                     Box::new(SyntaxExpr::Name("f".to_owned())),
                 )),
             )),
@@ -77,8 +136,8 @@ fn tagged_payloads_are_single_application_atoms() {
     );
     assert_eq!(
         parse_expr("tag:(f x)"),
-        Some(SyntaxExpr::SingletonDict(
-            SyntaxKeyExpr::Atom("tag".to_owned()),
+        Some(SyntaxExpr::PathDict(
+            vec![SyntaxKeyExpr::Atom("tag".to_owned())],
             Box::new(SyntaxExpr::Apply(
                 Box::new(SyntaxExpr::Name("f".to_owned())),
                 Box::new(SyntaxExpr::Name("x".to_owned())),
@@ -500,7 +559,7 @@ fn parses_dotted_paths_on_literal_expressions() {
     assert_eq!(
         parse_expr("{ hello:\"Hello\" }.hello"),
         Some(SyntaxExpr::Access(
-            Box::new(SyntaxExpr::DictUnion(vec![SyntaxExpr::DictEntry(
+            Box::new(SyntaxExpr::DictUnion(vec![SyntaxExpr::PathDict(
                 vec![SyntaxKeyExpr::Atom("hello".to_owned())],
                 Box::new(SyntaxExpr::Text("Hello".to_owned())),
             )])),
@@ -528,18 +587,18 @@ fn parses_general_dictionary_entry_paths() {
     assert_eq!(
         parse_expr("{ [0]:zero, [1,2]:deep, ([1] ++ [3,4]):computed, named.path:value }"),
         Some(SyntaxExpr::DictUnion(vec![
-            SyntaxExpr::DictEntry(
+            SyntaxExpr::PathDict(
                 vec![SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(0))))],
                 Box::new(SyntaxExpr::Name("zero".to_owned())),
             ),
-            SyntaxExpr::DictEntry(
+            SyntaxExpr::PathDict(
                 vec![
                     SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(1)))),
                     SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(2)))),
                 ],
                 Box::new(SyntaxExpr::Name("deep".to_owned())),
             ),
-            SyntaxExpr::DictEntry(
+            SyntaxExpr::PathDict(
                 vec![SyntaxKeyExpr::PathIndex(Box::new(SyntaxExpr::Append(
                     Box::new(SyntaxExpr::List(vec![SyntaxExpr::Number(n(1))])),
                     Box::new(SyntaxExpr::List(vec![
@@ -549,7 +608,7 @@ fn parses_general_dictionary_entry_paths() {
                 )))],
                 Box::new(SyntaxExpr::Name("computed".to_owned())),
             ),
-            SyntaxExpr::DictEntry(
+            SyntaxExpr::PathDict(
                 vec![
                     SyntaxKeyExpr::Atom("named".to_owned()),
                     SyntaxKeyExpr::Atom("path".to_owned()),

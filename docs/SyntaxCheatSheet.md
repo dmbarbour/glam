@@ -57,8 +57,12 @@ _42                 # NEGATIVE 42 — prefix '_' is part of the literal
 
 tag:Data            # tagged data: sugar for { tag:Data }
 :tag                # constructor: \ Data -> tag:Data
-[TagExpr]:Data      # computed tag (list of exactly one element)
-:[TagExpr]          # computed-tag constructor
+foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
+:foo.bar            # constructor: \ Data -> foo.bar:Data
+[KeyA,KeyB]:Data    # computed hierarchical path
+:[KeyA,KeyB]        # corresponding constructor
+(PathExpr):Data     # splice a computed list-valued path
+:(PathExpr)         # corresponding constructor
 # Colons are tight; tag:f x ≡ (tag:f) x. Use tag:(f x) to tag the call.
 
 {}                  # empty dict; ALSO the 'undefined' value
@@ -275,7 +279,7 @@ P1 as P2            # both views
 {x:P, y:Q, rem}     # partial match, 'rem' captures rest (default {} = exact)
 {:x, :y}            # ≡ {x:x, y:y}
 {a.b.c:P, _}        # deep path
-tag:P    :tag    'name    [TagExpr]:P
+tag:P    :tag    'name    [KeyA,KeyB]:P    (PathExpr):P
 []   [a,b,c]
 [x]++xs   xs++[x]   [x0]++mid++[xN]     # ONE variable segment max
 "foo"    "foo"++rest                    # texts are lists

@@ -1,2 +1,2 @@
 error|3|found ' '|expected
-error|4|found ' '|expected identifier|or '['
+error|4|found ' '|expected '['|'('|or identifier

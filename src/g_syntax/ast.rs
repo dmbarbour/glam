@@ -138,12 +138,11 @@ pub enum SyntaxExpr {
         alias: Option<String>,
         body: Vec<ObjectBodyDefinition>,
     },
-    /// One brace-delimited dictionary entry. Its path may contain ordinary
-    /// keys and dynamically evaluated list-valued path splices.
-    DictEntry(Vec<SyntaxKeyExpr>, Box<SyntaxExpr>),
-    /// One-key dictionary syntax used by tagged data outside braces.
-    SingletonDict(SyntaxKeyExpr, Box<SyntaxExpr>),
-    TaggedConstructor(SyntaxKeyExpr),
+    /// A dictionary containing one defined path. Braces may be omitted for
+    /// path-tagged data such as `tag:value` or `[first, second]:value`.
+    PathDict(Vec<SyntaxKeyExpr>, Box<SyntaxExpr>),
+    /// A function that places its argument at one defined dictionary path.
+    TaggedConstructor(Vec<SyntaxKeyExpr>),
     DictUnion(Vec<SyntaxExpr>),
     List(Vec<SyntaxExpr>),
     Lambda(Vec<String>, Box<SyntaxExpr>),

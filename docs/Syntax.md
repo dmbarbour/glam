@@ -285,12 +285,24 @@ Tagged data is modeled as singleton dictionaries. As a syntactic convenience, br
         tag:Data            # same as { tag:Data }
         :tag                # same as (\ Data -> tag:Data)
 
-This extends to computed tags. But for tags, it's limited to one element, not a path.
+Brace omission and constructor syntax extend to every non-empty dictionary
+path. Multi-component paths construct one hierarchical dictionary, just like
+one entry of a brace-delimited dictionary.
 
-        [TagExpr]:Data      # same as { [TagExpr]:Data } 
-        :[TagExpr]          # same as (\ Data -> [TagExpr]:Data )
+        foo.bar:Data        # same as { foo.bar:Data }
+        :foo.bar            # same as (\ Data -> foo.bar:Data)
 
-The colon in a tagged value or tagged constructor is lexically tight. A tagged
+        [KeyExpr]:Data      # one computed path component
+        [KeyA,KeyB]:Data    # two computed path components
+        :[KeyA,KeyB]        # same as (\ Data -> [KeyA,KeyB]:Data)
+
+        (PathExpr):Data     # splice a computed list-valued path
+        :(PathExpr)         # corresponding constructor
+
+For example, `[a,b]:Data` constructs `{[a]:{[b]:Data}}`. To use a list as one
+dictionary key instead, nest the brackets: `[[a,b]]:Data`.
+
+The colon in path-tagged data or a constructor is lexically tight. A tagged
 payload is one application atom; use parentheses when the payload is a compound
 expression.
 
@@ -879,7 +891,9 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
 
         tag:Pattern                 # same as {tag:Pattern}
         :tag                        # same as tag:tag 
-        [TagExpr]:Pattern           # same as {.[TagExpr]:Pattern}
+        [KeyExpr]:Pattern           # one computed-key path component
+        [KeyA,KeyB]:Pattern         # hierarchical path pattern
+        (PathExpr):Pattern          # computed list-valued path
         'name                       # a constant, same as ["name"]:()
 
         []                          # empty list

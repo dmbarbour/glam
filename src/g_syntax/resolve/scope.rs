@@ -169,8 +169,8 @@ mod resolver_context_tests {
         let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
         let mut resolver = ResolverContext::default();
         let syntax = SyntaxExpr::With {
-            base: Box::new(SyntaxExpr::SingletonDict(
-                SyntaxKeyExpr::Atom("base".to_owned()),
+            base: Box::new(SyntaxExpr::PathDict(
+                vec![SyntaxKeyExpr::Atom("base".to_owned())],
                 Box::new(SyntaxExpr::Unit),
             )),
             alias: None,

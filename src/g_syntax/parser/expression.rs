@@ -476,7 +476,7 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
             .delimited_by(just('['), just(']'))
             .map(SyntaxExpr::List);
 
-        let named_dict_path = name
+        let named_path = name
             .clone()
             .map(SyntaxKeyExpr::Atom)
             .then(path_suffix.clone())
@@ -485,7 +485,7 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
                 path.extend(flatten_path_suffixes(suffixes));
                 path
             });
-        let computed_dict_path = choice((path_list_shorthand.clone(), path_list_expr.clone()))
+        let computed_path = choice((path_list_shorthand.clone(), path_list_expr.clone()))
             .map(|suffix| flatten_path_suffixes(vec![suffix]))
             .try_map(|path, span| {
                 if path.is_empty() {
@@ -494,12 +494,13 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
                     Ok(path)
                 }
             });
-        let dict_item_path = choice((named_dict_path, computed_dict_path));
+        let data_path = choice((named_path, computed_path)).boxed();
         let dict_item = choice((
-            dict_item_path
+            data_path
+                .clone()
                 .then_ignore(just(':').padded())
                 .then(expr.clone())
-                .map(|(path, value)| SyntaxExpr::DictEntry(path, Box::new(value))),
+                .map(|(path, value)| SyntaxExpr::PathDict(path, Box::new(value))),
             expr.clone(),
         ));
         let dict = dict_item
@@ -608,19 +609,14 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
         ))
         .boxed();
         let atom = recursive(|atom| {
-            let tag_key = choice((
-                name.clone().map(SyntaxKeyExpr::Atom),
-                single_key_expr()
-                    .padded()
-                    .delimited_by(just('['), just(']')),
-            ));
             let constructor = just(':')
-                .ignore_then(tag_key.clone())
+                .ignore_then(data_path.clone())
                 .map(SyntaxExpr::TaggedConstructor);
-            let tagged = tag_key
+            let tagged = data_path
+                .clone()
                 .then_ignore(just(':'))
                 .then(atom)
-                .map(|(key, payload)| SyntaxExpr::SingletonDict(key, Box::new(payload)));
+                .map(|(path, payload)| SyntaxExpr::PathDict(path, Box::new(payload)));
 
             choice((constructor, tagged, base_atom.clone()))
         })
