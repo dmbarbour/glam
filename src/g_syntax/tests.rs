@@ -367,6 +367,77 @@ fn simple_declarations_preserve_continuation_alignment_diagnostics() {
 }
 
 #[test]
+fn boundary_aligned_closers_must_terminate_declarations() {
+    let valid = parse(concat!(
+        "language g0\n",
+        "terminal = (\n",
+        "  1\n",
+        ")\n",
+        "continued = (\n",
+        "  1\n",
+        "  ) + 2\n",
+    ));
+    assert_eq!(valid.diagnostics, []);
+
+    let same_line_suffix = parse(concat!("language g0\n", "value = (\n", "  1\n", ") + 2\n",));
+    assert!(same_line_suffix.diagnostics.iter().any(|diagnostic| {
+        diagnostic.line == 4
+            && diagnostic
+                .message
+                .contains("expression continues after a boundary-aligned closing delimiter")
+    }));
+
+    let later_suffix = parse(concat!(
+        "language g0\n",
+        "value = (\n",
+        "  1\n",
+        ")\n",
+        "  + 2\n",
+    ));
+    assert!(later_suffix.diagnostics.iter().any(|diagnostic| {
+        diagnostic.line == 4
+            && diagnostic
+                .message
+                .contains("indent the closing delimiter to continue")
+    }));
+}
+
+#[test]
+fn boundary_aligned_closer_policy_applies_to_nested_declarations() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "object outer with\n",
+        "  member = (\n",
+        "    1\n",
+        "  ) + 2\n",
+    ));
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.line == 5
+            && diagnostic
+                .message
+                .contains("expression continues after a boundary-aligned closing delimiter")
+    }));
+}
+
+#[test]
+fn non_closer_continuations_cannot_start_at_a_declaration_boundary() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "value = (\n",
+        "unindented\n",
+        ")\n",
+    ));
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.line == 3
+            && diagnostic
+                .message
+                .contains("declaration continuation is indented 0 spaces")
+    }));
+}
+
+#[test]
 fn reports_indented_lines_before_the_first_lexical_declaration() {
     let parsed = parse("  orphan = 1\nlanguage g0\n");
 

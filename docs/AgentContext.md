@@ -182,8 +182,10 @@ their detailed scheduling and representation contracts.
 ## Source-Surface Regressions
 
 - A `.g` source begins with a language declaration such as `language g0`.
-- Comments begin with `#`. Top-level declarations are unindented; continuation
-  lines are indented, except a closer-only line may dedent.
+- Comments begin with `#`. Top-level declarations are unindented and
+  continuation lines are indented. A boundary-aligned line containing only
+  closing delimiters may terminate a declaration, but may not carry or precede
+  a later expression suffix. Nested declarations use the same relative rule.
 - `=`, `:=`, and `::=` remain distinct introduction, override, and update
   operations.
 - List literals preserve every comma-separated expression as one element. Only

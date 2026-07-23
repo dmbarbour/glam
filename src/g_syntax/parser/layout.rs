@@ -143,6 +143,8 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
     /// A line at the base begins a statement and a deeper line continues it.
     /// A line below the base is rejected, except that a closer-only line stays
     /// with the preceding statement because delimiter ownership is lexical.
+    /// Declaration validation separately requires such a boundary-aligned
+    /// closer to terminate that declaration.
     pub(super) fn statements(self, base: LayoutBase) -> Result<Vec<LayoutStatement>, LayoutError> {
         let lines = self.lines();
         let Some(first) = lines.first().copied() else {

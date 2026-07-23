@@ -10,7 +10,7 @@ use super::super::{
     ObjectBodyDefinitionKind, ObjectDecl, ObjectExtendDecl, Severity, SyntaxExpr, SyntaxKeyExpr,
     warn_unused_locals, warn_unused_with_alias,
 };
-use super::input::TokenView;
+use super::input::{TokenRange, TokenView};
 use super::layout::{LayoutBase, LayoutView};
 use super::lexical::{Delimiter, LeadingTrivia, TokenKind};
 use super::structural::{
@@ -71,6 +71,100 @@ pub(in crate::g_syntax::parser) fn parse_declaration(
     }
 }
 
+pub(in crate::g_syntax::parser) fn validate_declaration_continuations(
+    view: TokenView<'_, '_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some((first_index, first_token)) = view.first_significant() else {
+        return;
+    };
+    let first_line = view.line_at_span(first_token.span()).unwrap_or(1);
+    let declaration_indentation = view.line_indentation_at(first_index).unwrap_or(0);
+    let line_starts = view
+        .tokens()
+        .iter()
+        .enumerate()
+        .filter_map(|(relative, token)| match token.kind() {
+            TokenKind::LineStart { indentation } => Some((
+                view.range().start() + relative,
+                *indentation,
+                view.line_at_span(token.span()).unwrap_or(first_line),
+            )),
+            _ => None,
+        })
+        .filter(|(_, _, line)| *line > first_line)
+        .collect::<Vec<_>>();
+
+    for (position, (line_start, indentation, line)) in line_starts.iter().copied().enumerate() {
+        if indentation > declaration_indentation {
+            continue;
+        }
+        let line_end = line_starts
+            .get(position + 1)
+            .map_or(view.range().end(), |(next, _, _)| *next);
+        let line_view = view
+            .subview(
+                TokenRange::new(line_start + 1, line_end)
+                    .expect("a physical source line has ordered token boundaries"),
+            )
+            .expect("a declaration line remains within its declaration");
+        let mut line_tokens = line_view
+            .tokens()
+            .iter()
+            .filter(|token| !matches!(token.kind(), TokenKind::LineStart { .. }));
+        let Some(first) = line_tokens.next() else {
+            continue;
+        };
+        let starts_with_closer = matches!(first.kind(), TokenKind::Close { .. });
+        let closer_only = starts_with_closer
+            && line_tokens.all(|token| matches!(token.kind(), TokenKind::Close { .. }));
+
+        if indentation == declaration_indentation && closer_only {
+            if position + 1 < line_starts.len() {
+                push_continuation_diagnostic(
+                    diagnostics,
+                    line,
+                    "expression continues after a boundary-aligned closing delimiter; indent the closing delimiter to continue the expression",
+                );
+            }
+        } else if starts_with_closer {
+            push_continuation_diagnostic(
+                diagnostics,
+                line,
+                "expression continues after a boundary-aligned closing delimiter; indent this line or end the declaration after the delimiter",
+            );
+        } else {
+            push_continuation_diagnostic(
+                diagnostics,
+                line,
+                format!(
+                    "declaration continuation is indented {indentation} spaces; expected at least {}",
+                    declaration_indentation + 1
+                ),
+            );
+        }
+    }
+}
+
+fn push_continuation_diagnostic(
+    diagnostics: &mut Vec<Diagnostic>,
+    line: usize,
+    message: impl Into<String>,
+) {
+    let already_reported = diagnostics.iter().any(|diagnostic| {
+        diagnostic.line == line
+            && (diagnostic
+                .message
+                .contains("boundary-aligned closing delimiter")
+                || diagnostic
+                    .message
+                    .starts_with("declaration continuation is indented"))
+    });
+    if !already_reported {
+        diagnostics.push(Diagnostic::error(line, message));
+    }
+}
+
 pub(in crate::g_syntax::parser) fn parse_object_body(
     view: TokenView<'_, '_>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -113,6 +207,7 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
 
     let mut body = Vec::with_capacity(statement_views.len());
     for (line, statement_view) in statement_views {
+        validate_declaration_continuations(statement_view, diagnostics);
         let statement_view = trim_layout(statement_view);
         let kind = match statement_view.first_significant() {
             Some((_, token)) if token_is_name(token, "object") => {

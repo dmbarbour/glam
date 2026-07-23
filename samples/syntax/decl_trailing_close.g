@@ -1,7 +1,7 @@
 language g0
 
-# declarations must be indented after first line, excepting a trailing
-# line consisting of }]) and whitespace (including comments)
+# Declaration continuations are indented. A terminal line containing only
+# closing delimiters may align with the declaration boundary.
 sample_dict = {
     , a:1
     , b:2
@@ -16,3 +16,6 @@ sample_expr = (
 sample_mess = [({a:(
     42
 )})]
+sample_continued = (
+    41
+    ) + 1

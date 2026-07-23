@@ -31,7 +31,35 @@ We'll support Python-style line comments, i.e. `#...` to end of line. There are 
 
 ## Toplevel Structure
 
-The module toplevel consists of a sequence of 'declarations'. Each declaration starts a new line. If a declaration requires more than one line, any continuing lines (excepting blanks) must be indented by at least one space. Special exception: a final line consisting entirely of `}])` characters and whitespace does not need to be indented. The goal is to simplify error isolation, local reasoning, and parallel processing of declarations.
+The module toplevel consists of a sequence of 'declarations'. Each declaration
+starts a new line. If a declaration requires more than one line, every
+nonblank continuation line must be indented by at least one space. A terminal
+line containing only closing delimiters and an optional comment may instead
+align with the declaration boundary:
+
+```g
+result = consume (
+  do
+    .r value
+)
+```
+
+This exception is terminal punctuation, not a general continuation rule. If
+the expression continues after its closing delimiter, that line must remain
+indented:
+
+```g
+result = consume (
+  do
+    .r value
+  ) |> finish
+```
+
+A later indented line may not resume a declaration after a boundary-aligned
+closer. The same rule applies relative to the indentation of a declaration
+nested in an object body. The goal is to simplify error isolation, local
+reasoning, and parallel processing of declarations without sacrificing the
+ordinary aligned-closing style for delimited declarations.
 
 Each declaration starts with either a keyword (such as `import`, `object`, or `unique`) or is a basic definition of form `name = Expr` or one of its variants (args in lhs, `:=`, `::=`, etc.). We'll favor basic definitions where feasible, thus keywords are mostly for special forms.
 

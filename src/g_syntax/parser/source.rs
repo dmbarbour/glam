@@ -1,6 +1,7 @@
 use super::super::{Declaration, Diagnostic, ParsedSource};
 use super::declaration::{
-    SimpleDeclaration, parse_declaration, parse_simple_declaration, validate_language_position,
+    SimpleDeclaration, parse_declaration, parse_simple_declaration,
+    validate_declaration_continuations, validate_language_position,
 };
 use super::input::{ParseSession, TokenView};
 use super::lexical::{TokenKind, lex_source};
@@ -47,6 +48,7 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
         } else {
             parse_declaration(view, line, &mut diagnostics)
         };
+        validate_declaration_continuations(view, &mut diagnostics);
         diagnostics.extend(token_session.take_diagnostics());
         let preview = declaration_preview(view);
         declarations.push(Declaration {
