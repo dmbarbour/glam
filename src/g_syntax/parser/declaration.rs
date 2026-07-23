@@ -14,7 +14,7 @@ use super::layout::{LayoutBase, LayoutView};
 use super::lexical::{Delimiter, LeadingTrivia, TokenKind};
 use super::structural::{
     contextual_keywords, first_top_level_line_start, is_layout_empty, local_name, parse_expression,
-    split_top_level, token_is_name, trim_layout, view_between,
+    parse_object_parents, split_top_level, token_is_name, trim_layout, view_between,
 };
 
 mod simple;
@@ -391,6 +391,9 @@ fn parse_object_declaration(
         ));
         return None;
     }
+    for parent in &parsed.deps {
+        warn_unused_locals(parent, line, diagnostics);
+    }
     let body = if parsed.has_with {
         let Some(body) = body else {
             diagnostics.push(Diagnostic::error(
@@ -458,7 +461,7 @@ fn parse_extend_declaration(
 struct StaticObjectHeader {
     target: String,
     alias: Option<String>,
-    deps: Vec<String>,
+    deps: Vec<SyntaxExpr>,
     has_with: bool,
 }
 
@@ -551,30 +554,13 @@ fn parse_static_object_header(
             extends_index + 1,
             header.range().end(),
         ));
-        let dep_views = split_top_level(deps_view, ",")
-            .into_iter()
-            .map(trim_layout)
-            .filter(|view| !is_layout_empty(*view))
-            .collect::<Vec<_>>();
-        if dep_views.is_empty() {
-            diagnostics.push(Diagnostic::error(
-                line,
-                "object `extends` requires at least one dependency",
-            ));
-            return None;
-        }
-        let mut deps = Vec::with_capacity(dep_views.len());
-        for dep in dep_views {
-            let Some(dep) = static_path(dep) else {
-                diagnostics.push(Diagnostic::error(
-                    line,
-                    "object dependency is not a path name",
-                ));
+        match parse_object_parents(deps_view, line) {
+            Ok(deps) => deps,
+            Err(mut errors) => {
+                diagnostics.append(&mut errors);
                 return None;
-            };
-            deps.push(dep);
+            }
         }
-        deps
     } else {
         Vec::new()
     };

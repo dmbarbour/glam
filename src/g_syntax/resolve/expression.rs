@@ -227,15 +227,7 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
         }
         None => ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
     };
-    let deps = object
-        .deps
-        .iter()
-        .map(|dep| {
-            let dep_object =
-                syntax_expr_to_resolved_in_semantic_scope(dep, line, context, scope, locals)?;
-            Ok(object_spec_resolved(dep_object))
-        })
-        .collect::<Result<Vec<_>, Diagnostic>>()?;
+    let deps = object_parents_resolved(&object.deps, line, context, scope, locals)?;
     let defs = object_body_defs_resolved_in_scope(
         &object.body,
         object.alias.as_deref(),

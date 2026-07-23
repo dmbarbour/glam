@@ -586,7 +586,10 @@ fn parses_named_object_declarations() {
         DeclarationKind::Object(ObjectDecl {
             target: "child".to_owned(),
             alias: None,
-            deps: vec!["base".to_owned(), "mixin".to_owned()],
+            deps: vec![
+                SyntaxExpr::Name("base".to_owned()),
+                SyntaxExpr::Name("mixin".to_owned()),
+            ],
             body: vec![
                 ObjectBodyDefinition {
                     line: 3,
@@ -608,6 +611,74 @@ fn parses_named_object_declarations() {
                 },
             ],
         })
+    );
+}
+
+#[test]
+fn object_declarations_parse_expression_valued_parents() {
+    let parsed =
+        parse("language g0\nobject child extends configured_parent options, (choose left right)\n");
+
+    assert_eq!(parsed.diagnostics, []);
+    let DeclarationKind::Object(object) = &parsed.declarations[1].kind else {
+        panic!("expected object declaration");
+    };
+    assert_eq!(object.deps.len(), 2);
+    assert!(matches!(
+        &object.deps[0],
+        SyntaxExpr::Apply(function, argument)
+            if matches!(&**function, SyntaxExpr::Name(name) if name == "configured_parent")
+                && matches!(&**argument, SyntaxExpr::Name(name) if name == "options")
+    ));
+    assert!(matches!(&object.deps[1], SyntaxExpr::Apply(_, _)));
+}
+
+#[test]
+fn object_parent_lists_reject_empty_expression_slots() {
+    for source in [
+        "language g0\nobject child extends , base\n",
+        "language g0\nobject child extends base,, other\n",
+        "language g0\nobject child extends base,\n",
+        "language g0\nvalue = object \"child\" extends , base\n",
+        "language g0\nvalue = object \"child\" extends base,, other\n",
+        "language g0\nvalue = object \"child\" extends base,\n",
+    ] {
+        let parsed = parse(source);
+
+        assert!(
+            parsed.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == Severity::Error
+                    && diagnostic.message == "object `extends` contains an empty parent expression"
+            }),
+            "{source}: {:#?}",
+            parsed.diagnostics
+        );
+    }
+}
+
+#[test]
+fn empty_and_malformed_object_parents_have_distinct_diagnostics() {
+    let empty = parse("language g0\nobject child extends\n");
+    assert!(empty.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "object `extends` requires at least one parent expression"
+    }));
+
+    let malformed = parse("language g0\nobject child extends base +\n");
+    assert!(
+        malformed
+            .diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.message.contains("empty parent")),
+        "{:#?}",
+        malformed.diagnostics
+    );
+    assert!(
+        malformed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Severity::Error),
+        "{:#?}",
+        malformed.diagnostics
     );
 }
 
@@ -788,7 +859,7 @@ fn parses_object_and_extend_aliases() {
         DeclarationKind::Object(object) => {
             assert_eq!(object.target, "child");
             assert_eq!(object.alias.as_deref(), Some("_c"));
-            assert_eq!(object.deps, ["base".to_owned()]);
+            assert_eq!(object.deps, [SyntaxExpr::Name("base".to_owned())]);
         }
         other => panic!("expected object declaration, got {other:?}"),
     }
@@ -2312,6 +2383,25 @@ fn object_expressions_evaluate_as_object_instances() {
 fn object_dependencies_apply_inherited_defs_to_child_self() {
     let parsed = parse(
         "language g0\nobject base with\n  text = hello ++ \", \" ++ target ++ \"!\"\n  hello = \"Hello\"\n  target = \"Base\"\nobject child extends base with\n  target := \"World\"\nasm.result = child.text\n",
+    );
+    let context = CompileContext::from_module_path(["assembly"]);
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"Hello, World!"
+    );
+}
+
+#[test]
+fn object_declaration_parents_are_evaluated_as_expressions() {
+    let parsed = parse(
+        "language g0\nselect x = x\nobject base with\n  text = \"Hello, World!\"\nobject child extends select base\nasm.result = child.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);

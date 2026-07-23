@@ -46,7 +46,7 @@ pub struct ImportDecl {
 pub struct ObjectDecl {
     pub target: String,
     pub alias: Option<String>,
-    pub deps: Vec<String>,
+    pub deps: Vec<SyntaxExpr>,
     pub body: Vec<ObjectBodyDefinition>,
 }
 

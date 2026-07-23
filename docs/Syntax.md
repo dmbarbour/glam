@@ -107,7 +107,7 @@ The bootstrap compiler rejects shadowing between local variables. This includes 
 such as `_name` shadowing `name`; both spellings have the same canonical local name. The inaccessible `_` binder may be repeated because it introduces no
 referable name. Reusing a name in disjoint lexical scopes is valid.
 
-The compiler also checks each source file as a whole. A source local may not reuse a global name introduced by that file in a visible namespace, or a
+The compiler also checks each source file as a whole. A source local may not reuse a global name defined by that file in a visible namespace, or a
 global root that the file actually selects through that namespace. Declaration order does not affect this rule. Literal keys and explicit `module` or prior
 references do not select an unqualified global; expression-valued keys do. Names that merely exist in an imported or extended namespace may be used as locals until the file introduces, overrides, or otherwise references them.
 
@@ -752,7 +752,7 @@ Object syntax can and should be compact by default. I propose:
             def2 := ...
 
         # desugars as expression
-        foo = object (abstract_global_path foo) extends [bar, baz] with 
+        foo = object (abstract_global_path foo) extends bar, baz with 
             def1 = ...
             def2 := ...
         
@@ -766,12 +766,20 @@ Object syntax can and should be compact by default. I propose:
             }
 
         # declaration
-        object Name (as Name)? (extends Name(, Name)*)? (with Body)?
+        object Name (as Name)? (extends ExpressionList)? (with Body)?
 
         # expression
-        object (NameExpr|_) (as Name)? (extends ObjectList)? (with Body)?
+        object (NameExpr|_) (as Name)? (extends ExpressionList)? (with Body)?
 
 The `extends` and `with` sections are optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). If provided, they cannot be empty. In general, `spec.name` may be any value with equality, e.g. `"foo"`. Toplevel object declarations use `abstract_global_path` to ensure globally unique names, but it's sufficient that we don't reuse a name for two different specs across transitive deps.
+
+`ExpressionList` is one or more ordinary expressions separated by top-level
+commas. Each expression is resolved in the scope surrounding the object and
+evaluates lazily to a parent object; the compiler extracts its `spec` for
+inheritance. Parent expressions that contain a top-level comma must therefore
+put that comma inside a delimiter group. The declared object's target remains
+a static path so its namespace and `abstract_global_path` are known during
+compilation.
 
 To instantiate the object, the compiler applies a linearization algorithm (C3?) to deduplicate and merge components. The compiler uses `spec.name` to distinguish specifications, and asserts (via reflective term annotation) that `spec.name` is not used for two different specs in linearization scope. After specifications are ordered, we apply `spec.defs` to an empty base `{}` then finally introduce `spec` as an implicit final mixin. 
 
@@ -799,8 +807,8 @@ Use of `^` composes, e.g. `^^^method` escapes three lexical levels. But it's bes
 
 For cases that require too many escapes, we also support an `as Name` modifier for object declarations and expressions. The default for object declarations is `as self`, which is why we have the default local names and `^` escapes. In some contexts, it is more convenient to use a local name so we don't need escapes.
 
-        object Name (as Name)? (extends ObjList)? (with Body)?              # object declaration
-        object (NameExpr|_) (as Name)? (extends ListExpr)? (with Body)?     # object expression
+        object Name (as Name)? (extends ExpressionList)? (with Body)?       # object declaration
+        object (NameExpr|_) (as Name)? (extends ExpressionList)? (with Body)? # object expression
         extend Name (as Name)? with Body                                    # extend declaration
 
 For example:

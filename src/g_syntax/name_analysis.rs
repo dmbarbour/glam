@@ -161,7 +161,7 @@ impl FileNameAnalysis {
         locals: &mut Vec<String>,
     ) {
         for dependency in &object.deps {
-            self.record_static_path_use(dependency, line, parent_scope, locals);
+            self.visit_expr(dependency, line, parent_scope, locals);
         }
         let object_namespace = self.introduce_static_path(
             self.scopes[parent_scope.0].definitions,
@@ -421,18 +421,6 @@ impl FileNameAnalysis {
             SyntaxKeyExpr::Index(expr) | SyntaxKeyExpr::PathIndex(expr) => {
                 self.visit_expr(expr, line, scope, locals);
             }
-        }
-    }
-
-    fn record_static_path_use(
-        &mut self,
-        path: &str,
-        line: usize,
-        scope: ResolutionScopeId,
-        locals: &[String],
-    ) {
-        if let Some(root) = path.split('.').next() {
-            self.record_name_use(root, line, scope, locals);
         }
     }
 

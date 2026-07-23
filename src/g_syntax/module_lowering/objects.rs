@@ -76,6 +76,7 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
     name: ResolvedExpr<Value>,
     declared_reflection: bool,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let deps = object_parents_resolved(&object.deps, line, context, &parent_scope, locals)?;
     let defs = object_body_defs_resolved_in_scope(
         &object.body,
         object.alias.as_deref(),
@@ -85,16 +86,28 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
         locals,
         declared_reflection,
     )?;
-    let deps = object
-        .deps
-        .iter()
-        .map(|dep| object_spec_resolved(path_resolved_in_scope(dep, &parent_scope, locals)))
-        .collect::<Vec<_>>();
     Ok(object_instance_from_parts_resolved(
         name,
         ResolvedExpr::List(deps),
         defs,
     ))
+}
+
+pub(in crate::g_syntax) fn object_parents_resolved(
+    parents: &[SyntaxExpr],
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<Vec<ResolvedExpr<Value>>, Diagnostic> {
+    parents
+        .iter()
+        .map(|parent| {
+            let parent =
+                syntax_expr_to_resolved_in_semantic_scope(parent, line, context, scope, locals)?;
+            Ok(object_spec_resolved(parent))
+        })
+        .collect()
 }
 
 pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(

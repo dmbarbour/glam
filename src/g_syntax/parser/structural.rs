@@ -460,25 +460,13 @@ fn parse_object_header(view: TokenView<'_, '_>) -> Option<ParseResult<ObjectHead
             extends_index + 1,
             header.range().end(),
         ));
-        let dep_views = split_top_level(deps_view, ",")
-            .into_iter()
-            .map(trim_layout)
-            .filter(|view| !is_layout_empty(*view))
-            .collect::<Vec<_>>();
-        if dep_views.is_empty() {
-            return Some(Err(error_at_view(
-                deps_view,
-                "object expression `extends` requires at least one dependency",
-            )));
+        match parse_object_parents(
+            deps_view,
+            view.line_at_span(object_token.span()).unwrap_or(1),
+        ) {
+            Ok(deps) => deps,
+            Err(diagnostics) => return Some(Err(diagnostics)),
         }
-        let mut deps = Vec::with_capacity(dep_views.len());
-        for dep in dep_views {
-            match parse_expression(dep) {
-                Ok(dep) => deps.push(dep),
-                Err(diagnostics) => return Some(Err(diagnostics)),
-            }
-        }
-        deps
     } else {
         Vec::new()
     };
@@ -585,6 +573,32 @@ pub(in crate::g_syntax::parser) fn split_top_level<'lex, 'source>(
     }
     parts.push(view_between(view, start, view.range().end()));
     parts
+}
+
+pub(in crate::g_syntax::parser) fn parse_object_parents(
+    view: TokenView<'_, '_>,
+    line: usize,
+) -> ParseResult<Vec<SyntaxExpr>> {
+    if is_layout_empty(view) {
+        return Err(vec![Diagnostic::error(
+            line,
+            "object `extends` requires at least one parent expression",
+        )]);
+    }
+
+    let parent_views = split_top_level(view, ",");
+    let mut parents = Vec::with_capacity(parent_views.len());
+    for parent in parent_views {
+        let parent = trim_layout(parent);
+        if is_layout_empty(parent) {
+            return Err(vec![Diagnostic::error(
+                line,
+                "object `extends` contains an empty parent expression",
+            )]);
+        }
+        parents.push(parse_expression(parent)?);
+    }
+    Ok(parents)
 }
 
 pub(in crate::g_syntax::parser) fn first_top_level_line_start(

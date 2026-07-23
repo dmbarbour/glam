@@ -160,6 +160,9 @@ fn analyze_object_body_locals(body: &[ObjectBodyDefinition], diagnostics: &mut V
             analyze_expr_locals(expr, item.line, diagnostics);
         }
         if let Some(object) = item.object() {
+            for parent in &object.deps {
+                analyze_expr_locals(parent, item.line, diagnostics);
+            }
             if let Some(alias) = &object.alias {
                 warn_unused_with_alias(alias, &object.body, item.line, diagnostics);
             }
@@ -286,6 +289,9 @@ fn mark_used_body_item_prior_alias(
         mark_used_prior_alias(expr, alias, used);
     }
     if let Some(object) = item.object() {
+        for parent in &object.deps {
+            mark_used_prior_alias(parent, alias, used);
+        }
         for item in &object.body {
             mark_used_body_item_prior_alias(item, alias, used);
         }
@@ -541,6 +547,9 @@ fn mark_used_body_item_locals(
         mark_used_locals(expr, locals, used);
     }
     if let Some(object) = item.object() {
+        for parent in &object.deps {
+            mark_used_locals(parent, locals, used);
+        }
         for item in &object.body {
             mark_used_body_item_locals(item, locals, used);
         }

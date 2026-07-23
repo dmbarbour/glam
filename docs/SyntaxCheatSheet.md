@@ -329,6 +329,9 @@ object foo extends bar, baz with
     def2 := ...             # override inherited def2; _def2 = prior
     def3 = ^a + def1        # ^a escapes to host scope (^^a two levels)
 
+object configured extends choose_parent options, fallback with
+    ...                     # each comma-separated parent is an expression
+
 object foo as f extends bar with    # 'as f': local alias, no ^ needed
     A = f.B + a             # 'a' resolves to host directly now
     B = f.C + 2             # _f.B would be the prior B

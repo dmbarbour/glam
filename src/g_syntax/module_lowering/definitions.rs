@@ -326,29 +326,6 @@ pub(in crate::g_syntax) fn static_path_resolved(target: &str) -> ResolvedExpr<Va
     )
 }
 
-pub(in crate::g_syntax) fn path_resolved_in_scope(
-    target: &str,
-    scope: &NameScope<ResolvedRoot>,
-    locals: &ResolverContext,
-) -> ResolvedExpr<Value> {
-    let mut parts = target.split('.');
-    let Some(first) = parts.next() else {
-        return ResolvedExpr::Embedded(Value::Dict(Dict::new_sync()));
-    };
-    let value = lower_name_expr_resolved(first, scope, locals);
-    let path = parts
-        .map(|part| ResolvedPathPart::Key(name_as_key(part)))
-        .collect::<Vec<_>>();
-    if path.is_empty() {
-        value
-    } else {
-        ResolvedExpr::Access {
-            base: Box::new(value),
-            path,
-        }
-    }
-}
-
 pub(in crate::g_syntax) fn path_resolved_in_definitions(
     target: &str,
     definitions: ResolvedExpr<Value>,

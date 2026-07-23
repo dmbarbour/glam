@@ -5,7 +5,9 @@ object base with
   hello = "Hello"
   target = "Base"
 
-object hello extends base with
+select_parent options = options
+
+object hello extends select_parent base with
   target := "World"
 
 asm.result = hello.text
