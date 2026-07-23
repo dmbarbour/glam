@@ -669,6 +669,25 @@ fn parses_hierarchical_object_body_declarations() {
 }
 
 #[test]
+fn parses_hierarchical_extend_body_declarations() {
+    let parsed = parse(
+        "language g0\nobject parent with\n  object child with\n    text = \"Hello\"\n  extend child as prior with\n    text := _prior.text ++ \"!\"\n",
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let DeclarationKind::Object(parent) = &parsed.declarations[1].kind else {
+        panic!("parent should parse as an object declaration");
+    };
+    let ObjectBodyDefinitionKind::Extend(extend) = &parent.body[1].kind else {
+        panic!("second parent body item should parse as an extend declaration");
+    };
+    assert_eq!(extend.target, "child");
+    assert_eq!(extend.alias.as_deref(), Some("prior"));
+    assert_eq!(extend.body.len(), 1);
+    assert!(extend.body[0].definition().is_some());
+}
+
+#[test]
 fn parses_object_expressions() {
     let parsed =
         parse("language g0\nhello = object \"hello\" as _h extends base with\n  text = h.target\n");
@@ -2401,6 +2420,29 @@ fn hierarchical_object_declarations_can_extend_sibling_objects() {
             &["asm", "result"]
         ))),
         b"Hello, World!"
+    );
+}
+
+#[test]
+fn hierarchical_extend_declarations_preserve_target_and_prior_scope() {
+    let parsed = parse(
+        "language g0\nobject parent with\n  suffix = \"!\"\n  object child with\n    text = \"Hello\"\n  extend child as prior with\n    text := _prior.text ++ suffix\nasm.result = parent.child.text\n",
+    );
+    let context = CompileContext::from_module_path(["assembly"]);
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"Hello!"
+    );
+    assert!(
+        value_at_atom_path(&value, &["child"]).is_none(),
+        "the nested extend target must remain under its enclosing object"
     );
 }
 

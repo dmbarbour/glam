@@ -60,20 +60,28 @@ pub struct ObjectBodyDefinition {
 pub enum ObjectBodyDefinitionKind {
     Definition(DefinitionDecl),
     Object(ObjectDecl),
+    Extend(ObjectExtendDecl),
 }
 
 impl ObjectBodyDefinition {
     pub(super) fn definition(&self) -> Option<&DefinitionDecl> {
         match &self.kind {
             ObjectBodyDefinitionKind::Definition(definition) => Some(definition),
-            ObjectBodyDefinitionKind::Object(_) => None,
+            ObjectBodyDefinitionKind::Object(_) | ObjectBodyDefinitionKind::Extend(_) => None,
         }
     }
 
     pub(super) fn object(&self) -> Option<&ObjectDecl> {
         match &self.kind {
-            ObjectBodyDefinitionKind::Definition(_) => None,
             ObjectBodyDefinitionKind::Object(object) => Some(object),
+            ObjectBodyDefinitionKind::Definition(_) | ObjectBodyDefinitionKind::Extend(_) => None,
+        }
+    }
+
+    pub(super) fn extend(&self) -> Option<&ObjectExtendDecl> {
+        match &self.kind {
+            ObjectBodyDefinitionKind::Extend(extend) => Some(extend),
+            ObjectBodyDefinitionKind::Definition(_) | ObjectBodyDefinitionKind::Object(_) => None,
         }
     }
 }

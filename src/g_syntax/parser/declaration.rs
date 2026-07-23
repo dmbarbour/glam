@@ -96,6 +96,10 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
                 parse_object_declaration(statement_view, line, diagnostics)
                     .map(ObjectBodyDefinitionKind::Object)
             }
+            Some((_, token)) if token_is_name(token, "extend") => {
+                parse_extend_declaration(statement_view, line, diagnostics)
+                    .map(ObjectBodyDefinitionKind::Extend)
+            }
             _ => parse_definition(statement_view, line, diagnostics)
                 .map(ObjectBodyDefinitionKind::Definition),
         };

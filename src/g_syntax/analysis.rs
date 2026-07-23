@@ -165,6 +165,12 @@ fn analyze_object_body_locals(body: &[ObjectBodyDefinition], diagnostics: &mut V
             }
             analyze_object_body_locals(&object.body, diagnostics);
         }
+        if let Some(extend) = item.extend() {
+            if let Some(alias) = &extend.alias {
+                warn_unused_with_alias(alias, &extend.body, item.line, diagnostics);
+            }
+            analyze_object_body_locals(&extend.body, diagnostics);
+        }
     }
 }
 
@@ -281,6 +287,11 @@ fn mark_used_body_item_prior_alias(
     }
     if let Some(object) = item.object() {
         for item in &object.body {
+            mark_used_body_item_prior_alias(item, alias, used);
+        }
+    }
+    if let Some(extend) = item.extend() {
+        for item in &extend.body {
             mark_used_body_item_prior_alias(item, alias, used);
         }
     }
@@ -531,6 +542,11 @@ fn mark_used_body_item_locals(
     }
     if let Some(object) = item.object() {
         for item in &object.body {
+            mark_used_body_item_locals(item, locals, used);
+        }
+    }
+    if let Some(extend) = item.extend() {
+        for item in &extend.body {
             mark_used_body_item_locals(item, locals, used);
         }
     }

@@ -172,6 +172,9 @@ pub(in crate::g_syntax) fn lower_object_body_item_resolved(
         ObjectBodyDefinitionKind::Object(object) => {
             lower_nested_object_resolved(object, item.line, context, definitions, scope, locals)
         }
+        ObjectBodyDefinitionKind::Extend(extend) => {
+            lower_nested_extend_resolved(extend, item.line, context, definitions, scope, locals)
+        }
     }
 }
 
@@ -297,19 +300,60 @@ pub(in crate::g_syntax) fn lower_extend(
     let mut locals = ResolverContext::default();
     let scope = module_scope.resolved();
     let definitions_root = ResolvedRoot::Provided(definitions.clone());
+    let updated = extend_object_resolved_in_scope(
+        extend,
+        line,
+        context,
+        &definitions_root,
+        &scope,
+        &mut locals,
+        declared_target_has_reflection(&extend.target),
+    )?;
+    *definitions = lower_resolved_expr(updated);
+    Ok(())
+}
+
+pub(in crate::g_syntax) fn lower_nested_extend_resolved(
+    extend: &ObjectExtendDecl,
+    line: usize,
+    context: &CompileContext,
+    definitions: &ResolvedRoot,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    extend_object_resolved_in_scope(
+        extend,
+        line,
+        context,
+        definitions,
+        scope,
+        locals,
+        scope.reflection.is_some() && declared_target_has_reflection(&extend.target),
+    )
+}
+
+fn extend_object_resolved_in_scope(
+    extend: &ObjectExtendDecl,
+    line: usize,
+    context: &CompileContext,
+    definitions: &ResolvedRoot,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+    declared_reflection: bool,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let extension_defs = object_body_defs_resolved_in_scope(
         &extend.body,
         extend.alias.as_deref(),
         line,
         context,
         scope.clone(),
-        &mut locals,
-        declared_target_has_reflection(&extend.target),
+        locals,
+        declared_reflection,
     )?;
-    let prior_object = path_resolved_in_definitions(&extend.target, definitions_root.expr());
+    let prior_object = path_resolved_in_definitions(&extend.target, definitions.expr());
     let prior_spec = object_spec_resolved(prior_object);
     let mut bindings = ResolvedBindings::default();
-    let prior_spec = bindings.bind(&mut locals, "<extended-object-spec>", prior_spec);
+    let prior_spec = bindings.bind(locals, "<extended-object-spec>", prior_spec);
     let spec_member = |name| ResolvedExpr::Access {
         base: Box::new(prior_spec.expr()),
         path: vec![ResolvedPathPart::Key(name_as_key(name))],
@@ -333,19 +377,18 @@ pub(in crate::g_syntax) fn lower_extend(
         spec_member("deps"),
         composed_defs,
     ));
-    let target_context = DefinitionTargetContext::new(&definitions_root, line, context, &scope);
+    let target_context = DefinitionTargetContext::new(definitions, line, context, scope);
     let object_value = target_context.annotate_static(
         BuiltinAssertion::Defined,
         &extend.target,
         object_value,
-        &mut locals,
+        locals,
     )?;
-    *definitions = lower_resolved_expr(update_module_resolved(
-        definitions_root.expr(),
+    Ok(update_module_resolved(
+        definitions.expr(),
         &extend.target,
         object_value,
-    ));
-    Ok(())
+    ))
 }
 
 pub(in crate::g_syntax) fn extend_object_with_defs(
