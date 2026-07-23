@@ -1,8 +1,9 @@
 use super::super::{Declaration, Diagnostic, ParsedSource};
 use super::declaration::{classify_declaration, validate_language_position};
 use super::layout::{
-    closes_multiline_text, indentation_width, is_dedent_closer, is_indented, opens_multiline_text,
-    split_lines, strip_comment, strip_indent_width,
+    legacy_closes_multiline_text, legacy_indentation_width, legacy_is_dedent_closer,
+    legacy_is_indented, legacy_opens_multiline_text, legacy_split_lines, legacy_strip_comment,
+    legacy_strip_indent_width,
 };
 use super::lexical::lex_source;
 
@@ -30,20 +31,20 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
             diagnostics,
         };
     }
-    let physical_lines = split_lines(text);
+    let physical_lines = legacy_split_lines(text);
     let mut declarations = Vec::new();
     let mut index = 0;
 
     while index < physical_lines.len() {
         let line = physical_lines[index];
-        let trimmed = strip_comment(line.text).trim();
+        let trimmed = legacy_strip_comment(line.text).trim();
 
         if trimmed.is_empty() {
             index += 1;
             continue;
         }
 
-        if is_indented(line.text) {
+        if legacy_is_indented(line.text) {
             diagnostics.push(Diagnostic::error(
                 line.number,
                 "continuation line without a preceding declaration",
@@ -56,7 +57,7 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
         let mut text = String::from(trimmed);
         index += 1;
         let mut continuation_indent = None;
-        let mut in_multiline_text = opens_multiline_text(&text);
+        let mut in_multiline_text = legacy_opens_multiline_text(&text);
 
         while index < physical_lines.len() {
             let next = physical_lines[index];
@@ -67,18 +68,18 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
                     index += 1;
                     continue;
                 }
-                if !is_indented(next.text) {
+                if !legacy_is_indented(next.text) {
                     break;
                 }
 
-                let closes_text = closes_multiline_text(next.text);
+                let closes_text = legacy_closes_multiline_text(next.text);
                 let source_line = if closes_text {
-                    strip_comment(next.text).trim_end()
+                    legacy_strip_comment(next.text).trim_end()
                 } else {
                     next.text
                 };
                 let next_text = continuation_indent
-                    .map(|indent| strip_indent_width(source_line, indent))
+                    .map(|indent| legacy_strip_indent_width(source_line, indent))
                     .unwrap_or_else(|| source_line.trim_start());
                 text.push('\n');
                 text.push_str(next_text);
@@ -87,19 +88,19 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
                 continue;
             }
 
-            let next_trimmed = strip_comment(next.text).trim();
+            let next_trimmed = legacy_strip_comment(next.text).trim();
 
             if next_trimmed.is_empty() {
                 index += 1;
                 continue;
             }
 
-            if !is_indented(next.text) && !is_dedent_closer(next_trimmed) {
+            if !legacy_is_indented(next.text) && !legacy_is_dedent_closer(next_trimmed) {
                 break;
             }
 
-            if is_indented(next.text) {
-                let next_indent = indentation_width(next.text);
+            if legacy_is_indented(next.text) {
+                let next_indent = legacy_indentation_width(next.text);
                 match continuation_indent {
                     Some(indent) if next_indent < indent => {
                         diagnostics.push(Diagnostic::error(
@@ -112,13 +113,13 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
                 }
             }
 
-            let next_text = strip_comment(next.text).trim_end();
+            let next_text = legacy_strip_comment(next.text).trim_end();
             let next_text = continuation_indent
-                .map(|indent| strip_indent_width(next_text, indent))
+                .map(|indent| legacy_strip_indent_width(next_text, indent))
                 .unwrap_or(next_trimmed);
             text.push('\n');
             text.push_str(next_text.trim_end());
-            in_multiline_text = opens_multiline_text(next_text);
+            in_multiline_text = legacy_opens_multiline_text(next_text);
             index += 1;
         }
 

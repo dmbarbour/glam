@@ -15,11 +15,42 @@ pub(super) struct ByteSpan {
 }
 
 impl ByteSpan {
+    pub(super) fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+
     pub(super) fn start(self) -> usize {
         self.start
     }
 
     pub(super) fn end(self) -> usize {
+        self.end
+    }
+
+    #[allow(
+        dead_code,
+        reason = "byte-range projection is part of the phase 2 token parser substrate"
+    )]
+    pub(super) fn range(self) -> Range<usize> {
+        self.start..self.end
+    }
+}
+
+impl chumsky::span::Span for ByteSpan {
+    type Context = ();
+    type Offset = usize;
+
+    fn new(_context: Self::Context, range: Range<Self::Offset>) -> Self {
+        Self::new(range.start, range.end)
+    }
+
+    fn context(&self) -> Self::Context {}
+
+    fn start(&self) -> Self::Offset {
+        self.start
+    }
+
+    fn end(&self) -> Self::Offset {
         self.end
     }
 }
@@ -103,6 +134,14 @@ impl<'source> SpannedToken<'source> {
 
     pub(super) fn span(&self) -> ByteSpan {
         self.span
+    }
+
+    #[allow(
+        dead_code,
+        reason = "borrowed spans back the phase 2 Chumsky mapped input"
+    )]
+    pub(super) fn span_ref(&self) -> &ByteSpan {
+        &self.span
     }
 
     pub(super) fn leading(&self) -> LeadingTrivia {
@@ -242,6 +281,34 @@ impl<'source> LexedSource<'source> {
 
     pub(super) fn line_at_byte(&self, byte: usize) -> Option<usize> {
         (byte <= self.source.len()).then(|| line_at(&self.line_starts, byte))
+    }
+
+    #[allow(
+        dead_code,
+        reason = "source-line projection is part of the phase 2 token parser substrate"
+    )]
+    pub(super) fn line_span(&self, line: usize) -> Option<ByteSpan> {
+        let start = *self.line_starts.get(line.checked_sub(1)?)?;
+        let mut end = self
+            .line_starts
+            .get(line)
+            .copied()
+            .unwrap_or(self.source.len());
+        if end > start && self.source.as_bytes()[end - 1] == b'\n' {
+            end -= 1;
+        }
+        if end > start && self.source.as_bytes()[end - 1] == b'\r' {
+            end -= 1;
+        }
+        Some(ByteSpan::new(start, end))
+    }
+
+    #[allow(
+        dead_code,
+        reason = "source-line projection is part of the phase 2 token parser substrate"
+    )]
+    pub(super) fn source_line(&self, line: usize) -> Option<&'source str> {
+        self.source_slice(self.line_span(line)?)
     }
 
     pub(super) fn invariants_hold(&self) -> bool {

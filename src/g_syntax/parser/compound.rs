@@ -4,7 +4,10 @@ use super::super::{Diagnostic, ObjectExpr, SyntaxExpr, SyntaxOperator};
 use super::declaration::{parse_object_body, take_header_word};
 use super::do_expr::{parse_braced_do_atoms_result, parse_do_expr_result};
 use super::expression::syntax_expr_parser;
-use super::layout::{indentation_width, is_glam_whitespace, local_name, split_layout_statements};
+use super::layout::{
+    legacy_indentation_width, legacy_is_glam_whitespace, legacy_local_name,
+    legacy_split_layout_statements,
+};
 
 pub(super) fn syntax_binary_expr(
     operator: SyntaxOperator,
@@ -92,7 +95,7 @@ pub(super) fn parse_let_expr_result(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Result<SyntaxExpr, String>> {
     let rest = text.strip_prefix("let")?;
-    if !rest.chars().next().is_some_and(is_glam_whitespace) {
+    if !rest.chars().next().is_some_and(legacy_is_glam_whitespace) {
         return None;
     }
     let rest = rest.trim_start();
@@ -216,7 +219,9 @@ pub(super) fn parse_local_binding(
         return Err(format!("local binding `{text}` must use `=`"));
     };
     let name = name.trim();
-    if local_name().parse(name).into_result().is_err() || name.contains(is_glam_whitespace) {
+    if legacy_local_name().parse(name).into_result().is_err()
+        || name.contains(legacy_is_glam_whitespace)
+    {
         return Err(format!("invalid local binding name `{name}`"));
     }
     let value = value.trim();
@@ -252,7 +257,7 @@ pub(super) fn split_multiline_let(text: &str) -> Result<(Vec<&str>, &str), Strin
             continue;
         }
 
-        let indent = indentation_width(line);
+        let indent = legacy_indentation_width(line);
         if indent == 0 {
             if split_top_level_binding_equals(trimmed).is_some() {
                 return Err(
@@ -288,7 +293,7 @@ pub(super) fn split_multiline_let(text: &str) -> Result<(Vec<&str>, &str), Strin
 }
 
 pub(super) fn parse_multiline_binding_texts(text: &str) -> Result<Vec<&str>, String> {
-    let statements = split_layout_statements(text)?;
+    let statements = legacy_split_layout_statements(text)?;
     if statements.is_empty() {
         return Err("local binding block requires at least one binding".to_owned());
     }
@@ -616,7 +621,7 @@ pub(super) fn parse_optional_object_expr_alias(
     let Some((alias, rest)) = take_header_word(after_as) else {
         return Err("`as` requires an object alias name".to_owned());
     };
-    if !local_name().parse(alias).into_result().is_ok() {
+    if !legacy_local_name().parse(alias).into_result().is_ok() {
         return Err(format!("object alias `{alias}` is not a valid local name"));
     }
     Ok((Some(alias.to_owned()), rest.trim()))
@@ -660,7 +665,7 @@ pub(super) fn parse_optional_with_alias(text: &str) -> (&str, Option<String>) {
     if alias == "_" {
         return (base.trim(), None);
     }
-    if local_name().parse(alias).into_result().is_ok() {
+    if legacy_local_name().parse(alias).into_result().is_ok() {
         (base.trim(), Some(alias.to_owned()))
     } else {
         (text, None)

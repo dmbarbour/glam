@@ -8,7 +8,10 @@ use super::compound::{
     keyword_starts_at, matching_closing_delimiter, parse_expr_result_with_diagnostics,
     split_top_level_binding_equals, top_level_char_indices, top_level_token_indices,
 };
-use super::layout::{dedent_layout_block, is_glam_whitespace, local_name, split_layout_statements};
+use super::layout::{
+    legacy_dedent_layout_block, legacy_is_glam_whitespace, legacy_local_name,
+    legacy_split_layout_statements,
+};
 
 enum ParsedDoStatement {
     Abstract(Vec<String>),
@@ -77,7 +80,7 @@ pub(super) fn parse_do_expr_result(
 ) -> Option<Result<SyntaxExpr, String>> {
     if !text.contains(['\r', '\n'])
         && let Some(body) = text.strip_prefix("do")
-        && body.chars().next().is_some_and(is_glam_whitespace)
+        && body.chars().next().is_some_and(legacy_is_glam_whitespace)
     {
         let body = body.trim_start();
         if body.starts_with('{') {
@@ -98,7 +101,11 @@ pub(super) fn parse_do_expr_result(
         ("", true)
     } else {
         let prefix = header.strip_suffix("do")?;
-        if !prefix.chars().next_back().is_some_and(is_glam_whitespace) {
+        if !prefix
+            .chars()
+            .next_back()
+            .is_some_and(legacy_is_glam_whitespace)
+        {
             return None;
         }
         (prefix.trim_end(), false)
@@ -229,7 +236,12 @@ fn find_braced_do_ranges(text: &str) -> Result<Vec<BracedDoRange>, String> {
         {
             let after_keyword = index + "do".len();
             let mut open = after_keyword;
-            while open < text.len() && text[open..].chars().next().is_some_and(is_glam_whitespace) {
+            while open < text.len()
+                && text[open..]
+                    .chars()
+                    .next()
+                    .is_some_and(legacy_is_glam_whitespace)
+            {
                 open += text[open..]
                     .chars()
                     .next()
@@ -297,7 +309,7 @@ fn line_break_count(text: &str) -> usize {
 fn parse_trailing_lambda_prefix(text: &str) -> Option<(Vec<String>, &str)> {
     let lambda = text.trim_start().strip_prefix('\\')?;
     let (parameters, body) = lambda.split_once("->")?;
-    let parameters = local_name()
+    let parameters = legacy_local_name()
         .padded()
         .repeated()
         .at_least(1)
@@ -314,8 +326,8 @@ fn parse_do_block(
     do_line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<SyntaxExpr, String> {
-    let body = dedent_layout_block(body)?;
-    let statements = split_layout_statements(&body)?;
+    let body = legacy_dedent_layout_block(body)?;
+    let statements = legacy_split_layout_statements(&body)?;
     if statements.is_empty() {
         return Err("layout do expression requires at least one statement".to_owned());
     }
@@ -587,13 +599,13 @@ fn parse_do_statement(
     if text == "abstract"
         || text
             .strip_prefix("abstract")
-            .is_some_and(|rest| rest.chars().next().is_some_and(is_glam_whitespace))
+            .is_some_and(|rest| rest.chars().next().is_some_and(legacy_is_glam_whitespace))
     {
         let names = text
             .strip_prefix("abstract")
             .expect("checked abstract statement prefix")
             .trim();
-        let names = local_name()
+        let names = legacy_local_name()
             .padded()
             .separated_by(just(',').padded())
             .at_least(1)
@@ -679,7 +691,7 @@ fn parse_do_statement(
 }
 
 fn parse_exact_local_name(text: &str) -> Option<String> {
-    local_name()
+    legacy_local_name()
         .then_ignore(end())
         .parse(text)
         .into_result()

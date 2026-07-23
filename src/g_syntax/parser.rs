@@ -4,6 +4,7 @@ mod compound;
 mod declaration;
 mod do_expr;
 mod expression;
+mod input;
 mod layout;
 mod lexical;
 mod source;

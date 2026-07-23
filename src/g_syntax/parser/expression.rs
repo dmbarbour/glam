@@ -11,7 +11,7 @@ use super::super::{
 };
 use super::compound::*;
 use super::declaration::quoted_text;
-use super::layout::{glam_name, local_name, whitespace1};
+use super::layout::{legacy_glam_name, legacy_local_name, legacy_whitespace1};
 
 #[cfg(test)]
 pub(in crate::g_syntax) fn parse_expr(text: &str) -> Option<SyntaxExpr> {
@@ -344,8 +344,8 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
     }
 
     recursive(|expr| {
-        let name = glam_name().boxed();
-        let expr_name = glam_name()
+        let name = legacy_glam_name().boxed();
+        let expr_name = legacy_glam_name()
             .try_map(|name, span| match name.as_str() {
                 "abstract" | "and" | "do" | "or" => {
                     Err(Rich::custom(span, format!("`{name}` is a keyword")))
@@ -353,7 +353,7 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
                 _ => Ok(name),
             })
             .boxed();
-        let local = local_name().boxed();
+        let local = legacy_local_name().boxed();
 
         let single_key_expr = || {
             choice((
@@ -656,7 +656,7 @@ pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
         let application = atom
             .clone()
             .then(
-                whitespace1()
+                legacy_whitespace1()
                     .ignore_then(atom.clone())
                     .repeated()
                     .collect::<Vec<_>>(),

@@ -34,9 +34,12 @@ notes instead of appending history; put subsystem details in
 - `g_syntax/parser/lexical.rs` owns source-wide newline, whitespace, text, and
   delimiter validation. Fatal lexical errors stop grammatical parsing. It also
   records the indentation and declaration structure needed for migration to
-  token-input parsing. Until that migration finishes, treat additional
-  character-level structure scanners as technical debt rather than new parser
-  architecture.
+  token-input parsing. `parser/input.rs` is the only adapter from that one
+  lexical result to token parsers; production token parsers receive an existing
+  `TokenView` and never re-lex substrings. `LayoutView` interprets `LineStart`
+  tokens only at its current delimiter depth. Character-level compatibility
+  helpers are named `legacy_*`; treat them as deletion-bound technical debt,
+  not new parser architecture.
 - Keep current implementation claims out of target-state design documents, and
   keep chronological spike notes out of this file.
 

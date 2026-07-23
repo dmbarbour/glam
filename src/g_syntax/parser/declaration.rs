@@ -7,9 +7,9 @@ use super::super::{
     warn_unused_locals, warn_unused_with_alias,
 };
 use super::layout::{
-    closes_multiline_text, first_word, glam_name, indentation_width, is_glam_whitespace,
-    is_indented, local_name, opens_multiline_text, strip_comment, strip_indent_width, whitespace0,
-    whitespace1,
+    legacy_closes_multiline_text, legacy_first_word, legacy_glam_name, legacy_indentation_width,
+    legacy_is_glam_whitespace, legacy_is_indented, legacy_local_name, legacy_opens_multiline_text,
+    legacy_strip_comment, legacy_strip_indent_width, legacy_whitespace0, legacy_whitespace1,
 };
 use super::{parse_expr_result_with_diagnostics, syntax_expr_parser};
 
@@ -47,7 +47,7 @@ pub(super) fn classify_declaration(
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> DeclarationKind {
-    match first_word(text) {
+    match legacy_first_word(text) {
         Some("object") => return classify_object_declaration(text, line, diagnostics),
         Some("extend") => return classify_extend_declaration(text, line, diagnostics),
         _ => {}
@@ -240,7 +240,7 @@ fn parse_optional_object_alias<'a>(
         ));
         return None;
     };
-    if !local_name().parse(alias).into_result().is_ok() {
+    if !legacy_local_name().parse(alias).into_result().is_ok() {
         diagnostics.push(Diagnostic::error(
             line,
             format!("object alias `{alias}` is not a valid local name"),
@@ -267,7 +267,7 @@ pub(super) fn parse_object_body(
         }
 
         let line_number = first_line + index;
-        if is_indented(line) {
+        if legacy_is_indented(line) {
             diagnostics.push(Diagnostic::error(
                 line_number,
                 "object body continuation line without a preceding nested declaration",
@@ -279,7 +279,7 @@ pub(super) fn parse_object_body(
         let mut text = trimmed.to_owned();
         index += 1;
         let mut continuation_indent = None;
-        let mut in_multiline_text = opens_multiline_text(&text);
+        let mut in_multiline_text = legacy_opens_multiline_text(&text);
         while index < lines.len() {
             let next = lines[index];
             let next_trimmed = next.trim();
@@ -289,18 +289,18 @@ pub(super) fn parse_object_body(
                     index += 1;
                     continue;
                 }
-                if !is_indented(next) {
+                if !legacy_is_indented(next) {
                     break;
                 }
 
-                let closes_text = closes_multiline_text(next);
+                let closes_text = legacy_closes_multiline_text(next);
                 let source_line = if closes_text {
-                    strip_comment(next).trim_end()
+                    legacy_strip_comment(next).trim_end()
                 } else {
                     next
                 };
                 let next_text = continuation_indent
-                    .map(|indent| strip_indent_width(source_line, indent))
+                    .map(|indent| legacy_strip_indent_width(source_line, indent))
                     .unwrap_or_else(|| source_line.trim_start());
                 text.push('\n');
                 text.push_str(next_text);
@@ -313,18 +313,18 @@ pub(super) fn parse_object_body(
                 index += 1;
                 continue;
             }
-            if !is_indented(next) {
+            if !legacy_is_indented(next) {
                 break;
             }
             if continuation_indent.is_none() {
-                continuation_indent = Some(indentation_width(next));
+                continuation_indent = Some(legacy_indentation_width(next));
             }
             let next_text = continuation_indent
-                .map(|indent| strip_indent_width(next.trim_end(), indent))
+                .map(|indent| legacy_strip_indent_width(next.trim_end(), indent))
                 .unwrap_or(next_trimmed);
             text.push('\n');
             text.push_str(next_text.trim_end());
-            in_multiline_text = opens_multiline_text(next_text);
+            in_multiline_text = legacy_opens_multiline_text(next_text);
             index += 1;
         }
 
@@ -436,7 +436,7 @@ pub(super) fn take_header_word(text: &str) -> Option<(&str, &str)> {
     if text.is_empty() {
         return None;
     }
-    let end = text.find(is_glam_whitespace).unwrap_or(text.len());
+    let end = text.find(legacy_is_glam_whitespace).unwrap_or(text.len());
     Some((&text[..end], &text[end..]))
 }
 
@@ -479,7 +479,7 @@ fn import_decl<'src>() -> impl Parser<'src, &'src str, ImportDecl, extra::Err<Ri
     let reference = choice((
         quoted_text().map(ImportReference::Local),
         just('\'')
-            .ignore_then(glam_name())
+            .ignore_then(legacy_glam_name())
             .map(ImportReference::Builtin),
     ));
     let placement = just("as")
@@ -526,15 +526,15 @@ pub(in crate::g_syntax) fn definition_decl<'src>()
 -> impl Parser<'src, &'src str, DefinitionDecl, extra::Err<Rich<'src, char>>> {
     definition_target()
         .then(
-            whitespace1().ignore_then(
-                local_name()
-                    .then_ignore(whitespace1())
+            legacy_whitespace1().ignore_then(
+                legacy_local_name()
+                    .then_ignore(legacy_whitespace1())
                     .repeated()
                     .collect::<Vec<_>>(),
             ),
         )
         .then(definition_operator())
-        .then_ignore(whitespace0())
+        .then_ignore(legacy_whitespace0())
         .then(rest_of_declaration())
         .try_map(|(((target, params), kind), body), span| {
             if body.is_empty() {
@@ -557,7 +557,7 @@ fn definition_target<'src>() -> impl Parser<'src, &'src str, String, extra::Err<
 
 pub(in crate::g_syntax) fn definition_target_path<'src>()
 -> impl Parser<'src, &'src str, Vec<SyntaxKeyExpr>, extra::Err<Rich<'src, char>>> {
-    let name = glam_name().boxed();
+    let name = legacy_glam_name().boxed();
     let expr = syntax_expr_parser().boxed();
     let single_key_expr = || {
         choice((
