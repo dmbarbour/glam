@@ -199,10 +199,10 @@ their detailed scheduling and representation contracts.
   parser routing. `_name` has canonical name `name`; repeated `_` binders and
   compiler-generated bindings remain exempt.
 - `g_syntax/keywords.rs` is the one `g0` reserved-word table. Enforce it in
-  definitions, locals, references, direct tags, and every direct path segment;
-  do not grow parser-local keyword lists. `module` and `self` remain special
-  references, while atoms, effect paths, and computed keys such as
-  `.['where]` remain data escapes.
+  bare definition roots, locals, and bare references; do not grow parser-local
+  keyword lists. Explicit member/key positions may use keyword spellings:
+  `module.where`, `where:Value`, and `.['where] = Value` are valid. `module`
+  and `self` remain special bare references.
 - Layout `do` is front-end sugar and must disappear during g-syntax
   resolution. A bare intermediate statement reuses `=>>` and therefore
   requires unit; the final expression is the continuation itself and is not

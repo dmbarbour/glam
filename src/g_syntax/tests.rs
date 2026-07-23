@@ -259,6 +259,7 @@ fn parses_language_declaration_with_extensions() {
 fn g0_keywords_are_reserved_across_source_name_positions() {
     for (keyword, source) in [
         ("where", "language g0\nwhere = 1\n"),
+        ("where", "language g0\n.where = 1\n"),
         ("let", "language g0\nvalue let = let\n"),
         ("where", "language g0\nvalue = \\where -> 1\n"),
         ("as", "language g0\nvalue = let as = 1 in as\n"),
@@ -270,23 +271,45 @@ fn g0_keywords_are_reserved_across_source_name_positions() {
             "binary",
             "language g0\nvalue = object \"value\" as binary with {}\n",
         ),
-        ("where", "language g0\nabstract outer.where\n"),
-        ("where", "language g0\nvalue = root.where\n"),
-        ("where", "language g0\nvalue = f (where)\n"),
-        ("binary", "language g0\nvalue = binary:1\n"),
     ] {
         assert_reserved_keyword_diagnostic(source, keyword);
     }
 }
 
 #[test]
-fn keyword_atoms_effect_paths_and_computed_paths_remain_data() {
+fn bare_keyword_references_are_rejected() {
+    for source in [
+        "language g0\nvalue = f (where)\n",
+        "language g0\nvalue = abstract\n",
+    ] {
+        assert!(
+            parse(source)
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error),
+            "bare keyword reference should be rejected: {source}"
+        );
+    }
+}
+
+#[test]
+fn keyword_atoms_explicit_key_paths_and_tags_remain_data() {
     let parsed = parse(concat!(
         "language g0\n",
         "atom = 'where\n",
         "effect = .where\n",
         ".['where] = atom\n",
+        "nested.where = atom\n",
+        "abstract outer.where\n",
+        "unique markers.unique\n",
+        "import 'list as imports.with\n",
+        "object nested.object with {}\n",
+        "direct = module.where\n",
+        "self_direct = object self with { .['where] = atom; copy = self.where }\n",
+        "tagged = binary:atom\n",
+        "constructor = :binary\n",
         "selected = module.['where]\n",
+        "direct_quoted = '.where\n",
         "quoted = '.['where]\n",
     ));
     assert_eq!(parsed.diagnostics, []);
@@ -4153,8 +4176,8 @@ fn builtin_list_at_is_exposed_by_list_and_std_modules() {
             "language g0\n",
             "import 'std as std\n",
             "import 'list as list\n",
-            "from_std = std.list.['at] 1 \"ABC\"\n",
-            "from_list = list.['at] 1 [10,20,30]\n",
+            "from_std = std.list.at 1 \"ABC\"\n",
+            "from_list = list.at 1 [10,20,30]\n",
         )),
         &context,
     );

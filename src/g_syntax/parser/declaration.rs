@@ -338,7 +338,9 @@ fn parse_definition_target(
         };
         match item.token().kind() {
             TokenKind::Name(name) => {
-                if let Some(keyword) = g0_keyword(name) {
+                if parts.is_empty()
+                    && let Some(keyword) = g0_keyword(name)
+                {
                     return Err(Diagnostic::error(line, reserved_keyword_message(keyword)));
                 }
                 parts.push(SyntaxKeyExpr::Atom((*name).to_owned()));
@@ -552,12 +554,15 @@ fn parse_static_object_header(
         .min()
         .unwrap_or(header.range().end());
     let target_view = trim_layout(view_between(header, header.range().start(), target_end));
-    if let Some(keyword) = target_view.top_level().find_map(|indexed| {
-        let TokenKind::Name(name) = indexed.token().kind() else {
-            return None;
-        };
-        g0_keyword(name)
-    }) {
+    if let Some(keyword) =
+        target_view
+            .top_level()
+            .next()
+            .and_then(|indexed| match indexed.token().kind() {
+                TokenKind::Name(name) => g0_keyword(name),
+                _ => None,
+            })
+    {
         diagnostics.push(Diagnostic::error(line, reserved_keyword_message(keyword)));
         return None;
     }

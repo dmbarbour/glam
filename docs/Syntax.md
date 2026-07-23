@@ -17,7 +17,7 @@ Proposed syntax:
         language (BaseVer) (with Extensions)?
         language g0 with utf8
 
-The version declaration should be the first toplevel declaration in a ".g" file. The BaseVer is a recognized string for a package of features. Extensions may modify that package, but the parser for extensions may also depend on BaseVer.
+The version declaration should be the first toplevel declaration in a ".g" file. The BaseVer is a recognized name for a package of features. Extensions may modify that package. The parser for extensions may flexibly depend on BaseVer.
 
 In practice, if a compiler halts on language version, we must be using different executable or configuration (if configuration defines `conf.env.lang.["g"].compile`) from development conditions. Users can resolve this by reproducing the executable (e.g. via nix) or by defining compatible compilers in the module system.
 
@@ -41,10 +41,10 @@ In context of errors, the errors can be reported but we can also make a best eff
 
 Keywords are names reserved by the selected language version. Users may not
 introduce them as definitions or locals, use them as ordinary references, or
-write them as direct dotted path components. Reservation is independent of the
-position in which a keyword normally has meaning: contextual words such as
-`where` and `as` do not become ordinary names merely because they occur outside
-a valid `where` or object header.
+use them as bare path roots. Reservation is independent of the position in
+which a keyword normally has meaning: contextual words such as `where` and
+`as` do not become ordinary names merely because they occur outside a valid
+`where` or object header.
 
 The active `g0` table is:
 
@@ -61,18 +61,22 @@ The active `g0` table is:
 A word may have more than one role, but the parser still has one
 version-owned source of truth for whether it is reserved.
 
-Atoms and computed keys are the data escape. For example, `'where` is atom
-data, `.['where]` is a definition or access path component, and
-`module.['where]` selects that component. Quoted path data may likewise contain
-the atom. Effect request paths such as `.where` are key data rather than source
-name lookup and remain valid. Direct spellings such as `where = ...`,
-`\where -> ...`, `module.where`, and `where:Value` are errors.
+Explicit key positions are not lexical names and may use keyword spellings.
+For example, `'where` is atom data, `module.where` and `self.where` select
+members, `where:Value` is tagged data, and `.['where] = Value` introduces a
+keyword-named root definition through a computed key. Quoted paths and effect
+request paths such as `'.where` and `.where` likewise remain valid. Bare
+spellings such as `where = ...`, `\where -> ...`, and an ordinary reference to
+`where` are errors.
 
 Words proposed for later syntax, including `using`, `without`, `if`, `then`,
 `else`, `match`, `try`, `when`, and `try_match`, are not active `g0` keywords
 until their language-version feature is introduced. The recognized table may
 therefore vary by base language version and extension without retroactively
 changing an older version.
+
+*Note:* Pre-release, a language version may freely adjust keywords, as reproducibility
+is not an issue yet.
 
 ## Names and Paths
 

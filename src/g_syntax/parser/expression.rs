@@ -94,7 +94,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
     recursive(move |expr| {
         let glam_name = glam_name().boxed();
         let expr_name = expr_name().boxed();
-        let path_name = path_name().boxed();
+        let key_name = glam_name.clone();
         let local_name = local_name().boxed();
 
         let single_key_expr = || {
@@ -128,7 +128,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .ignore_then(choice((
                 joint(path_list_shorthand.clone()),
                 joint(path_list_expr.clone()),
-                joint(path_name.clone())
+                joint(key_name.clone())
                     .map(SyntaxKeyExpr::Atom)
                     .map(PathSuffix::Single),
             )))
@@ -235,7 +235,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .then_ignore(close(Delimiter::Bracket))
             .map(SyntaxExpr::List);
 
-        let named_path = path_name
+        let named_path = key_name
             .clone()
             .map(SyntaxKeyExpr::Atom)
             .then(path_suffix.clone())
@@ -493,19 +493,6 @@ fn validate_expr_name(name: &str) -> Result<String, String> {
         }
         _ => Ok(name.to_owned()),
     }
-}
-
-fn path_name<'lex, 'source: 'lex>()
--> impl Parser<'lex, TokenInput<'lex, 'source>, String, TokenExtra<'lex, 'source>> {
-    name().try_map(|name, span| {
-        if !name.starts_with(|character: char| character.is_ascii_alphabetic()) {
-            return Err(Rich::custom(span, "expected name"));
-        }
-        if let Some(keyword) = g0_keyword(name) {
-            return Err(Rich::custom(span, reserved_keyword_message(keyword)));
-        }
-        Ok(name.to_owned())
-    })
 }
 
 fn local_name<'lex, 'source: 'lex>()

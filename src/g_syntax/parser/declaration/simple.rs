@@ -165,7 +165,7 @@ fn path<'lex, 'source: 'lex>()
     source_name()
         .then(
             joint(symbol("."))
-                .ignore_then(joint(source_name()))
+                .ignore_then(joint(glam_name().map(str::to_owned)))
                 .repeated()
                 .collect::<Vec<_>>(),
         )
