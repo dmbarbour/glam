@@ -1,1 +1,1 @@
-error|3|found end of input|expected '_'|'0'|'1'|'['|'{'|identifier
+error|3|found end of input|expected|name|bracket|brace|number

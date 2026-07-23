@@ -61,6 +61,30 @@ fn decodes_multiline_text_once_and_excludes_source_only_lines() {
 }
 
 #[test]
+fn rejects_multiline_content_without_the_required_line_prefix() {
+    let source = concat!(
+        "language g0\n",
+        "first =\n",
+        "  \"\"\"\n",
+        "  \"missing separator\n",
+        "  \"\"\"\n",
+        "second =\n",
+        "  \"\"\"\n",
+        "  missing quote\n",
+        "  \"\"\"\n",
+    );
+    let lexed = lex_source(source);
+
+    assert!(lexed.has_errors());
+    assert!(lexed.diagnostics().iter().any(|diagnostic| {
+        diagnostic.line == 4 && diagnostic.message.contains("separator space")
+    }));
+    assert!(lexed.diagnostics().iter().any(|diagnostic| {
+        diagnostic.line == 8 && diagnostic.message.contains("must begin with")
+    }));
+}
+
+#[test]
 fn delimiter_recovery_keeps_only_correctly_paired_groups() {
     let source = "language g0\nbad = ([)]\nnext = 1\n";
     let lexed = lex_source(source);
@@ -383,11 +407,10 @@ fn invalid_syntax_fixtures_have_explicit_lexical_classification() {
         "bad_language_decl.g",
         "let_where_syntax.g",
         "missing_language.g",
-        "multiline_text.g",
         "path_whitespace.g",
         "tagged_spacing.g",
     ];
-    let expected_lexical = ["unbalanced_delimiters.g"];
+    let expected_lexical = ["multiline_text.g", "unbalanced_delimiters.g"];
     let paths = sample_files(Path::new("samples/invalid/syntax"));
     assert_eq!(
         paths.len(),

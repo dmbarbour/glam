@@ -35,7 +35,7 @@ pub(in crate::g_syntax::parser) fn parse_simple_declaration<'lex, 'source: 'lex>
     view: TokenView<'lex, 'source>,
     line: usize,
     declaration: SimpleDeclaration,
-    session: &mut ParseSession<'lex, 'source>,
+    session: &mut ParseSession,
 ) -> DeclarationKind {
     match declaration {
         SimpleDeclaration::Language => parse_with(
@@ -68,7 +68,7 @@ pub(in crate::g_syntax::parser) fn parse_simple_declaration<'lex, 'source: 'lex>
 fn parse_with<'lex, 'source: 'lex, P>(
     view: TokenView<'lex, 'source>,
     line: usize,
-    session: &mut ParseSession<'lex, 'source>,
+    session: &mut ParseSession,
     parser: P,
 ) -> DeclarationKind
 where

@@ -30,6 +30,9 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
             for dep in &object.deps {
                 analyze_expr_locals(dep, line, diagnostics);
             }
+            if let Some(alias) = &object.alias {
+                warn_unused_with_alias(alias, &object.body, line, diagnostics);
+            }
             analyze_object_body_locals(&object.body, diagnostics);
         }
         SyntaxExpr::With { base, alias, body } => {
@@ -157,6 +160,9 @@ fn analyze_object_body_locals(body: &[ObjectBodyDefinition], diagnostics: &mut V
             analyze_expr_locals(expr, item.line, diagnostics);
         }
         if let Some(object) = item.object() {
+            if let Some(alias) = &object.alias {
+                warn_unused_with_alias(alias, &object.body, item.line, diagnostics);
+            }
             analyze_object_body_locals(&object.body, diagnostics);
         }
     }

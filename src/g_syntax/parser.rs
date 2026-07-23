@@ -9,11 +9,13 @@ mod layout;
 mod lexical;
 mod source;
 
+#[cfg(test)]
 pub(super) use compound::parse_expr_result_with_diagnostics;
 #[cfg(test)]
 pub(super) use declaration::definition_decl;
 pub(super) use declaration::definition_target_parts;
 #[cfg(test)]
 pub(super) use expression::parse_expr;
+#[cfg(test)]
 pub(super) use expression::syntax_expr_parser;
 pub use source::parse_source;

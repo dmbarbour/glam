@@ -152,7 +152,7 @@ fn line_start_and_layout_spacing_are_explicit_tokens() {
 fn token_errors_use_source_lines_and_source_lexemes() {
     let lexical = lex_source("first\n  42");
     let mut session = ParseSession::new(&lexical);
-    let view = session.whole_view();
+    let view = TokenView::whole(&lexical);
     let parser = line_start()
         .ignore_then(keyword("first"))
         .then_ignore(line_break_before(line_start()))
@@ -161,15 +161,12 @@ fn token_errors_use_source_lines_and_source_lexemes() {
     let errors = parser.parse(view.chumsky_input()).into_errors();
     session.record_token_errors(view, errors);
 
-    assert_eq!(session.diagnostics().len(), 1);
-    assert_eq!(session.diagnostics()[0].severity, Severity::Error);
-    assert_eq!(session.diagnostics()[0].line, 2);
-    assert!(session.diagnostics()[0].message.contains("second"));
-    assert!(session.diagnostics()[0].message.contains("`42`"));
-
-    let range = TokenRange::new(0, 2).unwrap();
-    assert_eq!(session.view(range).unwrap().range(), range);
-    assert_eq!(session.into_diagnostics().len(), 1);
+    let diagnostics = session.into_diagnostics();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert_eq!(diagnostics[0].line, 2);
+    assert!(diagnostics[0].message.contains("second"));
+    assert!(diagnostics[0].message.contains("`42`"));
 }
 
 #[test]

@@ -4,8 +4,7 @@
 //! lexical pass. A statement expression is handed back to the complete token
 //! expression parser; no source substring is normalized or re-lexed.
 
-use super::{ParsedDoStatement, empty_do_expr, finish_do_statements};
-use crate::g_syntax::{Diagnostic, SyntaxExpr};
+use crate::g_syntax::{Diagnostic, DoExpr, DoStep, DoStepKind, SyntaxExpr};
 
 use super::super::compound::token::parse_expression;
 use super::super::input::{TokenRange, TokenView};
@@ -13,6 +12,13 @@ use super::super::layout::{LayoutBase, LayoutView};
 use super::super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
+
+enum ParsedDoStatement {
+    Abstract(Vec<String>),
+    Bind { name: String, operation: SyntaxExpr },
+    ValueBind { name: String, value: SyntaxExpr },
+    Expr(SyntaxExpr),
+}
 
 /// Parses the `do` atom beginning at `do_index` and returns the first token
 /// after it. The caller can therefore consume the atom as one ordinary
@@ -167,6 +173,54 @@ fn parse_braced_body(
         })
         .collect::<ParseResult<Vec<_>>>()?;
     finish_do_statements(statements).map_err(|message| error_at_token(body, do_token, message))
+}
+
+fn finish_do_statements(
+    mut statements: Vec<(usize, ParsedDoStatement)>,
+) -> Result<SyntaxExpr, String> {
+    let (result_line, result_statement) = statements
+        .pop()
+        .expect("do statement sequence should be checked as non-empty");
+
+    let mut steps = Vec::with_capacity(statements.len());
+    for (line, statement) in statements {
+        let kind = match statement {
+            ParsedDoStatement::Abstract(names) => DoStepKind::Abstract(names),
+            ParsedDoStatement::Bind { name, operation } => DoStepKind::Bind { name, operation },
+            ParsedDoStatement::ValueBind { name, value } => DoStepKind::ValueBind { name, value },
+            ParsedDoStatement::Expr(expr) => DoStepKind::Then(expr),
+        };
+        steps.push(DoStep { line, kind });
+    }
+
+    let result = match result_statement {
+        ParsedDoStatement::Expr(expr) => expr,
+        ParsedDoStatement::Abstract(_) => {
+            return Err(
+                "do block cannot end with an abstract declaration; add its fulfillment and a final expression"
+                    .to_owned(),
+            );
+        }
+        ParsedDoStatement::Bind { .. } | ParsedDoStatement::ValueBind { .. } => {
+            return Err("do block cannot end with a binding; add a final expression".to_owned());
+        }
+    };
+    Ok(SyntaxExpr::Do(DoExpr {
+        steps,
+        result_line,
+        result: Box::new(result),
+    }))
+}
+
+fn empty_do_expr(line: usize) -> SyntaxExpr {
+    SyntaxExpr::Do(DoExpr {
+        steps: Vec::new(),
+        result_line: line,
+        result: Box::new(SyntaxExpr::Apply(
+            Box::new(SyntaxExpr::Effect(vec!["r".to_owned()])),
+            Box::new(SyntaxExpr::Unit),
+        )),
+    })
 }
 
 fn parse_statement(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {

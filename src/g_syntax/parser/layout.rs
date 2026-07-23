@@ -1,22 +1,16 @@
+#[cfg(test)]
 use chumsky::prelude::*;
 
 use super::input::{TokenRange, TokenView};
 use super::lexical::TokenKind;
 
-#[allow(
-    dead_code,
-    reason = "token-native layout is consumed as production grammars migrate after phase 2"
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LayoutBase {
     FirstLine,
+    #[cfg(test)]
     Indentation(usize),
 }
 
-#[allow(
-    dead_code,
-    reason = "token-native layout is consumed as production grammars migrate after phase 2"
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct LayoutLine {
     line: usize,
@@ -24,10 +18,6 @@ pub(super) struct LayoutLine {
     tokens: TokenRange,
 }
 
-#[allow(
-    dead_code,
-    reason = "token-native layout is consumed as production grammars migrate after phase 2"
-)]
 impl LayoutLine {
     pub(super) fn line(self) -> usize {
         self.line
@@ -42,20 +32,12 @@ impl LayoutLine {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "token-native layout is consumed as production grammars migrate after phase 2"
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct LayoutStatement {
     line: usize,
     tokens: TokenRange,
 }
 
-#[allow(
-    dead_code,
-    reason = "token-native layout is consumed as production grammars migrate after phase 2"
-)]
 impl LayoutStatement {
     pub(super) fn line(self) -> usize {
         self.line
@@ -66,20 +48,12 @@ impl LayoutStatement {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "token-native layout is consumed as production grammars migrate after phase 2"
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LayoutError {
     line: usize,
     message: String,
 }
 
-#[allow(
-    dead_code,
-    reason = "token-native layout is consumed as production grammars migrate after phase 2"
-)]
 impl LayoutError {
     pub(super) fn line(&self) -> usize {
         self.line
@@ -90,24 +64,17 @@ impl LayoutError {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "token-native layout is consumed as production grammars migrate after phase 2"
-)]
 #[derive(Debug, Clone, Copy)]
 pub(super) struct LayoutView<'lex, 'source> {
     tokens: TokenView<'lex, 'source>,
 }
 
-#[allow(
-    dead_code,
-    reason = "token-native layout is consumed as production grammars migrate after phase 2"
-)]
 impl<'lex, 'source> LayoutView<'lex, 'source> {
     pub(super) fn new(tokens: TokenView<'lex, 'source>) -> Self {
         Self { tokens }
     }
 
+    #[cfg(test)]
     pub(super) fn tokens(self) -> TokenView<'lex, 'source> {
         self.tokens
     }
@@ -186,6 +153,7 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
         };
         let base = match base {
             LayoutBase::FirstLine => first.indentation,
+            #[cfg(test)]
             LayoutBase::Indentation(indentation) => indentation,
         };
         let mut statements: Vec<LayoutStatement> = Vec::new();
@@ -236,246 +204,254 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
     }
 }
 
-pub(super) fn legacy_glam_name<'src>()
--> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
-    text::ascii::ident().try_map(|name: &str, span| {
-        if name
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_alphabetic())
-        {
-            Ok(name.to_owned())
-        } else {
-            Err(Rich::custom(span, "expected name"))
-        }
-    })
-}
+#[cfg(test)]
+pub(super) use legacy::*;
 
-pub(super) fn legacy_local_name<'src>()
--> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
-    choice((
-        just('_')
-            .ignore_then(legacy_glam_name())
-            .map(|name| format!("_{name}")),
-        just('_').to("_".to_owned()),
-        legacy_glam_name(),
-    ))
-}
+#[cfg(test)]
+mod legacy {
+    use super::*;
 
-pub(super) fn legacy_whitespace0<'src>()
--> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> {
-    one_of(" \r\n").repeated().ignored()
-}
-
-pub(super) fn legacy_whitespace1<'src>()
--> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> {
-    one_of(" \r\n").repeated().at_least(1).ignored()
-}
-
-pub(super) fn legacy_is_glam_whitespace(ch: char) -> bool {
-    matches!(ch, ' ' | '\r' | '\n')
-}
-
-pub(super) fn legacy_first_word(text: &str) -> Option<&str> {
-    text.split(legacy_is_glam_whitespace).next()
-}
-
-pub(super) fn legacy_strip_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    let mut quoted = false;
-    let mut index = 0;
-
-    while index < bytes.len() {
-        if bytes[index..].starts_with(b"\"\"\"") {
-            // A multiline delimiter does not turn the remainder of its own
-            // source line into text.
-            index += 3;
-            continue;
-        }
-        match bytes[index] {
-            b'"' => quoted = !quoted,
-            b'#' if !quoted => return &line[..index],
-            _ => {}
-        }
-        index += 1;
-    }
-
-    line
-}
-
-pub(super) fn legacy_opens_multiline_text(line: &str) -> bool {
-    line.trim_end().ends_with("\"\"\"")
-}
-
-pub(super) fn legacy_closes_multiline_text(line: &str) -> bool {
-    line.trim_start().starts_with("\"\"\"")
-}
-
-pub(super) fn legacy_is_indented(line: &str) -> bool {
-    line.starts_with(' ')
-}
-
-pub(super) fn legacy_indentation_width(line: &str) -> usize {
-    line.chars().take_while(|ch| *ch == ' ').count()
-}
-
-pub(super) fn legacy_strip_indent_width(line: &str, width: usize) -> &str {
-    let mut remaining = width;
-    for (index, ch) in line.char_indices() {
-        if remaining == 0 || ch != ' ' {
-            return &line[index..];
-        }
-        remaining = remaining.saturating_sub(ch.len_utf8());
-    }
-    ""
-}
-
-pub(super) fn legacy_is_dedent_closer(trimmed: &str) -> bool {
-    !trimmed.is_empty() && trimmed.chars().all(|ch| matches!(ch, '}' | ']' | ')'))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct LegacyLayoutStatement<'a> {
-    pub(super) text: &'a str,
-    /// Zero-based line offset within the supplied block text.
-    pub(super) line_offset: usize,
-}
-
-/// Splits a normalized layout block without interpreting its statements.
-///
-/// Each non-empty, unindented line begins a statement. Indented lines,
-/// dedented delimiter-only closers, and multiline text remain attached to the
-/// preceding statement. Source parsing removes comment-only lines before this
-/// helper receives a declaration body.
-pub(super) fn legacy_split_layout_statements(
-    text: &str,
-) -> Result<Vec<LegacyLayoutStatement<'_>>, String> {
-    let lines = legacy_split_lines(text);
-    let mut starts = Vec::new();
-    let mut in_multiline_text = false;
-
-    for line in lines {
-        let trimmed = line.text.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if in_multiline_text {
-            in_multiline_text = !legacy_closes_multiline_text(line.text);
-            continue;
-        }
-        if legacy_opens_multiline_text(line.text) {
-            in_multiline_text = true;
-        }
-        if legacy_is_indented(line.text) || legacy_is_dedent_closer(trimmed) {
-            if starts.is_empty() {
-                return Err("layout block begins with a continuation line".to_owned());
+    pub(in crate::g_syntax::parser) fn legacy_glam_name<'src>()
+    -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
+        text::ascii::ident().try_map(|name: &str, span| {
+            if name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic())
+            {
+                Ok(name.to_owned())
+            } else {
+                Err(Rich::custom(span, "expected name"))
             }
-            continue;
-        }
-        starts.push((line.start, line.number - 1));
+        })
     }
 
-    let mut statements = Vec::with_capacity(starts.len());
-    for (index, &(start, line_offset)) in starts.iter().enumerate() {
-        let end = starts
-            .get(index + 1)
-            .map_or(text.len(), |&(next_start, _)| next_start);
-        statements.push(LegacyLayoutStatement {
-            text: text[start..end].trim_end(),
-            line_offset,
-        });
-    }
-    Ok(statements)
-}
-
-/// Removes the indentation established by the first non-empty block line.
-/// This is needed when one layout expression is nested inside another
-/// statement; top-level declaration collection has already performed the same
-/// normalization for the outermost expression.
-pub(super) fn legacy_dedent_layout_block(text: &str) -> Result<String, String> {
-    let lines = legacy_split_lines(text);
-    let base_indent = lines
-        .iter()
-        .find(|line| !line.text.trim().is_empty())
-        .map_or(0, |line| legacy_indentation_width(line.text));
-    let mut normalized = String::with_capacity(text.len());
-    let mut in_multiline_text = false;
-
-    for (index, line) in lines.into_iter().enumerate() {
-        if index > 0 {
-            normalized.push('\n');
-        }
-        let trimmed = line.text.trim();
-        if !trimmed.is_empty()
-            && !in_multiline_text
-            && legacy_indentation_width(line.text) < base_indent
-        {
-            return Err(format!(
-                "layout line {} is indented less than the first statement",
-                line.number
-            ));
-        }
-        normalized.push_str(legacy_strip_indent_width(line.text, base_indent));
-
-        if in_multiline_text {
-            in_multiline_text = !legacy_closes_multiline_text(line.text);
-        } else if legacy_opens_multiline_text(line.text) {
-            in_multiline_text = true;
-        }
+    pub(in crate::g_syntax::parser) fn legacy_local_name<'src>()
+    -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
+        choice((
+            just('_')
+                .ignore_then(legacy_glam_name())
+                .map(|name| format!("_{name}")),
+            just('_').to("_".to_owned()),
+            legacy_glam_name(),
+        ))
     }
 
-    Ok(normalized)
-}
+    pub(in crate::g_syntax::parser) fn legacy_whitespace0<'src>()
+    -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> {
+        one_of(" \r\n").repeated().ignored()
+    }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct LegacyPhysicalLine<'a> {
-    pub(super) number: usize,
-    pub(super) start: usize,
-    pub(super) text: &'a str,
-}
+    pub(in crate::g_syntax::parser) fn legacy_whitespace1<'src>()
+    -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> {
+        one_of(" \r\n").repeated().at_least(1).ignored()
+    }
 
-pub(super) fn legacy_split_lines(text: &str) -> Vec<LegacyPhysicalLine<'_>> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    let mut number = 1;
-    let bytes = text.as_bytes();
-    let mut index = 0;
+    pub(in crate::g_syntax::parser) fn legacy_is_glam_whitespace(ch: char) -> bool {
+        matches!(ch, ' ' | '\r' | '\n')
+    }
 
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
-                lines.push(LegacyPhysicalLine {
-                    number,
-                    start,
-                    text: &text[start..index],
-                });
-                index += 2;
-                start = index;
-                number += 1;
+    pub(in crate::g_syntax::parser) fn legacy_strip_comment(line: &str) -> &str {
+        let bytes = line.as_bytes();
+        let mut quoted = false;
+        let mut index = 0;
+
+        while index < bytes.len() {
+            if bytes[index..].starts_with(b"\"\"\"") {
+                // A multiline delimiter does not turn the remainder of its own
+                // source line into text.
+                index += 3;
+                continue;
             }
-            b'\r' | b'\n' => {
-                lines.push(LegacyPhysicalLine {
-                    number,
-                    start,
-                    text: &text[start..index],
-                });
-                index += 1;
-                start = index;
-                number += 1;
+            match bytes[index] {
+                b'"' => quoted = !quoted,
+                b'#' if !quoted => return &line[..index],
+                _ => {}
             }
-            _ => index += 1,
+            index += 1;
         }
+
+        line
     }
 
-    if start < text.len() || text.is_empty() {
-        lines.push(LegacyPhysicalLine {
-            number,
-            start,
-            text: &text[start..],
-        });
+    pub(in crate::g_syntax::parser) fn legacy_opens_multiline_text(line: &str) -> bool {
+        line.trim_end().ends_with("\"\"\"")
     }
 
-    lines
+    pub(in crate::g_syntax::parser) fn legacy_closes_multiline_text(line: &str) -> bool {
+        line.trim_start().starts_with("\"\"\"")
+    }
+
+    pub(in crate::g_syntax::parser) fn legacy_is_indented(line: &str) -> bool {
+        line.starts_with(' ')
+    }
+
+    pub(in crate::g_syntax::parser) fn legacy_indentation_width(line: &str) -> usize {
+        line.chars().take_while(|ch| *ch == ' ').count()
+    }
+
+    pub(in crate::g_syntax::parser) fn legacy_strip_indent_width(line: &str, width: usize) -> &str {
+        let mut remaining = width;
+        for (index, ch) in line.char_indices() {
+            if remaining == 0 || ch != ' ' {
+                return &line[index..];
+            }
+            remaining = remaining.saturating_sub(ch.len_utf8());
+        }
+        ""
+    }
+
+    pub(in crate::g_syntax::parser) fn legacy_is_dedent_closer(trimmed: &str) -> bool {
+        !trimmed.is_empty() && trimmed.chars().all(|ch| matches!(ch, '}' | ']' | ')'))
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(in crate::g_syntax::parser) struct LegacyLayoutStatement<'a> {
+        pub(in crate::g_syntax::parser) text: &'a str,
+        /// Zero-based line offset within the supplied block text.
+        pub(in crate::g_syntax::parser) line_offset: usize,
+    }
+
+    /// Splits a normalized layout block without interpreting its statements.
+    ///
+    /// Each non-empty, unindented line begins a statement. Indented lines,
+    /// dedented delimiter-only closers, and multiline text remain attached to the
+    /// preceding statement. Source parsing removes comment-only lines before this
+    /// helper receives a declaration body.
+    pub(in crate::g_syntax::parser) fn legacy_split_layout_statements(
+        text: &str,
+    ) -> Result<Vec<LegacyLayoutStatement<'_>>, String> {
+        let lines = legacy_split_lines(text);
+        let mut starts = Vec::new();
+        let mut in_multiline_text = false;
+
+        for line in lines {
+            let trimmed = line.text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if in_multiline_text {
+                in_multiline_text = !legacy_closes_multiline_text(line.text);
+                continue;
+            }
+            if legacy_opens_multiline_text(line.text) {
+                in_multiline_text = true;
+            }
+            if legacy_is_indented(line.text) || legacy_is_dedent_closer(trimmed) {
+                if starts.is_empty() {
+                    return Err("layout block begins with a continuation line".to_owned());
+                }
+                continue;
+            }
+            starts.push((line.start, line.number - 1));
+        }
+
+        let mut statements = Vec::with_capacity(starts.len());
+        for (index, &(start, line_offset)) in starts.iter().enumerate() {
+            let end = starts
+                .get(index + 1)
+                .map_or(text.len(), |&(next_start, _)| next_start);
+            statements.push(LegacyLayoutStatement {
+                text: text[start..end].trim_end(),
+                line_offset,
+            });
+        }
+        Ok(statements)
+    }
+
+    /// Removes the indentation established by the first non-empty block line.
+    /// This is needed when one layout expression is nested inside another
+    /// statement; top-level declaration collection has already performed the same
+    /// normalization for the outermost expression.
+    pub(in crate::g_syntax::parser) fn legacy_dedent_layout_block(
+        text: &str,
+    ) -> Result<String, String> {
+        let lines = legacy_split_lines(text);
+        let base_indent = lines
+            .iter()
+            .find(|line| !line.text.trim().is_empty())
+            .map_or(0, |line| legacy_indentation_width(line.text));
+        let mut normalized = String::with_capacity(text.len());
+        let mut in_multiline_text = false;
+
+        for (index, line) in lines.into_iter().enumerate() {
+            if index > 0 {
+                normalized.push('\n');
+            }
+            let trimmed = line.text.trim();
+            if !trimmed.is_empty()
+                && !in_multiline_text
+                && legacy_indentation_width(line.text) < base_indent
+            {
+                return Err(format!(
+                    "layout line {} is indented less than the first statement",
+                    line.number
+                ));
+            }
+            normalized.push_str(legacy_strip_indent_width(line.text, base_indent));
+
+            if in_multiline_text {
+                in_multiline_text = !legacy_closes_multiline_text(line.text);
+            } else if legacy_opens_multiline_text(line.text) {
+                in_multiline_text = true;
+            }
+        }
+
+        Ok(normalized)
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub(in crate::g_syntax::parser) struct LegacyPhysicalLine<'a> {
+        pub(in crate::g_syntax::parser) number: usize,
+        pub(in crate::g_syntax::parser) start: usize,
+        pub(in crate::g_syntax::parser) text: &'a str,
+    }
+
+    pub(in crate::g_syntax::parser) fn legacy_split_lines(
+        text: &str,
+    ) -> Vec<LegacyPhysicalLine<'_>> {
+        let mut lines = Vec::new();
+        let mut start = 0;
+        let mut number = 1;
+        let bytes = text.as_bytes();
+        let mut index = 0;
+
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
+                    lines.push(LegacyPhysicalLine {
+                        number,
+                        start,
+                        text: &text[start..index],
+                    });
+                    index += 2;
+                    start = index;
+                    number += 1;
+                }
+                b'\r' | b'\n' => {
+                    lines.push(LegacyPhysicalLine {
+                        number,
+                        start,
+                        text: &text[start..index],
+                    });
+                    index += 1;
+                    start = index;
+                    number += 1;
+                }
+                _ => index += 1,
+            }
+        }
+
+        if start < text.len() || text.is_empty() {
+            lines.push(LegacyPhysicalLine {
+                number,
+                start,
+                text: &text[start..],
+            });
+        }
+
+        lines
+    }
 }
 
 #[cfg(test)]

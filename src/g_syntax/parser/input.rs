@@ -3,11 +3,6 @@
 //! This is the sole adapter from one [`LexedSource`] to token parsers. Grammar
 //! code receives an existing [`TokenView`]; it must not lex source fragments.
 
-#![allow(
-    dead_code,
-    reason = "phase 2 installs this substrate before phases 3-7 migrate production grammars"
-)]
-
 use std::fmt;
 use std::ops::Range;
 
@@ -72,6 +67,7 @@ pub(super) struct TokenView<'lex, 'source> {
 }
 
 impl<'lex, 'source> TokenView<'lex, 'source> {
+    #[cfg(test)]
     pub(super) fn whole(source: &'lex LexedSource<'source>) -> Self {
         Self {
             source,
@@ -124,6 +120,7 @@ impl<'lex, 'source> TokenView<'lex, 'source> {
         &self.source.tokens()[self.range.as_range()]
     }
 
+    #[cfg(test)]
     pub(super) fn get(self, relative_index: usize) -> Option<&'lex SpannedToken<'source>> {
         (relative_index < self.len())
             .then(|| &self.source.tokens()[self.range.start + relative_index])
@@ -156,10 +153,12 @@ impl<'lex, 'source> TokenView<'lex, 'source> {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn before(self, relative_index: usize) -> Option<Self> {
         self.slice(0..relative_index)
     }
 
+    #[cfg(test)]
     pub(super) fn after(self, relative_index: usize) -> Option<Self> {
         self.slice(relative_index.checked_add(1)?..self.len())
     }
@@ -188,6 +187,7 @@ impl<'lex, 'source> TokenView<'lex, 'source> {
         self.line_at_byte(span.start())
     }
 
+    #[cfg(test)]
     pub(super) fn source_line(self, line: usize) -> Option<&'source str> {
         self.source.source_line(line)
     }
@@ -223,6 +223,7 @@ impl<'lex, 'source> TokenView<'lex, 'source> {
         self.subview(range)
     }
 
+    #[cfg(test)]
     pub(super) fn group_at(
         self,
         relative_index: usize,
@@ -487,6 +488,7 @@ where
     leading(LeadingTrivia::Space, "same-line space").ignore_then(parser)
 }
 
+#[cfg(test)]
 pub(super) fn line_break_before<'lex, 'source: 'lex, O, P>(
     parser: P,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, O, TokenExtra<'lex, 'source>>
@@ -496,6 +498,7 @@ where
     leading(LeadingTrivia::LineBreak, "line break").ignore_then(parser)
 }
 
+#[cfg(test)]
 pub(super) fn space_or_layout_before<'lex, 'source: 'lex, O, P>(
     parser: P,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, O, TokenExtra<'lex, 'source>>
@@ -528,28 +531,18 @@ fn delimiter_label(delimiter: Delimiter) -> &'static str {
     }
 }
 
-pub(super) struct ParseSession<'lex, 'source> {
-    source: &'lex LexedSource<'source>,
+pub(super) struct ParseSession {
     diagnostics: Vec<Diagnostic>,
 }
 
-impl<'lex, 'source> ParseSession<'lex, 'source> {
-    pub(super) fn new(source: &'lex LexedSource<'source>) -> Self {
+impl ParseSession {
+    pub(super) fn new(_source: &LexedSource<'_>) -> Self {
         Self {
-            source,
             diagnostics: Vec::new(),
         }
     }
 
-    pub(super) fn whole_view(&self) -> TokenView<'lex, 'source> {
-        TokenView::whole(self.source)
-    }
-
-    pub(super) fn view(&self, range: TokenRange) -> Option<TokenView<'lex, 'source>> {
-        TokenView::new(self.source, range)
-    }
-
-    pub(super) fn record_token_errors(
+    pub(super) fn record_token_errors<'lex, 'source>(
         &mut self,
         view: TokenView<'lex, 'source>,
         errors: impl IntoIterator<Item = TokenError<'lex, 'source>>,
@@ -561,7 +554,7 @@ impl<'lex, 'source> ParseSession<'lex, 'source> {
         );
     }
 
-    pub(super) fn record_token_errors_at_line(
+    pub(super) fn record_token_errors_at_line<'lex, 'source>(
         &mut self,
         view: TokenView<'lex, 'source>,
         line: usize,
@@ -574,10 +567,6 @@ impl<'lex, 'source> ParseSession<'lex, 'source> {
         }));
     }
 
-    pub(super) fn diagnostics(&self) -> &[Diagnostic] {
-        &self.diagnostics
-    }
-
     pub(super) fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
         std::mem::take(&mut self.diagnostics)
     }
@@ -588,7 +577,14 @@ impl<'lex, 'source> ParseSession<'lex, 'source> {
 }
 
 fn token_error_diagnostic(view: TokenView<'_, '_>, error: &TokenError<'_, '_>) -> Diagnostic {
-    let line = view.line_at_span(*error.span()).unwrap_or(1);
+    let line = if error.found().is_none() {
+        view.last_significant()
+            .and_then(|(_, token)| view.line_at_span(token.span()))
+            .or_else(|| view.line_at_span(*error.span()))
+            .unwrap_or(1)
+    } else {
+        view.line_at_span(*error.span()).unwrap_or(1)
+    };
     let message = match error.reason() {
         RichReason::Custom(message) => message.clone(),
         RichReason::ExpectedFound { .. } => {

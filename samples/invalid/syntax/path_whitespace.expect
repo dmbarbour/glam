@@ -1,1 +1,1 @@
-error|3|found ' '|expected '['|'('|identifier
+error|3|expected adjacent token|found `bar`

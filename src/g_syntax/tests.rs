@@ -313,7 +313,7 @@ fn groups_indented_continuation_lines() {
     let parsed = parse("language g0\nfoo = do\n  .bar\n  .baz\nqux := 1\n");
 
     assert_eq!(parsed.declarations.len(), 3);
-    assert_eq!(parsed.declarations[1].text, "foo = do\n.bar\n.baz");
+    assert_eq!(parsed.declarations[1].text, "foo = do\n  .bar\n  .baz");
     assert_eq!(
         parsed.declarations[2].kind,
         DeclarationKind::Definition(DefinitionDecl {
@@ -1832,7 +1832,7 @@ fn parses_multiline_literals_with_leading_commas() {
             target: "nums".to_owned(),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "[\n, 1\n, 2\n]".to_owned(),
+            body: "[\n  , 1\n  , 2\n  ]".to_owned(),
             expr: Some(SyntaxExpr::List(vec![
                 SyntaxExpr::Number(n(1)),
                 SyntaxExpr::Number(n(2)),
@@ -1845,7 +1845,7 @@ fn parses_multiline_literals_with_leading_commas() {
             target: "d".to_owned(),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "{\n, hello:\"Hello\"\n, world:\"World\"\n}".to_owned(),
+            body: "{\n  , hello:\"Hello\"\n  , world:\"World\"\n  }".to_owned(),
             expr: Some(SyntaxExpr::DictUnion(vec![
                 SyntaxExpr::PathDict(
                     vec![SyntaxKeyExpr::Atom("hello".to_owned())],

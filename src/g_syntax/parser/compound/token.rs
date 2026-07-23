@@ -1,12 +1,11 @@
-//! Token-native compound-expression parsing used by the Phase 5 differential
-//! harness.
+//! Token-native compound-expression parsing.
 //!
-//! `let` and `where` produce complete syntax trees. Object and `with` parsing
-//! intentionally stops after their headers: nested declaration bodies remain
-//! owned by the legacy production parser until Phase 7 supplies token-native
-//! nested declarations.
+//! `let`, `where`, object, and `with` expressions produce complete syntax
+//! trees. Object bodies share the recursive declaration parser used by
+//! top-level object declarations.
 
-use super::super::super::{Diagnostic, SyntaxExpr};
+use super::super::super::{Diagnostic, ObjectExpr, Severity, SyntaxExpr};
+use super::super::declaration::token::parse_object_body;
 use super::super::expression::token::parse_expression_view;
 use super::super::input::{TokenRange, TokenView};
 use super::super::layout::{LayoutBase, LayoutView};
@@ -27,6 +26,7 @@ struct WithHeader {
     alias: Option<String>,
 }
 
+#[cfg(test)]
 pub(in crate::g_syntax::parser) fn parse_compound_expression_fragment(
     source: &[u8],
 ) -> ParseResult<SyntaxExpr> {
@@ -41,6 +41,12 @@ pub(in crate::g_syntax::parser) fn parse_expression(
         return result;
     }
     if let Some(result) = parse_where(view) {
+        return result;
+    }
+    if let Some(result) = parse_object(view) {
+        return result;
+    }
+    if let Some(result) = parse_with(view) {
         return result;
     }
     parse_expression_view(view)
@@ -231,6 +237,56 @@ fn parse_binding(view: TokenView<'_, '_>) -> ParseResult<(String, SyntaxExpr)> {
         ));
     }
     parse_expression(value_view).map(|value| (name.to_owned(), value))
+}
+
+fn parse_object(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
+    let header = match parse_object_header(view)? {
+        Ok(header) => header,
+        Err(diagnostics) => return Some(Err(diagnostics)),
+    };
+    let (body, diagnostics) = if let Some(body_start) = first_top_level_line_start(view) {
+        let body_view = view_between(view, body_start, view.range().end());
+        let mut diagnostics = Vec::new();
+        let body = parse_object_body(body_view, &mut diagnostics);
+        (body, diagnostics)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        return Some(Err(diagnostics));
+    }
+    Some(Ok(SyntaxExpr::Object(ObjectExpr {
+        name: header.name,
+        alias: header.alias,
+        deps: header.deps,
+        body,
+    })))
+}
+
+fn parse_with(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
+    let header = match parse_with_header(view)? {
+        Ok(header) => header,
+        Err(diagnostics) => return Some(Err(diagnostics)),
+    };
+    let body_start =
+        first_top_level_line_start(view).expect("with-expression headers require a body line");
+    let body_view = view_between(view, body_start, view.range().end());
+    let mut diagnostics = Vec::new();
+    let body = parse_object_body(body_view, &mut diagnostics);
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        return Some(Err(diagnostics));
+    }
+    Some(Ok(SyntaxExpr::With {
+        base: header.base,
+        alias: header.alias,
+        body,
+    }))
 }
 
 fn split_multiline_let<'lex, 'source>(
@@ -469,7 +525,10 @@ fn parse_with_header(view: TokenView<'_, '_>) -> Option<ParseResult<WithHeader>>
     Some(Ok(WithHeader { base, alias }))
 }
 
-fn contextual_keywords(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
+pub(in crate::g_syntax::parser) fn contextual_keywords(
+    view: TokenView<'_, '_>,
+    expected: &str,
+) -> Vec<usize> {
     view.top_level()
         .filter(|indexed| {
             (indexed.index() == view.range().start()
@@ -493,7 +552,7 @@ fn top_level_symbols(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
         .collect()
 }
 
-fn split_top_level<'lex, 'source>(
+pub(in crate::g_syntax::parser) fn split_top_level<'lex, 'source>(
     view: TokenView<'lex, 'source>,
     separator: &str,
 ) -> Vec<TokenView<'lex, 'source>> {
@@ -507,13 +566,17 @@ fn split_top_level<'lex, 'source>(
     parts
 }
 
-fn first_top_level_line_start(view: TokenView<'_, '_>) -> Option<usize> {
+pub(in crate::g_syntax::parser) fn first_top_level_line_start(
+    view: TokenView<'_, '_>,
+) -> Option<usize> {
     view.top_level().find_map(|indexed| {
         matches!(indexed.token().kind(), TokenKind::LineStart { .. }).then(|| indexed.index())
     })
 }
 
-fn local_name<'source>(view: TokenView<'_, 'source>) -> Option<&'source str> {
+pub(in crate::g_syntax::parser) fn local_name<'source>(
+    view: TokenView<'_, 'source>,
+) -> Option<&'source str> {
     let mut significant = view
         .tokens()
         .iter()
@@ -545,7 +608,7 @@ fn token_column(view: TokenView<'_, '_>, token: &SpannedToken<'_>) -> usize {
         .map_or(0, |line| token.span().start() - line.start())
 }
 
-fn token_is_name(token: &SpannedToken<'_>, expected: &str) -> bool {
+pub(in crate::g_syntax::parser) fn token_is_name(token: &SpannedToken<'_>, expected: &str) -> bool {
     matches!(token.kind(), TokenKind::Name(name) if *name == expected)
 }
 
@@ -571,7 +634,9 @@ fn view_is_single_name(view: TokenView<'_, '_>, expected: &str) -> bool {
         && significant.next().is_none()
 }
 
-fn trim_layout<'lex, 'source>(mut view: TokenView<'lex, 'source>) -> TokenView<'lex, 'source> {
+pub(in crate::g_syntax::parser) fn trim_layout<'lex, 'source>(
+    mut view: TokenView<'lex, 'source>,
+) -> TokenView<'lex, 'source> {
     let tokens = view.tokens();
     let leading = tokens
         .iter()
@@ -588,13 +653,13 @@ fn trim_layout<'lex, 'source>(mut view: TokenView<'lex, 'source>) -> TokenView<'
     view
 }
 
-fn is_layout_empty(view: TokenView<'_, '_>) -> bool {
+pub(in crate::g_syntax::parser) fn is_layout_empty(view: TokenView<'_, '_>) -> bool {
     view.tokens()
         .iter()
         .all(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
 }
 
-fn view_between<'lex, 'source>(
+pub(in crate::g_syntax::parser) fn view_between<'lex, 'source>(
     view: TokenView<'lex, 'source>,
     start: usize,
     end: usize,

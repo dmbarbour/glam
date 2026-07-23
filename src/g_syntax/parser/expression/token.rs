@@ -1,7 +1,7 @@
 //! Token-native ordinary expression grammar.
 //!
-//! Phase 4 keeps this beside the complete character/compound parser. It is
-//! exercised through differential tests until the contextual forms migrate.
+//! Contextual forms delegate here for their ordinary expression leaves after
+//! selecting their token-owned structural ranges.
 
 use chumsky::error::Rich;
 use chumsky::prelude::*;
@@ -480,6 +480,7 @@ where
         .then_ignore(layout_padding())
 }
 
+#[cfg(test)]
 pub(super) fn parse_expression_fragment(source: &[u8]) -> Result<SyntaxExpr, Vec<Diagnostic>> {
     super::super::input::parse_expression_fragment(source, parse_expression_view)
 }

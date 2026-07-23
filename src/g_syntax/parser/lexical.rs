@@ -1,8 +1,8 @@
 //! Single-pass lexical structure for the built-in `.g` compiler.
 //!
-//! Production parsing consumes lexical diagnostics. Token, group, layout, and
-//! declaration structure is exercised differentially against the text parser
-//! while declarations and expressions migrate to token input.
+//! Production parsing consumes its diagnostics, token groups, declaration
+//! sections, and text values directly. Character-oriented parsers remain only
+//! as temporary test oracles pending their deletion.
 
 use std::ops::Range;
 
@@ -27,10 +27,7 @@ impl ByteSpan {
         self.end
     }
 
-    #[allow(
-        dead_code,
-        reason = "byte-range projection is part of the phase 2 token parser substrate"
-    )]
+    #[cfg(test)]
     pub(super) fn range(self) -> Range<usize> {
         self.start..self.end
     }
@@ -136,10 +133,6 @@ impl<'source> SpannedToken<'source> {
         self.span
     }
 
-    #[allow(
-        dead_code,
-        reason = "borrowed spans back the phase 2 Chumsky mapped input"
-    )]
     pub(super) fn span_ref(&self) -> &ByteSpan {
         &self.span
     }
@@ -697,7 +690,21 @@ impl<'source> Lexer<'source> {
                 && !trimmed.starts_with('#')
                 && let Some(content) = trimmed.strip_prefix('"')
             {
-                lines.push(content.strip_prefix(' ').unwrap_or(content).to_owned());
+                if content.is_empty() {
+                    lines.push(String::new());
+                } else if let Some(content) = content.strip_prefix(' ') {
+                    lines.push(content.to_owned());
+                } else {
+                    self.structural_diagnostics.push(Diagnostic::error(
+                        line_at(&self.line_starts, line_start),
+                        "multiline text content requires one separator space after `\"`",
+                    ));
+                }
+            } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                self.structural_diagnostics.push(Diagnostic::error(
+                    line_at(&self.line_starts, line_start),
+                    "multiline text content lines must begin with `\"`",
+                ));
             }
             if !self.consume_newline(false) {
                 break;

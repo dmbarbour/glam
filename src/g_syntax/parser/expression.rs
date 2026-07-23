@@ -1,20 +1,26 @@
 //! G-expression grammar and the small layout-aware scanners used by compound
 //! expression forms.
 
+#[cfg(test)]
 use chumsky::prelude::*;
 
+#[cfg(test)]
 use crate::number::Number;
 
-use super::super::{PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, flatten_path_suffixes};
+#[cfg(test)]
+use super::super::SyntaxOperator;
+use super::super::{PathSuffix, SyntaxExpr, SyntaxKeyExpr, flatten_path_suffixes};
 #[cfg(test)]
 use super::compound::parse_expr_result;
+#[cfg(test)]
 use super::declaration::quoted_text;
+#[cfg(test)]
 use super::layout::{legacy_glam_name, legacy_local_name, legacy_whitespace1};
 
 mod infix;
-#[cfg(test)]
 pub(super) mod token;
 
+#[cfg(test)]
 use infix::resolve_infix_chain;
 
 #[cfg(test)]
@@ -56,6 +62,7 @@ fn quoted_path(suffixes: Vec<PathSuffix>) -> SyntaxExpr {
         .unwrap_or_else(|| SyntaxExpr::List(Vec::new()))
 }
 
+#[cfg(test)]
 pub(in crate::g_syntax) fn syntax_expr_parser<'src>()
 -> impl Parser<'src, &'src str, SyntaxExpr, extra::Err<Rich<'src, char>>> {
     recursive(|expr| {
