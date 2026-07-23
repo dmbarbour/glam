@@ -1,8 +1,8 @@
 use super::super::{Declaration, Diagnostic, ParsedSource};
 use super::declaration::{
-    SimpleDeclaration, parse_declaration, parse_simple_declaration,
-    validate_declaration_continuations, validate_language_position,
+    SimpleDeclaration, parse_declaration, parse_simple_declaration, validate_language_position,
 };
+use super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::input::{ParseSession, TokenView};
 use super::lexical::{TokenKind, lex_source};
 
@@ -43,12 +43,14 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
             });
         let simple = head.and_then(SimpleDeclaration::from_head);
         let kind = if let Some(simple) = simple {
+            let (_, mut floor_diagnostics) =
+                validate_expression_floor(view, ExpressionContext::for_owner(view));
+            diagnostics.append(&mut floor_diagnostics);
             validate_simple_continuation_indentation(view, &mut diagnostics);
             parse_simple_declaration(view, line, simple, &mut token_session)
         } else {
             parse_declaration(view, line, &mut diagnostics)
         };
-        validate_declaration_continuations(view, &mut diagnostics);
         diagnostics.extend(token_session.take_diagnostics());
         let preview = declaration_preview(view);
         declarations.push(Declaration {

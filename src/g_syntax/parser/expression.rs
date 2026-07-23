@@ -480,8 +480,12 @@ fn do_expr<'lex, 'source: 'lex>(
             .and_then(|next| next.checked_sub(1))
             .unwrap_or_else(|| view.range().end().saturating_sub(1));
         let parsed = parse_do_atom(view, do_index, context.may_yield()).map_err(|diagnostics| {
+            let span = diagnostics
+                .first()
+                .and_then(|diagnostic| view.line_span(diagnostic.line))
+                .unwrap_or_else(|| input.span_since(&before));
             Rich::custom(
-                input.span_since(&before),
+                span,
                 diagnostics
                     .into_iter()
                     .map(|diagnostic| diagnostic.message)

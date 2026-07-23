@@ -10,15 +10,14 @@ use super::super::{
     ObjectBodyDefinitionKind, ObjectDecl, ObjectExtendDecl, Severity, SyntaxExpr, SyntaxKeyExpr,
     warn_unused_locals, warn_unused_with_alias,
 };
-use super::expression_context::ExpressionContext;
-use super::input::{TokenRange, TokenView};
+use super::expression_context::{ExpressionContext, validate_expression_floor};
+use super::input::TokenView;
 use super::layout::{LayoutBase, LayoutView};
 use super::lexical::{Delimiter, LeadingTrivia, TokenKind};
 use super::structural::{
     braced_contents, contextual_keywords, is_layout_empty, local_name, object_alias_name,
     parse_expression_in_context, parse_object_parents, single_reserved_keyword,
-    split_braced_members, split_compound_header_body, split_top_level, token_is_name, trim_layout,
-    view_between,
+    split_braced_members, split_compound_header_body, split_top_level, trim_layout, view_between,
 };
 
 mod simple;
@@ -60,115 +59,34 @@ pub(in crate::g_syntax::parser) fn parse_declaration(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> DeclarationKind {
     let view = trim_layout(view);
+    let context = ExpressionContext::for_owner(view);
+    parse_declaration_in_context(view, line, context, diagnostics)
+}
+
+fn parse_declaration_in_context(
+    view: TokenView<'_, '_>,
+    line: usize,
+    context: ExpressionContext,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> DeclarationKind {
+    let (context, mut floor_diagnostics) = validate_expression_floor(view, context);
+    diagnostics.append(&mut floor_diagnostics);
     let Some((_, head)) = view.first_significant() else {
         return DeclarationKind::Unknown;
     };
     match head.kind() {
-        TokenKind::Name("object") => parse_object_declaration(view, line, diagnostics)
+        TokenKind::Name("object") => parse_object_declaration(view, line, context, diagnostics)
             .map_or(DeclarationKind::Unknown, DeclarationKind::Object),
-        TokenKind::Name("extend") => parse_extend_declaration(view, line, diagnostics)
+        TokenKind::Name("extend") => parse_extend_declaration(view, line, context, diagnostics)
             .map_or(DeclarationKind::Unknown, DeclarationKind::Extend),
-        _ => parse_definition(view, line, diagnostics)
+        _ => parse_definition(view, line, context, diagnostics)
             .map_or(DeclarationKind::Unknown, DeclarationKind::Definition),
-    }
-}
-
-pub(in crate::g_syntax::parser) fn validate_declaration_continuations(
-    view: TokenView<'_, '_>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let Some((first_index, first_token)) = view.first_significant() else {
-        return;
-    };
-    let first_line = view.line_at_span(first_token.span()).unwrap_or(1);
-    let declaration_indentation = view.line_indentation_at(first_index).unwrap_or(0);
-    let line_starts = view
-        .tokens()
-        .iter()
-        .enumerate()
-        .filter_map(|(relative, token)| match token.kind() {
-            TokenKind::LineStart { indentation } => Some((
-                view.range().start() + relative,
-                *indentation,
-                view.line_at_span(token.span()).unwrap_or(first_line),
-            )),
-            _ => None,
-        })
-        .filter(|(_, _, line)| *line > first_line)
-        .collect::<Vec<_>>();
-
-    for (position, (line_start, indentation, line)) in line_starts.iter().copied().enumerate() {
-        if indentation > declaration_indentation {
-            continue;
-        }
-        let line_end = line_starts
-            .get(position + 1)
-            .map_or(view.range().end(), |(next, _, _)| *next);
-        let line_view = view
-            .subview(
-                TokenRange::new(line_start + 1, line_end)
-                    .expect("a physical source line has ordered token boundaries"),
-            )
-            .expect("a declaration line remains within its declaration");
-        let mut line_tokens = line_view
-            .tokens()
-            .iter()
-            .filter(|token| !matches!(token.kind(), TokenKind::LineStart { .. }));
-        let Some(first) = line_tokens.next() else {
-            continue;
-        };
-        let starts_with_closer = matches!(first.kind(), TokenKind::Close { .. });
-        let closer_only = starts_with_closer
-            && line_tokens.all(|token| matches!(token.kind(), TokenKind::Close { .. }));
-
-        if indentation == declaration_indentation && closer_only {
-            if position + 1 < line_starts.len() {
-                push_continuation_diagnostic(
-                    diagnostics,
-                    line,
-                    "expression continues after a boundary-aligned closing delimiter; indent the closing delimiter to continue the expression",
-                );
-            }
-        } else if starts_with_closer {
-            push_continuation_diagnostic(
-                diagnostics,
-                line,
-                "expression continues after a boundary-aligned closing delimiter; indent this line or end the declaration after the delimiter",
-            );
-        } else {
-            push_continuation_diagnostic(
-                diagnostics,
-                line,
-                format!(
-                    "declaration continuation is indented {indentation} spaces; expected at least {}",
-                    declaration_indentation + 1
-                ),
-            );
-        }
-    }
-}
-
-fn push_continuation_diagnostic(
-    diagnostics: &mut Vec<Diagnostic>,
-    line: usize,
-    message: impl Into<String>,
-) {
-    let already_reported = diagnostics.iter().any(|diagnostic| {
-        diagnostic.line == line
-            && (diagnostic
-                .message
-                .contains("boundary-aligned closing delimiter")
-                || diagnostic
-                    .message
-                    .starts_with("declaration continuation is indented"))
-    });
-    if !already_reported {
-        diagnostics.push(Diagnostic::error(line, message));
     }
 }
 
 pub(in crate::g_syntax::parser) fn parse_object_body(
     view: TokenView<'_, '_>,
+    parent_context: ExpressionContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<ObjectBodyDefinition> {
     if is_layout_empty(view) {
@@ -209,19 +127,15 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
 
     let mut body = Vec::with_capacity(statement_views.len());
     for (line, statement_view) in statement_views {
-        validate_declaration_continuations(statement_view, diagnostics);
         let statement_view = trim_layout(statement_view);
-        let kind = match statement_view.first_significant() {
-            Some((_, token)) if token_is_name(token, "object") => {
-                parse_object_declaration(statement_view, line, diagnostics)
-                    .map(ObjectBodyDefinitionKind::Object)
+        let context = parent_context.child_owner(statement_view);
+        let kind = match parse_declaration_in_context(statement_view, line, context, diagnostics) {
+            DeclarationKind::Object(object) => Some(ObjectBodyDefinitionKind::Object(object)),
+            DeclarationKind::Extend(extend) => Some(ObjectBodyDefinitionKind::Extend(extend)),
+            DeclarationKind::Definition(definition) => {
+                Some(ObjectBodyDefinitionKind::Definition(definition))
             }
-            Some((_, token)) if token_is_name(token, "extend") => {
-                parse_extend_declaration(statement_view, line, diagnostics)
-                    .map(ObjectBodyDefinitionKind::Extend)
-            }
-            _ => parse_definition(statement_view, line, diagnostics)
-                .map(ObjectBodyDefinitionKind::Definition),
+            _ => None,
         };
         if let Some(kind) = kind {
             body.push(ObjectBodyDefinition { line, kind });
@@ -234,10 +148,11 @@ pub(in crate::g_syntax::parser) fn parse_nonempty_object_body(
     view: TokenView<'_, '_>,
     line: usize,
     empty_message: &str,
+    parent_context: ExpressionContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Vec<ObjectBodyDefinition>> {
     let diagnostic_start = diagnostics.len();
-    let body = parse_object_body(view, diagnostics);
+    let body = parse_object_body(view, parent_context, diagnostics);
     if body.is_empty() {
         if !diagnostics[diagnostic_start..]
             .iter()
@@ -253,9 +168,9 @@ pub(in crate::g_syntax::parser) fn parse_nonempty_object_body(
 fn parse_definition(
     view: TokenView<'_, '_>,
     line: usize,
+    context: ExpressionContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<DefinitionDecl> {
-    let context = ExpressionContext::for_owner(view);
     let operator = view.top_level().find_map(|indexed| {
         let kind = match indexed.token().kind() {
             TokenKind::Symbol("::=") => DefinitionKind::Update,
@@ -505,9 +420,9 @@ fn combine_parse_errors(line: usize, diagnostics: Vec<Diagnostic>) -> Diagnostic
 fn parse_object_declaration(
     view: TokenView<'_, '_>,
     line: usize,
+    context: ExpressionContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ObjectDecl> {
-    let context = ExpressionContext::for_owner(view);
     let (header, body) = split_compound_header_body(view);
     let head = header.first_significant()?.0;
     let header = trim_layout(view_between(header, head + 1, header.range().end()));
@@ -538,12 +453,13 @@ fn parse_object_declaration(
             return None;
         };
         if braced_contents(body).is_some() {
-            parse_object_body(body, diagnostics)
+            parse_object_body(body, context, diagnostics)
         } else {
             parse_nonempty_object_body(
                 body,
                 line,
                 "object `with` body cannot be empty; use `with {}` for an explicit empty body",
+                context,
                 diagnostics,
             )?
         }
@@ -564,9 +480,9 @@ fn parse_object_declaration(
 fn parse_extend_declaration(
     view: TokenView<'_, '_>,
     line: usize,
+    context: ExpressionContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ObjectExtendDecl> {
-    let context = ExpressionContext::for_owner(view);
     let (header, body) = split_compound_header_body(view);
     let head = header.first_significant()?.0;
     let header = trim_layout(view_between(header, head + 1, header.range().end()));
@@ -586,12 +502,13 @@ fn parse_extend_declaration(
         return None;
     };
     let body = if braced_contents(body_view).is_some() {
-        parse_object_body(body_view, diagnostics)
+        parse_object_body(body_view, context, diagnostics)
     } else {
         parse_nonempty_object_body(
             body_view,
             line,
             "extend declaration body cannot be empty; use `with {}` for an explicit empty body",
+            context,
             diagnostics,
         )?
     };

@@ -8,7 +8,7 @@ use super::super::keywords::{canonical_keyword, reserved_keyword_message};
 use super::super::{Diagnostic, ObjectExpr, Severity, SyntaxExpr};
 use super::declaration::{parse_nonempty_object_body, parse_object_body};
 use super::expression::parse_expression_view;
-use super::expression_context::{ExpressionContext, ParsedExpression};
+use super::expression_context::{ExpressionContext, ParsedExpression, validate_expression_floor};
 use super::input::{TokenRange, TokenView};
 use super::layout::{LayoutBase, LayoutView};
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
@@ -33,14 +33,9 @@ struct WithHeader {
 pub(in crate::g_syntax::parser) fn parse_compound_expression_fragment(
     source: &[u8],
 ) -> ParseResult<SyntaxExpr> {
-    super::input::parse_expression_fragment(source, parse_expression)
-}
-
-#[cfg(test)]
-pub(in crate::g_syntax::parser) fn parse_expression(
-    view: TokenView<'_, '_>,
-) -> ParseResult<SyntaxExpr> {
-    parse_expression_in_context(view, ExpressionContext::for_owner(view))
+    super::input::parse_expression_fragment(source, |view| {
+        parse_expression_in_context(view, ExpressionContext::for_fragment(view))
+    })
 }
 
 pub(in crate::g_syntax::parser) fn parse_expression_in_context(
@@ -58,6 +53,10 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
     context: ExpressionContext,
 ) -> ParseResult<ParsedExpression> {
     let view = trim_layout(view);
+    let (context, floor_diagnostics) = validate_expression_floor(view, context);
+    if !floor_diagnostics.is_empty() {
+        return Err(floor_diagnostics);
+    }
     let expression = if let Some(result) = parse_parenthesized_structural(view, context) {
         result?
     } else if let Some(result) = parse_let(view, context) {
@@ -369,12 +368,13 @@ fn parse_object(
             )]));
         };
         if braced_contents(body_view).is_some() {
-            parse_object_body(body_view, &mut diagnostics)
+            parse_object_body(body_view, context, &mut diagnostics)
         } else {
             parse_nonempty_object_body(
                 body_view,
                 object_line,
                 "object `with` body cannot be empty; use `with {}` for an explicit empty body",
+                context,
                 &mut diagnostics,
             )
             .unwrap_or_default()
@@ -408,7 +408,7 @@ fn parse_with(
     };
     let mut diagnostics = Vec::new();
     let body = if braced_contents(body_view).is_some() {
-        parse_object_body(body_view, &mut diagnostics)
+        parse_object_body(body_view, context, &mut diagnostics)
     } else {
         let line = view
             .first_significant()
@@ -418,6 +418,7 @@ fn parse_with(
             body_view,
             line,
             "`with` body cannot be empty; use `with {}` for an explicit empty body",
+            context,
             &mut diagnostics,
         )
         .unwrap_or_default()

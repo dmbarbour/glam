@@ -650,8 +650,8 @@ The 'compile' method shall be expressed effectfully. Effects include:
 - import integration, files as modules or binaries
   - modules are always pathed in toplevel namespace
   - this simplifies override of modules
+- uniqueness - abstract global paths
 - access to the past and future namespace
-- access to some primitive built-in definitions
 - *Standard Effects* for convenience
 
 The assembler should not privilege the built-in ".g" compiler or others. It is best to build upon the same API that will be provided for user-defined syntax.

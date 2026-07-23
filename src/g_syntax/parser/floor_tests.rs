@@ -285,3 +285,64 @@ fn boundary_aligned_closers_are_terminal_only() {
         "expression continues after a boundary-aligned closing delimiter",
     );
 }
+
+#[test]
+fn nested_declarations_validate_only_their_stricter_floor_interval() {
+    let source = concat!(
+        "language g0\n",
+        "object outer with\n",
+        "  member = (\n",
+        "    first\n",
+        "  + second\n",
+        "  )\n",
+    );
+    let diagnostics = assert_currently_rejected(source);
+    let floor_diagnostics = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.line == 5
+                && diagnostic
+                    .message
+                    .contains("expression continuation is indented 2 spaces")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        floor_diagnostics.len(),
+        1,
+        "nested floor validation should report one typed violation: {diagnostics:#?}"
+    );
+    assert!(floor_diagnostics[0].message.contains("expected at least 3"));
+}
+
+#[test]
+fn do_statements_establish_child_continuation_floors() {
+    assert_has_error(
+        concat!(
+            "language g0\n",
+            "result = do {\n",
+            "  value <- (\n",
+            "    first\n",
+            "  + second\n",
+            "    );\n",
+            "  .r value\n",
+            "}\n",
+        ),
+        5,
+        "expression continuation is indented 2 spaces; expected at least 3",
+    );
+}
+
+#[test]
+fn floor_validation_ignores_source_only_lines_inside_multiline_text() {
+    parse_without_errors(concat!(
+        "language g0\n",
+        "value = (\n",
+        "  consume\n",
+        "  \"\"\"\n",
+        "  # source-only text comment at the declaration floor\n",
+        "\n",
+        "  \" payload\n",
+        "  \"\"\"\n",
+        ")\n",
+    ));
+}

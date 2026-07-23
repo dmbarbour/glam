@@ -577,13 +577,14 @@ impl ParseSession {
 }
 
 fn token_error_diagnostic(view: TokenView<'_, '_>, error: &TokenError<'_, '_>) -> Diagnostic {
-    let line = if error.found().is_none() {
-        view.last_significant()
+    let line = match error.reason() {
+        RichReason::Custom(_) => view.line_at_span(*error.span()).unwrap_or(1),
+        RichReason::ExpectedFound { .. } if error.found().is_none() => view
+            .last_significant()
             .and_then(|(_, token)| view.line_at_span(token.span()))
             .or_else(|| view.line_at_span(*error.span()))
-            .unwrap_or(1)
-    } else {
-        view.line_at_span(*error.span()).unwrap_or(1)
+            .unwrap_or(1),
+        RichReason::ExpectedFound { .. } => view.line_at_span(*error.span()).unwrap_or(1),
     };
     let message = match error.reason() {
         RichReason::Custom(message) => message.clone(),

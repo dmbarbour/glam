@@ -433,7 +433,7 @@ fn non_closer_continuations_cannot_start_at_a_declaration_boundary() {
         diagnostic.line == 3
             && diagnostic
                 .message
-                .contains("declaration continuation is indented 0 spaces")
+                .contains("expression continuation is indented 0 spaces")
     }));
 }
 
