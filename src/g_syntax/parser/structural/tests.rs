@@ -27,7 +27,7 @@ fn let_and_where_parse() {
         "let { x = 1; _y = 2 } in x",
         "let {; x = 1; _y = 2; } in x",
         "let {} in x",
-        "let x = {in:\"where =\"} in x",
+        "let x = {key:\"in where =\"} in x",
         "let x = (left == right) in x",
         "let x = 1 in x where y = 2",
         "let x = 1\n    y = 2\nx + y",
@@ -35,7 +35,7 @@ fn let_and_where_parse() {
         "x + y where {; x = 1; y = 2; }",
         "x where {}",
         "x where x = y where y = 1",
-        "f (where) where x = \"in = where\"",
+        "f ('where) where x = \"in = where\"",
         "x + y where\nx = 1\ny = 2",
     ] {
         parse_structural(source);
@@ -159,12 +159,12 @@ fn parentheses_can_make_a_where_binding_right_associative() {
 
 #[test]
 fn token_keywords_ignore_nested_groups_and_text() {
-    parse_structural("let x = {in:\"where =\"} in x");
-    parse_structural("f (where) where x = \"in where = as\"");
-    parse_structural("(choose as value)");
+    parse_structural("let x = {key:\"in where =\"} in x");
+    parse_structural("f ('where) where x = \"in where = as\"");
+    parse_structural("(choose 'as value)");
 
     let object = token_object_header(
-        "object (choose as extends) as alias extends (parent with), right with\n  value = 1",
+        "object (choose 'as 'extends) as alias extends (parent 'with), right with\n  value = 1",
     );
     assert!(matches!(
         object,
@@ -175,7 +175,7 @@ fn token_keywords_ignore_nested_groups_and_text() {
         } if alias == "alias" && deps.len() == 2
     ));
 
-    let with = token_with_header("(choose as value) as alias with\n  value = \"as with = where\"");
+    let with = token_with_header("(choose 'as value) as alias with\n  value = \"as with = where\"");
     assert!(matches!(
         with,
         WithHeader {

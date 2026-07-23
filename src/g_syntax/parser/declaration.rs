@@ -4,6 +4,7 @@
 //! bodies reuse the same parser over layout-selected subranges, so expressions,
 //! delimiter groups, multiline text, and indentation have one interpretation.
 
+use super::super::keywords::{g0_keyword, reserved_keyword_message};
 use super::super::{
     DeclarationKind, DefinitionDecl, DefinitionKind, Diagnostic, ObjectBodyDefinition,
     ObjectBodyDefinitionKind, ObjectDecl, ObjectExtendDecl, Severity, SyntaxExpr, SyntaxKeyExpr,
@@ -13,9 +14,9 @@ use super::input::TokenView;
 use super::layout::{LayoutBase, LayoutView};
 use super::lexical::{Delimiter, LeadingTrivia, TokenKind};
 use super::structural::{
-    braced_contents, contextual_keywords, is_layout_empty, local_name, parse_expression,
-    parse_object_parents, split_braced_members, split_compound_header_body, split_top_level,
-    token_is_name, trim_layout, view_between,
+    braced_contents, contextual_keywords, is_layout_empty, local_name, object_alias_name,
+    parse_expression, parse_object_parents, single_reserved_keyword, split_braced_members,
+    split_compound_header_body, split_top_level, token_is_name, trim_layout, view_between,
 };
 
 mod simple;
@@ -290,6 +291,9 @@ fn parse_definition_left(
         }
         let parameter_view = view_between(view, indexed.index(), indexed.index() + 1);
         let Some(parameter) = local_name(parameter_view) else {
+            if let Some(keyword) = single_reserved_keyword(parameter_view) {
+                return Err(Diagnostic::error(line, reserved_keyword_message(keyword)));
+            }
             return Err(Diagnostic::error(
                 line,
                 "definition parameters must be local names",
@@ -317,6 +321,9 @@ fn parse_definition_target(
     if let Some(first) = tokens.first()
         && let TokenKind::Name(name) = first.token().kind()
     {
+        if let Some(keyword) = g0_keyword(name) {
+            return Err(Diagnostic::error(line, reserved_keyword_message(keyword)));
+        }
         parts.push(SyntaxKeyExpr::Atom((*name).to_owned()));
         position = 1;
     }
@@ -330,7 +337,12 @@ fn parse_definition_target(
             return Err(Diagnostic::error(line, "path suffix requires a key"));
         };
         match item.token().kind() {
-            TokenKind::Name(name) => parts.push(SyntaxKeyExpr::Atom((*name).to_owned())),
+            TokenKind::Name(name) => {
+                if let Some(keyword) = g0_keyword(name) {
+                    return Err(Diagnostic::error(line, reserved_keyword_message(keyword)));
+                }
+                parts.push(SyntaxKeyExpr::Atom((*name).to_owned()));
+            }
             TokenKind::Open {
                 group,
                 delimiter: Delimiter::Bracket,
@@ -540,6 +552,15 @@ fn parse_static_object_header(
         .min()
         .unwrap_or(header.range().end());
     let target_view = trim_layout(view_between(header, header.range().start(), target_end));
+    if let Some(keyword) = target_view.top_level().find_map(|indexed| {
+        let TokenKind::Name(name) = indexed.token().kind() else {
+            return None;
+        };
+        g0_keyword(name)
+    }) {
+        diagnostics.push(Diagnostic::error(line, reserved_keyword_message(keyword)));
+        return None;
+    }
     let target = match static_path(target_view) {
         Some(target) if target != "_" => target,
         Some(_) => {
@@ -565,9 +586,13 @@ fn parse_static_object_header(
     let alias = if let Some(as_index) = as_index {
         let end = extends_index.unwrap_or(header.range().end());
         let alias_view = trim_layout(view_between(header, as_index + 1, end));
-        match local_name(alias_view) {
+        match object_alias_name(alias_view) {
             Some(alias) => Some(alias.to_owned()),
             None => {
+                if let Some(keyword) = single_reserved_keyword(alias_view) {
+                    diagnostics.push(Diagnostic::error(line, reserved_keyword_message(keyword)));
+                    return None;
+                }
                 diagnostics.push(Diagnostic::error(
                     line,
                     "`as` requires a valid object alias name",

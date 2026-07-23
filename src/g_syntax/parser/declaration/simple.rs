@@ -3,6 +3,7 @@
 use chumsky::error::Rich;
 use chumsky::prelude::*;
 
+use super::super::super::keywords::{g0_keyword, reserved_keyword_message};
 use super::super::super::{
     DeclarationKind, ImportDecl, ImportPlacement, ImportReference, LanguageDecl,
 };
@@ -22,7 +23,7 @@ pub(in crate::g_syntax::parser) enum SimpleDeclaration {
 impl SimpleDeclaration {
     pub(in crate::g_syntax::parser) fn from_head(head: &str) -> Option<Self> {
         match head {
-            "language" | "lang" => Some(Self::Language),
+            "language" => Some(Self::Language),
             "import" => Some(Self::Import),
             "abstract" => Some(Self::Abstract),
             "unique" => Some(Self::Unique),
@@ -85,7 +86,7 @@ where
 
 fn language_decl<'lex, 'source: 'lex>()
 -> impl Parser<'lex, TokenInput<'lex, 'source>, LanguageDecl, TokenExtra<'lex, 'source>> {
-    choice((keyword("language"), keyword("lang")))
+    keyword("language")
         .then_ignore(layout_padding())
         .ignore_then(name().map(str::to_owned))
         .then(
@@ -161,11 +162,10 @@ fn keyword_name_list<'lex, 'source: 'lex>(
 
 fn path<'lex, 'source: 'lex>()
 -> impl Parser<'lex, TokenInput<'lex, 'source>, String, TokenExtra<'lex, 'source>> {
-    name()
-        .map(str::to_owned)
+    source_name()
         .then(
             joint(symbol("."))
-                .ignore_then(joint(name().map(str::to_owned)))
+                .ignore_then(joint(source_name()))
                 .repeated()
                 .collect::<Vec<_>>(),
         )
@@ -176,6 +176,22 @@ fn path<'lex, 'source: 'lex>()
                 path
             })
         })
+}
+
+fn source_name<'lex, 'source: 'lex>()
+-> impl Parser<'lex, TokenInput<'lex, 'source>, String, TokenExtra<'lex, 'source>> {
+    name().try_map(|name, span| {
+        if !name.starts_with(char::is_alphabetic) {
+            return Err(Rich::custom(
+                span,
+                "expected a name beginning with a letter",
+            ));
+        }
+        if let Some(keyword) = g0_keyword(name) {
+            return Err(Rich::custom(span, reserved_keyword_message(keyword)));
+        }
+        Ok(name.to_owned())
+    })
 }
 
 fn glam_name<'lex, 'source: 'lex>()

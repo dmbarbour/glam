@@ -33,29 +33,46 @@ We'll support Python-style line comments, i.e. `#...` to end of line. There are 
 
 The module toplevel consists of a sequence of 'declarations'. Each declaration starts a new line. If a declaration requires more than one line, any continuing lines (excepting blanks) must be indented by at least one space. Special exception: a final line consisting entirely of `}])` characters and whitespace does not need to be indented. The goal is to simplify error isolation, local reasoning, and parallel processing of declarations.
 
-Each declaration starts with either a keyword (such as `import`, `spec`, or `unique`) or is a basic definition of form `name = Expr` or one of its variants (args in lhs, `:=`, `::=`, etc.). We'll favor basic definitions where feasible, thus keywords are mostly for special forms.
+Each declaration starts with either a keyword (such as `import`, `object`, or `unique`) or is a basic definition of form `name = Expr` or one of its variants (args in lhs, `:=`, `::=`, etc.). We'll favor basic definitions where feasible, thus keywords are mostly for special forms.
 
 In context of errors, the errors can be reported but we can also make a best effort to proceed with errors. This might depend on configuration options or command-line arguments.
 
 ## Keywords
 
-Keywords are names reserved by the compiler to support special forms or aesthetics. Users are not permitted to define or use keywords directly as names. An exception is made for atoms. For example, although `import` is a keyword, users may define `.['import] = ...` or reference `module.['import]`.
+Keywords are names reserved by the selected language version. Users may not
+introduce them as definitions or locals, use them as ordinary references, or
+write them as direct dotted path components. Reservation is independent of the
+position in which a keyword normally has meaning: contextual words such as
+`where` and `as` do not become ordinary names merely because they occur outside
+a valid `where` or object header.
 
-Proposed keywords:
+The active `g0` table is:
 
-        import, as                                  modules
-        module, abstract, using                     namespace
-        unique, abstract_global_path                access
-        with, without                               dict 
-        do                                          effects
-        let, in, where                              locals
-        object, extend(s), self                     objects
+| Role | Keywords |
+| --- | --- |
+| declaration heads | `language`, `import`, `abstract`, `unique`, `object`, `extend` |
+| expression forms | `let`, `where`, `do`, `object` |
+| do statements | `abstract` |
+| expression operators | `and`, `or` |
+| special expression references | `module`, `self` |
+| special object/`with` alias | `self` |
+| contextual modifiers | `as`, `at`, `binary`, `extends`, `in`, `with` |
 
-        if, then, else                              basic conditionals
-        match, try, when, try_match                 advanced conditionals
-        and, or
+A word may have more than one role, but the parser still has one
+version-owned source of truth for whether it is reserved.
 
-The set of recognized keywords may vary per module based on language version declaration.
+Atoms and computed keys are the data escape. For example, `'where` is atom
+data, `.['where]` is a definition or access path component, and
+`module.['where]` selects that component. Quoted path data may likewise contain
+the atom. Effect request paths such as `.where` are key data rather than source
+name lookup and remain valid. Direct spellings such as `where = ...`,
+`\where -> ...`, `module.where`, and `where:Value` are errors.
+
+Words proposed for later syntax, including `using`, `without`, `if`, `then`,
+`else`, `match`, `try`, `when`, and `try_match`, are not active `g0` keywords
+until their language-version feature is introduced. The recognized table may
+therefore vary by base language version and extension without retroactively
+changing an older version.
 
 ## Names and Paths
 
@@ -785,7 +802,7 @@ Controlling what subprograms observe is useful for local reasoning. It starts wi
 An object is modeled as a dictionary that contains a specification, `spec`. A specification is itself a dict of three items:
 
 - name - specification name is a unique ID in linearization scope
-- defs - a mixin, logically of form `\ _self self -> _self with ...`.
+- defs - a mixin, logically of form `\ prior instance -> prior with ...`.
 - deps - a list of specifications for multiple inheritance 
 
 Object syntax can and should be compact by default. I propose:
@@ -804,7 +821,7 @@ Object syntax can and should be compact by default. I propose:
         foo = object_instance {
             , name:(anno 'scope_unique (abstract_global_path foo))
             , deps:[bar.spec, baz.spec]
-            , defs:\_self self -> _self with  
+            , defs:\prior instance -> prior with
                 def1 = ...
                 def2 := ...
             }
@@ -933,19 +950,23 @@ This supports lightweight extensions
 
 ### Method Chaining
 
-In OO languages, a common pattern is method chaining where each method linearly returns the 'next' object, and users select a method on that object. It's a convenient pattern. This can be almost directly expressed via piped functions and a helper function, though the ".g" syntax isn't optimized for it:
+In OO languages, a common pattern is method chaining where each method linearly returns the 'next' object, and users select a method on that object. It's a convenient pattern. This can be almost directly expressed via piped functions and a helper function.
 
-        Obj |> call 'method [Arg1, Arg2] 
-            |> call 'method2 [Arg3, Arg4] 
-            |> ...
+        # OO language idiom
+        Obj.method(Arg1, Arg2)
+           .method2(Arg3, Arg4)
 
-What the ".g" syntax is optimized for is running effects. 
+        # translation to ".g" syntax
+        Obj |> call 'method (Arg1, Arg2) 
+            |> call 'method2 (Arg3, Arg4) 
 
-        Obj.run do 
+The ".g" syntax isn't optimized for direct use of this idiom. Consequently, a direct translation is much less ergonomic and somewhat more typing. What the ".g" syntax is optimized for is running effects. We can easily use effects handlers as a basis for method chaining. 
+
+        Obj.runWith s0 do 
             .method Arg1 Arg2
             .method2 Arg3 Arg4
 
-This more flexible in many use cases, e.g. each method could have some additional results, and the object's `run` method can handle the shared chore of threading the object. In any case, I'd encourage users to design for this form in general. 
+In many ways, this is more flexible than the method chaining idiom. Beyond basic chaining, effects enable users to easily capture intermediate results, integrate loops or conditions, invoke procedural abstractions, all without breaking the chain. Also, we can contextually distinguish 'pure' runners vs. effects transformers based on whether we're running in context of another effect. I encourage users of this syntax to favor this form. 
 
 ### Dictionary as Object
 
@@ -954,16 +975,9 @@ expression must produce an object with a defined `spec`; a plain dictionary is
 not silently treated as a parent. This ensures that an undefined parent does
 not become an empty, no-op dictionary union.
 
-`object_from_dict Dict` explicitly constructs an anonymous object whose
-definitions union `Dict` into the inherited base. It accepts the empty
-dictionary, with `object_from_dict {}` equivalent to `object _`, because a
-contingently constructed dictionary may legitimately be empty. It rejects an
-existing object, keeping the conversion direction explicit.
-
-        import 'std
-
-        options = if Condition then { feature:Feature } else {}
-        object configured extends object_from_dict options
+`object_from_dict Dict` explicitly constructs an anonymous object that unions 
+`Dict` into the inherited base. For the empty dictionary, this is equivalent to
+`object _`. This function diverges if `Dict` contains `spec`.
 
 ## Conditionals
 

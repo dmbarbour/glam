@@ -4,6 +4,7 @@
 //! trees. Object bodies share the recursive declaration parser used by
 //! top-level object declarations.
 
+use super::super::keywords::{canonical_keyword, reserved_keyword_message};
 use super::super::{Diagnostic, ObjectExpr, Severity, SyntaxExpr};
 use super::declaration::{parse_nonempty_object_body, parse_object_body};
 use super::expression::parse_expression_view;
@@ -280,6 +281,9 @@ fn parse_binding(view: TokenView<'_, '_>) -> ParseResult<(String, SyntaxExpr)> {
     let name_view = trim_layout(view_between(view, view.range().start(), equal_index));
     let value_view = trim_layout(view_between(view, equal_index + 1, view.range().end()));
     let Some(name) = local_name(name_view) else {
+        if let Some(keyword) = single_reserved_keyword(name_view) {
+            return Err(error_at_view(name_view, reserved_keyword_message(keyword)));
+        }
         return Err(error_at_view(
             name_view,
             format!(
@@ -513,9 +517,15 @@ fn parse_object_header(view: TokenView<'_, '_>) -> Option<ParseResult<ObjectHead
     let alias = if let Some(as_index) = as_index {
         let alias_end = extends_index.unwrap_or(header.range().end());
         let alias_view = trim_layout(view_between(header, as_index + 1, alias_end));
-        match local_name(alias_view) {
+        match object_alias_name(alias_view) {
             Some(alias) => Some(alias.to_owned()),
             None => {
+                if let Some(keyword) = single_reserved_keyword(alias_view) {
+                    return Some(Err(error_at_view(
+                        alias_view,
+                        reserved_keyword_message(keyword),
+                    )));
+                }
                 return Some(Err(error_at_view(
                     alias_view,
                     "`as` requires a valid object alias name",
@@ -591,7 +601,7 @@ fn parse_with_header(view: TokenView<'_, '_>) -> Option<ParseResult<WithHeader>>
                 )),
                 None,
             )
-        } else if let Some(alias) = local_name(alias_view) {
+        } else if let Some(alias) = object_alias_name(alias_view) {
             (
                 trim_layout(view_between(
                     base_and_alias,
@@ -600,6 +610,11 @@ fn parse_with_header(view: TokenView<'_, '_>) -> Option<ParseResult<WithHeader>>
                 )),
                 Some(alias.to_owned()),
             )
+        } else if let Some(keyword) = single_reserved_keyword(alias_view) {
+            return Some(Err(error_at_view(
+                alias_view,
+                reserved_keyword_message(keyword),
+            )));
         } else {
             (base_and_alias, None)
         }
@@ -796,6 +811,19 @@ pub(in crate::g_syntax::parser) fn first_top_level_line_start(
 pub(in crate::g_syntax::parser) fn local_name<'source>(
     view: TokenView<'_, 'source>,
 ) -> Option<&'source str> {
+    local_name_allowing(view, false)
+}
+
+pub(in crate::g_syntax::parser) fn object_alias_name<'source>(
+    view: TokenView<'_, 'source>,
+) -> Option<&'source str> {
+    local_name_allowing(view, true)
+}
+
+fn local_name_allowing<'source>(
+    view: TokenView<'_, 'source>,
+    special_self: bool,
+) -> Option<&'source str> {
     let mut significant = view
         .tokens()
         .iter()
@@ -808,7 +836,29 @@ pub(in crate::g_syntax::parser) fn local_name<'source>(
         || name.strip_prefix('_').is_some_and(|rest| {
             rest.starts_with(|character: char| character.is_ascii_alphabetic())
         });
-    (valid && significant.next().is_none()).then_some(*name)
+    if !valid || significant.next().is_some() {
+        return None;
+    }
+    match canonical_keyword(name) {
+        Some(keyword) if special_self && keyword.spelling() == "self" => Some(*name),
+        Some(_) => None,
+        None => Some(*name),
+    }
+}
+
+pub(in crate::g_syntax::parser) fn single_reserved_keyword(
+    view: TokenView<'_, '_>,
+) -> Option<super::super::keywords::Keyword> {
+    let mut significant = view
+        .tokens()
+        .iter()
+        .filter(|token| !matches!(token.kind(), TokenKind::LineStart { .. }));
+    let TokenKind::Name(name) = significant.next()?.kind() else {
+        return None;
+    };
+    (significant.next().is_none())
+        .then(|| canonical_keyword(name))
+        .flatten()
 }
 
 fn next_significant_after<'lex, 'source>(

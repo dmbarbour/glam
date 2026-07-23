@@ -4,12 +4,13 @@
 //! lexical pass. A statement expression is handed back to the complete token
 //! expression parser; no source substring is normalized or re-lexed.
 
+use crate::g_syntax::keywords::{canonical_keyword, reserved_keyword_message};
 use crate::g_syntax::{Diagnostic, DoExpr, DoStep, DoStepKind, SyntaxExpr};
 
 use super::input::{TokenRange, TokenView};
 use super::layout::{LayoutBase, LayoutView};
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
-use super::structural::parse_expression;
+use super::structural::{parse_expression, single_reserved_keyword};
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
@@ -233,6 +234,9 @@ fn parse_statement(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
         let pattern = trim_layout(view_between(view, view.range().start(), arrow));
         let operation = trim_layout(view_between(view, arrow + 1, view.range().end()));
         let Some(name) = local_name(pattern) else {
+            if let Some(keyword) = single_reserved_keyword(pattern) {
+                return Err(error_at_view(pattern, reserved_keyword_message(keyword)));
+            }
             return Err(error_at_view(
                 pattern,
                 "patterns are not yet supported in do bindings; expected a local name before `<-`",
@@ -254,6 +258,9 @@ fn parse_statement(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
         let pattern = trim_layout(view_between(view, view.range().start(), equal));
         let value = trim_layout(view_between(view, equal + 1, view.range().end()));
         let Some(name) = local_name(pattern) else {
+            if let Some(keyword) = single_reserved_keyword(pattern) {
+                return Err(error_at_view(pattern, reserved_keyword_message(keyword)));
+            }
             return Err(error_at_view(
                 pattern,
                 "patterns are not yet supported in do value bindings; expected a local name before `=`",
@@ -291,6 +298,9 @@ fn parse_statement(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
         };
         let name = trim_layout(view_between(view, arrow + 1, view.range().end()));
         let Some(name) = local_name(name) else {
+            if let Some(keyword) = single_reserved_keyword(name) {
+                return Err(error_at_view(name, reserved_keyword_message(keyword)));
+            }
             return Err(error_at_view(
                 view,
                 "a do forward binding requires exactly one local name after `->`",
@@ -323,6 +333,8 @@ fn parse_abstract(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
                             name,
                             "do abstract declaration cannot use the inaccessible `_` name",
                         )
+                    } else if let Some(keyword) = single_reserved_keyword(name) {
+                        error_at_view(name, reserved_keyword_message(keyword))
                     } else {
                         error_at_token(
                             view,
@@ -386,7 +398,7 @@ fn local_name<'source>(view: TokenView<'_, 'source>) -> Option<&'source str> {
         || name.strip_prefix('_').is_some_and(|rest| {
             rest.starts_with(|character: char| character.is_ascii_alphabetic())
         });
-    (valid && significant.next().is_none()).then_some(*name)
+    (valid && significant.next().is_none() && canonical_keyword(name).is_none()).then_some(*name)
 }
 
 fn token_is_name(token: &SpannedToken<'_>, expected: &str) -> bool {

@@ -4002,7 +4002,7 @@ mod tests {
             &[b"first", b"outer"],
         );
         assert_search_bytes(
-            ".fix (\\self -> .alt (.r \"fix left\") (.r \"fix right\"))",
+            ".fix (\\_loop -> .alt (.r \"fix left\") (.r \"fix right\"))",
             &[b"fix left", b"fix right"],
         );
         assert_search_bytes(
@@ -5058,7 +5058,7 @@ mod tests {
     #[test]
     fn runs_return_sequence_and_fixpoint_requests() {
         let (assembler, value) =
-            completed(".fix (\\self -> .r \"A\") >>= (\\x -> .r (x ++ \"B\"))");
+            completed(".fix (\\_loop -> .r \"A\") >>= (\\x -> .r (x ++ \"B\"))");
         assert_eq!(assembler.to_binary(&value).unwrap(), b"AB".as_slice());
     }
 
@@ -5180,12 +5180,12 @@ mod tests {
     #[test]
     fn fixpoint_alternatives_receive_independent_futures() {
         let (assembler, value) = completed(
-            ".cut (.fix (\\self -> .alt (.alt (.r \"left\") (.r \"middle\")) (.r \"right\")) >>= (\\value -> (value == \"right\") =>> .r value))",
+            ".cut (.fix (\\_loop -> .alt (.alt (.r \"left\") (.r \"middle\")) (.r \"right\")) >>= (\\value -> (value == \"right\") =>> .r value))",
         );
         assert_eq!(assembler.to_binary(&value).unwrap(), b"right".as_slice());
 
         let (assembler, value) =
-            completed(".fix (\\self -> .cut (.alt .fail (.r \"nested cut\")))");
+            completed(".fix (\\_loop -> .cut (.alt .fail (.r \"nested cut\")))");
         assert_eq!(
             assembler.to_binary(&value).unwrap(),
             b"nested cut".as_slice()
@@ -5213,7 +5213,7 @@ mod tests {
     #[test]
     fn fixpoint_hides_then_restores_the_reset_stack() {
         let (_, hidden) = compile_effect(
-            ".reset \"prompt\" (.fix (\\self -> .shift \"prompt\" (\\continuation -> continuation \"wrong\")))",
+            ".reset \"prompt\" (.fix (\\_loop -> .shift \"prompt\" (\\continuation -> continuation \"wrong\")))",
         );
         assert!(
             run_standard_test(&hidden)
@@ -5223,7 +5223,7 @@ mod tests {
         );
 
         let (assembler, value) = completed(
-            ".reset \"prompt\" ((.fix (\\self -> .r ())) =>> .shift \"prompt\" (\\continuation -> continuation \"restored\"))",
+            ".reset \"prompt\" ((.fix (\\_loop -> .r ())) =>> .shift \"prompt\" (\\continuation -> continuation \"restored\"))",
         );
         assert_eq!(assembler.to_binary(&value).unwrap(), b"restored".as_slice());
     }
@@ -5630,7 +5630,7 @@ mod tests {
                 .contains("requires an enclosing `.cut`")
         );
 
-        let (_, fixpoint_alternative) = compile_effect(".fix (\\self -> .alt (.r 1) (.r 2))");
+        let (_, fixpoint_alternative) = compile_effect(".fix (\\_loop -> .alt (.r 1) (.r 2))");
         assert!(
             run_standard_test(&fixpoint_alternative)
                 .unwrap_err()

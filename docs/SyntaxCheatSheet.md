@@ -12,6 +12,10 @@ language g0 with utf8  # BaseVer with Extensions
 
 ```
 # Names: [a-zA-Z][a-zA-Z0-9]* parts, joined by single underscores.
+# Active g0 keywords are reserved in every direct name position:
+# abstract and as at binary do extend extends import in language let
+# module object or self unique where with
+# Use 'where for atom data or .['where] as a path component.
 foo = 42                    # introduce (ERROR if foo already defined)
 foo := 43                   # override (ERROR if foo NOT already defined)
 foo ::= \ prior -> prior+1  # in-place update; NO defined/undefined check
@@ -98,7 +102,7 @@ Dict as self with           # object-style scope: _x prior, ^a escapes to host
 ]
 xs ++ ys            # append (no cons operator; lists are finger-tree ropes)
 [x] ++ xs           # "cons" via append; also valid in patterns
-list.at n xs         # zero-based element lookup; errors when out of bounds
+list.['at] n xs      # `at` is reserved; zero-based lookup, errors out of bounds
 
 (,)                 # empty tuple: tuple:[]
 (a,)   (,a)         # singleton tuple: tuple:[a]

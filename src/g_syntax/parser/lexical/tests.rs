@@ -408,6 +408,7 @@ fn invalid_syntax_fixtures_have_explicit_lexical_classification() {
         "let_where_syntax.g",
         "missing_language.g",
         "path_whitespace.g",
+        "reserved_keywords.g",
         "tagged_spacing.g",
     ];
     let expected_lexical = ["multiline_text.g", "unbalanced_delimiters.g"];

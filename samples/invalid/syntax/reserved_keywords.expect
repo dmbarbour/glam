@@ -1,0 +1,5 @@
+error|3|`where`|reserved keyword|`'where`|`.['where]`
+error|4|`where`|reserved keyword|`'where`|`.['where]`
+error|5|`binary`|reserved keyword|`'binary`|`.['binary]`
+error|6|`with`|reserved keyword|`'with`|`.['with]`
+error|7|`at`|reserved keyword|`'at`|`.['at]`

@@ -24,6 +24,21 @@ fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> 
         .expect("lowered module should evaluate")
 }
 
+fn assert_reserved_keyword_diagnostic(source: &str, keyword: &str) {
+    let parsed = parse(source);
+    assert!(
+        parsed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == Severity::Error
+                && diagnostic.message.contains(&format!("`{keyword}`"))
+                && diagnostic.message.contains("reserved keyword")
+                && diagnostic.message.contains(&format!("'{keyword}"))
+                && diagnostic.message.contains(&format!(".['{keyword}]"))
+        }),
+        "missing reserved-keyword diagnostic for `{keyword}` in `{source}`: {:?}",
+        parsed.diagnostics
+    );
+}
+
 fn value_at_atom_path(definitions: &Value, path: &[&str]) -> Option<Value> {
     let context = test_eval_context();
     let mut current = definitions.clone();
@@ -238,6 +253,43 @@ fn parses_language_declaration_with_extensions() {
             extensions: vec!["utf8".to_owned(), "demo".to_owned()],
         })
     );
+}
+
+#[test]
+fn g0_keywords_are_reserved_across_source_name_positions() {
+    for (keyword, source) in [
+        ("where", "language g0\nwhere = 1\n"),
+        ("let", "language g0\nvalue let = let\n"),
+        ("where", "language g0\nvalue = \\where -> 1\n"),
+        ("as", "language g0\nvalue = let as = 1 in as\n"),
+        (
+            "where",
+            "language g0\nvalue = do { .r 1 -> where; .r where }\n",
+        ),
+        (
+            "binary",
+            "language g0\nvalue = object \"value\" as binary with {}\n",
+        ),
+        ("where", "language g0\nabstract outer.where\n"),
+        ("where", "language g0\nvalue = root.where\n"),
+        ("where", "language g0\nvalue = f (where)\n"),
+        ("binary", "language g0\nvalue = binary:1\n"),
+    ] {
+        assert_reserved_keyword_diagnostic(source, keyword);
+    }
+}
+
+#[test]
+fn keyword_atoms_effect_paths_and_computed_paths_remain_data() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "atom = 'where\n",
+        "effect = .where\n",
+        ".['where] = atom\n",
+        "selected = module.['where]\n",
+        "quoted = '.['where]\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
 }
 
 #[test]
@@ -3532,7 +3584,7 @@ fn effect_then_requires_unit_result_when_observed() {
 #[test]
 fn comparisons_and_boolean_operators_evaluate_as_effects() {
     let parsed = parse(
-        "language g0\nimport 'std\ntuple_left = { tuple:[1,2] }\ntuple_right = { tuple:[1,3] }\nasm.gt = list.pure ((3 > 2) =>> .r \"G\")\nasm.ge = list.pure ((3 >= 3) =>> .r \"E\")\nasm.eq = list.pure ((3 == 3) =>> .r \"Q\")\nasm.ne = list.pure ((3 <> 4) =>> .r \"N\")\nasm.le = list.pure ((3 =< 3) =>> .r \"L\")\nasm.lt = list.pure ((2 < 3) =>> .r \"T\")\nasm.fail = list.pure ((3 < 2) =>> .r \"bad\")\nasm.chain = list.pure ((1 < 2 =< 2 <> 3) =>> .r \"H\")\nasm.chain_fail = list.pure ((1 < 3 < 2) =>> .r \"bad\")\nasm.chain_raw = 1 < (2 + 0) < 3\nasm.list = list.pure (([1,2] < [1,3]) =>> .r \"S\")\nasm.binary_list = list.pure ((\"AB\" == [65,66]) =>> .r \"B\")\nasm.string_list = list.pure (([\"A\",\"B\"] == [\"A\",\"B\"]) =>> .r \"V\")\nasm.string_order = list.pure (([\"A\",\"B\"] < [\"A\",\"C\"]) =>> .r \"W\")\nasm.nested_list = list.pure (([\"A\",\"B\"] <> \"AB\") =>> .r \"X\")\nasm.list_tuple = list.pure (([1,2] <> tuple_left) =>> .r \"Y\")\nasm.tuple = list.pure ((tuple_left < tuple_right) =>> .r \"U\")\nasm.dict = list.pure (({ a:1, b:{} } == { a:1 }) =>> .r \"D\")\nasm.and = list.pure ((3 > 2 and \"A\" == [65]) =>> .r \"A\")\nasm.or = list.pure ((3 < 2 or 3 == 3) =>> .r \"O\")\nasm.not_true = list.pure ((not (3 > 2)) =>> .r \"bad\")\nasm.not_false = list.pure ((not (3 < 2)) =>> .r \"F\")\nasm.could_true = list.pure ((could (.alt .fail (3 == 3))) =>> .r \"C\")\nasm.could_false = list.pure ((could .fail) =>> .r \"bad\")\n",
+        "language g0\nimport 'std\ntuple_left = { tuple:[1,2] }\ntuple_right = { tuple:[1,3] }\nasm.gt = list.pure ((3 > 2) =>> .r \"G\")\nasm.ge = list.pure ((3 >= 3) =>> .r \"E\")\nasm.eq = list.pure ((3 == 3) =>> .r \"Q\")\nasm.ne = list.pure ((3 <> 4) =>> .r \"N\")\nasm.le = list.pure ((3 =< 3) =>> .r \"L\")\nasm.lt = list.pure ((2 < 3) =>> .r \"T\")\nasm.fail = list.pure ((3 < 2) =>> .r \"bad\")\nasm.chain = list.pure ((1 < 2 =< 2 <> 3) =>> .r \"H\")\nasm.chain_fail = list.pure ((1 < 3 < 2) =>> .r \"bad\")\nasm.chain_raw = 1 < (2 + 0) < 3\nasm.list = list.pure (([1,2] < [1,3]) =>> .r \"S\")\nasm.binary_list = list.pure ((\"AB\" == [65,66]) =>> .r \"B\")\nasm.string_list = list.pure (([\"A\",\"B\"] == [\"A\",\"B\"]) =>> .r \"V\")\nasm.string_order = list.pure (([\"A\",\"B\"] < [\"A\",\"C\"]) =>> .r \"W\")\nasm.nested_list = list.pure (([\"A\",\"B\"] <> \"AB\") =>> .r \"X\")\nasm.list_tuple = list.pure (([1,2] <> tuple_left) =>> .r \"Y\")\nasm.tuple = list.pure ((tuple_left < tuple_right) =>> .r \"U\")\nasm.dict = list.pure (({ a:1, b:{} } == { a:1 }) =>> .r \"D\")\nasm.and_result = list.pure ((3 > 2 and \"A\" == [65]) =>> .r \"A\")\nasm.or_result = list.pure ((3 < 2 or 3 == 3) =>> .r \"O\")\nasm.not_true = list.pure ((not (3 > 2)) =>> .r \"bad\")\nasm.not_false = list.pure ((not (3 < 2)) =>> .r \"F\")\nasm.could_true = list.pure ((could (.alt .fail (3 == 3))) =>> .r \"C\")\nasm.could_false = list.pure ((could .fail) =>> .r \"bad\")\n",
     );
     let context = CompileContext::default();
     let lowered = lower_parsed_source(parsed, &context);
@@ -3557,8 +3609,8 @@ fn comparisons_and_boolean_operators_evaluate_as_effects() {
         ("list_tuple", b"Y"),
         ("tuple", b"U"),
         ("dict", b"D"),
-        ("and", b"A"),
-        ("or", b"O"),
+        ("and_result", b"A"),
+        ("or_result", b"O"),
         ("not_true", b""),
         ("not_false", b"F"),
         ("could_true", b"C"),
@@ -3580,7 +3632,7 @@ fn comparisons_and_boolean_operators_evaluate_as_effects() {
 #[test]
 fn list_effect_handler_runs_standard_backtracking_effects() {
     let parsed = parse(
-        "language g0\nimport 'list as list\nchoices = (.alt (.r \"A\") (.alt .fail (.r \"B\"))) >>= (\\x -> .r (x ++ \"!\"))\ncut = .cut (.alt (.r \"C\") (.r \"D\"))\ncut_bad = .cut (.alt (.r \"G\") 42)\ncut_seq_bad = .cut ((.alt (.r \"S\") 42) >>= (\\x -> .r (x ++ \"!\")))\nobject_effect = { eff:(.r \"E\").eff, meta:1 }\nfixed = .fix (\\self -> .r { text:\"F\", self:self })\nasm.choices = list.pure choices\nasm.cut = list.pure cut\nasm.cut_fail = list.pure (.cut .fail)\nasm.cut_bad = list.pure cut_bad\nasm.cut_seq_bad = list.pure cut_seq_bad\nasm.object = list.pure object_effect\nasm.fixed = (list.head (list.pure fixed)).text\nasm.head = list.head \"Hi\"\nasm.tail = list.tail \"Hi\"\n",
+        "language g0\nimport 'list as list\nchoices = (.alt (.r \"A\") (.alt .fail (.r \"B\"))) >>= (\\x -> .r (x ++ \"!\"))\ncut = .cut (.alt (.r \"C\") (.r \"D\"))\ncut_bad = .cut (.alt (.r \"G\") 42)\ncut_seq_bad = .cut ((.alt (.r \"S\") 42) >>= (\\x -> .r (x ++ \"!\")))\nobject_effect = { eff:(.r \"E\").eff, meta:1 }\nfixed = .fix (\\loop -> .r { text:\"F\", cycle:loop })\nasm.choices = list.pure choices\nasm.cut = list.pure cut\nasm.cut_fail = list.pure (.cut .fail)\nasm.cut_bad = list.pure cut_bad\nasm.cut_seq_bad = list.pure cut_seq_bad\nasm.object_result = list.pure object_effect\nasm.fixed = (list.head (list.pure fixed)).text\nasm.head = list.head \"Hi\"\nasm.tail = list.tail \"Hi\"\n",
     );
     let context = CompileContext::default();
     let lowered = lower_parsed_source(parsed, &context);
@@ -3625,7 +3677,7 @@ fn list_effect_handler_runs_standard_backtracking_effects() {
     assert_eq!(
         output_binary_result_list(&fully_evaluated_value(resolved_value_at_path(
             &value,
-            &["asm", "object"]
+            &["asm", "object_result"]
         ))),
         b"E"
     );
@@ -4101,8 +4153,8 @@ fn builtin_list_at_is_exposed_by_list_and_std_modules() {
             "language g0\n",
             "import 'std as std\n",
             "import 'list as list\n",
-            "from_std = std.list.at 1 \"ABC\"\n",
-            "from_list = list.at 1 [10,20,30]\n",
+            "from_std = std.list.['at] 1 \"ABC\"\n",
+            "from_list = list.['at] 1 [10,20,30]\n",
         )),
         &context,
     );

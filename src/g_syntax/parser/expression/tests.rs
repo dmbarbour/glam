@@ -25,6 +25,8 @@ fn ordinary_expressions_parse() {
     const EXPRESSIONS: &[&str] = &[
         "()",
         "name",
+        "module",
+        "self",
         "_prior",
         "^outer",
         "^^outer",
@@ -86,10 +88,40 @@ fn ordinary_expressions_parse() {
         "x and y or z",
         "android",
         "'and",
+        "'where",
+        ".where",
     ];
 
     for source in EXPRESSIONS {
         assert_parses(source);
+    }
+}
+
+#[test]
+fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
+    for keyword in crate::g_syntax::keywords::G0_KEYWORDS {
+        let source = format!("root.{}", keyword.spelling());
+        let diagnostics = parse_expression_fragment(source.as_bytes())
+            .expect_err("a bare keyword should not parse as an ordinary name");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains(keyword.spelling())
+                    && diagnostic.message.contains("reserved keyword")
+                    && diagnostic
+                        .message
+                        .contains(&format!("'{}", keyword.spelling()))
+            }),
+            "missing keyword escape diagnostic for `{}`: {diagnostics:?}",
+            keyword.spelling()
+        );
+    }
+}
+
+#[test]
+fn keyword_data_escapes_remain_available() {
+    for keyword in crate::g_syntax::keywords::G0_KEYWORDS {
+        assert_parses(&format!("'{}", keyword.spelling()));
+        assert_parses(&format!("root.['{}]", keyword.spelling()));
     }
 }
 
