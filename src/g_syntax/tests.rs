@@ -435,6 +435,22 @@ fn parses_local_imports() {
 }
 
 #[test]
+fn binary_imports_require_a_named_target() {
+    let lowered = lower_parsed_source(
+        parse("language g0\nimport \"payload.bin\" binary\n"),
+        &CompileContext::default(),
+    );
+
+    assert_eq!(lowered.diagnostics.len(), 1);
+    assert_eq!(lowered.diagnostics[0].severity, Severity::Error);
+    assert_eq!(lowered.diagnostics[0].line, 2);
+    assert_eq!(
+        lowered.diagnostics[0].message,
+        "`import ... binary` requires `as name`"
+    );
+}
+
+#[test]
 fn rejects_non_child_local_import_requests_during_lowering() {
     for request in [
         "../parent.g",
@@ -670,6 +686,19 @@ fn parses_object_expressions() {
             ..
         }) if alias == "_h" && deps.len() == 1 && body.len() == 1
     ));
+}
+
+#[test]
+fn object_declarations_require_named_targets() {
+    let parsed = parse("language g0\nobject _ with\n  text = \"Hello\"\n");
+
+    assert_eq!(parsed.diagnostics.len(), 1);
+    assert_eq!(parsed.diagnostics[0].severity, Severity::Error);
+    assert_eq!(parsed.diagnostics[0].line, 2);
+    assert_eq!(
+        parsed.diagnostics[0].message,
+        "object declarations require a named target; use an object expression for an anonymous object"
+    );
 }
 
 #[test]

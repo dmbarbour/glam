@@ -102,7 +102,7 @@ pub(in crate::g_syntax) fn lower_local_binary_import(
     let ImportPlacement::As(target) = placement else {
         return Err(Diagnostic::error(
             line,
-            "`import ... binary` requires `as name` in the current spike",
+            "`import ... binary` requires `as name`",
         ));
     };
 

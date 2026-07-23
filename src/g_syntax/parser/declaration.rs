@@ -467,7 +467,7 @@ fn parse_static_object_header(
         Some(_) => {
             diagnostics.push(Diagnostic::error(
                 line,
-                "anonymous object declarations are not supported by the current spike",
+                "object declarations require a named target; use an object expression for an anonymous object",
             ));
             return None;
         }
