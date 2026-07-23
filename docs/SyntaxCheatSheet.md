@@ -230,6 +230,9 @@ g << f
 f x                 # application; ad hoc polymorphism:
                     #   functions; {apply:f,_} x = f x; (eff:f) x
                     #   raw interaction-net values are not applicable
+foo.bar             # member access
+foo (.bar)          # apply foo to effect path .bar; `foo .bar` is an ERROR
+foo <| .bar         # equivalent alternative without parentheses
 ```
 
 ## Effects & Do Notation

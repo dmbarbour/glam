@@ -72,7 +72,7 @@ and control flow.
   every heap write as conflicting after any heap read. Strategy selection is
   fixed by the builder before a reasoning session becomes runnable.
 - `.cut` supplies choice and transaction scope, not retryability. Plain `.fail`
-  and `.cut .fail` are permanent. A failed operation retries only when it
+  and `.cut (.fail)` are permanent. A failed operation retries only when it
   observed changeable host state, such as an empty log queue.
 - Top-level `.alt` is invalid for ordinary reflection tasks. The isolated
   all-results runner is an explicit host policy that supplies its own outer

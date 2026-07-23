@@ -185,10 +185,18 @@ fn token_keywords_ignore_nested_groups_and_text() {
     ));
 
     assert!(matches!(
-        parse_compound_expression_fragment(b"f .where"),
+        parse_compound_expression_fragment(b"f (.where)"),
         Ok(SyntaxExpr::Apply(_, argument))
             if matches!(*argument, SyntaxExpr::Effect(ref path) if path == &["where"])
     ));
+    assert!(
+        parse_compound_expression_fragment(b"f .where")
+            .expect_err("dot-leading arguments should require parentheses")
+            .iter()
+            .any(|diagnostic| diagnostic
+                .message
+                .contains("dot-leading application arguments must be parenthesized"))
+    );
 }
 
 #[test]

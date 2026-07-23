@@ -1,1 +1,2 @@
 error|3|expected adjacent token|found `bar`
+error|4|dot-leading application arguments must be parenthesized|`f (.bar)`|`<|`

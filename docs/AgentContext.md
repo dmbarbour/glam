@@ -188,6 +188,9 @@ their detailed scheduling and representation contracts.
   operations.
 - List literals preserve every comma-separated expression as one element. Only
   explicit `++` or `list.concat` flattens structure.
+- Dot-leading effect paths must be parenthesized in application-argument
+  position: `foo (.bar)` is valid and `foo .bar` is rejected. Head-position
+  `.bar`, member access `foo.bar`, and `foo <| .bar` remain valid.
 - Multiline `let`/`where` bindings align under the first binding and do not
   accept `in`. Naked semicolons do not group local bindings; semicolon-separated
   bindings require braces. Braced `let`/`where` and every `with` body permit

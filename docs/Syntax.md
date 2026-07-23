@@ -185,6 +185,12 @@ Application is essentially expressed as a special whitespace 'operator', i.e. `f
 
 This is a compiler feature: it does not implicitly extend to other languages or definition of interaction nets. We'll generally model advanced features (multimethods, keyword args, hooks for observability, etc.) via method objects. 
 
+A dot-leading effect path must be parenthesized when used as an application
+argument. Thus `foo.bar` is member access, `foo (.bar)` applies `foo` to the
+effect path, and `foo .bar` is rejected rather than allowing one accidental
+space to change access into application. `.bar` remains valid at the head of
+an expression; `foo <| .bar` is the punctuation-light alternative.
+
 ## Effects
 
 The target design adopts Haskell's do notation. For aesthetic reasons, it
@@ -989,7 +995,7 @@ I propose to model conditional behavior as effectful and backtracking, i.e. in t
 
 Boolean expressions become pass/fail effects, i.e. `.r ()` and `.fail`. This impacts all boolean operators, e.g. `(3 > 4)` evaluates as `.fail`, `or` is modeled via `.alt`, `and` via `.seq`. Negation can be expressed via staged effect:
 
-        not C = .alt (C =>> .r .fail) (.r (.r ())) >>= \ op -> op
+        not C = .alt (C =>> .r (.fail)) (.r (.r ())) >>= \ op -> op
         could C = not (not C)
 
 In this case, `could` will run `C` to prove it works, backtrack, then continue running. With just `.alt/.cut/.fail` there is no way to exfiltrate details about the success, other than the observation that it would have passed. 

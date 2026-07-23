@@ -900,7 +900,7 @@ fn configured_logger_reports_an_unjoined_child_failure() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .task.new .fail >>= (\\_task -> .r ())\n",
+        "language g0\nobject conf.env\nconf.log = .task.new (.fail) >>= (\\_task -> .r ())\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 

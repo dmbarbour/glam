@@ -68,7 +68,8 @@ fn ordinary_expressions_parse() {
         "\\x y -> x y",
         "f x y z",
         "foo.bar",
-        "foo .bar",
+        "foo (.bar)",
+        "foo <| .bar",
         "f\n  x\n  y",
         "(+)",
         "(+ 42)",
@@ -94,6 +95,24 @@ fn ordinary_expressions_parse() {
 
     for source in EXPRESSIONS {
         assert_parses(source);
+    }
+}
+
+#[test]
+fn dot_leading_application_arguments_require_parentheses() {
+    for source in ["foo .bar", "foo .bar.baz", "foo\n  .bar"] {
+        let diagnostics = parse_expression_fragment(source.as_bytes())
+            .expect_err("dot-leading application argument should require parentheses");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("dot-leading application arguments must be parenthesized")
+                    && diagnostic.message.contains("f (.bar)")
+                    && diagnostic.message.contains("<|")
+            }),
+            "missing dot-leading argument diagnostic for `{source}`: {diagnostics:?}"
+        );
     }
 }
 

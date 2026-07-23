@@ -18,7 +18,7 @@ use super::input::{
     ParseSession, TokenExtra, TokenInput, TokenView, close, joint, keyword, line_start, name,
     number, open, space_before, symbol, text_id,
 };
-use super::lexical::Delimiter;
+use super::lexical::{ByteSpan, Delimiter};
 
 mod infix;
 
@@ -371,7 +371,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             do_expr,
             literal_expr,
             escaped_expr,
-            effect_expr,
+            effect_expr.clone(),
             rooted_name,
         ))
         .boxed();
@@ -409,20 +409,31 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             choice((constructor, computed_tagged, named_atom, base_atom.clone())).boxed()
         })
         .boxed();
+        let application_argument_atom = choice((
+            effect_expr.map_with(|_, extra| Err::<SyntaxExpr, ByteSpan>(extra.span())),
+            atom.clone().map(Ok),
+        ))
+        .boxed();
         let application_argument = choice((
-            space_before(atom.clone()),
+            space_before(application_argument_atom.clone()),
             line_start()
                 .repeated()
                 .at_least(1)
                 .ignored()
-                .ignore_then(atom.clone()),
+                .ignore_then(application_argument_atom),
         ));
         let application = atom
             .clone()
             .then(application_argument.repeated().collect::<Vec<_>>())
-            .map(|(function, arguments)| {
-                arguments.into_iter().fold(function, |function, argument| {
-                    SyntaxExpr::Apply(Box::new(function), Box::new(argument))
+            .try_map(|(function, arguments), _| {
+                arguments.into_iter().try_fold(function, |function, argument| {
+                    let argument = argument.map_err(|span| {
+                        Rich::custom(
+                            span,
+                            "dot-leading application arguments must be parenthesized; write `f (.bar)` or use `<|`",
+                        )
+                    })?;
+                    Ok(SyntaxExpr::Apply(Box::new(function), Box::new(argument)))
                 })
             })
             .boxed();

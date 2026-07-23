@@ -3988,9 +3988,9 @@ mod tests {
     fn isolated_search_obeys_ordered_choice_laws() {
         assert_search_bytes(".r \"single\"", &[b"single"]);
         assert_search_bytes(".fail", &[]);
-        assert_search_bytes(".cut .fail", &[]);
+        assert_search_bytes(".cut (.fail)", &[]);
         assert_search_bytes(
-            ".alt (.r \"left\") (.alt .fail (.r \"right\"))",
+            ".alt (.r \"left\") (.alt (.fail) (.r \"right\"))",
             &[b"left", b"right"],
         );
         assert_search_bytes(
@@ -4639,7 +4639,7 @@ mod tests {
         for source in [
             ".task.new (.r ()) >>= (\\task -> .task.status task >>= (\\status -> (status == 'launched) =>> .r ()))",
             ".task.new (.r ()) >>= (\\task -> .task.join task >>= (\\_ -> .task.status task >>= (\\status -> .r status.ok)))",
-            ".task.new .fail >>= (\\task -> .task.error task >>= (\\_ -> .task.status task >>= (\\status -> .r status.err)))",
+            ".task.new (.fail) >>= (\\task -> .task.error task >>= (\\_ -> .task.status task >>= (\\status -> .r status.err)))",
             ".task.new (.r ()) >>= (\\task -> .task.cancel task =>> .task.error task >>= (\\_ -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ())))",
         ] {
             let (_, effect) = compile_effect(source);
@@ -4778,7 +4778,7 @@ mod tests {
 
     #[test]
     fn join_propagates_task_error_and_task_error_extracts_it() {
-        let (_, join) = compile_effect(".task.new .fail >>= (\\task -> .task.join task)");
+        let (_, join) = compile_effect(".task.new (.fail) >>= (\\task -> .task.join task)");
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&join, host.clone());
         let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
@@ -4787,7 +4787,7 @@ mod tests {
         assert!(error.contains("failed permanently"));
 
         let (assembler, extract) =
-            compile_effect(".task.new .fail >>= (\\task -> .task.error task)");
+            compile_effect(".task.new (.fail) >>= (\\task -> .task.error task)");
         let (context, task) = schedule_composed_test_task(&extract, host);
         let poll = pump_composed_test_task(&context, &task);
         let EvaluationTaskPoll::Complete(value) = poll else {
@@ -4804,7 +4804,7 @@ mod tests {
         let host = Arc::new(TestHost::default());
         for (source, expected) in [
             (
-                ".task.new .fail >>= (\\task -> .cut (.heap.get ['observed] >>= (\\_ -> .task.join task)))",
+                ".task.new (.fail) >>= (\\task -> .cut (.heap.get ['observed] >>= (\\_ -> .task.join task)))",
                 "failed permanently",
             ),
             (
@@ -4837,7 +4837,7 @@ mod tests {
 
     #[test]
     fn observed_evaluation_error_restarts_without_advancing_alternatives() {
-        let (assembler, effect) = compile_effect(".cut (.alt .read_log (1 2))");
+        let (assembler, effect) = compile_effect(".cut (.alt (.read_log) (1 2))");
         let host = Arc::new(TestHost::default());
         let mut task =
             EffectTask::new(effect.as_core().clone(), TestEffects, host.clone()).unwrap();
@@ -5064,7 +5064,7 @@ mod tests {
 
     #[test]
     fn unobserved_failure_is_permanent_with_or_without_cut() {
-        for source in [".fail", ".cut .fail"] {
+        for source in [".fail", ".cut (.fail)"] {
             let (_, effect) = compile_effect(source);
             let host = Arc::new(TestHost::default());
             assert!(
@@ -5115,8 +5115,9 @@ mod tests {
 
     #[test]
     fn cut_retries_only_after_a_failed_alternative_observes_changeable_state() {
-        let (assembler, effect) =
-            compile_effect(".cut (.alt (.read_log >>= (\\message -> .r message.msg.text)) .fail)");
+        let (assembler, effect) = compile_effect(
+            ".cut (.alt (.read_log >>= (\\message -> .r message.msg.text)) (.fail))",
+        );
         let host = Arc::new(TestHost::with_wake_diagnostic(Diagnostic::new(
             crate::diagnostic::Severity::Warning,
             "cut resumed",
@@ -5185,7 +5186,7 @@ mod tests {
         assert_eq!(assembler.to_binary(&value).unwrap(), b"right".as_slice());
 
         let (assembler, value) =
-            completed(".fix (\\_loop -> .cut (.alt .fail (.r \"nested cut\")))");
+            completed(".fix (\\_loop -> .cut (.alt (.fail) (.r \"nested cut\")))");
         assert_eq!(
             assembler.to_binary(&value).unwrap(),
             b"nested cut".as_slice()
