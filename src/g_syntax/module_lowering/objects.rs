@@ -22,7 +22,7 @@ pub(in crate::g_syntax) fn lower_object(
         declared_target_has_reflection(&object.target),
     )?;
     let target_context = DefinitionTargetContext::new(&definitions_root, line, context, &scope);
-    let object_value = target_context.annotate(
+    let object_value = target_context.annotate_static(
         BuiltinAssertion::Undefined,
         &object.target,
         object_value,
@@ -194,7 +194,7 @@ pub(in crate::g_syntax) fn lower_nested_object_resolved(
         scope.reflection.is_some() && declared_target_has_reflection(&object.target),
     )?;
     let target_context = DefinitionTargetContext::new(definitions, line, context, scope);
-    let object_value = target_context.annotate(
+    let object_value = target_context.annotate_static(
         BuiltinAssertion::Undefined,
         &object.target,
         object_value,
@@ -334,7 +334,7 @@ pub(in crate::g_syntax) fn lower_extend(
         composed_defs,
     ));
     let target_context = DefinitionTargetContext::new(&definitions_root, line, context, &scope);
-    let object_value = target_context.annotate(
+    let object_value = target_context.annotate_static(
         BuiltinAssertion::Defined,
         &extend.target,
         object_value,

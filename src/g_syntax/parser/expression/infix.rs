@@ -1,5 +1,5 @@
 use super::super::super::{SyntaxExpr, SyntaxOperator, is_comparison_operator};
-use super::super::compound::syntax_binary_expr;
+use super::syntax_binary_expr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Associativity {

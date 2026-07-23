@@ -1,29 +1,28 @@
-#[cfg(test)]
-use chumsky::prelude::*;
+//! Source and nested declaration grammar.
+//!
+//! A declaration is always parsed from one lexer-owned range. Nested object
+//! bodies reuse the same parser over layout-selected subranges, so expressions,
+//! delimiter groups, multiline text, and indentation have one interpretation.
 
-use super::super::{Declaration, DeclarationKind, Diagnostic, SyntaxKeyExpr};
-#[cfg(test)]
 use super::super::{
-    DefinitionDecl, DefinitionKind, ObjectBodyDefinition, ObjectBodyDefinitionKind, ObjectDecl,
-    PathSuffix, SyntaxExpr, flatten_path_suffixes, warn_unused_locals, warn_unused_with_alias,
+    DeclarationKind, DefinitionDecl, DefinitionKind, Diagnostic, ObjectBodyDefinition,
+    ObjectBodyDefinitionKind, ObjectDecl, ObjectExtendDecl, SyntaxExpr, SyntaxKeyExpr,
+    warn_unused_locals, warn_unused_with_alias,
 };
-#[cfg(test)]
-use super::layout::{
-    legacy_closes_multiline_text, legacy_glam_name, legacy_indentation_width,
-    legacy_is_glam_whitespace, legacy_is_indented, legacy_local_name, legacy_opens_multiline_text,
-    legacy_strip_comment, legacy_strip_indent_width, legacy_whitespace0, legacy_whitespace1,
+use super::input::TokenView;
+use super::layout::{LayoutBase, LayoutView};
+use super::lexical::{Delimiter, LeadingTrivia, TokenKind};
+use super::structural::{
+    contextual_keywords, first_top_level_line_start, is_layout_empty, local_name, parse_expression,
+    split_top_level, token_is_name, trim_layout, view_between,
 };
-#[cfg(test)]
-use super::{parse_expr_result_with_diagnostics, syntax_expr_parser};
 
 mod simple;
-pub(in crate::g_syntax::parser) mod token;
 
 pub(super) use simple::{SimpleDeclaration, parse_simple_declaration};
-pub(super) use token::parse_declaration;
 
 pub(super) fn validate_language_position(
-    declarations: &[Declaration],
+    declarations: &[super::super::Declaration],
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let Some(first) = declarations.first() else {
@@ -51,457 +50,529 @@ pub(super) fn validate_language_position(
     }
 }
 
-pub(in crate::g_syntax) fn definition_target_parts(
-    target: &str,
+pub(in crate::g_syntax::parser) fn parse_declaration(
+    view: TokenView<'_, '_>,
     line: usize,
-) -> Result<Vec<SyntaxKeyExpr>, Diagnostic> {
-    token::parse_definition_target_text(target, line)
+    diagnostics: &mut Vec<Diagnostic>,
+) -> DeclarationKind {
+    let view = trim_layout(view);
+    let Some((_, head)) = view.first_significant() else {
+        return DeclarationKind::Unknown;
+    };
+    match head.kind() {
+        TokenKind::Name("object") => parse_object_declaration(view, line, diagnostics)
+            .map_or(DeclarationKind::Unknown, DeclarationKind::Object),
+        TokenKind::Name("extend") => parse_extend_declaration(view, line, diagnostics)
+            .map_or(DeclarationKind::Unknown, DeclarationKind::Extend),
+        _ => parse_definition(view, line, diagnostics)
+            .map_or(DeclarationKind::Unknown, DeclarationKind::Definition),
+    }
 }
 
-#[cfg(test)]
-pub(in crate::g_syntax) use legacy::definition_decl;
-#[cfg(test)]
-pub(super) use legacy::{parse_object_body, quoted_text, take_header_word};
+pub(in crate::g_syntax::parser) fn parse_object_body(
+    view: TokenView<'_, '_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<ObjectBodyDefinition> {
+    if is_layout_empty(view) {
+        return Vec::new();
+    }
+    let statements = match LayoutView::new(view).statements(LayoutBase::FirstLine) {
+        Ok(statements) => statements,
+        Err(error) => {
+            diagnostics.push(Diagnostic::error(error.line(), error.message()));
+            return Vec::new();
+        }
+    };
 
-#[cfg(test)]
-mod legacy {
-    use super::*;
+    let mut body = Vec::with_capacity(statements.len());
+    for statement in statements {
+        let Some(statement_view) = view.subview(statement.tokens()) else {
+            continue;
+        };
+        let statement_view = trim_layout(statement_view);
+        let line = statement.line();
+        let kind = match statement_view.first_significant() {
+            Some((_, token)) if token_is_name(token, "object") => {
+                parse_object_declaration(statement_view, line, diagnostics)
+                    .map(ObjectBodyDefinitionKind::Object)
+            }
+            _ => parse_definition(statement_view, line, diagnostics)
+                .map(ObjectBodyDefinitionKind::Definition),
+        };
+        if let Some(kind) = kind {
+            body.push(ObjectBodyDefinition { line, kind });
+        }
+    }
+    body
+}
 
-    fn parse_object_declaration(
-        text: &str,
-        line: usize,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> Option<ObjectDecl> {
-        let mut lines = text.lines();
-        let header = lines.next()?.trim();
-        let body_lines = lines.collect::<Vec<_>>();
-        let header = header.strip_prefix("object")?.trim();
+fn parse_definition(
+    view: TokenView<'_, '_>,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<DefinitionDecl> {
+    let operator = view.top_level().find_map(|indexed| {
+        let kind = match indexed.token().kind() {
+            TokenKind::Symbol("::=") => DefinitionKind::Update,
+            TokenKind::Symbol(":=") => DefinitionKind::Override,
+            TokenKind::Symbol("=") => DefinitionKind::Introduce,
+            _ => return None,
+        };
+        Some((indexed.index(), kind))
+    });
+    let Some((operator_index, kind)) = operator else {
+        diagnostics.push(Diagnostic::error(line, "expected a declaration"));
+        return None;
+    };
 
-        let (target, rest) = take_header_word(header).unwrap_or(("", ""));
-        if target.is_empty() {
+    let left = trim_layout(view_between(view, view.range().start(), operator_index));
+    let body_view = trim_layout(view_between(view, operator_index + 1, view.range().end()));
+    if is_layout_empty(body_view) {
+        diagnostics.push(Diagnostic::error(line, "definition body cannot be empty"));
+        return None;
+    }
+
+    let (target, parameters) = match parse_definition_left(left, line) {
+        Ok(parts) => parts,
+        Err(diagnostic) => {
+            diagnostics.push(diagnostic);
+            return None;
+        }
+    };
+    let parsed_body = match parse_expression(body_view) {
+        Ok(expr) => expr,
+        Err(errors) => {
+            diagnostics.extend(errors);
+            return Some(DefinitionDecl {
+                target,
+                parameters,
+                kind,
+                expr: None,
+            });
+        }
+    };
+    let expr = if parameters.is_empty() {
+        parsed_body
+    } else {
+        SyntaxExpr::Lambda(parameters.clone(), Box::new(parsed_body))
+    };
+    warn_unused_locals(&expr, line, diagnostics);
+
+    Some(DefinitionDecl {
+        target,
+        parameters,
+        kind,
+        expr: Some(expr),
+    })
+}
+
+fn parse_definition_left(
+    view: TokenView<'_, '_>,
+    line: usize,
+) -> Result<(Vec<SyntaxKeyExpr>, Vec<String>), Diagnostic> {
+    let significant = view
+        .top_level()
+        .filter(|indexed| !matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
+        .collect::<Vec<_>>();
+    let Some(first) = significant.first().copied() else {
+        return Err(Diagnostic::error(line, "definition requires a target"));
+    };
+
+    let mut position;
+    let mut target_end;
+    match first.token().kind() {
+        TokenKind::Name(_) => {
+            position = 1;
+            target_end = first.index() + 1;
+        }
+        TokenKind::Symbol(".") => {
+            position = 0;
+            target_end = first.index();
+        }
+        _ => {
+            return Err(Diagnostic::error(
+                line,
+                "definition target must be a name or path",
+            ));
+        }
+    }
+
+    while position < significant.len() {
+        let dot = significant[position];
+        if !matches!(dot.token().kind(), TokenKind::Symbol(".")) {
+            break;
+        }
+        if position > 0 && dot.token().leading() != LeadingTrivia::Joint {
+            break;
+        }
+        let Some(item) = significant.get(position + 1).copied() else {
+            return Err(Diagnostic::error(line, "path suffix requires a key"));
+        };
+        if item.token().leading() != LeadingTrivia::Joint {
+            return Err(Diagnostic::error(
+                line,
+                "path suffix key must immediately follow `.`",
+            ));
+        }
+        target_end = match item.token().kind() {
+            TokenKind::Name(_) => item.index() + 1,
+            TokenKind::Open {
+                group,
+                delimiter: Delimiter::Bracket | Delimiter::Parenthesis,
+            } => view
+                .group(*group)
+                .and_then(|group| group.close_token())
+                .map(|close| close + 1)
+                .ok_or_else(|| Diagnostic::error(line, "unclosed definition target path"))?,
+            _ => {
+                return Err(Diagnostic::error(
+                    line,
+                    "definition path suffix requires a name, list, or parenthesized path",
+                ));
+            }
+        };
+        position += 2;
+    }
+
+    let target_view = view_between(view, first.index(), target_end);
+    let target = parse_definition_target(target_view, line)?;
+
+    let mut parameters = Vec::new();
+    for indexed in significant.into_iter().skip(position) {
+        if indexed.index() < target_end {
+            continue;
+        }
+        let parameter_view = view_between(view, indexed.index(), indexed.index() + 1);
+        let Some(parameter) = local_name(parameter_view) else {
+            return Err(Diagnostic::error(
+                line,
+                "definition parameters must be local names",
+            ));
+        };
+        if indexed.token().leading() == LeadingTrivia::Joint {
+            return Err(Diagnostic::error(
+                line,
+                "definition parameters must be separated from the target",
+            ));
+        }
+        parameters.push(parameter.to_owned());
+    }
+
+    Ok((target, parameters))
+}
+
+fn parse_definition_target(
+    view: TokenView<'_, '_>,
+    line: usize,
+) -> Result<Vec<SyntaxKeyExpr>, Diagnostic> {
+    let mut parts = Vec::new();
+    let tokens = view.top_level().collect::<Vec<_>>();
+    let mut position = 0;
+    if let Some(first) = tokens.first()
+        && let TokenKind::Name(name) = first.token().kind()
+    {
+        parts.push(SyntaxKeyExpr::Atom((*name).to_owned()));
+        position = 1;
+    }
+
+    while position < tokens.len() {
+        let dot = tokens[position];
+        if !matches!(dot.token().kind(), TokenKind::Symbol(".")) {
+            return Err(Diagnostic::error(line, "invalid definition target path"));
+        }
+        let Some(item) = tokens.get(position + 1).copied() else {
+            return Err(Diagnostic::error(line, "path suffix requires a key"));
+        };
+        match item.token().kind() {
+            TokenKind::Name(name) => parts.push(SyntaxKeyExpr::Atom((*name).to_owned())),
+            TokenKind::Open {
+                group,
+                delimiter: Delimiter::Bracket,
+            } => {
+                let contents = view
+                    .group_contents(*group)
+                    .ok_or_else(|| Diagnostic::error(line, "invalid path list"))?;
+                for item in split_top_level(contents, ",")
+                    .into_iter()
+                    .map(trim_layout)
+                    .filter(|item| !is_layout_empty(*item))
+                {
+                    let expr = parse_expression(item)
+                        .map_err(|errors| combine_parse_errors(line, errors))?;
+                    parts.push(match expr {
+                        SyntaxExpr::Atom(name) => SyntaxKeyExpr::Atom(name),
+                        expr => SyntaxKeyExpr::Index(Box::new(expr)),
+                    });
+                }
+            }
+            TokenKind::Open {
+                group,
+                delimiter: Delimiter::Parenthesis,
+            } => {
+                let contents = view
+                    .group_contents(*group)
+                    .ok_or_else(|| Diagnostic::error(line, "invalid computed path"))?;
+                let expr = parse_expression(contents)
+                    .map_err(|errors| combine_parse_errors(line, errors))?;
+                parts.push(SyntaxKeyExpr::PathIndex(Box::new(expr)));
+            }
+            _ => return Err(Diagnostic::error(line, "invalid definition target path")),
+        }
+        position += 2;
+    }
+
+    if parts.is_empty() {
+        Err(Diagnostic::error(
+            line,
+            "definition target path cannot be empty",
+        ))
+    } else {
+        Ok(parts)
+    }
+}
+
+fn combine_parse_errors(line: usize, diagnostics: Vec<Diagnostic>) -> Diagnostic {
+    Diagnostic::error(
+        line,
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
+fn parse_object_declaration(
+    view: TokenView<'_, '_>,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<ObjectDecl> {
+    let (header, body) = split_header_body(view);
+    let head = header.first_significant()?.0;
+    let header = trim_layout(view_between(header, head + 1, header.range().end()));
+    let parsed = parse_static_object_header(header, line, false, diagnostics)?;
+    if body.is_some() && !parsed.has_with {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "object body requires `with` in the declaration header",
+        ));
+        return None;
+    }
+    let body = body.map_or_else(Vec::new, |body| parse_object_body(body, diagnostics));
+    if let Some(alias) = &parsed.alias {
+        warn_unused_with_alias(alias, &body, line, diagnostics);
+    }
+    Some(ObjectDecl {
+        target: parsed.target,
+        alias: parsed.alias,
+        deps: parsed.deps,
+        body,
+    })
+}
+
+fn parse_extend_declaration(
+    view: TokenView<'_, '_>,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<ObjectExtendDecl> {
+    let (header, body) = split_header_body(view);
+    let head = header.first_significant()?.0;
+    let header = trim_layout(view_between(header, head + 1, header.range().end()));
+    let parsed = parse_static_object_header(header, line, true, diagnostics)?;
+    if !parsed.has_with {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "extend declarations currently require `extend name (as alias)? with`",
+        ));
+        return None;
+    }
+    let Some(body_view) = body else {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "extend declaration requires a body",
+        ));
+        return None;
+    };
+    let body = parse_object_body(body_view, diagnostics);
+    if body.is_empty() {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "extend declaration requires a body",
+        ));
+        return None;
+    }
+    if let Some(alias) = &parsed.alias {
+        warn_unused_with_alias(alias, &body, line, diagnostics);
+    }
+    Some(ObjectExtendDecl {
+        target: parsed.target,
+        alias: parsed.alias,
+        body,
+    })
+}
+
+struct StaticObjectHeader {
+    target: String,
+    alias: Option<String>,
+    deps: Vec<String>,
+    has_with: bool,
+}
+
+fn parse_static_object_header(
+    mut header: TokenView<'_, '_>,
+    line: usize,
+    extend: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<StaticObjectHeader> {
+    let with_index = contextual_keywords(header, "with").into_iter().next();
+    let has_with = with_index.is_some();
+    if let Some(with_index) = with_index {
+        if header.last_significant().map(|(index, _)| index) != Some(with_index) {
             diagnostics.push(Diagnostic::error(
                 line,
-                "object declaration requires a name",
+                "`with` must end an object declaration header",
             ));
             return None;
         }
-        if target == "_" {
+        header = trim_layout(view_between(header, header.range().start(), with_index));
+    }
+
+    let as_index = contextual_keywords(header, "as").into_iter().next();
+    let extends_index = contextual_keywords(header, "extends").into_iter().next();
+    if extend && extends_index.is_some() {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "extend declaration does not accept `extends` dependencies",
+        ));
+        return None;
+    }
+    if as_index
+        .is_some_and(|as_index| extends_index.is_some_and(|extends_index| as_index > extends_index))
+    {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "object declaration `as` must precede `extends`",
+        ));
+        return None;
+    }
+
+    let target_end = [as_index, extends_index]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(header.range().end());
+    let target_view = trim_layout(view_between(header, header.range().start(), target_end));
+    let target = match static_path(target_view) {
+        Some(target) if target != "_" => target,
+        Some(_) => {
             diagnostics.push(Diagnostic::error(
                 line,
                 "anonymous object declarations are not supported by the current spike",
             ));
             return None;
         }
-        if !path().parse(target).into_result().is_ok() {
+        None => {
             diagnostics.push(Diagnostic::error(
                 line,
-                "object declaration requires a path name",
+                if extend {
+                    "extend declaration requires a path name"
+                } else {
+                    "object declaration requires a path name"
+                },
             ));
             return None;
         }
+    };
 
-        let header_tail = parse_object_header_tail(rest.trim(), line, diagnostics)?;
-        if !body_lines.is_empty() && !header_tail.has_with {
-            diagnostics.push(Diagnostic::error(
-                line,
-                "object body requires `with` in the declaration header",
-            ));
-            return None;
+    let alias = if let Some(as_index) = as_index {
+        let end = extends_index.unwrap_or(header.range().end());
+        let alias_view = trim_layout(view_between(header, as_index + 1, end));
+        match local_name(alias_view) {
+            Some(alias) => Some(alias.to_owned()),
+            None => {
+                diagnostics.push(Diagnostic::error(
+                    line,
+                    "`as` requires a valid object alias name",
+                ));
+                return None;
+            }
         }
+    } else {
+        None
+    };
 
-        let body = parse_object_body(&body_lines, line + 1, diagnostics);
-        if let Some(alias) = &header_tail.alias {
-            warn_unused_with_alias(alias, &body, line, diagnostics);
-        }
-
-        Some(ObjectDecl {
-            target: target.to_owned(),
-            alias: header_tail.alias,
-            deps: header_tail.deps,
-            body,
-        })
-    }
-
-    struct ObjectHeaderTail {
-        alias: Option<String>,
-        deps: Vec<String>,
-        has_with: bool,
-    }
-
-    fn parse_object_header_tail(
-        rest: &str,
-        line: usize,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> Option<ObjectHeaderTail> {
-        let (alias, rest) = parse_optional_object_alias(rest, line, diagnostics)?;
-        if rest.is_empty() {
-            return Some(ObjectHeaderTail {
-                alias,
-                deps: Vec::new(),
-                has_with: false,
-            });
-        }
-        if rest == "with" {
-            return Some(ObjectHeaderTail {
-                alias,
-                deps: Vec::new(),
-                has_with: true,
-            });
-        }
-
-        let Some(after_extends) = rest.strip_prefix("extends").map(str::trim) else {
-            diagnostics.push(Diagnostic::error(
-            line,
-            "object declarations currently support only `extends ...` and `with` after the name",
+    let deps = if let Some(extends_index) = extends_index {
+        let deps_view = trim_layout(view_between(
+            header,
+            extends_index + 1,
+            header.range().end(),
         ));
-            return None;
-        };
-        if after_extends.is_empty() {
-            diagnostics.push(Diagnostic::error(
-                line,
-                "object `extends` requires at least one dependency",
-            ));
-            return None;
-        }
-
-        let (deps_text, has_with) = match after_extends.strip_suffix(" with") {
-            Some(deps) => (deps.trim(), true),
-            None if after_extends == "with" => {
-                diagnostics.push(Diagnostic::error(
-                    line,
-                    "object `extends` requires at least one dependency",
-                ));
-                return None;
-            }
-            None => (after_extends, false),
-        };
-        let deps = deps_text
-            .split(',')
-            .map(str::trim)
-            .filter(|dep| !dep.is_empty())
-            .map(ToOwned::to_owned)
+        let dep_views = split_top_level(deps_view, ",")
+            .into_iter()
+            .map(trim_layout)
+            .filter(|view| !is_layout_empty(*view))
             .collect::<Vec<_>>();
-        if deps.is_empty() {
+        if dep_views.is_empty() {
             diagnostics.push(Diagnostic::error(
                 line,
                 "object `extends` requires at least one dependency",
             ));
             return None;
         }
-        for dep in &deps {
-            if !path().parse(dep.as_str()).into_result().is_ok() {
+        let mut deps = Vec::with_capacity(dep_views.len());
+        for dep in dep_views {
+            let Some(dep) = static_path(dep) else {
                 diagnostics.push(Diagnostic::error(
                     line,
-                    format!("object dependency `{dep}` is not a path name"),
+                    "object dependency is not a path name",
                 ));
                 return None;
-            }
+            };
+            deps.push(dep);
         }
+        deps
+    } else {
+        Vec::new()
+    };
 
-        Some(ObjectHeaderTail {
-            alias,
-            deps,
-            has_with,
-        })
-    }
+    Some(StaticObjectHeader {
+        target,
+        alias,
+        deps,
+        has_with,
+    })
+}
 
-    fn parse_optional_object_alias<'a>(
-        rest: &'a str,
-        line: usize,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> Option<(Option<String>, &'a str)> {
-        let rest = rest.trim();
-        let Some((first, tail)) = take_header_word(rest) else {
-            return Some((None, ""));
-        };
-        if first != "as" {
-            return Some((None, rest));
-        }
-
-        let Some((alias, tail)) = take_header_word(tail) else {
-            diagnostics.push(Diagnostic::error(
-                line,
-                "`as` requires an object alias name",
-            ));
-            return None;
-        };
-        if !legacy_local_name().parse(alias).into_result().is_ok() {
-            diagnostics.push(Diagnostic::error(
-                line,
-                format!("object alias `{alias}` is not a valid local name"),
-            ));
-            return None;
-        }
-        Some((Some(alias.to_owned()), tail.trim()))
-    }
-
-    pub(in crate::g_syntax::parser) fn parse_object_body(
-        lines: &[&str],
-        first_line: usize,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> Vec<ObjectBodyDefinition> {
-        let mut body = Vec::new();
-        let mut index = 0;
-
-        while index < lines.len() {
-            let line = lines[index];
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                index += 1;
-                continue;
-            }
-
-            let line_number = first_line + index;
-            if legacy_is_indented(line) {
-                diagnostics.push(Diagnostic::error(
-                    line_number,
-                    "object body continuation line without a preceding nested declaration",
-                ));
-                index += 1;
-                continue;
-            }
-
-            let mut text = trimmed.to_owned();
-            index += 1;
-            let mut continuation_indent = None;
-            let mut in_multiline_text = legacy_opens_multiline_text(&text);
-            while index < lines.len() {
-                let next = lines[index];
-                let next_trimmed = next.trim();
-
-                if in_multiline_text {
-                    if next_trimmed.is_empty() || next_trimmed.starts_with('#') {
-                        index += 1;
-                        continue;
-                    }
-                    if !legacy_is_indented(next) {
-                        break;
-                    }
-
-                    let closes_text = legacy_closes_multiline_text(next);
-                    let source_line = if closes_text {
-                        legacy_strip_comment(next).trim_end()
-                    } else {
-                        next
-                    };
-                    let next_text = continuation_indent
-                        .map(|indent| legacy_strip_indent_width(source_line, indent))
-                        .unwrap_or_else(|| source_line.trim_start());
-                    text.push('\n');
-                    text.push_str(next_text);
-                    in_multiline_text = !closes_text;
-                    index += 1;
-                    continue;
+fn static_path(view: TokenView<'_, '_>) -> Option<String> {
+    let significant = view
+        .top_level()
+        .filter(|indexed| !matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
+        .collect::<Vec<_>>();
+    let TokenKind::Name(_) = significant.first()?.token().kind() else {
+        return None;
+    };
+    for (position, indexed) in significant.iter().enumerate() {
+        match (position % 2, indexed.token().kind()) {
+            (0, TokenKind::Name(_)) => {
+                if position > 0 && indexed.token().leading() != LeadingTrivia::Joint {
+                    return None;
                 }
-
-                if next_trimmed.is_empty() {
-                    index += 1;
-                    continue;
-                }
-                if !legacy_is_indented(next) {
-                    break;
-                }
-                if continuation_indent.is_none() {
-                    continuation_indent = Some(legacy_indentation_width(next));
-                }
-                let next_text = continuation_indent
-                    .map(|indent| legacy_strip_indent_width(next.trim_end(), indent))
-                    .unwrap_or(next_trimmed);
-                text.push('\n');
-                text.push_str(next_text.trim_end());
-                in_multiline_text = legacy_opens_multiline_text(next_text);
-                index += 1;
             }
-
-            if let Some(definition) = parse_object_body_definition(&text, line_number, diagnostics)
-            {
-                body.push(definition);
-            }
+            (1, TokenKind::Symbol(".")) if indexed.token().leading() == LeadingTrivia::Joint => {}
+            _ => return None,
         }
-
-        body
     }
+    (significant.len() % 2 == 1).then(|| view.source_text().unwrap_or("").trim().to_owned())
+}
 
-    fn parse_object_body_definition(
-        text: &str,
-        line: usize,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> Option<ObjectBodyDefinition> {
-        if text.trim_start().starts_with("object ") {
-            let object = parse_object_declaration(text, line, diagnostics)?;
-            return Some(ObjectBodyDefinition {
-                line,
-                text: text.to_owned(),
-                kind: ObjectBodyDefinitionKind::Object(object),
-            });
-        }
-
-        let (declaration, errors) = definition_decl().parse(text).into_output_errors();
-        for error in errors {
-            diagnostics.push(Diagnostic::error(line, error.to_string()));
-        }
-
-        let definition = declaration?;
-        Some(ObjectBodyDefinition {
-            line,
-            text: text.to_owned(),
-            kind: ObjectBodyDefinitionKind::Definition(finalize_definition_expr(
-                definition,
-                line,
-                diagnostics,
-            )),
-        })
-    }
-
-    pub(in crate::g_syntax::parser) fn take_header_word(text: &str) -> Option<(&str, &str)> {
-        let text = text.trim_start();
-        if text.is_empty() {
-            return None;
-        }
-        let end = text.find(legacy_is_glam_whitespace).unwrap_or(text.len());
-        Some((&text[..end], &text[end..]))
-    }
-
-    pub(in crate::g_syntax) fn definition_decl<'src>()
-    -> impl Parser<'src, &'src str, DefinitionDecl, extra::Err<Rich<'src, char>>> {
-        definition_target()
-            .then(
-                legacy_whitespace1().ignore_then(
-                    legacy_local_name()
-                        .then_ignore(legacy_whitespace1())
-                        .repeated()
-                        .collect::<Vec<_>>(),
-                ),
-            )
-            .then(definition_operator())
-            .then_ignore(legacy_whitespace0())
-            .then(rest_of_declaration())
-            .try_map(|(((target, params), kind), body), span| {
-                if body.is_empty() {
-                    Err(Rich::custom(span, "definition body cannot be empty"))
-                } else {
-                    Ok(DefinitionDecl {
-                        target,
-                        parameters: params,
-                        kind,
-                        body,
-                        expr: None,
-                    })
-                }
-            })
-    }
-
-    fn definition_target<'src>()
-    -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
-        definition_target_path().to_slice().map(ToOwned::to_owned)
-    }
-
-    pub(in crate::g_syntax) fn definition_target_path<'src>()
-    -> impl Parser<'src, &'src str, Vec<SyntaxKeyExpr>, extra::Err<Rich<'src, char>>> {
-        let name = legacy_glam_name().boxed();
-        let expr = syntax_expr_parser().boxed();
-        let single_key_expr = || {
-            choice((
-                just('\'')
-                    .ignore_then(name.clone())
-                    .map(SyntaxKeyExpr::Atom),
-                expr.clone()
-                    .map(|expr| SyntaxKeyExpr::Index(Box::new(expr))),
-            ))
-        };
-        let path_list_shorthand = single_key_expr()
-            .padded()
-            .separated_by(just(',').padded())
-            .allow_leading()
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just('['), just(']'))
-            .map(PathSuffix::Expand);
-        let path_list_expr = expr
-            .padded()
-            .delimited_by(just('('), just(')'))
-            .map(|expr| PathSuffix::Single(SyntaxKeyExpr::PathIndex(Box::new(expr))));
-        let path_suffix_item = just('.').ignore_then(choice((
-            path_list_shorthand,
-            path_list_expr,
-            name.clone()
-                .map(SyntaxKeyExpr::Atom)
-                .map(PathSuffix::Single),
-        )));
-        let path_suffix = path_suffix_item.clone().repeated().collect::<Vec<_>>();
-
-        choice((
-            name.clone()
-                .map(SyntaxKeyExpr::Atom)
-                .then(path_suffix.clone())
-                .map(|(name, suffixes)| {
-                    let mut parts = vec![name];
-                    parts.extend(flatten_path_suffixes(suffixes));
-                    parts
-                }),
-            path_suffix_item
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .map(flatten_path_suffixes),
-        ))
-    }
-
-    fn definition_operator<'src>()
-    -> impl Parser<'src, &'src str, DefinitionKind, extra::Err<Rich<'src, char>>> {
-        choice((
-            just("::=").to(DefinitionKind::Update),
-            just(":=").to(DefinitionKind::Override),
-            just('=').to(DefinitionKind::Introduce),
-        ))
-    }
-
-    fn path<'src>() -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
-        name()
-            .separated_by(just('.'))
-            .at_least(1)
-            .collect::<Vec<_>>()
-            .map(|parts| parts.join("."))
-    }
-
-    fn name<'src>() -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
-        text::ascii::ident().map(ToOwned::to_owned)
-    }
-
-    pub(in crate::g_syntax::parser) fn quoted_text<'src>()
-    -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
-        none_of('"')
-            .repeated()
-            .to_slice()
-            .map(ToOwned::to_owned)
-            .delimited_by(just('"'), just('"'))
-    }
-
-    fn rest_of_declaration<'src>()
-    -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> {
-        any()
-            .repeated()
-            .to_slice()
-            .map(|text: &str| text.trim().to_owned())
-    }
-
-    fn finalize_definition_expr(
-        mut definition: DefinitionDecl,
-        line: usize,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> DefinitionDecl {
-        match parse_expr_result_with_diagnostics(definition.body.as_str(), line, diagnostics) {
-            Ok(body) => {
-                let expr = if definition.parameters.is_empty() {
-                    body
-                } else {
-                    SyntaxExpr::Lambda(definition.parameters.clone(), Box::new(body))
-                };
-                warn_unused_locals(&expr, line, diagnostics);
-                definition.expr = Some(expr);
-            }
-            Err(message) => diagnostics.push(Diagnostic::error(line, message)),
-        }
-        definition
-    }
+fn split_header_body<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+) -> (TokenView<'lex, 'source>, Option<TokenView<'lex, 'source>>) {
+    let Some(header_end) = first_top_level_line_start(view) else {
+        return (view, None);
+    };
+    (
+        view_between(view, view.range().start(), header_end),
+        Some(view_between(view, header_end, view.range().end())),
+    )
 }

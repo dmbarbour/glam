@@ -236,12 +236,10 @@ mod resolver_context_tests {
             alias: None,
             body: vec![ObjectBodyDefinition {
                 line: 1,
-                text: "copy = self".to_owned(),
                 kind: ObjectBodyDefinitionKind::Definition(DefinitionDecl {
-                    target: "copy".to_owned(),
+                    target: vec![SyntaxKeyExpr::Atom("copy".to_owned())],
                     parameters: vec![],
                     kind: DefinitionKind::Introduce,
-                    body: "self".to_owned(),
                     expr: Some(SyntaxExpr::Name("self".to_owned())),
                 }),
             }],
@@ -276,12 +274,10 @@ mod resolver_context_tests {
             deps: Vec::new(),
             body: vec![ObjectBodyDefinition {
                 line: 1,
-                text: "copy = self".to_owned(),
                 kind: ObjectBodyDefinitionKind::Definition(DefinitionDecl {
-                    target: "copy".to_owned(),
+                    target: vec![SyntaxKeyExpr::Atom("copy".to_owned())],
                     parameters: vec![],
                     kind: DefinitionKind::Introduce,
-                    body: "self".to_owned(),
                     expr: Some(SyntaxExpr::Name("self".to_owned())),
                 }),
             }],

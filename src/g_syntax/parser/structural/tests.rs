@@ -1,32 +1,27 @@
 use super::*;
 use crate::g_syntax::{ObjectExpr, SyntaxExpr};
 
-use super::super::parse_expr_result;
-
-fn assert_expression_parity(source: &str) {
-    let character = parse_expr_result(source)
-        .unwrap_or_else(|error| panic!("character parser rejected `{source}`: {error}"));
-    let tokens = parse_compound_expression_fragment(source.as_bytes())
-        .unwrap_or_else(|diagnostics| panic!("token parser rejected `{source}`: {diagnostics:#?}"));
-    assert_eq!(tokens, character, "parser mismatch for `{source}`");
+fn parse_structural(source: &str) -> SyntaxExpr {
+    parse_compound_expression_fragment(source.as_bytes())
+        .unwrap_or_else(|diagnostics| panic!("parser rejected `{source}`: {diagnostics:#?}"))
 }
 
 fn token_object_header(source: &str) -> ObjectHeader {
-    super::super::super::input::parse_expression_fragment(source.as_bytes(), |view| {
+    super::super::input::parse_expression_fragment(source.as_bytes(), |view| {
         parse_object_header(view).expect("source should begin with an object expression")
     })
     .unwrap()
 }
 
 fn token_with_header(source: &str) -> WithHeader {
-    super::super::super::input::parse_expression_fragment(source.as_bytes(), |view| {
+    super::super::input::parse_expression_fragment(source.as_bytes(), |view| {
         parse_with_header(view).expect("source should contain a with-expression header")
     })
     .unwrap()
 }
 
 #[test]
-fn token_let_and_where_match_character_ast() {
+fn let_and_where_parse() {
     for source in [
         "let x = 1 in x + x",
         "let x = 1; _y = 2 in x",
@@ -39,14 +34,14 @@ fn token_let_and_where_match_character_ast() {
         "f (where) where x = \"in = where\"",
         "x + y where\nx = 1\ny = 2",
     ] {
-        assert_expression_parity(source);
+        parse_structural(source);
     }
 }
 
 #[test]
 fn token_keywords_ignore_nested_groups_and_text() {
-    assert_expression_parity("let x = {in:\"where =\"} in x");
-    assert_expression_parity("f (where) where x = \"in where = as\"");
+    parse_structural("let x = {in:\"where =\"} in x");
+    parse_structural("f (where) where x = \"in where = as\"");
 
     let object = token_object_header(
         "object (choose as extends) as alias extends (parent with), right with\n  value = 1",
@@ -77,18 +72,18 @@ fn token_keywords_ignore_nested_groups_and_text() {
 }
 
 #[test]
-fn object_headers_match_character_parser_without_reparsing_the_body() {
+fn object_headers_match_the_complete_structural_parse() {
     for source in [
         "object \"child\" with\n  value = 1",
         "object \"child\" as _self extends left, right with\n  value = 1",
         "object _ as _ with\n  value = 1",
     ] {
-        let character = parse_expr_result(source).unwrap();
+        let parsed = parse_structural(source);
         let SyntaxExpr::Object(ObjectExpr {
             name, alias, deps, ..
-        }) = character
+        }) = parsed
         else {
-            panic!("character parser did not produce an object");
+            panic!("parser did not produce an object");
         };
         assert_eq!(
             token_object_header(source),
@@ -98,15 +93,15 @@ fn object_headers_match_character_parser_without_reparsing_the_body() {
 }
 
 #[test]
-fn with_headers_match_character_parser_without_reparsing_the_body() {
+fn with_headers_match_the_complete_structural_parse() {
     for source in [
         "{x:1} with\n  x := 2",
         "base as prior with\n  x := _prior.x",
         "base as _ with\n  x := 2",
     ] {
-        let character = parse_expr_result(source).unwrap();
-        let SyntaxExpr::With { base, alias, .. } = character else {
-            panic!("character parser did not produce a with expression");
+        let parsed = parse_structural(source);
+        let SyntaxExpr::With { base, alias, .. } = parsed else {
+            panic!("parser did not produce a with expression");
         };
         assert_eq!(token_with_header(source), WithHeader { base, alias });
     }

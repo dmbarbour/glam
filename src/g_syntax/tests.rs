@@ -150,6 +150,12 @@ fn parse(text: &str) -> ParsedSource {
     parse_source(text.as_bytes())
 }
 
+fn static_definition_target(path: &str) -> Vec<SyntaxKeyExpr> {
+    path.split('.')
+        .map(|part| SyntaxKeyExpr::Atom(part.to_owned()))
+        .collect()
+}
+
 fn lower_with_module_path(text: &str, module_path: &[&str]) -> LoweredSource {
     let parsed = parse(text);
     let context = CompileContext::from_module_path(module_path.iter().copied());
@@ -313,14 +319,13 @@ fn groups_indented_continuation_lines() {
     let parsed = parse("language g0\nfoo = do\n  .bar\n  .baz\nqux := 1\n");
 
     assert_eq!(parsed.declarations.len(), 3);
-    assert_eq!(parsed.declarations[1].text, "foo = do\n  .bar\n  .baz");
+    assert_eq!(parsed.declarations[1].preview, "foo = do");
     assert_eq!(
         parsed.declarations[2].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "qux".to_owned(),
+            target: static_definition_target("qux"),
             parameters: vec![],
             kind: DefinitionKind::Override,
-            body: "1".to_owned(),
             expr: Some(SyntaxExpr::Number(n(1))),
         })
     );
@@ -489,7 +494,7 @@ fn parses_unique_declarations() {
 }
 
 #[test]
-fn mixes_token_native_and_legacy_top_level_declarations() {
+fn parses_mixed_top_level_declarations() {
     let parsed = parse(concat!(
         "language g0 with demo\n",
         "import 'std as standard\n",
@@ -569,23 +574,19 @@ fn parses_named_object_declarations() {
             body: vec![
                 ObjectBodyDefinition {
                     line: 3,
-                    text: "text = \"Hello\"".to_owned(),
                     kind: ObjectBodyDefinitionKind::Definition(DefinitionDecl {
-                        target: "text".to_owned(),
+                        target: static_definition_target("text"),
                         parameters: vec![],
                         kind: DefinitionKind::Introduce,
-                        body: "\"Hello\"".to_owned(),
                         expr: Some(SyntaxExpr::Text("Hello".to_owned())),
                     }),
                 },
                 ObjectBodyDefinition {
                     line: 4,
-                    text: "target := \"World\"".to_owned(),
                     kind: ObjectBodyDefinitionKind::Definition(DefinitionDecl {
-                        target: "target".to_owned(),
+                        target: static_definition_target("target"),
                         parameters: vec![],
                         kind: DefinitionKind::Override,
-                        body: "\"World\"".to_owned(),
                         expr: Some(SyntaxExpr::Text("World".to_owned())),
                     }),
                 },
@@ -608,12 +609,10 @@ fn parses_extend_declarations() {
             body: vec![
                 ObjectBodyDefinition {
                     line: 3,
-                    text: "text := _text ++ \"!\"".to_owned(),
                     kind: ObjectBodyDefinitionKind::Definition(DefinitionDecl {
-                        target: "text".to_owned(),
+                        target: static_definition_target("text"),
                         parameters: vec![],
                         kind: DefinitionKind::Override,
-                        body: "_text ++ \"!\"".to_owned(),
                         expr: Some(SyntaxExpr::Append(
                             Box::new(SyntaxExpr::PriorName("text".to_owned())),
                             Box::new(SyntaxExpr::Text("!".to_owned())),
@@ -622,12 +621,10 @@ fn parses_extend_declarations() {
                 },
                 ObjectBodyDefinition {
                     line: 4,
-                    text: "tail = \"done\"".to_owned(),
                     kind: ObjectBodyDefinitionKind::Definition(DefinitionDecl {
-                        target: "tail".to_owned(),
+                        target: static_definition_target("tail"),
                         parameters: vec![],
                         kind: DefinitionKind::Introduce,
-                        body: "\"done\"".to_owned(),
                         expr: Some(SyntaxExpr::Text("done".to_owned())),
                     }),
                 },
@@ -652,7 +649,7 @@ fn parses_hierarchical_object_body_declarations() {
     };
     assert_eq!(child.target, "child");
     assert_eq!(child.body.len(), 1);
-    assert_eq!(child.body[0].text, "text = \"Hello\"");
+    assert!(child.body[0].definition().is_some());
 }
 
 #[test]
@@ -746,108 +743,25 @@ fn warns_on_inconsistent_line_endings() {
 }
 
 #[test]
-fn parses_definition_forms() {
+fn definition_targets_retain_parsed_semantic_paths() {
+    let parsed = parse("language g0\nroot.([1, 2] ++ [3]) := value\n");
+
+    assert_eq!(parsed.diagnostics, []);
+    let DeclarationKind::Definition(definition) = &parsed.declarations[1].kind else {
+        panic!("expected a definition");
+    };
     assert_eq!(
-        definition_decl().parse("foo = 1").into_result(),
-        Ok(DefinitionDecl {
-            target: "foo".to_owned(),
-            parameters: vec![],
-            kind: DefinitionKind::Introduce,
-            body: "1".to_owned(),
-            expr: None,
-        })
-    );
-    assert_eq!(
-        definition_decl().parse("foo := 1").into_result(),
-        Ok(DefinitionDecl {
-            target: "foo".to_owned(),
-            parameters: vec![],
-            kind: DefinitionKind::Override,
-            body: "1".to_owned(),
-            expr: None,
-        })
-    );
-    assert_eq!(
-        definition_decl().parse("foo ::= f").into_result(),
-        Ok(DefinitionDecl {
-            target: "foo".to_owned(),
-            parameters: vec![],
-            kind: DefinitionKind::Update,
-            body: "f".to_owned(),
-            expr: None,
-        })
-    );
-    assert_eq!(
-        definition_decl().parse("foo x y = x + y").into_result(),
-        Ok(DefinitionDecl {
-            target: "foo".to_owned(),
-            parameters: vec!["x".to_owned(), "y".to_owned()],
-            kind: DefinitionKind::Introduce,
-            body: "x + y".to_owned(),
-            expr: None,
-        })
-    );
-    assert_eq!(
-        definition_decl().parse("skip _ y = y").into_result(),
-        Ok(DefinitionDecl {
-            target: "skip".to_owned(),
-            parameters: vec!["_".to_owned(), "y".to_owned()],
-            kind: DefinitionKind::Introduce,
-            body: "y".to_owned(),
-            expr: None,
-        })
-    );
-    assert_eq!(
-        definition_decl().parse("keep _value = value").into_result(),
-        Ok(DefinitionDecl {
-            target: "keep".to_owned(),
-            parameters: vec!["_value".to_owned()],
-            kind: DefinitionKind::Introduce,
-            body: "value".to_owned(),
-            expr: None,
-        })
-    );
-    assert_eq!(
-        definition_decl().parse("foo x := x").into_result(),
-        Ok(DefinitionDecl {
-            target: "foo".to_owned(),
-            parameters: vec!["x".to_owned()],
-            kind: DefinitionKind::Override,
-            body: "x".to_owned(),
-            expr: None,
-        })
-    );
-    assert_eq!(
-        definition_decl().parse("foo x ::= update").into_result(),
-        Ok(DefinitionDecl {
-            target: "foo".to_owned(),
-            parameters: vec!["x".to_owned()],
-            kind: DefinitionKind::Update,
-            body: "update".to_owned(),
-            expr: None,
-        })
-    );
-    assert_eq!(
-        definition_decl().parse(".[idx] = value").into_result(),
-        Ok(DefinitionDecl {
-            target: ".[idx]".to_owned(),
-            parameters: vec![],
-            kind: DefinitionKind::Introduce,
-            body: "value".to_owned(),
-            expr: None,
-        })
-    );
-    assert_eq!(
-        definition_decl()
-            .parse("foo.([1,2] ++ [3]) := value")
-            .into_result(),
-        Ok(DefinitionDecl {
-            target: "foo.([1,2] ++ [3])".to_owned(),
-            parameters: vec![],
-            kind: DefinitionKind::Override,
-            body: "value".to_owned(),
-            expr: None,
-        })
+        definition.target,
+        vec![
+            SyntaxKeyExpr::Atom("root".to_owned()),
+            SyntaxKeyExpr::PathIndex(Box::new(SyntaxExpr::Append(
+                Box::new(SyntaxExpr::List(vec![
+                    SyntaxExpr::Number(n(1)),
+                    SyntaxExpr::Number(n(2)),
+                ])),
+                Box::new(SyntaxExpr::List(vec![SyntaxExpr::Number(n(3))])),
+            ))),
+        ]
     );
 }
 
@@ -859,10 +773,9 @@ fn parses_inline_text_literal_expressions() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "asm.result".to_owned(),
+            target: static_definition_target("asm.result"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "\"Hello, World!\"".to_owned(),
             expr: Some(SyntaxExpr::Text("Hello, World!".to_owned())),
         })
     );
@@ -876,10 +789,9 @@ fn parses_atom_literal_expressions() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "answer".to_owned(),
+            target: static_definition_target("answer"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "'deque".to_owned(),
             expr: Some(SyntaxExpr::Atom("deque".to_owned())),
         })
     );
@@ -895,60 +807,54 @@ fn parses_number_literals() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "answer".to_owned(),
+            target: static_definition_target("answer"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "42".to_owned(),
             expr: Some(SyntaxExpr::Number(n(42))),
         })
     );
     assert_eq!(
         parsed.declarations[2].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "neg".to_owned(),
+            target: static_definition_target("neg"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "_42".to_owned(),
             expr: Some(SyntaxExpr::Number(Number::parse("_42").unwrap())),
         })
     );
     assert_eq!(
         parsed.declarations[3].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "hex".to_owned(),
+            target: static_definition_target("hex"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "0xc0de".to_owned(),
             expr: Some(SyntaxExpr::Number(Number::parse("0xc0de").unwrap())),
         })
     );
     assert_eq!(
         parsed.declarations[4].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "bits".to_owned(),
+            target: static_definition_target("bits"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "0b1011_1010".to_owned(),
             expr: Some(SyntaxExpr::Number(Number::parse("0b1011_1010").unwrap())),
         })
     );
     assert_eq!(
         parsed.declarations[5].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "scaled".to_owned(),
+            target: static_definition_target("scaled"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "1.234e_7".to_owned(),
             expr: Some(SyntaxExpr::Number(Number::parse("1.234e_7").unwrap())),
         })
     );
     assert_eq!(
         parsed.declarations[6].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "exact".to_owned(),
+            target: static_definition_target("exact"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "1/6".to_owned(),
             expr: Some(SyntaxExpr::Divide(
                 Box::new(SyntaxExpr::Number(n(1))),
                 Box::new(SyntaxExpr::Number(n(6))),
@@ -965,10 +871,9 @@ fn parses_list_and_append_expressions() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "bytes".to_owned(),
+            target: static_definition_target("bytes"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "[1, 2] ++ [3, 4]".to_owned(),
             expr: Some(SyntaxExpr::Append(
                 Box::new(SyntaxExpr::List(vec![
                     SyntaxExpr::Number(n(1)),
@@ -991,10 +896,9 @@ fn parses_arithmetic_with_precedence() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "answer".to_owned(),
+            target: static_definition_target("answer"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "(1 + 2 * 3) - (4 / 5)".to_owned(),
             expr: Some(SyntaxExpr::Subtract(
                 Box::new(SyntaxExpr::Add(
                     Box::new(SyntaxExpr::Number(n(1))),
@@ -1020,10 +924,9 @@ fn parses_name_and_append_expressions() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "asm.result".to_owned(),
+            target: static_definition_target("asm.result"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "hello ++ \", \" ++ world ++ \"!\"".to_owned(),
             expr: Some(SyntaxExpr::Append(
                 Box::new(SyntaxExpr::Append(
                     Box::new(SyntaxExpr::Append(
@@ -1046,10 +949,9 @@ fn parses_prior_name_expressions_only_at_name_roots() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "asm.result".to_owned(),
+            target: static_definition_target("asm.result"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "_hello ++ _world.tail".to_owned(),
             expr: Some(SyntaxExpr::Append(
                 Box::new(SyntaxExpr::PriorName("hello".to_owned())),
                 Box::new(SyntaxExpr::Access(
@@ -1060,8 +962,16 @@ fn parses_prior_name_expressions_only_at_name_roots() {
         })
     );
 
-    assert_eq!(parse_expr("foo._bar"), None);
-    assert_eq!(parse_expr("_foo._bar"), None);
+    for expression in ["foo._bar", "_foo._bar"] {
+        let parsed = parse(&format!("language g0\nvalue = {expression}\n"));
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error),
+            "`{expression}` should be rejected"
+        );
+    }
 }
 
 #[test]
@@ -1072,10 +982,9 @@ fn parses_lambda_and_application_expressions() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "asm.result".to_owned(),
+            target: static_definition_target("asm.result"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "(\\x -> x) \"Hello\"".to_owned(),
             expr: Some(SyntaxExpr::Apply(
                 Box::new(SyntaxExpr::Lambda(
                     vec!["x".to_owned()],
@@ -1095,10 +1004,9 @@ fn parses_local_root_paths_inside_lambda_bodies() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "asm.result".to_owned(),
+            target: static_definition_target("asm.result"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "\\x -> x.tail".to_owned(),
             expr: Some(SyntaxExpr::Lambda(
                 vec!["x".to_owned()],
                 Box::new(SyntaxExpr::Access(
@@ -1118,10 +1026,9 @@ fn parses_explicit_lambda_underscore_local_conventions() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "asm.result".to_owned(),
+            target: static_definition_target("asm.result"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "(\\ _value _ -> value) 1 2".to_owned(),
             expr: Some(SyntaxExpr::Apply(
                 Box::new(SyntaxExpr::Apply(
                     Box::new(SyntaxExpr::Lambda(
@@ -1144,10 +1051,9 @@ fn parses_definition_argument_sugar() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "id".to_owned(),
+            target: static_definition_target("id"),
             parameters: vec!["x".to_owned()],
             kind: DefinitionKind::Introduce,
-            body: "x".to_owned(),
             expr: Some(SyntaxExpr::Lambda(
                 vec!["x".to_owned()],
                 Box::new(SyntaxExpr::Name("x".to_owned())),
@@ -1164,10 +1070,9 @@ fn parses_update_definition_argument_sugar() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "id".to_owned(),
+            target: static_definition_target("id"),
             parameters: vec!["x".to_owned()],
             kind: DefinitionKind::Update,
-            body: "x".to_owned(),
             expr: Some(SyntaxExpr::Lambda(
                 vec!["x".to_owned()],
                 Box::new(SyntaxExpr::Name("x".to_owned())),
@@ -1186,18 +1091,17 @@ fn parameterized_definitions_parse_compound_bodies_before_lambda_wrapping() {
     ));
 
     assert_eq!(parsed.diagnostics, []);
-    for (index, expected_target, expected_kind, expected_body) in [
-        (1, "from_let", DefinitionKind::Introduce, "let y = x in y"),
-        (2, "from_where", DefinitionKind::Introduce, "y where y = x"),
-        (3, "update", DefinitionKind::Update, "let y = x in y"),
+    for (index, expected_target, expected_kind) in [
+        (1, "from_let", DefinitionKind::Introduce),
+        (2, "from_where", DefinitionKind::Introduce),
+        (3, "update", DefinitionKind::Update),
     ] {
         let DeclarationKind::Definition(definition) = &parsed.declarations[index].kind else {
             panic!("{expected_target} should be a definition");
         };
-        assert_eq!(definition.target, expected_target);
+        assert_eq!(definition.target, static_definition_target(expected_target));
         assert_eq!(definition.parameters, ["x"]);
         assert_eq!(definition.kind, expected_kind);
-        assert_eq!(definition.body, expected_body);
         assert!(matches!(
             &definition.expr,
             Some(SyntaxExpr::Lambda(parameters, body))
@@ -1681,10 +1585,9 @@ fn underscore_locals_suppress_unused_warnings_and_drop_is_allowed() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "keep".to_owned(),
+            target: static_definition_target("keep"),
             parameters: vec!["_value".to_owned()],
             kind: DefinitionKind::Introduce,
-            body: "value".to_owned(),
             expr: Some(SyntaxExpr::Lambda(
                 vec!["_value".to_owned()],
                 Box::new(SyntaxExpr::Name("value".to_owned())),
@@ -1694,10 +1597,9 @@ fn underscore_locals_suppress_unused_warnings_and_drop_is_allowed() {
     assert_eq!(
         parsed.declarations[2].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "skip".to_owned(),
+            target: static_definition_target("skip"),
             parameters: vec!["_".to_owned(), "y".to_owned()],
             kind: DefinitionKind::Introduce,
-            body: "y".to_owned(),
             expr: Some(SyntaxExpr::Lambda(
                 vec!["_".to_owned(), "y".to_owned()],
                 Box::new(SyntaxExpr::Name("y".to_owned())),
@@ -1777,10 +1679,9 @@ fn parses_dictionary_literals() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "d".to_owned(),
+            target: static_definition_target("d"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "{ hello:\"Hello\", world:\"World\" }".to_owned(),
             expr: Some(SyntaxExpr::DictUnion(vec![
                 SyntaxExpr::PathDict(
                     vec![SyntaxKeyExpr::Atom("hello".to_owned())],
@@ -1803,10 +1704,9 @@ fn parses_dictionary_unions() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "d".to_owned(),
+            target: static_definition_target("d"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "{ left, right, hello:\"Hello\" }".to_owned(),
             expr: Some(SyntaxExpr::DictUnion(vec![
                 SyntaxExpr::Name("left".to_owned()),
                 SyntaxExpr::Name("right".to_owned()),
@@ -1829,10 +1729,9 @@ fn parses_multiline_literals_with_leading_commas() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "nums".to_owned(),
+            target: static_definition_target("nums"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "[\n  , 1\n  , 2\n  ]".to_owned(),
             expr: Some(SyntaxExpr::List(vec![
                 SyntaxExpr::Number(n(1)),
                 SyntaxExpr::Number(n(2)),
@@ -1842,10 +1741,9 @@ fn parses_multiline_literals_with_leading_commas() {
     assert_eq!(
         parsed.declarations[2].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "d".to_owned(),
+            target: static_definition_target("d"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "{\n  , hello:\"Hello\"\n  , world:\"World\"\n  }".to_owned(),
             expr: Some(SyntaxExpr::DictUnion(vec![
                 SyntaxExpr::PathDict(
                     vec![SyntaxKeyExpr::Atom("hello".to_owned())],
@@ -1868,10 +1766,9 @@ fn parses_expression_indexed_names_and_keys() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "d".to_owned(),
+            target: static_definition_target("d"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "{ [42]:\"World\" }".to_owned(),
             expr: Some(SyntaxExpr::DictUnion(vec![SyntaxExpr::PathDict(
                 vec![SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(42))))],
                 Box::new(SyntaxExpr::Text("World".to_owned())),
@@ -1881,10 +1778,9 @@ fn parses_expression_indexed_names_and_keys() {
     assert_eq!(
         parsed.declarations[2].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "asm.result".to_owned(),
+            target: static_definition_target("asm.result"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "d.[42] ++ d.['tail]".to_owned(),
             expr: Some(SyntaxExpr::Append(
                 Box::new(SyntaxExpr::Access(
                     Box::new(SyntaxExpr::Name("d".to_owned())),
@@ -1907,10 +1803,9 @@ fn parses_path_list_shorthand_and_general_list_path_exprs() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "asm.result".to_owned(),
+            target: static_definition_target("asm.result"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "foo.[1,2,3] ++ foo.([1,2] ++ [3])".to_owned(),
             expr: Some(SyntaxExpr::Append(
                 Box::new(SyntaxExpr::Access(
                     Box::new(SyntaxExpr::Name("foo".to_owned())),
@@ -1948,10 +1843,9 @@ fn reports_ambiguous_slash_chains_as_parse_errors() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "asm.result".to_owned(),
+            target: static_definition_target("asm.result"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "3/4/5".to_owned(),
             expr: None,
         })
     );
@@ -1970,10 +1864,9 @@ fn reports_ambiguous_subtract_chains_as_parse_errors() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "asm.result".to_owned(),
+            target: static_definition_target("asm.result"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "3 - 4 - 5".to_owned(),
             expr: None,
         })
     );
@@ -1992,10 +1885,9 @@ fn reports_mixed_add_subtract_chains_as_parse_errors() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            target: "asm.result".to_owned(),
+            target: static_definition_target("asm.result"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            body: "3 + 1 - 4 + 1 - 5 + 1".to_owned(),
             expr: None,
         })
     );

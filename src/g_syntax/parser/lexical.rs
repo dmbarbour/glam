@@ -276,10 +276,6 @@ impl<'source> LexedSource<'source> {
         (byte <= self.source.len()).then(|| line_at(&self.line_starts, byte))
     }
 
-    #[allow(
-        dead_code,
-        reason = "source-line projection is part of the phase 2 token parser substrate"
-    )]
     pub(super) fn line_span(&self, line: usize) -> Option<ByteSpan> {
         let start = *self.line_starts.get(line.checked_sub(1)?)?;
         let mut end = self
@@ -296,10 +292,7 @@ impl<'source> LexedSource<'source> {
         Some(ByteSpan::new(start, end))
     }
 
-    #[allow(
-        dead_code,
-        reason = "source-line projection is part of the phase 2 token parser substrate"
-    )]
+    #[cfg(test)]
     pub(super) fn source_line(&self, line: usize) -> Option<&'source str> {
         self.source_slice(self.line_span(line)?)
     }

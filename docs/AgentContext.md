@@ -31,15 +31,12 @@ notes instead of appending history; put subsystem details in
 - Prefer source spans and diagnostics to panics for user-facing failures.
 - Use Chumsky for growing `.g` grammar work. Small hand-written layout or
   normalization passes are fine when clearer.
-- `g_syntax/parser/lexical.rs` owns source-wide newline, whitespace, text, and
-  delimiter validation. Fatal lexical errors stop grammatical parsing. It also
-  records the indentation and declaration structure needed for migration to
-  token-input parsing. `parser/input.rs` is the only adapter from that one
-  lexical result to token parsers; production token parsers receive an existing
-  `TokenView` and never re-lex substrings. `LayoutView` interprets `LineStart`
-  tokens only at its current delimiter depth. Character-level compatibility
-  helpers are named `legacy_*`; treat them as deletion-bound technical debt,
-  not new parser architecture.
+- `g_syntax/parser/lexical.rs` owns source-wide newline, whitespace, text,
+  delimiter, indentation, and declaration-section recognition. Fatal lexical
+  errors stop grammatical parsing. `parser/input.rs` is the only adapter from
+  that one lexical result to token parsers; production parsers receive an
+  existing `TokenView` and never re-lex substrings. `LayoutView` interprets
+  `LineStart` tokens only at its current delimiter depth.
 - Keep current implementation claims out of target-state design documents, and
   keep chronological spike notes out of this file.
 
@@ -52,6 +49,8 @@ notes instead of appending history; put subsystem details in
   environment representation.
 - `ResolvedExpr<Value>` is affine front-end IR. Move it through one lowering;
   cloning it risks lowering and evaluating the same work twice.
+- Definition targets retain parsed `SyntaxKeyExpr` paths through lowering.
+  Never reconstruct or re-lex a target source fragment.
 - A complete source function lowers to one bind spine, including leading binds
   for captures. Application spines lower together when possible.
 - Front ends receive a `SourceArtifact`'s raw bytes separately from

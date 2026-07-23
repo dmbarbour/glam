@@ -1,15 +1,15 @@
-//! Token-native compound-expression parsing.
+//! Structural expression parsing for `let`, `where`, objects, and `with`.
 //!
 //! `let`, `where`, object, and `with` expressions produce complete syntax
 //! trees. Object bodies share the recursive declaration parser used by
 //! top-level object declarations.
 
-use super::super::super::{Diagnostic, ObjectExpr, Severity, SyntaxExpr};
-use super::super::declaration::token::parse_object_body;
-use super::super::expression::token::parse_expression_view;
-use super::super::input::{TokenRange, TokenView};
-use super::super::layout::{LayoutBase, LayoutView};
-use super::super::lexical::{LeadingTrivia, SpannedToken, TokenKind};
+use super::super::{Diagnostic, ObjectExpr, Severity, SyntaxExpr};
+use super::declaration::parse_object_body;
+use super::expression::parse_expression_view;
+use super::input::{TokenRange, TokenView};
+use super::layout::{LayoutBase, LayoutView};
+use super::lexical::{LeadingTrivia, SpannedToken, TokenKind};
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
@@ -30,7 +30,7 @@ struct WithHeader {
 pub(in crate::g_syntax::parser) fn parse_compound_expression_fragment(
     source: &[u8],
 ) -> ParseResult<SyntaxExpr> {
-    super::super::input::parse_expression_fragment(source, parse_expression)
+    super::input::parse_expression_fragment(source, parse_expression)
 }
 
 pub(in crate::g_syntax::parser) fn parse_expression(
@@ -595,7 +595,7 @@ pub(in crate::g_syntax::parser) fn local_name<'source>(
 fn next_significant_after<'lex, 'source>(
     view: TokenView<'lex, 'source>,
     absolute_index: usize,
-) -> Option<super::super::input::IndexedToken<'lex, 'source>> {
+) -> Option<super::input::IndexedToken<'lex, 'source>> {
     view.top_level().find(|indexed| {
         indexed.index() > absolute_index
             && !matches!(indexed.token().kind(), TokenKind::LineStart { .. })

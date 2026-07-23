@@ -1,6 +1,3 @@
-#[cfg(test)]
-use chumsky::Parser;
-
 use crate::compiler::CompileContext;
 use crate::core::{Atom, Dict, Key, Value};
 use crate::core::{Builtin, keys};
@@ -26,11 +23,6 @@ use resolve::*;
 #[cfg(test)]
 use net_lowering::ResolvedNetLowerer;
 use net_lowering::lower_resolved_expr;
-#[cfg(test)]
-use parser::definition_decl;
-use parser::definition_target_parts;
-#[cfg(test)]
-use parser::parse_expr;
 pub use parser::parse_source;
 use resolved::{BindingId, ResolvedExpr, ResolvedPathPart};
 

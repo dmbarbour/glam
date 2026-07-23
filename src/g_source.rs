@@ -123,7 +123,7 @@ pub fn inspect_g_source(source: &[u8]) -> GSourceInspection {
         .map(|declaration| GDeclarationSummary {
             line: declaration.line,
             kind: declaration_kind(&declaration.kind),
-            preview: declaration.text.lines().next().unwrap_or("").into(),
+            preview: declaration.preview.into(),
         })
         .collect::<Vec<_>>();
     GSourceInspection {

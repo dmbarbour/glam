@@ -1,19 +1,14 @@
 use crate::g_syntax::{DoExpr, DoStepKind, SyntaxExpr};
 
-use super::super::super::compound::parse_expr_result;
-use super::super::super::compound::token::parse_compound_expression_fragment;
+use super::super::structural::parse_compound_expression_fragment;
 
-fn assert_expression_parity(source: &str) -> SyntaxExpr {
-    let character = parse_expr_result(source)
-        .unwrap_or_else(|error| panic!("character parser rejected `{source}`: {error}"));
-    let tokens = parse_compound_expression_fragment(source.as_bytes())
-        .unwrap_or_else(|diagnostics| panic!("token parser rejected `{source}`: {diagnostics:#?}"));
-    assert_eq!(tokens, character, "parser mismatch for `{source}`");
-    tokens
+fn parse_do_expression(source: &str) -> SyntaxExpr {
+    parse_compound_expression_fragment(source.as_bytes())
+        .unwrap_or_else(|diagnostics| panic!("parser rejected `{source}`: {diagnostics:#?}"))
 }
 
 #[test]
-fn layout_do_matches_the_character_parser() {
+fn layout_do_parses() {
     for source in [
         "do value",
         "do\n.read 'left -> left\nright <- .read 'right\ntotal = left + right\n.write total\n.r total",
@@ -23,13 +18,13 @@ fn layout_do_matches_the_character_parser() {
         "\\api -> do\n.r api",
         "\\api -> interaction_net do\n.bind -> ports\n.r ports",
     ] {
-        assert_expression_parity(source);
+        parse_do_expression(source);
     }
 }
 
 #[test]
 fn token_statement_classification_leaves_lambda_arrows_inside_expressions() {
-    let expr = assert_expression_parity(
+    let expr = parse_do_expression(
         "do\n(\\value -> value) -> function\nidentity = \\value -> value\n.r (function identity)",
     );
     let SyntaxExpr::Do(DoExpr { steps, .. }) = expr else {
@@ -59,7 +54,7 @@ fn braced_do_is_a_structural_atom_in_containers_and_other_do_blocks() {
         "do {}",
         "do {   }",
     ] {
-        assert_expression_parity(source);
+        parse_do_expression(source);
     }
 }
 

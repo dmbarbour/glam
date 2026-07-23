@@ -13,7 +13,8 @@ pub struct ParsedSource {
 pub struct Declaration {
     pub line: usize,
     pub kind: DeclarationKind,
-    pub text: String,
+    /// A source-inspection aid, not parser input retained by the syntax tree.
+    pub preview: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -52,7 +53,6 @@ pub struct ObjectDecl {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ObjectBodyDefinition {
     pub line: usize,
-    pub text: String,
     pub kind: ObjectBodyDefinitionKind,
 }
 
@@ -129,10 +129,9 @@ pub enum ImportPlacement {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct DefinitionDecl {
-    pub target: String,
+    pub target: Vec<SyntaxKeyExpr>,
     pub parameters: Vec<String>,
     pub kind: DefinitionKind,
-    pub body: String,
     pub expr: Option<SyntaxExpr>,
 }
 

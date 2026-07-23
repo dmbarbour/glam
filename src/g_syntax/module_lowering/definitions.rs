@@ -32,7 +32,7 @@ impl<'a> DefinitionTargetContext<'a> {
 
     fn lower_update(
         &self,
-        target: &str,
+        target: &[SyntaxKeyExpr],
         update: &SyntaxExpr,
         sugar_param_count: usize,
         locals: &mut ResolverContext,
@@ -89,7 +89,7 @@ impl<'a> DefinitionTargetContext<'a> {
     pub(in crate::g_syntax) fn annotate(
         &self,
         assertion: BuiltinAssertion,
-        target: &str,
+        target: &[SyntaxKeyExpr],
         value: ResolvedExpr<Value>,
         locals: &mut ResolverContext,
     ) -> Result<ResolvedExpr<Value>, Diagnostic> {
@@ -111,7 +111,9 @@ impl<'a> DefinitionTargetContext<'a> {
             [
                 singleton(
                     "name",
-                    ResolvedExpr::Embedded(Value::binary_from_text(target)),
+                    ResolvedExpr::Embedded(Value::binary_from_text(&definition_target_name(
+                        target,
+                    ))),
                 ),
                 singleton(
                     "value",
@@ -128,6 +130,20 @@ impl<'a> DefinitionTargetContext<'a> {
         );
         let annotation = singleton(tag, payload);
         Ok(apply_builtin_resolved(Builtin::Anno, [annotation, value]))
+    }
+
+    pub(in crate::g_syntax) fn annotate_static(
+        &self,
+        assertion: BuiltinAssertion,
+        target: &str,
+        value: ResolvedExpr<Value>,
+        locals: &mut ResolverContext,
+    ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+        let target = target
+            .split('.')
+            .map(|part| SyntaxKeyExpr::Atom(part.to_owned()))
+            .collect::<Vec<_>>();
+        self.annotate(assertion, &target, value, locals)
     }
 }
 
@@ -166,7 +182,7 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
             )?,
         ),
     };
-    let value = decorate_reflection_boundary(&definition.target, line, value, scope)?;
+    let value = decorate_reflection_boundary(&definition.target, value, scope)?;
     let value = match assertion {
         Some(assertion) => target_context.annotate(assertion, &definition.target, value, locals)?,
         None => value,
@@ -183,16 +199,14 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
 }
 
 fn decorate_reflection_boundary(
-    target: &str,
-    line: usize,
+    target: &[SyntaxKeyExpr],
     value: ResolvedExpr<Value>,
     scope: &NameScope<ResolvedRoot>,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let Some(boundary) = &scope.reflection else {
         return Ok(value);
     };
-    let parts = definition_target_parts(target, line)?;
-    let Some(SyntaxKeyExpr::Atom(root)) = parts.first() else {
+    let Some(SyntaxKeyExpr::Atom(root)) = target.first() else {
         // Reflection namespaces are intentionally statically recognizable.
         // A computed root might evaluate to `refl`, `meta`, or `spec`, so it
         // cannot safely receive an automatic demand boundary.
@@ -241,7 +255,7 @@ pub(in crate::g_syntax) fn update_module_resolved(
 
 pub(in crate::g_syntax) fn update_definition_target_resolved(
     definitions: &ResolvedRoot,
-    target: &str,
+    target: &[SyntaxKeyExpr],
     value: ResolvedExpr<Value>,
     line: usize,
     context: &CompileContext,
@@ -259,14 +273,14 @@ pub(in crate::g_syntax) fn update_definition_target_resolved(
 }
 
 pub(in crate::g_syntax) fn definition_target_access_resolved(
-    target: &str,
+    target: &[SyntaxKeyExpr],
     definitions: &ResolvedRoot,
     line: usize,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let path = definition_target_parts(target, line)?
+    let path = target
         .iter()
         .map(|part| syntax_key_expr_to_resolved_path(part, line, context, scope, locals))
         .collect::<Result<Vec<_>, _>>()?;
@@ -277,19 +291,30 @@ pub(in crate::g_syntax) fn definition_target_access_resolved(
 }
 
 pub(in crate::g_syntax) fn definition_target_path_resolved(
-    target: &str,
+    target: &[SyntaxKeyExpr],
     line: usize,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    syntax_path_resolved(
-        &definition_target_parts(target, line)?,
-        line,
-        context,
-        scope,
-        locals,
-    )
+    syntax_path_resolved(target, line, context, scope, locals)
+}
+
+fn definition_target_name(target: &[SyntaxKeyExpr]) -> String {
+    let mut name = String::new();
+    for part in target {
+        match part {
+            SyntaxKeyExpr::Atom(atom) => {
+                if !name.is_empty() {
+                    name.push('.');
+                }
+                name.push_str(atom);
+            }
+            SyntaxKeyExpr::Index(_) => name.push_str(".[computed]"),
+            SyntaxKeyExpr::PathIndex(_) => name.push_str(".(computed path)"),
+        }
+    }
+    name
 }
 
 pub(in crate::g_syntax) fn static_path_resolved(target: &str) -> ResolvedExpr<Value> {

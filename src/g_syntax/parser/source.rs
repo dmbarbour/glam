@@ -48,8 +48,12 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
             parse_declaration(view, line, &mut diagnostics)
         };
         diagnostics.extend(token_session.take_diagnostics());
-        let text = declaration_preview(view);
-        declarations.push(Declaration { line, kind, text });
+        let preview = declaration_preview(view);
+        declarations.push(Declaration {
+            line,
+            kind,
+            preview,
+        });
     }
 
     validate_language_position(&declarations, &mut diagnostics);
@@ -84,7 +88,13 @@ fn report_orphan_continuations(
 }
 
 fn declaration_preview(view: TokenView<'_, '_>) -> String {
-    view.source_text().unwrap_or("").trim().to_owned()
+    view.source_text()
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_owned()
 }
 
 fn validate_simple_continuation_indentation(
