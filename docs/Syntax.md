@@ -931,6 +931,22 @@ This supports lightweight extensions
             op3a = op3 with
                 ...
 
+### Method Chaining
+
+In OO languages, a common pattern is method chaining where each method linearly returns the 'next' object, and users select a method on that object. It's a convenient pattern. This can be almost directly expressed via piped functions and a helper function, though the ".g" syntax isn't optimized for it:
+
+        Obj |> call 'method [Arg1, Arg2] 
+            |> call 'method2 [Arg3, Arg4] 
+            |> ...
+
+What the ".g" syntax is optimized for is running effects. 
+
+        Obj.run do 
+            .method Arg1 Arg2
+            .method2 Arg3 Arg4
+
+This more flexible in many use cases, e.g. each method could have some additional results, and the object's `run` method can handle the shared chore of threading the object. In any case, I'd encourage users to design for this form in general. 
+
 ### Dictionary as Object
 
 Objects and dictionaries serve distinct roles. In particular, an `extends`
