@@ -9,6 +9,9 @@ use super::layout::{
     legacy_split_layout_statements,
 };
 
+#[cfg(test)]
+mod token;
+
 pub(super) fn syntax_binary_expr(
     operator: SyntaxOperator,
     left: SyntaxExpr,

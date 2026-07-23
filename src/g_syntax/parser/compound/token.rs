@@ -1,0 +1,622 @@
+//! Token-native compound-expression parsing used by the Phase 5 differential
+//! harness.
+//!
+//! `let` and `where` produce complete syntax trees. Object and `with` parsing
+//! intentionally stops after their headers: nested declaration bodies remain
+//! owned by the legacy production parser until Phase 7 supplies token-native
+//! nested declarations.
+
+use super::super::super::{Diagnostic, SyntaxExpr};
+use super::super::expression::token::parse_expression_view;
+use super::super::input::{TokenRange, TokenView};
+use super::super::layout::{LayoutBase, LayoutView};
+use super::super::lexical::{LeadingTrivia, SpannedToken, TokenKind};
+
+type ParseResult<T> = Result<T, Vec<Diagnostic>>;
+
+#[derive(Debug, PartialEq, Eq)]
+struct ObjectHeader {
+    name: Option<Box<SyntaxExpr>>,
+    alias: Option<String>,
+    deps: Vec<SyntaxExpr>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct WithHeader {
+    base: Box<SyntaxExpr>,
+    alias: Option<String>,
+}
+
+pub(super) fn parse_compound_expression_fragment(source: &[u8]) -> ParseResult<SyntaxExpr> {
+    super::super::input::parse_expression_fragment(source, parse_expression)
+}
+
+fn parse_expression(view: TokenView<'_, '_>) -> ParseResult<SyntaxExpr> {
+    let view = trim_layout(view);
+    if let Some(result) = parse_let(view) {
+        return result;
+    }
+    if let Some(result) = parse_where(view) {
+        return result;
+    }
+    parse_expression_view(view)
+}
+
+fn parse_let(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
+    let (let_index, let_token) = view.first_significant()?;
+    if !token_is_name(let_token, "let") {
+        return None;
+    }
+    let next = next_significant_after(view, let_index)?;
+    if next.token().leading() == LeadingTrivia::Joint {
+        return None;
+    }
+
+    let rest = trim_layout(view_between(view, let_index + 1, view.range().end()));
+    if is_layout_empty(rest) {
+        return Some(Err(error_at_token(
+            view,
+            let_token,
+            "let expression requires bindings and a body",
+        )));
+    }
+
+    let in_index = contextual_keywords(rest, "in").into_iter().next();
+    let (bindings, body) = if let Some(in_index) = in_index {
+        let bindings = trim_layout(view_between(rest, rest.range().start(), in_index));
+        if bindings
+            .top_level()
+            .any(|indexed| matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
+        {
+            return Some(Err(error_at_token(
+                view,
+                let_token,
+                "multi-line let expression must not use `in`",
+            )));
+        }
+        let body = trim_layout(view_between(rest, in_index + 1, rest.range().end()));
+        (parse_inline_bindings(bindings), body)
+    } else {
+        match split_multiline_let(view, let_index, rest) {
+            Ok((bindings, body)) => (parse_binding_views(bindings), body),
+            Err(diagnostics) => return Some(Err(diagnostics)),
+        }
+    };
+
+    let bindings = match bindings {
+        Ok(bindings) => bindings,
+        Err(diagnostics) => return Some(Err(diagnostics)),
+    };
+    if bindings.is_empty() {
+        return Some(Err(error_at_token(
+            view,
+            let_token,
+            "let expression requires at least one binding",
+        )));
+    }
+    if is_layout_empty(body) {
+        return Some(Err(error_at_token(
+            view,
+            let_token,
+            "let expression requires a body",
+        )));
+    }
+    let body = match parse_expression(body) {
+        Ok(body) => body,
+        Err(diagnostics) => return Some(Err(diagnostics)),
+    };
+
+    Some(Ok(SyntaxExpr::Let {
+        bindings,
+        body: Box::new(body),
+    }))
+}
+
+fn parse_where(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
+    let where_index = contextual_keywords(view, "where").into_iter().last()?;
+    let where_token = view.token_at(where_index)?;
+    let body = trim_layout(view_between(view, view.range().start(), where_index));
+    let bindings = trim_layout(view_between(view, where_index + 1, view.range().end()));
+    if is_layout_empty(body) {
+        return Some(Err(error_at_token(
+            view,
+            where_token,
+            "where expression requires a body",
+        )));
+    }
+    if is_layout_empty(bindings) {
+        return Some(Err(error_at_token(
+            view,
+            where_token,
+            "let expression requires at least one binding",
+        )));
+    }
+
+    let binding_views = if bindings
+        .top_level()
+        .any(|indexed| matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
+    {
+        let layout = LayoutView::new(bindings);
+        let lines = layout.lines();
+        if let Some(first) = lines.first()
+            && let Some(misaligned) = lines.iter().skip(1).find(|line| {
+                line.indentation() != first.indentation()
+                    && bindings
+                        .subview(line.tokens())
+                        .is_some_and(|line| !top_level_symbols(line, "=").is_empty())
+            })
+        {
+            return Some(Err(vec![Diagnostic::error(
+                misaligned.line(),
+                "multi-line where binding names must align under the first binding",
+            )]));
+        }
+        let statements = match layout.statements(LayoutBase::FirstLine) {
+            Ok(statements) => statements,
+            Err(error) => {
+                return Some(Err(vec![Diagnostic::error(error.line(), error.message())]));
+            }
+        };
+        statements
+            .into_iter()
+            .filter_map(|statement| bindings.subview(statement.tokens()))
+            .collect()
+    } else {
+        split_top_level(bindings, ";")
+    };
+    let bindings = match parse_binding_views(binding_views) {
+        Ok(bindings) => bindings,
+        Err(diagnostics) => return Some(Err(diagnostics)),
+    };
+    if bindings.is_empty() {
+        return Some(Err(error_at_token(
+            view,
+            where_token,
+            "let expression requires at least one binding",
+        )));
+    }
+    let body = match parse_expression(body) {
+        Ok(body) => body,
+        Err(diagnostics) => return Some(Err(diagnostics)),
+    };
+
+    Some(Ok(SyntaxExpr::Let {
+        bindings,
+        body: Box::new(body),
+    }))
+}
+
+fn parse_inline_bindings(view: TokenView<'_, '_>) -> ParseResult<Vec<(String, SyntaxExpr)>> {
+    parse_binding_views(split_top_level(view, ";"))
+}
+
+fn parse_binding_views(views: Vec<TokenView<'_, '_>>) -> ParseResult<Vec<(String, SyntaxExpr)>> {
+    views
+        .into_iter()
+        .map(trim_layout)
+        .filter(|view| !is_layout_empty(*view))
+        .map(parse_binding)
+        .collect()
+}
+
+fn parse_binding(view: TokenView<'_, '_>) -> ParseResult<(String, SyntaxExpr)> {
+    let Some(equal_index) = top_level_symbols(view, "=").into_iter().next() else {
+        return Err(error_at_view(
+            view,
+            format!(
+                "local binding `{}` must use `=`",
+                view.source_text().unwrap_or("").trim()
+            ),
+        ));
+    };
+    let name_view = trim_layout(view_between(view, view.range().start(), equal_index));
+    let value_view = trim_layout(view_between(view, equal_index + 1, view.range().end()));
+    let Some(name) = local_name(name_view) else {
+        return Err(error_at_view(
+            name_view,
+            format!(
+                "invalid local binding name `{}`",
+                name_view.source_text().unwrap_or("").trim()
+            ),
+        ));
+    };
+    if is_layout_empty(value_view) {
+        return Err(error_at_view(
+            view,
+            format!("local binding `{name}` requires a value"),
+        ));
+    }
+    parse_expression(value_view).map(|value| (name.to_owned(), value))
+}
+
+fn split_multiline_let<'lex, 'source>(
+    full: TokenView<'lex, 'source>,
+    let_index: usize,
+    rest: TokenView<'lex, 'source>,
+) -> ParseResult<(Vec<TokenView<'lex, 'source>>, TokenView<'lex, 'source>)> {
+    let lines = LayoutView::new(rest).lines();
+    let Some(first) = lines.first().copied() else {
+        return Err(error_at_view(
+            rest,
+            "multi-line let expression requires a body or `in`",
+        ));
+    };
+    let Some((_, first_binding_token)) = rest
+        .subview(first.tokens())
+        .and_then(TokenView::first_significant)
+    else {
+        return Err(error_at_view(
+            rest,
+            "let expression requires at least one binding",
+        ));
+    };
+    let let_column = token_column(
+        full,
+        full.token_at(let_index)
+            .expect("the let token remains within the full expression view"),
+    );
+    let binding_column = token_column(full, first_binding_token);
+    let mut binding_starts = vec![first.tokens().start()];
+    let mut body_start = None;
+
+    for line in lines.into_iter().skip(1) {
+        let line_view = rest
+            .subview(line.tokens())
+            .expect("layout lines remain within their source view");
+        let begins_binding = !top_level_symbols(line_view, "=").is_empty();
+
+        if line.indentation() <= let_column {
+            if line.indentation() != let_column {
+                return Err(vec![Diagnostic::error(
+                    line.line(),
+                    "multi-line let body must align with `let`",
+                )]);
+            }
+            if begins_binding {
+                return Err(vec![Diagnostic::error(
+                    line.line(),
+                    "multi-line let binding names must align under the first binding",
+                )]);
+            }
+            body_start = Some(line.tokens().start());
+            break;
+        }
+
+        if begins_binding {
+            if line.indentation() != binding_column {
+                return Err(vec![Diagnostic::error(
+                    line.line(),
+                    "multi-line let binding names must align under the first binding",
+                )]);
+            }
+            binding_starts.push(line.tokens().start());
+        }
+    }
+
+    let Some(body_start) = body_start else {
+        return Err(error_at_view(
+            rest,
+            "multi-line let expression requires a body",
+        ));
+    };
+    binding_starts.push(body_start);
+    let bindings = binding_starts
+        .windows(2)
+        .map(|bounds| trim_layout(view_between(rest, bounds[0], bounds[1])))
+        .collect();
+    let body = trim_layout(view_between(rest, body_start, rest.range().end()));
+    Ok((bindings, body))
+}
+
+fn parse_object_header(view: TokenView<'_, '_>) -> Option<ParseResult<ObjectHeader>> {
+    let (object_index, object_token) = view.first_significant()?;
+    if !token_is_name(object_token, "object") {
+        return None;
+    }
+    let header_end = first_top_level_line_start(view).unwrap_or(view.range().end());
+    let body_present = header_end < view.range().end();
+    let mut header = trim_layout(view_between(view, object_index + 1, header_end));
+    if is_layout_empty(header) {
+        return Some(Err(error_at_token(
+            view,
+            object_token,
+            "object expression requires a name expression or `_`",
+        )));
+    }
+
+    let has_with = last_significant_is_contextual_name(header, "with");
+    if has_with {
+        let with_index = header
+            .last_significant()
+            .map(|(index, _)| index)
+            .expect("nonempty header has a last token");
+        header = trim_layout(view_between(header, header.range().start(), with_index));
+    } else if body_present {
+        return Some(Err(error_at_token(
+            view,
+            object_token,
+            "object expression body requires `with` in the expression header",
+        )));
+    }
+
+    let as_index = contextual_keywords(header, "as").into_iter().next();
+    let extends_index = contextual_keywords(header, "extends").into_iter().next();
+    let name_end = [as_index, extends_index]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(header.range().end());
+    let name_view = trim_layout(view_between(header, header.range().start(), name_end));
+    let name = if view_is_single_name(name_view, "_") {
+        None
+    } else {
+        match parse_expression(name_view) {
+            Ok(name) => Some(Box::new(name)),
+            Err(diagnostics) => return Some(Err(diagnostics)),
+        }
+    };
+
+    let alias = if let Some(as_index) = as_index {
+        let alias_end = extends_index.unwrap_or(header.range().end());
+        let alias_view = trim_layout(view_between(header, as_index + 1, alias_end));
+        match local_name(alias_view) {
+            Some(alias) => Some(alias.to_owned()),
+            None => {
+                return Some(Err(error_at_view(
+                    alias_view,
+                    "`as` requires a valid object alias name",
+                )));
+            }
+        }
+    } else {
+        None
+    };
+
+    let deps = if let Some(extends_index) = extends_index {
+        if as_index.is_some_and(|as_index| as_index > extends_index) {
+            return Some(Err(error_at_view(
+                header,
+                "object expression `as` must precede `extends`",
+            )));
+        }
+        let deps_view = trim_layout(view_between(
+            header,
+            extends_index + 1,
+            header.range().end(),
+        ));
+        let dep_views = split_top_level(deps_view, ",")
+            .into_iter()
+            .map(trim_layout)
+            .filter(|view| !is_layout_empty(*view))
+            .collect::<Vec<_>>();
+        if dep_views.is_empty() {
+            return Some(Err(error_at_view(
+                deps_view,
+                "object expression `extends` requires at least one dependency",
+            )));
+        }
+        let mut deps = Vec::with_capacity(dep_views.len());
+        for dep in dep_views {
+            match parse_expression(dep) {
+                Ok(dep) => deps.push(dep),
+                Err(diagnostics) => return Some(Err(diagnostics)),
+            }
+        }
+        deps
+    } else {
+        Vec::new()
+    };
+
+    Some(Ok(ObjectHeader { name, alias, deps }))
+}
+
+fn parse_with_header(view: TokenView<'_, '_>) -> Option<ParseResult<WithHeader>> {
+    let header_end = first_top_level_line_start(view)?;
+    let header = trim_layout(view_between(view, view.range().start(), header_end));
+    if !last_significant_is_contextual_name(header, "with") {
+        return None;
+    }
+    let with_index = header
+        .last_significant()
+        .map(|(index, _)| index)
+        .expect("with header has a final token");
+    let base_and_alias = trim_layout(view_between(header, header.range().start(), with_index));
+    let as_index = contextual_keywords(base_and_alias, "as").into_iter().last();
+    let (base_view, alias) = if let Some(as_index) = as_index {
+        let alias_view = trim_layout(view_between(
+            base_and_alias,
+            as_index + 1,
+            base_and_alias.range().end(),
+        ));
+        if view_is_single_name(alias_view, "_") {
+            (
+                trim_layout(view_between(
+                    base_and_alias,
+                    base_and_alias.range().start(),
+                    as_index,
+                )),
+                None,
+            )
+        } else if let Some(alias) = local_name(alias_view) {
+            (
+                trim_layout(view_between(
+                    base_and_alias,
+                    base_and_alias.range().start(),
+                    as_index,
+                )),
+                Some(alias.to_owned()),
+            )
+        } else {
+            (base_and_alias, None)
+        }
+    } else {
+        (base_and_alias, None)
+    };
+    if is_layout_empty(base_view) {
+        return Some(Err(error_at_view(
+            header,
+            "with expression requires a base expression",
+        )));
+    }
+    let base = match parse_expression(base_view) {
+        Ok(base) => Box::new(base),
+        Err(diagnostics) => return Some(Err(diagnostics)),
+    };
+    Some(Ok(WithHeader { base, alias }))
+}
+
+fn contextual_keywords(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
+    view.top_level()
+        .filter(|indexed| {
+            (indexed.index() == view.range().start()
+                || indexed.token().leading() != LeadingTrivia::Joint
+                || indexed.index().checked_sub(1).is_some_and(|previous| {
+                    view.token_at(previous)
+                        .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
+                }))
+                && token_is_name(indexed.token(), expected)
+        })
+        .map(|indexed| indexed.index())
+        .collect()
+}
+
+fn top_level_symbols(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
+    view.top_level()
+        .filter(|indexed| {
+            matches!(indexed.token().kind(), TokenKind::Symbol(symbol) if *symbol == expected)
+        })
+        .map(|indexed| indexed.index())
+        .collect()
+}
+
+fn split_top_level<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+    separator: &str,
+) -> Vec<TokenView<'lex, 'source>> {
+    let mut start = view.range().start();
+    let mut parts = Vec::new();
+    for separator in top_level_symbols(view, separator) {
+        parts.push(view_between(view, start, separator));
+        start = separator + 1;
+    }
+    parts.push(view_between(view, start, view.range().end()));
+    parts
+}
+
+fn first_top_level_line_start(view: TokenView<'_, '_>) -> Option<usize> {
+    view.top_level().find_map(|indexed| {
+        matches!(indexed.token().kind(), TokenKind::LineStart { .. }).then(|| indexed.index())
+    })
+}
+
+fn local_name<'source>(view: TokenView<'_, 'source>) -> Option<&'source str> {
+    let mut significant = view
+        .tokens()
+        .iter()
+        .filter(|token| !matches!(token.kind(), TokenKind::LineStart { .. }));
+    let TokenKind::Name(name) = significant.next()?.kind() else {
+        return None;
+    };
+    let valid = *name == "_"
+        || name.starts_with(|character: char| character.is_ascii_alphabetic())
+        || name.strip_prefix('_').is_some_and(|rest| {
+            rest.starts_with(|character: char| character.is_ascii_alphabetic())
+        });
+    (valid && significant.next().is_none()).then_some(*name)
+}
+
+fn next_significant_after<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+    absolute_index: usize,
+) -> Option<super::super::input::IndexedToken<'lex, 'source>> {
+    view.top_level().find(|indexed| {
+        indexed.index() > absolute_index
+            && !matches!(indexed.token().kind(), TokenKind::LineStart { .. })
+    })
+}
+
+fn token_column(view: TokenView<'_, '_>, token: &SpannedToken<'_>) -> usize {
+    view.line_at_span(token.span())
+        .and_then(|line| view.line_span(line))
+        .map_or(0, |line| token.span().start() - line.start())
+}
+
+fn token_is_name(token: &SpannedToken<'_>, expected: &str) -> bool {
+    matches!(token.kind(), TokenKind::Name(name) if *name == expected)
+}
+
+fn last_significant_is_contextual_name(view: TokenView<'_, '_>, expected: &str) -> bool {
+    view.last_significant().is_some_and(|(index, token)| {
+        token_is_name(token, expected)
+            && (token.leading() != LeadingTrivia::Joint
+                || index.checked_sub(1).is_some_and(|previous| {
+                    view.token_at(previous)
+                        .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
+                }))
+    })
+}
+
+fn view_is_single_name(view: TokenView<'_, '_>, expected: &str) -> bool {
+    let mut significant = view
+        .tokens()
+        .iter()
+        .filter(|token| !matches!(token.kind(), TokenKind::LineStart { .. }));
+    significant
+        .next()
+        .is_some_and(|token| token_is_name(token, expected))
+        && significant.next().is_none()
+}
+
+fn trim_layout<'lex, 'source>(mut view: TokenView<'lex, 'source>) -> TokenView<'lex, 'source> {
+    let tokens = view.tokens();
+    let leading = tokens
+        .iter()
+        .take_while(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
+        .count();
+    let trailing = tokens
+        .iter()
+        .rev()
+        .take_while(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
+        .count();
+    view = view
+        .slice(leading..tokens.len().saturating_sub(trailing))
+        .expect("trimming layout tokens preserves an ordered range");
+    view
+}
+
+fn is_layout_empty(view: TokenView<'_, '_>) -> bool {
+    view.tokens()
+        .iter()
+        .all(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
+}
+
+fn view_between<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+    start: usize,
+    end: usize,
+) -> TokenView<'lex, 'source> {
+    view.subview(TokenRange::new(start, end).expect("ordered token indices form a range"))
+        .expect("subexpression range remains within its source view")
+}
+
+fn error_at_view(view: TokenView<'_, '_>, message: impl Into<String>) -> Vec<Diagnostic> {
+    let line = view
+        .first_significant()
+        .and_then(|(_, token)| view.line_at_span(token.span()))
+        .unwrap_or(1);
+    vec![Diagnostic::error(line, message)]
+}
+
+fn error_at_token(
+    view: TokenView<'_, '_>,
+    token: &SpannedToken<'_>,
+    message: impl Into<String>,
+) -> Vec<Diagnostic> {
+    vec![Diagnostic::error(
+        view.line_at_span(token.span()).unwrap_or(1),
+        message,
+    )]
+}
+
+#[cfg(test)]
+mod tests;

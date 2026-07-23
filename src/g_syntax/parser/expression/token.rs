@@ -19,7 +19,7 @@ use super::super::lexical::Delimiter;
 use super::infix::resolve_infix_chain;
 use super::{access_if_path, quoted_path};
 
-pub(super) fn syntax_expr_parser<'lex, 'source: 'lex>(
+pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
     recursive(move |expr| {
@@ -426,21 +426,25 @@ where
 }
 
 pub(super) fn parse_expression_fragment(source: &[u8]) -> Result<SyntaxExpr, Vec<Diagnostic>> {
-    super::super::input::parse_expression_fragment(source, |view| {
-        let mut session = ParseSession::new(view.source());
-        let (output, errors) = syntax_expr_parser(view)
-            .then_ignore(layout_padding())
-            .then_ignore(end())
-            .parse(view.chumsky_input())
-            .into_output_errors();
-        session.record_token_errors(view, errors);
-        let diagnostics = session.into_diagnostics();
-        if diagnostics.is_empty() {
-            output.ok_or_else(Vec::new)
-        } else {
-            Err(diagnostics)
-        }
-    })
+    super::super::input::parse_expression_fragment(source, parse_expression_view)
+}
+
+pub(in crate::g_syntax::parser) fn parse_expression_view(
+    view: TokenView<'_, '_>,
+) -> Result<SyntaxExpr, Vec<Diagnostic>> {
+    let mut session = ParseSession::new(view.source());
+    let (output, errors) = syntax_expr_parser(view)
+        .then_ignore(layout_padding())
+        .then_ignore(end())
+        .parse(view.chumsky_input())
+        .into_output_errors();
+    session.record_token_errors(view, errors);
+    let diagnostics = session.into_diagnostics();
+    if diagnostics.is_empty() {
+        output.ok_or_else(Vec::new)
+    } else {
+        Err(diagnostics)
+    }
 }
 
 #[cfg(test)]

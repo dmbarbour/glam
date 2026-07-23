@@ -13,7 +13,7 @@ use super::layout::{legacy_glam_name, legacy_local_name, legacy_whitespace1};
 
 mod infix;
 #[cfg(test)]
-mod token;
+pub(super) mod token;
 
 use infix::resolve_infix_chain;
 
