@@ -135,18 +135,49 @@ pub(super) fn eval_object_spec_builtin(
     let value = eval_value(context, value)?;
     let Value::Dict(dict) = value else {
         return Err(EvalError::new(
-            "object spec builtin requires an object or dictionary value",
+            "object spec builtin requires an object value",
         ));
     };
 
-    if let Some(spec) = dict.get(&*keys::SPEC) {
-        let spec = eval_value(context, spec)?;
-        if !is_undefined_dict_value(&spec) {
-            return Ok(spec);
-        }
+    let Some(spec) = dict.get(&*keys::SPEC) else {
+        return Err(EvalError::new(
+            "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
+        ));
+    };
+    let spec = eval_value(context, spec)?;
+    if is_undefined_dict_value(&spec) {
+        return Err(EvalError::new(
+            "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
+        ));
+    }
+    if !matches!(spec, Value::Dict(_)) {
+        return Err(EvalError::new(
+            "object value requires a dictionary-valued `spec`",
+        ));
+    }
+    Ok(spec)
+}
+
+pub(super) fn eval_object_from_dict_builtin(
+    context: &EvalContext,
+    value: &Value,
+) -> Result<Value, EvalError> {
+    let value = eval_value(context, value)?;
+    let Value::Dict(dict) = value else {
+        return Err(EvalError::new(
+            "object_from_dict requires a dictionary value",
+        ));
+    };
+
+    if let Some(spec) = dict.get(&*keys::SPEC)
+        && !is_undefined_dict_value(&eval_value(context, spec)?)
+    {
+        return Err(EvalError::new(
+            "object_from_dict requires a plain dictionary, not an object",
+        ));
     }
 
-    Ok(dict_object_spec(dict))
+    eval_object_instance_builtin(context, &dict_object_spec(dict))
 }
 
 pub(super) fn eval_object_local_name_builtin(

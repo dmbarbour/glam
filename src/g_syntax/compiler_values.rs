@@ -66,6 +66,10 @@ impl GCompilerValues {
                     Value::Builtin(Builtin::InteractionNet),
                 )
                 .insert(name_as_key("net_arity"), Value::Builtin(Builtin::NetArity))
+                .insert(
+                    name_as_key("object_from_dict"),
+                    Value::Builtin(Builtin::ObjectFromDict),
+                )
                 .insert(name_as_key("not"), not.clone())
                 .insert(name_as_key("could"), could.clone())
                 .insert(name_as_key("math"), math_value.clone())

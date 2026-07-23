@@ -16,6 +16,10 @@ pub(super) fn apply(
             let [value] = super::exact(arguments, "object spec")?;
             eval_object_spec_builtin(context, &value)
         }
+        Builtin::ObjectFromDict => {
+            let [value] = super::exact(arguments, "object_from_dict")?;
+            eval_object_from_dict_builtin(context, &value)
+        }
         Builtin::ObjectLocalName => {
             let [host, parts] = super::exact(arguments, "object local name")?;
             eval_object_local_name_builtin(context, &host, &parts)

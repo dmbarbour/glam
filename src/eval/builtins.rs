@@ -65,6 +65,7 @@ pub(super) fn apply_builtin(
         | Builtin::DictUpdate
         | Builtin::MergeDuplicate => dict::apply(context, builtin, arguments),
         Builtin::ObjectSpec
+        | Builtin::ObjectFromDict
         | Builtin::ObjectLocalName
         | Builtin::ObjectInstanceFromParts
         | Builtin::ObjectInstance

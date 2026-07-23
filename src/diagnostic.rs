@@ -214,6 +214,29 @@ pub(crate) fn enrich(
     severity: Severity,
     origin: Option<Value>,
 ) -> Result<Value, String> {
+    let context = crate::evaluation::EvalContext::standalone();
+    let message = eval::eval_value(&context, &message).map_err(|error| error.to_string())?;
+    let has_defined_spec = match &message {
+        Value::Dict(message) => match message.get(&*keys::SPEC) {
+            Some(spec) => {
+                let spec = eval::eval_value(&context, spec).map_err(|error| error.to_string())?;
+                !matches!(spec, Value::Dict(spec) if spec.is_empty())
+            }
+            None => false,
+        },
+        _ => false,
+    };
+    let message = if has_defined_spec {
+        message
+    } else {
+        let message = eval::apply_values(
+            &context,
+            Value::Builtin(Builtin::ObjectFromDict),
+            vec![message],
+        )
+        .map_err(|error| error.to_string())?;
+        eval::eval_value(&context, &message).map_err(|error| error.to_string())?
+    };
     apply_updates(message, Value::Dict(assembler_metadata(severity, origin)))
 }
 

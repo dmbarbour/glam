@@ -332,6 +332,10 @@ object foo extends bar, baz with
 object configured extends choose_parent options, fallback with
     ...                     # each comma-separated parent is an expression
 
+import 'std
+object legacy extends object_from_dict optional_defs with
+    ...                     # explicit plain-dict to anonymous-object conversion
+
 object foo as f extends bar with    # 'as f': local alias, no ^ needed
     A = f.B + a             # 'a' resolves to host directly now
     B = f.C + 2             # _f.B would be the prior B

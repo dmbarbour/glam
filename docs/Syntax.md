@@ -775,11 +775,12 @@ The `extends` and `with` sections are optional, with `spec.deps` and `spec.defs`
 
 `ExpressionList` is one or more ordinary expressions separated by top-level
 commas. Each expression is resolved in the scope surrounding the object and
-evaluates lazily to a parent object; the compiler extracts its `spec` for
-inheritance. Parent expressions that contain a top-level comma must therefore
-put that comma inside a delimiter group. The declared object's target remains
-a static path so its namespace and `abstract_global_path` are known during
-compilation.
+must evaluate lazily to a parent object with a defined `spec`. Plain
+dictionaries are not implicitly accepted as parents; use `object_from_dict`
+when that conversion is intended. Parent expressions that contain a top-level
+comma must put that comma inside a delimiter group. The declared object's
+target remains a static path so its namespace and `abstract_global_path` are
+known during compilation.
 
 To instantiate the object, the compiler applies a linearization algorithm (C3?) to deduplicate and merge components. The compiler uses `spec.name` to distinguish specifications, and asserts (via reflective term annotation) that `spec.name` is not used for two different specs in linearization scope. After specifications are ordered, we apply `spec.defs` to an empty base `{}` then finally introduce `spec` as an implicit final mixin. 
 
@@ -866,9 +867,21 @@ This supports lightweight extensions
 
 ### Dictionary as Object
 
-It is not difficult to convert an object into a dictionary by removing 'spec'. To go the opposite direction, we can leverage our ability to *union* dictionaries, i.e. our mixin `spec.defs` is `\ Base _ -> { Base, MyDict }`. This produces errors for anything previously defined, analogous to  *introducing* every name in `MyDict`.
+Objects and dictionaries serve distinct roles. In particular, an `extends`
+expression must produce an object with a defined `spec`; a plain dictionary is
+not silently treated as a parent. This ensures that an undefined parent does
+not become an empty, no-op dictionary union.
 
-We'll broadly treat dictionaries as anonymous objects for inheritance purposes. 
+`object_from_dict Dict` explicitly constructs an anonymous object whose
+definitions union `Dict` into the inherited base. It accepts the empty
+dictionary, with `object_from_dict {}` equivalent to `object _`, because a
+contingently constructed dictionary may legitimately be empty. It rejects an
+existing object, keeping the conversion direction explicit.
+
+        import 'std
+
+        options = if Condition then { feature:Feature } else {}
+        object configured extends object_from_dict options
 
 ## Conditionals
 

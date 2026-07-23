@@ -2570,9 +2570,9 @@ fn object_dependencies_use_c3_deduplication() {
 }
 
 #[test]
-fn object_dependencies_can_inherit_from_dictionaries() {
+fn object_dependencies_can_explicitly_inherit_from_dictionaries() {
     let parsed = parse(
-        "language g0\nbase = { hello:\"Hello\", target:\"Base\" }\nobject child extends base with\n  target := \"World\"\n  text = hello ++ \", \" ++ target ++ \"!\"\nasm.result = child.text\n",
+        "language g0\nimport 'std\nbase = { hello:\"Hello\", target:\"Base\" }\nobject child extends object_from_dict base with\n  target := \"World\"\n  text = hello ++ \", \" ++ target ++ \"!\"\nasm.result = child.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -2585,6 +2585,67 @@ fn object_dependencies_can_inherit_from_dictionaries() {
             &["asm", "result"]
         ))),
         b"Hello, World!"
+    );
+}
+
+#[test]
+fn empty_dictionaries_explicitly_convert_to_empty_anonymous_objects() {
+    let parsed = parse(
+        "language g0\nimport 'std\nobject child extends object_from_dict {} with\n  text = \"Hello, World!\"\nasm.result = child.text\n",
+    );
+    let context = CompileContext::from_module_path(["assembly"]);
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"Hello, World!"
+    );
+}
+
+#[test]
+fn object_parents_reject_implicit_dictionary_conversion() {
+    for parent in ["missing", "base"] {
+        let source = format!(
+            "language g0\nbase = {{ text:\"not an object\" }}\nobject child extends {parent} with\n  text = \"Hello\"\nasm.result = child.text\n"
+        );
+        let context = CompileContext::from_module_path(["assembly"]);
+        let lowered = lower_parsed_source(parse(&source), &context);
+        assert_eq!(lowered.diagnostics, [], "{parent}");
+
+        let value = evaluated_module_value(&context, &lowered);
+        let result =
+            value_at_atom_path(&value, &["asm", "result"]).expect("result binding should exist");
+        let error = crate::eval::eval_value(&test_eval_context(), &result)
+            .expect_err("plain dictionary parent should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("use `object_from_dict` to convert a dictionary"),
+            "{parent}: {error}"
+        );
+    }
+}
+
+#[test]
+fn object_from_dict_rejects_existing_objects() {
+    let parsed =
+        parse("language g0\nimport 'std\nobject base\nasm.result = object_from_dict base\n");
+    let context = CompileContext::from_module_path(["assembly"]);
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    let result = value_at_atom_path(&value, &["asm", "result"]).expect("result should exist");
+    let error = crate::eval::eval_value(&test_eval_context(), &result)
+        .expect_err("converting an existing object should fail");
+    assert_eq!(
+        error.to_string(),
+        "object_from_dict requires a plain dictionary, not an object"
     );
 }
 
@@ -3742,6 +3803,10 @@ fn lowers_builtin_imports_to_module_dictionaries() {
             assert!(matches!(
                 std.get(&Key::atom_from_text("net_arity")),
                 Some(Value::Builtin(crate::core::Builtin::NetArity))
+            ));
+            assert!(matches!(
+                std.get(&Key::atom_from_text("object_from_dict")),
+                Some(Value::Builtin(crate::core::Builtin::ObjectFromDict))
             ));
             assert!(matches!(
                 std.get(&Key::atom_from_text("seq")),

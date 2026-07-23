@@ -254,6 +254,7 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::DictUnion) => "{,}",
         SyntaxOperator::Builtin(crate::core::Builtin::DictUpdate) => "dict_update",
         SyntaxOperator::Builtin(crate::core::Builtin::ObjectSpec) => "object_spec",
+        SyntaxOperator::Builtin(crate::core::Builtin::ObjectFromDict) => "object_from_dict",
         SyntaxOperator::Builtin(crate::core::Builtin::ObjectLocalName) => "object_local_name",
         SyntaxOperator::Builtin(crate::core::Builtin::ObjectInstanceFromParts) => {
             "object_instance_from_parts"
