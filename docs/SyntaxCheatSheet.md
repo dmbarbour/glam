@@ -144,6 +144,17 @@ Body where n1 = d1; n2 = d2 # post-hoc let
 Body where
   n1 = d1
   n2 = d2
+
+# `where` is low-precedence and left-associative. These are separate groups;
+# the later group is the outer scope.
+Body where x = y where y = 1
+(Body where x = y) where y = 1
+
+# One suffix with multiple bindings is one mutually recursive group.
+Body where x = y; y = x
+
+# Parenthesize a right-associated binding expression explicitly.
+Body where x = (y where y = 1)
 ```
 
 ## Interaction Nets (performance escape hatch)

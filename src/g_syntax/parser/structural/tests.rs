@@ -39,6 +39,76 @@ fn let_and_where_parse() {
 }
 
 #[test]
+fn chained_where_suffixes_are_left_associative_binding_groups() {
+    let parsed = parse_structural("result where x = y where y = 1");
+    let SyntaxExpr::Let {
+        bindings: outer_bindings,
+        body: outer_body,
+    } = parsed
+    else {
+        panic!("last `where` suffix should produce the outer binding group");
+    };
+    assert_eq!(
+        outer_bindings
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["y"]
+    );
+
+    let SyntaxExpr::Let {
+        bindings: inner_bindings,
+        body: inner_body,
+    } = *outer_body
+    else {
+        panic!("first `where` suffix should produce the inner binding group");
+    };
+    assert_eq!(
+        inner_bindings
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["x"]
+    );
+    assert!(matches!(*inner_body, SyntaxExpr::Name(ref name) if name == "result"));
+}
+
+#[test]
+fn parentheses_can_make_a_where_binding_right_associative() {
+    let parsed = parse_structural("result where x = (y where y = 1)");
+    let SyntaxExpr::Let { bindings, body } = parsed else {
+        panic!("outer expression should contain the `x` binding group");
+    };
+    assert_eq!(
+        bindings
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["x"]
+    );
+    assert!(matches!(*body, SyntaxExpr::Name(ref name) if name == "result"));
+
+    let SyntaxExpr::Let {
+        bindings: nested_bindings,
+        body: nested_body,
+    } = &bindings[0].1
+    else {
+        panic!("parenthesized `where` should remain inside the `x` definition");
+    };
+    assert_eq!(
+        nested_bindings
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["y"]
+    );
+    assert!(matches!(
+        nested_body.as_ref(),
+        SyntaxExpr::Name(name) if name == "y"
+    ));
+}
+
+#[test]
 fn token_keywords_ignore_nested_groups_and_text() {
     parse_structural("let x = {in:\"where =\"} in x");
     parse_structural("f (where) where x = \"in where = as\"");

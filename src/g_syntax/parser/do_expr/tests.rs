@@ -59,6 +59,49 @@ fn braced_do_is_a_structural_atom_in_containers_and_other_do_blocks() {
 }
 
 #[test]
+fn braced_do_semicolons_currently_separate_unparenthesized_where_expressions() {
+    for source in [
+        "do { result where x = 1; y = 2 }",
+        "do { result where x = 1; y = 2; .r y }",
+    ] {
+        let diagnostics = parse_compound_expression_fragment(source.as_bytes())
+            .expect_err("an unparenthesized inline `where` is currently misclassified");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("patterns are not yet supported in do value bindings")
+            }),
+            "unexpected diagnostics for `{source}`: {diagnostics:#?}"
+        );
+    }
+
+    let parsed = parse_do_expression("do { (result where x = 1); y = 2; .r y }");
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = parsed else {
+        panic!("expected a do expression");
+    };
+    assert!(matches!(
+        &steps[0].kind,
+        DoStepKind::Then(SyntaxExpr::Let { bindings, .. })
+            if bindings.iter().map(|(name, _)| name.as_str()).eq(["x"])
+    ));
+    assert!(matches!(
+        &steps[1].kind,
+        DoStepKind::ValueBind { name, .. } if name == "y"
+    ));
+
+    let parenthesized = parse_do_expression("do { (result where x = 1; y = 2) }");
+    let SyntaxExpr::Do(DoExpr { result, .. }) = parenthesized else {
+        panic!("expected a do expression");
+    };
+    assert!(matches!(
+        result.as_ref(),
+        SyntaxExpr::Let { bindings, .. }
+            if bindings.iter().map(|(name, _)| name.as_str()).eq(["x", "y"])
+    ));
+}
+
+#[test]
 fn token_do_reports_structural_statement_errors() {
     let cases = [
         ("do {;}", "semicolon is not an empty computation"),

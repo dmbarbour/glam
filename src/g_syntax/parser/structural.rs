@@ -38,6 +38,9 @@ pub(in crate::g_syntax::parser) fn parse_expression(
     view: TokenView<'_, '_>,
 ) -> ParseResult<SyntaxExpr> {
     let view = trim_layout(view);
+    if let Some(result) = parse_parenthesized_structural(view) {
+        return result;
+    }
     if let Some(result) = parse_let(view) {
         return result;
     }
@@ -51,6 +54,30 @@ pub(in crate::g_syntax::parser) fn parse_expression(
         return result;
     }
     parse_expression_view(view)
+}
+
+fn parse_parenthesized_structural(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
+    let (open_index, open_token) = view.first_significant()?;
+    let (close_index, _) = view.last_significant()?;
+    let TokenKind::Open {
+        group,
+        delimiter: super::lexical::Delimiter::Parenthesis,
+    } = open_token.kind()
+    else {
+        return None;
+    };
+    let delimiter_group = view.group(*group)?;
+    if open_index != delimiter_group.open_token()
+        || delimiter_group.close_token() != Some(close_index)
+    {
+        return None;
+    }
+
+    let contents = trim_layout(view.group_contents(*group)?);
+    parse_let(contents)
+        .or_else(|| parse_where(contents))
+        .or_else(|| parse_object(contents))
+        .or_else(|| parse_with(contents))
 }
 
 fn parse_let(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {

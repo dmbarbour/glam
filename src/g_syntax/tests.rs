@@ -3194,6 +3194,25 @@ fn lowers_where_expressions_to_lambda_application() {
 }
 
 #[test]
+fn chained_where_groups_make_later_groups_visible_to_earlier_groups() {
+    let parsed = parse(
+        "language g0\nasm.result = first where first = second where second = \"Hello, World!\"\n",
+    );
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"Hello, World!"
+    );
+}
+
+#[test]
 fn lowers_multiline_let_expressions_to_lambda_application() {
     let parsed = parse(
         "language g0\nasm.result =\n  let hello = \"Hello\"\n      world = \"World\"\n  hello ++ \", \" ++ world ++ \"!\"\n",

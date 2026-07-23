@@ -356,6 +356,26 @@ We'll support Haskell-style locals.
           Name3 = This is a very long definition and it
             continues on the next line past the name
 
+`where` is a low-precedence, left-associative postfix construct. Each suffix
+introduces a separate mutually recursive binding group:
+
+        Body where x = y where y = 1
+        # equivalent to:
+        (Body where x = y) where y = 1
+        # and therefore:
+        let y = 1 in let x = y in Body
+
+The later textual group is the outer scope: its names are visible in earlier
+groups, but names from an earlier group are not visible in a later group.
+Chaining does not combine the groups. Use one binding block when mutual
+recursion across all names is intended:
+
+        Body where x = y; y = x
+
+Use parentheses to request the right-associated structure explicitly:
+
+        Body where x = (y where y = 1)
+
 Aside from `let` and `where`, locals can be introduced by pattern matching. See *Conditionals*.
 
 ## Tagged Data
