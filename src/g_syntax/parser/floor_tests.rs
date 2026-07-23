@@ -3,7 +3,10 @@ use crate::g_syntax::{
     DeclarationKind, Diagnostic, ObjectBodyDefinitionKind, ParsedSource, SyntaxExpr,
 };
 
+use super::expression_context::ExpressionContext;
+use super::input::parse_expression_fragment;
 use super::parse_source;
+use super::structural::parse_expression_extent;
 
 fn parse_without_errors(source: &str) -> ParsedSource {
     let parsed = parse_source(source.as_bytes());
@@ -58,6 +61,18 @@ fn assert_has_error(source: &str, line: usize, message: &str) {
         }),
         "`{source}` did not report line {line} containing `{message}`: {diagnostics:#?}"
     );
+}
+
+#[test]
+fn contextual_expression_reports_its_absolute_token_end() {
+    parse_expression_fragment(b"  do { .r value }.result", |view| {
+        let expected_end = view.range().end();
+        let parsed = parse_expression_extent(view, ExpressionContext::for_owner(view).may_yield())?;
+        assert_eq!(parsed.end(), expected_end);
+        assert!(matches!(parsed.into_expression(), SyntaxExpr::Access(_, _)));
+        Ok(())
+    })
+    .unwrap();
 }
 
 #[test]

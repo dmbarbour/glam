@@ -7,10 +7,11 @@
 use crate::g_syntax::keywords::{canonical_keyword, reserved_keyword_message};
 use crate::g_syntax::{Diagnostic, DoExpr, DoStep, DoStepKind, SyntaxExpr};
 
+use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{TokenRange, TokenView};
 use super::layout::{LayoutBase, LayoutView};
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
-use super::structural::{parse_expression, single_reserved_keyword};
+use super::structural::{parse_expression_in_context, single_reserved_keyword};
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
@@ -27,7 +28,8 @@ enum ParsedDoStatement {
 pub(in crate::g_syntax::parser) fn parse_do_atom(
     view: TokenView<'_, '_>,
     do_index: usize,
-) -> ParseResult<(SyntaxExpr, usize)> {
+    context: ExpressionContext,
+) -> ParseResult<ParsedExpression> {
     let Some(do_token) = view.token_at(do_index) else {
         return Err(error_at_view(
             view,
@@ -86,15 +88,18 @@ pub(in crate::g_syntax::parser) fn parse_do_atom(
                 "braced do expression body falls outside its token view",
             ));
         };
-        return parse_braced_body(body, do_token).map(|expr| (expr, close + 1));
+        return parse_braced_body(body, do_token, context)
+            .map(|expr| ParsedExpression::new(expr, close + 1));
     }
 
-    parse_layout_body(after_do, do_token).map(|expr| (expr, view.range().end()))
+    parse_layout_body(after_do, do_token, context)
+        .map(|expr| ParsedExpression::new(expr, view.range().end()))
 }
 
 fn parse_layout_body(
     body: TokenView<'_, '_>,
     do_token: &SpannedToken<'_>,
+    context: ExpressionContext,
 ) -> ParseResult<SyntaxExpr> {
     let statements = LayoutView::new(body)
         .statements(LayoutBase::FirstLine)
@@ -122,7 +127,7 @@ fn parse_layout_body(
             let view = body
                 .subview(statement.tokens())
                 .expect("layout statements remain within the do body");
-            parse_statement(view).map(|statement_kind| (statement.line(), statement_kind))
+            parse_statement(view, context).map(|statement_kind| (statement.line(), statement_kind))
         })
         .collect::<ParseResult<Vec<_>>>()?;
     finish_do_statements(statements).map_err(|message| error_at_token(body, do_token, message))
@@ -131,6 +136,7 @@ fn parse_layout_body(
 fn parse_braced_body(
     body: TokenView<'_, '_>,
     do_token: &SpannedToken<'_>,
+    context: ExpressionContext,
 ) -> ParseResult<SyntaxExpr> {
     if is_layout_empty(body) {
         let line = body.line_at_span(do_token.span()).unwrap_or(1);
@@ -170,7 +176,7 @@ fn parse_braced_body(
                 .first_significant()
                 .and_then(|(_, token)| statement.line_at_span(token.span()))
                 .unwrap_or(1);
-            parse_statement(statement).map(|statement_kind| (line, statement_kind))
+            parse_statement(statement, context).map(|statement_kind| (line, statement_kind))
         })
         .collect::<ParseResult<Vec<_>>>()?;
     finish_do_statements(statements).map_err(|message| error_at_token(body, do_token, message))
@@ -224,8 +230,12 @@ fn empty_do_expr(line: usize) -> SyntaxExpr {
     })
 }
 
-fn parse_statement(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
+fn parse_statement(
+    view: TokenView<'_, '_>,
+    parent_context: ExpressionContext,
+) -> ParseResult<ParsedDoStatement> {
     let view = trim_layout(view);
+    let context = parent_context.child_owner(view);
     if starts_with_contextual_name(view, "abstract") {
         return parse_abstract(view);
     }
@@ -248,9 +258,11 @@ fn parse_statement(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
                 format!("do binding `{name}` requires an operation after `<-`"),
             ));
         }
-        return parse_expression(operation).map(|operation| ParsedDoStatement::Bind {
-            name: name.to_owned(),
-            operation,
+        return parse_expression_in_context(operation, context).map(|operation| {
+            ParsedDoStatement::Bind {
+                name: name.to_owned(),
+                operation,
+            }
         });
     }
 
@@ -272,13 +284,15 @@ fn parse_statement(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
                 format!("do value binding `{name}` requires a value after `=`"),
             ));
         }
-        return parse_expression(value).map(|value| ParsedDoStatement::ValueBind {
-            name: name.to_owned(),
-            value,
+        return parse_expression_in_context(value, context).map(|value| {
+            ParsedDoStatement::ValueBind {
+                name: name.to_owned(),
+                value,
+            }
         });
     }
 
-    if let Ok(expr) = parse_expression(view) {
+    if let Ok(expr) = parse_expression_in_context(view, context) {
         return Ok(ParsedDoStatement::Expr(expr));
     }
 
@@ -293,7 +307,7 @@ fn parse_statement(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
     }
     for arrow in arrows.into_iter().rev() {
         let operation = trim_layout(view_between(view, view.range().start(), arrow));
-        let Ok(operation) = parse_expression(operation) else {
+        let Ok(operation) = parse_expression_in_context(operation, context) else {
             continue;
         };
         let name = trim_layout(view_between(view, arrow + 1, view.range().end()));
@@ -312,7 +326,7 @@ fn parse_statement(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
         });
     }
 
-    parse_expression(view).map(ParsedDoStatement::Expr)
+    parse_expression_in_context(view, context).map(ParsedDoStatement::Expr)
 }
 
 fn parse_abstract(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {

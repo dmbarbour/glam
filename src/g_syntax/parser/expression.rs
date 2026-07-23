@@ -14,6 +14,7 @@ use super::super::{
     Diagnostic, PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, flatten_path_suffixes,
 };
 use super::do_expr::parse_do_atom;
+use super::expression_context::ExpressionContext;
 use super::input::{
     ParseSession, TokenExtra, TokenInput, TokenView, close, joint, keyword, line_start, name,
     number, open, space_before, symbol, text_id,
@@ -90,6 +91,7 @@ fn quoted_path(suffixes: Vec<PathSuffix>) -> SyntaxExpr {
 
 pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
+    context: ExpressionContext,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
     recursive(move |expr| {
         let glam_name = glam_name().boxed();
@@ -345,7 +347,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .then(expr.clone())
             .map(|(params, body)| SyntaxExpr::Lambda(params, Box::new(body)));
 
-        let do_expr = do_expr(view)
+        let do_expr = do_expr(view, context)
             .then(path_suffix.clone())
             .map(|(base, suffixes)| access_if_path(base, suffixes))
             .boxed();
@@ -458,6 +460,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
 
 fn do_expr<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
+    context: ExpressionContext,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
     keyword("do").ignore_then(custom::<
         _,
@@ -476,7 +479,7 @@ fn do_expr<'lex, 'source: 'lex>(
         let do_index = next_index
             .and_then(|next| next.checked_sub(1))
             .unwrap_or_else(|| view.range().end().saturating_sub(1));
-        let (expr, end) = parse_do_atom(view, do_index).map_err(|diagnostics| {
+        let parsed = parse_do_atom(view, do_index, context.may_yield()).map_err(|diagnostics| {
             Rich::custom(
                 input.span_since(&before),
                 diagnostics
@@ -486,6 +489,7 @@ fn do_expr<'lex, 'source: 'lex>(
                     .join("; "),
             )
         })?;
+        let end = parsed.end();
         for _ in do_index + 1..end {
             if input.next().is_none() {
                 return Err(Rich::custom(
@@ -494,7 +498,7 @@ fn do_expr<'lex, 'source: 'lex>(
                 ));
             }
         }
-        Ok(expr)
+        Ok(parsed.into_expression())
     }))
 }
 
@@ -590,14 +594,17 @@ where
 
 #[cfg(test)]
 pub(super) fn parse_expression_fragment(source: &[u8]) -> Result<SyntaxExpr, Vec<Diagnostic>> {
-    super::input::parse_expression_fragment(source, parse_expression_view)
+    super::input::parse_expression_fragment(source, |view| {
+        parse_expression_view(view, ExpressionContext::for_owner(view))
+    })
 }
 
 pub(in crate::g_syntax::parser) fn parse_expression_view(
     view: TokenView<'_, '_>,
+    context: ExpressionContext,
 ) -> Result<SyntaxExpr, Vec<Diagnostic>> {
     let mut session = ParseSession::new(view.source());
-    let (output, errors) = syntax_expr_parser(view)
+    let (output, errors) = syntax_expr_parser(view, context)
         .then_ignore(layout_padding())
         .then_ignore(end())
         .parse(view.chumsky_input())

@@ -8,14 +8,16 @@ fn parse_structural(source: &str) -> SyntaxExpr {
 
 fn token_object_header(source: &str) -> ObjectHeader {
     super::super::input::parse_expression_fragment(source.as_bytes(), |view| {
-        parse_object_header(view).expect("source should begin with an object expression")
+        parse_object_header(view, ExpressionContext::for_owner(view))
+            .expect("source should begin with an object expression")
     })
     .unwrap()
 }
 
 fn token_with_header(source: &str) -> WithHeader {
     super::super::input::parse_expression_fragment(source.as_bytes(), |view| {
-        parse_with_header(view).expect("source should contain a with-expression header")
+        parse_with_header(view, ExpressionContext::for_owner(view))
+            .expect("source should contain a with-expression header")
     })
     .unwrap()
 }

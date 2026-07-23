@@ -8,6 +8,7 @@ use super::super::keywords::{canonical_keyword, reserved_keyword_message};
 use super::super::{Diagnostic, ObjectExpr, Severity, SyntaxExpr};
 use super::declaration::{parse_nonempty_object_body, parse_object_body};
 use super::expression::parse_expression_view;
+use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{TokenRange, TokenView};
 use super::layout::{LayoutBase, LayoutView};
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
@@ -35,29 +36,55 @@ pub(in crate::g_syntax::parser) fn parse_compound_expression_fragment(
     super::input::parse_expression_fragment(source, parse_expression)
 }
 
+#[cfg(test)]
 pub(in crate::g_syntax::parser) fn parse_expression(
     view: TokenView<'_, '_>,
 ) -> ParseResult<SyntaxExpr> {
-    let view = trim_layout(view);
-    if let Some(result) = parse_parenthesized_structural(view) {
-        return result;
-    }
-    if let Some(result) = parse_let(view) {
-        return result;
-    }
-    if let Some(result) = parse_where(view) {
-        return result;
-    }
-    if let Some(result) = parse_object(view) {
-        return result;
-    }
-    if let Some(result) = parse_with(view) {
-        return result;
-    }
-    parse_expression_view(view)
+    parse_expression_in_context(view, ExpressionContext::for_owner(view))
 }
 
-fn parse_parenthesized_structural(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
+pub(in crate::g_syntax::parser) fn parse_expression_in_context(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> ParseResult<SyntaxExpr> {
+    let view = trim_layout(view);
+    let parsed = parse_expression_extent(view, context.complete())?;
+    debug_assert_eq!(parsed.end(), view.range().end());
+    Ok(parsed.into_expression())
+}
+
+pub(in crate::g_syntax::parser) fn parse_expression_extent(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> ParseResult<ParsedExpression> {
+    let view = trim_layout(view);
+    let expression = if let Some(result) = parse_parenthesized_structural(view, context) {
+        result?
+    } else if let Some(result) = parse_let(view, context) {
+        result?
+    } else if let Some(result) = parse_where(view, context) {
+        result?
+    } else if let Some(result) = parse_object(view, context) {
+        result?
+    } else if let Some(result) = parse_with(view, context) {
+        result?
+    } else {
+        parse_expression_view(view, context)?
+    };
+    let parsed = ParsedExpression::new(expression, view.range().end());
+    if parsed.end() < view.range().end() && !context.permits_yield() {
+        return Err(error_at_view(
+            view,
+            "expression ended before its complete token range",
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_parenthesized_structural(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> Option<ParseResult<SyntaxExpr>> {
     let (open_index, open_token) = view.first_significant()?;
     let (close_index, _) = view.last_significant()?;
     let TokenKind::Open {
@@ -75,13 +102,17 @@ fn parse_parenthesized_structural(view: TokenView<'_, '_>) -> Option<ParseResult
     }
 
     let contents = trim_layout(view.group_contents(*group)?);
-    parse_let(contents)
-        .or_else(|| parse_where(contents))
-        .or_else(|| parse_object(contents))
-        .or_else(|| parse_with(contents))
+    let context = context.complete();
+    parse_let(contents, context)
+        .or_else(|| parse_where(contents, context))
+        .or_else(|| parse_object(contents, context))
+        .or_else(|| parse_with(contents, context))
 }
 
-fn parse_let(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
+fn parse_let(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> Option<ParseResult<SyntaxExpr>> {
     let (let_index, let_token) = view.first_significant()?;
     if !token_is_name(let_token, "let") {
         return None;
@@ -114,7 +145,7 @@ fn parse_let(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
             )));
         }
         let body = trim_layout(view_between(rest, in_index + 1, rest.range().end()));
-        if let Some(bindings) = parse_braced_bindings(bindings_view, "let") {
+        if let Some(bindings) = parse_braced_bindings(bindings_view, "let", context) {
             (bindings, true, body)
         } else if !top_level_symbols(bindings_view, ";").is_empty() {
             (
@@ -126,11 +157,15 @@ fn parse_let(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
                 body,
             )
         } else {
-            (parse_binding_views(vec![bindings_view]), false, body)
+            (
+                parse_binding_views(vec![bindings_view], context),
+                false,
+                body,
+            )
         }
     } else {
         match split_multiline_let(view, let_index, rest) {
-            Ok((bindings, body)) => (parse_binding_views(bindings), false, body),
+            Ok((bindings, body)) => (parse_binding_views(bindings, context), false, body),
             Err(diagnostics) => return Some(Err(diagnostics)),
         }
     };
@@ -153,7 +188,7 @@ fn parse_let(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
             "let expression requires a body",
         )));
     }
-    let body = match parse_expression(body) {
+    let body = match parse_expression_in_context(body, context) {
         Ok(body) => body,
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
@@ -164,7 +199,10 @@ fn parse_let(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
     }))
 }
 
-fn parse_where(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
+fn parse_where(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> Option<ParseResult<SyntaxExpr>> {
     let where_index = contextual_keywords(view, "where").into_iter().last()?;
     let where_token = view.token_at(where_index)?;
     let body = trim_layout(view_between(view, view.range().start(), where_index));
@@ -185,7 +223,7 @@ fn parse_where(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
     }
 
     let (bindings, braced_bindings) = if let Some(bindings) =
-        parse_braced_bindings(bindings, "where")
+        parse_braced_bindings(bindings, "where", context)
     {
         (bindings, true)
     } else if bindings
@@ -217,7 +255,7 @@ fn parse_where(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
             .into_iter()
             .filter_map(|statement| bindings.subview(statement.tokens()))
             .collect();
-        (parse_binding_views(binding_views), false)
+        (parse_binding_views(binding_views, context), false)
     } else if !top_level_symbols(bindings, ";").is_empty() {
         (
             Err(error_at_view(
@@ -227,7 +265,7 @@ fn parse_where(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
             false,
         )
     } else {
-        (parse_binding_views(vec![bindings]), false)
+        (parse_binding_views(vec![bindings], context), false)
     };
     let bindings = match bindings {
         Ok(bindings) => bindings,
@@ -240,7 +278,7 @@ fn parse_where(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
             "where expression requires at least one binding",
         )));
     }
-    let body = match parse_expression(body) {
+    let body = match parse_expression_in_context(body, context) {
         Ok(body) => body,
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
@@ -254,21 +292,29 @@ fn parse_where(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
 fn parse_braced_bindings(
     view: TokenView<'_, '_>,
     construct: &str,
+    context: ExpressionContext,
 ) -> Option<ParseResult<Vec<(String, SyntaxExpr)>>> {
     split_braced_members(view, &format!("`{construct}` binding group"))
-        .map(|members| members.and_then(parse_binding_views))
+        .map(|members| members.and_then(|members| parse_binding_views(members, context)))
 }
 
-fn parse_binding_views(views: Vec<TokenView<'_, '_>>) -> ParseResult<Vec<(String, SyntaxExpr)>> {
+fn parse_binding_views(
+    views: Vec<TokenView<'_, '_>>,
+    context: ExpressionContext,
+) -> ParseResult<Vec<(String, SyntaxExpr)>> {
     views
         .into_iter()
         .map(trim_layout)
         .filter(|view| !is_layout_empty(*view))
-        .map(parse_binding)
+        .map(|view| parse_binding(view, context))
         .collect()
 }
 
-fn parse_binding(view: TokenView<'_, '_>) -> ParseResult<(String, SyntaxExpr)> {
+fn parse_binding(
+    view: TokenView<'_, '_>,
+    parent_context: ExpressionContext,
+) -> ParseResult<(String, SyntaxExpr)> {
+    let context = parent_context.child_owner(view);
     let Some(equal_index) = top_level_symbols(view, "=").into_iter().next() else {
         return Err(error_at_view(
             view,
@@ -298,16 +344,19 @@ fn parse_binding(view: TokenView<'_, '_>) -> ParseResult<(String, SyntaxExpr)> {
             format!("local binding `{name}` requires a value"),
         ));
     }
-    parse_expression(value_view).map(|value| (name.to_owned(), value))
+    parse_expression_in_context(value_view, context).map(|value| (name.to_owned(), value))
 }
 
-fn parse_object(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
+fn parse_object(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> Option<ParseResult<SyntaxExpr>> {
     let object_line = view
         .first_significant()
         .and_then(|(_, token)| view.line_at_span(token.span()))
         .unwrap_or(1);
     let (_, body_view) = split_compound_header_body(view);
-    let header = match parse_object_header(view)? {
+    let header = match parse_object_header(view, context)? {
         Ok(header) => header,
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
@@ -347,10 +396,13 @@ fn parse_object(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
     })))
 }
 
-fn parse_with(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
+fn parse_with(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> Option<ParseResult<SyntaxExpr>> {
     let (_, body_view) = split_compound_header_body(view);
     let body_view = body_view?;
-    let header = match parse_with_header(view)? {
+    let header = match parse_with_header(view, context)? {
         Ok(header) => header,
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
@@ -462,7 +514,10 @@ fn split_multiline_let<'lex, 'source>(
     Ok((bindings, body))
 }
 
-fn parse_object_header(view: TokenView<'_, '_>) -> Option<ParseResult<ObjectHeader>> {
+fn parse_object_header(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> Option<ParseResult<ObjectHeader>> {
     let (header_view, body) = split_compound_header_body(view);
     let (object_index, object_token) = header_view.first_significant()?;
     if !token_is_name(object_token, "object") {
@@ -508,7 +563,7 @@ fn parse_object_header(view: TokenView<'_, '_>) -> Option<ParseResult<ObjectHead
     let name = if view_is_single_name(name_view, "_") {
         None
     } else {
-        match parse_expression(name_view) {
+        match parse_expression_in_context(name_view, context.complete()) {
             Ok(name) => Some(Box::new(name)),
             Err(diagnostics) => return Some(Err(diagnostics)),
         }
@@ -557,6 +612,7 @@ fn parse_object_header(view: TokenView<'_, '_>) -> Option<ParseResult<ObjectHead
         match parse_object_parents(
             deps_view,
             view.line_at_span(object_token.span()).unwrap_or(1),
+            context.complete(),
         ) {
             Ok(deps) => deps,
             Err(diagnostics) => return Some(Err(diagnostics)),
@@ -573,7 +629,10 @@ fn parse_object_header(view: TokenView<'_, '_>) -> Option<ParseResult<ObjectHead
     }))
 }
 
-fn parse_with_header(view: TokenView<'_, '_>) -> Option<ParseResult<WithHeader>> {
+fn parse_with_header(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> Option<ParseResult<WithHeader>> {
     let (header, body) = split_compound_header_body(view);
     body?;
     let header = trim_layout(header);
@@ -627,7 +686,7 @@ fn parse_with_header(view: TokenView<'_, '_>) -> Option<ParseResult<WithHeader>>
             "with expression requires a base expression",
         )));
     }
-    let base = match parse_expression(base_view) {
+    let base = match parse_expression_in_context(base_view, context.complete()) {
         Ok(base) => Box::new(base),
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
@@ -777,6 +836,7 @@ pub(in crate::g_syntax::parser) fn split_compound_header_body<'lex, 'source>(
 pub(in crate::g_syntax::parser) fn parse_object_parents(
     view: TokenView<'_, '_>,
     line: usize,
+    context: ExpressionContext,
 ) -> ParseResult<Vec<SyntaxExpr>> {
     if is_layout_empty(view) {
         return Err(vec![Diagnostic::error(
@@ -795,7 +855,7 @@ pub(in crate::g_syntax::parser) fn parse_object_parents(
                 "object `extends` contains an empty parent expression",
             )]);
         }
-        parents.push(parse_expression(parent)?);
+        parents.push(parse_expression_in_context(parent, context.complete())?);
     }
     Ok(parents)
 }

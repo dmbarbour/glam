@@ -10,13 +10,15 @@ use super::super::{
     ObjectBodyDefinitionKind, ObjectDecl, ObjectExtendDecl, Severity, SyntaxExpr, SyntaxKeyExpr,
     warn_unused_locals, warn_unused_with_alias,
 };
+use super::expression_context::ExpressionContext;
 use super::input::{TokenRange, TokenView};
 use super::layout::{LayoutBase, LayoutView};
 use super::lexical::{Delimiter, LeadingTrivia, TokenKind};
 use super::structural::{
     braced_contents, contextual_keywords, is_layout_empty, local_name, object_alias_name,
-    parse_expression, parse_object_parents, single_reserved_keyword, split_braced_members,
-    split_compound_header_body, split_top_level, token_is_name, trim_layout, view_between,
+    parse_expression_in_context, parse_object_parents, single_reserved_keyword,
+    split_braced_members, split_compound_header_body, split_top_level, token_is_name, trim_layout,
+    view_between,
 };
 
 mod simple;
@@ -253,6 +255,7 @@ fn parse_definition(
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<DefinitionDecl> {
+    let context = ExpressionContext::for_owner(view);
     let operator = view.top_level().find_map(|indexed| {
         let kind = match indexed.token().kind() {
             TokenKind::Symbol("::=") => DefinitionKind::Update,
@@ -274,14 +277,14 @@ fn parse_definition(
         return None;
     }
 
-    let (target, parameters) = match parse_definition_left(left, line) {
+    let (target, parameters) = match parse_definition_left(left, line, context) {
         Ok(parts) => parts,
         Err(diagnostic) => {
             diagnostics.push(diagnostic);
             return None;
         }
     };
-    let parsed_body = match parse_expression(body_view) {
+    let parsed_body = match parse_expression_in_context(body_view, context) {
         Ok(expr) => expr,
         Err(errors) => {
             diagnostics.extend(errors);
@@ -311,6 +314,7 @@ fn parse_definition(
 fn parse_definition_left(
     view: TokenView<'_, '_>,
     line: usize,
+    context: ExpressionContext,
 ) -> Result<(Vec<SyntaxKeyExpr>, Vec<String>), Diagnostic> {
     let significant = view
         .top_level()
@@ -377,7 +381,7 @@ fn parse_definition_left(
     }
 
     let target_view = view_between(view, first.index(), target_end);
-    let target = parse_definition_target(target_view, line)?;
+    let target = parse_definition_target(target_view, line, context)?;
 
     let mut parameters = Vec::new();
     for indexed in significant.into_iter().skip(position) {
@@ -409,6 +413,7 @@ fn parse_definition_left(
 fn parse_definition_target(
     view: TokenView<'_, '_>,
     line: usize,
+    context: ExpressionContext,
 ) -> Result<Vec<SyntaxKeyExpr>, Diagnostic> {
     let mut parts = Vec::new();
     let tokens = view.top_level().collect::<Vec<_>>();
@@ -452,7 +457,7 @@ fn parse_definition_target(
                     .map(trim_layout)
                     .filter(|item| !is_layout_empty(*item))
                 {
-                    let expr = parse_expression(item)
+                    let expr = parse_expression_in_context(item, context.complete())
                         .map_err(|errors| combine_parse_errors(line, errors))?;
                     parts.push(match expr {
                         SyntaxExpr::Atom(name) => SyntaxKeyExpr::Atom(name),
@@ -467,7 +472,7 @@ fn parse_definition_target(
                 let contents = view
                     .group_contents(*group)
                     .ok_or_else(|| Diagnostic::error(line, "invalid computed path"))?;
-                let expr = parse_expression(contents)
+                let expr = parse_expression_in_context(contents, context.complete())
                     .map_err(|errors| combine_parse_errors(line, errors))?;
                 parts.push(SyntaxKeyExpr::PathIndex(Box::new(expr)));
             }
@@ -502,10 +507,11 @@ fn parse_object_declaration(
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ObjectDecl> {
+    let context = ExpressionContext::for_owner(view);
     let (header, body) = split_compound_header_body(view);
     let head = header.first_significant()?.0;
     let header = trim_layout(view_between(header, head + 1, header.range().end()));
-    let parsed = parse_static_object_header(header, line, false, diagnostics)?;
+    let parsed = parse_static_object_header(header, line, false, context, diagnostics)?;
     if body.is_some() && !parsed.has_with {
         diagnostics.push(Diagnostic::error(
             line,
@@ -560,10 +566,11 @@ fn parse_extend_declaration(
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ObjectExtendDecl> {
+    let context = ExpressionContext::for_owner(view);
     let (header, body) = split_compound_header_body(view);
     let head = header.first_significant()?.0;
     let header = trim_layout(view_between(header, head + 1, header.range().end()));
-    let parsed = parse_static_object_header(header, line, true, diagnostics)?;
+    let parsed = parse_static_object_header(header, line, true, context, diagnostics)?;
     if !parsed.has_with {
         diagnostics.push(Diagnostic::error(
             line,
@@ -609,6 +616,7 @@ fn parse_static_object_header(
     mut header: TokenView<'_, '_>,
     line: usize,
     extend: bool,
+    context: ExpressionContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<StaticObjectHeader> {
     let with_index = contextual_keywords(header, "with").into_iter().next();
@@ -710,7 +718,7 @@ fn parse_static_object_header(
             extends_index + 1,
             header.range().end(),
         ));
-        match parse_object_parents(deps_view, line) {
+        match parse_object_parents(deps_view, line, context.complete()) {
             Ok(deps) => deps,
             Err(mut errors) => {
                 diagnostics.append(&mut errors);

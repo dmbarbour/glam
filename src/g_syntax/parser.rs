@@ -3,6 +3,7 @@
 mod declaration;
 mod do_expr;
 mod expression;
+mod expression_context;
 #[cfg(test)]
 mod floor_tests;
 mod input;
