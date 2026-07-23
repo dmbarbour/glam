@@ -365,7 +365,7 @@ pub(super) type TokenInput<'lex, 'source> = MappedInput<
 >;
 
 pub(super) type TokenError<'lex, 'source> = Rich<'lex, SpannedToken<'source>, ByteSpan>;
-type TokenExtra<'lex, 'source> = extra::Err<TokenError<'lex, 'source>>;
+pub(super) type TokenExtra<'lex, 'source> = extra::Err<TokenError<'lex, 'source>>;
 
 fn token_and_span<'lex, 'source>(
     token: &'lex SpannedToken<'source>,
@@ -561,8 +561,25 @@ impl<'lex, 'source> ParseSession<'lex, 'source> {
         );
     }
 
+    pub(super) fn record_token_errors_at_line(
+        &mut self,
+        view: TokenView<'lex, 'source>,
+        line: usize,
+        errors: impl IntoIterator<Item = TokenError<'lex, 'source>>,
+    ) {
+        self.diagnostics.extend(errors.into_iter().map(|error| {
+            let mut diagnostic = token_error_diagnostic(view, &error);
+            diagnostic.line = line;
+            diagnostic
+        }));
+    }
+
     pub(super) fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    pub(super) fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.diagnostics)
     }
 
     pub(super) fn into_diagnostics(self) -> Vec<Diagnostic> {

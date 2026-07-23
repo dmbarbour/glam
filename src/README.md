@@ -31,7 +31,8 @@ not define future language semantics or collect subsystem invariants.
 | `g_syntax/parser/lexical.rs` | Authoritative single-pass source validation and spanned tokens, text values, delimiter pairs, indentation facts, and declaration ranges |
 | `g_syntax/parser/input.rs` | Checked token-range views, balanced-group iteration, mapped Chumsky input, token predicates, and source-aware parser diagnostics |
 | `g_syntax/parser/layout.rs` | Token-native contextual layout views plus explicitly named `legacy_*` character helpers retained during grammar migration |
-| remaining `g_syntax/parser/` | Transitional declaration, expression, and compound parsers migrating from normalized text to lexical tokens |
+| `g_syntax/parser/source.rs`, `parser/declaration/simple.rs` | Lexical declaration iteration and token-native `language`, `import`, `abstract`, and `unique`; one deletion-bound normalizer feeds remaining text grammars |
+| remaining `g_syntax/parser/` | Transitional object, definition, expression, and compound parsers migrating from normalized text to lexical tokens |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs` | Scope resolution, affine semantic IR, captures, and warnings |
 | `g_syntax/compiler_values.rs` | Shared closed helpers and built-in modules owned by the g compiler |
 | `g_syntax/module_lowering/` | Imports, definitions, objects, and module fixpoint orchestration |

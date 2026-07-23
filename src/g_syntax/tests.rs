@@ -235,6 +235,80 @@ fn parses_language_declaration_with_extensions() {
 }
 
 #[test]
+fn simple_declarations_preserve_indented_line_continuations() {
+    let parsed = parse(concat!(
+        "language\n",
+        "  g0 with utf8,\n",
+        "    demo\n",
+        "import\n",
+        "  'std\n",
+        "  as standard\n",
+        "abstract first,\n",
+        "  nested.second\n",
+        "unique\n",
+        "  Marker\n",
+    ));
+
+    assert_eq!(parsed.diagnostics, []);
+    assert_eq!(
+        parsed.declarations[0].kind,
+        DeclarationKind::Language(LanguageDecl {
+            base: "g0".to_owned(),
+            extensions: vec!["utf8".to_owned(), "demo".to_owned()],
+        })
+    );
+    assert_eq!(
+        parsed.declarations[1].kind,
+        DeclarationKind::Import(ImportDecl {
+            reference: ImportReference::Builtin("std".to_owned()),
+            binary: false,
+            placement: ImportPlacement::As("standard".to_owned()),
+        })
+    );
+    assert_eq!(
+        parsed.declarations[2].kind,
+        DeclarationKind::Abstract(vec!["first".to_owned(), "nested.second".to_owned()])
+    );
+    assert_eq!(
+        parsed.declarations[3].kind,
+        DeclarationKind::Unique(vec!["Marker".to_owned()])
+    );
+}
+
+#[test]
+fn simple_declarations_preserve_continuation_alignment_diagnostics() {
+    let parsed = parse("language\n    g0\n  with utf8\n");
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.line == 3
+            && diagnostic
+                .message
+                .contains("continuation indentation must align")
+    }));
+    assert!(matches!(
+        parsed.declarations[0].kind,
+        DeclarationKind::Language(_)
+    ));
+}
+
+#[test]
+fn reports_indented_lines_before_the_first_lexical_declaration() {
+    let parsed = parse("  orphan = 1\nlanguage g0\n");
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.line == 1
+            && diagnostic
+                .message
+                .contains("continuation line without a preceding declaration")
+    }));
+    assert_eq!(parsed.declarations.len(), 1);
+    assert!(matches!(
+        parsed.declarations[0].kind,
+        DeclarationKind::Language(_)
+    ));
+}
+
+#[test]
 fn groups_indented_continuation_lines() {
     let parsed = parse("language g0\nfoo = do\n  .bar\n  .baz\nqux := 1\n");
 
@@ -412,6 +486,71 @@ fn parses_unique_declarations() {
         parsed.declarations[1].kind,
         DeclarationKind::Unique(vec!["Foo".to_owned(), "palette.Blue".to_owned()])
     );
+}
+
+#[test]
+fn mixes_token_native_and_legacy_top_level_declarations() {
+    let parsed = parse(concat!(
+        "language g0 with demo\n",
+        "import 'std as standard\n",
+        "abstract missing, nested.value\n",
+        "unique Marker\n",
+        "object holder with\n",
+        "  value = 41\n",
+        "answer = holder.value + 1\n",
+    ));
+
+    assert_eq!(parsed.diagnostics, []);
+    assert!(matches!(
+        parsed.declarations[0].kind,
+        DeclarationKind::Language(_)
+    ));
+    assert!(matches!(
+        parsed.declarations[1].kind,
+        DeclarationKind::Import(_)
+    ));
+    assert_eq!(
+        parsed.declarations[2].kind,
+        DeclarationKind::Abstract(vec!["missing".to_owned(), "nested.value".to_owned()])
+    );
+    assert_eq!(
+        parsed.declarations[3].kind,
+        DeclarationKind::Unique(vec!["Marker".to_owned()])
+    );
+    assert!(matches!(
+        parsed.declarations[4].kind,
+        DeclarationKind::Object(_)
+    ));
+    assert!(matches!(
+        parsed.declarations[5].kind,
+        DeclarationKind::Definition(_)
+    ));
+}
+
+#[test]
+fn malformed_simple_declarations_report_their_declaration_lines() {
+    for (source, line) in [
+        ("language\n", 1),
+        ("language g0\nimport\n", 2),
+        ("language g0\nabstract\n", 2),
+        ("language g0\nunique\n", 2),
+    ] {
+        let parsed = parse(source);
+
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.line == line
+                    && diagnostic.message.starts_with("expected")),
+            "{source:?} produced {:#?}",
+            parsed.diagnostics
+        );
+        assert!(matches!(
+            parsed.declarations.last().unwrap().kind,
+            DeclarationKind::Unknown
+        ));
+    }
 }
 
 #[test]

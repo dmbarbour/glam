@@ -1,10 +1,9 @@
 use chumsky::prelude::*;
 
 use super::super::{
-    Declaration, DeclarationKind, DefinitionDecl, DefinitionKind, Diagnostic, ImportDecl,
-    ImportPlacement, ImportReference, LanguageDecl, ObjectBodyDefinition, ObjectBodyDefinitionKind,
-    ObjectDecl, ObjectExtendDecl, PathSuffix, SyntaxExpr, SyntaxKeyExpr, flatten_path_suffixes,
-    warn_unused_locals, warn_unused_with_alias,
+    Declaration, DeclarationKind, DefinitionDecl, DefinitionKind, Diagnostic, ObjectBodyDefinition,
+    ObjectBodyDefinitionKind, ObjectDecl, ObjectExtendDecl, PathSuffix, SyntaxExpr, SyntaxKeyExpr,
+    flatten_path_suffixes, warn_unused_locals, warn_unused_with_alias,
 };
 use super::layout::{
     legacy_closes_multiline_text, legacy_first_word, legacy_glam_name, legacy_indentation_width,
@@ -12,6 +11,10 @@ use super::layout::{
     legacy_strip_comment, legacy_strip_indent_width, legacy_whitespace0, legacy_whitespace1,
 };
 use super::{parse_expr_result_with_diagnostics, syntax_expr_parser};
+
+mod simple;
+
+pub(super) use simple::{SimpleDeclaration, parse_simple_declaration};
 
 pub(super) fn validate_language_position(
     declarations: &[Declaration],
@@ -42,7 +45,7 @@ pub(super) fn validate_language_position(
     }
 }
 
-pub(super) fn classify_declaration(
+pub(super) fn classify_legacy_declaration(
     text: &str,
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
@@ -53,7 +56,11 @@ pub(super) fn classify_declaration(
         _ => {}
     }
 
-    let (declaration, errors) = declaration_parser().parse(text).into_output_errors();
+    let (declaration, errors) = definition_decl()
+        .map(DeclarationKind::Definition)
+        .then_ignore(end())
+        .parse(text)
+        .into_output_errors();
 
     for error in errors {
         diagnostics.push(Diagnostic::error(line, error.to_string()));
@@ -438,88 +445,6 @@ pub(super) fn take_header_word(text: &str) -> Option<(&str, &str)> {
     }
     let end = text.find(legacy_is_glam_whitespace).unwrap_or(text.len());
     Some((&text[..end], &text[end..]))
-}
-
-fn declaration_parser<'src>()
--> impl Parser<'src, &'src str, DeclarationKind, extra::Err<Rich<'src, char>>> {
-    choice((
-        language_decl().map(DeclarationKind::Language),
-        import_decl().map(DeclarationKind::Import),
-        keyword_name_list("abstract").map(DeclarationKind::Abstract),
-        keyword_name_list("unique").map(DeclarationKind::Unique),
-        definition_decl().map(DeclarationKind::Definition),
-    ))
-    .then_ignore(end())
-}
-
-fn language_decl<'src>() -> impl Parser<'src, &'src str, LanguageDecl, extra::Err<Rich<'src, char>>>
-{
-    just("language")
-        .or(just("lang"))
-        .padded()
-        .ignore_then(name())
-        .then(
-            just("with")
-                .padded()
-                .ignore_then(
-                    name()
-                        .separated_by(just(',').padded())
-                        .at_least(1)
-                        .collect::<Vec<_>>(),
-                )
-                .or_not(),
-        )
-        .map(|(base, extensions)| LanguageDecl {
-            base,
-            extensions: extensions.unwrap_or_default(),
-        })
-}
-
-fn import_decl<'src>() -> impl Parser<'src, &'src str, ImportDecl, extra::Err<Rich<'src, char>>> {
-    let reference = choice((
-        quoted_text().map(ImportReference::Local),
-        just('\'')
-            .ignore_then(legacy_glam_name())
-            .map(ImportReference::Builtin),
-    ));
-    let placement = just("as")
-        .padded()
-        .ignore_then(path())
-        .map(ImportPlacement::As)
-        .or(just("at")
-            .padded()
-            .ignore_then(path())
-            .map(ImportPlacement::At))
-        .or_not()
-        .map(|placement| placement.unwrap_or(ImportPlacement::Inline));
-
-    let binary = just("binary")
-        .padded()
-        .to(true)
-        .or_not()
-        .map(|v| v.unwrap_or(false));
-
-    just("import")
-        .padded()
-        .ignore_then(reference)
-        .then(binary)
-        .then(placement)
-        .map(|((reference, binary), placement)| ImportDecl {
-            reference,
-            binary,
-            placement,
-        })
-}
-
-fn keyword_name_list<'src>(
-    keyword: &'static str,
-) -> impl Parser<'src, &'src str, Vec<String>, extra::Err<Rich<'src, char>>> {
-    just(keyword).padded().ignore_then(
-        path()
-            .separated_by(just(',').padded())
-            .at_least(1)
-            .collect::<Vec<_>>(),
-    )
 }
 
 pub(in crate::g_syntax) fn definition_decl<'src>()
