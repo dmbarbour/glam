@@ -1,8 +1,8 @@
 //! Single-pass lexical structure for the built-in `.g` compiler.
 //!
-//! Production parsing currently consumes only the source-wide validation
-//! results. The remaining structure is exercised differentially against the
-//! text parser while declarations and expressions migrate to token input.
+//! Production parsing consumes lexical diagnostics. Token, group, layout, and
+//! declaration structure is exercised differentially against the text parser
+//! while declarations and expressions migrate to token input.
 
 use std::ops::Range;
 
@@ -10,8 +10,18 @@ use super::super::Diagnostic;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ByteSpan {
-    pub(super) start: usize,
-    pub(super) end: usize,
+    start: usize,
+    end: usize,
+}
+
+impl ByteSpan {
+    pub(super) fn start(self) -> usize {
+        self.start
+    }
+
+    pub(super) fn end(self) -> usize {
+        self.end
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,86 +75,262 @@ pub(super) enum TokenKind<'source> {
     Number(&'source str),
     Text(TextId),
     Symbol(&'source str),
-    Open(GroupId),
-    Close(GroupId),
-    LineStart { indentation: usize },
+    Open {
+        group: GroupId,
+        delimiter: Delimiter,
+    },
+    Close {
+        group: GroupId,
+        delimiter: Delimiter,
+    },
+    LineStart {
+        indentation: usize,
+    },
     Unknown(char),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SpannedToken<'source> {
-    pub(super) kind: TokenKind<'source>,
-    pub(super) span: ByteSpan,
-    pub(super) leading: LeadingTrivia,
+    kind: TokenKind<'source>,
+    span: ByteSpan,
+    leading: LeadingTrivia,
+}
+
+impl<'source> SpannedToken<'source> {
+    pub(super) fn kind(&self) -> &TokenKind<'source> {
+        &self.kind
+    }
+
+    pub(super) fn span(&self) -> ByteSpan {
+        self.span
+    }
+
+    pub(super) fn leading(&self) -> LeadingTrivia {
+        self.leading
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LexedText {
-    pub(super) value: String,
-    pub(super) span: ByteSpan,
-    pub(super) multiline: bool,
+    value: String,
+    span: ByteSpan,
+    multiline: bool,
+}
+
+impl LexedText {
+    pub(super) fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub(super) fn span(&self) -> ByteSpan {
+        self.span
+    }
+
+    pub(super) fn is_multiline(&self) -> bool {
+        self.multiline
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DelimiterGroup {
-    pub(super) delimiter: Delimiter,
-    pub(super) open_token: usize,
-    pub(super) close_token: Option<usize>,
-    pub(super) parent: Option<GroupId>,
+    delimiter: Delimiter,
+    open_token: usize,
+    close_token: Option<usize>,
+    parent: Option<GroupId>,
+}
+
+impl DelimiterGroup {
+    pub(super) fn delimiter(&self) -> Delimiter {
+        self.delimiter
+    }
+
+    pub(super) fn open_token(&self) -> usize {
+        self.open_token
+    }
+
+    pub(super) fn close_token(&self) -> Option<usize> {
+        self.close_token
+    }
+
+    pub(super) fn parent(&self) -> Option<GroupId> {
+        self.parent
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DeclarationSection {
-    pub(super) tokens: Range<usize>,
-    pub(super) span: ByteSpan,
-    pub(super) line: usize,
+    tokens: Range<usize>,
+    span: ByteSpan,
+    line: usize,
+}
+
+impl DeclarationSection {
+    pub(super) fn tokens(&self) -> Range<usize> {
+        self.tokens.clone()
+    }
+
+    pub(super) fn span(&self) -> ByteSpan {
+        self.span
+    }
+
+    pub(super) fn line(&self) -> usize {
+        self.line
+    }
 }
 
 #[derive(Debug)]
 pub(super) struct LexedSource<'source> {
-    pub(super) source: &'source str,
-    pub(super) tokens: Vec<SpannedToken<'source>>,
-    pub(super) texts: Vec<LexedText>,
-    pub(super) groups: Vec<DelimiterGroup>,
-    pub(super) declarations: Vec<DeclarationSection>,
-    pub(super) line_starts: Vec<usize>,
-    pub(super) validation_diagnostics: Vec<Diagnostic>,
-    pub(super) structural_diagnostics: Vec<Diagnostic>,
-    pub(super) has_invalid_whitespace: bool,
+    source: &'source str,
+    tokens: Vec<SpannedToken<'source>>,
+    texts: Vec<LexedText>,
+    groups: Vec<DelimiterGroup>,
+    declarations: Vec<DeclarationSection>,
+    line_starts: Vec<usize>,
+    diagnostics: Vec<Diagnostic>,
+    has_errors: bool,
 }
 
-impl LexedSource<'_> {
+impl<'source> LexedSource<'source> {
+    pub(super) fn source(&self) -> &'source str {
+        self.source
+    }
+
+    pub(super) fn tokens(&self) -> &[SpannedToken<'source>] {
+        &self.tokens
+    }
+
+    pub(super) fn texts(&self) -> &[LexedText] {
+        &self.texts
+    }
+
+    pub(super) fn groups(&self) -> &[DelimiterGroup] {
+        &self.groups
+    }
+
+    pub(super) fn declarations(&self) -> &[DeclarationSection] {
+        &self.declarations
+    }
+
+    pub(super) fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    pub(super) fn has_errors(&self) -> bool {
+        self.has_errors
+    }
+
+    pub(super) fn token(&self, index: usize) -> Option<&SpannedToken<'source>> {
+        self.tokens.get(index)
+    }
+
+    pub(super) fn text(&self, id: TextId) -> Option<&LexedText> {
+        self.texts.get(id)
+    }
+
+    pub(super) fn group(&self, id: GroupId) -> Option<&DelimiterGroup> {
+        self.groups.get(id)
+    }
+
+    pub(super) fn group_contents(&self, id: GroupId) -> Option<Range<usize>> {
+        let group = self.group(id)?;
+        Some(group.open_token + 1..group.close_token?)
+    }
+
+    pub(super) fn source_slice(&self, span: ByteSpan) -> Option<&'source str> {
+        self.source.get(span.start..span.end)
+    }
+
+    pub(super) fn line_at_byte(&self, byte: usize) -> Option<usize> {
+        (byte <= self.source.len()).then(|| line_at(&self.line_starts, byte))
+    }
+
     pub(super) fn invariants_hold(&self) -> bool {
-        let source_len = self.source.len();
+        let source_len = self.source().len();
         self.line_starts.first() == Some(&0)
             && self
                 .line_starts
                 .windows(2)
                 .all(|pair| pair[0] < pair[1] && pair[1] <= source_len)
-            && self
-                .tokens
-                .iter()
-                .all(|token| token.span.start <= token.span.end && token.span.end <= source_len)
-            && self
-                .texts
-                .iter()
-                .all(|text| text.span.start <= text.span.end && text.span.end <= source_len)
-            && self.groups.iter().all(|group| {
-                group.open_token < self.tokens.len()
-                    && group
-                        .close_token
-                        .is_none_or(|close| close < self.tokens.len() && close > group.open_token)
+            && self.tokens().iter().all(|token| {
+                let span = token.span();
+                let token_reference_is_valid = match token.kind() {
+                    TokenKind::Text(id) => self.text(*id).is_some(),
+                    TokenKind::Open { group, delimiter }
+                    | TokenKind::Close { group, delimiter } => self
+                        .group(*group)
+                        .is_some_and(|candidate| candidate.delimiter() == *delimiter),
+                    _ => true,
+                };
+                matches!(
+                    token.leading(),
+                    LeadingTrivia::Joint | LeadingTrivia::Space | LeadingTrivia::LineBreak
+                ) && span.start() <= span.end()
+                    && span.end() <= source_len
+                    && self.source_slice(span).is_some()
+                    && self.line_at_byte(span.start()).is_some()
+                    && token_reference_is_valid
             })
-            && self.declarations.iter().all(|declaration| {
-                declaration.tokens.start <= declaration.tokens.end
-                    && declaration.tokens.end <= self.tokens.len()
-                    && declaration.span.start <= declaration.span.end
-                    && declaration.span.end <= source_len
+            && self.texts().iter().enumerate().all(|(id, text)| {
+                let span = text.span();
+                self.text(id) == Some(text)
+                    && span.start() <= span.end()
+                    && span.end() <= source_len
+                    && !text.value().contains('\r')
+                    && self.source_slice(span).is_some_and(|source| {
+                        if text.is_multiline() {
+                            source.starts_with("\"\"\"")
+                        } else {
+                            source.starts_with('"')
+                        }
+                    })
+            })
+            && self.groups().iter().enumerate().all(|(group_id, group)| {
+                self.token(group.open_token()).is_some_and(|token| {
+                    matches!(
+                        token.kind(),
+                        TokenKind::Open { group: token_group, delimiter }
+                            if *token_group == group_id && *delimiter == group.delimiter()
+                    )
+                }) && group.close_token().is_none_or(|close| {
+                    close > group.open_token()
+                        && self.token(close).is_some_and(|token| {
+                            matches!(
+                                token.kind(),
+                                TokenKind::Close { group: token_group, delimiter }
+                                    if *token_group == group_id
+                                        && *delimiter == group.delimiter()
+                            )
+                        })
+                }) && group
+                    .parent()
+                    .is_none_or(|parent| parent < group_id && self.group(parent).is_some())
+                    && group.close_token().is_none_or(|close| {
+                        self.group_contents(group_id) == Some(group.open_token() + 1..close)
+                    })
+            })
+            && self.declarations().iter().all(|declaration| {
+                let tokens = declaration.tokens();
+                let span = declaration.span();
+                tokens.start < tokens.end
+                    && tokens.end <= self.tokens.len()
+                    && span.start() < span.end()
+                    && span.end() <= source_len
+                    && declaration.line() == self.line_at_byte(span.start()).unwrap_or(0)
+                    && self.source_slice(span).is_some()
+            })
+            && self.declarations().windows(2).all(|declarations| {
+                declarations[0].tokens().end <= declarations[1].tokens().start
+                    && declarations[0].span().end() <= declarations[1].span().start()
             })
             && self
-                .structural_diagnostics
+                .diagnostics()
                 .iter()
                 .all(|diagnostic| diagnostic.line > 0)
+            && self.has_errors()
+                == self
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.severity == crate::diagnostic::Severity::Error)
     }
 }
 
@@ -254,7 +440,7 @@ impl<'source> Lexer<'source> {
             }
         }
 
-        self.finish_declaration(self.tokens.len(), self.source.len());
+        self.finish_declaration(self.tokens.len());
         for group_id in self.group_stack.drain(..).rev() {
             let group = &self.groups[group_id];
             let line = line_at(&self.line_starts, self.tokens[group.open_token].span.start);
@@ -264,13 +450,15 @@ impl<'source> Lexer<'source> {
             ));
         }
 
-        let mut validation_diagnostics = Vec::new();
+        let mut diagnostics = Vec::new();
         if self.newline_kinds.count_ones() > 1 {
-            validation_diagnostics
-                .push(Diagnostic::warn(1, "source uses inconsistent line endings"));
+            diagnostics.push(Diagnostic::warn(1, "source uses inconsistent line endings"));
         }
-        let has_invalid_whitespace = !self.invalid_whitespace_diagnostics.is_empty();
-        validation_diagnostics.extend(self.invalid_whitespace_diagnostics);
+        let has_errors = !self.invalid_whitespace_diagnostics.is_empty()
+            || !self.structural_diagnostics.is_empty();
+        diagnostics.extend(self.invalid_whitespace_diagnostics);
+        diagnostics.extend(self.structural_diagnostics);
+        diagnostics.sort_by_key(|diagnostic| diagnostic.line);
 
         LexedSource {
             source: self.source,
@@ -279,9 +467,8 @@ impl<'source> Lexer<'source> {
             groups: self.groups,
             declarations: self.declarations,
             line_starts: self.line_starts,
-            validation_diagnostics,
-            structural_diagnostics: self.structural_diagnostics,
-            has_invalid_whitespace,
+            diagnostics,
+            has_errors,
         }
     }
 
@@ -298,7 +485,7 @@ impl<'source> Lexer<'source> {
         }
         let token_start = self.tokens.len();
         if self.group_stack.is_empty() && self.indentation == 0 {
-            self.finish_declaration(token_start, self.line_start);
+            self.finish_declaration(token_start);
             self.open_declaration = Some(OpenDeclaration {
                 token_start,
                 byte_start: self.line_start,
@@ -494,7 +681,14 @@ impl<'source> Lexer<'source> {
             close_token: None,
             parent: self.group_stack.last().copied(),
         });
-        self.emit(TokenKind::Open(group_id), start, self.index);
+        self.emit(
+            TokenKind::Open {
+                group: group_id,
+                delimiter,
+            },
+            start,
+            self.index,
+        );
         self.group_stack.push(group_id);
     }
 
@@ -529,7 +723,14 @@ impl<'source> Lexer<'source> {
             return;
         }
         let close_token = self.tokens.len();
-        self.emit(TokenKind::Close(group_id), start, self.index);
+        self.emit(
+            TokenKind::Close {
+                group: group_id,
+                delimiter,
+            },
+            start,
+            self.index,
+        );
         self.groups[group_id].close_token = Some(close_token);
         self.group_stack.pop();
     }
@@ -612,10 +813,11 @@ impl<'source> Lexer<'source> {
         );
     }
 
-    fn finish_declaration(&mut self, token_end: usize, byte_end: usize) {
+    fn finish_declaration(&mut self, token_end: usize) {
         let Some(open) = self.open_declaration.take() else {
             return;
         };
+        let byte_end = self.tokens[token_end - 1].span.end;
         self.declarations.push(DeclarationSection {
             tokens: open.token_start..token_end,
             span: ByteSpan {
@@ -680,155 +882,4 @@ fn line_at(line_starts: &[usize], byte: usize) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
-
-    use super::*;
-    use crate::g_syntax::parser::source::parse_source;
-
-    #[test]
-    fn scans_validation_structure_and_declarations_together() {
-        let source = "language g0\r\nvalue = do {\n  text = \"#;[]\"\n  .r (text)\n}\nnext = 1\n";
-        let lexed = lex_source(source);
-
-        assert_eq!(
-            lexed.validation_diagnostics,
-            vec![Diagnostic::warn(1, "source uses inconsistent line endings")]
-        );
-        assert_eq!(lexed.declarations.len(), 3);
-        assert_eq!(
-            lexed
-                .declarations
-                .iter()
-                .map(|declaration| declaration.line)
-                .collect::<Vec<_>>(),
-            [1, 2, 6]
-        );
-        assert_eq!(lexed.groups.len(), 2);
-        assert!(lexed.groups.iter().all(|group| group.close_token.is_some()));
-        assert_eq!(lexed.texts[0].value, "#;[]");
-        assert!(lexed.structural_diagnostics.is_empty());
-    }
-
-    #[test]
-    fn decodes_multiline_text_once_and_excludes_source_only_lines() {
-        let source = concat!(
-            "language g0\n",
-            "text =\n",
-            "    \"\"\"\n",
-            "      \" first  \n",
-            "  # source-only comment\n",
-            "\n",
-            "  \" second # retained\n",
-            "      \" \"\"\" retained\n",
-            "    \"\"\"\n",
-        );
-        let lexed = lex_source(source);
-
-        assert_eq!(lexed.texts.len(), 1);
-        assert_eq!(
-            lexed.texts[0].value,
-            "first  \nsecond # retained\n\"\"\" retained"
-        );
-        assert!(lexed.texts[0].multiline);
-        assert!(lexed.structural_diagnostics.is_empty());
-    }
-
-    #[test]
-    fn reports_delimiter_errors_without_mistaking_text_for_structure() {
-        let lexed = lex_source("language g0\nvalue = ([\"})]\"]}\n");
-
-        assert_eq!(lexed.groups.len(), 2);
-        assert_eq!(lexed.texts[0].value, "})]");
-        assert_eq!(lexed.structural_diagnostics.len(), 2);
-        assert!(
-            lexed.structural_diagnostics[0]
-                .message
-                .contains("mismatched closing delimiter")
-        );
-        assert!(
-            lexed.structural_diagnostics[1]
-                .message
-                .contains("unclosed delimiter")
-        );
-    }
-
-    #[test]
-    fn source_validation_matches_the_previous_contract() {
-        let source = concat!(
-            "language g0\r\n",
-            "separator\t= 1\n",
-            "text = \"tab\there\"\n",
-            "# non-breaking space: \u{00A0}\n",
-        );
-        let lexed = lex_source(source);
-
-        assert!(lexed.has_invalid_whitespace);
-        assert_eq!(
-            lexed
-                .validation_diagnostics
-                .iter()
-                .map(|diagnostic| (diagnostic.line, diagnostic.severity))
-                .collect::<Vec<_>>(),
-            [
-                (1, crate::diagnostic::Severity::Warning),
-                (2, crate::diagnostic::Severity::Error),
-                (3, crate::diagnostic::Severity::Error),
-                (4, crate::diagnostic::Severity::Error),
-            ]
-        );
-    }
-
-    #[test]
-    fn declaration_sections_match_valid_syntax_samples() {
-        for path in sample_files(Path::new("samples/syntax")) {
-            let bytes = fs::read(&path)
-                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-            let source = std::str::from_utf8(&bytes)
-                .unwrap_or_else(|error| panic!("{} is not UTF-8: {error}", path.display()));
-            let lexed = lex_source(source);
-            let parsed = parse_source(&bytes);
-            assert_eq!(
-                lexed.declarations.len(),
-                parsed.declarations.len(),
-                "{}",
-                path.display()
-            );
-            assert_eq!(
-                lexed
-                    .declarations
-                    .iter()
-                    .map(|declaration| declaration.line)
-                    .collect::<Vec<_>>(),
-                parsed
-                    .declarations
-                    .iter()
-                    .map(|declaration| declaration.line)
-                    .collect::<Vec<_>>(),
-                "{}",
-                path.display()
-            );
-        }
-    }
-
-    fn sample_files(folder: &Path) -> Vec<PathBuf> {
-        let mut paths = fs::read_dir(folder)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", folder.display()))
-            .flat_map(|entry| {
-                let path = entry
-                    .expect("sample directory entry should be readable")
-                    .path();
-                if path.is_dir() {
-                    sample_files(&path)
-                } else if path.extension().is_some_and(|extension| extension == "g") {
-                    vec![path]
-                } else {
-                    Vec::new()
-                }
-            })
-            .collect::<Vec<_>>();
-        paths.sort();
-        paths
-    }
-}
+mod tests;

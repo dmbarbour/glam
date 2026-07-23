@@ -22,8 +22,9 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
 
     let lexical = lex_source(text);
     debug_assert!(lexical.invariants_hold());
-    let mut diagnostics = lexical.validation_diagnostics;
-    if lexical.has_invalid_whitespace {
+    let has_lexical_errors = lexical.has_errors();
+    let mut diagnostics = lexical.diagnostics().to_vec();
+    if has_lexical_errors {
         return ParsedSource {
             declarations: Vec::new(),
             diagnostics,

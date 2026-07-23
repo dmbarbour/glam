@@ -1,0 +1,2 @@
+error|2|mismatched closing delimiter|expected `]`
+error|2|unclosed delimiter|expected `)`
