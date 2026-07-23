@@ -29,6 +29,12 @@ struct WithHeader {
     alias: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructuralBody {
+    Braced { end: usize },
+    Layout { start: usize },
+}
+
 #[cfg(test)]
 pub(in crate::g_syntax::parser) fn parse_compound_expression_fragment(
     source: &[u8],
@@ -57,24 +63,31 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
     if !floor_diagnostics.is_empty() {
         return Err(floor_diagnostics);
     }
-    let expression = if let Some(result) = parse_parenthesized_structural(view, context) {
-        result?
+    let parsed = if let Some(result) = parse_parenthesized_structural(view, context) {
+        ParsedExpression::new(result?, view.range().end())
     } else if let Some(result) = parse_let(view, context) {
-        result?
-    } else if let Some(result) = parse_where(view, context) {
-        result?
+        ParsedExpression::new(result?, view.range().end())
     } else if let Some(result) = parse_object(view, context) {
         result?
     } else if let Some(result) = parse_with(view, context) {
         result?
+    } else if let Some(result) = parse_where(view, context) {
+        result?
     } else {
-        parse_expression_view(view, context)?
+        ParsedExpression::new(parse_expression_view(view, context)?, view.range().end())
     };
-    let parsed = ParsedExpression::new(expression, view.range().end());
+    let parsed = resume_where_suffixes(view, context, parsed)?;
     if parsed.end() < view.range().end() && !context.permits_yield() {
+        let tail = trim_layout(view_between(view, parsed.end(), view.range().end()));
+        let found = tail
+            .source_text()
+            .and_then(|source| source.split_whitespace().next())
+            .unwrap_or("unrecognized input");
         return Err(error_at_view(
-            view,
-            "expression ended before its complete token range",
+            tail,
+            format!(
+                "expression cannot resume with `{found}` after the preceding layout body ended"
+            ),
         ));
     }
     Ok(parsed)
@@ -102,10 +115,13 @@ fn parse_parenthesized_structural(
 
     let contents = trim_layout(view.group_contents(*group)?);
     let context = context.complete();
-    parse_let(contents, context)
-        .or_else(|| parse_where(contents, context))
-        .or_else(|| parse_object(contents, context))
-        .or_else(|| parse_with(contents, context))
+    let starts_structural = contents
+        .first_significant()
+        .is_some_and(|(_, token)| token_is_name(token, "let") || token_is_name(token, "object"))
+        || !contextual_keywords(contents, "where").is_empty()
+        || has_compound_with_body(contents);
+    starts_structural
+        .then(|| parse_expression_extent(contents, context).map(ParsedExpression::into_expression))
 }
 
 fn parse_let(
@@ -201,11 +217,10 @@ fn parse_let(
 fn parse_where(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
-) -> Option<ParseResult<SyntaxExpr>> {
+) -> Option<ParseResult<ParsedExpression>> {
     let where_index = contextual_keywords(view, "where").into_iter().last()?;
     let where_token = view.token_at(where_index)?;
     let body = trim_layout(view_between(view, view.range().start(), where_index));
-    let bindings = trim_layout(view_between(view, where_index + 1, view.range().end()));
     if is_layout_empty(body) {
         return Some(Err(error_at_token(
             view,
@@ -213,79 +228,148 @@ fn parse_where(
             "where expression requires a body",
         )));
     }
-    if is_layout_empty(bindings) {
-        return Some(Err(error_at_token(
+    let body = match parse_expression_in_context(body, context) {
+        Ok(body) => body,
+        Err(diagnostics) => return Some(Err(diagnostics)),
+    };
+    Some(parse_where_suffix(view, context, where_index, body))
+}
+
+fn parse_where_suffix(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+    where_index: usize,
+    body: SyntaxExpr,
+) -> ParseResult<ParsedExpression> {
+    let where_token = view
+        .token_at(where_index)
+        .expect("a selected where suffix remains within its expression view");
+    let suffix_end = contextual_keywords(view, "where")
+        .into_iter()
+        .find(|candidate| *candidate > where_index)
+        .unwrap_or(view.range().end());
+    let all_bindings = trim_layout(view_between(view, where_index + 1, suffix_end));
+    if is_layout_empty(all_bindings) {
+        return Err(error_at_token(
             view,
             where_token,
             "where expression requires at least one binding or an explicit `{}` group",
-        )));
+        ));
     }
 
-    let (bindings, braced_bindings) = if let Some(bindings) =
-        parse_braced_bindings(bindings, "where", context)
-    {
-        (bindings, true)
-    } else if bindings
+    let (bindings_view, end) = if braced_contents(all_bindings).is_some() {
+        (all_bindings, all_bindings.range().end())
+    } else if all_bindings
         .top_level()
         .any(|indexed| matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
     {
-        let layout = LayoutView::new(bindings);
-        let lines = layout.lines();
-        if let Some(first) = lines.first()
-            && let Some(misaligned) = lines.iter().skip(1).find(|line| {
-                line.indentation() != first.indentation()
-                    && bindings
-                        .subview(line.tokens())
-                        .is_some_and(|line| !top_level_symbols(line, "=").is_empty())
-            })
-        {
-            return Some(Err(vec![Diagnostic::error(
-                misaligned.line(),
-                "multi-line where binding names must align under the first binding",
-            )]));
+        let block = LayoutView::new(all_bindings)
+            .block(LayoutBase::FirstLine)
+            .map_err(|error| vec![Diagnostic::error(error.line(), error.message())])?;
+        if !block.statements().is_empty() && !context.accepts_layout_anchor(block.anchor()) {
+            return Err(vec![Diagnostic::error(
+                block.statements()[0].line(),
+                format!(
+                    "where binding layout begins at indentation {}; expected more than continuation floor {}",
+                    block.anchor(),
+                    context.continuation_floor()
+                ),
+            )]);
         }
-        let statements = match layout.statements(LayoutBase::FirstLine) {
+        if let Some(boundary) = block.boundary()
+            && all_bindings
+                .subview(boundary.tokens())
+                .is_some_and(|line| !top_level_symbols(line, "=").is_empty())
+        {
+            return Err(vec![Diagnostic::error(
+                boundary.line(),
+                "multi-line where binding names must align under the first binding",
+            )]);
+        }
+        (
+            trim_layout(view_between(
+                all_bindings,
+                all_bindings.range().start(),
+                block.end(),
+            )),
+            block.end(),
+        )
+    } else {
+        (all_bindings, all_bindings.range().end())
+    };
+
+    let (bindings, braced_bindings) = if let Some(bindings) =
+        parse_braced_bindings(bindings_view, "where", context)
+    {
+        (bindings, true)
+    } else if bindings_view
+        .top_level()
+        .any(|indexed| matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
+    {
+        let statements = match LayoutView::new(bindings_view).statements(LayoutBase::FirstLine) {
             Ok(statements) => statements,
             Err(error) => {
-                return Some(Err(vec![Diagnostic::error(error.line(), error.message())]));
+                return Err(vec![Diagnostic::error(error.line(), error.message())]);
             }
         };
         let binding_views = statements
             .into_iter()
-            .filter_map(|statement| bindings.subview(statement.tokens()))
+            .filter_map(|statement| bindings_view.subview(statement.tokens()))
             .collect();
         (parse_binding_views(binding_views, context), false)
-    } else if !top_level_symbols(bindings, ";").is_empty() {
+    } else if !top_level_symbols(bindings_view, ";").is_empty() {
         (
             Err(error_at_view(
-                bindings,
+                bindings_view,
                 "naked semicolon-separated `where` bindings are not supported; use `where { ... }`",
             )),
             false,
         )
     } else {
-        (parse_binding_views(vec![bindings], context), false)
+        (parse_binding_views(vec![bindings_view], context), false)
     };
-    let bindings = match bindings {
-        Ok(bindings) => bindings,
-        Err(diagnostics) => return Some(Err(diagnostics)),
-    };
+    let bindings = bindings?;
     if bindings.is_empty() && !braced_bindings {
-        return Some(Err(error_at_token(
+        return Err(error_at_token(
             view,
             where_token,
             "where expression requires at least one binding",
-        )));
+        ));
     }
-    let body = match parse_expression_in_context(body, context) {
-        Ok(body) => body,
-        Err(diagnostics) => return Some(Err(diagnostics)),
-    };
 
-    Some(Ok(SyntaxExpr::Let {
-        bindings,
-        body: Box::new(body),
-    }))
+    Ok(ParsedExpression::new(
+        SyntaxExpr::Let {
+            bindings,
+            body: Box::new(body),
+        },
+        end,
+    ))
+}
+
+fn resume_where_suffixes(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+    mut parsed: ParsedExpression,
+) -> ParseResult<ParsedExpression> {
+    while parsed.end() < view.range().end() {
+        let tail = trim_layout(view_between(view, parsed.end(), view.range().end()));
+        let Some((where_index, token)) = tail.first_significant() else {
+            break;
+        };
+        if !token_is_name(token, "where")
+            || (token.leading() == LeadingTrivia::Joint
+                && where_index.checked_sub(1).is_none_or(|previous| {
+                    !matches!(
+                        view.token_at(previous).map(SpannedToken::kind),
+                        Some(TokenKind::LineStart { .. })
+                    )
+                }))
+        {
+            break;
+        }
+        parsed = parse_where_suffix(view, context, where_index, parsed.into_expression())?;
+    }
+    Ok(parsed)
 }
 
 fn parse_braced_bindings(
@@ -349,13 +433,24 @@ fn parse_binding(
 fn parse_object(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
-) -> Option<ParseResult<SyntaxExpr>> {
+) -> Option<ParseResult<ParsedExpression>> {
+    let (_, head) = view.first_significant()?;
+    if !token_is_name(head, "object") {
+        return None;
+    }
+    if !contextual_keywords(view, "where").is_empty() && !has_compound_with_body(view) {
+        return None;
+    }
+    let (owned_view, end) = match structural_body_extent(view, context) {
+        Ok(owned) => owned,
+        Err(diagnostics) => return Some(Err(diagnostics)),
+    };
     let object_line = view
         .first_significant()
         .and_then(|(_, token)| view.line_at_span(token.span()))
         .unwrap_or(1);
-    let (_, body_view) = split_compound_header_body(view);
-    let header = match parse_object_header(view, context)? {
+    let (_, body_view) = split_compound_header_body(owned_view);
+    let header = match parse_object_header(owned_view, context)? {
         Ok(header) => header,
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
@@ -388,21 +483,31 @@ fn parse_object(
     {
         return Some(Err(diagnostics));
     }
-    Some(Ok(SyntaxExpr::Object(ObjectExpr {
-        name: header.name,
-        alias: header.alias,
-        deps: header.deps,
-        body,
-    })))
+    Some(Ok(ParsedExpression::new(
+        SyntaxExpr::Object(ObjectExpr {
+            name: header.name,
+            alias: header.alias,
+            deps: header.deps,
+            body,
+        }),
+        end,
+    )))
 }
 
 fn parse_with(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
-) -> Option<ParseResult<SyntaxExpr>> {
-    let (_, body_view) = split_compound_header_body(view);
+) -> Option<ParseResult<ParsedExpression>> {
+    if !has_compound_with_body(view) {
+        return None;
+    }
+    let (owned_view, end) = match structural_body_extent(view, context) {
+        Ok(owned) => owned,
+        Err(diagnostics) => return Some(Err(diagnostics)),
+    };
+    let (_, body_view) = split_compound_header_body(owned_view);
     let body_view = body_view?;
-    let header = match parse_with_header(view, context)? {
+    let header = match parse_with_header(owned_view, context)? {
         Ok(header) => header,
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
@@ -410,9 +515,9 @@ fn parse_with(
     let body = if braced_contents(body_view).is_some() {
         parse_object_body(body_view, context, &mut diagnostics)
     } else {
-        let line = view
+        let line = owned_view
             .first_significant()
-            .and_then(|(_, token)| view.line_at_span(token.span()))
+            .and_then(|(_, token)| owned_view.line_at_span(token.span()))
             .unwrap_or(1);
         parse_nonempty_object_body(
             body_view,
@@ -429,11 +534,78 @@ fn parse_with(
     {
         return Some(Err(diagnostics));
     }
-    Some(Ok(SyntaxExpr::With {
-        base: header.base,
-        alias: header.alias,
-        body,
-    }))
+    Some(Ok(ParsedExpression::new(
+        SyntaxExpr::With {
+            base: header.base,
+            alias: header.alias,
+            body,
+        },
+        end,
+    )))
+}
+
+/// Selects the exact structural prefix owned by an object or `with`
+/// expression. Layout bodies yield their first dedented line; braced bodies
+/// end at their matching delimiter.
+fn structural_body_extent<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+    context: ExpressionContext,
+) -> ParseResult<(TokenView<'lex, 'source>, usize)> {
+    match find_structural_body(view) {
+        Some(StructuralBody::Braced { end }) => {
+            Ok((view_between(view, view.range().start(), end), end))
+        }
+        Some(StructuralBody::Layout { start }) => {
+            let body = view_between(view, start, view.range().end());
+            let block = LayoutView::new(body)
+                .block(LayoutBase::FirstLine)
+                .map_err(|error| vec![Diagnostic::error(error.line(), error.message())])?;
+            if !block.statements().is_empty() && !context.accepts_layout_anchor(block.anchor()) {
+                let line = block.statements()[0].line();
+                return Err(vec![Diagnostic::error(
+                    line,
+                    format!(
+                        "nested layout begins at indentation {}; expected more than continuation floor {}",
+                        block.anchor(),
+                        context.continuation_floor()
+                    ),
+                )]);
+            }
+            let end = block.end();
+            Ok((view_between(view, view.range().start(), end), end))
+        }
+        None => Ok((view, view.range().end())),
+    }
+}
+
+fn has_compound_with_body(view: TokenView<'_, '_>) -> bool {
+    find_structural_body(view).is_some()
+}
+
+fn find_structural_body(view: TokenView<'_, '_>) -> Option<StructuralBody> {
+    for indexed in view.top_level() {
+        let TokenKind::Open {
+            group,
+            delimiter: Delimiter::Brace,
+        } = indexed.token().kind()
+        else {
+            continue;
+        };
+        let header = trim_layout(view_between(view, view.range().start(), indexed.index()));
+        if !last_significant_is_contextual_name(header, "with") {
+            continue;
+        }
+        let close = view.group(*group).and_then(|group| group.close_token())?;
+        return Some(StructuralBody::Braced { end: close + 1 });
+    }
+
+    let start = first_top_level_line_start(view)?;
+    let header = trim_layout(view_between(view, view.range().start(), start));
+    if last_significant_is_contextual_name(header, "with") {
+        return Some(StructuralBody::Layout { start });
+    }
+
+    None
 }
 
 fn split_multiline_let<'lex, 'source>(

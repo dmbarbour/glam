@@ -255,6 +255,28 @@ fn layout_policy_handles_fixed_bases_continuations_and_closers() {
     assert!(error.message().contains("expected at least 4"));
 }
 
+#[test]
+fn layout_blocks_report_the_first_unconsumed_dedent() {
+    let lexical = lex_source("  first\n    continuation\n  second\n boundary\nlater");
+    let view = TokenView::whole(&lexical);
+    let block = LayoutView::new(view).block(LayoutBase::FirstLine).unwrap();
+
+    assert_eq!(block.anchor(), 2);
+    assert_eq!(block.statements().len(), 2);
+    let boundary = block.boundary().expect("the block should yield at line 4");
+    assert_eq!(boundary.line(), 4);
+    assert_eq!(boundary.indentation(), 1);
+    assert_eq!(
+        view.subview(
+            TokenRange::new(block.end(), view.range().end())
+                .expect("the yielded tail is an ordered range")
+        )
+        .unwrap()
+        .source_text(),
+        Some("boundary\nlater")
+    );
+}
+
 fn diagnostics<'lex, 'source>(
     view: TokenView<'lex, 'source>,
     errors: Vec<TokenError<'lex, 'source>>,

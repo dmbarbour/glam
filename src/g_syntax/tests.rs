@@ -1033,6 +1033,31 @@ fn braced_with_bodies_share_the_recursive_object_declaration_grammar() {
 }
 
 #[test]
+fn where_binding_can_own_a_deeper_layout_with_expression() {
+    let source = concat!(
+        "language g0\n",
+        "base = { text:\"before\" }\n",
+        "asm.result = updated.text where\n",
+        "  updated = base with\n",
+        "    text := \"after\"\n",
+    );
+    let parsed = parse(source);
+    assert_eq!(parsed.diagnostics, []);
+
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"after"
+    );
+}
+
+#[test]
 fn braced_with_bodies_reject_semicolon_only_and_interior_empty_members() {
     for source in [
         "language g0\nobject bad with {;}\n",

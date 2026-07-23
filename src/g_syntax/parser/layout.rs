@@ -12,6 +12,7 @@ pub(super) enum LayoutBase {
 pub(super) struct LayoutLine {
     line: usize,
     indentation: usize,
+    start: usize,
     tokens: TokenRange,
 }
 
@@ -42,6 +43,36 @@ impl LayoutStatement {
 
     pub(super) fn tokens(self) -> TokenRange {
         self.tokens
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LayoutBlock {
+    anchor: usize,
+    statements: Vec<LayoutStatement>,
+    end: usize,
+    boundary: Option<LayoutLine>,
+}
+
+impl LayoutBlock {
+    pub(super) fn anchor(&self) -> usize {
+        self.anchor
+    }
+
+    pub(super) fn statements(&self) -> &[LayoutStatement] {
+        &self.statements
+    }
+
+    pub(super) fn into_statements(self) -> Vec<LayoutStatement> {
+        self.statements
+    }
+
+    pub(super) fn end(&self) -> usize {
+        self.end
+    }
+
+    pub(super) fn boundary(&self) -> Option<LayoutLine> {
+        self.boundary
     }
 }
 
@@ -114,6 +145,7 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
                 lines.push(LayoutLine {
                     line,
                     indentation,
+                    start,
                     tokens: TokenRange::new(start, end)
                         .expect("ordered token boundaries form a range"),
                 });
@@ -129,6 +161,7 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
                 lines.push(LayoutLine {
                     line: self.tokens.line_at_span(*span).unwrap_or(1),
                     indentation: *indentation,
+                    start: *line_start,
                     tokens: TokenRange::new(start, end)
                         .expect("ordered token boundaries form a range"),
                 });
@@ -138,17 +171,22 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
         lines
     }
 
-    /// Groups lines into statements according to one construct-selected base.
+    /// Selects one layout body and leaves its first dedented line unconsumed.
     ///
     /// A line at the base begins a statement and a deeper line continues it.
-    /// A line below the base is rejected, except that a closer-only line stays
-    /// with the preceding statement because delimiter ownership is lexical.
-    /// Declaration validation separately requires such a boundary-aligned
-    /// closer to terminate that declaration.
-    pub(super) fn statements(self, base: LayoutBase) -> Result<Vec<LayoutStatement>, LayoutError> {
+    /// A line below the base ends the body, except that a closer-only line
+    /// stays with the preceding statement because delimiter ownership is
+    /// lexical. The enclosing grammar decides whether it can consume the
+    /// returned boundary.
+    pub(super) fn block(self, base: LayoutBase) -> Result<LayoutBlock, LayoutError> {
         let lines = self.lines();
         let Some(first) = lines.first().copied() else {
-            return Ok(Vec::new());
+            return Ok(LayoutBlock {
+                anchor: 0,
+                statements: Vec::new(),
+                end: self.tokens.range().end(),
+                boundary: None,
+            });
         };
         let base = match base {
             LayoutBase::FirstLine => first.indentation,
@@ -160,12 +198,11 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
         for line in lines {
             let closer_only = self.line_is_closer_only(line);
             if line.indentation < base && !closer_only {
-                return Err(LayoutError {
-                    line: line.line,
-                    message: format!(
-                        "layout line is indented {} spaces; expected at least {base}",
-                        line.indentation
-                    ),
+                return Ok(LayoutBlock {
+                    anchor: base,
+                    statements,
+                    end: line.start,
+                    boundary: Some(line),
                 });
             }
 
@@ -185,7 +222,31 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
             }
         }
 
-        Ok(statements)
+        Ok(LayoutBlock {
+            anchor: base,
+            statements,
+            end: self.tokens.range().end(),
+            boundary: None,
+        })
+    }
+
+    /// Groups a view that must contain exactly one complete layout body.
+    ///
+    /// This compatibility wrapper keeps complete-range callers strict while
+    /// structural expression parsers migrate to `block`.
+    pub(super) fn statements(self, base: LayoutBase) -> Result<Vec<LayoutStatement>, LayoutError> {
+        let block = self.block(base)?;
+        if let Some(boundary) = block.boundary() {
+            return Err(LayoutError {
+                line: boundary.line,
+                message: format!(
+                    "layout line is indented {} spaces; expected at least {}",
+                    boundary.indentation,
+                    block.anchor()
+                ),
+            });
+        }
+        Ok(block.into_statements())
     }
 
     fn line_is_closer_only(self, line: LayoutLine) -> bool {

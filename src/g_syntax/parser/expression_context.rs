@@ -19,6 +19,7 @@ pub(super) enum ExpressionExtent {
 pub(super) struct ExpressionContext {
     continuation_floor: usize,
     validated_through: Option<usize>,
+    floor_enforced: bool,
     extent: ExpressionExtent,
 }
 
@@ -27,6 +28,7 @@ impl ExpressionContext {
         Self {
             continuation_floor: owner_indentation(view).unwrap_or(0),
             validated_through: None,
+            floor_enforced: true,
             extent: ExpressionExtent::CompleteHardRange,
         }
     }
@@ -38,6 +40,7 @@ impl ExpressionContext {
         Self {
             continuation_floor: owner_indentation(view).unwrap_or(0),
             validated_through: Some(usize::MAX),
+            floor_enforced: false,
             extent: ExpressionExtent::CompleteHardRange,
         }
     }
@@ -51,6 +54,7 @@ impl ExpressionContext {
                         validated.max(self.continuation_floor)
                     }),
             ),
+            floor_enforced: true,
             extent: ExpressionExtent::CompleteHardRange,
         }
     }
@@ -69,9 +73,12 @@ impl ExpressionContext {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn continuation_floor(self) -> usize {
         self.continuation_floor
+    }
+
+    pub(super) fn accepts_layout_anchor(self, anchor: usize) -> bool {
+        !self.floor_enforced || anchor > self.continuation_floor
     }
 
     fn needs_validation(self, indentation: usize) -> bool {
@@ -111,6 +118,11 @@ impl ParsedExpression {
 
     pub(super) fn end(&self) -> usize {
         self.end
+    }
+
+    #[cfg(test)]
+    pub(super) fn expression(&self) -> &SyntaxExpr {
+        &self.expression
     }
 
     pub(super) fn into_expression(self) -> SyntaxExpr {

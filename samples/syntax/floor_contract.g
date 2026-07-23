@@ -28,6 +28,20 @@ postfix = x + y + z where
   y = 1
   z = 2
 
+# A layout body yields at its first dedent. The inner with remains inside the
+# where binding because its member anchor is deeper than the binding anchor.
+nested_binding = op3a where
+    op3a = op3 with
+        C = value
+
+# One dedent may close several nested bodies before where resumes the nearest
+# compatible enclosing expression.
+resumed_where = outer with
+    member = inner with
+        value = replacement
+  where
+    replacement = value
+
 # Leading infix lines preserve ordinary one-line precedence and associativity.
 pipeline = source
   |> decode

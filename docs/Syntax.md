@@ -1001,6 +1001,20 @@ This supports lightweight extensions
             op3a = op3 with
                 ...
 
+A layout body takes its sibling anchor from its first member. Lines at that
+anchor begin siblings, while deeper lines continue the current member. A
+dedent closes the body and leaves the boundary to an enclosing expression.
+`where` may resume there, and attaches to the nearest expression whose body
+has closed at that indentation. One dedent may close several nested `with` or
+object bodies.
+
+Consequently, changing only the indentation of `where` can deliberately
+change its owner. A `where` below an inner member anchor but still above an
+outer member anchor belongs to that outer member's expression. Dedenting below
+the outer member anchor attaches it to the surrounding definition instead.
+Every nested body must choose an anchor strictly to the right of the
+continuation floor established by its owning declaration or binding.
+
 ### Method Chaining
 
 In OO languages, a common pattern is method chaining where each method linearly returns the 'next' object, and users select a method on that object. It's a convenient pattern. This can be almost directly expressed via piped functions and a helper function.

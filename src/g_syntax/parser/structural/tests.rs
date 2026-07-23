@@ -122,6 +122,21 @@ fn chained_where_suffixes_are_left_associative_binding_groups() {
         ["x"]
     );
     assert!(matches!(*inner_body, SyntaxExpr::Name(ref name) if name == "result"));
+
+    let after_structural = parse_structural("base with { member = value } where x = y where y = 1");
+    let SyntaxExpr::Let {
+        bindings: outer_bindings,
+        body: outer_body,
+    } = after_structural
+    else {
+        panic!("the later where should remain the outer structural suffix");
+    };
+    assert_eq!(outer_bindings[0].0, "y");
+    assert!(matches!(
+        outer_body.as_ref(),
+        SyntaxExpr::Let { bindings, body }
+            if bindings[0].0 == "x" && matches!(body.as_ref(), SyntaxExpr::With { .. })
+    ));
 }
 
 #[test]
@@ -157,6 +172,17 @@ fn parentheses_can_make_a_where_binding_right_associative() {
         nested_body.as_ref(),
         SyntaxExpr::Name(name) if name == "y"
     ));
+}
+
+#[test]
+fn where_after_a_bodyless_object_wraps_the_object_expression() {
+    let parsed = parse_structural("object _ where x = 1");
+    let SyntaxExpr::Let { body, bindings } = parsed else {
+        panic!("where should remain outside a bodyless object expression");
+    };
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].0, "x");
+    assert!(matches!(body.as_ref(), SyntaxExpr::Object(_)));
 }
 
 #[test]

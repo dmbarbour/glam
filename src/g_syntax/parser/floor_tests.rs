@@ -4,7 +4,7 @@ use crate::g_syntax::{
 };
 
 use super::expression_context::ExpressionContext;
-use super::input::parse_expression_fragment;
+use super::input::{TokenRange, parse_expression_fragment};
 use super::parse_source;
 use super::structural::parse_expression_extent;
 
@@ -73,6 +73,38 @@ fn contextual_expression_reports_its_absolute_token_end() {
         Ok(())
     })
     .unwrap();
+}
+
+#[test]
+fn contextual_expression_leaves_an_unrecognized_dedent_boundary_unconsumed() {
+    parse_expression_fragment(b"outer with\n  member = value\n tail", |view| {
+        let parsed =
+            parse_expression_extent(view, ExpressionContext::for_fragment(view).may_yield())?;
+        assert!(matches!(parsed.expression(), SyntaxExpr::With { .. }));
+        let tail = view
+            .subview(
+                TokenRange::new(parsed.end(), view.range().end())
+                    .expect("the yielded tail is an ordered token range"),
+            )
+            .expect("the yielded tail remains inside the expression view");
+        assert_eq!(tail.source_text(), Some("tail"));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn nested_layout_anchor_must_clear_its_owner_floor() {
+    let diagnostics = parse_expression_fragment(b"outer with\nvalue = 1", |view| {
+        parse_expression_extent(view, ExpressionContext::for_owner(view)).map(|_| ())
+    })
+    .expect_err("a nested body may not begin at its owner's floor");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.line == 2
+            && diagnostic
+                .message
+                .contains("expression continuation is indented 0 spaces")
+    }));
 }
 
 #[test]
@@ -257,12 +289,88 @@ fn dedented_where_preserves_nested_with_owners() {
 }
 
 #[test]
-fn with_inside_a_where_binding_is_currently_rejected() {
-    assert_currently_rejected(concat!(
+fn where_indentation_selects_the_nearest_compatible_expression_owner() {
+    let inner = definition_expr(concat!(
+        "language g0\n",
+        "foo = outer with\n",
+        "    member = inner with\n",
+        "        value = x\n",
+        "      where\n",
+        "        x = replacement\n",
+    ));
+    let SyntaxExpr::With {
+        body: outer_body, ..
+    } = inner
+    else {
+        panic!("the outer with should remain the definition body");
+    };
+    let ObjectBodyDefinitionKind::Definition(member) = &outer_body[0].kind else {
+        panic!("the outer body should contain one member definition");
+    };
+    assert!(matches!(
+        member.expr.as_ref(),
+        Some(SyntaxExpr::Let { body, bindings })
+            if bindings.len() == 1
+                && bindings[0].0 == "x"
+                && matches!(body.as_ref(), SyntaxExpr::With { .. })
+    ));
+
+    let outer = definition_expr(concat!(
+        "language g0\n",
+        "foo = outer with\n",
+        "    member = inner with\n",
+        "        value = x\n",
+        "  where\n",
+        "    x = replacement\n",
+    ));
+    let SyntaxExpr::Let { body, bindings } = outer else {
+        panic!("the farther dedent should attach where to the outer expression");
+    };
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].0, "x");
+    assert!(matches!(body.as_ref(), SyntaxExpr::With { .. }));
+}
+
+#[test]
+fn one_dedent_closes_nested_object_layout_before_where_resumes() {
+    let expression = definition_expr(concat!(
+        "language g0\n",
+        "foo = object _ with\n",
+        "    object child with\n",
+        "        value = x\n",
+        "  where\n",
+        "    x = replacement\n",
+    ));
+    let SyntaxExpr::Let { body, bindings } = expression else {
+        panic!("the dedented where should resume outside both object bodies");
+    };
+    assert_eq!(bindings.len(), 1);
+    let SyntaxExpr::Object(outer) = body.as_ref() else {
+        panic!("the where body should remain the outer object expression");
+    };
+    assert_eq!(outer.body.len(), 1);
+    assert!(matches!(
+        outer.body[0].kind,
+        ObjectBodyDefinitionKind::Object(_)
+    ));
+}
+
+#[test]
+fn with_inside_a_where_binding_owns_its_deeper_layout() {
+    let expression = definition_expr(concat!(
         "language g0\n",
         "foo = op1 >>= op2 >>= op3a where\n",
         "    op3a = op3 with\n",
         "        C = value\n",
+    ));
+    let SyntaxExpr::Let { bindings, .. } = expression else {
+        panic!("the outer postfix where should remain a binding expression");
+    };
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].0, "op3a");
+    assert!(matches!(
+        &bindings[0].1,
+        SyntaxExpr::With { body, .. } if body.len() == 1
     ));
 }
 

@@ -169,6 +169,13 @@ Body where { x = y; y = x }
 # Parenthesize a right-associated binding expression explicitly.
 Body where x = (y where y = 1)
 
+# Dedent closes layout bodies before `where` resumes the nearest owner.
+Body with
+    member = Inner with
+        value = x
+  where
+    x = replacement
+
 # Naked ';' never groups let/where bindings; use braces or layout.
 ```
 
