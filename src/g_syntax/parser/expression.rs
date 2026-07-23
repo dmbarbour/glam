@@ -253,7 +253,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                     Ok(path)
                 }
             });
-        let data_path = choice((named_path, computed_path)).boxed();
+        let data_path = choice((named_path.clone(), computed_path.clone())).boxed();
         let dict_item = choice((
             data_path
                 .clone()
@@ -380,13 +380,33 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             let constructor = symbol(":")
                 .ignore_then(joint(data_path.clone()))
                 .map(SyntaxExpr::TaggedConstructor);
-            let tagged = data_path
+            let computed_tagged = computed_path
                 .clone()
                 .then_ignore(joint(symbol(":")))
-                .then(joint(atom))
+                .then(joint(atom.clone()))
                 .map(|(path, payload)| SyntaxExpr::PathDict(path, Box::new(payload)));
+            let named_atom = named_path
+                .clone()
+                .then(joint(symbol(":")).ignore_then(joint(atom)).or_not())
+                .try_map(|(mut path, payload), span| {
+                    if let Some(payload) = payload {
+                        return Ok(SyntaxExpr::PathDict(path, Box::new(payload)));
+                    }
 
-            choice((constructor, tagged, base_atom.clone())).boxed()
+                    let SyntaxKeyExpr::Atom(name) = path.remove(0) else {
+                        unreachable!("named paths always begin with an atom key");
+                    };
+                    let base = validate_expr_name(&name)
+                        .map(SyntaxExpr::Name)
+                        .map_err(|message| Rich::custom(span, message))?;
+                    Ok(if path.is_empty() {
+                        base
+                    } else {
+                        SyntaxExpr::Access(Box::new(base), path)
+                    })
+                });
+
+            choice((constructor, computed_tagged, named_atom, base_atom.clone())).boxed()
         })
         .boxed();
         let application_argument = choice((

@@ -278,17 +278,11 @@ fn g0_keywords_are_reserved_across_source_name_positions() {
 
 #[test]
 fn bare_keyword_references_are_rejected() {
-    for source in [
-        "language g0\nvalue = f (where)\n",
-        "language g0\nvalue = abstract\n",
+    for (keyword, source) in [
+        ("where", "language g0\nvalue = f (where)\n"),
+        ("abstract", "language g0\nvalue = abstract\n"),
     ] {
-        assert!(
-            parse(source)
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.severity == Severity::Error),
-            "bare keyword reference should be rejected: {source}"
-        );
+        assert_reserved_keyword_diagnostic(source, keyword);
     }
 }
 

@@ -100,14 +100,32 @@ fn ordinary_expressions_parse() {
 #[test]
 fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
     for keyword in crate::g_syntax::keywords::G0_KEYWORDS {
-        if matches!(keyword.spelling(), "module" | "self") {
+        if matches!(keyword.spelling(), "do" | "module" | "self") {
             continue;
         }
         let source = keyword.spelling();
         let diagnostics = parse_expression_fragment(source.as_bytes())
             .expect_err("a bare keyword should not parse as an ordinary name");
-        assert!(!diagnostics.is_empty());
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains(keyword.spelling())
+                    && diagnostic.message.contains("reserved keyword")
+                    && diagnostic
+                        .message
+                        .contains(&format!("'{}", keyword.spelling()))
+            }),
+            "missing keyword escape diagnostic for `{}`: {diagnostics:?}",
+            keyword.spelling()
+        );
     }
+
+    let do_diagnostics = parse_expression_fragment(b"do")
+        .expect_err("a bare `do` should be diagnosed as a malformed do expression");
+    assert!(do_diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("do expression requires a newline-delimited block")
+    }));
 }
 
 #[test]
