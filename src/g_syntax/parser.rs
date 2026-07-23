@@ -3,6 +3,8 @@
 mod declaration;
 mod do_expr;
 mod expression;
+#[cfg(test)]
+mod floor_tests;
 mod input;
 mod layout;
 mod lexical;
