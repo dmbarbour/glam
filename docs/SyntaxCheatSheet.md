@@ -139,6 +139,9 @@ import as q from {          # remote: content-addressed
 \ x y z -> Expr             # lambda (no argument patterns)
 skip _ y = y                # '_' drops an argument
 f _unused y = y             # '_' prefix suppresses unused warning
+map xs \x -> transform x    # unparenthesized lambda may be final argument
+op >>= \x -> continue x     # or tail infix operand; body owns the right tail
+(map xs \x -> transform x) |> finish # parentheses resume outside the lambda
 
 let x = 1 in x + x          # one-liner
 let { x = 1; y = 2 } in x + y # braced ';' group is mutually recursive
@@ -230,6 +233,7 @@ g << f
 f x                 # application; ad hoc polymorphism:
                     #   functions; {apply:f,_} x = f x; (eff:f) x
                     #   raw interaction-net values are not applicable
+f x \y -> body       # a trailing lambda is the final application argument
 foo.bar             # member access
 foo (.bar)          # apply foo to effect path .bar; `foo .bar` is an ERROR
 foo <| .bar         # equivalent alternative without parentheses

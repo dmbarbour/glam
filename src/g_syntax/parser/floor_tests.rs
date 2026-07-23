@@ -99,24 +99,42 @@ fn declaration_floor_does_not_depend_on_inline_rhs_position() {
 }
 
 #[test]
-fn continuation_lambdas_as_infix_operands_are_currently_rejected() {
-    for source in [
-        concat!(
-            "language g0\n",
-            "result = Operation1 >>= \\r1 ->\n",
-            "  Operation2 r1 >>= \\r2 ->\n",
-            "  finish r1 r2\n",
-        ),
-        concat!(
-            "language g0\n",
-            "result =\n",
-            "  Operation1 >>= \\r1 ->\n",
-            "  Operation2 r1 >>= \\r2 ->\n",
-            "  finish r1 r2\n",
-        ),
-    ] {
-        assert_currently_rejected(source);
-    }
+fn continuation_lambdas_are_tail_infix_operands() {
+    let inline = definition_expr(concat!(
+        "language g0\n",
+        "result = Operation1 >>= \\r1 ->\n",
+        "  Operation2 r1 >>= \\r2 ->\n",
+        "  finish r1 r2\n",
+    ));
+    let next_line = definition_expr(concat!(
+        "language g0\n",
+        "result =\n",
+        "  Operation1 >>= \\r1 ->\n",
+        "  Operation2 r1 >>= \\r2 ->\n",
+        "  finish r1 r2\n",
+    ));
+
+    assert_eq!(inline, next_line);
+    let SyntaxExpr::OperatorApply {
+        operator: crate::g_syntax::SyntaxOperator::EffectBind,
+        right,
+        ..
+    } = inline
+    else {
+        panic!("the outer expression should remain an effect bind");
+    };
+    let SyntaxExpr::Lambda(parameters, body) = *right else {
+        panic!("the bind's tail operand should be a continuation lambda");
+    };
+    assert_eq!(parameters, ["r1"]);
+    assert!(matches!(
+        *body,
+        SyntaxExpr::OperatorApply {
+            operator: crate::g_syntax::SyntaxOperator::EffectBind,
+            right,
+            ..
+        } if matches!(&*right, SyntaxExpr::Lambda(parameters, _) if parameters == &["r2"])
+    ));
 }
 
 #[test]
@@ -137,10 +155,44 @@ fn layout_do_is_already_a_final_application_argument() {
 }
 
 #[test]
-fn trailing_lambda_application_argument_is_currently_rejected() {
-    assert_currently_rejected(concat!(
+fn trailing_lambda_application_argument_owns_the_host_tail() {
+    let expression = definition_expr(concat!(
         "language g0\n",
-        "mapped = map values \\value -> transform value\n",
+        "mapped = map values \\value -> transform value |> finish\n",
+    ));
+    let SyntaxExpr::Apply(function, argument) = expression else {
+        panic!("a trailing lambda should be the final application argument");
+    };
+    assert!(matches!(
+        *function,
+        SyntaxExpr::Apply(function, argument)
+            if matches!(*function, SyntaxExpr::Name(ref name) if name == "map")
+                && matches!(*argument, SyntaxExpr::Name(ref name) if name == "values")
+    ));
+    let SyntaxExpr::Lambda(parameters, body) = *argument else {
+        panic!("the trailing argument should remain a lambda");
+    };
+    assert_eq!(parameters, ["value"]);
+    assert!(matches!(
+        *body,
+        SyntaxExpr::OperatorApply {
+            operator: crate::g_syntax::SyntaxOperator::PipeForward,
+            ..
+        }
+    ));
+
+    let parenthesized = definition_expr(concat!(
+        "language g0\n",
+        "mapped = (map values \\value -> transform value) |> finish\n",
+    ));
+    assert!(matches!(
+        parenthesized,
+        SyntaxExpr::OperatorApply {
+            operator: crate::g_syntax::SyntaxOperator::PipeForward,
+            left,
+            ..
+        } if matches!(&*left, SyntaxExpr::Apply(_, argument)
+            if matches!(argument.as_ref(), SyntaxExpr::Lambda(_, _)))
     ));
 }
 

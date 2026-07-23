@@ -13,8 +13,8 @@ use super::super::keywords::{canonical_keyword, g0_keyword, reserved_keyword_mes
 use super::super::{
     Diagnostic, PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, flatten_path_suffixes,
 };
-use super::do_expr::parse_do_atom;
-use super::expression_context::ExpressionContext;
+use super::do_expr::parse_do_expression;
+use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{
     ParseSession, TokenExtra, TokenInput, TokenView, close, joint, keyword, line_start, name,
     number, open, space_before, symbol, text_id,
@@ -345,7 +345,8 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             )
             .then_ignore(padded(symbol("->")))
             .then(expr.clone())
-            .map(|(params, body)| SyntaxExpr::Lambda(params, Box::new(body)));
+            .map(|(params, body)| SyntaxExpr::Lambda(params, Box::new(body)))
+            .boxed();
 
         let do_expr = do_expr(view, context)
             .then(path_suffix.clone())
@@ -424,7 +425,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                 .ignored()
                 .ignore_then(application_argument_atom),
         ));
-        let application = atom
+        let application_head = atom
             .clone()
             .then(application_argument.repeated().collect::<Vec<_>>())
             .try_map(|(function, arguments), _| {
@@ -439,6 +440,22 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                 })
             })
             .boxed();
+        let tail_lambda_argument = choice((
+            space_before(lambda.clone()),
+            line_start()
+                .repeated()
+                .at_least(1)
+                .ignored()
+                .ignore_then(lambda.clone()),
+        ));
+        let application = application_head
+            .then(tail_lambda_argument.or_not())
+            .map(|(function, tail)| match tail {
+                Some(argument) => SyntaxExpr::Apply(Box::new(function), Box::new(argument)),
+                None => function,
+            })
+            .boxed();
+        let tail_infix_operand = choice((lambda.clone(), application.clone())).boxed();
 
         choice((
             lambda,
@@ -446,7 +463,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                 .clone()
                 .then(
                     padded(infix_operator)
-                        .then(application)
+                        .then(tail_infix_operand)
                         .repeated()
                         .collect::<Vec<_>>(),
                 )
@@ -462,12 +479,32 @@ fn do_expr<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
-    keyword("do").ignore_then(custom::<
-        _,
-        TokenInput<'lex, 'source>,
-        SyntaxExpr,
-        TokenExtra<'lex, 'source>,
-    >(move |input| {
+    keyword("do").ignore_then(structural_expression_after_head(
+        view,
+        context,
+        parse_do_expression,
+    ))
+}
+
+type StructuralExpressionParser =
+    for<'lex, 'source> fn(
+        TokenView<'lex, 'source>,
+        usize,
+        ExpressionContext,
+    ) -> Result<ParsedExpression, Vec<Diagnostic>>;
+
+/// Consumes a structural expression according to the exact end reported by
+/// its token-range parser.
+///
+/// The head parser remains responsible for selecting the construct. This
+/// adapter owns cursor recovery and advancement for both explicitly delimited
+/// structural expressions and tail forms that consume their host remainder.
+fn structural_expression_after_head<'lex, 'source: 'lex>(
+    view: TokenView<'lex, 'source>,
+    context: ExpressionContext,
+    parse: StructuralExpressionParser,
+) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
+    custom::<_, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>>(move |input| {
         let before = input.cursor();
         let next_span = input.peek().map(|token| token.span());
         let next_index = next_span.and_then(|span| {
@@ -476,10 +513,10 @@ fn do_expr<'lex, 'source: 'lex>(
                 .position(|candidate| candidate.span() == span)
                 .and_then(|relative| view.absolute_index(relative))
         });
-        let do_index = next_index
+        let head_index = next_index
             .and_then(|next| next.checked_sub(1))
             .unwrap_or_else(|| view.range().end().saturating_sub(1));
-        let parsed = parse_do_atom(view, do_index, context.may_yield()).map_err(|diagnostics| {
+        let parsed = parse(view, head_index, context.may_yield()).map_err(|diagnostics| {
             let span = diagnostics
                 .first()
                 .and_then(|diagnostic| view.line_span(diagnostic.line))
@@ -494,7 +531,7 @@ fn do_expr<'lex, 'source: 'lex>(
             )
         })?;
         let end = parsed.end();
-        for _ in do_index + 1..end {
+        for _ in head_index + 1..end {
             if input.next().is_none() {
                 return Err(Rich::custom(
                     input.span_since(&before),
@@ -503,7 +540,7 @@ fn do_expr<'lex, 'source: 'lex>(
             }
         }
         Ok(parsed.into_expression())
-    }))
+    })
 }
 
 fn glam_name<'lex, 'source: 'lex>()

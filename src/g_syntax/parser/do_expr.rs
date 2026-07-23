@@ -22,10 +22,10 @@ enum ParsedDoStatement {
     Expr(SyntaxExpr),
 }
 
-/// Parses the `do` atom beginning at `do_index` and returns the first token
-/// after it. The caller can therefore consume the atom as one ordinary
-/// expression node without rewriting its source.
-pub(in crate::g_syntax::parser) fn parse_do_atom(
+/// Parses the `do` expression beginning at `do_index` and reports its exact
+/// lexical end. A braced form ends at its matching `}`, while an
+/// unparenthesized layout form owns the remainder of its host range.
+pub(in crate::g_syntax::parser) fn parse_do_expression(
     view: TokenView<'_, '_>,
     do_index: usize,
     context: ExpressionContext,

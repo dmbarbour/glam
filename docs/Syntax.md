@@ -219,6 +219,21 @@ effect path, and `foo .bar` is rejected rather than allowing one accidental
 space to change access into application. `.bar` remains valid at the head of
 an expression; `foo <| .bar` is the punctuation-light alternative.
 
+An unparenthesized lambda may be the final application argument or the
+right-hand tail operand of an infix expression:
+
+        mapped = map values \value -> transform value
+        bound = operation >>= \value -> continue value
+
+The lambda body has rightward extent, so `map values \value -> transform value
+|> finish` places `|> finish` inside the lambda body. Parenthesize the
+application to pipe its result instead:
+
+        (map values \value -> transform value) |> finish
+
+An explicitly parenthesized lambda remains an ordinary atom and may therefore
+be followed by more arguments.
+
 ## Effects
 
 The target design adopts Haskell's do notation. For aesthetic reasons, it

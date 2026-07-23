@@ -15,6 +15,14 @@ final_do = begin_op_header do
   Operation2 -> r2
   finish r1 r2
 
+# An unparenthesized lambda may be the final application argument or the tail
+# operand of an infix expression. Its body has ordinary rightward extent.
+mapped = map values \value -> transform value |> finish
+
+bound = Operation1 >>= \r1 ->
+  Operation2 r1 >>= \r2 ->
+  finish r1 r2
+
 # A postfix where owns its remaining binding layout.
 postfix = x + y + z where
   y = 1

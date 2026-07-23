@@ -1555,6 +1555,39 @@ fn parses_layout_do_in_definition_lambda_and_application_positions() {
 }
 
 #[test]
+fn trailing_lambda_and_layout_do_arguments_evaluate() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "invoke input transform = transform input\n",
+        "run_effect operation = list.head (list.pure operation)\n",
+        "asm.lambda = invoke \"Hello\" \\value -> value ++ \", World!\"\n",
+        "asm.layout = run_effect do\n",
+        "  .r \"Hello, Do!\"\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "lambda"]
+        ))),
+        b"Hello, World!"
+    );
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "layout"]
+        ))),
+        b"Hello, Do!"
+    );
+}
+
+#[test]
 fn braced_do_evaluates_like_layout_do_and_supports_empty_blocks() {
     let parsed = parse(concat!(
         "language g0\n",

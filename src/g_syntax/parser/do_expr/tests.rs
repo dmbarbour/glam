@@ -46,6 +46,7 @@ fn token_statement_classification_leaves_lambda_arrows_inside_expressions() {
 fn braced_do_is_a_structural_atom_in_containers_and_other_do_blocks() {
     for source in [
         "consume [do { .r 1 }, do { text = \"a;b\"; .r text }, do { x = do .r 2; .r x }]",
+        "consume do { .r 1 } next",
         "result:do { .r 1 }",
         "do { .r {answer: 42} }.answer",
         "(do { .r 1 }, do { .r 2 })",
