@@ -8,6 +8,7 @@ mod ast;
 mod compiler_values;
 mod diagnostic_formatter;
 mod module_lowering;
+mod name_analysis;
 mod net_lowering;
 mod parser;
 mod recursive_do;
@@ -18,6 +19,7 @@ use analysis::{warn_unused_locals, warn_unused_with_alias};
 pub use ast::*;
 use module_lowering::lower_parsed_source;
 use module_lowering::*;
+use name_analysis::check_file_global_local_shadowing;
 use resolve::*;
 
 #[cfg(test)]

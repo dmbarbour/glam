@@ -33,7 +33,7 @@ not define future language semantics or collect subsystem invariants.
 | `g_syntax/parser/source.rs`, `lexical.rs`, `input.rs`, `layout.rs` | UTF-8 orchestration, the one source scan, token-range/Chumsky input, and contextual layout views |
 | `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs` | Ordinary precedence grammar, structural `let`/`where`/object/`with` forms, and do statements |
 | `g_syntax/parser/declaration.rs`, `declaration/simple.rs` | Top-level and recursive object-body declarations, including simple language/import/abstract/unique forms |
-| `g_syntax/resolve/`, `resolved.rs`, `analysis.rs` | Scope resolution, affine semantic IR, captures, and warnings |
+| `g_syntax/resolve/`, `resolved.rs`, `analysis.rs`, `name_analysis.rs` | Lexical resolution, affine semantic IR, local-use warnings, and file-wide local/global shadow checks |
 | `g_syntax/compiler_values.rs` | Shared closed helpers and built-in modules owned by the g compiler |
 | `g_syntax/module_lowering/` | Imports, definitions, objects, and module fixpoint orchestration |
 | `g_syntax/net_lowering.rs` | Resolved functions and applications to closed interaction nets |

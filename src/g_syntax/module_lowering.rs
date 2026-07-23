@@ -24,6 +24,7 @@ pub(in crate::g_syntax) fn lower_parsed_source(
         declarations,
         mut diagnostics,
     } = parsed;
+    diagnostics.extend(check_file_global_local_shadowing(&declarations));
 
     for declaration in &declarations {
         match &declaration.kind {

@@ -107,7 +107,9 @@ The bootstrap compiler rejects shadowing between local variables. This includes 
 such as `_name` shadowing `name`; both spellings have the same canonical local name. The inaccessible `_` binder may be repeated because it introduces no
 referable name. Reusing a name in disjoint lexical scopes is valid.
 
-Detecting every collision between a local and a lazily constructed module or object namespace requires broader namespace analysis. Such namespace shadowing may initially remain a warning or linter concern; this does not weaken the local-to-local compiler error.
+The compiler also checks each source file as a whole. A source local may not reuse a global name introduced by that file in a visible namespace, or a
+global root that the file actually selects through that namespace. Declaration order does not affect this rule. Literal keys and explicit `module` or prior
+references do not select an unqualified global; expression-valued keys do. Names that merely exist in an imported or extended namespace may be used as locals until the file introduces, overrides, or otherwise references them.
 
 ### Using Scopes
 

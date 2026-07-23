@@ -3,6 +3,6 @@ import 'std
 
 hello = .r "Hello"
 world = .r "World"
-format = .r (\world hello -> hello ++ ", " ++ world ++ "!")
+format = .r (\world_text hello_text -> hello_text ++ ", " ++ world_text ++ "!")
 
 asm.result = list.head (list.pure (hello !> world !> format))

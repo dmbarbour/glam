@@ -1471,10 +1471,10 @@ fn crossing_recursive_do_promotes_fix_scope_without_leaking_name_visibility() {
     let parsed = parse(concat!(
         "language g0\n",
         "import 'std\n",
-        "inner = 1\n",
+        "initial = 1\n",
         "crossing = do\n",
         "  abstract outer\n",
-        "  prior = inner\n",
+        "  prior = initial\n",
         "  abstract _inner\n",
         "  outer = prior\n",
         "  inner = 2\n",
@@ -1603,8 +1603,8 @@ fn do_lowering_sequences_binds_value_guards_and_bare_operations() {
         "  .r \"ignored\" -> _\n",
         "  .r 69\n",
         "asm.scope = list.pure do\n",
-        "  source_value <- .r source_value\n",
-        "  .r source_value\n",
+        "  selected <- .r source_value\n",
+        "  .r selected\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -1763,6 +1763,176 @@ fn lowering_allows_local_reuse_in_disjoint_scopes_and_repeated_drops() {
         "left = (\\x -> x) 1\n",
         "right = (\\x -> x) 2\n",
         "drop_both _ _ = ()\n",
+    ));
+    let lowered = lower_parsed_source(parsed, &CompileContext::default());
+
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != Severity::Error),
+        "unexpected diagnostics: {:?}",
+        lowered.diagnostics
+    );
+}
+
+#[test]
+fn source_locals_cannot_shadow_file_globals_regardless_of_declaration_order() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "apply = \\_foo -> foo\n",
+        "foo := 42\n",
+    ));
+    let lowered = lower_parsed_source(parsed, &CompileContext::default());
+    let errors = lowered
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .collect::<Vec<_>>();
+
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].line, 2);
+    assert_eq!(
+        errors[0].message,
+        "local `_foo` shadows external `foo` defined on line 3"
+    );
+}
+
+#[test]
+fn source_locals_cannot_shadow_global_roots_used_elsewhere_in_the_file() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "other = \\_net_arity -> net_arity\n",
+        "build = net_arity.member\n",
+    ));
+    let lowered = lower_parsed_source(parsed, &CompileContext::default());
+    let errors = lowered
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .collect::<Vec<_>>();
+
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].line, 3);
+    assert_eq!(
+        errors[0].message,
+        "local `_net_arity` shadows external `net_arity` used by this file on line 4"
+    );
+}
+
+#[test]
+fn available_but_unselected_import_names_do_not_conflict_with_locals() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "identity = \\net_arity -> net_arity\n",
+    ));
+    let lowered = lower_parsed_source(parsed, &CompileContext::default());
+
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != Severity::Error),
+        "unexpected diagnostics: {:?}",
+        lowered.diagnostics
+    );
+}
+
+#[test]
+fn literal_paths_are_not_global_uses_but_computed_keys_are() {
+    let literal = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "payload = { net_arity:1 }\n",
+        "identity = \\net_arity -> net_arity\n",
+    ));
+    let literal = lower_parsed_source(literal, &CompileContext::default());
+    assert!(
+        literal
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != Severity::Error),
+        "unexpected diagnostics: {:?}",
+        literal.diagnostics
+    );
+
+    let computed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        ".[net_arity] = 1\n",
+        "identity = \\net_arity -> net_arity\n",
+    ));
+    let computed = lower_parsed_source(computed, &CompileContext::default());
+    assert!(computed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == Severity::Error
+            && diagnostic.line == 4
+            && diagnostic
+                .message
+                .contains("external `net_arity` used by this file on line 3")
+    }));
+}
+
+#[test]
+fn object_body_locals_use_their_visible_namespace_index() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "outer = 1\n",
+        "object parent with\n",
+        "  member = 2\n",
+        "  apply = \\_member -> member\n",
+        "object child as _alias with\n",
+        "  apply = \\_outer -> outer\n",
+    ));
+    let lowered = lower_parsed_source(parsed, &CompileContext::default());
+    let errors = lowered
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .collect::<Vec<_>>();
+
+    assert_eq!(errors.len(), 2);
+    assert_eq!(errors[0].line, 5);
+    assert_eq!(
+        errors[0].message,
+        "local `_member` shadows external `member` defined on line 4"
+    );
+    assert_eq!(errors[1].line, 7);
+    assert_eq!(
+        errors[1].message,
+        "local `_outer` shadows external `outer` defined on line 2"
+    );
+}
+
+#[test]
+fn escaped_global_uses_are_recorded_in_the_scope_they_resolve_through() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "object child with\n",
+        "  probe = ^net_arity\n",
+        "  identity = \\_net_arity -> net_arity\n",
+    ));
+    let lowered = lower_parsed_source(parsed, &CompileContext::default());
+
+    assert!(lowered.diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == Severity::Error
+            && diagnostic.line == 5
+            && diagnostic
+                .message
+                .contains("external `net_arity` used by this file on line 4")
+    }));
+}
+
+#[test]
+fn explicit_module_and_prior_references_do_not_select_unqualified_globals() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "module_probe = module.net_arity\n",
+        "prior_probe = _net_arity\n",
+        "identity = \\net_arity -> net_arity\n",
     ));
     let lowered = lower_parsed_source(parsed, &CompileContext::default());
 
@@ -2993,7 +3163,7 @@ fn pipe_and_composition_operators_evaluate_as_syntax_sugar() {
 #[test]
 fn effect_operators_evaluate_as_syntax_sugar() {
     let parsed = parse(
-        "language g0\napi = { r:(\\x -> x), seq:(\\op k -> (k (op.eff api)).eff api) }\nop = .r \"Hello\"\nk x = .r (x ++ \", World!\")\nf x = .r (x ++ \", World\")\ng x = .r (x ++ \"!\")\nop_unit = .r ()\nbind_section = (>>= k)\nbind_function = (>>=)\nthen_function = (=>>)\nkleisli_function = (>=>)\nasm.bind = (op >>= k).eff api\nasm.bind_section = (bind_section op).eff api\nasm.bind_function = (bind_function op k).eff api\nasm.kleisli = ((f >=> g) \"Hello\").eff api\nasm.kleisli_function = (kleisli_function f g \"Hello\").eff api\nasm.then = (op_unit =>> .r \"Hello, World!\").eff api\nasm.then_function = (then_function op_unit (.r \"Hello, World!\")).eff api\n",
+        "language g0\napi = { r:(\\x -> x), seq:(\\operation continuation -> (continuation (operation.eff api)).eff api) }\nop = .r \"Hello\"\nk x = .r (x ++ \", World!\")\nf x = .r (x ++ \", World\")\ng x = .r (x ++ \"!\")\nop_unit = .r ()\nbind_section = (>>= k)\nbind_function = (>>=)\nthen_function = (=>>)\nkleisli_function = (>=>)\nasm.bind = (op >>= k).eff api\nasm.bind_section = (bind_section op).eff api\nasm.bind_function = (bind_function op k).eff api\nasm.kleisli = ((f >=> g) \"Hello\").eff api\nasm.kleisli_function = (kleisli_function f g \"Hello\").eff api\nasm.then = (op_unit =>> .r \"Hello, World!\").eff api\nasm.then_function = (then_function op_unit (.r \"Hello, World!\")).eff api\n",
     );
     let context = CompileContext::default();
     let lowered = lower_parsed_source(parsed, &context);
@@ -3025,7 +3195,7 @@ fn applicative_operators_apply_and_sequence_in_source_order() {
     let parsed = parse(concat!(
         "language g0\n",
         "api = { r:(\\value -> {value:value, trace:\"R\"}), seq:(\\operation continuation -> (\\first -> (\\second -> {value:second.value, trace:first.trace ++ second.trace}) ((continuation first.value).eff api)) (operation.eff api)) }\n",
-        "marked tag value = {eff:(\\_api -> {value:value, trace:tag})}\n",
+        "marked tag value = {eff:(\\_effect_api -> {value:value, trace:tag})}\n",
         "backward = (marked \"F\" (\\x -> x ++ \"!\") <! marked \"A\" \"Hello\").eff api\n",
         "forward = (marked \"A\" \"Hello\" !> marked \"F\" (\\x -> x ++ \"!\")).eff api\n",
         "backward_chain = (.r (\\x y -> x ++ y) <! marked \"A\" \"A\" <! marked \"B\" \"B\").eff api\n",

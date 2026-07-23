@@ -190,10 +190,11 @@ their detailed scheduling and representation contracts.
   explicit `++` or `list.concat` flattens structure.
 - Multiline `let`/`where` bindings align under the first binding and do not
   accept `in`. Keep valid and invalid samples synchronized with parser tests.
-- Source local variables may not shadow another active local. `_name` has the
-  canonical name `name` for this check; repeated `_` binders remain valid
-  because they cannot be referenced. Compiler-generated bindings are not
-  source locals.
+- Source local variables may not shadow another active local or a global that
+  the same file introduces or actually selects through a visible namespace.
+  The global check is file-wide and lives in `g_syntax/name_analysis.rs`, not
+  parser routing. `_name` has canonical name `name`; repeated `_` binders and
+  compiler-generated bindings remain exempt.
 - Layout `do` is front-end sugar and must disappear during g-syntax
   resolution. A bare intermediate statement reuses `=>>` and therefore
   requires unit; the final expression is the continuation itself and is not
