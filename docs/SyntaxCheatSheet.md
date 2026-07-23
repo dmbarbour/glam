@@ -78,6 +78,8 @@ foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
 d2 = d1 with
     x := 10                 # override existing
     y = 20                  # introduce new
+d3 = d2 with { x := 11; z = 30 } # semicolon-delimited equivalent
+d4 = d3 with {}             # explicit no-op update
 Dict as d with              # capture: _d.x = prior, d.x = result
     x := _d.x + 1
     y = d.x + a
@@ -135,12 +137,16 @@ skip _ y = y                # '_' drops an argument
 f _unused y = y             # '_' prefix suppresses unused warning
 
 let x = 1 in x + x          # one-liner
-let x = 1; y = 2 in x + y   # ';' separates; groups are mutually recursive
+let { x = 1; y = 2 } in x + y # braced ';' group is mutually recursive
+let {; x = 1; y = 2; } in x + y # leading/trailing ';' accepted
+let {} in Expr              # explicit empty group; equivalent to Expr
 let x = 1                   # multi-line: no 'in', Body aligns with 'let'
     y = x + 1
 x + y
 
-Body where n1 = d1; n2 = d2 # post-hoc let
+Body where n = d            # post-hoc single binding
+Body where { n1 = d1; n2 = d2 } # braced semicolon-separated group
+Body where {}               # explicit empty group; equivalent to Body
 Body where
   n1 = d1
   n2 = d2
@@ -151,10 +157,12 @@ Body where x = y where y = 1
 (Body where x = y) where y = 1
 
 # One suffix with multiple bindings is one mutually recursive group.
-Body where x = y; y = x
+Body where { x = y; y = x }
 
 # Parenthesize a right-associated binding expression explicitly.
 Body where x = (y where y = 1)
+
+# Naked ';' never groups let/where bindings; use braces or layout.
 ```
 
 ## Interaction Nets (performance escape hatch)
@@ -339,6 +347,13 @@ object foo extends bar, baz with
     def1 = ...              # names bind to self by default
     def2 := ...             # override inherited def2; _def2 = prior
     def3 = ^a + def1        # ^a escapes to host scope (^^a two levels)
+
+object compact with {;      # braced bodies share the recursive vocabulary
+  value = 1;
+  object nested with { other = 2 };
+}
+extend compact with { value := 2 }
+empty = object () with {}   # explicit empty body
 
 object configured extends choose_parent options, fallback with
     ...                     # each comma-separated parent is an expression

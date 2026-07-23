@@ -24,17 +24,66 @@ fn token_with_header(source: &str) -> WithHeader {
 fn let_and_where_parse() {
     for source in [
         "let x = 1 in x + x",
-        "let x = 1; _y = 2 in x",
+        "let { x = 1; _y = 2 } in x",
+        "let {; x = 1; _y = 2; } in x",
+        "let {} in x",
         "let x = {in:\"where =\"} in x",
         "let x = (left == right) in x",
         "let x = 1 in x where y = 2",
         "let x = 1\n    y = 2\nx + y",
-        "x + y where x = 1; y = 2",
+        "x + y where { x = 1; y = 2 }",
+        "x + y where {; x = 1; y = 2; }",
+        "x where {}",
         "x where x = y where y = 1",
         "f (where) where x = \"in = where\"",
         "x + y where\nx = 1\ny = 2",
     ] {
         parse_structural(source);
+    }
+}
+
+#[test]
+fn naked_semicolons_do_not_group_let_or_where_bindings() {
+    for (source, expected) in [
+        (
+            "let x = 1; y = 2 in x + y",
+            "naked semicolon-separated `let` bindings",
+        ),
+        (
+            "x + y where x = 1; y = 2",
+            "naked semicolon-separated `where` bindings",
+        ),
+    ] {
+        let diagnostics = parse_compound_expression_fragment(source.as_bytes())
+            .expect_err("naked semicolon-separated bindings must be rejected");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "`{source}` reported {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn braced_binding_groups_distinguish_empty_bodies_from_empty_members() {
+    for source in [
+        "let {;} in value",
+        "let { x = 1;; y = 2 } in value",
+        "value where {;}",
+        "value where { x = 1;; y = 2 }",
+    ] {
+        let diagnostics = parse_compound_expression_fragment(source.as_bytes())
+            .expect_err("semicolon-only or interior-empty binding members must be rejected");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains("use `{}` for an empty body")
+                    || diagnostic
+                        .message
+                        .contains("empty member between semicolons")
+            }),
+            "`{source}` reported {diagnostics:#?}"
+        );
     }
 }
 
@@ -112,6 +161,7 @@ fn parentheses_can_make_a_where_binding_right_associative() {
 fn token_keywords_ignore_nested_groups_and_text() {
     parse_structural("let x = {in:\"where =\"} in x");
     parse_structural("f (where) where x = \"in where = as\"");
+    parse_structural("(choose as value)");
 
     let object = token_object_header(
         "object (choose as extends) as alias extends (parent with), right with\n  value = 1",
@@ -145,8 +195,11 @@ fn token_keywords_ignore_nested_groups_and_text() {
 fn object_headers_match_the_complete_structural_parse() {
     for source in [
         "object \"child\" with\n  value = 1",
+        "object \"child\" with { value = 1 }",
         "object \"child\" as _self extends left, right with\n  value = 1",
+        "object \"child\" as _self extends left, right with {; value = 1; }",
         "object _ as _ with\n  value = 1",
+        "object _ as _ with {}",
     ] {
         let parsed = parse_structural(source);
         let SyntaxExpr::Object(ObjectExpr {
@@ -171,8 +224,11 @@ fn object_headers_match_the_complete_structural_parse() {
 fn with_headers_match_the_complete_structural_parse() {
     for source in [
         "{x:1} with\n  x := 2",
+        "{x:1} with { x := 2 }",
         "base as prior with\n  x := _prior.x",
+        "base as prior with {; x := _prior.x; }",
         "base as _ with\n  x := 2",
+        "base as _ with {}",
     ] {
         let parsed = parse_structural(source);
         let SyntaxExpr::With { base, alias, .. } = parsed else {

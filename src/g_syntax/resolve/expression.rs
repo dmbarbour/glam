@@ -771,6 +771,10 @@ pub(in crate::g_syntax) fn lower_let_expr_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    if bindings.is_empty() {
+        return syntax_expr_to_resolved_in_semantic_scope(body, line, context, scope, locals);
+    }
+
     let values = bindings
         .iter()
         .map(|(_, expr)| {

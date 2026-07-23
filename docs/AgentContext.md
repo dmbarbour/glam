@@ -189,7 +189,10 @@ their detailed scheduling and representation contracts.
 - List literals preserve every comma-separated expression as one element. Only
   explicit `++` or `list.concat` flattens structure.
 - Multiline `let`/`where` bindings align under the first binding and do not
-  accept `in`. Keep valid and invalid samples synchronized with parser tests.
+  accept `in`. Naked semicolons do not group local bindings; semicolon-separated
+  bindings require braces. Braced `let`/`where` and every `with` body permit
+  leading/trailing semicolons and explicit empty `{}` bodies. Keep valid and
+  invalid samples synchronized with parser tests.
 - Source local variables may not shadow another active local or a global that
   the same file introduces or actually selects through a visible namespace.
   The global check is file-wide and lives in `g_syntax/name_analysis.rs`, not

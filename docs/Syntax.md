@@ -337,9 +337,15 @@ We'll support Haskell-style locals.
               continues on the next line past the name
         Body
 
-        # semicolon separator for multiple names inline
-        # each group of names is mutually recursive
-        let Name1 = Def1; Name2 = Def2 in Body
+        # braced form for semicolon-separated names inline
+        # each braced or layout group is mutually recursive
+        let { Name1 = Def1; Name2 = Def2 } in Body
+
+        # braces may have one leading/trailing semicolon
+        let {; Name1 = Def1; Name2 = Def2; } in Body
+
+        # explicit empty group; equivalent to Body
+        let {} in Body
 
         # line separator for multiple lines of definitions
         let Name1 = Def1
@@ -347,7 +353,13 @@ We'll support Haskell-style locals.
         Body
 
         # the 'where' form is essentially a post-hoc 'let'
-        Body where Name1 = Def1; Name2 = Def2
+        Body where Name = Def
+
+        # semicolon-separated groups require braces
+        Body where { Name1 = Def1; Name2 = Def2 }
+
+        # explicit empty group; equivalent to Body
+        Body where {}
 
         # multi-line version
         Body where 
@@ -370,11 +382,17 @@ groups, but names from an earlier group are not visible in a later group.
 Chaining does not combine the groups. Use one binding block when mutual
 recursion across all names is intended:
 
-        Body where x = y; y = x
+        Body where { x = y; y = x }
 
 Use parentheses to request the right-associated structure explicitly:
 
         Body where x = (y where y = 1)
+
+Naked semicolons do not delimit `let` or `where` bindings. They are reserved
+for an enclosing braced construct such as `do { ... }`; use a braced binding
+group when bindings need semicolon separators. Within a braced binding group,
+one leading and one trailing semicolon are permitted, while an empty member
+between semicolons is an error.
 
 Aside from `let` and `where`, locals can be introduced by pattern matching. See *Conditionals*.
 
@@ -444,6 +462,12 @@ Dictionaries and objects have access to a `with` syntax for definition-style upd
         {name1:Expr1a} with
             name1 := Expr1b
             name2 = Expr2
+
+        # equivalent semicolon-delimited form
+        {name1:Expr1a} with { name1 := Expr1b; name2 = Expr2 }
+
+        # explicit no-op update
+        {name1:Expr1a} with {}
 
 In this notation, a '.' prefix is required when first path element is expression-indexed.
 
@@ -791,7 +815,29 @@ Object syntax can and should be compact by default. I propose:
         # expression
         object (NameExpr|_) (as Name)? (extends ExpressionList)? (with Body)?
 
-The `extends` and `with` sections are optional, with `spec.deps` and `spec.defs` respectively defaulting to the empty list and const function (`\x _ -> x`). If provided, they cannot be empty. In general, `spec.name` may be any value with equality, e.g. `"foo"`. Toplevel object declarations use `abstract_global_path` to ensure globally unique names, but it's sufficient that we don't reuse a name for two different specs across transitive deps.
+The `extends` and `with` sections are optional, with `spec.deps` and
+`spec.defs` respectively defaulting to the empty list and const function
+(`\x _ -> x`). If `extends` is provided, it cannot be empty. A layout `with`
+must contain at least one definition, while `with {}` is an explicit empty
+body. In general, `spec.name` may be any value with equality, e.g. `"foo"`.
+Toplevel object declarations use `abstract_global_path` to ensure globally
+unique names, but it's sufficient that we don't reuse a name for two different
+specs across transitive deps.
+
+Every object, `extend`, and dictionary/object-update `with` body accepts either
+the layout form shown above or a brace-delimited form:
+
+        object child with {
+          value = 1;
+          object nested with { other = 2 };
+        }
+        extend child with { value := 2 }
+        updated = child with { added = 3 }
+
+Braced bodies use the same recursive definition vocabulary and source ordering
+as layout bodies. Members are separated by semicolons, and one leading or
+trailing semicolon is permitted. Empty braces are an explicit no-op body;
+omitting the body after `with` remains an error.
 
 `ExpressionList` is one or more ordinary expressions separated by top-level
 commas. Each expression is resolved in the scope surrounding the object and

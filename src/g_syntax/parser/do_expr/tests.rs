@@ -90,7 +90,7 @@ fn braced_do_semicolons_currently_separate_unparenthesized_where_expressions() {
         DoStepKind::ValueBind { name, .. } if name == "y"
     ));
 
-    let parenthesized = parse_do_expression("do { (result where x = 1; y = 2) }");
+    let parenthesized = parse_do_expression("do { (result where { x = 1; y = 2 }) }");
     let SyntaxExpr::Do(DoExpr { result, .. }) = parenthesized else {
         panic!("expected a do expression");
     };
@@ -98,6 +98,16 @@ fn braced_do_semicolons_currently_separate_unparenthesized_where_expressions() {
         result.as_ref(),
         SyntaxExpr::Let { bindings, .. }
             if bindings.iter().map(|(name, _)| name.as_str()).eq(["x", "y"])
+    ));
+
+    let braced_where = parse_do_expression("do { result where { x = 1 }; y = 2; .r y }");
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = braced_where else {
+        panic!("expected a do expression");
+    };
+    assert!(matches!(
+        &steps[0].kind,
+        DoStepKind::Then(SyntaxExpr::Let { bindings, .. })
+            if bindings.iter().map(|(name, _)| name.as_str()).eq(["x"])
     ));
 }
 

@@ -13,8 +13,9 @@ use super::input::TokenView;
 use super::layout::{LayoutBase, LayoutView};
 use super::lexical::{Delimiter, LeadingTrivia, TokenKind};
 use super::structural::{
-    contextual_keywords, first_top_level_line_start, is_layout_empty, local_name, parse_expression,
-    parse_object_parents, split_top_level, token_is_name, trim_layout, view_between,
+    braced_contents, contextual_keywords, is_layout_empty, local_name, parse_expression,
+    parse_object_parents, split_braced_members, split_compound_header_body, split_top_level,
+    token_is_name, trim_layout, view_between,
 };
 
 mod simple;
@@ -76,21 +77,42 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
     if is_layout_empty(view) {
         return Vec::new();
     }
-    let statements = match LayoutView::new(view).statements(LayoutBase::FirstLine) {
-        Ok(statements) => statements,
-        Err(error) => {
-            diagnostics.push(Diagnostic::error(error.line(), error.message()));
+    let statement_views = match split_braced_members(view, "`with` body") {
+        Some(Ok(members)) => members
+            .into_iter()
+            .map(|member| {
+                let line = member
+                    .first_significant()
+                    .and_then(|(_, token)| member.line_at_span(token.span()))
+                    .unwrap_or(1);
+                (line, member)
+            })
+            .collect::<Vec<_>>(),
+        Some(Err(mut errors)) => {
+            diagnostics.append(&mut errors);
             return Vec::new();
+        }
+        None => {
+            let statements = match LayoutView::new(view).statements(LayoutBase::FirstLine) {
+                Ok(statements) => statements,
+                Err(error) => {
+                    diagnostics.push(Diagnostic::error(error.line(), error.message()));
+                    return Vec::new();
+                }
+            };
+            statements
+                .into_iter()
+                .filter_map(|statement| {
+                    view.subview(statement.tokens())
+                        .map(|statement_view| (statement.line(), statement_view))
+                })
+                .collect()
         }
     };
 
-    let mut body = Vec::with_capacity(statements.len());
-    for statement in statements {
-        let Some(statement_view) = view.subview(statement.tokens()) else {
-            continue;
-        };
+    let mut body = Vec::with_capacity(statement_views.len());
+    for (line, statement_view) in statement_views {
         let statement_view = trim_layout(statement_view);
-        let line = statement.line();
         let kind = match statement_view.first_significant() {
             Some((_, token)) if token_is_name(token, "object") => {
                 parse_object_declaration(statement_view, line, diagnostics)
@@ -113,6 +135,7 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
 pub(in crate::g_syntax::parser) fn parse_nonempty_object_body(
     view: TokenView<'_, '_>,
     line: usize,
+    empty_message: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Vec<ObjectBodyDefinition>> {
     let diagnostic_start = diagnostics.len();
@@ -122,10 +145,7 @@ pub(in crate::g_syntax::parser) fn parse_nonempty_object_body(
             .iter()
             .any(|diagnostic| diagnostic.severity == Severity::Error)
         {
-            diagnostics.push(Diagnostic::error(
-                line,
-                "object `with` body cannot be empty",
-            ));
+            diagnostics.push(Diagnostic::error(line, empty_message));
         }
         return None;
     }
@@ -373,7 +393,7 @@ fn parse_object_declaration(
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ObjectDecl> {
-    let (header, body) = split_header_body(view);
+    let (header, body) = split_compound_header_body(view);
     let head = header.first_significant()?.0;
     let header = trim_layout(view_between(header, head + 1, header.range().end()));
     let parsed = parse_static_object_header(header, line, false, diagnostics)?;
@@ -398,11 +418,20 @@ fn parse_object_declaration(
         let Some(body) = body else {
             diagnostics.push(Diagnostic::error(
                 line,
-                "object `with` body cannot be empty",
+                "object `with` requires a body; use `with {}` for an explicit empty body",
             ));
             return None;
         };
-        parse_nonempty_object_body(body, line, diagnostics)?
+        if braced_contents(body).is_some() {
+            parse_object_body(body, diagnostics)
+        } else {
+            parse_nonempty_object_body(
+                body,
+                line,
+                "object `with` body cannot be empty; use `with {}` for an explicit empty body",
+                diagnostics,
+            )?
+        }
     } else {
         Vec::new()
     };
@@ -422,7 +451,7 @@ fn parse_extend_declaration(
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ObjectExtendDecl> {
-    let (header, body) = split_header_body(view);
+    let (header, body) = split_compound_header_body(view);
     let head = header.first_significant()?.0;
     let header = trim_layout(view_between(header, head + 1, header.range().end()));
     let parsed = parse_static_object_header(header, line, true, diagnostics)?;
@@ -440,14 +469,16 @@ fn parse_extend_declaration(
         ));
         return None;
     };
-    let body = parse_object_body(body_view, diagnostics);
-    if body.is_empty() {
-        diagnostics.push(Diagnostic::error(
+    let body = if braced_contents(body_view).is_some() {
+        parse_object_body(body_view, diagnostics)
+    } else {
+        parse_nonempty_object_body(
+            body_view,
             line,
-            "extend declaration requires a body",
-        ));
-        return None;
-    }
+            "extend declaration body cannot be empty; use `with {}` for an explicit empty body",
+            diagnostics,
+        )?
+    };
     if let Some(alias) = &parsed.alias {
         warn_unused_with_alias(alias, &body, line, diagnostics);
     }
@@ -593,16 +624,4 @@ fn static_path(view: TokenView<'_, '_>) -> Option<String> {
         }
     }
     (significant.len() % 2 == 1).then(|| view.source_text().unwrap_or("").trim().to_owned())
-}
-
-fn split_header_body<'lex, 'source>(
-    view: TokenView<'lex, 'source>,
-) -> (TokenView<'lex, 'source>, Option<TokenView<'lex, 'source>>) {
-    let Some(header_end) = first_top_level_line_start(view) else {
-        return (view, None);
-    };
-    (
-        view_between(view, view.range().start(), header_end),
-        Some(view_between(view, header_end, view.range().end())),
-    )
 }

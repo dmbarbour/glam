@@ -17,4 +17,10 @@ bad_where1 = hello ++ ", " ++ world ++ "!" where
     hello = "Hello"
   world = "World"
 
+# bad let: semicolon-separated binding groups require braces
+bad_let3 = let hello = "Hello"; world = "World" in hello ++ world
+
+# bad where: semicolon-separated binding groups require braces
+bad_where2 = hello ++ world where hello = "Hello"; world = "World"
+
 asm.result = bad_where1

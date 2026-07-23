@@ -9,7 +9,7 @@ use super::declaration::{parse_nonempty_object_body, parse_object_body};
 use super::expression::parse_expression_view;
 use super::input::{TokenRange, TokenView};
 use super::layout::{LayoutBase, LayoutView};
-use super::lexical::{LeadingTrivia, SpannedToken, TokenKind};
+use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
@@ -100,9 +100,9 @@ fn parse_let(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
     }
 
     let in_index = contextual_keywords(rest, "in").into_iter().next();
-    let (bindings, body) = if let Some(in_index) = in_index {
-        let bindings = trim_layout(view_between(rest, rest.range().start(), in_index));
-        if bindings
+    let (bindings, braced_bindings, body) = if let Some(in_index) = in_index {
+        let bindings_view = trim_layout(view_between(rest, rest.range().start(), in_index));
+        if bindings_view
             .top_level()
             .any(|indexed| matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
         {
@@ -113,10 +113,23 @@ fn parse_let(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
             )));
         }
         let body = trim_layout(view_between(rest, in_index + 1, rest.range().end()));
-        (parse_inline_bindings(bindings), body)
+        if let Some(bindings) = parse_braced_bindings(bindings_view, "let") {
+            (bindings, true, body)
+        } else if !top_level_symbols(bindings_view, ";").is_empty() {
+            (
+                Err(error_at_view(
+                    bindings_view,
+                    "naked semicolon-separated `let` bindings are not supported; use `let { ... } in ...`",
+                )),
+                false,
+                body,
+            )
+        } else {
+            (parse_binding_views(vec![bindings_view]), false, body)
+        }
     } else {
         match split_multiline_let(view, let_index, rest) {
-            Ok((bindings, body)) => (parse_binding_views(bindings), body),
+            Ok((bindings, body)) => (parse_binding_views(bindings), false, body),
             Err(diagnostics) => return Some(Err(diagnostics)),
         }
     };
@@ -125,7 +138,7 @@ fn parse_let(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
         Ok(bindings) => bindings,
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
-    if bindings.is_empty() {
+    if bindings.is_empty() && !braced_bindings {
         return Some(Err(error_at_token(
             view,
             let_token,
@@ -166,11 +179,15 @@ fn parse_where(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
         return Some(Err(error_at_token(
             view,
             where_token,
-            "let expression requires at least one binding",
+            "where expression requires at least one binding or an explicit `{}` group",
         )));
     }
 
-    let binding_views = if bindings
+    let (bindings, braced_bindings) = if let Some(bindings) =
+        parse_braced_bindings(bindings, "where")
+    {
+        (bindings, true)
+    } else if bindings
         .top_level()
         .any(|indexed| matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
     {
@@ -195,22 +212,31 @@ fn parse_where(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
                 return Some(Err(vec![Diagnostic::error(error.line(), error.message())]));
             }
         };
-        statements
+        let binding_views = statements
             .into_iter()
             .filter_map(|statement| bindings.subview(statement.tokens()))
-            .collect()
+            .collect();
+        (parse_binding_views(binding_views), false)
+    } else if !top_level_symbols(bindings, ";").is_empty() {
+        (
+            Err(error_at_view(
+                bindings,
+                "naked semicolon-separated `where` bindings are not supported; use `where { ... }`",
+            )),
+            false,
+        )
     } else {
-        split_top_level(bindings, ";")
+        (parse_binding_views(vec![bindings]), false)
     };
-    let bindings = match parse_binding_views(binding_views) {
+    let bindings = match bindings {
         Ok(bindings) => bindings,
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
-    if bindings.is_empty() {
+    if bindings.is_empty() && !braced_bindings {
         return Some(Err(error_at_token(
             view,
             where_token,
-            "let expression requires at least one binding",
+            "where expression requires at least one binding",
         )));
     }
     let body = match parse_expression(body) {
@@ -224,8 +250,12 @@ fn parse_where(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
     }))
 }
 
-fn parse_inline_bindings(view: TokenView<'_, '_>) -> ParseResult<Vec<(String, SyntaxExpr)>> {
-    parse_binding_views(split_top_level(view, ";"))
+fn parse_braced_bindings(
+    view: TokenView<'_, '_>,
+    construct: &str,
+) -> Option<ParseResult<Vec<(String, SyntaxExpr)>>> {
+    split_braced_members(view, &format!("`{construct}` binding group"))
+        .map(|members| members.and_then(parse_binding_views))
 }
 
 fn parse_binding_views(views: Vec<TokenView<'_, '_>>) -> ParseResult<Vec<(String, SyntaxExpr)>> {
@@ -272,20 +302,30 @@ fn parse_object(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
         .first_significant()
         .and_then(|(_, token)| view.line_at_span(token.span()))
         .unwrap_or(1);
+    let (_, body_view) = split_compound_header_body(view);
     let header = match parse_object_header(view)? {
         Ok(header) => header,
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
     let mut diagnostics = Vec::new();
     let body = if header.has_with {
-        let Some(body_start) = first_top_level_line_start(view) else {
+        let Some(body_view) = body_view else {
             return Some(Err(vec![Diagnostic::error(
                 object_line,
-                "object `with` body cannot be empty",
+                "object `with` requires a body; use `with {}` for an explicit empty body",
             )]));
         };
-        let body_view = view_between(view, body_start, view.range().end());
-        parse_nonempty_object_body(body_view, object_line, &mut diagnostics).unwrap_or_default()
+        if braced_contents(body_view).is_some() {
+            parse_object_body(body_view, &mut diagnostics)
+        } else {
+            parse_nonempty_object_body(
+                body_view,
+                object_line,
+                "object `with` body cannot be empty; use `with {}` for an explicit empty body",
+                &mut diagnostics,
+            )
+            .unwrap_or_default()
+        }
     } else {
         Vec::new()
     };
@@ -304,15 +344,28 @@ fn parse_object(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
 }
 
 fn parse_with(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
+    let (_, body_view) = split_compound_header_body(view);
+    let body_view = body_view?;
     let header = match parse_with_header(view)? {
         Ok(header) => header,
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
-    let body_start =
-        first_top_level_line_start(view).expect("with-expression headers require a body line");
-    let body_view = view_between(view, body_start, view.range().end());
     let mut diagnostics = Vec::new();
-    let body = parse_object_body(body_view, &mut diagnostics);
+    let body = if braced_contents(body_view).is_some() {
+        parse_object_body(body_view, &mut diagnostics)
+    } else {
+        let line = view
+            .first_significant()
+            .and_then(|(_, token)| view.line_at_span(token.span()))
+            .unwrap_or(1);
+        parse_nonempty_object_body(
+            body_view,
+            line,
+            "`with` body cannot be empty; use `with {}` for an explicit empty body",
+            &mut diagnostics,
+        )
+        .unwrap_or_default()
+    };
     if diagnostics
         .iter()
         .any(|diagnostic| diagnostic.severity == Severity::Error)
@@ -406,13 +459,17 @@ fn split_multiline_let<'lex, 'source>(
 }
 
 fn parse_object_header(view: TokenView<'_, '_>) -> Option<ParseResult<ObjectHeader>> {
-    let (object_index, object_token) = view.first_significant()?;
+    let (header_view, body) = split_compound_header_body(view);
+    let (object_index, object_token) = header_view.first_significant()?;
     if !token_is_name(object_token, "object") {
         return None;
     }
-    let header_end = first_top_level_line_start(view).unwrap_or(view.range().end());
-    let body_present = header_end < view.range().end();
-    let mut header = trim_layout(view_between(view, object_index + 1, header_end));
+    let body_present = body.is_some();
+    let mut header = trim_layout(view_between(
+        header_view,
+        object_index + 1,
+        header_view.range().end(),
+    ));
     if is_layout_empty(header) {
         return Some(Err(error_at_token(
             view,
@@ -507,8 +564,9 @@ fn parse_object_header(view: TokenView<'_, '_>) -> Option<ParseResult<ObjectHead
 }
 
 fn parse_with_header(view: TokenView<'_, '_>) -> Option<ParseResult<WithHeader>> {
-    let header_end = first_top_level_line_start(view)?;
-    let header = trim_layout(view_between(view, view.range().start(), header_end));
+    let (header, body) = split_compound_header_body(view);
+    body?;
+    let header = trim_layout(header);
     if !last_significant_is_contextual_name(header, "with") {
         return None;
     }
@@ -600,6 +658,105 @@ pub(in crate::g_syntax::parser) fn split_top_level<'lex, 'source>(
     }
     parts.push(view_between(view, start, view.range().end()));
     parts
+}
+
+pub(in crate::g_syntax::parser) fn braced_contents<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+) -> Option<TokenView<'lex, 'source>> {
+    let view = trim_layout(view);
+    let (open_index, open_token) = view.first_significant()?;
+    let (close_index, close_token) = view.last_significant()?;
+    let TokenKind::Open {
+        group,
+        delimiter: Delimiter::Brace,
+    } = open_token.kind()
+    else {
+        return None;
+    };
+    if !matches!(
+        close_token.kind(),
+        TokenKind::Close {
+            group: close_group,
+            delimiter: Delimiter::Brace,
+        } if close_group == group
+    ) {
+        return None;
+    }
+    let delimiter_group = view.group(*group)?;
+    (delimiter_group.open_token() == open_index
+        && delimiter_group.close_token() == Some(close_index))
+    .then(|| view.group_contents(*group))
+    .flatten()
+}
+
+pub(in crate::g_syntax::parser) fn split_braced_members<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+    context: &str,
+) -> Option<ParseResult<Vec<TokenView<'lex, 'source>>>> {
+    let contents = braced_contents(view)?;
+    if is_layout_empty(contents) {
+        return Some(Ok(Vec::new()));
+    }
+
+    let members = split_top_level(contents, ";")
+        .into_iter()
+        .map(trim_layout)
+        .collect::<Vec<_>>();
+    if !members.iter().any(|member| !is_layout_empty(*member)) {
+        return Some(Err(error_at_view(
+            view,
+            format!("{context} cannot contain only semicolons; use `{{}}` for an empty body"),
+        )));
+    }
+    if members
+        .iter()
+        .enumerate()
+        .any(|(index, member)| is_layout_empty(*member) && index != 0 && index != members.len() - 1)
+    {
+        return Some(Err(error_at_view(
+            view,
+            format!("{context} contains an empty member between semicolons"),
+        )));
+    }
+    Some(Ok(members
+        .into_iter()
+        .filter(|member| !is_layout_empty(*member))
+        .collect()))
+}
+
+pub(in crate::g_syntax::parser) fn split_compound_header_body<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+) -> (TokenView<'lex, 'source>, Option<TokenView<'lex, 'source>>) {
+    if let Some(header_end) = first_top_level_line_start(view) {
+        return (
+            view_between(view, view.range().start(), header_end),
+            Some(view_between(view, header_end, view.range().end())),
+        );
+    }
+
+    let last_index = view.last_significant().map(|(index, _)| index);
+    let braced_open = view.top_level().find_map(|indexed| {
+        let TokenKind::Open {
+            group,
+            delimiter: Delimiter::Brace,
+        } = indexed.token().kind()
+        else {
+            return None;
+        };
+        (view.group(*group).and_then(|group| group.close_token()) == last_index)
+            .then_some(indexed.index())
+    });
+    if let Some(body_start) = braced_open {
+        let header = trim_layout(view_between(view, view.range().start(), body_start));
+        if last_significant_is_contextual_name(header, "with") {
+            return (
+                header,
+                Some(view_between(view, body_start, view.range().end())),
+            );
+        }
+    }
+
+    (view, None)
 }
 
 pub(in crate::g_syntax::parser) fn parse_object_parents(
@@ -709,8 +866,9 @@ pub(in crate::g_syntax::parser) fn trim_layout<'lex, 'source>(
         .rev()
         .take_while(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
         .count();
+    let end = tokens.len().saturating_sub(trailing).max(leading);
     view = view
-        .slice(leading..tokens.len().saturating_sub(trailing))
+        .slice(leading..end)
         .expect("trimming layout tokens preserves an ordered range");
     view
 }

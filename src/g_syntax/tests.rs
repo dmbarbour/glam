@@ -810,20 +810,104 @@ fn objects_without_with_bodies_remain_valid() {
 }
 
 #[test]
-fn explicit_object_with_bodies_cannot_be_empty() {
-    for source in [
-        "language g0\nobject declared with\n",
-        "language g0\nobject declared with\n  # comments are not definitions\n",
-        "language g0\nexpression = object \"expression\" with\n",
-        "language g0\nexpression = object \"expression\" with\n  # comments are not definitions\n",
+fn omitted_and_layout_empty_object_with_bodies_are_rejected() {
+    for (source, expected) in [
+        (
+            "language g0\nobject declared with\n",
+            "object `with` requires a body; use `with {}` for an explicit empty body",
+        ),
+        (
+            "language g0\nobject declared with\n  # comments are not definitions\n",
+            "object `with` requires a body; use `with {}` for an explicit empty body",
+        ),
+        (
+            "language g0\nexpression = object \"expression\" with\n",
+            "object `with` requires a body; use `with {}` for an explicit empty body",
+        ),
+        (
+            "language g0\nexpression = object \"expression\" with\n  # comments are not definitions\n",
+            "object `with` requires a body; use `with {}` for an explicit empty body",
+        ),
     ] {
         let parsed = parse(source);
 
         assert_eq!(parsed.diagnostics.len(), 1, "{source}");
         assert_eq!(parsed.diagnostics[0].severity, Severity::Error, "{source}");
-        assert_eq!(
-            parsed.diagnostics[0].message, "object `with` body cannot be empty",
-            "{source}"
+        assert_eq!(parsed.diagnostics[0].message, expected, "{source}");
+    }
+}
+
+#[test]
+fn explicit_braced_compound_bodies_may_be_empty() {
+    let parsed = parse(
+        "language g0\nobject declared with {}\nexpression = object () with {}\nextend declared with {}\nunchanged = { value:\"Hello, World!\" } with {}\nasm.result = unchanged.value where {}\n",
+    );
+    assert_eq!(parsed.diagnostics, []);
+    assert!(matches!(
+        &parsed.declarations[1].kind,
+        DeclarationKind::Object(ObjectDecl { body, .. }) if body.is_empty()
+    ));
+    assert!(matches!(
+        &parsed.declarations[2].kind,
+        DeclarationKind::Definition(DefinitionDecl {
+            expr: Some(SyntaxExpr::Object(ObjectExpr { body, .. })),
+            ..
+        }) if body.is_empty()
+    ));
+    assert!(matches!(
+        &parsed.declarations[3].kind,
+        DeclarationKind::Extend(ObjectExtendDecl { body, .. }) if body.is_empty()
+    ));
+
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"Hello, World!"
+    );
+}
+
+#[test]
+fn braced_with_bodies_share_the_recursive_object_declaration_grammar() {
+    let parsed = parse(
+        "language g0\nobject parent with {;\n  prefix = \"Hello\";\n  object child with { text = ^prefix ++ \", World\" };\n  extend child with { text := _text ++ \"!\" };\n}\nasm.result = parent.child.text\n",
+    );
+    assert_eq!(parsed.diagnostics, []);
+
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"Hello, World!"
+    );
+}
+
+#[test]
+fn braced_with_bodies_reject_semicolon_only_and_interior_empty_members() {
+    for source in [
+        "language g0\nobject bad with {;}\n",
+        "language g0\nobject bad with { first = 1;; second = 2 }\n",
+    ] {
+        let parsed = parse(source);
+        assert!(
+            parsed.diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains("use `{}` for an empty body")
+                    || diagnostic
+                        .message
+                        .contains("empty member between semicolons")
+            }),
+            "`{source}` reported {:#?}",
+            parsed.diagnostics
         );
     }
 }
@@ -1742,7 +1826,8 @@ fn warns_on_unused_locals_without_underscore_prefix() {
 
 #[test]
 fn let_bindings_follow_local_unused_warning_rules() {
-    let parsed = parse("language g0\nasm.result = let unused = 1; _suppressed = 2; _ = 3 in 4\n");
+    let parsed =
+        parse("language g0\nasm.result = let { unused = 1; _suppressed = 2; _ = 3 } in 4\n");
 
     let warnings = parsed
         .diagnostics
@@ -3158,7 +3243,7 @@ fn front_end_closure_conversion_preserves_nested_captures() {
 #[test]
 fn lowers_let_expressions_to_lambda_application() {
     let parsed = parse(
-        "language g0\nasm.result = let hello = \"Hello\"; world = \"World\" in hello ++ \", \" ++ world ++ \"!\"\n",
+        "language g0\nasm.result = let { hello = \"Hello\"; world = \"World\" } in hello ++ \", \" ++ world ++ \"!\"\n",
     );
     let context = CompileContext::default();
     let lowered = lower_parsed_source(parsed, &context);
@@ -3177,7 +3262,26 @@ fn lowers_let_expressions_to_lambda_application() {
 #[test]
 fn lowers_where_expressions_to_lambda_application() {
     let parsed = parse(
-        "language g0\nasm.result = hello ++ \", \" ++ world ++ \"!\" where hello = \"Hello\"; world = \"World\"\n",
+        "language g0\nasm.result = hello ++ \", \" ++ world ++ \"!\" where { hello = \"Hello\"; world = \"World\" }\n",
+    );
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"Hello, World!"
+    );
+}
+
+#[test]
+fn empty_braced_let_and_where_groups_are_identity_sugar() {
+    let parsed = parse(
+        "language g0\nleft = let {} in \"Hello\"\nright = \", World!\" where {}\nasm.result = left ++ right\n",
     );
     let context = CompileContext::default();
     let lowered = lower_parsed_source(parsed, &context);
