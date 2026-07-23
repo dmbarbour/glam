@@ -28,7 +28,8 @@ not define future language semantics or collect subsystem invariants.
 | `g_source.rs` | Narrow public inspection report for the built-in `.g` parser; no syntax tree or lowering context escapes |
 | `compiler.rs` | Per-source capabilities, hidden artifact/import provenance, loaders, namespace qualification, and diagnostic emission |
 | `g_syntax.rs` | Private built-in `.g` front-end facade |
-| `g_syntax/parser/` | Layout, declaration, expression, and compound parsing |
+| `g_syntax/parser/lexical.rs` | Single-pass source validation plus provisional spanned tokens, text values, delimiter pairs, indentation facts, and declaration ranges |
+| remaining `g_syntax/parser/` | Transitional layout, declaration, expression, and compound parsers migrating from normalized text to lexical tokens |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs` | Scope resolution, affine semantic IR, captures, and warnings |
 | `g_syntax/compiler_values.rs` | Shared closed helpers and built-in modules owned by the g compiler |
 | `g_syntax/module_lowering/` | Imports, definitions, objects, and module fixpoint orchestration |
@@ -92,6 +93,7 @@ alternative.
 
 ```text
 raw source bytes
+  -> built-in g lexical structure and source-wide diagnostics
   -> parser-owned SyntaxExpr and declarations
   -> resolver-owned BindingId locals and ResolvedExpr<Value>
   -> module lowering or net lowering

@@ -31,6 +31,11 @@ notes instead of appending history; put subsystem details in
 - Prefer source spans and diagnostics to panics for user-facing failures.
 - Use Chumsky for growing `.g` grammar work. Small hand-written layout or
   normalization passes are fine when clearer.
+- `g_syntax/parser/lexical.rs` owns source-wide newline and whitespace
+  validation and records the delimiter, text, indentation, and declaration
+  structure needed for migration to token-input parsing. Until that migration
+  finishes, treat additional character-level structure scanners as technical
+  debt rather than new parser architecture.
 - Keep current implementation claims out of target-state design documents, and
   keep chronological spike notes out of this file.
 

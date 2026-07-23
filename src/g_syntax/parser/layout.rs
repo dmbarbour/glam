@@ -1,7 +1,5 @@
 use chumsky::prelude::*;
 
-use super::super::Diagnostic;
-
 pub(super) fn glam_name<'src>() -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>>
 {
     text::ascii::ident().try_map(|name: &str, span| {
@@ -96,26 +94,6 @@ pub(super) fn strip_indent_width(line: &str, width: usize) -> &str {
     ""
 }
 
-pub(super) fn unsupported_whitespace_diagnostics(text: &str) -> Vec<Diagnostic> {
-    split_lines(text)
-        .into_iter()
-        .filter_map(|line| {
-            line.text
-                .chars()
-                .find(|ch| ch.is_whitespace() && *ch != ' ')
-                .map(|ch| {
-                    Diagnostic::error(
-                        line.number,
-                        format!(
-                            "unsupported whitespace U+{:04X}; .g source permits only SP, CR, and LF",
-                            ch as u32
-                        ),
-                    )
-                })
-        })
-        .collect()
-}
-
 pub(super) fn is_dedent_closer(trimmed: &str) -> bool {
     !trimmed.is_empty() && trimmed.chars().all(|ch| matches!(ch, '}' | ']' | ')'))
 }
@@ -206,43 +184,6 @@ pub(super) fn dedent_layout_block(text: &str) -> Result<String, String> {
     }
 
     Ok(normalized)
-}
-
-pub(super) fn line_ending_diagnostics(text: &str) -> Vec<Diagnostic> {
-    let mut has_lf = false;
-    let mut has_crlf = false;
-    let mut has_cr = false;
-    let bytes = text.as_bytes();
-    let mut index = 0;
-
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
-                has_crlf = true;
-                index += 2;
-            }
-            b'\r' => {
-                has_cr = true;
-                index += 1;
-            }
-            b'\n' => {
-                has_lf = true;
-                index += 1;
-            }
-            _ => index += 1,
-        }
-    }
-
-    let kinds = [has_lf, has_crlf, has_cr]
-        .into_iter()
-        .filter(|present| *present)
-        .count();
-
-    if kinds > 1 {
-        vec![Diagnostic::warn(1, "source uses inconsistent line endings")]
-    } else {
-        Vec::new()
-    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -5,6 +5,7 @@ mod declaration;
 mod do_expr;
 mod expression;
 mod layout;
+mod lexical;
 mod source;
 
 pub(super) use compound::parse_expr_result_with_diagnostics;
