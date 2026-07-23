@@ -27,11 +27,15 @@ struct WithHeader {
     alias: Option<String>,
 }
 
-pub(super) fn parse_compound_expression_fragment(source: &[u8]) -> ParseResult<SyntaxExpr> {
+pub(in crate::g_syntax::parser) fn parse_compound_expression_fragment(
+    source: &[u8],
+) -> ParseResult<SyntaxExpr> {
     super::super::input::parse_expression_fragment(source, parse_expression)
 }
 
-fn parse_expression(view: TokenView<'_, '_>) -> ParseResult<SyntaxExpr> {
+pub(in crate::g_syntax::parser) fn parse_expression(
+    view: TokenView<'_, '_>,
+) -> ParseResult<SyntaxExpr> {
     let view = trim_layout(view);
     if let Some(result) = parse_let(view) {
         return result;

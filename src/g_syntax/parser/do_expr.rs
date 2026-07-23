@@ -13,6 +13,9 @@ use super::layout::{
     legacy_split_layout_statements,
 };
 
+#[cfg(test)]
+pub(super) mod token;
+
 enum ParsedDoStatement {
     Abstract(Vec<String>),
     Bind { name: String, operation: SyntaxExpr },
@@ -395,32 +398,38 @@ fn parse_braced_do_block(
 }
 
 fn parse_do_statements(
-    mut statements: Vec<DoStatementSource<'_>>,
+    statements: Vec<DoStatementSource<'_>>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<SyntaxExpr, String> {
-    let result_statement = statements
+    let statements = statements
+        .into_iter()
+        .map(|statement| {
+            parse_do_statement(statement.text, statement.line, diagnostics)
+                .map(|statement_kind| (statement.line, statement_kind))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    finish_do_statements(statements)
+}
+
+fn finish_do_statements(
+    mut statements: Vec<(usize, ParsedDoStatement)>,
+) -> Result<SyntaxExpr, String> {
+    let (result_line, result_statement) = statements
         .pop()
         .expect("do statement sequence should be checked as non-empty");
 
     let mut steps = Vec::with_capacity(statements.len());
-    for statement in statements {
-        let kind = match parse_do_statement(statement.text, statement.line, diagnostics)? {
+    for (line, statement) in statements {
+        let kind = match statement {
             ParsedDoStatement::Abstract(names) => DoStepKind::Abstract(names),
             ParsedDoStatement::Bind { name, operation } => DoStepKind::Bind { name, operation },
             ParsedDoStatement::ValueBind { name, value } => DoStepKind::ValueBind { name, value },
             ParsedDoStatement::Expr(expr) => DoStepKind::Then(expr),
         };
-        steps.push(DoStep {
-            line: statement.line,
-            kind,
-        });
+        steps.push(DoStep { line, kind });
     }
 
-    let result = match parse_do_statement(
-        result_statement.text,
-        result_statement.line,
-        diagnostics,
-    )? {
+    let result = match result_statement {
         ParsedDoStatement::Expr(expr) => expr,
         ParsedDoStatement::Abstract(_) => {
             return Err(
@@ -434,7 +443,7 @@ fn parse_do_statements(
     };
     Ok(SyntaxExpr::Do(DoExpr {
         steps,
-        result_line: result_statement.line,
+        result_line,
         result: Box::new(result),
     }))
 }
@@ -701,7 +710,17 @@ fn parse_exact_local_name(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::g_syntax::parser::compound::parse_expr_result;
+    use crate::g_syntax::parser::compound::token::parse_compound_expression_fragment;
+
+    fn parse_expr_result(source: &str) -> Result<SyntaxExpr, String> {
+        parse_compound_expression_fragment(source.as_bytes()).map_err(|diagnostics| {
+            diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.message)
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    }
 
     #[test]
     fn parses_do_statement_kinds_and_preserves_lines() {
@@ -951,7 +970,7 @@ mod tests {
             ("do {;}", "semicolon is not an empty computation"),
             ("do { .r ();; .r () }", "empty statement"),
             ("do { value <- .r 1; }", "cannot end with a binding"),
-            ("do { .r ()", "unmatched or mismatched"),
+            ("do { .r ()", "expected `}`"),
         ];
 
         for (source, expected) in cases {

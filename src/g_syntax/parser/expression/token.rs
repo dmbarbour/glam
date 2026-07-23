@@ -11,6 +11,7 @@ use crate::number::Number;
 use super::super::super::{
     Diagnostic, PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, flatten_path_suffixes,
 };
+use super::super::do_expr::token::parse_do_atom;
 use super::super::input::{
     ParseSession, TokenExtra, TokenInput, TokenView, close, joint, keyword, line_start, name,
     number, open, space_before, symbol, text_id,
@@ -273,6 +274,11 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .then(expr.clone())
             .map(|(params, body)| SyntaxExpr::Lambda(params, Box::new(body)));
 
+        let do_expr = do_expr(view)
+            .then(path_suffix.clone())
+            .map(|(base, suffixes)| access_if_path(base, suffixes))
+            .boxed();
+
         let literal_atom = choice((
             unit,
             text,
@@ -290,7 +296,14 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .then(path_suffix.clone())
             .map(|(base, suffixes)| access_if_path(base, suffixes))
             .boxed();
-        let base_atom = choice((literal_expr, escaped_expr, effect_expr, rooted_name)).boxed();
+        let base_atom = choice((
+            do_expr,
+            literal_expr,
+            escaped_expr,
+            effect_expr,
+            rooted_name,
+        ))
+        .boxed();
 
         let atom = recursive(|atom| {
             let constructor = symbol(":")
@@ -339,6 +352,48 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
         ))
         .boxed()
     })
+}
+
+fn do_expr<'lex, 'source: 'lex>(
+    view: TokenView<'lex, 'source>,
+) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
+    keyword("do").ignore_then(custom::<
+        _,
+        TokenInput<'lex, 'source>,
+        SyntaxExpr,
+        TokenExtra<'lex, 'source>,
+    >(move |input| {
+        let before = input.cursor();
+        let next_span = input.peek().map(|token| token.span());
+        let next_index = next_span.and_then(|span| {
+            view.tokens()
+                .iter()
+                .position(|candidate| candidate.span() == span)
+                .and_then(|relative| view.absolute_index(relative))
+        });
+        let do_index = next_index
+            .and_then(|next| next.checked_sub(1))
+            .unwrap_or_else(|| view.range().end().saturating_sub(1));
+        let (expr, end) = parse_do_atom(view, do_index).map_err(|diagnostics| {
+            Rich::custom(
+                input.span_since(&before),
+                diagnostics
+                    .into_iter()
+                    .map(|diagnostic| diagnostic.message)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })?;
+        for _ in do_index + 1..end {
+            if input.next().is_none() {
+                return Err(Rich::custom(
+                    input.span_since(&before),
+                    "do expression extends beyond its expression view",
+                ));
+            }
+        }
+        Ok(expr)
+    }))
 }
 
 fn glam_name<'lex, 'source: 'lex>()

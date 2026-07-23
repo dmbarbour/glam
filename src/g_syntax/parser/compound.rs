@@ -10,7 +10,7 @@ use super::layout::{
 };
 
 #[cfg(test)]
-mod token;
+pub(in crate::g_syntax::parser) mod token;
 
 pub(super) fn syntax_binary_expr(
     operator: SyntaxOperator,
