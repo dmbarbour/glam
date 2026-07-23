@@ -5,7 +5,7 @@
 //! top-level object declarations.
 
 use super::super::{Diagnostic, ObjectExpr, Severity, SyntaxExpr};
-use super::declaration::parse_object_body;
+use super::declaration::{parse_nonempty_object_body, parse_object_body};
 use super::expression::parse_expression_view;
 use super::input::{TokenRange, TokenView};
 use super::layout::{LayoutBase, LayoutView};
@@ -18,6 +18,7 @@ struct ObjectHeader {
     name: Option<Box<SyntaxExpr>>,
     alias: Option<String>,
     deps: Vec<SyntaxExpr>,
+    has_with: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -240,17 +241,26 @@ fn parse_binding(view: TokenView<'_, '_>) -> ParseResult<(String, SyntaxExpr)> {
 }
 
 fn parse_object(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxExpr>> {
+    let object_line = view
+        .first_significant()
+        .and_then(|(_, token)| view.line_at_span(token.span()))
+        .unwrap_or(1);
     let header = match parse_object_header(view)? {
         Ok(header) => header,
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
-    let (body, diagnostics) = if let Some(body_start) = first_top_level_line_start(view) {
+    let mut diagnostics = Vec::new();
+    let body = if header.has_with {
+        let Some(body_start) = first_top_level_line_start(view) else {
+            return Some(Err(vec![Diagnostic::error(
+                object_line,
+                "object `with` body cannot be empty",
+            )]));
+        };
         let body_view = view_between(view, body_start, view.range().end());
-        let mut diagnostics = Vec::new();
-        let body = parse_object_body(body_view, &mut diagnostics);
-        (body, diagnostics)
+        parse_nonempty_object_body(body_view, object_line, &mut diagnostics).unwrap_or_default()
     } else {
-        (Vec::new(), Vec::new())
+        Vec::new()
     };
     if diagnostics
         .iter()
@@ -431,6 +441,12 @@ fn parse_object_header(view: TokenView<'_, '_>) -> Option<ParseResult<ObjectHead
     } else {
         None
     };
+    if alias.is_some() && !has_with {
+        return Some(Err(error_at_view(
+            header,
+            "object expression `as` requires a `with` body",
+        )));
+    }
 
     let deps = if let Some(extends_index) = extends_index {
         if as_index.is_some_and(|as_index| as_index > extends_index) {
@@ -467,7 +483,12 @@ fn parse_object_header(view: TokenView<'_, '_>) -> Option<ParseResult<ObjectHead
         Vec::new()
     };
 
-    Some(Ok(ObjectHeader { name, alias, deps }))
+    Some(Ok(ObjectHeader {
+        name,
+        alias,
+        deps,
+        has_with,
+    }))
 }
 
 fn parse_with_header(view: TokenView<'_, '_>) -> Option<ParseResult<WithHeader>> {

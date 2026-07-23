@@ -6,7 +6,7 @@
 
 use super::super::{
     DeclarationKind, DefinitionDecl, DefinitionKind, Diagnostic, ObjectBodyDefinition,
-    ObjectBodyDefinitionKind, ObjectDecl, ObjectExtendDecl, SyntaxExpr, SyntaxKeyExpr,
+    ObjectBodyDefinitionKind, ObjectDecl, ObjectExtendDecl, Severity, SyntaxExpr, SyntaxKeyExpr,
     warn_unused_locals, warn_unused_with_alias,
 };
 use super::input::TokenView;
@@ -104,6 +104,28 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
         }
     }
     body
+}
+
+pub(in crate::g_syntax::parser) fn parse_nonempty_object_body(
+    view: TokenView<'_, '_>,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Vec<ObjectBodyDefinition>> {
+    let diagnostic_start = diagnostics.len();
+    let body = parse_object_body(view, diagnostics);
+    if body.is_empty() {
+        if !diagnostics[diagnostic_start..]
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Severity::Error)
+        {
+            diagnostics.push(Diagnostic::error(
+                line,
+                "object `with` body cannot be empty",
+            ));
+        }
+        return None;
+    }
+    Some(body)
 }
 
 fn parse_definition(
@@ -358,7 +380,25 @@ fn parse_object_declaration(
         ));
         return None;
     }
-    let body = body.map_or_else(Vec::new, |body| parse_object_body(body, diagnostics));
+    if parsed.alias.is_some() && !parsed.has_with {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "object declaration `as` requires a `with` body",
+        ));
+        return None;
+    }
+    let body = if parsed.has_with {
+        let Some(body) = body else {
+            diagnostics.push(Diagnostic::error(
+                line,
+                "object `with` body cannot be empty",
+            ));
+            return None;
+        };
+        parse_nonempty_object_body(body, line, diagnostics)?
+    } else {
+        Vec::new()
+    };
     if let Some(alias) = &parsed.alias {
         warn_unused_with_alias(alias, &body, line, diagnostics);
     }

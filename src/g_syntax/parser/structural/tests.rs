@@ -87,7 +87,12 @@ fn object_headers_match_the_complete_structural_parse() {
         };
         assert_eq!(
             token_object_header(source),
-            ObjectHeader { name, alias, deps }
+            ObjectHeader {
+                name,
+                alias,
+                deps,
+                has_with: true,
+            }
         );
     }
 }

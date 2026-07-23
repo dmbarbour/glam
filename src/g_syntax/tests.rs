@@ -702,6 +702,63 @@ fn object_declarations_require_named_targets() {
 }
 
 #[test]
+fn objects_without_with_bodies_remain_valid() {
+    let parsed = parse("language g0\nobject declared\nexpression = object \"expression\"\n");
+
+    assert_eq!(parsed.diagnostics, []);
+    assert!(matches!(
+        &parsed.declarations[1].kind,
+        DeclarationKind::Object(ObjectDecl { body, .. }) if body.is_empty()
+    ));
+    assert!(matches!(
+        &parsed.declarations[2].kind,
+        DeclarationKind::Definition(DefinitionDecl {
+            expr: Some(SyntaxExpr::Object(ObjectExpr { body, .. })),
+            ..
+        }) if body.is_empty()
+    ));
+}
+
+#[test]
+fn explicit_object_with_bodies_cannot_be_empty() {
+    for source in [
+        "language g0\nobject declared with\n",
+        "language g0\nobject declared with\n  # comments are not definitions\n",
+        "language g0\nexpression = object \"expression\" with\n",
+        "language g0\nexpression = object \"expression\" with\n  # comments are not definitions\n",
+    ] {
+        let parsed = parse(source);
+
+        assert_eq!(parsed.diagnostics.len(), 1, "{source}");
+        assert_eq!(parsed.diagnostics[0].severity, Severity::Error, "{source}");
+        assert_eq!(
+            parsed.diagnostics[0].message, "object `with` body cannot be empty",
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn object_aliases_require_with_bodies() {
+    for (source, expected) in [
+        (
+            "language g0\nobject declared as self\n",
+            "object declaration `as` requires a `with` body",
+        ),
+        (
+            "language g0\nexpression = object \"expression\" as self\n",
+            "object expression `as` requires a `with` body",
+        ),
+    ] {
+        let parsed = parse(source);
+
+        assert_eq!(parsed.diagnostics.len(), 1, "{source}");
+        assert_eq!(parsed.diagnostics[0].severity, Severity::Error, "{source}");
+        assert_eq!(parsed.diagnostics[0].message, expected, "{source}");
+    }
+}
+
+#[test]
 fn parses_object_and_extend_aliases() {
     let parsed = parse(
         "language g0\nobject child as _c extends base with\n  text = c.base\nextend child as _c with\n  text := _c.text ++ \"!\"\n",
@@ -2388,7 +2445,7 @@ fn hierarchical_object_names_are_local_to_the_host_object() {
 #[test]
 fn repeated_anonymous_object_mixins_are_not_deduplicated() {
     let parsed = parse(
-        "language g0\nobject base with\n  count = 0\ninc = object _ with\n  count := _count + 1\nobject child extends inc, inc, inc, base with\nasm.result = child.count\n",
+        "language g0\nobject base with\n  count = 0\ninc = object _ with\n  count := _count + 1\nobject child extends inc, inc, inc, base\nasm.result = child.count\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -2423,7 +2480,7 @@ fn anonymous_object_dependencies_can_have_anonymous_and_named_dependencies() {
 #[test]
 fn anonymous_object_dependencies_follow_dependency_override_order() {
     let parsed = parse(
-        "language g0\nobject base with\n  code = \"\"\nadd_a = object _ with\n  code := _code ++ \"A\"\nadd_b = object _ with\n  code := _code ++ \"B\"\nobject child extends add_a, add_b, base with\nasm.result = child.code\n",
+        "language g0\nobject base with\n  code = \"\"\nadd_a = object _ with\n  code := _code ++ \"A\"\nadd_b = object _ with\n  code := _code ++ \"B\"\nobject child extends add_a, add_b, base\nasm.result = child.code\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
