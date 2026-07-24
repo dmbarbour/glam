@@ -369,25 +369,27 @@ do
 if C then A else B
 A if C else B
 if (a,b) = Expr and a > b then A else B     # C is guard: patterns + effects + 'and'
+value if (value, rest) = split input else fallback
+# Postfix guards bind within the preceding success value, not the else branch.
 
 match Expr with
-    Pattern1 -> Result1
-    P2 when C2 -> R2               # guard clause
+    Pattern1 => Result1
+    P2 when C2 => R2               # guard clause
     P3 when                        # branching guards, nestable
-        C3a -> R3a
-        C3b -> R3b
-    _ -> Default
+        C3a => R3a
+        C3b => R3b
+    _ => Default
 
 match when                          # no scrutinee: guard-only dispatch
-    C1 -> R1
-    C2 -> R2
+    C1 => R1
+    C2 => R2
 
 try C then A else B                 # effectful variants: run in host with
 try_match Expr with ...             #    backtracking, state access
 
 if C then? .r A else B              # tentative choice: branch must
 if C then? .fail else B             #   explicitly .r Result or .fail
-match Expr with P -?> ...           # tentative arrow for match
+match Expr with P =>? ...           # tentative arrow: result returns or fails
 ```
 
 ```
@@ -442,7 +444,8 @@ tag:P    :tag    'name
 '.foo.[key].(tail) # computed quoted path; earlier captures are in scope
 (,)   (P,)   (P1,P2) # tuple patterns
 42   _1.23   1/6    # exact constants
-(View -> P)         # view pattern — MUST be parenthesized; view runs first
+(View -> P)         # view pattern; view runs first
+View -> P => Result # whole match-arm view may omit outer parentheses
 (P <- View)
 (Nat n)             # predicate pattern: pass/fail, captures ORIGINAL input
 (Prefix "x-" rest)  # last arg is the pattern
@@ -523,12 +526,12 @@ self                        # current object namespace (= module at toplevel)
 
 ```
 foreach L Action = match L with
-    [x]++xs -> Action x >>= foreach xs Action
-    [] -> .r ()
+    [x]++xs => Action x >>= foreach xs Action
+    [] => .r ()
 
 untilDone s0 Action = match s0 with
-    done:R -> .r R
-    _ -> Action s0 >>= \ s1 -> untilDone s1 Action
+    done:R => .r R
+    _ => Action s0 >>= \ s1 -> untilDone s1 Action
 ```
 
 ## Putting It Together

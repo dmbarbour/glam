@@ -223,7 +223,7 @@ Fixpoint is not compatible with all effects. But it is feasible to restrict some
 
 ### Effectful Pattern Matching
 
-I propose to desugar syntax for conditional behavior, such as pattern matching, into a choice effect. The choice effect supports deferred branching for cases sharing a common prefix, and empty choice expresses match failure or backtracking. A conventional `Pattern -> Outcome` syntax may desugar to `PatternEffect >>= \ vars -> Return Outcome` such that Pattern binds variables in scope of Outcome, and Return serves as a stage separator for further effects. We can introduce an alternative separator where the Return is explicit, perhaps `Pattern >> Return Outcome`, such that the RHS may be an effectful expression expanding to multiple Outcomes.
+I propose to desugar syntax for conditional behavior, such as pattern matching, into a choice effect. The choice effect supports deferred branching for cases sharing a common prefix, and empty choice expresses match failure or backtracking. A conventional `Pattern => Outcome` syntax may desugar to `PatternEffect >>= \ vars -> Return Outcome` such that Pattern binds variables in scope of Outcome, and Return serves as a stage separator for further effects. The tentative `Pattern =>? Operation` separator leaves the return explicit, such that its RHS may return or fail effectfully.
 
 We should carefully distinguish an explicitly branching effect from local
 conditional search. `X or Y` is effect-level sugar for the raw, ordered

@@ -1291,12 +1291,24 @@ I support `if/then/else` for reasons of familiarity and convenience. We'll desug
 
         # in general, desugars as
         match when
-            C -> A
-            _ -> B
+            C => A
+            _ => B
 
 Note that conditions are not expressions. Instead, they're guard clauses, i.e. a sequence of `Guard (and Guard)*`. Relevantly, this admits pattern guards, which are often convenient, and effects guards, which can express branching conditions.
 
         if (a,b) = Expr and a > b then A else B
+
+The postfix form has the same binding scope as the prefix form. Its guards
+run first, and names introduced by those guards are visible in the
+textually-earlier successful result:
+
+```g
+value if (value, rest) = decompose input else fallback
+```
+
+The captures are not visible in the `else` result or after the conditional.
+This is an intentional case where semantic binding order differs from textual
+order.
 
 *Note:* Users are encouraged to switch to the `match` form rather than chaining `else if` many times.
 
@@ -1306,7 +1318,7 @@ I propose to model a 'pure' `if/then/else` or `match` syntax in terms of the com
 
 ### Tentative Choice
 
-Instead of confidently returning a result, we can extend the conditional into the result via `then?` (or `-?>` for `match`). 
+Instead of confidently returning a result, we can extend the conditional into the result via `then?` (or `=>?` for `match`).
 
         if C then? .r A else B          # same as if C then A else B
         if C then? .fail else B         # always returns B
@@ -1337,32 +1349,32 @@ The `then?` branch has access to the same effects as guard conditions, and must 
 I borrow a lot of inspiration from Haskell's syntax for `match`. Common use cases are basically the same.
 
         match Expr with
-            Pattern1 -> Result1
-            Pattern2 -> Result2 
-            _ -> Result3
+            Pattern1 => Result1
+            Pattern2 => Result2
+            _ => Result3
 
 We also support branching guard clauses. We use `when` to separate the pattern from the a branching clause. base case, we have only one branch. But we'll need another `when` for hierarchical branching.
 
         match Expr with
-            P1 when C1 -> R1        # basic
+            P1 when C1 => R1        # basic
             P2 when                 # multiline
-                C2_a -> R2_a
-                C2_b -> R2_b
+                C2_a => R2_a
+                C2_b => R2_b
             P3 when
                 C3_a when           # multi-level
-                    C3_a_a -> R3_a_a
-                    C3_a_b -> R3_a_b
-                C3_b -> R3_b
+                    C3_a_a => R3_a_a
+                    C3_a_b => R3_a_b
+                C3_b => R3_b
 
 If users don't need the pattern, they may just write `match when` instead. 
 
         match when
-            C1 -> R1
+            C1 => R1
             C2 when
-                C2a -> R2a
-                C2b -> R2b
+                C2a => R2a
+                C2b => R2b
 
-Tentative choice is expressed using `-?>`.
+Tentative choice is expressed using `=>?`.
 
 ### Guard Clauses
 
@@ -1435,8 +1447,9 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         _1.23
         1/6                         # exact rationals supported
 
-        (View -> Pattern)           # view patterns *must* be parenthesized
-        (Pattern <- View)           
+        (View -> Pattern)           # parenthesized in ambiguous contexts
+        (Pattern <- View)
+        View -> Pattern => Result   # whole match-arm view may omit parens
         (Predicate Pattern)         # predicate patterns (special view)
         (Pattern when Guard)        # local guards
 
@@ -1446,6 +1459,16 @@ View patterns have an opportunity to filter, rewrite, and search (branch) on dat
 
         (View -> Pattern)     # or equivalently
         (Pattern <- View)
+
+Parentheses remain required where the view arrow would conflict with another
+`->` owner, notably inside a forward `do` binding. A view occupying the
+complete pattern head of a match arm may omit them because `=>` marks the
+distinct result boundary:
+
+```g
+match Subject with
+  View -> Pattern => Result
+```
 
 The primary difference between a view pattern and effectful guard clause is that, in the pattern context, we have an input other than the effectful environment. The viewer has access to the *same* effects as the guard clauses and tentative choice.
 
@@ -1481,12 +1504,12 @@ As with Haskell, we don't need keywords to support loops. Using *objects*, we ca
 
         # foreach [1,2,3] \item-> do Body
         foreach L Action = match L with
-            [x]++xs -> (Action x) >>= foreach xs Action
-            [] -> .r ()
+            [x]++xs => (Action x) >>= foreach xs Action
+            [] => .r ()
 
         untilDone s0 Action = match s0 with
-            done:R -> .r R
-            _ -> Action s0 >>= \ s1 -> untilDone s1 Action 
+            done:R => .r R
+            _ => Action s0 >>= \ s1 -> untilDone s1 Action
 
 At least for now, I'll defer keywords for loops. But there are at least a few motives for syntax-supported loops: user familiarity, and tighter integration with pattern matching. Perhaps more if we could make loop objects syntactically convenient to work with. Will review later.
 
