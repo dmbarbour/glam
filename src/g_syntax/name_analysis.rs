@@ -414,8 +414,8 @@ impl FileNameAnalysis {
         unresolved: &mut Vec<String>,
     ) {
         pattern.visit_scope_events(&mut |event| match event {
-            SyntaxPatternScopeEvent::Key(key) => {
-                self.visit_key_expr(key, line, scope, locals);
+            SyntaxPatternScopeEvent::Expression(expr) => {
+                self.visit_expr(expr, line, scope, locals);
             }
             SyntaxPatternScopeEvent::Capture(name) => {
                 if !fulfills_abstract_name(name, unresolved) {

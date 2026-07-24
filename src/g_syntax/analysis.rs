@@ -457,9 +457,9 @@ fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {
             }
             DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
                 pattern.visit_scope_events(&mut |event| match event {
-                    SyntaxPatternScopeEvent::Key(key) => {
-                        mark_used_key_expr(key, &locals, &mut used);
-                        analyze_key_expr_locals(key, step.line, diagnostics);
+                    SyntaxPatternScopeEvent::Expression(expr) => {
+                        mark_used_locals(expr, &locals, &mut used);
+                        analyze_expr_locals(expr, step.line, diagnostics);
                     }
                     SyntaxPatternScopeEvent::Capture(name) => {
                         if !fulfills_abstract(name, &mut unresolved_abstracts) {
@@ -552,8 +552,8 @@ fn mark_used_do_locals(do_expr: &DoExpr, locals: &[LocalName], used: &mut [bool]
             }
             DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
                 pattern.visit_scope_events(&mut |event| match event {
-                    SyntaxPatternScopeEvent::Key(key) => {
-                        mark_used_key_expr(key, &combined, &mut combined_used);
+                    SyntaxPatternScopeEvent::Expression(expr) => {
+                        mark_used_locals(expr, &combined, &mut combined_used);
                     }
                     SyntaxPatternScopeEvent::Capture(name) => {
                         if !fulfills_abstract(name, &mut unresolved_abstracts) {

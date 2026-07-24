@@ -139,8 +139,21 @@ pub struct SyntaxDictPatternEntry {
     pub pattern: SyntaxPattern,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum SyntaxPatternGuard {
+    Effect(SyntaxExpr),
+    Bind {
+        pattern: SyntaxPattern,
+        operation: SyntaxExpr,
+    },
+    ValueBind {
+        pattern: SyntaxPattern,
+        value: SyntaxExpr,
+    },
+}
+
 pub(super) enum SyntaxPatternScopeEvent<'a> {
-    Key(&'a SyntaxKeyExpr),
+    Expression(&'a SyntaxExpr),
     Capture(&'a str),
 }
 
@@ -161,6 +174,18 @@ pub enum SyntaxPatternKind {
     QuotedPath(Vec<SyntaxKeyExpr>),
     Group(Box<SyntaxPattern>),
     As(Box<SyntaxPattern>, Box<SyntaxPattern>),
+    View {
+        view: Box<SyntaxExpr>,
+        pattern: Box<SyntaxPattern>,
+    },
+    Predicate {
+        predicate: Box<SyntaxExpr>,
+        pattern: Box<SyntaxPattern>,
+    },
+    Guarded {
+        pattern: Box<SyntaxPattern>,
+        guards: Vec<SyntaxPatternGuard>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -193,11 +218,12 @@ impl SyntaxPattern {
         });
     }
 
-    /// Visits computed path expressions and captures in matching order.
+    /// Visits pattern-owned expressions and captures in matching order.
     ///
-    /// Each key expression is evaluated before the subpattern selected by that
-    /// path. Later path expressions may therefore use captures established by
-    /// earlier subpatterns.
+    /// Each expression is evaluated at its semantic match step. Later
+    /// expressions may therefore use captures established by earlier
+    /// subpatterns, while views and predicates cannot see their own inner
+    /// pattern's captures.
     pub(super) fn visit_scope_events<'a>(
         &'a self,
         visitor: &mut impl FnMut(SyntaxPatternScopeEvent<'a>),
@@ -223,7 +249,7 @@ impl SyntaxPattern {
             SyntaxPatternKind::Dict { entries, remainder } => {
                 for entry in entries {
                     for key in &entry.path {
-                        visitor(SyntaxPatternScopeEvent::Key(key));
+                        visit_key_scope_events(key, visitor);
                     }
                     entry.pattern.visit_scope_events(visitor);
                 }
@@ -233,13 +259,27 @@ impl SyntaxPattern {
             }
             SyntaxPatternKind::QuotedPath(path) => {
                 for key in path {
-                    visitor(SyntaxPatternScopeEvent::Key(key));
+                    visit_key_scope_events(key, visitor);
                 }
             }
             SyntaxPatternKind::Group(pattern) => pattern.visit_scope_events(visitor),
             SyntaxPatternKind::As(left, right) => {
                 left.visit_scope_events(visitor);
                 right.visit_scope_events(visitor);
+            }
+            SyntaxPatternKind::View { view, pattern } => {
+                visitor(SyntaxPatternScopeEvent::Expression(view));
+                pattern.visit_scope_events(visitor);
+            }
+            SyntaxPatternKind::Predicate { predicate, pattern } => {
+                visitor(SyntaxPatternScopeEvent::Expression(predicate));
+                pattern.visit_scope_events(visitor);
+            }
+            SyntaxPatternKind::Guarded { pattern, guards } => {
+                pattern.visit_scope_events(visitor);
+                for guard in guards {
+                    guard.visit_scope_events(visitor);
+                }
             }
         }
     }
@@ -258,7 +298,10 @@ impl SyntaxPattern {
             SyntaxPatternKind::Literal(_)
             | SyntaxPatternKind::List { .. }
             | SyntaxPatternKind::Dict { .. }
-            | SyntaxPatternKind::QuotedPath(_) => false,
+            | SyntaxPatternKind::QuotedPath(_)
+            | SyntaxPatternKind::View { .. }
+            | SyntaxPatternKind::Predicate { .. }
+            | SyntaxPatternKind::Guarded { .. } => false,
         }
     }
 
@@ -306,6 +349,20 @@ impl SyntaxPattern {
                 left.visit_match_events(visitor);
                 right.visit_match_events(visitor);
             }
+            SyntaxPatternKind::View { pattern, .. } => {
+                visitor(None);
+                pattern.visit_match_events(visitor);
+            }
+            SyntaxPatternKind::Predicate { pattern, .. } => {
+                visitor(None);
+                pattern.visit_match_events(visitor);
+            }
+            SyntaxPatternKind::Guarded { pattern, guards } => {
+                pattern.visit_match_events(visitor);
+                for guard in guards {
+                    guard.visit_primitive_events(visitor);
+                }
+            }
             SyntaxPatternKind::List {
                 prefix,
                 middle,
@@ -341,6 +398,43 @@ impl SyntaxPattern {
                     visitor(None);
                 }
             }
+        }
+    }
+}
+
+impl SyntaxPatternGuard {
+    fn visit_scope_events<'a>(&'a self, visitor: &mut impl FnMut(SyntaxPatternScopeEvent<'a>)) {
+        match self {
+            Self::Effect(expr) => visitor(SyntaxPatternScopeEvent::Expression(expr)),
+            Self::Bind { pattern, operation } => {
+                visitor(SyntaxPatternScopeEvent::Expression(operation));
+                pattern.visit_scope_events(visitor);
+            }
+            Self::ValueBind { pattern, value } => {
+                visitor(SyntaxPatternScopeEvent::Expression(value));
+                pattern.visit_scope_events(visitor);
+            }
+        }
+    }
+
+    fn visit_primitive_events<'a>(&'a self, visitor: &mut impl FnMut(Option<&'a str>)) {
+        match self {
+            Self::Effect(_) => visitor(None),
+            Self::Bind { pattern, .. } | Self::ValueBind { pattern, .. } => {
+                pattern.visit_primitive_events(visitor);
+            }
+        }
+    }
+}
+
+fn visit_key_scope_events<'a>(
+    key: &'a SyntaxKeyExpr,
+    visitor: &mut impl FnMut(SyntaxPatternScopeEvent<'a>),
+) {
+    match key {
+        SyntaxKeyExpr::Atom(_) => {}
+        SyntaxKeyExpr::Index(expr) | SyntaxKeyExpr::PathIndex(expr) => {
+            visitor(SyntaxPatternScopeEvent::Expression(expr));
         }
     }
 }

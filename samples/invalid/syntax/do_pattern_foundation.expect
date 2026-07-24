@@ -7,4 +7,5 @@ error|23|requires an operation after `<-`
 error|25|requires a value after `=`
 error|27|requires an operation before `->`
 error|29|cannot end with a binding
-error|33|requires irrefutable patterns on both sides
+error|33|view pattern requires a view before `->` and a pattern after it
+error|37|local pattern guard requires a guard after `when`

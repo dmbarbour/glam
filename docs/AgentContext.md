@@ -247,6 +247,14 @@ their detailed scheduling and representation contracts.
   dictionary decomposition without braces. A final dictionary remainder is an
   ordinary pattern over the residual dictionary and may be refutable; omitting
   it instead requires the residual dictionary to be logically empty.
+- Effectful patterns also expand into the same primitive-do stream. A view
+  applies its expression to the subject, binds the resulting effect, then
+  matches the produced value. A predicate appends the original subject to its
+  expression, requires unit success, then matches that unchanged subject.
+  Local `when` guards run after their enclosed pattern; `and`-separated effect,
+  effect-bind, and value-bind clauses run left to right, and their captures
+  remain visible after the complete guarded pattern succeeds. General `P as Q`
+  matches one shared subject left to right.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

@@ -7,7 +7,7 @@
 use crate::g_syntax::keywords::{canonical_keyword, reserved_keyword_message};
 use crate::g_syntax::{
     Diagnostic, SyntaxDictPatternEntry, SyntaxExpr, SyntaxKeyExpr, SyntaxPattern,
-    SyntaxPatternKind, SyntaxPatternLiteral,
+    SyntaxPatternGuard, SyntaxPatternKind, SyntaxPatternLiteral,
 };
 use crate::number::Number;
 
@@ -63,12 +63,6 @@ pub(in crate::g_syntax::parser) fn parse_pattern(
         let mut pattern = parse_pattern(parts.next().expect("as pattern has a left side"))?;
         for right in parts {
             let right = parse_pattern(right)?;
-            if !pattern.is_irrefutable() || !right.is_irrefutable() {
-                return Err(error_at_view(
-                    view,
-                    "`P as Q` currently requires irrefutable patterns on both sides",
-                ));
-            }
             pattern = SyntaxPattern {
                 kind: SyntaxPatternKind::As(Box::new(pattern), Box::new(right)),
             };
@@ -147,6 +141,15 @@ pub(in crate::g_syntax::parser) fn parse_pattern(
                     let items = parse_pattern_list_items(contents, "tuple pattern")?;
                     return Ok(tuple_pattern(items));
                 }
+                if let Some(guarded) = parse_guarded_pattern(contents) {
+                    return guarded;
+                }
+                if let Some(view_pattern) = parse_view_pattern(contents) {
+                    return view_pattern;
+                }
+                if let Some(predicate) = parse_predicate_pattern(contents) {
+                    return Ok(predicate);
+                }
                 return parse_pattern(contents).map(|pattern| SyntaxPattern {
                     kind: SyntaxPatternKind::Group(Box::new(pattern)),
                 });
@@ -198,6 +201,219 @@ pub(in crate::g_syntax::parser) fn parse_pattern(
         view,
         "expected a capture, literal, list pattern, quoted-path pattern, or parenthesized pattern",
     ))
+}
+
+fn parse_guarded_pattern(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxPattern>> {
+    let when = top_level_names(view, "when");
+    if when.is_empty() {
+        return None;
+    }
+    if when.len() > 1 {
+        return Some(Err(error_at_view(
+            view,
+            "local pattern guard permits one top-level `when`",
+        )));
+    }
+
+    let when = when[0];
+    let pattern = trim_layout(view_between(view, view.range().start(), when));
+    let guards = trim_layout(view_between(view, when + 1, view.range().end()));
+    if is_layout_empty(pattern) {
+        return Some(Err(error_at_view(
+            view,
+            "local pattern guard requires a pattern before `when`",
+        )));
+    }
+    if is_layout_empty(guards) {
+        return Some(Err(error_at_view(
+            view,
+            "local pattern guard requires a guard after `when`",
+        )));
+    }
+
+    Some((|| {
+        let pattern = parse_pattern(pattern)?;
+        let clauses = split_top_level_names(guards, "and");
+        let mut parsed = Vec::with_capacity(clauses.len());
+        for clause in clauses {
+            let clause = trim_layout(clause);
+            if is_layout_empty(clause) {
+                return Err(error_at_view(
+                    guards,
+                    "local pattern guard contains an empty clause around `and`",
+                ));
+            }
+            parsed.push(parse_guard_clause(clause)?);
+        }
+        Ok(SyntaxPattern {
+            kind: SyntaxPatternKind::Guarded {
+                pattern: Box::new(pattern),
+                guards: parsed,
+            },
+        })
+    })())
+}
+
+fn parse_view_pattern(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxPattern>> {
+    let backward = top_level_symbols(view, "<-");
+    if !backward.is_empty() {
+        if backward.len() > 1 {
+            return Some(Err(error_at_view(
+                view,
+                "view pattern permits one top-level `<-`",
+            )));
+        }
+        let arrow = backward[0];
+        let pattern = trim_layout(view_between(view, view.range().start(), arrow));
+        let operation = trim_layout(view_between(view, arrow + 1, view.range().end()));
+        return Some((|| {
+            if is_layout_empty(pattern) || is_layout_empty(operation) {
+                return Err(error_at_view(
+                    view,
+                    "view pattern requires a pattern before `<-` and a view after it",
+                ));
+            }
+            Ok(SyntaxPattern {
+                kind: SyntaxPatternKind::View {
+                    view: Box::new(parse_pattern_expression(operation)?),
+                    pattern: Box::new(parse_pattern(pattern)?),
+                },
+            })
+        })());
+    }
+
+    let arrows = top_level_symbols(view, "->");
+    if arrows.is_empty() {
+        return None;
+    }
+    for arrow in arrows.into_iter().rev() {
+        let operation = trim_layout(view_between(view, view.range().start(), arrow));
+        let pattern = trim_layout(view_between(view, arrow + 1, view.range().end()));
+        if is_layout_empty(operation) || is_layout_empty(pattern) {
+            continue;
+        }
+        let Ok(operation) = parse_pattern_expression(operation) else {
+            continue;
+        };
+        let Ok(pattern) = parse_pattern(pattern) else {
+            continue;
+        };
+        return Some(Ok(SyntaxPattern {
+            kind: SyntaxPatternKind::View {
+                view: Box::new(operation),
+                pattern: Box::new(pattern),
+            },
+        }));
+    }
+    Some(Err(error_at_view(
+        view,
+        "view pattern requires a view before `->` and a pattern after it",
+    )))
+}
+
+fn parse_predicate_pattern(view: TokenView<'_, '_>) -> Option<SyntaxPattern> {
+    let first = view.first_significant()?.0;
+    let candidates = view
+        .top_level()
+        .filter(|indexed| {
+            indexed.index() != first
+                && !matches!(indexed.token().kind(), TokenKind::LineStart { .. })
+                && indexed.token().leading() != LeadingTrivia::Joint
+        })
+        .map(|indexed| indexed.index())
+        .collect::<Vec<_>>();
+
+    for start in candidates.into_iter().rev() {
+        let predicate = trim_layout(view_between(view, view.range().start(), start));
+        let pattern = trim_layout(view_between(view, start, view.range().end()));
+        let Ok(predicate) = parse_pattern_expression(predicate) else {
+            continue;
+        };
+        let Ok(pattern) = parse_pattern(pattern) else {
+            continue;
+        };
+        return Some(SyntaxPattern {
+            kind: SyntaxPatternKind::Predicate {
+                predicate: Box::new(predicate),
+                pattern: Box::new(pattern),
+            },
+        });
+    }
+    None
+}
+
+fn parse_guard_clause(view: TokenView<'_, '_>) -> ParseResult<SyntaxPatternGuard> {
+    if is_wildcard_guard(view) {
+        return Ok(SyntaxPatternGuard::Effect(SyntaxExpr::Apply(
+            Box::new(SyntaxExpr::Effect(vec!["r".to_owned()])),
+            Box::new(SyntaxExpr::Unit),
+        )));
+    }
+
+    if let Some(arrow) = top_level_symbols(view, "<-").into_iter().next() {
+        let pattern = trim_layout(view_between(view, view.range().start(), arrow));
+        let operation = trim_layout(view_between(view, arrow + 1, view.range().end()));
+        if is_layout_empty(pattern) || is_layout_empty(operation) {
+            return Err(error_at_view(
+                view,
+                "guard binding requires a pattern before `<-` and an operation after it",
+            ));
+        }
+        return Ok(SyntaxPatternGuard::Bind {
+            pattern: parse_pattern(pattern)?,
+            operation: parse_pattern_expression(operation)?,
+        });
+    }
+
+    if let Some(equal) = top_level_symbols(view, "=").into_iter().next() {
+        let pattern = trim_layout(view_between(view, view.range().start(), equal));
+        let value = trim_layout(view_between(view, equal + 1, view.range().end()));
+        if is_layout_empty(pattern) || is_layout_empty(value) {
+            return Err(error_at_view(
+                view,
+                "guard value binding requires a pattern before `=` and a value after it",
+            ));
+        }
+        return Ok(SyntaxPatternGuard::ValueBind {
+            pattern: parse_pattern(pattern)?,
+            value: parse_pattern_expression(value)?,
+        });
+    }
+
+    if let Ok(effect) = parse_pattern_expression(view) {
+        return Ok(SyntaxPatternGuard::Effect(effect));
+    }
+
+    for arrow in top_level_symbols(view, "->").into_iter().rev() {
+        let operation = trim_layout(view_between(view, view.range().start(), arrow));
+        let pattern = trim_layout(view_between(view, arrow + 1, view.range().end()));
+        let Ok(operation) = parse_pattern_expression(operation) else {
+            continue;
+        };
+        let Ok(pattern) = parse_pattern(pattern) else {
+            continue;
+        };
+        return Ok(SyntaxPatternGuard::Bind { pattern, operation });
+    }
+
+    Err(error_at_view(
+        view,
+        "expected an effect, effect-pattern binding, or value-pattern binding guard",
+    ))
+}
+
+fn parse_pattern_expression(view: TokenView<'_, '_>) -> ParseResult<SyntaxExpr> {
+    parse_expression_in_context(view, ExpressionContext::for_owner(view))
+}
+
+fn is_wildcard_guard(view: TokenView<'_, '_>) -> bool {
+    let mut tokens = view
+        .top_level()
+        .filter(|indexed| !matches!(indexed.token().kind(), TokenKind::LineStart { .. }));
+    matches!(
+        (tokens.next(), tokens.next()),
+        (Some(token), None) if matches!(token.token().kind(), TokenKind::Name("_"))
+    )
 }
 
 fn parse_tag_pattern(view: TokenView<'_, '_>, colon: usize) -> ParseResult<SyntaxPattern> {
@@ -728,6 +944,29 @@ fn top_level_symbols(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
         })
         .map(|indexed| indexed.index())
         .collect()
+}
+
+fn top_level_names(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
+    view.top_level()
+        .filter(
+            |indexed| matches!(indexed.token().kind(), TokenKind::Name(name) if *name == expected),
+        )
+        .map(|indexed| indexed.index())
+        .collect()
+}
+
+fn split_top_level_names<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+    separator: &str,
+) -> Vec<TokenView<'lex, 'source>> {
+    let mut start = view.range().start();
+    let mut parts = Vec::new();
+    for index in top_level_names(view, separator) {
+        parts.push(view_between(view, start, index));
+        start = index + 1;
+    }
+    parts.push(view_between(view, start, view.range().end()));
+    parts
 }
 
 fn is_local_name(name: &str) -> bool {

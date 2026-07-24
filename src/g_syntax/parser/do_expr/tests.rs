@@ -1,5 +1,6 @@
 use crate::g_syntax::{
-    DoExpr, DoStepKind, SyntaxExpr, SyntaxKeyExpr, SyntaxPattern, SyntaxPatternKind,
+    DoExpr, DoStepKind, SyntaxExpr, SyntaxKeyExpr, SyntaxPattern, SyntaxPatternGuard,
+    SyntaxPatternKind,
 };
 
 use super::super::structural::parse_compound_expression_fragment;
@@ -396,6 +397,85 @@ fn variable_length_list_segments_accept_refutable_patterns() {
 }
 
 #[test]
+fn effectful_patterns_parse_with_progressive_capture_order() {
+    let expr = parse_do_expression(concat!(
+        "do\n",
+        ".r [1,2] -> [left,2] as whole\n",
+        ".r 3 -> (increment -> viewed)\n",
+        ".r 4 -> (backward <- increment)\n",
+        ".r 5 -> (positive kept)\n",
+        ".r [6,7] -> ([first,second] when first < second and .r (second + 1) -> next and doubled = next + next)\n",
+        ".r [left,whole,viewed,backward,kept,first,second,next,doubled]\n",
+    ));
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = expr else {
+        panic!("expected a do expression");
+    };
+
+    assert!(matches!(
+        &steps[0].kind,
+        DoStepKind::Bind {
+            pattern: SyntaxPattern {
+                kind: SyntaxPatternKind::As(left, right),
+            },
+            ..
+        } if matches!(&left.kind, SyntaxPatternKind::List { .. })
+            && right.captures() == ["whole"]
+            && left.captures() == ["left"]
+    ));
+    assert!(matches!(
+        &steps[1].kind,
+        DoStepKind::Bind {
+            pattern: SyntaxPattern {
+                kind: SyntaxPatternKind::View { view, pattern },
+            },
+            ..
+        } if matches!(view.as_ref(), SyntaxExpr::Name(name) if name == "increment")
+            && pattern.captures() == ["viewed"]
+    ));
+    assert!(matches!(
+        &steps[2].kind,
+        DoStepKind::Bind {
+            pattern: SyntaxPattern {
+                kind: SyntaxPatternKind::View { view, pattern },
+            },
+            ..
+        } if matches!(view.as_ref(), SyntaxExpr::Name(name) if name == "increment")
+            && pattern.captures() == ["backward"]
+    ));
+    assert!(matches!(
+        &steps[3].kind,
+        DoStepKind::Bind {
+            pattern: SyntaxPattern {
+                kind: SyntaxPatternKind::Predicate { predicate, pattern },
+            },
+            ..
+        } if matches!(predicate.as_ref(), SyntaxExpr::Name(name) if name == "positive")
+            && pattern.captures() == ["kept"]
+    ));
+    let DoStepKind::Bind { pattern, .. } = &steps[4].kind else {
+        panic!("expected a guarded pattern");
+    };
+    let SyntaxPatternKind::Guarded {
+        pattern: guarded,
+        guards,
+    } = &pattern.kind
+    else {
+        panic!("expected a guarded pattern");
+    };
+    assert_eq!(guarded.captures(), ["first", "second"]);
+    assert!(matches!(&guards[0], SyntaxPatternGuard::Effect(_)));
+    assert!(matches!(
+        &guards[1],
+        SyntaxPatternGuard::Bind { pattern, .. } if pattern.captures() == ["next"]
+    ));
+    assert!(matches!(
+        &guards[2],
+        SyntaxPatternGuard::ValueBind { pattern, .. } if pattern.captures() == ["doubled"]
+    ));
+    assert_eq!(pattern.captures(), ["first", "second", "next", "doubled"]);
+}
+
+#[test]
 fn braced_do_is_a_structural_atom_in_containers_and_other_do_blocks() {
     for source in [
         "consume [do { .r 1 }, do { text = \"a;b\"; .r text }, do { x = do .r 2; .r x }]",
@@ -503,8 +583,16 @@ fn token_do_reports_structural_statement_errors() {
             "only one variable-length segment",
         ),
         (
-            "do\n1 as value <- .r 1\n.r value",
-            "requires irrefutable patterns on both sides",
+            "do\n.r 1 -> (increment ->)\n.r ()",
+            "view pattern requires a view before `->` and a pattern after it",
+        ),
+        (
+            "do\n.r 1 -> (_ when)\n.r ()",
+            "local pattern guard requires a guard after `when`",
+        ),
+        (
+            "do\n.r 1 -> (_ when .r () and and .r ())\n.r ()",
+            "local pattern guard contains an empty clause",
         ),
         (
             "do\n'.foo.() <- .r []\n.r ()",

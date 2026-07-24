@@ -2424,6 +2424,74 @@ fn refutable_variable_list_segments_match_the_middle_slice() {
 }
 
 #[test]
+fn effectful_patterns_transform_filter_guard_and_preserve_the_subject() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "increment value = .r (value + 1)\n",
+        "add delta value = .r (delta + value)\n",
+        "equals expected actual = expected == actual\n",
+        "asm.view = list.pure do { .r 64 -> (increment -> viewed); (viewed == 65) =>> .r \"A\" }\n",
+        "asm.backward_view = list.pure do { .r 65 -> (viewed <- increment); (viewed == 66) =>> .r \"B\" }\n",
+        "asm.predicate = list.pure do { .r 67 -> (equals 67 kept); (kept == 67) =>> .r \"C\" }\n",
+        "asm.general_as = list.pure do { .r [68,69] -> [left,right] as whole; ((list.at 0 whole == left) and (right == 69)) =>> .r \"D\" }\n",
+        "asm.progressive_view = list.pure do { .r [1,71] -> [delta,(add delta -> sum)]; (sum == 72) =>> .r \"H\" }\n",
+        "asm.guard = list.pure do { .r 72 -> (value when .r (value + 1) -> next and doubled = next + next and doubled == 146); (next == 73) =>> .r \"I\" }\n",
+        "asm.backward_guard = list.pure do { .r 73 -> (value when next <- .r (value + 1) and next == 74); .r \"J\" }\n",
+        "asm.wildcard_guard = list.pure do { .r 1 -> (_ when _); .r \"W\" }\n",
+        "asm.view_fallback = list.pure (.alt (do { .r 1 -> (increment -> 3); .r \"bad\" }) (.r \"V\"))\n",
+        "asm.predicate_fallback = list.pure (.alt (do { .r 1 -> (equals 2 _); .r \"bad\" }) (.r \"P\"))\n",
+        "asm.guard_fallback = list.pure (.alt (do { .r 1 -> (_ when 1 == 2); .r \"bad\" }) (.r \"G\"))\n",
+        "asm.recursive = list.pure do { abstract viewed,next; .r 74 -> ((increment -> viewed) when .r (viewed + 1) -> next); ((viewed == 75) and (next == 76)) =>> .r \"R\" }\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("view", b"A".as_slice()),
+        ("backward_view", b"B".as_slice()),
+        ("predicate", b"C".as_slice()),
+        ("general_as", b"D".as_slice()),
+        ("progressive_view", b"H".as_slice()),
+        ("guard", b"I".as_slice()),
+        ("backward_guard", b"J".as_slice()),
+        ("wildcard_guard", b"W".as_slice()),
+        ("view_fallback", b"V".as_slice()),
+        ("predicate_fallback", b"P".as_slice()),
+        ("guard_fallback", b"G".as_slice()),
+        ("recursive", b"R".as_slice()),
+    ] {
+        let result = fully_evaluated_value(resolved_value_at_path(&value, &["asm", path]));
+        assert_eq!(output_binary_result_list(&result), expected, "{path}");
+    }
+}
+
+#[test]
+fn local_pattern_guards_require_unit_when_their_result_is_discarded() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "api = {r:(\\x -> x),seq:(\\op k -> (k (op.eff api)).eff api)}\n",
+        "bad = do { .r 1 -> (_ when .r 2); .r 3 }\n",
+        "asm.result = bad.eff api\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    let result = value_at_atom_path(&value, &["asm", "result"]).expect("result should exist");
+    assert!(
+        fully_evaluated_error(result)
+            .to_string()
+            .contains("requires discarded effect results to be unit")
+    );
+}
+
+#[test]
 fn bare_do_operations_reuse_the_effect_then_unit_policy() {
     let parsed = parse(concat!(
         "language g0\n",

@@ -22,3 +22,13 @@ initial_patterns = do
   .r [forward, backward, pure]
 
 braced_patterns = do { .r 1 -> ((value)); _ = 2; .r value }
+
+increment input = .r (input + 1)
+equals expected actual = expected == actual
+
+effectful_patterns = do
+  .r [1, 2] -> [first, second] as whole
+  .r first -> (increment -> viewed)
+  .r second -> (equals 2 kept)
+  .r whole -> (_ when viewed < kept and .r (viewed + kept) -> total)
+  .r total

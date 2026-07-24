@@ -128,6 +128,38 @@ fn append_match_steps(
             append_match_steps(steps, subject, left, line, lowering)?;
             append_match_steps(steps, subject, right, line, lowering)
         }
+        SyntaxPatternKind::View { view, pattern } => {
+            let view = syntax_expr_to_resolved_in_semantic_scope(
+                view,
+                line,
+                lowering.context,
+                lowering.scope,
+                lowering.locals,
+            )?;
+            let operation = ResolvedExpr::apply(view, [ResolvedExpr::Local(subject)]);
+            let viewed = append_bind(steps, operation, line, lowering.locals);
+            append_match_steps(steps, viewed, pattern, line, lowering)
+        }
+        SyntaxPatternKind::Predicate { predicate, pattern } => {
+            let predicate = syntax_expr_to_resolved_in_semantic_scope(
+                predicate,
+                line,
+                lowering.context,
+                lowering.scope,
+                lowering.locals,
+            )?;
+            append_then(
+                steps,
+                ResolvedExpr::apply(predicate, [ResolvedExpr::Local(subject)]),
+                line,
+                lowering.locals,
+            );
+            append_match_steps(steps, subject, pattern, line, lowering)
+        }
+        SyntaxPatternKind::Guarded { pattern, guards } => {
+            append_match_steps(steps, subject, pattern, line, lowering)?;
+            append_guard_steps(steps, guards, line, lowering)
+        }
         SyntaxPatternKind::Literal(literal) => {
             append_then(
                 steps,
@@ -169,6 +201,61 @@ fn append_match_steps(
             Ok(())
         }
     }
+}
+
+fn append_guard_steps(
+    steps: &mut Vec<PrimitiveDoStep>,
+    guards: &[SyntaxPatternGuard],
+    line: usize,
+    lowering: &mut PatternLoweringContext<'_>,
+) -> Result<(), Diagnostic> {
+    for guard in guards {
+        match guard {
+            SyntaxPatternGuard::Effect(expr) => {
+                let operation = syntax_expr_to_resolved_in_semantic_scope(
+                    expr,
+                    line,
+                    lowering.context,
+                    lowering.scope,
+                    lowering.locals,
+                )?;
+                append_then(steps, operation, line, lowering.locals);
+            }
+            SyntaxPatternGuard::Bind { pattern, operation } => {
+                let operation = syntax_expr_to_resolved_in_semantic_scope(
+                    operation,
+                    line,
+                    lowering.context,
+                    lowering.scope,
+                    lowering.locals,
+                )?;
+                append_pattern_steps(
+                    steps,
+                    PrimitivePatternInput::Effect(operation),
+                    pattern,
+                    line,
+                    lowering,
+                )?;
+            }
+            SyntaxPatternGuard::ValueBind { pattern, value } => {
+                let value = syntax_expr_to_resolved_in_semantic_scope(
+                    value,
+                    line,
+                    lowering.context,
+                    lowering.scope,
+                    lowering.locals,
+                )?;
+                append_pattern_steps(
+                    steps,
+                    PrimitivePatternInput::Value(value),
+                    pattern,
+                    line,
+                    lowering,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn append_list_match(

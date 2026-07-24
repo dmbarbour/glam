@@ -29,6 +29,10 @@ missing_forward_operation = do { -> value; .r () }
 final_binding = do
   .r 1 -> value
 
-refutable_as = do
-  .r [1, 2] -> 1 as item
+malformed_view = do
+  .r [1, 2] -> (increment ->)
+  .r ()
+
+missing_local_guard = do
+  .r 1 -> (_ when)
   .r ()
