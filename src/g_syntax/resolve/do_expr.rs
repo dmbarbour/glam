@@ -238,7 +238,7 @@ fn append_irrefutable_pattern_steps(
     locals: &mut ResolverContext,
     forwards: &mut [ResolvedForward],
 ) -> Result<(), Diagnostic> {
-    let captures = irrefutable_captures(pattern);
+    let captures = pattern.captures();
     if captures.len() <= 1 {
         let (binding, recursion) = if let Some(name) = captures.first() {
             resolve_capture_binding(forward_names, name, line, locals, forwards)?

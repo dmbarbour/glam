@@ -166,7 +166,6 @@ impl SyntaxPattern {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn captures(&self) -> Vec<&str> {
         let mut captures = Vec::new();
         self.visit_captures(&mut |name| captures.push(name));

@@ -501,10 +501,8 @@ fn preview_recursive_do_plan(
                 });
             }
             DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
-                let mut captures = Vec::new();
-                pattern.visit_captures(&mut |name| captures.push(name));
-                let no_captures = captures.is_empty();
-                if captures.len() > 1 {
+                let captures = pattern.captures();
+                if captures.len() != 1 {
                     steps.push(recursive_do::RecursiveDoStep {
                         line: step.line,
                         event: recursive_do::RecursiveDoEvent::None,
@@ -518,12 +516,6 @@ fn preview_recursive_do_plan(
                     steps.push(recursive_do::RecursiveDoStep {
                         line: step.line,
                         event,
-                    });
-                }
-                if no_captures {
-                    steps.push(recursive_do::RecursiveDoStep {
-                        line: step.line,
-                        event: recursive_do::RecursiveDoEvent::None,
                     });
                 }
             }
