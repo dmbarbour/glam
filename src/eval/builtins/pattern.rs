@@ -33,6 +33,18 @@ pub(super) fn apply(
             let [expected, value] = super::exact(arguments, "pattern-equal")?;
             pattern_equal(context, &expected, &value)
         }
+        Builtin::PatternIsDict => {
+            let [value] = super::exact(arguments, "pattern-is-dict")?;
+            pattern_is_dict(context, &value)
+        }
+        Builtin::PatternDictTryTake => {
+            let [path, value] = super::exact(arguments, "pattern-dict-try-take")?;
+            pattern_dict_try_take(context, &path, &value)
+        }
+        Builtin::PatternDictIsEmpty => {
+            let [value] = super::exact(arguments, "pattern-dict-is-empty")?;
+            pattern_dict_is_empty(context, &value)
+        }
         _ => unreachable!("pattern dispatcher received a non-pattern builtin"),
     }
 }
@@ -129,6 +141,98 @@ fn pattern_equal(
     } else {
         pattern_failure()
     })
+}
+
+fn pattern_is_dict(context: &EvalContext, value: &Value) -> Result<Value, EvalError> {
+    Ok(match eval_value(context, value)? {
+        Value::Dict(_) => pattern_success((*keys::UNIT_VALUE).clone()),
+        _ => pattern_failure(),
+    })
+}
+
+fn pattern_dict_try_take(
+    context: &EvalContext,
+    path: &Value,
+    value: &Value,
+) -> Result<Value, EvalError> {
+    let path = eval_key_path_list(context, path)?;
+    if path.is_empty() {
+        return Err(EvalError::new(
+            "pattern-dict-try-take received an empty compiler path",
+        ));
+    }
+    let Value::Dict(dict) = eval_value(context, value)? else {
+        return Ok(pattern_failure());
+    };
+    let Some((value, rest)) = take_dict_path(context, &dict, &path)? else {
+        return Ok(pattern_failure());
+    };
+    Ok(pattern_success(Value::Dict(
+        Dict::new_sync()
+            .insert((*keys::VALUE).clone(), value)
+            .insert((*keys::REST).clone(), Value::Dict(rest)),
+    )))
+}
+
+fn take_dict_path(
+    context: &EvalContext,
+    dict: &Dict,
+    path: &[Key],
+) -> Result<Option<(Value, Dict)>, EvalError> {
+    let Some((head, tail)) = path.split_first() else {
+        return Ok(None);
+    };
+    let Some(selected) = dict.get(head) else {
+        return Ok(None);
+    };
+    let selected = eval_value(context, selected)?;
+    if tail.is_empty() {
+        if value_is_logically_undefined(context, &selected)? {
+            return Ok(None);
+        }
+        return Ok(Some((selected, dict.remove(head))));
+    }
+
+    let Value::Dict(child) = selected else {
+        return Ok(None);
+    };
+    let Some((value, child_rest)) = take_dict_path(context, &child, tail)? else {
+        return Ok(None);
+    };
+    let rest = if child_rest.is_empty() {
+        dict.remove(head)
+    } else {
+        dict.insert(head.clone(), Value::Dict(child_rest))
+    };
+    Ok(Some((value, rest)))
+}
+
+fn pattern_dict_is_empty(context: &EvalContext, value: &Value) -> Result<Value, EvalError> {
+    let empty = match eval_value(context, value)? {
+        Value::Dict(dict) => dict_is_logically_empty(context, &dict)?,
+        _ => false,
+    };
+    Ok(if empty {
+        pattern_success((*keys::UNIT_VALUE).clone())
+    } else {
+        pattern_failure()
+    })
+}
+
+fn value_is_logically_undefined(context: &EvalContext, value: &Value) -> Result<bool, EvalError> {
+    match eval_value(context, value)? {
+        Value::Dict(dict) => dict_is_logically_empty(context, &dict),
+        _ => Ok(false),
+    }
+}
+
+fn dict_is_logically_empty(context: &EvalContext, dict: &Dict) -> Result<bool, EvalError> {
+    for (_, value) in dict.iter() {
+        if !value_is_logically_undefined(context, value)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn binary_equals_list(

@@ -799,19 +799,23 @@ fn run_pattern_builtin(builtin: Builtin, value: Value) -> Result<Vec<Value>, Eva
     list_to_value_items(&test_context(), &results)
 }
 
-fn run_pattern_equal(expected: Value, value: Value) -> Result<Vec<Value>, EvalError> {
+fn run_pattern_builtin2(
+    builtin: Builtin,
+    first: Value,
+    second: Value,
+) -> Result<Vec<Value>, EvalError> {
     let handled = eval_closed_expr(&builtin1_expr(
         Builtin::ListEffect,
-        builtin2_expr(
-            Builtin::PatternEqual,
-            TestExpr::Value(expected),
-            TestExpr::Value(value),
-        ),
+        builtin2_expr(builtin, TestExpr::Value(first), TestExpr::Value(second)),
     ))?;
     let Value::List(results) = handled else {
         panic!("the list effect handler should return a list");
     };
     list_to_value_items(&test_context(), &results)
+}
+
+fn run_pattern_equal(expected: Value, value: Value) -> Result<Vec<Value>, EvalError> {
+    run_pattern_builtin2(Builtin::PatternEqual, expected, value)
 }
 
 fn builtin3_expr(builtin: Builtin, first: TestExpr, second: TestExpr, third: TestExpr) -> TestExpr {
@@ -1401,6 +1405,100 @@ fn compiler_pattern_equality_mismatches_incompatible_values() {
             .expect_err("forcing failures must propagate")
             .to_string(),
         "literal input failed"
+    );
+}
+
+#[test]
+fn compiler_pattern_dictionary_operations_preserve_remainders() {
+    let foo = Key::atom_from_text("foo");
+    let bar = Key::atom_from_text("bar");
+    let keep = Key::atom_from_text("keep");
+    let other = Key::atom_from_text("other");
+    let child = Dict::new_sync()
+        .insert(bar.clone(), n(7))
+        .insert(keep.clone(), n(8));
+    let dict = Dict::new_sync()
+        .insert(foo.clone(), Value::Dict(child))
+        .insert(other.clone(), n(9));
+    let path = Value::List(List::from_values(vec![key_value(&foo), key_value(&bar)]));
+
+    let [parts]: [Value; 1] =
+        run_pattern_builtin2(Builtin::PatternDictTryTake, path, Value::Dict(dict))
+            .expect("a present static dictionary path should match")
+            .try_into()
+            .expect("successful extraction should return one parts value");
+    let Value::Dict(parts) = parts else {
+        panic!("dictionary extraction should return a parts dictionary");
+    };
+    assert_eq!(parts.get(&*keys::VALUE), Some(&n(7)));
+    let Some(Value::Dict(rest)) = parts.get(&*keys::REST) else {
+        panic!("dictionary extraction should retain a dictionary remainder");
+    };
+    assert_eq!(rest.get(&other), Some(&n(9)));
+    let Some(Value::Dict(child)) = rest.get(&foo) else {
+        panic!("the nonempty nested remainder should retain its parent path");
+    };
+    assert_eq!(child.get(&keep), Some(&n(8)));
+    assert!(!child.contains_key(&bar));
+}
+
+#[test]
+fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
+    let key = Key::atom_from_text("key");
+    let path = Value::List(List::from_values(vec![key_value(&key)]));
+    for value in [
+        Value::Dict(Dict::new_sync()),
+        Value::Dict(Dict::new_sync().insert(key.clone(), Value::Dict(Dict::new_sync()))),
+        n(1),
+    ] {
+        assert!(
+            run_pattern_builtin2(Builtin::PatternDictTryTake, path.clone(), value)
+                .expect("missing, undefined, and wrong-kind paths should mismatch")
+                .is_empty()
+        );
+    }
+
+    assert_eq!(
+        run_pattern_builtin(Builtin::PatternIsDict, Value::Dict(Dict::new_sync()))
+            .expect("dictionary values should pass the kind check"),
+        [(*keys::UNIT_VALUE).clone()]
+    );
+    assert!(
+        run_pattern_builtin(Builtin::PatternIsDict, n(1))
+            .expect("wrong-kind values should mismatch")
+            .is_empty()
+    );
+
+    let logically_empty = Dict::new_sync().insert(
+        key,
+        Value::Lazy(LazyValue::deferred("empty dictionary field", |_| {
+            Ok(Value::Dict(Dict::new_sync()))
+        })),
+    );
+    assert_eq!(
+        run_pattern_builtin(Builtin::PatternDictIsEmpty, Value::Dict(logically_empty))
+            .expect("nested and deferred undefined values should be logically empty"),
+        [(*keys::UNIT_VALUE).clone()]
+    );
+    assert!(
+        run_pattern_builtin(
+            Builtin::PatternDictIsEmpty,
+            Value::Dict(Dict::new_sync().insert(Key::atom_from_text("present"), n(1))),
+        )
+        .expect("a present dictionary value should mismatch empty")
+        .is_empty()
+    );
+    assert_eq!(
+        run_pattern_builtin(
+            Builtin::PatternDictIsEmpty,
+            Value::Dict(Dict::new_sync().insert(
+                Key::atom_from_text("broken"),
+                Value::error("dict value failed")
+            ),),
+        )
+        .expect_err("forcing failures while establishing emptiness must propagate")
+        .to_string(),
+        "dict value failed"
     );
 }
 

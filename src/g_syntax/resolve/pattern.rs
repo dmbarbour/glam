@@ -154,6 +154,15 @@ fn append_match_steps(
             locals,
             forwards,
         ),
+        SyntaxPatternKind::Dict { .. } => append_dict_match(
+            steps,
+            subject,
+            forward_names,
+            pattern,
+            line,
+            locals,
+            forwards,
+        ),
     }
 }
 
@@ -258,6 +267,66 @@ fn append_list_match(
         )?;
     }
     Ok(())
+}
+
+fn append_dict_match(
+    steps: &mut Vec<PrimitiveDoStep>,
+    subject: BindingId,
+    forward_names: &mut ForwardNameRegistry,
+    pattern: &SyntaxPattern,
+    line: usize,
+    locals: &mut ResolverContext,
+    forwards: &mut [ResolvedForward],
+) -> Result<(), Diagnostic> {
+    let SyntaxPatternKind::Dict { entries, remainder } = &pattern.kind else {
+        unreachable!("dictionary expansion receives a dictionary pattern");
+    };
+    append_then(
+        steps,
+        pattern_builtin(Builtin::PatternIsDict, [ResolvedExpr::Local(subject)]),
+        line,
+        locals,
+    );
+
+    let mut rest = ResolvedExpr::Local(subject);
+    for (path, pattern) in entries {
+        let parts = append_bind(
+            steps,
+            pattern_builtin(Builtin::PatternDictTryTake, [static_path_value(path), rest]),
+            line,
+            locals,
+        );
+        append_value_pattern(
+            steps,
+            part_access(parts, &keys::VALUE),
+            forward_names,
+            pattern,
+            line,
+            locals,
+            forwards,
+        )?;
+        rest = part_access(parts, &keys::REST);
+    }
+
+    if let Some(remainder) = remainder.as_deref() {
+        append_value_pattern(
+            steps,
+            rest,
+            forward_names,
+            remainder,
+            line,
+            locals,
+            forwards,
+        )
+    } else {
+        append_then(
+            steps,
+            pattern_builtin(Builtin::PatternDictIsEmpty, [rest]),
+            line,
+            locals,
+        );
+        Ok(())
+    }
 }
 
 fn append_capture(
@@ -366,4 +435,14 @@ fn pattern_literal_value(literal: &SyntaxPatternLiteral) -> Value {
         }
         SyntaxPatternLiteral::Text(text) => Value::binary_from_text(text),
     }
+}
+
+fn static_path_value(path: &[String]) -> ResolvedExpr<Value> {
+    ResolvedExpr::List(
+        path.iter()
+            .map(|name| {
+                ResolvedExpr::Embedded(Value::Atom(Atom::from_key(&Key::binary_from_text(name))))
+            })
+            .collect(),
+    )
 }

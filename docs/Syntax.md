@@ -366,8 +366,9 @@ evaluates to `.fail`.
 
 The current Rust bootstrap implements pattern-bearing statements in both
 layout and braced forms. Patterns currently include names, `_`, irrefutable
-`P as Q`, unit, numbers, atoms, text, quoted paths, and list patterns with at
-most one irrefutable variable-length segment. A layout block is
+`P as Q`, unit, numbers, atoms, text, fixed quoted paths, list patterns with at
+most one irrefutable variable-length segment, static-path dictionaries, tags,
+and tuples. Computed pattern paths and tags remain deferred. A layout block is
 newline-delimited:
 
         my_effect = do
@@ -416,8 +417,8 @@ synthesize a result, so a block still cannot end with a binding. The special
 separator-free `do {}` means `.r ()`, while `do {;}` is invalid. Semicolons are
 owned by the nearest enclosing grammar: `do { x = do A; B }` has the two outer
 statements `x = do A` and `B`; the inner singleton do does not consume the
-semicolon. Dictionary, tagged, tuple, view, predicate, and guarded do patterns
-remain target syntax.
+semicolon. Computed-path/tag, view, predicate, and guarded do patterns remain
+target syntax.
 
 Lightweight effects are supported: we desugar `.name` to `eff:(\api -> api.name)`, and we support application `(eff:f) x = eff:(\api -> f api x)`. This enables us to work with APIs concisely without redefining things:
 
@@ -1362,7 +1363,7 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         [KeyA,KeyB]:Pattern         # hierarchical path pattern
         (PathExpr):Pattern          # computed list-valued path
         'name                       # a constant, same as ["name"]:()
-        '.Path                      # a constant, same as a list of constants
+        '.Path                      # a constant or computed path, matches equal list
 
         []                          # empty list
         [a,b,c]                     # list of three items

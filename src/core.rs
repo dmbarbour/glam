@@ -760,6 +760,9 @@ pub enum Builtin {
     PatternListTryUnsnoc,
     PatternListIsEmpty,
     PatternEqual,
+    PatternIsDict,
+    PatternDictTryTake,
+    PatternDictIsEmpty,
     /// Splits binary-compatible text into shared line segments without their
     /// newline delimiters. Internal support for closed formatting functions.
     TextLines,
@@ -828,6 +831,9 @@ impl Builtin {
             Self::PatternListTryUnsnoc => 1,
             Self::PatternListIsEmpty => 1,
             Self::PatternEqual => 2,
+            Self::PatternIsDict => 1,
+            Self::PatternDictTryTake => 2,
+            Self::PatternDictIsEmpty => 1,
             Self::TextLines => 1,
             Self::ListEffect => 1,
             Self::ListEffectReturn => 1,

@@ -75,6 +75,11 @@ pub(in crate::g_syntax::parser) fn parse_pattern(
         return parse_list_append_pattern(view, append_parts);
     }
 
+    let colons = top_level_symbols(view, ":");
+    if let Some(colon) = colons.first().copied() {
+        return parse_tag_pattern(view, colon);
+    }
+
     if matches!(first.kind(), TokenKind::Symbol("'")) {
         return parse_quoted_pattern(view);
     }
@@ -132,6 +137,10 @@ pub(in crate::g_syntax::parser) fn parse_pattern(
                         kind: SyntaxPatternKind::Literal(SyntaxPatternLiteral::Unit),
                     });
                 }
+                if !top_level_symbols(contents, ",").is_empty() {
+                    let items = parse_pattern_list_items(contents, "tuple pattern")?;
+                    return Ok(tuple_pattern(items));
+                }
                 return parse_pattern(contents).map(|pattern| SyntaxPattern {
                     kind: SyntaxPatternKind::Group(Box::new(pattern)),
                 });
@@ -157,6 +166,25 @@ pub(in crate::g_syntax::parser) fn parse_pattern(
                 return Ok(fixed_list_pattern(items));
             }
         }
+        TokenKind::Open {
+            group,
+            delimiter: Delimiter::Brace,
+        } => {
+            let Some(delimiter_group) = view.group(*group) else {
+                return Err(error_at_view(
+                    view,
+                    "dictionary pattern refers to an unknown delimiter group",
+                ));
+            };
+            if first_index == delimiter_group.open_token()
+                && delimiter_group.close_token() == Some(last_index)
+            {
+                let contents = view
+                    .group_contents(*group)
+                    .expect("a pattern delimiter group retains its contents");
+                return parse_dict_pattern(contents);
+            }
+        }
         _ => {}
     }
 
@@ -164,6 +192,199 @@ pub(in crate::g_syntax::parser) fn parse_pattern(
         view,
         "expected a capture, literal, list pattern, quoted-path pattern, or parenthesized pattern",
     ))
+}
+
+fn parse_tag_pattern(view: TokenView<'_, '_>, colon: usize) -> ParseResult<SyntaxPattern> {
+    let left = trim_layout(view_between(view, view.range().start(), colon));
+    let right = trim_layout(view_between(view, colon + 1, view.range().end()));
+    if is_layout_empty(right) {
+        return Err(error_at_view(
+            view,
+            "tag pattern requires a payload pattern after `:`",
+        ));
+    }
+    let Some((_, right_first)) = right.first_significant() else {
+        unreachable!("nonempty tag payload has a first token");
+    };
+    if right_first.leading() != LeadingTrivia::Joint {
+        return Err(error_at_view(
+            view,
+            "tag pattern payload must be joint with `:`",
+        ));
+    }
+
+    if is_layout_empty(left) {
+        let payload = parse_pattern(right)?;
+        let SyntaxPatternKind::Capture(name) = &payload.kind else {
+            return Err(error_at_view(
+                right,
+                "`:name` pattern shorthand requires one capture name",
+            ));
+        };
+        return Ok(dict_pattern(
+            vec![(vec![canonical_capture_name(name).to_owned()], payload)],
+            None,
+        ));
+    }
+
+    let Some((_, colon_token)) = view
+        .top_level()
+        .find(|indexed| indexed.index() == colon)
+        .map(|indexed| (indexed.index(), indexed.token()))
+    else {
+        unreachable!("selected tag colon belongs to its view");
+    };
+    if colon_token.leading() != LeadingTrivia::Joint {
+        return Err(error_at_view(
+            view,
+            "tag pattern `:` must be joint with its static path",
+        ));
+    }
+    let path = parse_static_path(left, "tag pattern")?;
+    Ok(dict_pattern(vec![(path, parse_pattern(right)?)], None))
+}
+
+fn parse_dict_pattern(contents: TokenView<'_, '_>) -> ParseResult<SyntaxPattern> {
+    if is_layout_empty(contents) {
+        return Ok(dict_pattern(Vec::new(), None));
+    }
+    let members = split_top_level(contents, ",")
+        .into_iter()
+        .map(trim_layout)
+        .collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    let mut remainder = None;
+
+    for (index, member) in members.iter().copied().enumerate() {
+        if is_layout_empty(member) {
+            if index == 0 || index + 1 == members.len() {
+                continue;
+            }
+            return Err(error_at_view(
+                contents,
+                "dictionary pattern contains an empty item between commas",
+            ));
+        }
+        let colons = top_level_symbols(member, ":");
+        let Some(colon) = colons.first().copied() else {
+            if remainder.is_some() {
+                return Err(error_at_view(
+                    member,
+                    "dictionary pattern permits only one remainder",
+                ));
+            }
+            if members[index + 1..]
+                .iter()
+                .copied()
+                .any(|later| !is_layout_empty(later))
+            {
+                return Err(error_at_view(
+                    member,
+                    "dictionary remainder must be the final pattern item",
+                ));
+            }
+            let pattern = parse_pattern(member)?;
+            if !pattern.is_irrefutable() {
+                return Err(error_at_view(
+                    member,
+                    "dictionary remainder must be an irrefutable pattern",
+                ));
+            }
+            remainder = Some(Box::new(pattern));
+            continue;
+        };
+
+        let path = trim_layout(view_between(member, member.range().start(), colon));
+        let payload = trim_layout(view_between(member, colon + 1, member.range().end()));
+        if is_layout_empty(payload) {
+            return Err(error_at_view(
+                member,
+                "dictionary entry pattern requires a payload after `:`",
+            ));
+        }
+        let (path, payload) = if is_layout_empty(path) {
+            let payload = parse_pattern(payload)?;
+            let SyntaxPatternKind::Capture(name) = &payload.kind else {
+                return Err(error_at_view(
+                    member,
+                    "`:name` dictionary shorthand requires one capture name",
+                ));
+            };
+            (vec![canonical_capture_name(name).to_owned()], payload)
+        } else {
+            (
+                parse_static_path(path, "dictionary pattern")?,
+                parse_pattern(payload)?,
+            )
+        };
+        if entries
+            .iter()
+            .any(|(existing, _): &(Vec<String>, SyntaxPattern)| existing == &path)
+        {
+            return Err(error_at_view(
+                member,
+                "dictionary pattern repeats the same static path",
+            ));
+        }
+        entries.push((path, payload));
+    }
+
+    Ok(dict_pattern(entries, remainder))
+}
+
+fn parse_static_path(view: TokenView<'_, '_>, context: &str) -> ParseResult<Vec<String>> {
+    let tokens = view
+        .top_level()
+        .filter(|indexed| !matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
+        .collect::<Vec<_>>();
+    let mut path = Vec::new();
+    let mut expect_name = true;
+    for token in tokens {
+        if expect_name {
+            let TokenKind::Name(name) = token.token().kind() else {
+                return Err(error_at_view(
+                    view,
+                    format!("{context} requires a static name path"),
+                ));
+            };
+            path.push((*name).to_owned());
+        } else if !matches!(token.token().kind(), TokenKind::Symbol("."))
+            || token.token().leading() != LeadingTrivia::Joint
+        {
+            return Err(error_at_view(
+                view,
+                format!("{context} requires a joint static name path"),
+            ));
+        }
+        expect_name = !expect_name;
+    }
+    if path.is_empty() || expect_name {
+        return Err(error_at_view(
+            view,
+            format!("{context} requires a complete static name path"),
+        ));
+    }
+    Ok(path)
+}
+
+fn tuple_pattern(items: Vec<SyntaxPattern>) -> SyntaxPattern {
+    dict_pattern(
+        vec![(vec!["tuple".to_owned()], fixed_list_pattern(items))],
+        None,
+    )
+}
+
+fn dict_pattern(
+    entries: Vec<(Vec<String>, SyntaxPattern)>,
+    remainder: Option<Box<SyntaxPattern>>,
+) -> SyntaxPattern {
+    SyntaxPattern {
+        kind: SyntaxPatternKind::Dict { entries, remainder },
+    }
+}
+
+fn canonical_capture_name(name: &str) -> &str {
+    name.strip_prefix('_').unwrap_or(name)
 }
 
 fn parse_list_append_pattern(
@@ -370,6 +591,15 @@ fn number_pattern_from_byte(byte: u8) -> SyntaxPattern {
     SyntaxPattern {
         kind: SyntaxPatternKind::Literal(SyntaxPatternLiteral::Number(Number::from_u8(byte))),
     }
+}
+
+fn top_level_symbols(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
+    view.top_level()
+        .filter(|indexed| {
+            matches!(indexed.token().kind(), TokenKind::Symbol(symbol) if *symbol == expected)
+        })
+        .map(|indexed| indexed.index())
+        .collect()
 }
 
 fn is_local_name(name: &str) -> bool {

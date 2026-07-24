@@ -232,6 +232,10 @@ their detailed scheduling and representation contracts.
   mismatches invoke `.fail`, while forcing errors still propagate. Quoted-path
   patterns are exact fixed lists of literals; they do not admit computed path
   splices. A list pattern has at most one irrefutable variable-length segment.
+- Fixed dictionary, tag, and tuple patterns use the same compiler-private
+  dictionary decomposition. Known paths are removed persistently without
+  iteration; only exact-empty remainder checks may scan deferred fields to
+  honor logical undefined equivalence. Computed paths and tags remain deferred.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

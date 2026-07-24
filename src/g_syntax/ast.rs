@@ -142,6 +142,10 @@ pub enum SyntaxPatternKind {
         middle: Option<Box<SyntaxPattern>>,
         suffix: Vec<SyntaxPattern>,
     },
+    Dict {
+        entries: Vec<(Vec<String>, SyntaxPattern)>,
+        remainder: Option<Box<SyntaxPattern>>,
+    },
     Group(Box<SyntaxPattern>),
     As(Box<SyntaxPattern>, Box<SyntaxPattern>),
 }
@@ -187,6 +191,14 @@ impl SyntaxPattern {
                     pattern.visit_captures(visitor);
                 }
             }
+            SyntaxPatternKind::Dict { entries, remainder } => {
+                for (_, pattern) in entries {
+                    pattern.visit_captures(visitor);
+                }
+                if let Some(pattern) = remainder {
+                    pattern.visit_captures(visitor);
+                }
+            }
             SyntaxPatternKind::Group(pattern) => pattern.visit_captures(visitor),
             SyntaxPatternKind::As(left, right) => {
                 left.visit_captures(visitor);
@@ -206,7 +218,9 @@ impl SyntaxPattern {
             SyntaxPatternKind::Capture(_) | SyntaxPatternKind::Wildcard => true,
             SyntaxPatternKind::Group(pattern) => pattern.is_irrefutable(),
             SyntaxPatternKind::As(left, right) => left.is_irrefutable() && right.is_irrefutable(),
-            SyntaxPatternKind::Literal(_) | SyntaxPatternKind::List { .. } => false,
+            SyntaxPatternKind::Literal(_)
+            | SyntaxPatternKind::List { .. }
+            | SyntaxPatternKind::Dict { .. } => false,
         }
     }
 
@@ -275,6 +289,18 @@ impl SyntaxPattern {
                 }
                 for pattern in suffix {
                     pattern.visit_match_events(visitor);
+                }
+            }
+            SyntaxPatternKind::Dict { entries, remainder } => {
+                visitor(None);
+                for (_, pattern) in entries {
+                    visitor(None);
+                    pattern.visit_value_events(visitor);
+                }
+                if let Some(pattern) = remainder {
+                    pattern.visit_value_events(visitor);
+                } else {
+                    visitor(None);
                 }
             }
         }

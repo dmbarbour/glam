@@ -2258,6 +2258,53 @@ fn literal_and_list_patterns_match_or_fall_through() {
 }
 
 #[test]
+fn dictionary_tag_and_tuple_patterns_match_or_fall_through() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "asm.empty = list.pure do { .r {} -> {}; .r \"E\" }\n",
+        "asm.nested = list.pure do { .r {foo:{bar:65,baz:66},other:67} -> {foo.bar:value,rest}; ((value == 65) and (rest.foo.baz == 66) and (rest.other == 67)) =>> .r \"D\" }\n",
+        "asm.remainder = list.pure do { .r {foo:65,extra:66} -> {foo:value,rest}; ((value == 65) and (rest.extra == 66)) =>> .r \"R\" }\n",
+        "asm.whole = list.pure do { .r {foo:65} -> {whole}; (whole.foo == 65) =>> .r \"W\" }\n",
+        "asm.tag = list.pure do { .r tag:65 -> tag:value; (value == 65) =>> .r \"T\" }\n",
+        "asm.tag_short = list.pure do { .r tag:65 -> :tag; (tag == 65) =>> .r \"S\" }\n",
+        "asm.tuple = list.pure do { .r (65,66) -> (left,right); ((left == 65) and (right == 66)) =>> .r \"U\" }\n",
+        "asm.backward = list.pure do { {:value} <- .r {value:66}; (value == 66) =>> .r \"B\" }\n",
+        "asm.pure = list.pure do { {:value} = {value:67}; (value == 67) =>> .r \"C\" }\n",
+        "asm.extra_fallback = list.pure (.alt (do { .r {foo:1,extra:2} -> {foo:1}; .r \"bad\" }) (.r \"X\"))\n",
+        "asm.tag_fallback = list.pure (.alt (do { .r {tag:1,extra:2} -> tag:1; .r \"bad\" }) (.r \"G\"))\n",
+        "asm.tuple_fallback = list.pure (.alt (do { .r {tuple:[1],extra:2} -> (1,); .r \"bad\" }) (.r \"P\"))\n",
+        "asm.kind_fallback = list.pure (.alt (do { .r 1 -> {}; .r \"bad\" }) (.r \"K\"))\n",
+        "asm.recursive = list.pure do { abstract left, right; .r {left:65,right:66} -> {:left,:right}; ((left == 65) and (right == 66)) =>> .r \"AB\" }\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("empty", b"E".as_slice()),
+        ("nested", b"D".as_slice()),
+        ("remainder", b"R".as_slice()),
+        ("whole", b"W".as_slice()),
+        ("tag", b"T".as_slice()),
+        ("tag_short", b"S".as_slice()),
+        ("tuple", b"U".as_slice()),
+        ("backward", b"B".as_slice()),
+        ("pure", b"C".as_slice()),
+        ("extra_fallback", b"X".as_slice()),
+        ("tag_fallback", b"G".as_slice()),
+        ("tuple_fallback", b"P".as_slice()),
+        ("kind_fallback", b"K".as_slice()),
+        ("recursive", b"AB".as_slice()),
+    ] {
+        let result = fully_evaluated_value(resolved_value_at_path(&value, &["asm", path]));
+        assert_eq!(output_binary_result_list(&result), expected, "{path}");
+    }
+}
+
+#[test]
 fn bare_do_operations_reuse_the_effect_then_unit_policy() {
     let parsed = parse(concat!(
         "language g0\n",

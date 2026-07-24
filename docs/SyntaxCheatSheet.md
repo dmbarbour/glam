@@ -332,9 +332,10 @@ nested = f [do { .r 1 }, do {; .r 2; }]
 # - Braced do is an expression atom. One leading/trailing `;` is ignored;
 #   interior empty statements and `do {;}` are invalid.
 # - Do bindings currently support irrefutable names, `_`, grouping, irrefutable
-#   `P as Q`, scalar literals, quoted paths, and list patterns with at most one
-#   irrefutable variable-length segment. Other structural patterns remain
-#   target syntax.
+#   `P as Q`, scalar literals, fixed quoted paths, list patterns with at most
+#   one irrefutable variable-length segment, static-path dictionary patterns,
+#   tags, and tuples. Computed path/tag and effectful patterns remain target
+#   syntax.
 
 op1 >>= k           # bind        k1 >=> k2   # Kleisli
 op1 =>> op2         # sequence, dropping unit result

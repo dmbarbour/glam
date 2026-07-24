@@ -178,6 +178,46 @@ fn literal_list_and_quoted_path_patterns_parse_structurally() {
 }
 
 #[test]
+fn dictionary_tag_and_tuple_patterns_share_dictionary_structure() {
+    let expr = parse_do_expression(concat!(
+        "do\n",
+        ".r {} -> {}\n",
+        ".r {foo:{bar:1}} -> {foo.bar:value}\n",
+        ".r {foo:1, other:2} -> {foo:first, rest}\n",
+        ".r tag:1 -> tag:payload\n",
+        ".r tag:1 -> :tag\n",
+        ".r (1,2) -> (left,right)\n",
+        ".r {foo:1} -> {whole}\n",
+        "{:backward} <- .r {backward:3}\n",
+        ".r [value, first, rest, payload, tag, left, right, whole, backward]\n",
+    ));
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = expr else {
+        panic!("expected a do expression");
+    };
+    for step in &steps {
+        if let DoStepKind::Bind { pattern, .. } = &step.kind {
+            assert!(matches!(pattern.kind, SyntaxPatternKind::Dict { .. }));
+        }
+    }
+    assert!(matches!(
+        &steps[1].kind,
+        DoStepKind::Bind { pattern, .. } if pattern.captures() == ["value"]
+    ));
+    assert!(matches!(
+        &steps[2].kind,
+        DoStepKind::Bind { pattern, .. } if pattern.captures() == ["first", "rest"]
+    ));
+    assert!(matches!(
+        &steps[4].kind,
+        DoStepKind::Bind { pattern, .. } if pattern.captures() == ["tag"]
+    ));
+    assert!(matches!(
+        &steps[5].kind,
+        DoStepKind::Bind { pattern, .. } if pattern.captures() == ["left", "right"]
+    ));
+}
+
+#[test]
 fn braced_do_is_a_structural_atom_in_containers_and_other_do_blocks() {
     for source in [
         "consume [do { .r 1 }, do { text = \"a;b\"; .r text }, do { x = do .r 2; .r x }]",
@@ -299,6 +339,26 @@ fn token_do_reports_structural_statement_errors() {
         (
             "do\n'.foo.[path] <- .r []\n.r ()",
             "components must be literals",
+        ),
+        (
+            "do\n.r {} -> {[key]:value}\n.r value",
+            "requires a static name path",
+        ),
+        (
+            "do\n.r {} -> {foo:value, rest, bar:other}\n.r value",
+            "remainder must be the final pattern item",
+        ),
+        (
+            "do\n.r {} -> {foo:value, []}\n.r value",
+            "remainder must be an irrefutable pattern",
+        ),
+        (
+            "do\n.r {} -> {foo:value, foo:other}\n.r value",
+            "repeats the same static path",
+        ),
+        (
+            "do\n.r {} -> :42\n.r ()",
+            "`:name` pattern shorthand requires one capture name",
         ),
         (
             "do\nabstract\n.r ()",
