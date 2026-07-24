@@ -217,15 +217,16 @@ the parser to consume that argument completely.
 | Effect | Result | Behavior |
 | --- | --- | --- |
 | `.token.text Text` | `()` | Consume exact literal text. |
-| `.token.regex Regex` | `Text` | Consume a nonempty or empty span matched at the current cursor. |
+| `.token.regex Regex` | `{span:Text}` | Consume a nonempty or empty span matched at the current cursor. |
 | `.token.any` | `Text` | Consume one Unicode scalar value. |
 | `.token.end` | `()` | Succeed only at the end of the argument. |
 
 `.token.regex` currently uses `regex-lite` syntax and forbids explicit capture
-groups; its returned value is the whole matched span. Regex alternatives follow
-the engine's leftmost-first preference. Literal token readers can enumerate
-completion candidates, while a general regex contributes an expectation but
-does not enumerate its language.
+groups. Its `span` field is the whole matched text; the record leaves room for
+future capture metadata without changing the reader's outer result shape.
+Regex alternatives follow the engine's leftmost-first preference. Literal
+token readers can enumerate completion candidates, while a general regex
+contributes an expectation but does not enumerate its language.
 
 Token parsing is its own restricted effect context. It has fresh task-local
 state for each `.read.token`, isolated from `conf.cli` and from other token

@@ -143,7 +143,10 @@ fn regex_span(
         return Ok(RequestResult::Fail);
     }
     journal.cursor = cursor + matched.end();
-    Ok(RequestResult::Return(Value::text(matched.as_str())))
+    Ok(RequestResult::Return(Value::record([(
+        "span",
+        Value::text(matched.as_str()),
+    )])))
 }
 
 fn any(

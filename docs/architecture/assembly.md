@@ -156,8 +156,9 @@ Configured parsing records an argument index and token-relative byte offset for
 failed reader expectations. `.read.token` starts a nested restricted effect
 search over one UTF-8 argument; literal, capture-free `regex-lite`, Unicode
 scalar, and end readers advance its byte cursor, and every complete nested
-result resumes the outer continuation. Regex matching is anchored at the
-current token cursor and follows `regex-lite`'s leftmost-first preference.
+result resumes the outer continuation. Regex matching returns its whole match
+as `{span:Text}`, is anchored at the current token cursor, and follows
+`regex-lite`'s leftmost-first preference.
 
 `cli::complete_configured` runs the same outer parser with an optional active
 argument split into prefix and suffix. Readers at that frontier record

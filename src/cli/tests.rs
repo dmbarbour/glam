@@ -355,7 +355,7 @@ fn configured_cli_builds_one_canonical_command_plan() {
 #[test]
 fn configured_cli_parses_structured_utf8_tokens() {
     let (assembler, configuration) = configuration(
-        "language g0\nimport 'std\nconf.cli =\n    .read.token \"script option\" (.token.text \"--script.\" =>> .token.regex \"[A-Za-z0-9_+-]+\") >>= (\\extension ->\n    .read.text \"script body\" >>= (\\body ->\n    .read.end =>> .write.script extension body))\n",
+        "language g0\nimport 'std\nconf.cli =\n    .read.token \"script option\" (.token.text \"--script.\" =>> .token.regex \"[A-Za-z0-9_+-]+\") >>= (\\extension ->\n    .read.text \"script body\" >>= (\\body ->\n    .read.end =>> .write.script extension.span body))\n",
     );
     let expansion = expand_configured(
         &assembler,
@@ -403,7 +403,7 @@ fn configured_cli_token_alternatives_reenter_outer_search() {
 #[test]
 fn configured_token_parser_returns_user_structured_values() {
     let (assembler, configuration) = configuration(
-        "language g0\nimport 'std\nconf.cli = .read.token \"field\" (.token.regex \"[A-Za-z]+\" >>= (\\key -> .token.text \"=\" =>> .token.regex \"[0-9]+\" >>= (\\value -> .r {key:key, value:value}))) >>= (\\field -> (field == {key:\"answer\", value:\"42\"}) =>> .read.end =>> .write.script \"g\" \"ok\")\n",
+        "language g0\nimport 'std\nconf.cli = .read.token \"field\" (.token.regex \"[A-Za-z]+\" >>= (\\key -> .token.text \"=\" =>> .token.regex \"[0-9]+\" >>= (\\value -> .r {key:key.span, value:value.span}))) >>= (\\field -> (field == {key:\"answer\", value:\"42\"}) =>> .read.end =>> .write.script \"g\" \"ok\")\n",
     );
     let expansion = expand_configured(
         &assembler,
