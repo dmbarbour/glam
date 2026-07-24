@@ -504,6 +504,36 @@ mod tests {
     }
 
     #[test]
+    fn refutable_value_binding_does_not_synthesize_a_return_effect() {
+        let value_pattern = SyntaxPattern {
+            kind: SyntaxPatternKind::Literal(SyntaxPatternLiteral::Number(Number::from(42_i64))),
+        };
+        let resolved = resolve(&SyntaxExpr::Do(DoExpr {
+            steps: vec![DoStep {
+                line: 2,
+                kind: DoStepKind::ValueBind {
+                    pattern: value_pattern,
+                    value: SyntaxExpr::Number(42.into()),
+                },
+            }],
+            result_line: 3,
+            result: Box::new(SyntaxExpr::Unit),
+        }));
+
+        assert_eq!(
+            count_embedded_value(
+                &resolved,
+                &crate::g_syntax::compiler_values::effect_value("r")
+            ),
+            0
+        );
+        assert_eq!(
+            count_embedded_value(&resolved, &Value::Builtin(Builtin::PatternEqual)),
+            1
+        );
+    }
+
+    #[test]
     fn wildcard_uses_an_unspellable_continuation_parameter() {
         let resolved = resolve(&SyntaxExpr::Do(DoExpr {
             steps: vec![DoStep {

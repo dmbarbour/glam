@@ -365,12 +365,13 @@ and does not use `let`. General pattern matching either captures locals or
 evaluates to `.fail`.
 
 The current Rust bootstrap implements pattern-bearing statements in both
-layout and braced forms. Patterns currently include names, `_`, irrefutable
+layout and braced forms. Patterns currently include names, `_`, general
 `P as Q`, unit, numbers, atoms, text, fixed quoted paths, list patterns with at
 most one potentially refutable variable-length segment, computed-path
-dictionaries and quoted paths, static and computed tags, and tuples. Dictionary
-entries are required by default; `path?:Pattern` explicitly passes `{}` to the
-payload pattern when the path is absent or undefined. Computed paths are
+dictionaries and quoted paths, static and computed tags, tuples, views,
+predicates, and local guards. Dictionary entries are required by default;
+`path?:Pattern` explicitly passes `{}` to the payload pattern when the path is
+absent or undefined. Computed paths and effectful pattern expressions are
 evaluated once in source order and may use captures from earlier subpatterns.
 A layout block is newline-delimited:
 
@@ -383,12 +384,14 @@ A layout block is newline-delimited:
             .r total
 
 `Pattern <- Operation` and `Operation -> Pattern` are equivalent monadic
-binds. `Pattern = Value` is the pure form; a single irrefutable name remains
-optimized to ordinary lambda application. Structural or literal mismatch
-invokes the ambient `.fail`. `_name` suppresses its unused-local warning and
-`Operation -> _` explicitly discards any result. A producing expression is
-resolved before its new names enter scope, and active source locals cannot be
-shadowed.
+binds. `Pattern = Value` is semantically equivalent to
+`Pattern <- .r Value`, but the compiler binds the value directly and emits no
+synthetic `.r`; only refutable matching steps use effects. A single
+irrefutable name remains optimized to ordinary lambda application. Structural
+or literal mismatch invokes the ambient `.fail`. `_name` suppresses its
+unused-local warning and `Operation -> _` explicitly discards any result. A
+producing expression is resolved before its new names enter scope, and active
+source locals cannot be shadowed.
 
 A non-final bare operation uses the existing `=>>` behavior, including its
 requirement that the discarded result be unit. The final statement should
@@ -1334,7 +1337,8 @@ Several forms of guard clauses:
 - `Effect -> Pattern` or `Pattern <- Effect` 
   - reject on `.fail`
   - accept `.r Result when Pattern = Result`
-- `Pattern = Expr` - eqv. to `Pattern <- .r Expr` 
+- `Pattern = Expr` - semantically equivalent to `Pattern <- .r Expr`, but
+  lowers as a direct value binding without an actual `.r` request
 - `_` - eqv. to `.r ()` 
 
 Guard clauses compose sequentially via 'and': `Guard (and Guard)*`. 

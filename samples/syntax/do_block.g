@@ -32,3 +32,11 @@ effectful_patterns = do
   .r second -> (equals 2 kept)
   .r whole -> (_ when viewed < kept and .r (viewed + kept) -> total)
   .r total
+
+backward_effectful_pattern = do
+  (increment -> viewed) <- .r 2
+  .r viewed
+
+pure_effectful_pattern = do
+  (increment -> viewed) = 3
+  .r viewed

@@ -2470,6 +2470,51 @@ fn effectful_patterns_transform_filter_guard_and_preserve_the_subject() {
 }
 
 #[test]
+fn effectful_patterns_support_every_do_binding_direction() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "increment value = .r (value + 1)\n",
+        "equals expected actual = expected == actual\n",
+        "asm.forward_view = list.pure do { .r 64 -> (increment -> value); (value == 65) =>> .r \"A\" }\n",
+        "asm.backward_view = list.pure do { (increment -> value) <- .r 65; (value == 66) =>> .r \"B\" }\n",
+        "asm.value_view = list.pure do { (increment -> value) = 66; (value == 67) =>> .r \"C\" }\n",
+        "asm.forward_predicate = list.pure do { .r 68 -> (equals 68 value); (value == 68) =>> .r \"D\" }\n",
+        "asm.backward_predicate = list.pure do { (equals 69 value) <- .r 69; (value == 69) =>> .r \"E\" }\n",
+        "asm.value_predicate = list.pure do { (equals 70 value) = 70; (value == 70) =>> .r \"F\" }\n",
+        "asm.forward_as = list.pure do { .r [71] -> [value] as whole; (value == list.head whole) =>> .r \"G\" }\n",
+        "asm.backward_as = list.pure do { [value] as whole <- .r [72]; (value == list.head whole) =>> .r \"H\" }\n",
+        "asm.value_as = list.pure do { [value] as whole = [73]; (value == list.head whole) =>> .r \"I\" }\n",
+        "asm.forward_guard = list.pure do { .r 74 -> (value when value == 74); .r \"J\" }\n",
+        "asm.backward_guard = list.pure do { (value when value == 75) <- .r 75; .r \"K\" }\n",
+        "asm.value_guard = list.pure do { (value when value == 76) = 76; .r \"L\" }\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("forward_view", b"A".as_slice()),
+        ("backward_view", b"B".as_slice()),
+        ("value_view", b"C".as_slice()),
+        ("forward_predicate", b"D".as_slice()),
+        ("backward_predicate", b"E".as_slice()),
+        ("value_predicate", b"F".as_slice()),
+        ("forward_as", b"G".as_slice()),
+        ("backward_as", b"H".as_slice()),
+        ("value_as", b"I".as_slice()),
+        ("forward_guard", b"J".as_slice()),
+        ("backward_guard", b"K".as_slice()),
+        ("value_guard", b"L".as_slice()),
+    ] {
+        let result = fully_evaluated_value(resolved_value_at_path(&value, &["asm", path]));
+        assert_eq!(output_binary_result_list(&result), expected, "{path}");
+    }
+}
+
+#[test]
 fn local_pattern_guards_require_unit_when_their_result_is_discarded() {
     let parsed = parse(concat!(
         "language g0\n",
