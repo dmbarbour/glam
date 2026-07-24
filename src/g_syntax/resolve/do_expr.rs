@@ -2,7 +2,7 @@ use super::super::recursive_do::{
     ForwardNameId, ForwardNameRegistry, RecursiveDoEvent, RecursiveDoPlan, RecursiveDoStep,
 };
 use super::super::*;
-use super::pattern::append_pattern_steps;
+use super::pattern::{PatternLoweringContext, append_pattern_steps};
 use crate::number::Number;
 
 #[derive(Default)]
@@ -132,14 +132,19 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
+                        let mut pattern_lowering = PatternLoweringContext::new(
+                            &mut forward_names,
+                            self.context,
+                            self.scope,
+                            locals,
+                            &mut forwards,
+                        );
                         append_pattern_steps(
                             &mut steps,
                             PrimitivePatternInput::Effect(operation),
-                            &mut forward_names,
                             pattern,
                             step.line,
-                            locals,
-                            &mut forwards,
+                            &mut pattern_lowering,
                         )?;
                     }
                     DoStepKind::ValueBind { pattern, value } => {
@@ -150,14 +155,19 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
+                        let mut pattern_lowering = PatternLoweringContext::new(
+                            &mut forward_names,
+                            self.context,
+                            self.scope,
+                            locals,
+                            &mut forwards,
+                        );
                         append_pattern_steps(
                             &mut steps,
                             PrimitivePatternInput::Value(value),
-                            &mut forward_names,
                             pattern,
                             step.line,
-                            locals,
-                            &mut forwards,
+                            &mut pattern_lowering,
                         )?;
                     }
                     DoStepKind::Then(operation) => {

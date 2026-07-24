@@ -1409,6 +1409,54 @@ fn compiler_pattern_equality_mismatches_incompatible_values() {
 }
 
 #[test]
+fn compiler_pattern_path_equality_matches_keyable_lists_directionally() {
+    let foo = key_value(&Key::atom_from_text("foo"));
+    let expected = Value::List(List::from_values(vec![foo.clone(), n(42)]));
+    assert_eq!(
+        run_pattern_builtin2(
+            Builtin::PatternPathEqual,
+            expected.clone(),
+            Value::List(List::from_values(vec![foo.clone(), n(42)])),
+        )
+        .expect("equal computed paths should match"),
+        [(*keys::UNIT_VALUE).clone()]
+    );
+    for actual in [
+        Value::List(List::from_values(vec![foo, n(43)])),
+        Value::List(List::from_values(vec![Value::Builtin(Builtin::Add)])),
+        n(42),
+    ] {
+        assert!(
+            run_pattern_builtin2(Builtin::PatternPathEqual, expected.clone(), actual)
+                .expect("a different or non-keyable subject path should mismatch")
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        run_pattern_builtin2(
+            Builtin::PatternPathEqual,
+            Value::List(List::from_values(vec![Value::Builtin(Builtin::Add)])),
+            Value::List(List::empty()),
+        )
+        .expect_err("an invalid computed expected path should remain an error")
+        .to_string(),
+        "dictionary keys must evaluate to keyable values"
+    );
+    assert_eq!(
+        run_pattern_builtin2(
+            Builtin::PatternPathEqual,
+            expected,
+            Value::List(List::from_values(vec![Value::error(
+                "quoted path value failed"
+            )])),
+        )
+        .expect_err("forcing failures in the subject path must propagate")
+        .to_string(),
+        "quoted path value failed"
+    );
+}
+
+#[test]
 fn compiler_pattern_dictionary_operations_preserve_remainders() {
     let foo = Key::atom_from_text("foo");
     let bar = Key::atom_from_text("bar");

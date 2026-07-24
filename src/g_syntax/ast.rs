@@ -134,9 +134,14 @@ pub struct SyntaxPattern {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SyntaxDictPatternEntry {
-    pub path: Vec<String>,
+    pub path: Vec<SyntaxKeyExpr>,
     pub optional: bool,
     pub pattern: SyntaxPattern,
+}
+
+pub(super) enum SyntaxPatternScopeEvent<'a> {
+    Key(&'a SyntaxKeyExpr),
+    Capture(&'a str),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -153,6 +158,7 @@ pub enum SyntaxPatternKind {
         entries: Vec<SyntaxDictPatternEntry>,
         remainder: Option<Box<SyntaxPattern>>,
     },
+    QuotedPath(Vec<SyntaxKeyExpr>),
     Group(Box<SyntaxPattern>),
     As(Box<SyntaxPattern>, Box<SyntaxPattern>),
 }
@@ -180,8 +186,24 @@ impl SyntaxPattern {
 
     /// Visits source captures in their semantic binding order.
     pub(super) fn visit_captures<'a>(&'a self, visitor: &mut impl FnMut(&'a str)) {
+        self.visit_scope_events(&mut |event| {
+            if let SyntaxPatternScopeEvent::Capture(name) = event {
+                visitor(name);
+            }
+        });
+    }
+
+    /// Visits computed path expressions and captures in matching order.
+    ///
+    /// Each key expression is evaluated before the subpattern selected by that
+    /// path. Later path expressions may therefore use captures established by
+    /// earlier subpatterns.
+    pub(super) fn visit_scope_events<'a>(
+        &'a self,
+        visitor: &mut impl FnMut(SyntaxPatternScopeEvent<'a>),
+    ) {
         match &self.kind {
-            SyntaxPatternKind::Capture(name) => visitor(name),
+            SyntaxPatternKind::Capture(name) => visitor(SyntaxPatternScopeEvent::Capture(name)),
             SyntaxPatternKind::Wildcard | SyntaxPatternKind::Literal(_) => {}
             SyntaxPatternKind::List {
                 prefix,
@@ -189,27 +211,35 @@ impl SyntaxPattern {
                 suffix,
             } => {
                 for pattern in prefix {
-                    pattern.visit_captures(visitor);
+                    pattern.visit_scope_events(visitor);
                 }
                 if let Some(pattern) = middle {
-                    pattern.visit_captures(visitor);
+                    pattern.visit_scope_events(visitor);
                 }
                 for pattern in suffix {
-                    pattern.visit_captures(visitor);
+                    pattern.visit_scope_events(visitor);
                 }
             }
             SyntaxPatternKind::Dict { entries, remainder } => {
                 for entry in entries {
-                    entry.pattern.visit_captures(visitor);
+                    for key in &entry.path {
+                        visitor(SyntaxPatternScopeEvent::Key(key));
+                    }
+                    entry.pattern.visit_scope_events(visitor);
                 }
                 if let Some(pattern) = remainder {
-                    pattern.visit_captures(visitor);
+                    pattern.visit_scope_events(visitor);
                 }
             }
-            SyntaxPatternKind::Group(pattern) => pattern.visit_captures(visitor),
+            SyntaxPatternKind::QuotedPath(path) => {
+                for key in path {
+                    visitor(SyntaxPatternScopeEvent::Key(key));
+                }
+            }
+            SyntaxPatternKind::Group(pattern) => pattern.visit_scope_events(visitor),
             SyntaxPatternKind::As(left, right) => {
-                left.visit_captures(visitor);
-                right.visit_captures(visitor);
+                left.visit_scope_events(visitor);
+                right.visit_scope_events(visitor);
             }
         }
     }
@@ -227,7 +257,8 @@ impl SyntaxPattern {
             SyntaxPatternKind::As(left, right) => left.is_irrefutable() && right.is_irrefutable(),
             SyntaxPatternKind::Literal(_)
             | SyntaxPatternKind::List { .. }
-            | SyntaxPatternKind::Dict { .. } => false,
+            | SyntaxPatternKind::Dict { .. }
+            | SyntaxPatternKind::QuotedPath(_) => false,
         }
     }
 
@@ -269,7 +300,7 @@ impl SyntaxPattern {
         match &self.kind {
             SyntaxPatternKind::Capture(name) => visitor(Some(name)),
             SyntaxPatternKind::Wildcard => {}
-            SyntaxPatternKind::Literal(_) => visitor(None),
+            SyntaxPatternKind::Literal(_) | SyntaxPatternKind::QuotedPath(_) => visitor(None),
             SyntaxPatternKind::Group(pattern) => pattern.visit_match_events(visitor),
             SyntaxPatternKind::As(left, right) => {
                 left.visit_match_events(visitor);

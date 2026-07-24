@@ -230,15 +230,19 @@ their detailed scheduling and representation contracts.
   reconstruct a surface `DoExpr` or lower the subject more than once.
 - Literal and list-pattern observations are compiler-private pass/fail effects:
   mismatches invoke `.fail`, while forcing errors still propagate. Quoted-path
-  patterns are exact fixed lists of literals; they do not admit computed path
-  splices. A list pattern has at most one irrefutable variable-length segment.
+  patterns with only literals remain exact fixed lists; computed components
+  resolve at their source-order match step and use directional key-path
+  comparison. A list pattern has at most one irrefutable variable-length
+  segment.
 - Fixed dictionary, tag, and tuple patterns use the same compiler-private
   dictionary decomposition. Known paths are removed persistently without
   iteration; only exact-empty remainder checks may scan deferred fields to
   honor logical undefined equivalence. Required `path:Pattern` entries mismatch
   on absent/undefined paths; explicit `path?:Pattern` entries pass `{}` to the
   payload and preserve the original remainder. A defined non-dict path prefix
-  still mismatches. Computed paths and tags remain deferred.
+  still mismatches. Computed dictionary paths are evaluated once immediately
+  before their payload match and may use earlier captures; computed tag syntax
+  remains deferred.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

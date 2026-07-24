@@ -60,6 +60,7 @@ pub(super) fn apply_builtin(
         | Builtin::PatternListTryUnsnoc
         | Builtin::PatternListIsEmpty
         | Builtin::PatternEqual
+        | Builtin::PatternPathEqual
         | Builtin::PatternIsDict
         | Builtin::PatternDictTryTake
         | Builtin::PatternDictTryTakeOptional

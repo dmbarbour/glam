@@ -333,9 +333,9 @@ nested = f [do { .r 1 }, do {; .r 2; }]
 #   interior empty statements and `do {;}` are invalid.
 # - Do bindings currently support irrefutable names, `_`, grouping, irrefutable
 #   `P as Q`, scalar literals, fixed quoted paths, list patterns with at most
-#   one irrefutable variable-length segment, static-path dictionary patterns,
-#   tags, and tuples. Computed path/tag and effectful patterns remain target
-#   syntax.
+#   one irrefutable variable-length segment, computed-path dictionary and
+#   quoted-path patterns, static tags, and tuples. Computed tag and effectful
+#   patterns remain target syntax.
 
 op1 >>= k           # bind        k1 >=> k2   # Kleisli
 op1 =>> op2         # sequence, dropping unit result
@@ -404,10 +404,16 @@ P1 as P2            # both views
 {x?:{}}             # explicitly accept a missing x (`{x:{}}` remains required)
 {:x, :y}            # ≡ {x:x, y:y}
 {a.b.c:P, _}        # deep path
-tag:P    :tag    'name    [KeyA,KeyB]:P    (PathExpr):P
+{selector:key, [key]:P, rem}       # prior capture selects a computed key
+{selector:key, root.[key]:P, rem}  # computed hierarchical component
+{path:p, (p):P, rem}               # splice a computed list-valued path
+tag:P    :tag    'name
+# Target computed-tag forms (not implemented by the bootstrap yet):
+[KeyA,KeyB]:P    (PathExpr):P
 []   [a,b,c]
 [x]++xs   xs++[x]   [x0]++mid++[xN]     # ONE variable segment max
 "foo"    "foo"++rest                    # texts are lists
+'.foo.[key].(tail) # computed quoted path; earlier captures are in scope
 (,)   (P,)   (P1,P2) # tuple patterns
 42   _1.23   1/6    # exact constants
 (View -> P)         # view pattern — MUST be parenthesized; view runs first

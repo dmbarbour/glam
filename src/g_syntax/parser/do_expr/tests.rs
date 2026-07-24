@@ -1,4 +1,4 @@
-use crate::g_syntax::{DoExpr, DoStepKind, SyntaxExpr, SyntaxPatternKind};
+use crate::g_syntax::{DoExpr, DoStepKind, SyntaxExpr, SyntaxKeyExpr, SyntaxPatternKind};
 
 use super::super::structural::parse_compound_expression_fragment;
 
@@ -224,9 +224,62 @@ fn dictionary_tag_and_tuple_patterns_share_dictionary_structure() {
             },
             ..
         } if entries.len() == 1
-            && entries[0].path == ["optional"]
+            && matches!(
+                entries[0].path.as_slice(),
+                [SyntaxKeyExpr::Atom(name)] if name == "optional"
+            )
             && entries[0].optional
             && entries[0].pattern.captures() == ["value"]
+    ));
+}
+
+#[test]
+fn computed_dictionary_and_quoted_paths_parse_as_owned_expressions() {
+    let expr = parse_do_expression(concat!(
+        "do\n",
+        ".r {selector:'target,target:1} -> {selector:key, [key]:value}\n",
+        ".r {root:{target:2}} -> {root.[key]:nested}\n",
+        ".r {target:3} -> {(path):spliced}\n",
+        ".r {} -> {[key]?:{}}\n",
+        ".r (42,['foo,42]) -> (index, '.foo.[index])\n",
+        ".r (['foo,42],['foo,42]) -> (whole_path, '.(whole_path))\n",
+        ".r [value, nested, spliced, index]\n",
+    ));
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = expr else {
+        panic!("expected a do expression");
+    };
+
+    let DoStepKind::Bind { pattern, .. } = &steps[0].kind else {
+        panic!("expected a dictionary-pattern binding");
+    };
+    let SyntaxPatternKind::Dict { entries, .. } = &pattern.kind else {
+        panic!("expected a dictionary pattern");
+    };
+    assert_eq!(entries.len(), 2);
+    assert!(matches!(
+        entries[1].path.as_slice(),
+        [SyntaxKeyExpr::Index(expr)] if matches!(expr.as_ref(), SyntaxExpr::Name(name) if name == "key")
+    ));
+    assert_eq!(pattern.captures(), ["key", "value"]);
+
+    let DoStepKind::Bind { pattern, .. } = &steps[4].kind else {
+        panic!("expected a tuple-pattern binding");
+    };
+    let SyntaxPatternKind::Dict { entries, .. } = &pattern.kind else {
+        panic!("tuple patterns use dictionary structure");
+    };
+    let SyntaxPatternKind::List { prefix, .. } = &entries[0].pattern.kind else {
+        panic!("tuple payload should be a fixed list pattern");
+    };
+    assert!(matches!(
+        &prefix[1].kind,
+        SyntaxPatternKind::QuotedPath(path)
+            if matches!(
+                path.as_slice(),
+                [SyntaxKeyExpr::Atom(name), SyntaxKeyExpr::Index(expr)]
+                    if name == "foo"
+                        && matches!(expr.as_ref(), SyntaxExpr::Name(index) if index == "index")
+            )
     ));
 }
 
@@ -346,16 +399,12 @@ fn token_do_reports_structural_statement_errors() {
             "requires irrefutable patterns on both sides",
         ),
         (
-            "do\n'.foo.(path) <- .r []\n.r ()",
-            "cannot contain computed path splices",
+            "do\n'.foo.() <- .r []\n.r ()",
+            "path splice requires an expression",
         ),
         (
-            "do\n'.foo.[path] <- .r []\n.r ()",
-            "components must be literals",
-        ),
-        (
-            "do\n.r {} -> {[key]:value}\n.r value",
-            "requires a static name path",
+            "do\n.r {} -> {[first,,second]:value}\n.r value",
+            "contains an empty key between commas",
         ),
         (
             "do\n.r {} -> {foo:value, rest, bar:other}\n.r value",
@@ -367,11 +416,15 @@ fn token_do_reports_structural_statement_errors() {
         ),
         (
             "do\n.r {} -> {foo:value, foo:other}\n.r value",
-            "repeats the same static path",
+            "repeats the same path expression",
+        ),
+        (
+            "do\n.r {} -> {[key]:value, [key]:other}\n.r value",
+            "repeats the same path expression",
         ),
         (
             "do\n.r {} -> {?:value}\n.r value",
-            "requires a static path before `?:`",
+            "requires a path before `?:`",
         ),
         (
             "do\n.r {} -> {foo ?:value}\n.r value",

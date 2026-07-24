@@ -2283,6 +2283,15 @@ fn dictionary_tag_and_tuple_patterns_match_or_fall_through() {
         "asm.optional_nested = list.pure do { .r {foo:{extra:67}} -> {foo.bar?:{},rest}; (rest.foo.extra == 67) =>> .r \"N\" }\n",
         "asm.optional_literal_fallback = list.pure (.alt (do { .r {} -> {foo?:42}; .r \"bad\" }) (.r \"L\"))\n",
         "asm.optional_prefix_fallback = list.pure (.alt (do { .r {foo:1} -> {foo.bar?:{}}; .r \"bad\" }) (.r \"I\"))\n",
+        "asm.computed_entry = list.pure do { .r {selector:'target,target:65} -> {selector:key,[key]:value}; (value == 65) =>> .r \"J\" }\n",
+        "asm.computed_nested = list.pure do { .r {selector:'target,root:{target:66}} -> {selector:key,root.[key]:value}; (value == 66) =>> .r \"H\" }\n",
+        "asm.computed_splice = list.pure do { .r {path:['root,'target],root:{target:67}} -> {path:path,(path):value}; (value == 67) =>> .r \"V\" }\n",
+        "asm.computed_optional = list.pure do { .r {selector:'missing,keep:68} -> {selector:key,[key]?:{},rest}; (rest.keep == 68) =>> .r \"Y\" }\n",
+        "asm.computed_quoted = list.pure do { .r (42,['foo,42]) -> (index,'.foo.[index]); .r \"Z\" }\n",
+        "asm.spliced_quoted = list.pure do { .r (['foo,42],['foo,42]) -> (path,'.(path)); .r \"F\" }\n",
+        "asm.computed_fallback = list.pure (.alt (do { .r {selector:'missing} -> {selector:key,[key]:_value}; .r \"bad\" }) (.r \"G\"))\n",
+        "asm.quoted_fallback = list.pure (.alt (do { .r (43,['foo,42]) -> (index,'.foo.[index]); .r \"bad\" }) (.r \"P\"))\n",
+        "asm.computed_recursive = list.pure do { abstract key,value; .r {selector:'target,target:65} -> {selector:key,[key]:value}; ((value == 65) and (key == 'target)) =>> .r \"X\" }\n",
         "asm.recursive = list.pure do { abstract left, right; .r {left:65,right:66} -> {:left,:right}; ((left == 65) and (right == 66)) =>> .r \"AB\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
@@ -2313,6 +2322,15 @@ fn dictionary_tag_and_tuple_patterns_match_or_fall_through() {
         ("optional_nested", b"N".as_slice()),
         ("optional_literal_fallback", b"L".as_slice()),
         ("optional_prefix_fallback", b"I".as_slice()),
+        ("computed_entry", b"J".as_slice()),
+        ("computed_nested", b"H".as_slice()),
+        ("computed_splice", b"V".as_slice()),
+        ("computed_optional", b"Y".as_slice()),
+        ("computed_quoted", b"Z".as_slice()),
+        ("spliced_quoted", b"F".as_slice()),
+        ("computed_fallback", b"G".as_slice()),
+        ("quoted_fallback", b"P".as_slice()),
+        ("computed_recursive", b"X".as_slice()),
         ("recursive", b"AB".as_slice()),
     ] {
         let result = fully_evaluated_value(resolved_value_at_path(&value, &["asm", path]));

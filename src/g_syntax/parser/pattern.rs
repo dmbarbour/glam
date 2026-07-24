@@ -1,18 +1,22 @@
 //! Pattern grammar shared by pattern-bearing `.g` syntax.
 //!
-//! Patterns are parsed independently from expressions. Quoted paths become
-//! exact list patterns here rather than retaining expression-level path
-//! construction.
+//! Patterns are parsed independently from expressions. Fixed quoted paths
+//! become exact list patterns; computed components remain affine syntax-owned
+//! expressions until their matching step.
 
 use crate::g_syntax::keywords::{canonical_keyword, reserved_keyword_message};
 use crate::g_syntax::{
-    Diagnostic, SyntaxDictPatternEntry, SyntaxPattern, SyntaxPatternKind, SyntaxPatternLiteral,
+    Diagnostic, SyntaxDictPatternEntry, SyntaxExpr, SyntaxKeyExpr, SyntaxPattern,
+    SyntaxPatternKind, SyntaxPatternLiteral,
 };
 use crate::number::Number;
 
+use super::expression_context::ExpressionContext;
 use super::input::{TokenRange, TokenView};
 use super::lexical::{Delimiter, LeadingTrivia, TokenKind};
-use super::structural::{is_layout_empty, split_top_level, trim_layout};
+use super::structural::{
+    is_layout_empty, parse_expression_in_context, split_top_level, trim_layout,
+};
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
@@ -225,7 +229,7 @@ fn parse_tag_pattern(view: TokenView<'_, '_>, colon: usize) -> ParseResult<Synta
         };
         return Ok(dict_pattern(
             vec![dict_entry(
-                vec![canonical_capture_name(name).to_owned()],
+                static_pattern_path([canonical_capture_name(name)]),
                 false,
                 payload,
             )],
@@ -248,7 +252,11 @@ fn parse_tag_pattern(view: TokenView<'_, '_>, colon: usize) -> ParseResult<Synta
     }
     let path = parse_static_path(left, "tag pattern")?;
     Ok(dict_pattern(
-        vec![dict_entry(path, false, parse_pattern(right)?)],
+        vec![dict_entry(
+            static_pattern_path(path.iter().map(String::as_str)),
+            false,
+            parse_pattern(right)?,
+        )],
         None,
     ))
 }
@@ -320,7 +328,7 @@ fn parse_dict_pattern(contents: TokenView<'_, '_>) -> ParseResult<SyntaxPattern>
             if optional {
                 return Err(error_at_view(
                     member,
-                    "optional dictionary entry pattern requires a static path before `?:`",
+                    "optional dictionary entry pattern requires a path before `?:`",
                 ));
             }
             let payload = parse_pattern(payload)?;
@@ -330,10 +338,10 @@ fn parse_dict_pattern(contents: TokenView<'_, '_>) -> ParseResult<SyntaxPattern>
                     "`:name` dictionary shorthand requires one capture name",
                 ));
             };
-            (vec![canonical_capture_name(name).to_owned()], payload)
+            (static_pattern_path([canonical_capture_name(name)]), payload)
         } else {
             (
-                parse_static_path(path, "dictionary pattern")?,
+                parse_pattern_path(path, "dictionary pattern", false)?,
                 parse_pattern(payload)?,
             )
         };
@@ -343,7 +351,7 @@ fn parse_dict_pattern(contents: TokenView<'_, '_>) -> ParseResult<SyntaxPattern>
         {
             return Err(error_at_view(
                 member,
-                "dictionary pattern repeats the same static path",
+                "dictionary pattern repeats the same path expression",
             ));
         }
         entries.push(dict_entry(path, optional, payload));
@@ -387,6 +395,124 @@ fn parse_static_path(view: TokenView<'_, '_>, context: &str) -> ParseResult<Vec<
     Ok(path)
 }
 
+fn parse_pattern_path(
+    view: TokenView<'_, '_>,
+    context: &str,
+    leading_dot: bool,
+) -> ParseResult<Vec<SyntaxKeyExpr>> {
+    let tokens = view
+        .top_level()
+        .filter(|indexed| !matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
+        .collect::<Vec<_>>();
+    let mut path = Vec::new();
+    let mut index = 0;
+    let mut require_dot = leading_dot;
+
+    while index < tokens.len() {
+        if require_dot {
+            let dot = &tokens[index];
+            if !matches!(dot.token().kind(), TokenKind::Symbol("."))
+                || dot.token().leading() != LeadingTrivia::Joint
+            {
+                return Err(error_at_view(
+                    view,
+                    format!("{context} requires joint `.component` path suffixes"),
+                ));
+            }
+            index += 1;
+            if index == tokens.len() {
+                return Err(error_at_view(
+                    view,
+                    format!("{context} requires a component after `.`"),
+                ));
+            }
+            if tokens[index].token().leading() != LeadingTrivia::Joint {
+                return Err(error_at_view(
+                    view,
+                    format!("{context} requires joint `.component` path suffixes"),
+                ));
+            }
+        }
+
+        match tokens[index].token().kind() {
+            TokenKind::Name(name) => path.push(SyntaxKeyExpr::Atom((*name).to_owned())),
+            TokenKind::Open {
+                group,
+                delimiter: Delimiter::Bracket,
+            } => {
+                let contents = view.group_contents(*group).ok_or_else(|| {
+                    error_at_view(view, format!("{context} contains an invalid key list"))
+                })?;
+                path.extend(parse_pattern_path_list(contents, context)?);
+            }
+            TokenKind::Open {
+                group,
+                delimiter: Delimiter::Parenthesis,
+            } => {
+                let contents = view.group_contents(*group).ok_or_else(|| {
+                    error_at_view(view, format!("{context} contains an invalid path splice"))
+                })?;
+                if is_layout_empty(contents) {
+                    return Err(error_at_view(
+                        contents,
+                        format!("{context} path splice requires an expression"),
+                    ));
+                }
+                let expr =
+                    parse_expression_in_context(contents, ExpressionContext::for_owner(contents))?;
+                path.push(SyntaxKeyExpr::PathIndex(Box::new(expr)));
+            }
+            _ => {
+                return Err(error_at_view(
+                    view,
+                    format!("{context} requires a name, key list, or path splice"),
+                ));
+            }
+        }
+        index += 1;
+        require_dot = true;
+    }
+
+    if path.is_empty() {
+        return Err(error_at_view(
+            view,
+            format!("{context} requires at least one path component"),
+        ));
+    }
+    Ok(path)
+}
+
+fn parse_pattern_path_list(
+    contents: TokenView<'_, '_>,
+    context: &str,
+) -> ParseResult<Vec<SyntaxKeyExpr>> {
+    if is_layout_empty(contents) {
+        return Ok(Vec::new());
+    }
+    let parts = split_top_level(contents, ",")
+        .into_iter()
+        .map(trim_layout)
+        .collect::<Vec<_>>();
+    let mut keys = Vec::new();
+    for (index, part) in parts.iter().copied().enumerate() {
+        if is_layout_empty(part) {
+            if index == 0 || index + 1 == parts.len() {
+                continue;
+            }
+            return Err(error_at_view(
+                contents,
+                format!("{context} contains an empty key between commas"),
+            ));
+        }
+        let expr = parse_expression_in_context(part, ExpressionContext::for_owner(part))?;
+        keys.push(match expr {
+            SyntaxExpr::Atom(name) => SyntaxKeyExpr::Atom(name),
+            expr => SyntaxKeyExpr::Index(Box::new(expr)),
+        });
+    }
+    Ok(keys)
+}
+
 fn strip_optional_dict_marker<'lex, 'source>(
     member: TokenView<'lex, 'source>,
     path: TokenView<'lex, 'source>,
@@ -424,12 +550,55 @@ fn strip_optional_dict_marker<'lex, 'source>(
 fn tuple_pattern(items: Vec<SyntaxPattern>) -> SyntaxPattern {
     dict_pattern(
         vec![dict_entry(
-            vec!["tuple".to_owned()],
+            static_pattern_path(["tuple"]),
             false,
             fixed_list_pattern(items),
         )],
         None,
     )
+}
+
+fn quoted_path_pattern(path: Vec<SyntaxKeyExpr>) -> SyntaxPattern {
+    if path.iter().all(fixed_quoted_path_component) {
+        return fixed_list_pattern(
+            path.into_iter()
+                .map(fixed_quoted_path_component_pattern)
+                .collect(),
+        );
+    }
+    SyntaxPattern {
+        kind: SyntaxPatternKind::QuotedPath(path),
+    }
+}
+
+fn fixed_quoted_path_component(component: &SyntaxKeyExpr) -> bool {
+    match component {
+        SyntaxKeyExpr::Atom(_) => true,
+        SyntaxKeyExpr::Index(expr) => matches!(
+            expr.as_ref(),
+            SyntaxExpr::Unit | SyntaxExpr::Number(_) | SyntaxExpr::Text(_) | SyntaxExpr::Atom(_)
+        ),
+        SyntaxKeyExpr::PathIndex(_) => false,
+    }
+}
+
+fn fixed_quoted_path_component_pattern(component: SyntaxKeyExpr) -> SyntaxPattern {
+    let literal = match component {
+        SyntaxKeyExpr::Atom(name) => SyntaxPatternLiteral::Atom(name),
+        SyntaxKeyExpr::Index(expr) => match *expr {
+            SyntaxExpr::Unit => SyntaxPatternLiteral::Unit,
+            SyntaxExpr::Number(number) => SyntaxPatternLiteral::Number(number),
+            SyntaxExpr::Text(text) => SyntaxPatternLiteral::Text(text),
+            SyntaxExpr::Atom(name) => SyntaxPatternLiteral::Atom(name),
+            _ => unreachable!("fixed quoted-path component was classified as a literal"),
+        },
+        SyntaxKeyExpr::PathIndex(_) => {
+            unreachable!("fixed quoted-path component cannot be a path splice")
+        }
+    };
+    SyntaxPattern {
+        kind: SyntaxPatternKind::Literal(literal),
+    }
 }
 
 fn dict_pattern(
@@ -441,12 +610,23 @@ fn dict_pattern(
     }
 }
 
-fn dict_entry(path: Vec<String>, optional: bool, pattern: SyntaxPattern) -> SyntaxDictPatternEntry {
+fn dict_entry(
+    path: Vec<SyntaxKeyExpr>,
+    optional: bool,
+    pattern: SyntaxPattern,
+) -> SyntaxDictPatternEntry {
     SyntaxDictPatternEntry {
         path,
         optional,
         pattern,
     }
+}
+
+fn static_pattern_path<'a>(parts: impl IntoIterator<Item = &'a str>) -> Vec<SyntaxKeyExpr> {
+    parts
+        .into_iter()
+        .map(|name| SyntaxKeyExpr::Atom(name.to_owned()))
+        .collect()
 }
 
 fn canonical_capture_name(name: &str) -> &str {
@@ -541,79 +721,13 @@ fn parse_quoted_pattern(view: TokenView<'_, '_>) -> ParseResult<SyntaxPattern> {
         });
     }
 
-    let mut items = Vec::new();
-    let mut index = 1;
-    while index < tokens.len() {
-        if !matches!(tokens[index].token().kind(), TokenKind::Symbol("."))
-            || tokens[index].token().leading() != LeadingTrivia::Joint
-        {
-            return Err(error_at_view(
-                view,
-                "quoted-path patterns require joint `.component` suffixes",
-            ));
-        }
-        index += 1;
-        let Some(component) = tokens.get(index) else {
-            return Err(error_at_view(
-                view,
-                "quoted-path pattern requires a component after `.`",
-            ));
-        };
-        if component.token().leading() != LeadingTrivia::Joint {
-            return Err(error_at_view(
-                view,
-                "quoted-path patterns require joint `.component` suffixes",
-            ));
-        }
-        match component.token().kind() {
-            TokenKind::Name(name) => items.push(SyntaxPattern {
-                kind: SyntaxPatternKind::Literal(SyntaxPatternLiteral::Atom((*name).to_owned())),
-            }),
-            TokenKind::Open {
-                group,
-                delimiter: Delimiter::Bracket,
-            } => {
-                let contents = view
-                    .group_contents(*group)
-                    .ok_or_else(|| error_at_view(view, "invalid quoted-path pattern list"))?;
-                let path_items = parse_pattern_list_items(contents, "quoted-path pattern")?;
-                if path_items
-                    .iter()
-                    .any(|pattern| !matches!(pattern.kind, SyntaxPatternKind::Literal(_)))
-                {
-                    return Err(error_at_view(
-                        contents,
-                        "quoted-path pattern components must be literals",
-                    ));
-                }
-                items.extend(path_items);
-            }
-            TokenKind::Open {
-                delimiter: Delimiter::Parenthesis,
-                ..
-            } => {
-                return Err(error_at_view(
-                    view,
-                    "quoted-path patterns cannot contain computed path splices",
-                ));
-            }
-            _ => {
-                return Err(error_at_view(
-                    view,
-                    "quoted-path pattern components must be names or literal lists",
-                ));
-            }
-        }
-        index += 1;
-    }
-
-    if items.is_empty() {
-        return Err(error_at_view(
-            view,
-            "quoted-path pattern requires at least one path suffix",
-        ));
-    }
-    Ok(fixed_list_pattern(items))
+    let quote = tokens
+        .first()
+        .expect("a quoted pattern retains its quote token")
+        .index();
+    let suffix = trim_layout(view_between(view, quote + 1, view.range().end()));
+    let path = parse_pattern_path(suffix, "quoted-path pattern", true)?;
+    Ok(quoted_path_pattern(path))
 }
 
 fn parse_pattern_list_items(

@@ -252,6 +252,7 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
             "pattern_list_is_empty"
         }
         SyntaxOperator::Builtin(crate::core::Builtin::PatternEqual) => "pattern_equal",
+        SyntaxOperator::Builtin(crate::core::Builtin::PatternPathEqual) => "pattern_path_equal",
         SyntaxOperator::Builtin(crate::core::Builtin::PatternIsDict) => "pattern_is_dict",
         SyntaxOperator::Builtin(crate::core::Builtin::PatternDictTryTake) => {
             "pattern_dict_try_take"

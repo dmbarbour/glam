@@ -456,11 +456,17 @@ fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {
                 }
             }
             DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
-                pattern.visit_captures(&mut |name| {
-                    if !fulfills_abstract(name, &mut unresolved_abstracts) {
-                        locals.push(local_name_metadata(name));
-                        used.push(false);
-                        binding_lines.push(step.line);
+                pattern.visit_scope_events(&mut |event| match event {
+                    SyntaxPatternScopeEvent::Key(key) => {
+                        mark_used_key_expr(key, &locals, &mut used);
+                        analyze_key_expr_locals(key, step.line, diagnostics);
+                    }
+                    SyntaxPatternScopeEvent::Capture(name) => {
+                        if !fulfills_abstract(name, &mut unresolved_abstracts) {
+                            locals.push(local_name_metadata(name));
+                            used.push(false);
+                            binding_lines.push(step.line);
+                        }
                     }
                 });
             }
@@ -545,10 +551,15 @@ fn mark_used_do_locals(do_expr: &DoExpr, locals: &[LocalName], used: &mut [bool]
                 }
             }
             DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
-                pattern.visit_captures(&mut |name| {
-                    if !fulfills_abstract(name, &mut unresolved_abstracts) {
-                        combined.push(local_name_metadata(name));
-                        combined_used.push(false);
+                pattern.visit_scope_events(&mut |event| match event {
+                    SyntaxPatternScopeEvent::Key(key) => {
+                        mark_used_key_expr(key, &combined, &mut combined_used);
+                    }
+                    SyntaxPatternScopeEvent::Capture(name) => {
+                        if !fulfills_abstract(name, &mut unresolved_abstracts) {
+                            combined.push(local_name_metadata(name));
+                            combined_used.push(false);
+                        }
                     }
                 });
             }

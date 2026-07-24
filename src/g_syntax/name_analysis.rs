@@ -390,19 +390,11 @@ impl FileNameAnalysis {
                 }
                 DoStepKind::Bind { pattern, operation } => {
                     self.visit_expr(operation, step.line, scope, locals);
-                    pattern.visit_captures(&mut |name| {
-                        if !fulfills_abstract_name(name, &mut unresolved) {
-                            self.push_source_local(name, step.line, scope, locals);
-                        }
-                    });
+                    self.visit_pattern_scope(pattern, step.line, scope, locals, &mut unresolved);
                 }
                 DoStepKind::ValueBind { pattern, value } => {
                     self.visit_expr(value, step.line, scope, locals);
-                    pattern.visit_captures(&mut |name| {
-                        if !fulfills_abstract_name(name, &mut unresolved) {
-                            self.push_source_local(name, step.line, scope, locals);
-                        }
-                    });
+                    self.visit_pattern_scope(pattern, step.line, scope, locals, &mut unresolved);
                 }
                 DoStepKind::Then(expr) => {
                     self.visit_expr(expr, step.line, scope, locals);
@@ -411,6 +403,26 @@ impl FileNameAnalysis {
         }
         self.visit_expr(&do_expr.result, do_expr.result_line, scope, locals);
         locals.truncate(base_len);
+    }
+
+    fn visit_pattern_scope(
+        &mut self,
+        pattern: &SyntaxPattern,
+        line: usize,
+        scope: ResolutionScopeId,
+        locals: &mut Vec<String>,
+        unresolved: &mut Vec<String>,
+    ) {
+        pattern.visit_scope_events(&mut |event| match event {
+            SyntaxPatternScopeEvent::Key(key) => {
+                self.visit_key_expr(key, line, scope, locals);
+            }
+            SyntaxPatternScopeEvent::Capture(name) => {
+                if !fulfills_abstract_name(name, unresolved) {
+                    self.push_source_local(name, line, scope, locals);
+                }
+            }
+        });
     }
 
     fn visit_key_expr(
