@@ -84,7 +84,15 @@ impl RecursiveDoPlan {
                         names: declaration_names,
                     });
                 }
-                DoStepKind::Bind { name, .. } | DoStepKind::ValueBind { name, .. } => {
+                DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
+                    let captures = pattern.captures();
+                    debug_assert!(
+                        captures.len() <= 1,
+                        "primitive do planning currently receives at most one capture per pattern"
+                    );
+                    let Some(name) = captures.first().copied() else {
+                        continue;
+                    };
                     let Some(canonical) = local_name_metadata(name).canonical else {
                         continue;
                     };
@@ -230,7 +238,7 @@ mod tests {
         DoStep {
             line,
             kind: DoStepKind::ValueBind {
-                name: name.to_owned(),
+                pattern: SyntaxPattern::capture(name),
                 value: SyntaxExpr::Unit,
             },
         }

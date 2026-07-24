@@ -9,6 +9,7 @@ mod floor_tests;
 mod input;
 mod layout;
 mod lexical;
+mod pattern;
 mod source;
 mod structural;
 

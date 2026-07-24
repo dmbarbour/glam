@@ -1816,12 +1816,14 @@ fn braced_do_evaluates_like_layout_do_and_supports_empty_blocks() {
         "import 'std\n",
         "braced = do { first <- .r 70; second = first + 2; .r second }\n",
         "nested = do { value <- do .r 72; .r value }\n",
+        "patterned = do { .r 70 -> (value); (_) = 1; .r (value + 2) }\n",
         "empty = do {}\n",
         "commented = do {\n",
         "  # comments do not make an empty block non-empty\n",
         "}\n",
         "asm.braced = list.head (list.pure braced)\n",
         "asm.nested = list.head (list.pure nested)\n",
+        "asm.patterned = list.head (list.pure patterned)\n",
         "asm.empty = list.head (list.pure empty)\n",
         "asm.commented = list.head (list.pure commented)\n",
     ));
@@ -1831,7 +1833,7 @@ fn braced_do_evaluates_like_layout_do_and_supports_empty_blocks() {
     let lowered = lower_parsed_source(parsed, &context);
     assert_eq!(lowered.diagnostics, []);
     let value = evaluated_module_value(&context, &lowered);
-    for path in ["braced", "nested"] {
+    for path in ["braced", "nested", "patterned"] {
         assert_eq!(
             fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
             Value::Number(n(72)),
@@ -1852,8 +1854,9 @@ fn do_bindings_follow_sequential_unused_local_rules() {
     let parsed = parse(concat!(
         "language g0\n",
         "outer prior = do\n",
-        "  current <- .r prior\n",
-        "  unused = current\n",
+        "  (current) <- .r prior\n",
+        "  (unused) = current\n",
+        "  (_) <- .r current\n",
         "  _quiet <- .r current\n",
         "  .r current\n",
         "nested = do\n",
@@ -1881,9 +1884,9 @@ fn recursive_do_forward_names_follow_unused_local_rules() {
         "recursive = do\n",
         "  abstract unused, _quiet, used\n",
         "  reader = \\_ -> used\n",
-        "  unused = 1\n",
+        "  (unused) = 1\n",
         "  quiet = 2\n",
-        "  used = 3\n",
+        "  (used) = 3\n",
         "  .r reader\n",
     ));
 

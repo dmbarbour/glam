@@ -91,7 +91,7 @@ impl DoLowering<'_> {
                         }
                         ResolvedDoStep::Abstract
                     }
-                    DoStepKind::Bind { name, operation } => {
+                    DoStepKind::Bind { pattern, operation } => {
                         let operation = syntax_expr_to_resolved_in_semantic_scope(
                             operation,
                             step.line,
@@ -101,14 +101,14 @@ impl DoLowering<'_> {
                         )?;
                         let binding = resolve_step_binding(
                             self.plan.fulfillment_at[step_index],
-                            name,
+                            pattern,
                             step.line,
                             locals,
                             &mut forwards,
                         )?;
                         ResolvedDoStep::Bind { operation, binding }
                     }
-                    DoStepKind::ValueBind { name, value } => {
+                    DoStepKind::ValueBind { pattern, value } => {
                         let value = syntax_expr_to_resolved_in_semantic_scope(
                             value,
                             step.line,
@@ -118,7 +118,7 @@ impl DoLowering<'_> {
                         )?;
                         let binding = resolve_step_binding(
                             self.plan.fulfillment_at[step_index],
-                            name,
+                            pattern,
                             step.line,
                             locals,
                             &mut forwards,
@@ -189,11 +189,24 @@ impl DoLowering<'_> {
 
 fn resolve_step_binding(
     fulfillment: Option<ForwardNameId>,
-    name: &str,
+    pattern: &SyntaxPattern,
     line: usize,
     locals: &mut ResolverContext,
     forwards: &mut [ResolvedForward],
 ) -> Result<BindingId, Diagnostic> {
+    let captures = pattern.captures();
+    debug_assert!(
+        captures.len() <= 1,
+        "primitive do lowering currently receives at most one capture per pattern"
+    );
+    let Some(name) = captures.first().copied() else {
+        debug_assert!(
+            fulfillment.is_none(),
+            "a wildcard pattern cannot fulfill a recursive-do abstract"
+        );
+        return Ok(locals.fresh_binding());
+    };
+
     let Some(id) = fulfillment else {
         return Ok(locals
             .extend_source_bindings([name], line)?
@@ -407,7 +420,7 @@ mod tests {
             steps: vec![DoStep {
                 line: 2,
                 kind: DoStepKind::ValueBind {
-                    name: "value".to_owned(),
+                    pattern: SyntaxPattern::capture("value"),
                     value: SyntaxExpr::Number(42.into()),
                 },
             }],
@@ -430,6 +443,65 @@ mod tests {
     }
 
     #[test]
+    fn grouped_capture_preserves_single_name_lowering() {
+        let resolved = resolve(&SyntaxExpr::Do(DoExpr {
+            steps: vec![DoStep {
+                line: 2,
+                kind: DoStepKind::ValueBind {
+                    pattern: SyntaxPattern {
+                        kind: SyntaxPatternKind::Group(Box::new(SyntaxPattern::capture("value"))),
+                    },
+                    value: SyntaxExpr::Number(42.into()),
+                },
+            }],
+            result_line: 3,
+            result: Box::new(SyntaxExpr::Name("value".to_owned())),
+        }));
+
+        assert!(matches!(
+            resolved,
+            ResolvedExpr::ApplyLambda {
+                parameters,
+                body,
+                arguments,
+            } if matches!(body.as_ref(), ResolvedExpr::Local(binding)
+                if *binding == parameters[0])
+                && matches!(arguments.as_slice(),
+                    [ResolvedExpr::Embedded(Value::Number(number))]
+                        if *number == Number::from(42_i64))
+        ));
+    }
+
+    #[test]
+    fn wildcard_uses_an_unspellable_continuation_parameter() {
+        let resolved = resolve(&SyntaxExpr::Do(DoExpr {
+            steps: vec![DoStep {
+                line: 2,
+                kind: DoStepKind::ValueBind {
+                    pattern: SyntaxPattern::wildcard(),
+                    value: SyntaxExpr::Number(42.into()),
+                },
+            }],
+            result_line: 3,
+            result: Box::new(SyntaxExpr::Unit),
+        }));
+
+        assert!(matches!(
+            resolved,
+            ResolvedExpr::ApplyLambda {
+                parameters,
+                body,
+                arguments,
+            } if parameters.len() == 1
+                && matches!(body.as_ref(), ResolvedExpr::Embedded(value)
+                    if *value == *crate::core::keys::UNIT_VALUE)
+                && matches!(arguments.as_slice(),
+                    [ResolvedExpr::Embedded(Value::Number(number))]
+                        if *number == Number::from(42_i64))
+        ));
+    }
+
+    #[test]
     fn every_abstract_name_lowers_to_an_independent_fix_request() {
         let resolved = resolve(&SyntaxExpr::Do(DoExpr {
             steps: vec![
@@ -444,21 +516,21 @@ mod tests {
                 DoStep {
                     line: 3,
                     kind: DoStepKind::ValueBind {
-                        name: "y".to_owned(),
+                        pattern: SyntaxPattern::capture("y"),
                         value: SyntaxExpr::Unit,
                     },
                 },
                 DoStep {
                     line: 4,
                     kind: DoStepKind::ValueBind {
-                        name: "x".to_owned(),
+                        pattern: SyntaxPattern::capture("x"),
                         value: SyntaxExpr::Unit,
                     },
                 },
                 DoStep {
                     line: 5,
                     kind: DoStepKind::ValueBind {
-                        name: "z".to_owned(),
+                        pattern: SyntaxPattern::capture("z"),
                         value: SyntaxExpr::Unit,
                     },
                 },

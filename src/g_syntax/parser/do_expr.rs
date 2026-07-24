@@ -5,20 +5,27 @@
 //! expression parser; no source substring is normalized or re-lexed.
 
 use crate::g_syntax::keywords::{canonical_keyword, reserved_keyword_message};
-use crate::g_syntax::{Diagnostic, DoExpr, DoStep, DoStepKind, SyntaxExpr};
+use crate::g_syntax::{Diagnostic, DoExpr, DoStep, DoStepKind, SyntaxExpr, SyntaxPattern};
 
 use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{TokenRange, TokenView};
 use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
+use super::pattern::parse_pattern;
 use super::structural::{parse_expression_in_context, single_reserved_keyword};
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
 enum ParsedDoStatement {
     Abstract(Vec<String>),
-    Bind { name: String, operation: SyntaxExpr },
-    ValueBind { name: String, value: SyntaxExpr },
+    Bind {
+        pattern: SyntaxPattern,
+        operation: SyntaxExpr,
+    },
+    ValueBind {
+        pattern: SyntaxPattern,
+        value: SyntaxExpr,
+    },
     Expr(SyntaxExpr),
 }
 
@@ -190,29 +197,29 @@ fn line_begins_do_statement(view: TokenView<'_, '_>) -> bool {
             .into_iter()
             .next()
             .is_some_and(|arrow| {
-                local_name(trim_layout(view_between(view, view.range().start(), arrow))).is_some()
+                parse_pattern(trim_layout(view_between(view, view.range().start(), arrow))).is_ok()
             })
         || top_level_symbols(view, "=")
             .into_iter()
             .next()
             .is_some_and(|equals| {
-                local_name(trim_layout(view_between(
+                parse_pattern(trim_layout(view_between(
                     view,
                     view.range().start(),
                     equals,
                 )))
-                .is_some()
+                .is_ok()
             })
         || top_level_symbols(view, "->")
             .into_iter()
             .next()
             .is_some_and(|arrow| {
-                local_name(trim_layout(view_between(
+                parse_pattern(trim_layout(view_between(
                     view,
                     arrow + 1,
                     view.range().end(),
                 )))
-                .is_some()
+                .is_ok()
             })
 }
 
@@ -276,8 +283,12 @@ fn finish_do_statements(
     for (line, statement) in statements {
         let kind = match statement {
             ParsedDoStatement::Abstract(names) => DoStepKind::Abstract(names),
-            ParsedDoStatement::Bind { name, operation } => DoStepKind::Bind { name, operation },
-            ParsedDoStatement::ValueBind { name, value } => DoStepKind::ValueBind { name, value },
+            ParsedDoStatement::Bind { pattern, operation } => {
+                DoStepKind::Bind { pattern, operation }
+            }
+            ParsedDoStatement::ValueBind { pattern, value } => {
+                DoStepKind::ValueBind { pattern, value }
+            }
             ParsedDoStatement::Expr(expr) => DoStepKind::Then(expr),
         };
         steps.push(DoStep { line, kind });
@@ -326,53 +337,41 @@ fn parse_statement(
     if let Some(arrow) = top_level_symbols(view, "<-").into_iter().next() {
         let pattern = trim_layout(view_between(view, view.range().start(), arrow));
         let operation = trim_layout(view_between(view, arrow + 1, view.range().end()));
-        let Some(name) = local_name(pattern) else {
-            if let Some(keyword) = single_reserved_keyword(pattern) {
-                return Err(error_at_view(pattern, reserved_keyword_message(keyword)));
-            }
+        if is_layout_empty(pattern) {
             return Err(error_at_view(
-                pattern,
-                "patterns are not yet supported in do bindings; expected a local name before `<-`",
+                view,
+                "a do backward binding requires a pattern before `<-`",
             ));
-        };
+        }
+        let pattern = parse_pattern(pattern)?;
         if is_layout_empty(operation) {
             return Err(error_at_view(
                 view,
-                format!("do binding `{name}` requires an operation after `<-`"),
+                "a do backward binding requires an operation after `<-`",
             ));
         }
-        return parse_expression_in_context(operation, context).map(|operation| {
-            ParsedDoStatement::Bind {
-                name: name.to_owned(),
-                operation,
-            }
-        });
+        return parse_expression_in_context(operation, context)
+            .map(|operation| ParsedDoStatement::Bind { pattern, operation });
     }
 
     if let Some(equal) = top_level_symbols(view, "=").into_iter().next() {
         let pattern = trim_layout(view_between(view, view.range().start(), equal));
         let value = trim_layout(view_between(view, equal + 1, view.range().end()));
-        let Some(name) = local_name(pattern) else {
-            if let Some(keyword) = single_reserved_keyword(pattern) {
-                return Err(error_at_view(pattern, reserved_keyword_message(keyword)));
-            }
+        if is_layout_empty(pattern) {
             return Err(error_at_view(
-                pattern,
-                "patterns are not yet supported in do value bindings; expected a local name before `=`",
+                view,
+                "a do value binding requires a pattern before `=`",
             ));
-        };
+        }
+        let pattern = parse_pattern(pattern)?;
         if is_layout_empty(value) {
             return Err(error_at_view(
                 view,
-                format!("do value binding `{name}` requires a value after `=`"),
+                "a do value binding requires a value after `=`",
             ));
         }
-        return parse_expression_in_context(value, context).map(|value| {
-            ParsedDoStatement::ValueBind {
-                name: name.to_owned(),
-                value,
-            }
-        });
+        return parse_expression_in_context(value, context)
+            .map(|value| ParsedDoStatement::ValueBind { pattern, value });
     }
 
     if let Ok(expr) = parse_expression_in_context(view, context) {
@@ -393,20 +392,15 @@ fn parse_statement(
         let Ok(operation) = parse_expression_in_context(operation, context) else {
             continue;
         };
-        let name = trim_layout(view_between(view, arrow + 1, view.range().end()));
-        let Some(name) = local_name(name) else {
-            if let Some(keyword) = single_reserved_keyword(name) {
-                return Err(error_at_view(name, reserved_keyword_message(keyword)));
-            }
+        let pattern = trim_layout(view_between(view, arrow + 1, view.range().end()));
+        if is_layout_empty(pattern) {
             return Err(error_at_view(
                 view,
-                "a do forward binding requires exactly one local name after `->`",
+                "a do forward binding requires a pattern after `->`",
             ));
-        };
-        return Ok(ParsedDoStatement::Bind {
-            name: name.to_owned(),
-            operation,
-        });
+        }
+        let pattern = parse_pattern(pattern)?;
+        return Ok(ParsedDoStatement::Bind { pattern, operation });
     }
 
     parse_expression_in_context(view, context).map(ParsedDoStatement::Expr)

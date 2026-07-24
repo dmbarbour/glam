@@ -123,11 +123,61 @@ pub struct DoStep {
     pub kind: DoStepKind,
 }
 
+/// An affine source pattern owned by the built-in front end.
+///
+/// Pattern structure is expanded within `g_syntax`; it is never reified as a
+/// core or evaluator value.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SyntaxPattern {
+    pub kind: SyntaxPatternKind,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SyntaxPatternKind {
+    Capture(String),
+    Wildcard,
+    Group(Box<SyntaxPattern>),
+}
+
+impl SyntaxPattern {
+    pub(super) fn capture(name: impl Into<String>) -> Self {
+        Self {
+            kind: SyntaxPatternKind::Capture(name.into()),
+        }
+    }
+
+    pub(super) fn wildcard() -> Self {
+        Self {
+            kind: SyntaxPatternKind::Wildcard,
+        }
+    }
+
+    pub(super) fn visit_captures<'a>(&'a self, visitor: &mut impl FnMut(&'a str)) {
+        match &self.kind {
+            SyntaxPatternKind::Capture(name) => visitor(name),
+            SyntaxPatternKind::Wildcard => {}
+            SyntaxPatternKind::Group(pattern) => pattern.visit_captures(visitor),
+        }
+    }
+
+    pub(super) fn captures(&self) -> Vec<&str> {
+        let mut captures = Vec::new();
+        self.visit_captures(&mut |name| captures.push(name));
+        captures
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum DoStepKind {
     Abstract(Vec<String>),
-    Bind { name: String, operation: SyntaxExpr },
-    ValueBind { name: String, value: SyntaxExpr },
+    Bind {
+        pattern: SyntaxPattern,
+        operation: SyntaxExpr,
+    },
+    ValueBind {
+        pattern: SyntaxPattern,
+        value: SyntaxExpr,
+    },
     Then(SyntaxExpr),
 }
 

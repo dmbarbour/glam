@@ -388,16 +388,20 @@ impl FileNameAnalysis {
                         }
                     }
                 }
-                DoStepKind::Bind { name, operation } => {
+                DoStepKind::Bind { pattern, operation } => {
                     self.visit_expr(operation, step.line, scope, locals);
-                    if !fulfills_abstract_name(name, &mut unresolved) {
-                        self.push_source_local(name, step.line, scope, locals);
+                    for name in pattern.captures() {
+                        if !fulfills_abstract_name(name, &mut unresolved) {
+                            self.push_source_local(name, step.line, scope, locals);
+                        }
                     }
                 }
-                DoStepKind::ValueBind { name, value } => {
+                DoStepKind::ValueBind { pattern, value } => {
                     self.visit_expr(value, step.line, scope, locals);
-                    if !fulfills_abstract_name(name, &mut unresolved) {
-                        self.push_source_local(name, step.line, scope, locals);
+                    for name in pattern.captures() {
+                        if !fulfills_abstract_name(name, &mut unresolved) {
+                            self.push_source_local(name, step.line, scope, locals);
+                        }
                     }
                 }
                 DoStepKind::Then(expr) => {

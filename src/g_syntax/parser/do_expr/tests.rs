@@ -61,13 +61,42 @@ fn token_statement_classification_leaves_lambda_arrows_inside_expressions() {
     };
     assert!(matches!(
         &steps[0].kind,
-        DoStepKind::Bind { name, operation }
-            if name == "function" && matches!(operation, SyntaxExpr::Lambda(_, _))
+        DoStepKind::Bind { pattern, operation }
+            if pattern.captures() == ["function"]
+                && matches!(operation, SyntaxExpr::Lambda(_, _))
     ));
     assert!(matches!(
         &steps[1].kind,
-        DoStepKind::ValueBind { name, value }
-            if name == "identity" && matches!(value, SyntaxExpr::Lambda(_, _))
+        DoStepKind::ValueBind { pattern, value }
+            if pattern.captures() == ["identity"]
+                && matches!(value, SyntaxExpr::Lambda(_, _))
+    ));
+}
+
+#[test]
+fn initial_patterns_are_shared_by_all_do_binding_directions() {
+    let expr = parse_do_expression(
+        "do\n.r 1 -> (forward)\n(backward) <- .r 2\n((pure)) = 3\n_ <- .r 4\n.r [forward, backward, pure]",
+    );
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = expr else {
+        panic!("expected a do expression");
+    };
+
+    assert!(matches!(
+        &steps[0].kind,
+        DoStepKind::Bind { pattern, .. } if pattern.captures() == ["forward"]
+    ));
+    assert!(matches!(
+        &steps[1].kind,
+        DoStepKind::Bind { pattern, .. } if pattern.captures() == ["backward"]
+    ));
+    assert!(matches!(
+        &steps[2].kind,
+        DoStepKind::ValueBind { pattern, .. } if pattern.captures() == ["pure"]
+    ));
+    assert!(matches!(
+        &steps[3].kind,
+        DoStepKind::Bind { pattern, .. } if pattern.captures().is_empty()
     ));
 }
 
@@ -100,7 +129,7 @@ fn braced_do_semicolons_currently_separate_unparenthesized_where_expressions() {
             diagnostics.iter().any(|diagnostic| {
                 diagnostic
                     .message
-                    .contains("patterns are not yet supported in do value bindings")
+                    .contains("pattern currently supports only")
             }),
             "unexpected diagnostics for `{source}`: {diagnostics:#?}"
         );
@@ -117,7 +146,7 @@ fn braced_do_semicolons_currently_separate_unparenthesized_where_expressions() {
     ));
     assert!(matches!(
         &steps[1].kind,
-        DoStepKind::ValueBind { name, .. } if name == "y"
+        DoStepKind::ValueBind { pattern, .. } if pattern.captures() == ["y"]
     ));
 
     let parenthesized = parse_do_expression("do { (result where { x = 1; y = 2 }) }");
@@ -149,13 +178,27 @@ fn token_do_reports_structural_statement_errors() {
         ("do { value <- .r 1; }", "cannot end with a binding"),
         (
             "do\n[first] <- .read\n.r first",
-            "patterns are not yet supported",
+            "pattern currently supports only",
         ),
         (
             "do\n.read -> first second\n.r ()",
-            "requires exactly one local name",
+            "pattern currently supports only",
         ),
-        ("do\n-> result\n.r result", "requires an operation"),
+        (
+            "do\n-> result\n.r result",
+            "requires an operation before `->`",
+        ),
+        ("do\n<- .r 1\n.r ()", "requires a pattern before `<-`"),
+        ("do\n.r 1 ->\n.r ()", "requires a pattern after `->`"),
+        ("do\n= 1\n.r ()", "requires a pattern before `=`"),
+        (
+            "do\n.r 1 -> binary\n.r ()",
+            "`binary` is a reserved keyword",
+        ),
+        (
+            "do\n() <- .r ()\n.r ()",
+            "unit patterns are not supported yet",
+        ),
         (
             "do\nabstract\n.r ()",
             "requires one or more comma-separated local names",

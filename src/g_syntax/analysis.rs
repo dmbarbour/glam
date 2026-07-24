@@ -455,11 +455,13 @@ fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {
                     binding_lines.push(step.line);
                 }
             }
-            DoStepKind::Bind { name, .. } | DoStepKind::ValueBind { name, .. } => {
-                if !fulfills_abstract(name, &mut unresolved_abstracts) {
-                    locals.push(local_name_metadata(name));
-                    used.push(false);
-                    binding_lines.push(step.line);
+            DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
+                for name in pattern.captures() {
+                    if !fulfills_abstract(name, &mut unresolved_abstracts) {
+                        locals.push(local_name_metadata(name));
+                        used.push(false);
+                        binding_lines.push(step.line);
+                    }
                 }
             }
             DoStepKind::Then(_) => {}
@@ -502,10 +504,12 @@ fn mark_used_do_locals(do_expr: &DoExpr, locals: &[LocalName], used: &mut [bool]
                     combined_used.push(false);
                 }
             }
-            DoStepKind::Bind { name, .. } | DoStepKind::ValueBind { name, .. } => {
-                if !fulfills_abstract(name, &mut unresolved_abstracts) {
-                    combined.push(local_name_metadata(name));
-                    combined_used.push(false);
+            DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
+                for name in pattern.captures() {
+                    if !fulfills_abstract(name, &mut unresolved_abstracts) {
+                        combined.push(local_name_metadata(name));
+                        combined_used.push(false);
+                    }
                 }
             }
             DoStepKind::Then(_) => {}
