@@ -8,8 +8,8 @@ broader target design remains in `docs/DistilledDesign.md` and `docs/Design.md`.
 An object is an ordinary dictionary with a `spec` member. A specification is a
 dictionary with:
 
-- `name`: a stable identity for named objects, or the empty dictionary for an
-  anonymous object;
+- `name`: a stable identity for named objects; the empty dictionary or an
+  absent field equivalently identifies an anonymous object;
 - `deps`: a list of parent specifications; and
 - `defs`: a curried two-argument definition mixin, logically
   `prior_self -> final_self -> dictionary`.
@@ -20,11 +20,13 @@ linearized spec's `defs` to the accumulated base and that final self, then
 inserts the most-derived `spec` and fulfills the pending self. Every mixin must
 produce a dictionary.
 
-`abstract object` uses the parallel internal `ObjectAbstractFromParts`
-constructor. It returns the singleton object dictionary `{spec:...}` without
-applying `defs`. The specification retains the same name, dependencies, and
-curried definition mixin as an instantiated object; abstractness is a
-front-end realization choice rather than another core value kind.
+`abstract object` lowers through ordinary dictionary construction. It returns
+the singleton object dictionary `{spec:...}` without applying `defs`. The
+specification retains the same name, dependencies, and curried definition
+mixin as an instantiated object; abstractness is a front-end realization
+choice rather than another core value kind. An absent `spec.name` is
+semantically the anonymous name `{}`, consistent with ordinary dictionary
+normalization.
 
 Ordinary dictionaries participate as anonymous object specifications through
 `ObjectSpec`: their dictionary content becomes a mixin, their name is empty,

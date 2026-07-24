@@ -52,15 +52,6 @@ pub(super) fn eval_object_instance_from_parts_builtin(
     eval_object_instance_builtin(context, &Value::Dict(spec))
 }
 
-pub(super) fn eval_object_abstract_from_parts_builtin(
-    name: Value,
-    deps: Value,
-    defs: Value,
-) -> Value {
-    let spec = object_spec_from_parts(name, deps, defs);
-    Value::Dict(crate::core::Dict::new_sync().insert((*keys::SPEC).clone(), Value::Dict(spec)))
-}
-
 fn object_spec_from_parts(name: Value, deps: Value, defs: Value) -> crate::core::Dict {
     crate::core::Dict::new_sync()
         .insert((*keys::NAME).clone(), name)
@@ -79,10 +70,7 @@ pub(super) fn eval_object_with_defs_builtin(
     extension_defs: Value,
 ) -> Result<Value, EvalError> {
     let spec = object_spec_dict(context, &eval_object_spec_builtin(context, object)?)?;
-    let name = spec
-        .get(&*keys::NAME)
-        .cloned()
-        .ok_or_else(|| EvalError::new("object specification requires a name"))?;
+    let name = object_spec_name_value(&spec);
     let deps = spec
         .get(&*keys::DEPS)
         .cloned()
@@ -200,9 +188,7 @@ pub(super) fn eval_object_local_name_builtin(
 ) -> Result<Value, EvalError> {
     let host_spec = eval_object_spec_builtin(context, host)?;
     let host_spec = object_spec_dict(context, &host_spec)?;
-    let Some(host_name) = host_spec.get(&*keys::NAME).cloned() else {
-        return Err(EvalError::new("object specification requires a name"));
-    };
+    let host_name = object_spec_name_value(&host_spec);
 
     let mut name_parts = vec![eval_value(context, &host_name)?];
     name_parts.extend(match eval_value(context, parts)? {
@@ -384,11 +370,14 @@ fn same_linearized_object_spec(left: &LinearizedObjectSpec, right: &LinearizedOb
 }
 
 fn object_spec_name(context: &EvalContext, spec: &crate::core::Dict) -> Result<Key, EvalError> {
-    let Some(name) = spec.get(&*keys::NAME) else {
-        return Err(EvalError::new("object specification requires a name"));
-    };
-    let name = eval_value(context, name)?;
+    let name = eval_value(context, &object_spec_name_value(spec))?;
     value_to_key(context, &name)
+}
+
+fn object_spec_name_value(spec: &crate::core::Dict) -> Value {
+    spec.get(&*keys::NAME)
+        .cloned()
+        .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()))
 }
 
 fn is_anonymous_object_name(name: &Key) -> bool {

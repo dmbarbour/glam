@@ -769,7 +769,6 @@ pub enum Builtin {
     ObjectSpec,
     ObjectFromDict,
     ObjectLocalName,
-    ObjectAbstractFromParts,
     ObjectInstanceFromParts,
     ObjectInstance,
     /// Internal protocol adapters used while object/effect construction is
@@ -831,7 +830,6 @@ impl Builtin {
             Self::ObjectSpec => 1,
             Self::ObjectFromDict => 1,
             Self::ObjectLocalName => 2,
-            Self::ObjectAbstractFromParts => 3,
             Self::ObjectInstanceFromParts => 3,
             Self::ObjectInstance => 1,
             Self::EffectApply => 3,

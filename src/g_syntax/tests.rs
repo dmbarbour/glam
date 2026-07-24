@@ -2940,7 +2940,7 @@ fn object_expressions_evaluate_as_object_instances() {
 #[test]
 fn abstract_objects_retain_specs_without_instantiating_members() {
     let parsed = parse(
-        "language g0\nabstract object protocol with\n  text = \"Hello\"\nexpression = abstract object _ with\n  punctuation = \"!\"\nobject concrete extends expression, protocol with\n  result = text ++ punctuation\nasm.result = concrete.result\n",
+        "language g0\nabstract object protocol with\n  text = \"Hello\"\nexpression = abstract object _ with\n  punctuation = \"!\"\nobserved_name = expression.spec.name\nobject concrete extends expression, protocol with\n  result = text ++ punctuation\nasm.result = concrete.result\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -2954,8 +2954,18 @@ fn abstract_objects_retain_specs_without_instantiating_members() {
     assert!(protocol.get(&*keys::SPEC).is_some());
     assert!(protocol.get(&Key::atom_from_text("text")).is_none());
 
+    let Value::Dict(expression) = resolved_value_at_path(&value, &["expression"]) else {
+        panic!("abstract expression should evaluate to a dictionary");
+    };
+    let Some(expression_spec) = expression.get(&*keys::SPEC).cloned() else {
+        panic!("abstract expression should retain its specification");
+    };
+    let Value::Dict(expression_spec) = fully_evaluated_value(expression_spec) else {
+        panic!("abstract expression specification should evaluate to a dictionary");
+    };
+    assert!(expression_spec.get(&*keys::NAME).is_none());
     assert_eq!(
-        resolved_value_at_path(&value, &["expression", "spec", "name"]),
+        resolved_value_at_path(&value, &["observed_name"]),
         Value::Dict(Dict::new_sync())
     );
     assert_eq!(

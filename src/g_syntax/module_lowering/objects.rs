@@ -103,9 +103,30 @@ pub(in crate::g_syntax) fn object_from_parts_resolved(
     match realization {
         ObjectRealization::Instance => object_instance_from_parts_resolved(name, deps, defs),
         ObjectRealization::Abstract => {
-            apply_builtin_resolved(Builtin::ObjectAbstractFromParts, [name, deps, defs])
+            let spec = resolved_record([("name", name), ("deps", deps), ("defs", defs)]);
+            resolved_record([("spec", spec)])
         }
     }
+}
+
+fn resolved_record(
+    fields: impl IntoIterator<Item = (&'static str, ResolvedExpr<Value>)>,
+) -> ResolvedExpr<Value> {
+    let mut fields = fields.into_iter().map(|(name, value)| {
+        apply_builtin_resolved(
+            Builtin::DictSingleton,
+            [
+                ResolvedExpr::Embedded(Value::Atom(atom_from_str(name))),
+                value,
+            ],
+        )
+    });
+    let Some(first) = fields.next() else {
+        return ResolvedExpr::Embedded(Value::Dict(Dict::new_sync()));
+    };
+    fields.fold(first, |record, field| {
+        apply_builtin_resolved(Builtin::DictUnion, [record, field])
+    })
 }
 
 pub(in crate::g_syntax) fn object_parents_resolved(

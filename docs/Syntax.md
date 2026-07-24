@@ -1155,6 +1155,10 @@ The body still constructs `spec.defs`; those definitions are applied only when
 the specification is later instantiated. Declaring abstract names or methods
 inside an ordinary object does not make that object abstract.
 
+For an anonymous abstract object, ordinary dictionary normalization may omit
+the empty `spec.name` field. Missing `spec.name` and `spec.name = {}` are
+semantically identical throughout access, instantiation, and linearization.
+
 For `extend Object` this is expressed as `extend abstract Object ...`. It
 composes the extension into `spec.defs` but leaves the resulting object
 abstract regardless of the prior realization. Conversely, ordinary `extend`

@@ -54,5 +54,5 @@ Run these after Rust edits:
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo test -q
 ```
