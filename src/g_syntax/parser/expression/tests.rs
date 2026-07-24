@@ -84,9 +84,9 @@ fn ordinary_expressions_parse() {
         "op =>> next",
         "first !> second !> function",
         "function <! first <! second",
-        "1 + 2 * 3",
+        "1 + (2 * 3)",
         "x < y =< z",
-        "x and y or z",
+        "x and (y or z)",
         "android",
         "'and",
         "'where",
@@ -170,6 +170,12 @@ fn ordinary_expression_rejections_are_preserved() {
         "[first,,second]",
         "{first,,second}",
         "first !> function <! argument",
+        "1 + 2 * 3",
+        "1 * 2 + 3",
+        "1 * 2 / 3",
+        "1 / 2 * 3",
+        "x and y or z",
+        "x or y and z",
         "1 / 2 / 3",
         "foo. bar",
         "1e999999999999999999999",
@@ -180,14 +186,21 @@ fn ordinary_expression_rejections_are_preserved() {
 
 #[test]
 fn operator_relation_diagnostic_is_preserved() {
-    let diagnostics = parse_expression_fragment(b"first !> function <! argument")
-        .expect_err("opposing applicative directions need parentheses");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("no precedence relationship")),
-        "{diagnostics:?}"
-    );
+    for source in [
+        "first !> function <! argument",
+        "1 + 2 * 3",
+        "1 * 2 / 3",
+        "left and middle or right",
+    ] {
+        let diagnostics = parse_expression_fragment(source.as_bytes())
+            .expect_err("unrelated operators should require parentheses");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("no precedence relationship")),
+            "missing operator-relation diagnostic for `{source}`: {diagnostics:?}"
+        );
+    }
 }
 
 #[test]

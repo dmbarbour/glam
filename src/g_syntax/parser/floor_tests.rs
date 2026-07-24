@@ -452,21 +452,18 @@ fn infix_resumption_after_with_can_then_resume_where() {
 }
 
 #[test]
-fn yielded_layout_preserves_cross_operator_precedence() {
-    let layout = definition_expr(concat!(
-        "language g0\n",
-        "result = 1\n",
-        "  + do\n",
-        "    .r 2\n",
-        "  * 3\n",
-    ));
-    let SyntaxExpr::Add(_, right) = layout else {
-        panic!("multiplication should bind inside the addition");
-    };
-    let SyntaxExpr::Multiply(left, _) = *right else {
-        panic!("the resumed multiplication should bind more strongly");
-    };
-    assert!(matches!(*left, SyntaxExpr::Do(_)));
+fn yielded_layout_does_not_invent_mixed_arithmetic_precedence() {
+    assert_has_error(
+        concat!(
+            "language g0\n",
+            "result = 1\n",
+            "  + do\n",
+            "    .r 2\n",
+            "  * 3\n",
+        ),
+        2,
+        "no precedence relationship",
+    );
 }
 
 #[test]
@@ -489,8 +486,14 @@ fn leading_infix_resumption_supports_every_operator_family() {
         ("a !> b !> c", "a\n  !> b\n  !> c", "a !>\n  b !>\n  c"),
         ("a <! b <! c", "a\n  <! b\n  <! c", "a <!\n  b <!\n  c"),
         ("a ++ b ++ c", "a\n  ++ b\n  ++ c", "a ++\n  b ++\n  c"),
-        ("a and b or c", "a\n  and b\n  or c", "a and\n  b or\n  c"),
-        ("a + b * c", "a\n  + b\n  * c", "a +\n  b *\n  c"),
+        (
+            "a and b and c",
+            "a\n  and b\n  and c",
+            "a and\n  b and\n  c",
+        ),
+        ("a or b or c", "a\n  or b\n  or c", "a or\n  b or\n  c"),
+        ("a + b + c", "a\n  + b\n  + c", "a +\n  b +\n  c"),
+        ("a * b * c", "a\n  * b\n  * c", "a *\n  b *\n  c"),
         ("a < b =< c", "a\n  < b\n  =< c", "a <\n  b =<\n  c"),
     ] {
         let single = definition_expr(&format!("language g0\nresult = {single}\n"));

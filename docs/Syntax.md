@@ -300,13 +300,30 @@ The compiler will arrange to automatically run `refl.*` definitions as reflectio
 
 ## Operators
 
-Operators are essentially infix functions. We'll support Haskell-style operator sections, such that `((>>= k) op)` is equivalent to `(op >>= k)`. To avoid unnecessary parentheses, we'll support precedence between most operators. To mitigate confusion, not every pair of operators will have valid precedence, e.g. cannot mix both `>>` and `<<` without parentheses.
+Operators are essentially infix functions. We'll support Haskell-style
+operator sections, such that `((>>= k) op)` is equivalent to `(op >>= k)`.
+Precedence is deliberately a partial relationship rather than one total
+conventional ladder. Homogeneous chains such as `a + b + c`, `a * b * c`,
+`A and B and C`, and `A or B or C` remain concise. Distinct arithmetic
+operators have no implicit precedence, and neither do `and` and `or`:
+
+```g
+a + (b * c)          # parentheses required
+(a * b) / c          # parentheses required
+A or (B and C)       # parentheses required
+```
+
+The same explicit-grouping rule applies to opposing directional operators
+such as `>>` and `<<`. Other deliberately useful relationships remain, such
+as arithmetic within a comparison and comparisons within a homogeneous
+boolean chain.
 
 We may support a few special non-binary forms, e.g. `(x < y =< z)` as shorthand for `((x < y) and (y =< z))`. We'd also support `(< =<)` operator sections. Risk of confusion is mitigated because we cannot compare booleans for less-than or greater-than.
 
 Operators may support limited ad-hoc polymorphism. For example, `>` will only compare two numbers, two lists, or two tuples. For lists and tuples, we use a lexicographic comparison of elements. Comparing a number to a list, or even a list to a tuple, would simply diverge with an error. As a rule, ad-hoc polymorphism must preserve laws or intuitions, e.g. don't use `+` to append lists because it does not preserve commutativity of `+` on numbers.
 
-*Tentative:* Minimal operator precedence, mostly for associative structure. Require parentheses everywhere else.
+Subtraction and division are non-associative. Their repeated chains also
+require parentheses.
 
 ### Application
 

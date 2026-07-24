@@ -269,6 +269,9 @@ g << f
 (>>= k)             # Haskell-style operator sections
 (x < y =< z)        # chained comparison: (x < y) and (y =< z)
 # No mixing of opposing directions (>> vs <<, |> vs <|) without parens.
+# Distinct arithmetic operators have no precedence: a + (b * c), (a * b) / c.
+# `and` and `or` do not mix without parens: A or (B and C).
+# Homogeneous `+`, `*`, `and`, and `or` chains remain concise.
 
 # A leading operator establishes an aligned resumption anchor. It may close
 # nested layout while preserving the same precedence as one-line syntax:

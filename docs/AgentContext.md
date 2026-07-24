@@ -203,6 +203,9 @@ their detailed scheduling and representation contracts.
 - Dot-leading effect paths must be parenthesized in application-argument
   position: `foo (.bar)` is valid and `foo .bar` is rejected. Head-position
   `.bar`, member access `foo.bar`, and `foo <| .bar` remain valid.
+- Distinct arithmetic operators have no implicit precedence, and neither do
+  `and` and `or`. Preserve homogeneous chains and require parentheses for
+  mixed forms such as `a + (b * c)` and `A or (B and C)`.
 - Multiline `let`/`where` bindings align under the first binding and do not
   accept `in`. Naked semicolons do not group local bindings; semicolon-separated
   bindings require braces. Braced `let`/`where` and every `with` body permit

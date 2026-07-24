@@ -1374,8 +1374,8 @@ fn parses_list_and_append_expressions() {
 }
 
 #[test]
-fn parses_arithmetic_with_precedence() {
-    let parsed = parse("language g0\nanswer = (1 + 2 * 3) - (4 / 5)\n");
+fn parses_explicitly_grouped_mixed_arithmetic() {
+    let parsed = parse("language g0\nanswer = (1 + (2 * 3)) - (4 / 5)\n");
 
     assert_eq!(parsed.diagnostics, []);
     assert_eq!(
@@ -2692,6 +2692,31 @@ fn reports_mixed_add_subtract_chains_as_parse_errors() {
             expr: None,
         })
     );
+}
+
+#[test]
+fn reports_mixed_arithmetic_and_boolean_operators_as_parse_errors() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "add_multiply = 1 + 2 * 3\n",
+        "multiply_divide = 1 * 2 / 3\n",
+        "and_or = left and middle or right\n",
+        "or_and = left or middle and right\n",
+    ));
+
+    for (line, left, right) in [
+        (2, "+", "*"),
+        (3, "*", "/"),
+        (4, "and", "or"),
+        (5, "or", "and"),
+    ] {
+        assert!(parsed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.line == line
+                && diagnostic.message.contains(&format!(
+                    "operators `{left}` and `{right}` have no precedence relationship"
+                ))
+        }));
+    }
 }
 
 #[test]

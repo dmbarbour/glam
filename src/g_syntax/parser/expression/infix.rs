@@ -135,8 +135,7 @@ fn infix_operator_relation(left: SyntaxOperator, right: SyntaxOperator) -> Opera
 
     match (left, right) {
         (BoolOr, BoolOr) | (BoolAnd, BoolAnd) => OperatorRelation::Same(Associativity::Left),
-        (BoolOr, BoolAnd) => OperatorRelation::Weaker,
-        (BoolAnd, BoolOr) => OperatorRelation::Stronger,
+        (BoolOr, BoolAnd) | (BoolAnd, BoolOr) => OperatorRelation::Unrelated,
         (EffectBind, EffectBind)
         | (EffectBind, EffectThen)
         | (EffectThen, EffectBind)
@@ -157,18 +156,17 @@ fn infix_operator_relation(left: SyntaxOperator, right: SyntaxOperator) -> Opera
         }
         (Builtin(Append), Builtin(Append)) => OperatorRelation::Same(Associativity::Left),
         (Builtin(Add), Builtin(Add)) => OperatorRelation::Same(Associativity::Left),
-        (Builtin(Add), Builtin(Subtract)) | (Builtin(Subtract), Builtin(Add)) => {
-            OperatorRelation::Unrelated
-        }
         (Builtin(Subtract), Builtin(Subtract)) => OperatorRelation::Same(Associativity::None),
+        (Builtin(Multiply), Builtin(Multiply)) => OperatorRelation::Same(Associativity::Left),
+        (Builtin(Divide), Builtin(Divide)) => OperatorRelation::Same(Associativity::None),
+        (
+            Builtin(Add | Subtract | Multiply | Divide),
+            Builtin(Add | Subtract | Multiply | Divide),
+        ) => OperatorRelation::Unrelated,
         (
             Builtin(Greater | GreaterEqual | Equal | NotEqual | LessEqual | Less),
             Builtin(Greater | GreaterEqual | Equal | NotEqual | LessEqual | Less),
         ) => OperatorRelation::Same(Associativity::None),
-        (Builtin(Multiply), Builtin(Multiply))
-        | (Builtin(Multiply), Builtin(Divide))
-        | (Builtin(Divide), Builtin(Multiply)) => OperatorRelation::Same(Associativity::Left),
-        (Builtin(Divide), Builtin(Divide)) => OperatorRelation::Same(Associativity::None),
         _ => match operator_precedence(left).cmp(&operator_precedence(right)) {
             std::cmp::Ordering::Greater => OperatorRelation::Stronger,
             std::cmp::Ordering::Less => OperatorRelation::Weaker,

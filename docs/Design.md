@@ -169,7 +169,7 @@ There are no typeclasses. We can specialize the monadic operators for our only m
         (Return a) >>= k = k a
         k1 >=> k2 = (>>= k2) . k1
 
-Effectively, '>>=' captures the continuation into 'Yield'. Unfortunately, the Kleisli composition `>=>` is left-associative, i.e. `((((k1 >=> k2) >=> k3) >=> k4) >=> k5)`, but this rebuilds the entire 'stack' on every step. Right-associative `(k1 >=> (k2 >=> (k3 >=> (k4 >=> k5))))` performance is superior. Ideally, the assembler optimizes this, logically recognizing and rewriting `>=>`. We can also rewrite `(k >=> Return)` and `(Return >=> k)` to `k` as a form of tail-call optimization (TCO). We'll want TCO in general for long-running loops.
+Effectively, '>>=' captures the continuation into 'Yield'. A relevant concern is left-associative structures such as `((((k1 >=> k2) >=> k3) >=> k4) >=> k5)` would tend to rebuild the 'stack' on every step. Right-associative `(k1 >=> (k2 >=> (k3 >=> (k4 >=> k5))))` performance is superior. Ideally, this is resolved at evaluation time, which benefits from a stack-like representation of the continuation (instead of immediate composition of functions).
 
 Behavior is embodied in the runner or handler. Almost any effect can be modeled, the primary exception being race conditions. Not all effects are fully 'compatible'. A few examples:
 
