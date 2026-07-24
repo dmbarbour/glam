@@ -232,8 +232,9 @@ their detailed scheduling and representation contracts.
   mismatches invoke `.fail`, while forcing errors still propagate. Quoted-path
   patterns with only literals remain exact fixed lists; computed components
   resolve at their source-order match step and use directional key-path
-  comparison. A list pattern has at most one irrefutable variable-length
-  segment.
+  comparison. A list pattern has at most one variable-length segment; that
+  segment is an ordinary pattern over the residual middle slice and may be
+  refutable.
 - Fixed dictionary, tag, and tuple patterns use the same compiler-private
   dictionary decomposition. Known paths are removed persistently without
   iteration; only exact-empty remainder checks may scan deferred fields to

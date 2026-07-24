@@ -2395,6 +2395,35 @@ fn refutable_dictionary_remainders_match_the_residual_dictionary() {
 }
 
 #[test]
+fn refutable_variable_list_segments_match_the_middle_slice() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "asm.nested = list.pure do { .r [0,1,2,9] -> [0] ++ ([head] ++ tail) ++ [9]; ((head == 1) and (tail == [2])) =>> .r \"N\" }\n",
+        "asm.exact = list.pure do { .r [0,1,2,9] -> [0] ++ ([1,2]) ++ [9]; .r \"E\" }\n",
+        "asm.computed = list.pure do { .r [42,'foo,42,9] -> [key] ++ '.foo.[key] ++ [9]; .r \"C\" }\n",
+        "asm.fallback = list.pure (.alt (do { .r [0,1,3,9] -> [0] ++ ([1,2]) ++ [9]; .r \"bad\" }) (.r \"F\"))\n",
+        "asm.recursive = list.pure do { abstract head,tail; .r [0,1,2,9] -> [0] ++ ([head] ++ tail) ++ [9]; ((head == 1) and (tail == [2])) =>> .r \"R\" }\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("nested", b"N".as_slice()),
+        ("exact", b"E".as_slice()),
+        ("computed", b"C".as_slice()),
+        ("fallback", b"F".as_slice()),
+        ("recursive", b"R".as_slice()),
+    ] {
+        let result = fully_evaluated_value(resolved_value_at_path(&value, &["asm", path]));
+        assert_eq!(output_binary_result_list(&result), expected, "{path}");
+    }
+}
+
+#[test]
 fn bare_do_operations_reuse_the_effect_then_unit_policy() {
     let parsed = parse(concat!(
         "language g0\n",

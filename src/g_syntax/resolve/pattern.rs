@@ -234,10 +234,6 @@ fn append_list_match(
     }
 
     if let Some(middle) = middle.as_deref() {
-        debug_assert!(
-            middle.is_irrefutable(),
-            "variable-length list segments are irrefutable"
-        );
         append_value_pattern(steps, remainder, middle, line, lowering)?;
     } else {
         append_then(

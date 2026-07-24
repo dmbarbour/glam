@@ -367,12 +367,12 @@ evaluates to `.fail`.
 The current Rust bootstrap implements pattern-bearing statements in both
 layout and braced forms. Patterns currently include names, `_`, irrefutable
 `P as Q`, unit, numbers, atoms, text, fixed quoted paths, list patterns with at
-most one irrefutable variable-length segment, computed-path dictionaries and
-quoted paths, static and computed tags, and tuples. Dictionary entries are
-required by default; `path?:Pattern` explicitly passes `{}` to the payload
-pattern when the path is absent or undefined. Computed paths are evaluated once
-in source order and may use captures from earlier subpatterns. A layout block
-is newline-delimited:
+most one potentially refutable variable-length segment, computed-path
+dictionaries and quoted paths, static and computed tags, and tuples. Dictionary
+entries are required by default; `path?:Pattern` explicitly passes `{}` to the
+payload pattern when the path is absent or undefined. Computed paths are
+evaluated once in source order and may use captures from earlier subpatterns.
+A layout block is newline-delimited:
 
         my_effect = do
             .read 'left -> left
@@ -1379,6 +1379,7 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         [x]++xs                     # we can use append notation in patterns
         xs++[x]                      
         [x0]++xs++[xN]
+        [x0]++([y]++ys)++[xN]      # middle slice runs an ordinary pattern
         # lhs++rhs                  # ILLEGAL - limit one variable sublist
 
         "foo"                       # match text

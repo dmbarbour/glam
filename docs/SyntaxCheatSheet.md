@@ -333,8 +333,8 @@ nested = f [do { .r 1 }, do {; .r 2; }]
 #   interior empty statements and `do {;}` are invalid.
 # - Do bindings currently support irrefutable names, `_`, grouping, irrefutable
 #   `P as Q`, scalar literals, fixed quoted paths, list patterns with at most
-#   one irrefutable variable-length segment, computed-path dictionary and
-#   quoted-path patterns, static tags, and tuples. Computed tag and effectful
+#   one potentially refutable variable-length segment, computed-path dictionary
+#   and quoted-path patterns, static and computed tags, and tuples. Effectful
 #   patterns remain target syntax.
 
 op1 >>= k           # bind        k1 >=> k2   # Kleisli
@@ -413,7 +413,8 @@ tag:P    :tag    'name
 [KeyA,KeyB]:P     # computed hierarchical singleton tag
 (PathExpr):P      # singleton tag from a computed list-valued path
 []   [a,b,c]
-[x]++xs   xs++[x]   [x0]++mid++[xN]     # ONE variable segment max
+[x]++xs   xs++[x]   [x0]++mid++[xN]     # ONE variable segment max; may refute
+[x0]++([y]++ys)++[xN]                   # nested pattern sees middle slice
 "foo"    "foo"++rest                    # texts are lists
 '.foo.[key].(tail) # computed quoted path; earlier captures are in scope
 (,)   (P,)   (P1,P2) # tuple patterns

@@ -355,6 +355,47 @@ fn dictionary_remainders_accept_refutable_patterns() {
 }
 
 #[test]
+fn variable_length_list_segments_accept_refutable_patterns() {
+    let expr = parse_do_expression(concat!(
+        "do\n",
+        ".r [0,1,2,9] -> [0] ++ ([head] ++ tail) ++ [9]\n",
+        ".r [42,'foo,42,9] -> [key] ++ '.foo.[key] ++ [9]\n",
+        ".r [head,tail]\n",
+    ));
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = expr else {
+        panic!("expected a do expression");
+    };
+
+    let DoStepKind::Bind { pattern, .. } = &steps[0].kind else {
+        panic!("expected a list-pattern binding");
+    };
+    let SyntaxPatternKind::List {
+        prefix,
+        middle: Some(middle),
+        suffix,
+    } = &pattern.kind
+    else {
+        panic!("expected a variable-length list pattern");
+    };
+    assert_eq!(prefix.len(), 1);
+    assert_eq!(suffix.len(), 1);
+    assert!(matches!(&middle.kind, SyntaxPatternKind::Group(_)));
+    assert_eq!(middle.captures(), ["head", "tail"]);
+
+    let DoStepKind::Bind { pattern, .. } = &steps[1].kind else {
+        panic!("expected a list-pattern binding");
+    };
+    assert!(matches!(
+        &pattern.kind,
+        SyntaxPatternKind::List {
+            middle: Some(middle),
+            ..
+        } if matches!(&middle.kind, SyntaxPatternKind::QuotedPath(_))
+    ));
+    assert_eq!(pattern.captures(), ["key"]);
+}
+
+#[test]
 fn braced_do_is_a_structural_atom_in_containers_and_other_do_blocks() {
     for source in [
         "consume [do { .r 1 }, do { text = \"a;b\"; .r text }, do { x = do .r 2; .r x }]",
@@ -460,10 +501,6 @@ fn token_do_reports_structural_statement_errors() {
         (
             "do\n[head] ++ first ++ second <- .r []\n.r head",
             "only one variable-length segment",
-        ),
-        (
-            "do\n[head] ++ 42 ++ [last] <- .r []\n.r head",
-            "variable-length list segment must be an irrefutable pattern",
         ),
         (
             "do\n1 as value <- .r 1\n.r value",

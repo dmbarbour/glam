@@ -630,19 +630,13 @@ fn parse_list_append_pattern(
                 };
                 target.extend(text.bytes().map(number_pattern_from_byte));
             }
-            pattern if pattern.is_irrefutable() && middle.is_none() => {
+            pattern if middle.is_none() => {
                 middle = Some(Box::new(pattern));
-            }
-            _ if middle.is_some() => {
-                return Err(error_at_view(
-                    part,
-                    "list patterns permit only one variable-length segment",
-                ));
             }
             _ => {
                 return Err(error_at_view(
                     part,
-                    "a variable-length list segment must be an irrefutable pattern",
+                    "list patterns permit only one variable-length segment",
                 ));
             }
         }
