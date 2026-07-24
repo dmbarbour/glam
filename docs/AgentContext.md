@@ -35,8 +35,10 @@ notes instead of appending history; put subsystem details in
   delimiter, indentation, and declaration-section recognition. Fatal lexical
   errors stop grammatical parsing. `parser/input.rs` is the only adapter from
   that one lexical result to token parsers; production parsers receive an
-  existing `TokenView` and never re-lex substrings. `LayoutView` interprets
-  `LineStart` tokens only at its current delimiter depth.
+  existing `TokenView` and never re-lex substrings. `LayoutView` infers one
+  next-line or hanging block at its current delimiter depth and returns rather
+  than consumes its first dedent. `ExpressionContext` decides whether a
+  postfix/infix owner may resume there.
 - Keep current implementation claims out of target-state design documents, and
   keep chronological spike notes out of this file.
 
@@ -186,6 +188,14 @@ their detailed scheduling and representation contracts.
   continuation lines are indented. A boundary-aligned line containing only
   closing delimiters may terminate a declaration, but may not carry or precede
   a later expression suffix. Nested declarations use the same relative rule.
+- Layout siblings align at the first member's inferred anchor; deeper lines
+  continue that member. A final structural child inherits its owner's floor.
+  Do not make the inline RHS column a new floor or let a nested body collide
+  with the operator indentation that introduced it.
+- Delimited groups retain ordinary expression continuation internally.
+  Commas/semicolons alone separate members; only post-opening member or
+  separator contribution lines establish and obey the delimiter content
+  anchor.
 - `=`, `:=`, and `::=` remain distinct introduction, override, and update
   operations.
 - List literals preserve every comma-separated expression as one element. Only

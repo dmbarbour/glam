@@ -96,6 +96,76 @@ expression's floor. Closing delimiters retain the terminal-closer rule above.
 These acceptance rules permit dense and leading-separator styles; a formatter
 may consistently choose a stricter house style.
 
+### Layout Bodies and Expression Resumption
+
+A declaration, object member, local binding, or `do` statement establishes an
+exclusive continuation floor. Its continuation lines must remain strictly to
+the right of that floor. The position of an inline right-hand expression does
+not establish a new floor:
+
+```g
+result = Operation1 >>= \r1 ->
+  Operation2 r1 >>= \r2 ->
+  finish r1 r2
+```
+
+A layout body takes its sibling anchor from its first member. An inline first
+member uses its token column as a hanging anchor; a first member on a later
+line freely chooses an anchor to the right of the enclosing floor. Lines at
+the anchor begin siblings, while deeper lines continue the current member.
+
+A final child that owns the remainder of its host expression inherits the host
+floor. This is why a final lambda, `do`, `let`, object, or `with` expression
+does not require indentation to drift progressively right. A dedent closes a
+layout body and leaves its boundary unconsumed. Only an enclosing grammar that
+expects a postfix or infix continuation may resume there.
+
+`where` attaches to the nearest expression whose body has closed at its
+indentation. One dedent may close several nested `with` or object bodies:
+
+```g
+configured = source
+  |> configure with
+    A := 42
+    B := derive A
+  |> finish
+  where
+    derive = transform
+```
+
+Changing only the indentation of `where` can therefore change its owner. A
+`where` below an inner member anchor but still above an outer member anchor
+belongs to that outer member's expression. Dedenting below the outer anchor
+attaches it to the surrounding definition.
+
+A leading infix operator uses the same yielded boundary. The first leading
+operator establishes a resumption anchor; later leading operators in that
+chain must align with it:
+
+```g
+result = source
+  |> process do
+    input <- .read
+    .r (transform input)
+  |> finish
+```
+
+The recovered operators form one ordinary infix chain. Newlines do not change
+precedence or associativity. A trailing operator remains an incomplete-right-
+operand continuation:
+
+```g
+result = source |>
+  decode |>
+  finish
+```
+
+The operator indentation is the continuation floor of its right operand, so a
+nested layout body must begin strictly farther right. A formatter should make
+these ownership relationships visible by aligning siblings and resumption
+operators. It may choose a fixed indentation increment or add parentheses and
+braces, but it must preserve the parsed grouping.
+
 Each declaration starts with either a keyword (such as `import`, `object`, or `unique`) or is a basic definition of form `name = Expr` or one of its variants (args in lhs, `:=`, `::=`, etc.). We'll favor basic definitions where feasible, thus keywords are mostly for special forms.
 
 In context of errors, the errors can be reported but we can also make a best effort to proceed with errors. This might depend on configuration options or command-line arguments.
@@ -1089,52 +1159,6 @@ This supports lightweight extensions
         foo = op1 >>= op2 >>= op3a where
             op3a = op3 with
                 ...
-
-A layout body takes its sibling anchor from its first member. Lines at that
-anchor begin siblings, while deeper lines continue the current member. A
-dedent closes the body and leaves the boundary to an enclosing expression.
-`where` may resume there, and attaches to the nearest expression whose body
-has closed at that indentation. One dedent may close several nested `with` or
-object bodies.
-
-Consequently, changing only the indentation of `where` can deliberately
-change its owner. A `where` below an inner member anchor but still above an
-outer member anchor belongs to that outer member's expression. Dedenting below
-the outer member anchor attaches it to the surrounding definition instead.
-Every nested body must choose an anchor strictly to the right of the
-continuation floor established by its owning declaration or binding.
-
-Leading infix operators use the same yielding boundary. The first leading
-operator establishes a resumption anchor; later leading operators in that
-chain must align with it. A matching operator can close one or more layout
-bodies:
-
-        result = source
-          |> process do
-            input <- .read
-            .r (transform input)
-          |> finish
-
-        configured = source
-          |> configure with
-            A := 42
-            B := derive A
-          |> finish
-          where
-            derive = transform
-
-The recovered operators form one ordinary infix chain. Line breaks do not
-change precedence or associativity, and retain the usual diagnostics for
-non-associative or unrelated operators. A trailing operator remains an
-incomplete-right-operand continuation:
-
-        result = source |>
-          decode |>
-          finish
-
-The operator indentation is also the continuation floor of its right operand.
-A nested layout body must therefore begin strictly farther right than its
-operator.
 
 ### Method Chaining
 

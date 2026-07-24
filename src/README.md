@@ -28,10 +28,11 @@ not define future language semantics or collect subsystem invariants.
 | `g_source.rs` | Narrow public inspection report for the built-in `.g` parser; no syntax tree or lowering context escapes |
 | `compiler.rs` | Per-source capabilities, hidden artifact/import provenance, loaders, namespace qualification, and diagnostic emission |
 | `g_syntax.rs` | Private built-in `.g` front-end facade |
-| `g_syntax/parser/lexical.rs` | Authoritative single-pass source validation and spanned tokens, text values, delimiter pairs, indentation facts, and declaration ranges |
-| `g_syntax/parser/input.rs` | Checked token-range views, balanced-group iteration, mapped Chumsky input, token predicates, and source-aware parser diagnostics |
-| `g_syntax/parser/source.rs`, `lexical.rs`, `input.rs`, `layout.rs` | UTF-8 orchestration, the one source scan, token-range/Chumsky input, and contextual layout views |
-| `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs` | Ordinary precedence grammar, structural `let`/`where`/object/`with` forms, and do statements |
+| `g_syntax/parser/source.rs` | UTF-8 entry point, one lexical pass, source-wide validation, declaration orchestration, and recovery |
+| `g_syntax/parser/lexical.rs` | Authoritative spanned tokens, text values, delimiter groups, indentation facts, and declaration ranges |
+| `g_syntax/parser/input.rs` | Checked token-range views, group-aware iteration, mapped Chumsky input, token predicates, and parser diagnostics |
+| `g_syntax/parser/layout.rs`, `expression_context.rs` | Delimiter-depth lines, inferred layout blocks, continuation floors, exact expression extents, and yielded boundaries |
+| `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs` | Ordinary precedence grammar, structural/postfix resumption, `let`/object/`with` forms, and do statements |
 | `g_syntax/parser/declaration.rs`, `declaration/simple.rs` | Top-level and recursive object-body declarations, including simple language/import/abstract/unique forms |
 | `g_syntax/keywords.rs` | Language-version-owned `g0` reserved words and their syntactic roles |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs`, `name_analysis.rs` | Lexical resolution, affine semantic IR, local-use warnings, and file-wide local/global shadow checks |
@@ -97,7 +98,13 @@ alternative.
 
 ```text
 raw source bytes
-  -> built-in g lexical structure and source-wide diagnostics
+  -> UTF-8 validation
+  -> one lexer-owned token/group/declaration structure
+  -> source-wide floor and delimiter-layout diagnostics
+  -> declaration token ranges
+  -> contextual expression parse
+       -> complete hard range, or
+       -> exact dedent boundary resumed by postfix/infix grammar
   -> parser-owned SyntaxExpr and declarations
   -> resolver-owned BindingId locals and ResolvedExpr<Value>
   -> module lowering or net lowering
@@ -108,6 +115,12 @@ Syntax and sugar end in `g_syntax`. `ResolvedExpr<Value>` is moved through a
 single lowering; no syntax or core expression tree survives into evaluation.
 Module lowering owns declaration order and the open module fixpoint. Net
 lowering emits complete bind and application spines.
+
+`LayoutView` selects one next-line or hanging sibling anchor and returns the
+first dedented line without consuming it. `ExpressionContext` carries the
+owner floor and whether such a boundary may yield. Structural parsing then
+resumes only recognized postfix `where` or infix operators; it never reparses
+source fragments or uses indentation as an implicit separator.
 
 ## Evaluation Dataflow
 

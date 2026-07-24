@@ -1,7 +1,8 @@
 //! Structural expression parsing for `let`, `where`, objects, and `with`.
 //!
-//! `let`, `where`, object, and `with` expressions produce complete syntax
-//! trees. Object bodies share the recursive declaration parser used by
+//! Each parser consumes a lexer-owned hard range or returns an exact yielded
+//! boundary. Postfix `where` and leading infix operators resume from those
+//! boundaries. Object bodies share the recursive declaration parser used by
 //! top-level object declarations.
 
 use super::super::keywords::{canonical_keyword, reserved_keyword_message};
@@ -10,7 +11,7 @@ use super::declaration::{parse_nonempty_object_body, parse_object_body};
 use super::expression::{parse_expression_chain_view, syntax_operator};
 use super::expression_context::{ExpressionContext, ParsedExpression, validate_expression_floor};
 use super::input::{TokenRange, TokenView};
-use super::layout::{LayoutBase, LayoutView};
+use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
@@ -73,8 +74,19 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         result?
     } else if let Some(result) = parse_with(view, context) {
         result?
-    } else if let Some(result) = parse_where(view, context) {
-        result?
+    } else if let Some(where_index) = contextual_keywords(view, "where").into_iter().next() {
+        let where_token = view
+            .token_at(where_index)
+            .expect("a selected where suffix remains within its expression view");
+        let body = trim_layout(view_between(view, view.range().start(), where_index));
+        if is_layout_empty(body) {
+            return Err(error_at_token(
+                view,
+                where_token,
+                "where expression requires a body",
+            ));
+        }
+        parse_expression_extent(body, context.complete())?
     } else {
         ParsedExpression::from_chain(
             parse_expression_chain_view(view, context)?,
@@ -224,27 +236,6 @@ fn parse_let(
     }))
 }
 
-fn parse_where(
-    view: TokenView<'_, '_>,
-    context: ExpressionContext,
-) -> Option<ParseResult<ParsedExpression>> {
-    let where_index = contextual_keywords(view, "where").into_iter().last()?;
-    let where_token = view.token_at(where_index)?;
-    let body = trim_layout(view_between(view, view.range().start(), where_index));
-    if is_layout_empty(body) {
-        return Some(Err(error_at_token(
-            view,
-            where_token,
-            "where expression requires a body",
-        )));
-    }
-    let body = match parse_expression_in_context(body, context) {
-        Ok(body) => body,
-        Err(diagnostics) => return Some(Err(diagnostics)),
-    };
-    Some(parse_where_suffix(view, context, where_index, body))
-}
-
 fn parse_where_suffix(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
@@ -267,16 +258,15 @@ fn parse_where_suffix(
         ));
     }
 
-    let (bindings_view, end) = if braced_contents(all_bindings).is_some() {
-        (all_bindings, all_bindings.range().end())
+    let (bindings, end, braced_bindings) = if let Some(bindings) =
+        parse_braced_bindings(all_bindings, "where", context)
+    {
+        (bindings?, all_bindings.range().end(), true)
     } else if all_bindings
         .top_level()
         .any(|indexed| matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
     {
-        let layout = LayoutView::new(all_bindings);
-        let block = layout
-            .block(layout.inferred_base())
-            .map_err(|error| vec![Diagnostic::error(error.line(), error.message())])?;
+        let block = LayoutView::new(all_bindings).block();
         if !block.statements().is_empty() && !context.accepts_layout_anchor(block.anchor()) {
             return Err(vec![Diagnostic::error(
                 block.statements()[0].line(),
@@ -301,50 +291,25 @@ fn parse_where_suffix(
                 ),
             )]);
         }
-        (
-            trim_layout(view_between(
-                all_bindings,
-                all_bindings.range().start(),
-                block.end(),
-            )),
-            block.end(),
-        )
-    } else {
-        (all_bindings, all_bindings.range().end())
-    };
-
-    let (bindings, braced_bindings) = if let Some(bindings) =
-        parse_braced_bindings(bindings_view, "where", context)
-    {
-        (bindings, true)
-    } else if bindings_view
-        .top_level()
-        .any(|indexed| matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
-    {
-        let layout = LayoutView::new(bindings_view);
-        let statements = match layout.statements(layout.inferred_base()) {
-            Ok(statements) => statements,
-            Err(error) => {
-                return Err(vec![Diagnostic::error(error.line(), error.message())]);
-            }
-        };
-        let binding_views = statements
+        let end = block.end();
+        let binding_views = block
+            .into_statements()
             .into_iter()
-            .filter_map(|statement| bindings_view.subview(statement.tokens()))
+            .filter_map(|statement| all_bindings.subview(statement.tokens()))
             .collect();
-        (parse_binding_views(binding_views, context), false)
-    } else if !top_level_symbols(bindings_view, ";").is_empty() {
+        (parse_binding_views(binding_views, context)?, end, false)
+    } else if !top_level_symbols(all_bindings, ";").is_empty() {
+        return Err(error_at_view(
+            all_bindings,
+            "naked semicolon-separated `where` bindings are not supported; use `where { ... }`",
+        ));
+    } else {
         (
-            Err(error_at_view(
-                bindings_view,
-                "naked semicolon-separated `where` bindings are not supported; use `where { ... }`",
-            )),
+            parse_binding_views(vec![all_bindings], context)?,
+            all_bindings.range().end(),
             false,
         )
-    } else {
-        (parse_binding_views(vec![bindings_view], context), false)
     };
-    let bindings = bindings?;
     if bindings.is_empty() && !braced_bindings {
         return Err(error_at_token(
             view,
@@ -657,11 +622,7 @@ fn structural_body_extent<'lex, 'source>(
                 None => context,
             };
             let body = view_between(view, start, view.range().end());
-            let layout = LayoutView::new(body);
-            let base = layout.inferred_base();
-            let block = layout
-                .block(base)
-                .map_err(|error| vec![Diagnostic::error(error.line(), error.message())])?;
+            let block = LayoutView::new(body).block();
             if !block.statements().is_empty() && !body_context.accepts_layout_anchor(block.anchor())
             {
                 let line = block.statements()[0].line();
@@ -674,7 +635,7 @@ fn structural_body_extent<'lex, 'source>(
                     ),
                 )]);
             }
-            if matches!(base, LayoutBase::Hanging(_))
+            if block.hanging()
                 && let Some(boundary) = block.boundary()
                 && body
                     .subview(boundary.tokens())
@@ -819,34 +780,23 @@ fn split_multiline_let<'lex, 'source>(
             "multi-line let expression requires a body or `in`",
         ));
     };
-    let Some((_, first_binding_token)) = rest
+    if rest
         .subview(first.tokens())
         .and_then(TokenView::first_significant)
-    else {
+        .is_none()
+    {
         return Err(error_at_view(
             rest,
             "let expression requires at least one binding",
         ));
-    };
+    }
     let let_token = full
         .token_at(let_index)
         .expect("the let token remains within the full expression view");
     let let_column = full
         .column_at_span(let_token.span())
         .expect("the let token has a source column");
-    let binding_column = full
-        .column_at_span(first_binding_token.span())
-        .expect("the first let binding has a source column");
-    let first_is_inline =
-        full.line_at_span(let_token.span()) == full.line_at_span(first_binding_token.span());
-    let base = if first_is_inline {
-        LayoutBase::Hanging(binding_column)
-    } else {
-        LayoutBase::FirstLine
-    };
-    let block = LayoutView::new(rest)
-        .block(base)
-        .map_err(|error| vec![Diagnostic::error(error.line(), error.message())])?;
+    let block = LayoutView::new(rest).block();
 
     for line in lines.into_iter().skip(1) {
         if line.start() >= block.end() {

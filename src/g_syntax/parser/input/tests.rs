@@ -2,7 +2,7 @@ use chumsky::prelude::*;
 
 use super::*;
 use crate::diagnostic::Severity;
-use crate::g_syntax::parser::layout::{LayoutBase, LayoutView, validate_delimited_layouts};
+use crate::g_syntax::parser::layout::{LayoutView, validate_delimited_layouts};
 use crate::g_syntax::parser::lexical::lex_source;
 
 #[test]
@@ -201,7 +201,7 @@ fn layout_lines_ignore_nested_groups_and_multiline_text() {
     assert_eq!(layout.tokens().range(), view.range());
     assert_eq!(lines[0].tokens().start(), view.range().start() + 1);
 
-    let statements = layout.statements(LayoutBase::FirstLine).unwrap();
+    let statements = layout.block().into_statements();
     assert_eq!(statements.len(), 2);
     assert_eq!(statements[0].line(), 1);
     assert_eq!(statements[1].line(), 4);
@@ -216,7 +216,7 @@ fn layout_lines_ignore_nested_groups_and_multiline_text() {
 }
 
 #[test]
-fn layout_policy_handles_fixed_bases_continuations_and_closers() {
+fn inferred_layout_keeps_closers_with_the_preceding_statement() {
     let lexical = lex_source("(\n  .first\n)\n  .second\n    continuation");
     let whole = TokenView::whole(&lexical);
     let open_index = whole
@@ -233,8 +233,8 @@ fn layout_policy_handles_fixed_bases_continuations_and_closers() {
         .subview(TokenRange::new(open_index + 1, close + 1).unwrap())
         .unwrap();
     let statements = LayoutView::new(body_through_close)
-        .statements(LayoutBase::Indentation(2))
-        .unwrap();
+        .block()
+        .into_statements();
     assert_eq!(statements.len(), 1);
     assert_eq!(statements[0].line(), 2);
 
@@ -242,24 +242,16 @@ fn layout_policy_handles_fixed_bases_continuations_and_closers() {
     let second = whole
         .subview(TokenRange::new(second_start, whole.range().end()).unwrap())
         .unwrap();
-    let statements = LayoutView::new(second)
-        .statements(LayoutBase::Indentation(2))
-        .unwrap();
+    let statements = LayoutView::new(second).block().into_statements();
     assert_eq!(statements.len(), 1);
     assert_eq!(statements[0].line(), 4);
-
-    let error = LayoutView::new(second)
-        .statements(LayoutBase::Indentation(4))
-        .unwrap_err();
-    assert_eq!(error.line(), 4);
-    assert!(error.message().contains("expected at least 4"));
 }
 
 #[test]
 fn layout_blocks_report_the_first_unconsumed_dedent() {
     let lexical = lex_source("  first\n    continuation\n  second\n boundary\nlater");
     let view = TokenView::whole(&lexical);
-    let block = LayoutView::new(view).block(LayoutBase::FirstLine).unwrap();
+    let block = LayoutView::new(view).block();
 
     assert_eq!(block.anchor(), 2);
     assert_eq!(block.statements().len(), 2);
@@ -279,11 +271,20 @@ fn layout_blocks_report_the_first_unconsumed_dedent() {
 
 #[test]
 fn hanging_layout_uses_the_inline_member_column_for_later_lines() {
-    let lexical = lex_source("first\n   second\n     continuation\nboundary");
-    let view = TokenView::whole(&lexical);
-    let block = LayoutView::new(view).block(LayoutBase::Hanging(3)).unwrap();
+    let lexical = lex_source("do first\n   second\n     continuation\nboundary");
+    let whole = TokenView::whole(&lexical);
+    let first = whole
+        .top_level()
+        .find(|indexed| matches!(indexed.token().kind(), TokenKind::Name("first")))
+        .unwrap()
+        .index();
+    let view = whole
+        .subview(TokenRange::new(first, whole.range().end()).unwrap())
+        .unwrap();
+    let block = LayoutView::new(view).block();
 
     assert_eq!(block.anchor(), 3);
+    assert!(block.hanging());
     assert_eq!(block.statements().len(), 2);
     assert_eq!(block.statements()[0].line(), 1);
     assert_eq!(block.statements()[1].line(), 2);

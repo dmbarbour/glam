@@ -1,19 +1,14 @@
+//! Delimiter-depth-aware physical lines and inferred layout blocks.
+//!
+//! `LayoutView::block` chooses next-line or hanging layout from its first
+//! member and leaves the first dedented line unconsumed. Construct-specific
+//! parsers decide whether that boundary is a valid member error or an
+//! enclosing expression resumption.
+
 use crate::g_syntax::Diagnostic;
 
 use super::input::{TokenRange, TokenView};
 use super::lexical::{Delimiter, LeadingTrivia, LexedSource, TokenKind};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LayoutBase {
-    FirstLine,
-    /// The first member follows its introducer on the same source line.
-    ///
-    /// Its token column establishes the anchor even though the physical line
-    /// begins before it. Later lines use ordinary indentation comparisons.
-    Hanging(usize),
-    #[cfg(test)]
-    Indentation(usize),
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct LayoutLine {
@@ -60,6 +55,7 @@ impl LayoutStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LayoutBlock {
     anchor: usize,
+    hanging: bool,
     statements: Vec<LayoutStatement>,
     end: usize,
     boundary: Option<LayoutLine>,
@@ -68,6 +64,10 @@ pub(super) struct LayoutBlock {
 impl LayoutBlock {
     pub(super) fn anchor(&self) -> usize {
         self.anchor
+    }
+
+    pub(super) fn hanging(&self) -> bool {
+        self.hanging
     }
 
     pub(super) fn statements(&self) -> &[LayoutStatement] {
@@ -87,22 +87,6 @@ impl LayoutBlock {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct LayoutError {
-    line: usize,
-    message: String,
-}
-
-impl LayoutError {
-    pub(super) fn line(&self) -> usize {
-        self.line
-    }
-
-    pub(super) fn message(&self) -> &str {
-        &self.message
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(super) struct LayoutView<'lex, 'source> {
     tokens: TokenView<'lex, 'source>,
@@ -111,28 +95,6 @@ pub(super) struct LayoutView<'lex, 'source> {
 impl<'lex, 'source> LayoutView<'lex, 'source> {
     pub(super) fn new(tokens: TokenView<'lex, 'source>) -> Self {
         Self { tokens }
-    }
-
-    /// Selects next-line or hanging policy from the first significant member.
-    ///
-    /// A member beginning after earlier source on its physical line has a
-    /// token column deeper than that line's indentation and therefore owns a
-    /// hanging anchor. Source-only blank and comment lines have no tokens and
-    /// cannot affect this decision.
-    pub(super) fn inferred_base(self) -> LayoutBase {
-        let Some((index, token)) = self.tokens.first_significant() else {
-            return LayoutBase::FirstLine;
-        };
-        let indentation = self.tokens.line_indentation_at(index).unwrap_or(0);
-        let column = self
-            .tokens
-            .column_at_span(token.span())
-            .unwrap_or(indentation);
-        if column > indentation {
-            LayoutBase::Hanging(column)
-        } else {
-            LayoutBase::FirstLine
-        }
     }
 
     #[cfg(test)]
@@ -211,22 +173,47 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
     /// stays with the preceding statement because delimiter ownership is
     /// lexical. The enclosing grammar decides whether it can consume the
     /// returned boundary.
-    pub(super) fn block(self, base: LayoutBase) -> Result<LayoutBlock, LayoutError> {
+    pub(super) fn block(self) -> LayoutBlock {
         let lines = self.lines();
         let Some(first) = lines.first().copied() else {
-            return Ok(LayoutBlock {
+            return LayoutBlock {
                 anchor: 0,
+                hanging: false,
                 statements: Vec::new(),
                 end: self.tokens.range().end(),
                 boundary: None,
-            });
+            };
         };
-        let (base, hanging) = match base {
-            LayoutBase::FirstLine => (first.indentation, false),
-            LayoutBase::Hanging(indentation) => (indentation, true),
-            #[cfg(test)]
-            LayoutBase::Indentation(indentation) => (indentation, false),
+        let (base, hanging) = self.inferred_anchor(first);
+        self.block_with_anchor(lines, base, hanging)
+            .unwrap_or_else(|_| unreachable!("inferred layout starts at its first member"))
+    }
+
+    fn inferred_anchor(self, first: LayoutLine) -> (usize, bool) {
+        let Some((_, token)) = self
+            .tokens
+            .subview(first.tokens)
+            .and_then(TokenView::first_significant)
+        else {
+            return (first.indentation, false);
         };
+        let column = self
+            .tokens
+            .column_at_span(token.span())
+            .unwrap_or(first.indentation);
+        if column > first.indentation {
+            (column, true)
+        } else {
+            (first.indentation, false)
+        }
+    }
+
+    fn block_with_anchor(
+        self,
+        lines: Vec<LayoutLine>,
+        base: usize,
+        hanging: bool,
+    ) -> Result<LayoutBlock, ()> {
         let mut statements: Vec<LayoutStatement> = Vec::new();
 
         for (position, line) in lines.into_iter().enumerate() {
@@ -235,6 +222,7 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
             if !hanging_first && line.indentation < base && !closer_only {
                 return Ok(LayoutBlock {
                     anchor: base,
+                    hanging,
                     statements,
                     end: line.start,
                     boundary: Some(line),
@@ -250,38 +238,17 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
                 statement.tokens = TokenRange::new(statement.tokens.start(), line.tokens.end())
                     .expect("continuation extends an ordered statement range");
             } else {
-                return Err(LayoutError {
-                    line: line.line,
-                    message: "layout block begins with a continuation line".to_owned(),
-                });
+                return Err(());
             }
         }
 
         Ok(LayoutBlock {
             anchor: base,
+            hanging,
             statements,
             end: self.tokens.range().end(),
             boundary: None,
         })
-    }
-
-    /// Groups a view that must contain exactly one complete layout body.
-    ///
-    /// This compatibility wrapper keeps complete-range callers strict while
-    /// structural expression parsers migrate to `block`.
-    pub(super) fn statements(self, base: LayoutBase) -> Result<Vec<LayoutStatement>, LayoutError> {
-        let block = self.block(base)?;
-        if let Some(boundary) = block.boundary() {
-            return Err(LayoutError {
-                line: boundary.line,
-                message: format!(
-                    "layout line is indented {} spaces; expected at least {}",
-                    boundary.indentation,
-                    block.anchor()
-                ),
-            });
-        }
-        Ok(block.into_statements())
     }
 
     fn line_is_closer_only(self, line: LayoutLine) -> bool {

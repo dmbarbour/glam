@@ -1,8 +1,9 @@
-//! Context carried while recovering one expression's token extent.
+//! Floors and extent policy for one contextual expression parse.
 //!
-//! Phase 1 records ownership without enforcing new layout. Floors become
-//! authoritative in the later validation phase, and `MayYield` becomes
-//! observable when structural expressions can return at dedent boundaries.
+//! An owner establishes the exclusive physical floor for its continuations.
+//! Nested owners validate only their newly stricter interval. `MayYield`
+//! permits a structural expression to return an exact dedent boundary for an
+//! enclosing postfix or infix parser; a complete hard range rejects that tail.
 
 use super::super::Diagnostic;
 use super::super::SyntaxExpr;

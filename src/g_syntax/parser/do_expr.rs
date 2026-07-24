@@ -9,7 +9,7 @@ use crate::g_syntax::{Diagnostic, DoExpr, DoStep, DoStepKind, SyntaxExpr};
 
 use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{TokenRange, TokenView};
-use super::layout::{LayoutBase, LayoutView};
+use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 use super::structural::{parse_expression_in_context, single_reserved_keyword};
 
@@ -23,8 +23,8 @@ enum ParsedDoStatement {
 }
 
 /// Parses the `do` expression beginning at `do_index` and reports its exact
-/// lexical end. A braced form ends at its matching `}`, while an
-/// unparenthesized layout form owns the remainder of its host range.
+/// lexical end. A braced form ends at its matching `}`; a layout form ends at
+/// the first boundary yielded by its inferred statement block.
 pub(in crate::g_syntax::parser) fn parse_do_expression(
     view: TokenView<'_, '_>,
     do_index: usize,
@@ -61,13 +61,6 @@ pub(in crate::g_syntax::parser) fn parse_do_expression(
             "`do` must be separated from its body",
         ));
     }
-    let body_starts_on_new_line = next.leading() == LeadingTrivia::LineBreak
-        || after_do
-            .tokens()
-            .iter()
-            .take(next_index - after_do.range().start())
-            .any(|token| matches!(token.kind(), TokenKind::LineStart { .. }));
-
     if let TokenKind::Open {
         group: group_id,
         delimiter: Delimiter::Brace,
@@ -98,35 +91,15 @@ pub(in crate::g_syntax::parser) fn parse_do_expression(
             .map(|expr| ParsedExpression::new(expr, close + 1));
     }
 
-    let base = if body_starts_on_new_line {
-        LayoutBase::FirstLine
-    } else {
-        LayoutBase::Hanging(
-            view.column_at_span(next.span())
-                .expect("a do body token has a source column"),
-        )
-    };
-    parse_layout_body(after_do, do_token, context, base)
+    parse_layout_body(after_do, do_token, context)
 }
 
 fn parse_layout_body(
     body: TokenView<'_, '_>,
     do_token: &SpannedToken<'_>,
     context: ExpressionContext,
-    base: LayoutBase,
 ) -> ParseResult<ParsedExpression> {
-    let hanging = matches!(base, LayoutBase::Hanging(_));
-    let block = LayoutView::new(body).block(base).map_err(|error| {
-        let message = if error.message().contains("expected at least") {
-            format!(
-                "layout line {} is indented less than the first statement",
-                error.line()
-            )
-        } else {
-            error.message().to_owned()
-        };
-        vec![Diagnostic::error(error.line(), message)]
-    })?;
+    let block = LayoutView::new(body).block();
     if !block.statements().is_empty() && !context.accepts_layout_anchor(block.anchor()) {
         return Err(vec![Diagnostic::error(
             block.statements()[0].line(),
@@ -137,7 +110,7 @@ fn parse_layout_body(
             ),
         )]);
     }
-    if hanging {
+    if block.hanging() {
         validate_hanging_statement_alignment(body, &block)?;
     }
     let end = block.end();

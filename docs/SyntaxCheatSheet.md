@@ -38,6 +38,13 @@ unique Red, Green, Blue     # introduce unique atoms based on namespace path
 # Multi-line: continuation lines must be indented; closing }]) may sit at col 0.
 big_thing = f arg1
     arg2 arg3               # indented => continuation of same declaration
+
+# Layout rules:
+# - The owner line establishes an exclusive floor; continuations stay right.
+# - First body member chooses the sibling anchor; inline means hanging layout.
+# - A final structural child inherits its owner's floor rather than drifting.
+# - Dedent closes a body; only a compatible `where`/operator may resume it.
+# - A leading operator chain aligns at one resumption anchor.
 ```
 
 ## Numbers

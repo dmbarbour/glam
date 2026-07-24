@@ -108,15 +108,20 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
             return Vec::new();
         }
         None => {
-            let layout = LayoutView::new(view);
-            let statements = match layout.statements(layout.inferred_base()) {
-                Ok(statements) => statements,
-                Err(error) => {
-                    diagnostics.push(Diagnostic::error(error.line(), error.message()));
-                    return Vec::new();
-                }
-            };
-            statements
+            let block = LayoutView::new(view).block();
+            if let Some(boundary) = block.boundary() {
+                diagnostics.push(Diagnostic::error(
+                    boundary.line(),
+                    format!(
+                        "layout line is indented {} spaces; expected at least {}",
+                        boundary.indentation(),
+                        block.anchor()
+                    ),
+                ));
+                return Vec::new();
+            }
+            block
+                .into_statements()
                 .into_iter()
                 .filter_map(|statement| {
                     view.subview(statement.tokens())

@@ -576,19 +576,18 @@ fn do_expr<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
-    keyword("do").ignore_then(structural_expression_after_head(
+    keyword("do").ignore_then(structural_atom_after_head(
         view,
         context,
         parse_do_expression,
     ))
 }
 
-type StructuralExpressionParser =
-    for<'lex, 'source> fn(
-        TokenView<'lex, 'source>,
-        usize,
-        ExpressionContext,
-    ) -> Result<ParsedExpression, Vec<Diagnostic>>;
+type StructuralAtomParser = for<'lex, 'source> fn(
+    TokenView<'lex, 'source>,
+    usize,
+    ExpressionContext,
+) -> Result<ParsedExpression, Vec<Diagnostic>>;
 
 /// Consumes a structural expression according to the exact end reported by
 /// its token-range parser.
@@ -596,10 +595,10 @@ type StructuralExpressionParser =
 /// The head parser remains responsible for selecting the construct. This
 /// adapter owns cursor recovery and advancement for both explicitly delimited
 /// structural expressions and tail forms that consume their host remainder.
-fn structural_expression_after_head<'lex, 'source: 'lex>(
+fn structural_atom_after_head<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
-    parse: StructuralExpressionParser,
+    parse: StructuralAtomParser,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
     custom::<_, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>>(move |input| {
         let before = input.cursor();
@@ -638,7 +637,7 @@ fn structural_expression_after_head<'lex, 'source: 'lex>(
             if input.next().is_none() {
                 return Err(Rich::custom(
                     input.span_since(&before),
-                    "do expression extends beyond its expression view",
+                    "structural expression extends beyond its token range",
                 ));
             }
         }
