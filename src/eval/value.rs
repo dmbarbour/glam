@@ -363,7 +363,9 @@ fn await_deferred_task(
                     "{kind} belongs to another evaluation session"
                 ))),
             },
-            EvaluationPumpOutcome::NoProgress | EvaluationPumpOutcome::BudgetExhausted => {
+            EvaluationPumpOutcome::Busy
+            | EvaluationPumpOutcome::NoProgress
+            | EvaluationPumpOutcome::BudgetExhausted => {
                 Err(EvalError::blocked(CoreWaitToken(wait)))
             }
         };
@@ -371,6 +373,12 @@ fn await_deferred_task(
     loop {
         match context.pump_wait(&wait, 256) {
             EvaluationPumpOutcome::TargetReady => break,
+            EvaluationPumpOutcome::Busy if context.waits_for_claimed_tasks() => {
+                context.wait_for_claimed_task(&wait);
+            }
+            EvaluationPumpOutcome::Busy => {
+                return Err(EvalError::blocked(CoreWaitToken(wait)));
+            }
             EvaluationPumpOutcome::NoProgress => {
                 return Err(EvalError::blocked(CoreWaitToken(wait)));
             }

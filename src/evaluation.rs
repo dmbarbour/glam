@@ -221,6 +221,8 @@ pub(crate) enum ReflectionTaskKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvaluationPumpOutcome {
     TargetReady,
+    /// The target has a producer currently claimed by another thread.
+    Busy,
     NoProgress,
     BudgetExhausted,
 }
@@ -510,6 +512,7 @@ pub(crate) struct EvalContext {
     session: Arc<EvaluationSession>,
     task: Arc<OnceLock<Result<EvaluationTaskId, Arc<str>>>>,
     scheduled_task: bool,
+    waits_for_claimed_tasks: bool,
     originating_task: Option<EvaluationTaskId>,
 }
 
@@ -519,7 +522,15 @@ impl EvalContext {
             session,
             task: Arc::new(OnceLock::new()),
             scheduled_task: false,
+            waits_for_claimed_tasks: false,
             originating_task: None,
+        }
+    }
+
+    pub(crate) fn patient(session: Arc<EvaluationSession>) -> Self {
+        Self {
+            waits_for_claimed_tasks: true,
+            ..Self::new(session)
         }
     }
 
@@ -531,6 +542,7 @@ impl EvalContext {
             session,
             task,
             scheduled_task: true,
+            waits_for_claimed_tasks: false,
             originating_task: Some(id),
         }
     }
@@ -547,6 +559,7 @@ impl EvalContext {
             session,
             task,
             scheduled_task: true,
+            waits_for_claimed_tasks: false,
             originating_task,
         }
     }
@@ -581,6 +594,35 @@ impl EvalContext {
 
     pub(crate) fn runs_scheduled_task(&self) -> bool {
         self.scheduled_task
+    }
+
+    pub(crate) fn waits_for_claimed_tasks(&self) -> bool {
+        self.waits_for_claimed_tasks
+    }
+
+    /// Waits for one scheduler change only while the target has a producer
+    /// claimed by another thread.
+    ///
+    /// Rechecking under the scheduler mutex prevents a producer release
+    /// between [`Self::pump_wait`] and this call from becoming a lost wakeup.
+    pub(crate) fn wait_for_claimed_task(&self, target: &EvaluationWaitToken) {
+        if target.owner_id() != self.session.id {
+            return;
+        }
+        let tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        if !target_has_running_producer(&tasks, target) {
+            return;
+        }
+        drop(
+            self.session
+                .task_changed
+                .wait(tasks)
+                .expect("evaluation task registry was poisoned"),
+        );
     }
 
     pub(crate) fn observes_as_task(&self, task: EvaluationTaskId) -> bool {
@@ -683,6 +725,7 @@ impl EvalContext {
             session: self.session.clone(),
             task: Arc::new(OnceLock::new()),
             scheduled_task: false,
+            waits_for_claimed_tasks: false,
             originating_task: None,
         };
         let task = context.task_id()?;
@@ -1429,10 +1472,8 @@ impl EvaluationSession {
                     .tasks
                     .lock()
                     .expect("evaluation task registry was poisoned");
-                if target_has_running_deferred_producer(&tasks, target)
-                    || context.runs_scheduled_task() && target_has_running_producer(&tasks, target)
-                {
-                    return EvaluationPumpOutcome::NoProgress;
+                if target_has_running_producer(&tasks, target) {
+                    return EvaluationPumpOutcome::Busy;
                 }
                 let prioritized = prioritized_task(&tasks, target, &attempted_blocked);
                 prioritized
@@ -1441,22 +1482,12 @@ impl EvaluationSession {
                     .or_else(|| claim_blocked_task(&mut tasks, &attempted_blocked))
             };
             let Some(mut claimed) = claimed else {
-                let mut tasks = self
+                let tasks = self
                     .tasks
                     .lock()
                     .expect("evaluation task registry was poisoned");
                 if target_has_running_producer(&tasks, target) {
-                    if context.runs_scheduled_task()
-                        || target_has_running_deferred_producer(&tasks, target)
-                    {
-                        return EvaluationPumpOutcome::NoProgress;
-                    }
-                    tasks = self
-                        .task_changed
-                        .wait(tasks)
-                        .expect("evaluation task registry was poisoned");
-                    drop(tasks);
-                    continue;
+                    return EvaluationPumpOutcome::Busy;
                 }
                 drop(tasks);
                 if !matches!(context.poll_wait(target), EvaluationTaskPoll::Pending(_)) {
@@ -1957,51 +1988,6 @@ fn target_has_running_producer(tasks: &EvaluationTasks, target: &EvaluationWaitT
     false
 }
 
-fn target_has_running_deferred_producer(
-    tasks: &EvaluationTasks,
-    target: &EvaluationWaitToken,
-) -> bool {
-    let mut seen = HashSet::new();
-    let mut wait = target.clone();
-    while let Some(id) = producer_for_wait(tasks, &wait) {
-        if !seen.insert(id) {
-            return false;
-        }
-        if let Some(deferred) = tasks.deferred_by_task.get(&id) {
-            let Some(record) = tasks.deferred.get(deferred) else {
-                return false;
-            };
-            match &record.state {
-                DeferredTaskState::Running => return true,
-                DeferredTaskState::Blocked(block) => {
-                    let Some(dependency) = &block.lazy else {
-                        return false;
-                    };
-                    wait = dependency.clone();
-                }
-                _ => return false,
-            }
-            continue;
-        }
-        let Some(task_wait) = tasks.reflection_by_id.get(&id) else {
-            return false;
-        };
-        let Some(record) = tasks.reflection.get(task_wait) else {
-            return false;
-        };
-        match &record.state {
-            EvaluationTaskState::Blocked(block) => {
-                let Some(dependency) = &block.lazy else {
-                    return false;
-                };
-                wait = dependency.clone();
-            }
-            _ => return false,
-        }
-    }
-    false
-}
-
 fn claim_task(tasks: &mut EvaluationTasks, id: EvaluationTaskId) -> Option<ClaimedTask> {
     if let Some(wait) = tasks.reflection_by_id.get(&id).cloned() {
         let record = tasks.reflection.get_mut(&wait)?;
@@ -2346,11 +2332,15 @@ mod tests {
         let right_outcome = right_thread.join().unwrap();
         assert!(matches!(
             left_outcome,
-            EvaluationPumpOutcome::TargetReady | EvaluationPumpOutcome::NoProgress
+            EvaluationPumpOutcome::TargetReady
+                | EvaluationPumpOutcome::Busy
+                | EvaluationPumpOutcome::NoProgress
         ));
         assert!(matches!(
             right_outcome,
-            EvaluationPumpOutcome::TargetReady | EvaluationPumpOutcome::NoProgress
+            EvaluationPumpOutcome::TargetReady
+                | EvaluationPumpOutcome::Busy
+                | EvaluationPumpOutcome::NoProgress
         ));
         assert!(matches!(
             context.poll_wait(&left_wait),

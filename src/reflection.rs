@@ -892,6 +892,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         match self.eval_context.pump_wait(&wait, 4_096) {
                             EvaluationPumpOutcome::TargetReady
                             | EvaluationPumpOutcome::BudgetExhausted => continue,
+                            EvaluationPumpOutcome::Busy => {
+                                self.eval_context.wait_for_claimed_task(&wait);
+                                continue;
+                            }
                             EvaluationPumpOutcome::NoProgress
                                 if blocked.observed_generation.is_none() =>
                             {

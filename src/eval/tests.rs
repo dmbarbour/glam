@@ -729,6 +729,11 @@ fn concurrent_lazy_observers_receive_one_wait_without_parking() {
         .blocked_on()
         .expect("all contending observations should expose the wait");
     assert_eq!(first_wait, second_wait);
+    assert_eq!(
+        context.pump_wait(&first_wait.0, 256),
+        crate::evaluation::EvaluationPumpOutcome::Busy,
+        "a claimed producer is busy rather than quiescent"
+    );
 
     let (lock, changed) = &*release;
     *lock.lock().expect("test release lock was poisoned") = true;

@@ -23,8 +23,12 @@ control-flow overview.
   structural boundary; it does not authorize inspecting an opaque net.
 - Computed lazy work is owned by demand-driven `EvaluationSession` task
   records. Contending observers receive the task's stable wait token; they do
-  not wait on a lazy-specific condition variable. Lazy tasks participate in
-  exact dependency pumping but never enter the background-ready queue.
+  not wait on a lazy-specific condition variable. A pump distinguishes a
+  producer claimed by another thread (`Busy`) from stable quiescence
+  (`NoProgress`). Cooperative and scheduled contexts return the wait, while
+  synchronous assembler contexts wait on the session condition variable and
+  retry. Lazy tasks participate in exact dependency pumping but never enter
+  the background-ready queue.
 - A blocked lazy or assigned-promise task records an edge only when its wait is
   produced by another deferred-value task. The resulting functional graph is
   checked on every edge change. Cycles containing only computed lazies are

@@ -1010,7 +1010,7 @@ impl ReasoningSession {
     }
 
     fn eval_context(&self) -> EvalContext {
-        EvalContext::new(self.evaluation.clone())
+        EvalContext::patient(self.evaluation.clone())
     }
 
     fn conflict_analysis(&self) -> Arc<dyn ConflictAnalysisStrategy> {
@@ -2243,6 +2243,63 @@ mod tests {
             .expect("dormant runtime should activate");
         assert_eq!(runtime.worker_threads(), 1);
         assert!(runtime.activate_workers(1).is_err());
+    }
+
+    #[test]
+    fn synchronous_assembler_evaluation_waits_for_a_worker_claim() {
+        let runtime = EvaluationRuntime::new(1).expect("worker runtime should build");
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime)
+            .build()
+            .expect("assembler should build");
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let producer_release = release.clone();
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let lazy = crate::core::LazyValue::deferred("worker-claimed public value", move |_| {
+            started_sender
+                .send(())
+                .expect("test should still await the worker claim");
+            let (lock, changed) = &*producer_release;
+            let mut released = lock.lock().expect("test release lock was poisoned");
+            while !*released {
+                released = changed
+                    .wait(released)
+                    .expect("test release lock was poisoned");
+            }
+            Ok(CoreValue::Number(42.into()))
+        });
+        let value = Value::from_core(CoreValue::Lazy(lazy));
+        assembler.eval_context().spark(value.as_core().clone());
+        started_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("worker should claim the sparked value");
+
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        let evaluator = std::thread::spawn({
+            let assembler = assembler.clone();
+            let value = value.clone();
+            move || {
+                result_sender
+                    .send(assembler.evaluate(&value))
+                    .expect("test should still await the result");
+            }
+        });
+        assert!(
+            result_receiver
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "synchronous evaluation must wait while the worker owns the value"
+        );
+
+        let (lock, changed) = &*release;
+        *lock.lock().expect("test release lock was poisoned") = true;
+        changed.notify_all();
+        let result = result_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("worker completion should wake synchronous evaluation")
+            .expect("worker-computed value should succeed");
+        assert_eq!(result, Value::number_from_text("42").unwrap());
+        evaluator.join().expect("evaluator thread should finish");
     }
 
     #[test]
