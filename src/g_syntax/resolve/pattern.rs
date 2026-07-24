@@ -289,10 +289,15 @@ fn append_dict_match(
     );
 
     let mut rest = ResolvedExpr::Local(subject);
-    for (path, pattern) in entries {
+    for entry in entries {
+        let builtin = if entry.optional {
+            Builtin::PatternDictTryTakeOptional
+        } else {
+            Builtin::PatternDictTryTake
+        };
         let parts = append_bind(
             steps,
-            pattern_builtin(Builtin::PatternDictTryTake, [static_path_value(path), rest]),
+            pattern_builtin(builtin, [static_path_value(&entry.path), rest]),
             line,
             locals,
         );
@@ -300,7 +305,7 @@ fn append_dict_match(
             steps,
             part_access(parts, &keys::VALUE),
             forward_names,
-            pattern,
+            &entry.pattern,
             line,
             locals,
             forwards,

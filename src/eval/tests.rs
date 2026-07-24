@@ -1503,6 +1503,76 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
 }
 
 #[test]
+fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors() {
+    let foo = Key::atom_from_text("foo");
+    let bar = Key::atom_from_text("bar");
+    let keep = Key::atom_from_text("keep");
+    let path = Value::List(List::from_values(vec![key_value(&foo), key_value(&bar)]));
+
+    let absent = Dict::new_sync().insert(
+        foo.clone(),
+        Value::Dict(Dict::new_sync().insert(keep.clone(), n(8))),
+    );
+    let [parts]: [Value; 1] = run_pattern_builtin2(
+        Builtin::PatternDictTryTakeOptional,
+        path.clone(),
+        Value::Dict(absent.clone()),
+    )
+    .expect("an optional absent path should succeed")
+    .try_into()
+    .expect("optional extraction should return one parts value");
+    let Value::Dict(parts) = parts else {
+        panic!("optional dictionary extraction should return a parts dictionary");
+    };
+    assert_eq!(
+        parts.get(&*keys::VALUE),
+        Some(&Value::Dict(Dict::new_sync()))
+    );
+    assert_eq!(parts.get(&*keys::REST), Some(&Value::Dict(absent)));
+
+    let present = Dict::new_sync().insert(
+        foo.clone(),
+        Value::Dict(
+            Dict::new_sync()
+                .insert(bar.clone(), n(7))
+                .insert(keep, n(8)),
+        ),
+    );
+    let [parts]: [Value; 1] = run_pattern_builtin2(
+        Builtin::PatternDictTryTakeOptional,
+        path.clone(),
+        Value::Dict(present),
+    )
+    .expect("an optional present path should extract normally")
+    .try_into()
+    .expect("optional extraction should return one parts value");
+    let Value::Dict(parts) = parts else {
+        panic!("optional dictionary extraction should return a parts dictionary");
+    };
+    assert_eq!(parts.get(&*keys::VALUE), Some(&n(7)));
+
+    let wrong_intermediate = Value::Dict(Dict::new_sync().insert(foo.clone(), n(1)));
+    assert!(
+        run_pattern_builtin2(
+            Builtin::PatternDictTryTakeOptional,
+            path.clone(),
+            wrong_intermediate,
+        )
+        .expect("a non-dictionary path prefix should mismatch")
+        .is_empty()
+    );
+
+    let failed =
+        Value::Dict(Dict::new_sync().insert(foo, Value::error("optional dict path failed")));
+    assert_eq!(
+        run_pattern_builtin2(Builtin::PatternDictTryTakeOptional, path, failed)
+            .expect_err("forcing failures along an optional path must propagate")
+            .to_string(),
+        "optional dict path failed"
+    );
+}
+
+#[test]
 fn compiler_pattern_list_decomposition_preserves_compact_remainders() {
     let [uncons]: [Value; 1] =
         run_pattern_builtin(Builtin::PatternListTryUncons, Value::binary_from_text("AB"))

@@ -2275,6 +2275,14 @@ fn dictionary_tag_and_tuple_patterns_match_or_fall_through() {
         "asm.tag_fallback = list.pure (.alt (do { .r {tag:1,extra:2} -> tag:1; .r \"bad\" }) (.r \"G\"))\n",
         "asm.tuple_fallback = list.pure (.alt (do { .r {tuple:[1],extra:2} -> (1,); .r \"bad\" }) (.r \"P\"))\n",
         "asm.kind_fallback = list.pure (.alt (do { .r 1 -> {}; .r \"bad\" }) (.r \"K\"))\n",
+        "asm.required_missing = list.pure (.alt (do { .r {} -> {foo:{}}; .r \"bad\" }) (.r \"Q\"))\n",
+        "asm.optional_missing = list.pure do { .r {} -> {foo?:{}}; .r \"M\" }\n",
+        "asm.optional_capture = list.pure do { .r {} -> {foo?:value}; .r value -> {}; .r \"C\" }\n",
+        "asm.optional_present = list.pure do { .r {foo:65} -> {foo?:value}; (value == 65) =>> .r \"O\" }\n",
+        "asm.optional_remainder = list.pure do { .r {extra:66} -> {foo?:{},rest}; (rest.extra == 66) =>> .r \"A\" }\n",
+        "asm.optional_nested = list.pure do { .r {foo:{extra:67}} -> {foo.bar?:{},rest}; (rest.foo.extra == 67) =>> .r \"N\" }\n",
+        "asm.optional_literal_fallback = list.pure (.alt (do { .r {} -> {foo?:42}; .r \"bad\" }) (.r \"L\"))\n",
+        "asm.optional_prefix_fallback = list.pure (.alt (do { .r {foo:1} -> {foo.bar?:{}}; .r \"bad\" }) (.r \"I\"))\n",
         "asm.recursive = list.pure do { abstract left, right; .r {left:65,right:66} -> {:left,:right}; ((left == 65) and (right == 66)) =>> .r \"AB\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
@@ -2297,6 +2305,14 @@ fn dictionary_tag_and_tuple_patterns_match_or_fall_through() {
         ("tag_fallback", b"G".as_slice()),
         ("tuple_fallback", b"P".as_slice()),
         ("kind_fallback", b"K".as_slice()),
+        ("required_missing", b"Q".as_slice()),
+        ("optional_missing", b"M".as_slice()),
+        ("optional_capture", b"C".as_slice()),
+        ("optional_present", b"O".as_slice()),
+        ("optional_remainder", b"A".as_slice()),
+        ("optional_nested", b"N".as_slice()),
+        ("optional_literal_fallback", b"L".as_slice()),
+        ("optional_prefix_fallback", b"I".as_slice()),
         ("recursive", b"AB".as_slice()),
     ] {
         let result = fully_evaluated_value(resolved_value_at_path(&value, &["asm", path]));

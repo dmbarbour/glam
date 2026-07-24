@@ -235,7 +235,10 @@ their detailed scheduling and representation contracts.
 - Fixed dictionary, tag, and tuple patterns use the same compiler-private
   dictionary decomposition. Known paths are removed persistently without
   iteration; only exact-empty remainder checks may scan deferred fields to
-  honor logical undefined equivalence. Computed paths and tags remain deferred.
+  honor logical undefined equivalence. Required `path:Pattern` entries mismatch
+  on absent/undefined paths; explicit `path?:Pattern` entries pass `{}` to the
+  payload and preserve the original remainder. A defined non-dict path prefix
+  still mismatches. Computed paths and tags remain deferred.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

@@ -189,6 +189,7 @@ fn dictionary_tag_and_tuple_patterns_share_dictionary_structure() {
         ".r (1,2) -> (left,right)\n",
         ".r {foo:1} -> {whole}\n",
         "{:backward} <- .r {backward:3}\n",
+        ".r {} -> {optional?:value}\n",
         ".r [value, first, rest, payload, tag, left, right, whole, backward]\n",
     ));
     let SyntaxExpr::Do(DoExpr { steps, .. }) = expr else {
@@ -214,6 +215,18 @@ fn dictionary_tag_and_tuple_patterns_share_dictionary_structure() {
     assert!(matches!(
         &steps[5].kind,
         DoStepKind::Bind { pattern, .. } if pattern.captures() == ["left", "right"]
+    ));
+    assert!(matches!(
+        &steps[8].kind,
+        DoStepKind::Bind {
+            pattern: crate::g_syntax::SyntaxPattern {
+                kind: SyntaxPatternKind::Dict { entries, .. },
+            },
+            ..
+        } if entries.len() == 1
+            && entries[0].path == ["optional"]
+            && entries[0].optional
+            && entries[0].pattern.captures() == ["value"]
     ));
 }
 
@@ -355,6 +368,22 @@ fn token_do_reports_structural_statement_errors() {
         (
             "do\n.r {} -> {foo:value, foo:other}\n.r value",
             "repeats the same static path",
+        ),
+        (
+            "do\n.r {} -> {?:value}\n.r value",
+            "requires a static path before `?:`",
+        ),
+        (
+            "do\n.r {} -> {foo ?:value}\n.r value",
+            "marker `?` must be joint with its path",
+        ),
+        (
+            "do\n.r {} -> {foo? :value}\n.r value",
+            "must be written as joint `?:`",
+        ),
+        (
+            "do\n.r {} -> {foo?:}\n.r ()",
+            "requires a payload after `?:`",
         ),
         (
             "do\n.r {} -> :42\n.r ()",

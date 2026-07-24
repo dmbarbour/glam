@@ -5,7 +5,9 @@
 //! construction.
 
 use crate::g_syntax::keywords::{canonical_keyword, reserved_keyword_message};
-use crate::g_syntax::{Diagnostic, SyntaxPattern, SyntaxPatternKind, SyntaxPatternLiteral};
+use crate::g_syntax::{
+    Diagnostic, SyntaxDictPatternEntry, SyntaxPattern, SyntaxPatternKind, SyntaxPatternLiteral,
+};
 use crate::number::Number;
 
 use super::input::{TokenRange, TokenView};
@@ -222,7 +224,11 @@ fn parse_tag_pattern(view: TokenView<'_, '_>, colon: usize) -> ParseResult<Synta
             ));
         };
         return Ok(dict_pattern(
-            vec![(vec![canonical_capture_name(name).to_owned()], payload)],
+            vec![dict_entry(
+                vec![canonical_capture_name(name).to_owned()],
+                false,
+                payload,
+            )],
             None,
         ));
     }
@@ -241,7 +247,10 @@ fn parse_tag_pattern(view: TokenView<'_, '_>, colon: usize) -> ParseResult<Synta
         ));
     }
     let path = parse_static_path(left, "tag pattern")?;
-    Ok(dict_pattern(vec![(path, parse_pattern(right)?)], None))
+    Ok(dict_pattern(
+        vec![dict_entry(path, false, parse_pattern(right)?)],
+        None,
+    ))
 }
 
 fn parse_dict_pattern(contents: TokenView<'_, '_>) -> ParseResult<SyntaxPattern> {
@@ -295,14 +304,25 @@ fn parse_dict_pattern(contents: TokenView<'_, '_>) -> ParseResult<SyntaxPattern>
         };
 
         let path = trim_layout(view_between(member, member.range().start(), colon));
+        let (path, optional) = strip_optional_dict_marker(member, path, colon)?;
         let payload = trim_layout(view_between(member, colon + 1, member.range().end()));
         if is_layout_empty(payload) {
             return Err(error_at_view(
                 member,
-                "dictionary entry pattern requires a payload after `:`",
+                if optional {
+                    "optional dictionary entry pattern requires a payload after `?:`"
+                } else {
+                    "dictionary entry pattern requires a payload after `:`"
+                },
             ));
         }
         let (path, payload) = if is_layout_empty(path) {
+            if optional {
+                return Err(error_at_view(
+                    member,
+                    "optional dictionary entry pattern requires a static path before `?:`",
+                ));
+            }
             let payload = parse_pattern(payload)?;
             let SyntaxPatternKind::Capture(name) = &payload.kind else {
                 return Err(error_at_view(
@@ -319,14 +339,14 @@ fn parse_dict_pattern(contents: TokenView<'_, '_>) -> ParseResult<SyntaxPattern>
         };
         if entries
             .iter()
-            .any(|(existing, _): &(Vec<String>, SyntaxPattern)| existing == &path)
+            .any(|entry: &SyntaxDictPatternEntry| entry.path == path)
         {
             return Err(error_at_view(
                 member,
                 "dictionary pattern repeats the same static path",
             ));
         }
-        entries.push((path, payload));
+        entries.push(dict_entry(path, optional, payload));
     }
 
     Ok(dict_pattern(entries, remainder))
@@ -367,19 +387,65 @@ fn parse_static_path(view: TokenView<'_, '_>, context: &str) -> ParseResult<Vec<
     Ok(path)
 }
 
+fn strip_optional_dict_marker<'lex, 'source>(
+    member: TokenView<'lex, 'source>,
+    path: TokenView<'lex, 'source>,
+    colon: usize,
+) -> ParseResult<(TokenView<'lex, 'source>, bool)> {
+    let Some((question, token)) = path.last_significant() else {
+        return Ok((path, false));
+    };
+    if !matches!(token.kind(), TokenKind::Symbol("?")) {
+        return Ok((path, false));
+    }
+    if token.leading() != LeadingTrivia::Joint {
+        return Err(error_at_view(
+            member,
+            "optional dictionary entry marker `?` must be joint with its path",
+        ));
+    }
+    let colon_token = member
+        .top_level()
+        .find(|indexed| indexed.index() == colon)
+        .map(|indexed| indexed.token())
+        .expect("selected dictionary colon belongs to its member");
+    if colon_token.leading() != LeadingTrivia::Joint {
+        return Err(error_at_view(
+            member,
+            "optional dictionary entry marker must be written as joint `?:`",
+        ));
+    }
+    Ok((
+        trim_layout(view_between(path, path.range().start(), question)),
+        true,
+    ))
+}
+
 fn tuple_pattern(items: Vec<SyntaxPattern>) -> SyntaxPattern {
     dict_pattern(
-        vec![(vec!["tuple".to_owned()], fixed_list_pattern(items))],
+        vec![dict_entry(
+            vec!["tuple".to_owned()],
+            false,
+            fixed_list_pattern(items),
+        )],
         None,
     )
 }
 
 fn dict_pattern(
-    entries: Vec<(Vec<String>, SyntaxPattern)>,
+    entries: Vec<SyntaxDictPatternEntry>,
     remainder: Option<Box<SyntaxPattern>>,
 ) -> SyntaxPattern {
     SyntaxPattern {
         kind: SyntaxPatternKind::Dict { entries, remainder },
+    }
+}
+
+fn dict_entry(path: Vec<String>, optional: bool, pattern: SyntaxPattern) -> SyntaxDictPatternEntry {
+    SyntaxDictPatternEntry {
+        path,
+        optional,
+        pattern,
     }
 }
 

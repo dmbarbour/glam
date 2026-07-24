@@ -256,6 +256,9 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::PatternDictTryTake) => {
             "pattern_dict_try_take"
         }
+        SyntaxOperator::Builtin(crate::core::Builtin::PatternDictTryTakeOptional) => {
+            "pattern_dict_try_take_optional"
+        }
         SyntaxOperator::Builtin(crate::core::Builtin::PatternDictIsEmpty) => {
             "pattern_dict_is_empty"
         }

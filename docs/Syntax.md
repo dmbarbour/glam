@@ -368,7 +368,9 @@ The current Rust bootstrap implements pattern-bearing statements in both
 layout and braced forms. Patterns currently include names, `_`, irrefutable
 `P as Q`, unit, numbers, atoms, text, fixed quoted paths, list patterns with at
 most one irrefutable variable-length segment, static-path dictionaries, tags,
-and tuples. Computed pattern paths and tags remain deferred. A layout block is
+and tuples. Dictionary entries are required by default; `path?:Pattern`
+explicitly passes `{}` to the payload pattern when the path is absent or
+undefined. Computed pattern paths and tags remain deferred. A layout block is
 newline-delimited:
 
         my_effect = do
@@ -1353,6 +1355,8 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         {}                          # empty dict
         {d}                         # any dict
         {x:Pattern, y:Pattern, rem} # dict of at least x,y with matching data
+        {x?:Pattern, rem}           # absent/undefined x feeds {} to Pattern
+        {x?:{}}                     # explicitly accept a missing x
         {:x,:y,:z}                  # same as {x:x, y:y, z:z} (as tag:Name)
         {foo.bar.baz:Pattern, _}    # deep refs
         { (Expr):Pattern, _}        # eval list-path expr, extract, match Pattern

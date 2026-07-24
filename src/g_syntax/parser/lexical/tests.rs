@@ -282,7 +282,7 @@ fn lexical_boundaries_preserve_names_numbers_symbols_and_adjacency() {
                 "close:)",
             ],
         ),
-        ("name ? # ignored", vec!["name:name", "unknown:?"]),
+        ("name ? # ignored", vec!["name:name", "symbol:?"]),
     ];
 
     for (source, expected) in cases {

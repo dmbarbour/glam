@@ -133,6 +133,13 @@ pub struct SyntaxPattern {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct SyntaxDictPatternEntry {
+    pub path: Vec<String>,
+    pub optional: bool,
+    pub pattern: SyntaxPattern,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum SyntaxPatternKind {
     Capture(String),
     Wildcard,
@@ -143,7 +150,7 @@ pub enum SyntaxPatternKind {
         suffix: Vec<SyntaxPattern>,
     },
     Dict {
-        entries: Vec<(Vec<String>, SyntaxPattern)>,
+        entries: Vec<SyntaxDictPatternEntry>,
         remainder: Option<Box<SyntaxPattern>>,
     },
     Group(Box<SyntaxPattern>),
@@ -192,8 +199,8 @@ impl SyntaxPattern {
                 }
             }
             SyntaxPatternKind::Dict { entries, remainder } => {
-                for (_, pattern) in entries {
-                    pattern.visit_captures(visitor);
+                for entry in entries {
+                    entry.pattern.visit_captures(visitor);
                 }
                 if let Some(pattern) = remainder {
                     pattern.visit_captures(visitor);
@@ -293,9 +300,9 @@ impl SyntaxPattern {
             }
             SyntaxPatternKind::Dict { entries, remainder } => {
                 visitor(None);
-                for (_, pattern) in entries {
+                for entry in entries {
                     visitor(None);
-                    pattern.visit_value_events(visitor);
+                    entry.pattern.visit_value_events(visitor);
                 }
                 if let Some(pattern) = remainder {
                     pattern.visit_value_events(visitor);

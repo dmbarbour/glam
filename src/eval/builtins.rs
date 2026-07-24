@@ -62,6 +62,7 @@ pub(super) fn apply_builtin(
         | Builtin::PatternEqual
         | Builtin::PatternIsDict
         | Builtin::PatternDictTryTake
+        | Builtin::PatternDictTryTakeOptional
         | Builtin::PatternDictIsEmpty => pattern::apply(context, builtin, arguments),
         Builtin::ListEffect
         | Builtin::ListEffectReturn

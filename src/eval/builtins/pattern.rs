@@ -39,7 +39,11 @@ pub(super) fn apply(
         }
         Builtin::PatternDictTryTake => {
             let [path, value] = super::exact(arguments, "pattern-dict-try-take")?;
-            pattern_dict_try_take(context, &path, &value)
+            pattern_dict_try_take(context, &path, &value, false)
+        }
+        Builtin::PatternDictTryTakeOptional => {
+            let [path, value] = super::exact(arguments, "pattern-dict-try-take-optional")?;
+            pattern_dict_try_take(context, &path, &value, true)
         }
         Builtin::PatternDictIsEmpty => {
             let [value] = super::exact(arguments, "pattern-dict-is-empty")?;
@@ -154,6 +158,7 @@ fn pattern_dict_try_take(
     context: &EvalContext,
     path: &Value,
     value: &Value,
+    optional: bool,
 ) -> Result<Value, EvalError> {
     let path = eval_key_path_list(context, path)?;
     if path.is_empty() {
@@ -164,8 +169,12 @@ fn pattern_dict_try_take(
     let Value::Dict(dict) = eval_value(context, value)? else {
         return Ok(pattern_failure());
     };
-    let Some((value, rest)) = take_dict_path(context, &dict, &path)? else {
-        return Ok(pattern_failure());
+    let (value, rest) = match take_dict_path(context, &dict, &path)? {
+        DictPathTake::Found { value, rest } => (value, rest),
+        DictPathTake::Absent if optional => (Value::Dict(Dict::new_sync()), dict),
+        DictPathTake::Absent | DictPathTake::WrongIntermediateKind => {
+            return Ok(pattern_failure());
+        }
     };
     Ok(pattern_success(Value::Dict(
         Dict::new_sync()
@@ -174,37 +183,47 @@ fn pattern_dict_try_take(
     )))
 }
 
+enum DictPathTake {
+    Found { value: Value, rest: Dict },
+    Absent,
+    WrongIntermediateKind,
+}
+
 fn take_dict_path(
     context: &EvalContext,
     dict: &Dict,
     path: &[Key],
-) -> Result<Option<(Value, Dict)>, EvalError> {
+) -> Result<DictPathTake, EvalError> {
     let Some((head, tail)) = path.split_first() else {
-        return Ok(None);
+        return Ok(DictPathTake::Absent);
     };
     let Some(selected) = dict.get(head) else {
-        return Ok(None);
+        return Ok(DictPathTake::Absent);
     };
     let selected = eval_value(context, selected)?;
     if tail.is_empty() {
         if value_is_logically_undefined(context, &selected)? {
-            return Ok(None);
+            return Ok(DictPathTake::Absent);
         }
-        return Ok(Some((selected, dict.remove(head))));
+        return Ok(DictPathTake::Found {
+            value: selected,
+            rest: dict.remove(head),
+        });
     }
 
     let Value::Dict(child) = selected else {
-        return Ok(None);
+        return Ok(DictPathTake::WrongIntermediateKind);
     };
-    let Some((value, child_rest)) = take_dict_path(context, &child, tail)? else {
-        return Ok(None);
+    let (value, child_rest) = match take_dict_path(context, &child, tail)? {
+        DictPathTake::Found { value, rest } => (value, rest),
+        other => return Ok(other),
     };
     let rest = if child_rest.is_empty() {
         dict.remove(head)
     } else {
         dict.insert(head.clone(), Value::Dict(child_rest))
     };
-    Ok(Some((value, rest)))
+    Ok(DictPathTake::Found { value, rest })
 }
 
 fn pattern_dict_is_empty(context: &EvalContext, value: &Value) -> Result<Value, EvalError> {
