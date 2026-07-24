@@ -277,6 +277,19 @@ fn layout_blocks_report_the_first_unconsumed_dedent() {
     );
 }
 
+#[test]
+fn hanging_layout_uses_the_inline_member_column_for_later_lines() {
+    let lexical = lex_source("first\n   second\n     continuation\nboundary");
+    let view = TokenView::whole(&lexical);
+    let block = LayoutView::new(view).block(LayoutBase::Hanging(3)).unwrap();
+
+    assert_eq!(block.anchor(), 3);
+    assert_eq!(block.statements().len(), 2);
+    assert_eq!(block.statements()[0].line(), 1);
+    assert_eq!(block.statements()[1].line(), 2);
+    assert_eq!(block.boundary().map(|line| line.line()), Some(4));
+}
+
 fn diagnostics<'lex, 'source>(
     view: TokenView<'lex, 'source>,
     errors: Vec<TokenError<'lex, 'source>>,

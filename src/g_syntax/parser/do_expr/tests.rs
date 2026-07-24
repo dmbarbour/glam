@@ -11,6 +11,8 @@ fn parse_do_expression(source: &str) -> SyntaxExpr {
 fn layout_do_parses() {
     for source in [
         "do value",
+        "do first <- .read\n   second <- .read\n   .r [first, second]",
+        "do # the first significant member establishes next-line layout\n  first <- .read\n\n  # comments do not change the anchor\n  second <- .read\n  .r [first, second]",
         "do\n.read 'left -> left\nright <- .read 'right\ntotal = left + right\n.write total\n.r total",
         "do\nabstract left, _right\n.r (\\_ -> left) -> use_left\nleft = 1\nright <- .r 2\n.r (use_left ())",
         "do\nvalue <- do\n  input <- source\n  .r input\nwritten <- write\n  value\n.r written",
@@ -19,6 +21,33 @@ fn layout_do_parses() {
         "\\api -> interaction_net do\n.bind -> ports\n.r ports",
     ] {
         parse_do_expression(source);
+    }
+}
+
+#[test]
+fn hanging_do_reports_the_expected_sibling_indentation() {
+    for (source, actual) in [
+        (
+            "do first <- .read\n    second <- .read\n   .r [first, second]",
+            4,
+        ),
+        (
+            "do first <- .read\n  second <- .read\n   .r [first, second]",
+            2,
+        ),
+    ] {
+        let diagnostics = parse_compound_expression_fragment(source.as_bytes())
+            .expect_err("a hanging do binding must align with the first statement");
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.line == 2
+                && diagnostic
+                    .message
+                    .contains(&format!("indented {actual} spaces"))
+                && diagnostic
+                    .message
+                    .contains("expected sibling indentation 3")
+        }));
     }
 }
 

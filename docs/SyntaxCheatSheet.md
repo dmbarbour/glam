@@ -150,6 +150,10 @@ let {} in Expr              # explicit empty group; equivalent to Expr
 let x = 1                   # multi-line: no 'in', Body aligns with 'let'
     y = x + 1
 x + y
+let                         # next-line bindings choose their own anchor
+  x = 1
+  y = x + 1
+x + y
 
 Body where n = d            # post-hoc single binding
 Body where { n1 = d1; n2 = d2 } # braced semicolon-separated group
@@ -274,12 +278,17 @@ my_proc = do
     .r z                    # final expression is continuation effect
 
 inline = do .r 1            # singleton do
+hanging = do x <- .read     # same-line first statement sets sibling column
+             y <- .read
+             .r [x, y]
 braced = do { x <- .r 1; .r x }
 empty = do {}               # exactly .r ()
 nested = f [do { .r 1 }, do {; .r 2; }]
 
 # Current bootstrap rules:
 # - Layout `do` introduces a non-empty newline-delimited block; braces use `;`.
+# - An inline first statement establishes a hanging sibling anchor. A
+#   next-line first statement freely chooses an anchor above the outer floor.
 # - A binding scopes only over later statements; its producer is outside it.
 # - `_name` suppresses its unused warning; `op -> _` discards any result.
 # - A bare intermediate op uses `=>>` semantics and therefore requires unit.

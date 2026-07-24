@@ -276,6 +276,16 @@ fn with_headers_match_the_complete_structural_parse() {
 
 #[test]
 fn multiline_let_and_where_use_lexical_indentation_lines() {
+    for source in [
+        "let first = 1\n    second = 2\nfirst + second",
+        "let # the first significant binding begins on the next line\n  first = 1\n\n  # comments do not change the anchor\n  second = 2\nfirst + second",
+    ] {
+        assert!(
+            parse_compound_expression_fragment(source.as_bytes()).is_ok(),
+            "valid hanging/next-line let was rejected: `{source}`"
+        );
+    }
+
     assert!(
         parse_compound_expression_fragment(b"x + y where\n  x = 1\n  y = 2").is_ok(),
         "raw source indentation should be interpreted without normalizing text"
@@ -285,7 +295,11 @@ fn multiline_let_and_where_use_lexical_indentation_lines() {
         parse_compound_expression_fragment(b"let first = 1\n  second = 2\nfirst + second")
             .expect_err("misaligned let bindings must be rejected");
     assert!(let_diagnostics.iter().any(|diagnostic| {
-        diagnostic.line == 2 && diagnostic.message.contains("binding names must align")
+        diagnostic.line == 2
+            && diagnostic.message.contains("indented 2 spaces")
+            && diagnostic
+                .message
+                .contains("expected sibling indentation 4")
     }));
 
     let in_diagnostics =

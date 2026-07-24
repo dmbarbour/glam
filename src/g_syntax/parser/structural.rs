@@ -779,61 +779,86 @@ fn split_multiline_let<'lex, 'source>(
             "let expression requires at least one binding",
         ));
     };
-    let let_column = token_column(
-        full,
-        full.token_at(let_index)
-            .expect("the let token remains within the full expression view"),
-    );
-    let binding_column = token_column(full, first_binding_token);
-    let mut binding_starts = vec![first.tokens().start()];
-    let mut body_start = None;
+    let let_token = full
+        .token_at(let_index)
+        .expect("the let token remains within the full expression view");
+    let let_column = full
+        .column_at_span(let_token.span())
+        .expect("the let token has a source column");
+    let binding_column = full
+        .column_at_span(first_binding_token.span())
+        .expect("the first let binding has a source column");
+    let first_is_inline =
+        full.line_at_span(let_token.span()) == full.line_at_span(first_binding_token.span());
+    let base = if first_is_inline {
+        LayoutBase::Hanging(binding_column)
+    } else {
+        LayoutBase::FirstLine
+    };
+    let block = LayoutView::new(rest)
+        .block(base)
+        .map_err(|error| vec![Diagnostic::error(error.line(), error.message())])?;
 
     for line in lines.into_iter().skip(1) {
+        if line.start() >= block.end() {
+            break;
+        }
         let line_view = rest
             .subview(line.tokens())
             .expect("layout lines remain within their source view");
         let begins_binding = !top_level_symbols(line_view, "=").is_empty();
-
-        if line.indentation() <= let_column {
-            if line.indentation() != let_column {
-                return Err(vec![Diagnostic::error(
-                    line.line(),
-                    "multi-line let body must align with `let`",
-                )]);
-            }
-            if begins_binding {
-                return Err(vec![Diagnostic::error(
-                    line.line(),
-                    "multi-line let binding names must align under the first binding",
-                )]);
-            }
-            body_start = Some(line.tokens().start());
-            break;
-        }
-
-        if begins_binding {
-            if line.indentation() != binding_column {
-                return Err(vec![Diagnostic::error(
-                    line.line(),
-                    "multi-line let binding names must align under the first binding",
-                )]);
-            }
-            binding_starts.push(line.tokens().start());
+        if begins_binding && line.indentation() != block.anchor() {
+            return Err(vec![Diagnostic::error(
+                line.line(),
+                format!(
+                    "multi-line let binding is indented {} spaces; expected sibling indentation {}",
+                    line.indentation(),
+                    block.anchor()
+                ),
+            )]);
         }
     }
 
-    let Some(body_start) = body_start else {
+    let Some(boundary) = block.boundary() else {
         return Err(error_at_view(
             rest,
             "multi-line let expression requires a body",
         ));
     };
-    binding_starts.push(body_start);
-    let bindings = binding_starts
-        .windows(2)
-        .map(|bounds| trim_layout(view_between(rest, bounds[0], bounds[1])))
+    let boundary_view = rest
+        .subview(boundary.tokens())
+        .expect("a let layout boundary remains within the source view");
+    if !top_level_symbols(boundary_view, "=").is_empty() {
+        return Err(vec![Diagnostic::error(
+            boundary.line(),
+            format!(
+                "multi-line let binding is indented {} spaces; expected sibling indentation {}",
+                boundary.indentation(),
+                block.anchor()
+            ),
+        )]);
+    }
+    if boundary.indentation() != let_column {
+        return Err(vec![Diagnostic::error(
+            boundary.line(),
+            format!(
+                "multi-line let body is indented {} spaces; expected alignment with `let` at indentation {}",
+                boundary.indentation(),
+                let_column
+            ),
+        )]);
+    }
+    let bindings = block
+        .into_statements()
+        .into_iter()
+        .filter_map(|statement| rest.subview(statement.tokens()))
+        .map(trim_layout)
         .collect();
-    let body = trim_layout(view_between(rest, body_start, rest.range().end()));
+    let body = trim_layout(view_between(
+        rest,
+        boundary.tokens().start(),
+        rest.range().end(),
+    ));
     Ok((bindings, body))
 }
 
@@ -1244,12 +1269,6 @@ fn next_significant_after<'lex, 'source>(
         indexed.index() > absolute_index
             && !matches!(indexed.token().kind(), TokenKind::LineStart { .. })
     })
-}
-
-fn token_column(view: TokenView<'_, '_>, token: &SpannedToken<'_>) -> usize {
-    view.line_at_span(token.span())
-        .and_then(|line| view.line_span(line))
-        .map_or(0, |line| token.span().start() - line.start())
 }
 
 pub(in crate::g_syntax::parser) fn token_is_name(token: &SpannedToken<'_>, expected: &str) -> bool {

@@ -1,4 +1,4 @@
-error|6|multi-line let binding names|align
+error|6|multi-line let binding|expected sibling indentation 6
 error|11|multi-line let expression|must not use `in`
 error|18|multi-line where binding names|align
 error|21|naked semicolon-separated `let` bindings|use `let { ... } in ...`

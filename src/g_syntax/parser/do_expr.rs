@@ -98,32 +98,36 @@ pub(in crate::g_syntax::parser) fn parse_do_expression(
             .map(|expr| ParsedExpression::new(expr, close + 1));
     }
 
-    parse_layout_body(after_do, do_token, context, body_starts_on_new_line)
+    let base = if body_starts_on_new_line {
+        LayoutBase::FirstLine
+    } else {
+        LayoutBase::Hanging(
+            view.column_at_span(next.span())
+                .expect("a do body token has a source column"),
+        )
+    };
+    parse_layout_body(after_do, do_token, context, base)
 }
 
 fn parse_layout_body(
     body: TokenView<'_, '_>,
     do_token: &SpannedToken<'_>,
     context: ExpressionContext,
-    body_starts_on_new_line: bool,
+    base: LayoutBase,
 ) -> ParseResult<ParsedExpression> {
-    let block = LayoutView::new(body)
-        .block(LayoutBase::FirstLine)
-        .map_err(|error| {
-            let message = if error.message().contains("expected at least") {
-                format!(
-                    "layout line {} is indented less than the first statement",
-                    error.line()
-                )
-            } else {
-                error.message().to_owned()
-            };
-            vec![Diagnostic::error(error.line(), message)]
-        })?;
-    if body_starts_on_new_line
-        && !block.statements().is_empty()
-        && !context.accepts_layout_anchor(block.anchor())
-    {
+    let hanging = matches!(base, LayoutBase::Hanging(_));
+    let block = LayoutView::new(body).block(base).map_err(|error| {
+        let message = if error.message().contains("expected at least") {
+            format!(
+                "layout line {} is indented less than the first statement",
+                error.line()
+            )
+        } else {
+            error.message().to_owned()
+        };
+        vec![Diagnostic::error(error.line(), message)]
+    })?;
+    if !block.statements().is_empty() && !context.accepts_layout_anchor(block.anchor()) {
         return Err(vec![Diagnostic::error(
             block.statements()[0].line(),
             format!(
@@ -132,6 +136,9 @@ fn parse_layout_body(
                 context.continuation_floor()
             ),
         )]);
+    }
+    if hanging {
+        validate_hanging_statement_alignment(body, &block)?;
     }
     let end = block.end();
     let statements = block.into_statements();
@@ -154,6 +161,86 @@ fn parse_layout_body(
     finish_do_statements(statements)
         .map(|expr| ParsedExpression::new(expr, end))
         .map_err(|message| error_at_token(body, do_token, message))
+}
+
+fn validate_hanging_statement_alignment(
+    body: TokenView<'_, '_>,
+    block: &super::layout::LayoutBlock,
+) -> ParseResult<()> {
+    if let Some(boundary) = block.boundary() {
+        let line_view = body
+            .subview(boundary.tokens())
+            .expect("a do layout boundary remains within the body");
+        if line_begins_do_statement(line_view) {
+            return Err(hanging_statement_alignment_error(
+                boundary.line(),
+                boundary.indentation(),
+                block.anchor(),
+            ));
+        }
+    }
+
+    for line in LayoutView::new(body).lines().into_iter().skip(1) {
+        if line.start() >= block.end() || line.indentation() <= block.anchor() {
+            continue;
+        }
+        let line_view = body
+            .subview(line.tokens())
+            .expect("layout lines remain within the do body");
+        if line_begins_do_statement(line_view) {
+            return Err(hanging_statement_alignment_error(
+                line.line(),
+                line.indentation(),
+                block.anchor(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn hanging_statement_alignment_error(
+    line: usize,
+    indentation: usize,
+    expected: usize,
+) -> Vec<Diagnostic> {
+    vec![Diagnostic::error(
+        line,
+        format!(
+            "hanging do statement is indented {indentation} spaces; expected sibling indentation {expected}"
+        ),
+    )]
+}
+
+fn line_begins_do_statement(view: TokenView<'_, '_>) -> bool {
+    starts_with_contextual_name(view, "abstract")
+        || top_level_symbols(view, "<-")
+            .into_iter()
+            .next()
+            .is_some_and(|arrow| {
+                local_name(trim_layout(view_between(view, view.range().start(), arrow))).is_some()
+            })
+        || top_level_symbols(view, "=")
+            .into_iter()
+            .next()
+            .is_some_and(|equals| {
+                local_name(trim_layout(view_between(
+                    view,
+                    view.range().start(),
+                    equals,
+                )))
+                .is_some()
+            })
+        || top_level_symbols(view, "->")
+            .into_iter()
+            .next()
+            .is_some_and(|arrow| {
+                local_name(trim_layout(view_between(
+                    view,
+                    arrow + 1,
+                    view.range().end(),
+                )))
+                .is_some()
+            })
 }
 
 fn parse_braced_body(

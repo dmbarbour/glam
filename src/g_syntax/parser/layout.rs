@@ -4,6 +4,11 @@ use super::lexical::TokenKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LayoutBase {
     FirstLine,
+    /// The first member follows its introducer on the same source line.
+    ///
+    /// Its token column establishes the anchor even though the physical line
+    /// begins before it. Later lines use ordinary indentation comparisons.
+    Hanging(usize),
     #[cfg(test)]
     Indentation(usize),
 }
@@ -192,16 +197,18 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
                 boundary: None,
             });
         };
-        let base = match base {
-            LayoutBase::FirstLine => first.indentation,
+        let (base, hanging) = match base {
+            LayoutBase::FirstLine => (first.indentation, false),
+            LayoutBase::Hanging(indentation) => (indentation, true),
             #[cfg(test)]
-            LayoutBase::Indentation(indentation) => indentation,
+            LayoutBase::Indentation(indentation) => (indentation, false),
         };
         let mut statements: Vec<LayoutStatement> = Vec::new();
 
-        for line in lines {
+        for (position, line) in lines.into_iter().enumerate() {
             let closer_only = self.line_is_closer_only(line);
-            if line.indentation < base && !closer_only {
+            let hanging_first = hanging && position == 0;
+            if !hanging_first && line.indentation < base && !closer_only {
                 return Ok(LayoutBlock {
                     anchor: base,
                     statements,
@@ -210,7 +217,7 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
                 });
             }
 
-            if line.indentation == base && !closer_only {
+            if (hanging_first || line.indentation == base) && !closer_only {
                 statements.push(LayoutStatement {
                     line: line.line,
                     tokens: line.tokens,

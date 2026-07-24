@@ -1651,6 +1651,35 @@ fn trailing_lambda_and_layout_do_arguments_evaluate() {
 }
 
 #[test]
+fn hanging_do_and_let_layout_evaluate() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "hanging = do first = 70\n",
+        "             second = first + 2\n",
+        "             .r second\n",
+        "asm.do_result = list.head (list.pure hanging)\n",
+        "asm.let_result =\n",
+        "  let _ignored = 70\n",
+        "      second = 72\n",
+        "  second\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+    let value = evaluated_module_value(&context, &lowered);
+    for path in ["do_result", "let_result"] {
+        assert_eq!(
+            fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
+            Value::Number(n(72)),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn braced_do_evaluates_like_layout_do_and_supports_empty_blocks() {
     let parsed = parse(concat!(
         "language g0\n",

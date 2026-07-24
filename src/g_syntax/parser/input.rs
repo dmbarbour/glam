@@ -187,6 +187,12 @@ impl<'lex, 'source> TokenView<'lex, 'source> {
         self.line_at_byte(span.start())
     }
 
+    pub(super) fn column_at_span(self, span: ByteSpan) -> Option<usize> {
+        let line = self.line_at_span(span)?;
+        let line = self.line_span(line)?;
+        Some(span.start().saturating_sub(line.start()))
+    }
+
     #[cfg(test)]
     pub(super) fn source_line(self, line: usize) -> Option<&'source str> {
         self.source.source_line(line)

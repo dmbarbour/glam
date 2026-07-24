@@ -266,6 +266,16 @@ express an effect and is not implicitly wrapped with `.r`. A layout block must
 be non-empty and occupy the trailing position of its containing definition,
 lambda body, or enclosing do statement; in an application it can therefore
 only be the final argument. A singleton may be written inline as `do Effect`.
+An inline first statement may also establish a hanging block. Later statements
+must align with that first statement's token column:
+
+        read_pair = do first <- .read
+                       second <- .read
+                       .r [first, second]
+
+This differs from `run do` followed by a next-line body: the latter freely
+chooses its first statement's indentation above the enclosing expression
+floor. Blank and comment-only lines establish neither form's anchor.
 
 Braces make do notation an ordinary expression atom and use semicolons as
 statement separators:
@@ -417,9 +427,16 @@ We'll support Haskell-style locals.
         # explicit empty group; equivalent to Body
         let {} in Body
 
-        # line separator for multiple lines of definitions
+        # An inline first binding establishes a hanging sibling anchor.
+        # The body still aligns with `let`.
         let Name1 = Def1
             Name2 = Def2
+        Body
+
+        # A next-line first binding freely chooses an anchor above `let`.
+        let
+          Name1 = Def1
+          Name2 = Def2
         Body
 
         # the 'where' form is essentially a post-hoc 'let'
