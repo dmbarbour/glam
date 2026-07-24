@@ -69,7 +69,10 @@ fn contextual_expression_reports_its_absolute_token_end() {
         let expected_end = view.range().end();
         let parsed = parse_expression_extent(view, ExpressionContext::for_owner(view).may_yield())?;
         assert_eq!(parsed.end(), expected_end);
-        assert!(matches!(parsed.into_expression(), SyntaxExpr::Access(_, _)));
+        assert!(matches!(
+            parsed.into_expression(),
+            Ok(SyntaxExpr::Access(_, _))
+        ));
         Ok(())
     })
     .unwrap();
@@ -80,7 +83,7 @@ fn contextual_expression_leaves_an_unrecognized_dedent_boundary_unconsumed() {
     parse_expression_fragment(b"outer with\n  member = value\n tail", |view| {
         let parsed =
             parse_expression_extent(view, ExpressionContext::for_fragment(view).may_yield())?;
-        assert!(matches!(parsed.expression(), SyntaxExpr::With { .. }));
+        assert!(matches!(parsed.expression(), Some(SyntaxExpr::With { .. })));
         let tail = view
             .subview(
                 TokenRange::new(parsed.end(), view.range().end())
@@ -391,8 +394,8 @@ fn leading_infix_lines_preserve_single_line_grouping() {
 }
 
 #[test]
-fn infix_resumption_after_layout_do_is_currently_rejected() {
-    assert_currently_rejected(concat!(
+fn infix_resumption_after_layout_do_preserves_the_flat_operator_chain() {
+    let layout = definition_expr(concat!(
         "language g0\n",
         "result = source\n",
         "  |> process do\n",
@@ -400,6 +403,140 @@ fn infix_resumption_after_layout_do_is_currently_rejected() {
         "    .r (transform input)\n",
         "  |> finish\n",
     ));
+    let SyntaxExpr::OperatorApply {
+        operator: crate::g_syntax::SyntaxOperator::PipeForward,
+        left,
+        right,
+    } = layout
+    else {
+        panic!("the resumed operator should form the outer pipe");
+    };
+    assert!(matches!(*right, SyntaxExpr::Name(ref name) if name == "finish"));
+    let SyntaxExpr::OperatorApply {
+        operator: crate::g_syntax::SyntaxOperator::PipeForward,
+        right,
+        ..
+    } = *left
+    else {
+        panic!("the first leading pipe should remain inside the outer pipe");
+    };
+    assert!(matches!(
+        *right,
+        SyntaxExpr::Apply(_, argument) if matches!(*argument, SyntaxExpr::Do(_))
+    ));
+}
+
+#[test]
+fn infix_resumption_after_with_can_then_resume_where() {
+    let expression = definition_expr(concat!(
+        "language g0\n",
+        "result = source\n",
+        "  |> configure with\n",
+        "    A := 42\n",
+        "    B := derive A\n",
+        "  |> finish\n",
+        "  where\n",
+        "    derive = transform\n",
+    ));
+    let SyntaxExpr::Let { body, bindings } = expression else {
+        panic!("the final where should wrap the complete pipe expression");
+    };
+    assert_eq!(bindings.len(), 1);
+    assert!(matches!(
+        *body,
+        SyntaxExpr::OperatorApply {
+            operator: crate::g_syntax::SyntaxOperator::PipeForward,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn yielded_layout_preserves_cross_operator_precedence() {
+    let layout = definition_expr(concat!(
+        "language g0\n",
+        "result = 1\n",
+        "  + do\n",
+        "    .r 2\n",
+        "  * 3\n",
+    ));
+    let SyntaxExpr::Add(_, right) = layout else {
+        panic!("multiplication should bind inside the addition");
+    };
+    let SyntaxExpr::Multiply(left, _) = *right else {
+        panic!("the resumed multiplication should bind more strongly");
+    };
+    assert!(matches!(*left, SyntaxExpr::Do(_)));
+}
+
+#[test]
+fn leading_infix_resumption_supports_every_operator_family() {
+    for (single, leading, trailing) in [
+        ("a |> b |> c", "a\n  |> b\n  |> c", "a |>\n  b |>\n  c"),
+        ("a <| b <| c", "a\n  <| b\n  <| c", "a <|\n  b <|\n  c"),
+        ("a >> b >> c", "a\n  >> b\n  >> c", "a >>\n  b >>\n  c"),
+        ("a << b << c", "a\n  << b\n  << c", "a <<\n  b <<\n  c"),
+        (
+            "a >=> b >=> c",
+            "a\n  >=> b\n  >=> c",
+            "a >=>\n  b >=>\n  c",
+        ),
+        (
+            "a >>= b =>> c",
+            "a\n  >>= b\n  =>> c",
+            "a >>=\n  b =>>\n  c",
+        ),
+        ("a !> b !> c", "a\n  !> b\n  !> c", "a !>\n  b !>\n  c"),
+        ("a <! b <! c", "a\n  <! b\n  <! c", "a <!\n  b <!\n  c"),
+        ("a ++ b ++ c", "a\n  ++ b\n  ++ c", "a ++\n  b ++\n  c"),
+        ("a and b or c", "a\n  and b\n  or c", "a and\n  b or\n  c"),
+        ("a + b * c", "a\n  + b\n  * c", "a +\n  b *\n  c"),
+        ("a < b =< c", "a\n  < b\n  =< c", "a <\n  b =<\n  c"),
+    ] {
+        let single = definition_expr(&format!("language g0\nresult = {single}\n"));
+        let leading = definition_expr(&format!("language g0\nresult = {leading}\n"));
+        let trailing = definition_expr(&format!("language g0\nresult = {trailing}\n"));
+        assert_eq!(single, leading);
+        assert_eq!(single, trailing);
+    }
+}
+
+#[test]
+fn leading_infix_operators_must_align() {
+    assert_has_error(
+        concat!(
+            "language g0\n",
+            "result = source\n",
+            "  |> decode\n",
+            "    |> finish\n",
+        ),
+        2,
+        "leading infix operators must align",
+    );
+}
+
+#[test]
+fn multiline_infix_keeps_existing_chain_errors() {
+    assert_has_error(
+        concat!(
+            "language g0\n",
+            "result = left\n",
+            "  - middle\n",
+            "  - right\n",
+        ),
+        2,
+        "non-associative",
+    );
+    assert_has_error(
+        concat!(
+            "language g0\n",
+            "result = left\n",
+            "  |> middle\n",
+            "  <| right\n",
+        ),
+        2,
+        "no precedence relationship",
+    );
 }
 
 #[test]

@@ -19,9 +19,85 @@ use super::input::{
     ParseSession, TokenExtra, TokenInput, TokenView, close, joint, keyword, line_start, name,
     number, open, space_before, symbol, text_id,
 };
-use super::lexical::{ByteSpan, Delimiter};
+use super::lexical::{ByteSpan, Delimiter, SpannedToken, TokenKind};
 
 mod infix;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::g_syntax::parser) struct InfixChain {
+    first: SyntaxExpr,
+    rest: Vec<(SyntaxOperator, SyntaxExpr)>,
+    resumption_anchor: Option<usize>,
+}
+
+impl InfixChain {
+    pub(in crate::g_syntax::parser) fn single(expression: SyntaxExpr) -> Self {
+        Self {
+            first: expression,
+            rest: Vec::new(),
+            resumption_anchor: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::g_syntax::parser) fn single_expression(&self) -> Option<&SyntaxExpr> {
+        self.rest.is_empty().then_some(&self.first)
+    }
+
+    pub(in crate::g_syntax::parser) fn append(
+        &mut self,
+        operator: SyntaxOperator,
+        mut right: Self,
+        indentation: Option<usize>,
+        context: ExpressionContext,
+    ) -> Result<(), String> {
+        if let Some(indentation) = indentation {
+            self.accept_resumption_anchor(indentation, context)?;
+        }
+        if let Some(anchor) = right.resumption_anchor {
+            self.accept_resumption_anchor(anchor, context)?;
+        }
+        self.rest.push((operator, right.first));
+        self.rest.append(&mut right.rest);
+        Ok(())
+    }
+
+    pub(in crate::g_syntax::parser) fn with_resumption_anchor(
+        mut self,
+        indentation: usize,
+        context: ExpressionContext,
+    ) -> Result<Self, String> {
+        self.accept_resumption_anchor(indentation, context)?;
+        Ok(self)
+    }
+
+    fn accept_resumption_anchor(
+        &mut self,
+        indentation: usize,
+        context: ExpressionContext,
+    ) -> Result<(), String> {
+        if !context.accepts_layout_anchor(indentation) {
+            return Err(format!(
+                "leading infix operator is indented {indentation} spaces; expected more than continuation floor {}",
+                context.continuation_floor()
+            ));
+        }
+        if let Some(anchor) = self.resumption_anchor {
+            if indentation != anchor {
+                return Err(format!(
+                    "leading infix operators must align at indentation {anchor}; found indentation {indentation}"
+                ));
+            }
+        } else {
+            self.resumption_anchor = Some(indentation);
+        }
+        Ok(())
+    }
+
+    pub(in crate::g_syntax::parser) fn resolve(self) -> Result<SyntaxExpr, String> {
+        resolve_infix_chain(self.first, self.rest)
+    }
+}
 
 fn syntax_binary_expr(operator: SyntaxOperator, left: SyntaxExpr, right: SyntaxExpr) -> SyntaxExpr {
     match operator {
@@ -92,7 +168,7 @@ fn quoted_path(suffixes: Vec<PathSuffix>) -> SyntaxExpr {
 pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
-) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
+) -> impl Parser<'lex, TokenInput<'lex, 'source>, InfixChain, TokenExtra<'lex, 'source>> {
     recursive(move |expr| {
         let glam_name = glam_name().boxed();
         let expr_name = expr_name().boxed();
@@ -104,8 +180,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                 symbol("'")
                     .ignore_then(joint(glam_name.clone()))
                     .map(SyntaxKeyExpr::Atom),
-                expr.clone()
-                    .map(|expr| SyntaxKeyExpr::Index(Box::new(expr))),
+                resolved(expr.clone()).map(|expr| SyntaxKeyExpr::Index(Box::new(expr))),
             ))
         };
 
@@ -121,7 +196,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .map(PathSuffix::Expand)
             .boxed();
         let path_list_expr = open(Delimiter::Parenthesis)
-            .ignore_then(padded(expr.clone()))
+            .ignore_then(padded(resolved(expr.clone())))
             .then_ignore(close(Delimiter::Parenthesis))
             .map(|expr| PathSuffix::Single(SyntaxKeyExpr::PathIndex(Box::new(expr))))
             .boxed();
@@ -157,7 +232,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
 
         let escaped_target = choice((
             joint(open(Delimiter::Parenthesis))
-                .ignore_then(padded(expr.clone()))
+                .ignore_then(padded(resolved(expr.clone())))
                 .then_ignore(close(Delimiter::Parenthesis)),
             joint(expr_name.clone())
                 .map(SyntaxExpr::Name)
@@ -228,7 +303,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
 
         let list = open(Delimiter::Bracket)
             .ignore_then(
-                padded(expr.clone())
+                padded(resolved(expr.clone()))
                     .separated_by(padded(symbol(",")))
                     .allow_leading()
                     .allow_trailing()
@@ -260,9 +335,9 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             data_path
                 .clone()
                 .then_ignore(padded(symbol(":")))
-                .then(expr.clone())
+                .then(resolved(expr.clone()))
                 .map(|(path, value)| SyntaxExpr::PathDict(path, Box::new(value))),
-            expr.clone(),
+            resolved(expr.clone()),
         ));
         let dict = open(Delimiter::Brace)
             .ignore_then(
@@ -278,7 +353,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
         let infix_operator = infix_operator().boxed();
         let prefix_operator_section = open(Delimiter::Parenthesis)
             .ignore_then(padded(infix_operator.clone()))
-            .then(expr.clone())
+            .then(resolved(expr.clone()))
             .then_ignore(close(Delimiter::Parenthesis))
             .map(|(operator, right)| SyntaxExpr::OperatorSection {
                 operator,
@@ -286,7 +361,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                 right: Some(Box::new(right)),
             });
         let postfix_operator_section = open(Delimiter::Parenthesis)
-            .ignore_then(padded(expr.clone()))
+            .ignore_then(padded(resolved(expr.clone())))
             .then(infix_operator.clone())
             .then_ignore(layout_padding())
             .then_ignore(close(Delimiter::Parenthesis))
@@ -306,7 +381,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
 
         let tuple_separator = || padded(symbol(","));
         let tuple_items_after_comma = || {
-            padded(expr.clone())
+            padded(resolved(expr.clone()))
                 .separated_by(tuple_separator())
                 .allow_trailing()
                 .collect::<Vec<_>>()
@@ -317,7 +392,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .then_ignore(close(Delimiter::Parenthesis))
             .map(SyntaxExpr::Tuple);
         let grouped_or_trailing_tuple = open(Delimiter::Parenthesis)
-            .ignore_then(padded(expr.clone()))
+            .ignore_then(padded(resolved(expr.clone())))
             .then(
                 tuple_separator()
                     .ignore_then(tuple_items_after_comma())
@@ -344,7 +419,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                     .collect::<Vec<_>>(),
             )
             .then_ignore(padded(symbol("->")))
-            .then(expr.clone())
+            .then(resolved(expr.clone()))
             .map(|(params, body)| SyntaxExpr::Lambda(params, Box::new(body)))
             .boxed();
 
@@ -458,20 +533,42 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
         let tail_infix_operand = choice((lambda.clone(), application.clone())).boxed();
 
         choice((
-            lambda,
+            lambda.map(InfixChain::single),
             application
                 .clone()
                 .then(
-                    padded(infix_operator)
+                    infix_operator_after_layout(infix_operator)
                         .then(tail_infix_operand)
                         .repeated()
                         .collect::<Vec<_>>(),
                 )
-                .try_map(|(first, rest), span| {
-                    resolve_infix_chain(first, rest).map_err(|message| Rich::custom(span, message))
+                .try_map(move |(first, rest), span| {
+                    let mut chain = InfixChain::single(first);
+                    for ((operator, indentation), right) in rest {
+                        if let Some(indentation) = indentation {
+                            chain
+                                .accept_resumption_anchor(indentation, context)
+                                .map_err(|message| Rich::custom(span, message))?;
+                        }
+                        chain.rest.push((operator, right));
+                    }
+                    Ok(chain)
                 }),
         ))
         .boxed()
+    })
+}
+
+fn resolved<'lex, 'source: 'lex, P>(
+    parser: P,
+) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>>
+where
+    P: Parser<'lex, TokenInput<'lex, 'source>, InfixChain, TokenExtra<'lex, 'source>>,
+{
+    parser.try_map(|chain, span| {
+        chain
+            .resolve()
+            .map_err(|message| Rich::custom(span, message))
     })
 }
 
@@ -516,20 +613,26 @@ fn structural_expression_after_head<'lex, 'source: 'lex>(
         let head_index = next_index
             .and_then(|next| next.checked_sub(1))
             .unwrap_or_else(|| view.range().end().saturating_sub(1));
-        let parsed = parse(view, head_index, context.may_yield()).map_err(|diagnostics| {
-            let span = diagnostics
-                .first()
-                .and_then(|diagnostic| view.line_span(diagnostic.line))
-                .unwrap_or_else(|| input.span_since(&before));
-            Rich::custom(
-                span,
-                diagnostics
-                    .into_iter()
-                    .map(|diagnostic| diagnostic.message)
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            )
-        })?;
+        let structural_context = view
+            .line_indentation_at(head_index)
+            .map_or(context, |indentation| {
+                context.with_physical_line_floor(indentation)
+            });
+        let parsed =
+            parse(view, head_index, structural_context.may_yield()).map_err(|diagnostics| {
+                let span = diagnostics
+                    .first()
+                    .and_then(|diagnostic| view.line_span(diagnostic.line))
+                    .unwrap_or_else(|| input.span_since(&before));
+                Rich::custom(
+                    span,
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| diagnostic.message)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                )
+            })?;
         let end = parsed.end();
         for _ in head_index + 1..end {
             if input.next().is_none() {
@@ -539,7 +642,9 @@ fn structural_expression_after_head<'lex, 'source: 'lex>(
                 ));
             }
         }
-        Ok(parsed.into_expression())
+        parsed
+            .into_expression()
+            .map_err(|message| Rich::custom(input.span_since(&before), message))
     })
 }
 
@@ -591,35 +696,68 @@ fn local_name<'lex, 'source: 'lex>()
 
 fn infix_operator<'lex, 'source: 'lex>()
 -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxOperator, TokenExtra<'lex, 'source>> {
-    choice((
-        keyword("and").to(SyntaxOperator::BoolAnd),
-        keyword("or").to(SyntaxOperator::BoolOr),
-        symbol(">>=").to(SyntaxOperator::EffectBind),
-        symbol(">=>").to(SyntaxOperator::KleisliCompose),
-        symbol("=>>").to(SyntaxOperator::EffectThen),
-        symbol("!>").to(SyntaxOperator::ApplicativeForward),
-        symbol("<!").to(SyntaxOperator::ApplicativeBackward),
-        symbol(">=").to(SyntaxOperator::Builtin(crate::core::Builtin::GreaterEqual)),
-        symbol("==").to(SyntaxOperator::Builtin(crate::core::Builtin::Equal)),
-        symbol("<>").to(SyntaxOperator::Builtin(crate::core::Builtin::NotEqual)),
-        symbol("=<").to(SyntaxOperator::Builtin(crate::core::Builtin::LessEqual)),
-        symbol(">>").to(SyntaxOperator::ComposeForward),
-        symbol("<<").to(SyntaxOperator::ComposeBackward),
-        symbol("|>").to(SyntaxOperator::PipeForward),
-        symbol("<|").to(SyntaxOperator::PipeBackward),
-        symbol(">").to(SyntaxOperator::Builtin(crate::core::Builtin::Greater)),
-        symbol("<").to(SyntaxOperator::Builtin(crate::core::Builtin::Less)),
-        symbol("++").to(SyntaxOperator::Builtin(crate::core::Builtin::Append)),
-        symbol("*").to(SyntaxOperator::Builtin(crate::core::Builtin::Multiply)),
-        symbol("/").to(SyntaxOperator::Builtin(crate::core::Builtin::Divide)),
-        symbol("+").to(SyntaxOperator::Builtin(crate::core::Builtin::Add)),
-        symbol("-").to(SyntaxOperator::Builtin(crate::core::Builtin::Subtract)),
-    ))
+    chumsky::primitive::select_ref(|token: &'lex SpannedToken<'source>, _| syntax_operator(token))
+        .labelled("infix operator")
+}
+
+pub(in crate::g_syntax::parser) fn syntax_operator(
+    token: &SpannedToken<'_>,
+) -> Option<SyntaxOperator> {
+    use crate::core::Builtin::{
+        Add, Append, Divide, Equal, Greater, GreaterEqual, Less, LessEqual, Multiply, NotEqual,
+        Subtract,
+    };
+
+    Some(match token.kind() {
+        TokenKind::Name("and") => SyntaxOperator::BoolAnd,
+        TokenKind::Name("or") => SyntaxOperator::BoolOr,
+        TokenKind::Symbol(">>=") => SyntaxOperator::EffectBind,
+        TokenKind::Symbol(">=>") => SyntaxOperator::KleisliCompose,
+        TokenKind::Symbol("=>>") => SyntaxOperator::EffectThen,
+        TokenKind::Symbol("!>") => SyntaxOperator::ApplicativeForward,
+        TokenKind::Symbol("<!") => SyntaxOperator::ApplicativeBackward,
+        TokenKind::Symbol(">=") => SyntaxOperator::Builtin(GreaterEqual),
+        TokenKind::Symbol("==") => SyntaxOperator::Builtin(Equal),
+        TokenKind::Symbol("<>") => SyntaxOperator::Builtin(NotEqual),
+        TokenKind::Symbol("=<") => SyntaxOperator::Builtin(LessEqual),
+        TokenKind::Symbol(">>") => SyntaxOperator::ComposeForward,
+        TokenKind::Symbol("<<") => SyntaxOperator::ComposeBackward,
+        TokenKind::Symbol("|>") => SyntaxOperator::PipeForward,
+        TokenKind::Symbol("<|") => SyntaxOperator::PipeBackward,
+        TokenKind::Symbol(">") => SyntaxOperator::Builtin(Greater),
+        TokenKind::Symbol("<") => SyntaxOperator::Builtin(Less),
+        TokenKind::Symbol("++") => SyntaxOperator::Builtin(Append),
+        TokenKind::Symbol("*") => SyntaxOperator::Builtin(Multiply),
+        TokenKind::Symbol("/") => SyntaxOperator::Builtin(Divide),
+        TokenKind::Symbol("+") => SyntaxOperator::Builtin(Add),
+        TokenKind::Symbol("-") => SyntaxOperator::Builtin(Subtract),
+        _ => return None,
+    })
 }
 
 fn layout_padding<'lex, 'source: 'lex>()
 -> impl Parser<'lex, TokenInput<'lex, 'source>, (), TokenExtra<'lex, 'source>> {
     line_start().repeated().ignored()
+}
+
+fn infix_operator_after_layout<'lex, 'source: 'lex, P>(
+    parser: P,
+) -> impl Parser<
+    'lex,
+    TokenInput<'lex, 'source>,
+    (SyntaxOperator, Option<usize>),
+    TokenExtra<'lex, 'source>,
+>
+where
+    P: Parser<'lex, TokenInput<'lex, 'source>, SyntaxOperator, TokenExtra<'lex, 'source>>,
+{
+    line_start()
+        .repeated()
+        .collect::<Vec<_>>()
+        .map(|line_starts| line_starts.last().copied())
+        .then(parser)
+        .then_ignore(layout_padding())
+        .map(|(indentation, operator)| (operator, indentation))
 }
 
 fn padded<'lex, 'source: 'lex, O, P>(
@@ -640,10 +778,26 @@ pub(super) fn parse_expression_fragment(source: &[u8]) -> Result<SyntaxExpr, Vec
     })
 }
 
+#[cfg(test)]
 pub(in crate::g_syntax::parser) fn parse_expression_view(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
 ) -> Result<SyntaxExpr, Vec<Diagnostic>> {
+    parse_expression_chain_view(view, context).and_then(|chain| {
+        chain.resolve().map_err(|message| {
+            let line = view
+                .first_significant()
+                .and_then(|(_, token)| view.line_at_span(token.span()))
+                .unwrap_or(1);
+            vec![Diagnostic::error(line, message)]
+        })
+    })
+}
+
+pub(in crate::g_syntax::parser) fn parse_expression_chain_view(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> Result<InfixChain, Vec<Diagnostic>> {
     let mut session = ParseSession::new(view.source());
     let (output, errors) = syntax_expr_parser(view, context)
         .then_ignore(layout_padding())

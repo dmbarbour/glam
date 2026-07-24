@@ -61,6 +61,12 @@ pub(in crate::g_syntax::parser) fn parse_do_expression(
             "`do` must be separated from its body",
         ));
     }
+    let body_starts_on_new_line = next.leading() == LeadingTrivia::LineBreak
+        || after_do
+            .tokens()
+            .iter()
+            .take(next_index - after_do.range().start())
+            .any(|token| matches!(token.kind(), TokenKind::LineStart { .. }));
 
     if let TokenKind::Open {
         group: group_id,
@@ -92,17 +98,17 @@ pub(in crate::g_syntax::parser) fn parse_do_expression(
             .map(|expr| ParsedExpression::new(expr, close + 1));
     }
 
-    parse_layout_body(after_do, do_token, context)
-        .map(|expr| ParsedExpression::new(expr, view.range().end()))
+    parse_layout_body(after_do, do_token, context, body_starts_on_new_line)
 }
 
 fn parse_layout_body(
     body: TokenView<'_, '_>,
     do_token: &SpannedToken<'_>,
     context: ExpressionContext,
-) -> ParseResult<SyntaxExpr> {
-    let statements = LayoutView::new(body)
-        .statements(LayoutBase::FirstLine)
+    body_starts_on_new_line: bool,
+) -> ParseResult<ParsedExpression> {
+    let block = LayoutView::new(body)
+        .block(LayoutBase::FirstLine)
         .map_err(|error| {
             let message = if error.message().contains("expected at least") {
                 format!(
@@ -114,6 +120,21 @@ fn parse_layout_body(
             };
             vec![Diagnostic::error(error.line(), message)]
         })?;
+    if body_starts_on_new_line
+        && !block.statements().is_empty()
+        && !context.accepts_layout_anchor(block.anchor())
+    {
+        return Err(vec![Diagnostic::error(
+            block.statements()[0].line(),
+            format!(
+                "do layout begins at indentation {}; expected more than continuation floor {}",
+                block.anchor(),
+                context.continuation_floor()
+            ),
+        )]);
+    }
+    let end = block.end();
+    let statements = block.into_statements();
     if statements.is_empty() {
         return Err(error_at_token(
             body,
@@ -130,7 +151,9 @@ fn parse_layout_body(
             parse_statement(view, context).map(|statement_kind| (statement.line(), statement_kind))
         })
         .collect::<ParseResult<Vec<_>>>()?;
-    finish_do_statements(statements).map_err(|message| error_at_token(body, do_token, message))
+    finish_do_statements(statements)
+        .map(|expr| ParsedExpression::new(expr, end))
+        .map_err(|message| error_at_token(body, do_token, message))
 }
 
 fn parse_braced_body(

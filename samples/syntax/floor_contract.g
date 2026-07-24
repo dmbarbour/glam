@@ -47,6 +47,24 @@ pipeline = source
   |> decode
   |> validate
 
+# A leading operator at the established anchor may close a layout do and
+# resume the enclosing chain.
+processed = source
+  |> process do
+    input <- .read
+    .r (transform input)
+  |> finish
+
+# The same resumption closes a with body. A later where at that anchor wraps
+# the complete recovered operator chain.
+configured = source
+  |> configure with
+    A := 42
+    B := derive A
+  |> finish
+  where
+    derive = transform
+
 # A boundary-aligned closer-only line may terminate the declaration.
 terminal_group = (
   value

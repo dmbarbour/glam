@@ -237,6 +237,17 @@ g << f
 (x < y =< z)        # chained comparison: (x < y) and (y =< z)
 # No mixing of opposing directions (>> vs <<, |> vs <|) without parens.
 
+# A leading operator establishes an aligned resumption anchor. It may close
+# nested layout while preserving the same precedence as one-line syntax:
+result = source
+  |> configure with
+    value := replacement
+  |> finish
+# Trailing operators remain ordinary incomplete-RHS continuations:
+result = source |>
+  configure |>
+  finish
+
 f x                 # application; ad hoc polymorphism:
                     #   functions; {apply:f,_} x = f x; (eff:f) x
                     #   raw interaction-net values are not applicable
@@ -274,8 +285,9 @@ nested = f [do { .r 1 }, do {; .r 2; }]
 # - A bare intermediate op uses `=>>` semantics and therefore requires unit.
 # - The final statement must express an effect, not a returned value (though
 #   it may express an effect to return a value)
-# - The layout block must be the trailing part of its containing expression;
-#   in an application it can therefore only be the final argument.
+# - A layout do may yield to an aligned leading infix operator after its block.
+#   Otherwise it owns the trailing part of its containing expression; in an
+#   application it can therefore only be the final argument.
 # - Braced do is an expression atom. One leading/trailing `;` is ignored;
 #   interior empty statements and `do {;}` are invalid.
 # - Patterns are not implemented yet.

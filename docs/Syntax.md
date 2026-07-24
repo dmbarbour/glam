@@ -1015,6 +1015,38 @@ the outer member anchor attaches it to the surrounding definition instead.
 Every nested body must choose an anchor strictly to the right of the
 continuation floor established by its owning declaration or binding.
 
+Leading infix operators use the same yielding boundary. The first leading
+operator establishes a resumption anchor; later leading operators in that
+chain must align with it. A matching operator can close one or more layout
+bodies:
+
+        result = source
+          |> process do
+            input <- .read
+            .r (transform input)
+          |> finish
+
+        configured = source
+          |> configure with
+            A := 42
+            B := derive A
+          |> finish
+          where
+            derive = transform
+
+The recovered operators form one ordinary infix chain. Line breaks do not
+change precedence or associativity, and retain the usual diagnostics for
+non-associative or unrelated operators. A trailing operator remains an
+incomplete-right-operand continuation:
+
+        result = source |>
+          decode |>
+          finish
+
+The operator indentation is also the continuation floor of its right operand.
+A nested layout body must therefore begin strictly farther right than its
+operator.
+
 ### Method Chaining
 
 In OO languages, a common pattern is method chaining where each method linearly returns the 'next' object, and users select a method on that object. It's a convenient pattern. This can be almost directly expressed via piped functions and a helper function.

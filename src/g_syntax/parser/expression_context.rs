@@ -6,6 +6,7 @@
 
 use super::super::Diagnostic;
 use super::super::SyntaxExpr;
+use super::expression::InfixChain;
 use super::input::{TokenRange, TokenView};
 use super::lexical::TokenKind;
 
@@ -81,6 +82,22 @@ impl ExpressionContext {
         !self.floor_enforced || anchor > self.continuation_floor
     }
 
+    pub(super) fn with_continuation_floor(self, continuation_floor: usize) -> Self {
+        Self {
+            continuation_floor: self.continuation_floor.max(continuation_floor),
+            floor_enforced: true,
+            ..self
+        }
+    }
+
+    pub(super) fn with_physical_line_floor(self, continuation_floor: usize) -> Self {
+        if self.floor_enforced {
+            self.with_continuation_floor(continuation_floor)
+        } else {
+            self
+        }
+    }
+
     fn needs_validation(self, indentation: usize) -> bool {
         indentation <= self.continuation_floor
             && self
@@ -107,12 +124,19 @@ impl ExpressionContext {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct ParsedExpression {
-    expression: SyntaxExpr,
+    expression: InfixChain,
     end: usize,
 }
 
 impl ParsedExpression {
     pub(super) fn new(expression: SyntaxExpr, end: usize) -> Self {
+        Self {
+            expression: InfixChain::single(expression),
+            end,
+        }
+    }
+
+    pub(super) fn from_chain(expression: InfixChain, end: usize) -> Self {
         Self { expression, end }
     }
 
@@ -121,12 +145,16 @@ impl ParsedExpression {
     }
 
     #[cfg(test)]
-    pub(super) fn expression(&self) -> &SyntaxExpr {
-        &self.expression
+    pub(super) fn expression(&self) -> Option<&SyntaxExpr> {
+        self.expression.single_expression()
     }
 
-    pub(super) fn into_expression(self) -> SyntaxExpr {
+    pub(super) fn into_chain(self) -> InfixChain {
         self.expression
+    }
+
+    pub(super) fn into_expression(self) -> Result<SyntaxExpr, String> {
+        self.expression.resolve()
     }
 }
 

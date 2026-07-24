@@ -7,7 +7,7 @@
 use super::super::keywords::{canonical_keyword, reserved_keyword_message};
 use super::super::{Diagnostic, ObjectExpr, Severity, SyntaxExpr};
 use super::declaration::{parse_nonempty_object_body, parse_object_body};
-use super::expression::parse_expression_view;
+use super::expression::{parse_expression_chain_view, syntax_operator};
 use super::expression_context::{ExpressionContext, ParsedExpression, validate_expression_floor};
 use super::input::{TokenRange, TokenView};
 use super::layout::{LayoutBase, LayoutView};
@@ -51,7 +51,9 @@ pub(in crate::g_syntax::parser) fn parse_expression_in_context(
     let view = trim_layout(view);
     let parsed = parse_expression_extent(view, context.complete())?;
     debug_assert_eq!(parsed.end(), view.range().end());
-    Ok(parsed.into_expression())
+    parsed
+        .into_expression()
+        .map_err(|message| error_at_view(view, message))
 }
 
 pub(in crate::g_syntax::parser) fn parse_expression_extent(
@@ -74,9 +76,12 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
     } else if let Some(result) = parse_where(view, context) {
         result?
     } else {
-        ParsedExpression::new(parse_expression_view(view, context)?, view.range().end())
+        ParsedExpression::from_chain(
+            parse_expression_chain_view(view, context)?,
+            view.range().end(),
+        )
     };
-    let parsed = resume_where_suffixes(view, context, parsed)?;
+    let parsed = resume_expression_suffixes(view, context, parsed)?;
     if parsed.end() < view.range().end() && !context.permits_yield() {
         let tail = trim_layout(view_between(view, parsed.end(), view.range().end()));
         let found = tail
@@ -120,8 +125,13 @@ fn parse_parenthesized_structural(
         .is_some_and(|(_, token)| token_is_name(token, "let") || token_is_name(token, "object"))
         || !contextual_keywords(contents, "where").is_empty()
         || has_compound_with_body(contents);
-    starts_structural
-        .then(|| parse_expression_extent(contents, context).map(ParsedExpression::into_expression))
+    starts_structural.then(|| {
+        parse_expression_extent(contents, context).and_then(|parsed| {
+            parsed
+                .into_expression()
+                .map_err(|message| error_at_view(contents, message))
+        })
+    })
 }
 
 fn parse_let(
@@ -346,30 +356,100 @@ fn parse_where_suffix(
     ))
 }
 
-fn resume_where_suffixes(
+fn resume_expression_suffixes(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
     mut parsed: ParsedExpression,
 ) -> ParseResult<ParsedExpression> {
     while parsed.end() < view.range().end() {
         let tail = trim_layout(view_between(view, parsed.end(), view.range().end()));
-        let Some((where_index, token)) = tail.first_significant() else {
+        let Some((boundary_index, token)) = tail.first_significant() else {
             break;
         };
-        if !token_is_name(token, "where")
-            || (token.leading() == LeadingTrivia::Joint
-                && where_index.checked_sub(1).is_none_or(|previous| {
-                    !matches!(
-                        view.token_at(previous).map(SpannedToken::kind),
-                        Some(TokenKind::LineStart { .. })
-                    )
-                }))
+        if token_is_name(token, "where")
+            && (token.leading() != LeadingTrivia::Joint
+                || begins_layout_line(view, boundary_index, token))
+        {
+            let body = parsed
+                .into_expression()
+                .map_err(|message| error_at_view(tail, message))?;
+            parsed = parse_where_suffix(view, context, boundary_index, body)?;
+            continue;
+        }
+
+        let Some(operator) = syntax_operator(token) else {
+            break;
+        };
+        if token.leading() == LeadingTrivia::Joint
+            && !begins_layout_line(view, boundary_index, token)
         {
             break;
         }
-        parsed = parse_where_suffix(view, context, where_index, parsed.into_expression())?;
+        let indentation = begins_layout_line(view, boundary_index, token)
+            .then(|| view.line_indentation_at(boundary_index).unwrap_or(0));
+        let operand_start = boundary_index + 1;
+        let operand_tail = view_between(view, operand_start, view.range().end());
+        let operand_end = next_resumption_boundary(operand_tail, indentation)
+            .map_or(view.range().end(), |line| line.start());
+        let operand_view = trim_layout(view_between(view, operand_start, operand_end));
+        if is_layout_empty(operand_view) {
+            return Err(error_at_token(
+                view,
+                token,
+                "infix operator requires a right operand",
+            ));
+        }
+        let operand_context = indentation
+            .map_or(context, |indentation| {
+                context.with_continuation_floor(indentation)
+            })
+            .may_yield();
+        let right = parse_expression_extent(operand_view, operand_context)?;
+        if right.end() != operand_view.range().end() {
+            let unconsumed =
+                trim_layout(view_between(view, right.end(), operand_view.range().end()));
+            return Err(error_at_view(
+                unconsumed,
+                "right operand ended before an unrecognized layout boundary",
+            ));
+        }
+        let mut chain = parsed.into_chain();
+        chain
+            .append(operator, right.into_chain(), indentation, context)
+            .map_err(|message| error_at_token(view, token, message))?;
+        parsed = ParsedExpression::from_chain(chain, operand_end);
     }
     Ok(parsed)
+}
+
+fn begins_layout_line(
+    view: TokenView<'_, '_>,
+    token_index: usize,
+    token: &SpannedToken<'_>,
+) -> bool {
+    token.leading() == LeadingTrivia::LineBreak
+        || token_index.checked_sub(1).is_some_and(|previous| {
+            matches!(
+                view.token_at(previous).map(SpannedToken::kind),
+                Some(TokenKind::LineStart { .. })
+            )
+        })
+}
+
+fn next_resumption_boundary(
+    view: TokenView<'_, '_>,
+    current_anchor: Option<usize>,
+) -> Option<super::layout::LayoutLine> {
+    LayoutView::new(view).lines().into_iter().find(|line| {
+        if current_anchor.is_some_and(|anchor| line.indentation() > anchor) {
+            return false;
+        }
+        view.subview(line.tokens())
+            .and_then(TokenView::first_significant)
+            .is_some_and(|(_, token)| {
+                syntax_operator(token).is_some() || token_is_name(token, "where")
+            })
+    })
 }
 
 fn parse_braced_bindings(
@@ -534,14 +614,23 @@ fn parse_with(
     {
         return Some(Err(diagnostics));
     }
-    Some(Ok(ParsedExpression::new(
-        SyntaxExpr::With {
-            base: header.base,
-            alias: header.alias,
-            body,
+    let expression = SyntaxExpr::With {
+        base: header.base,
+        alias: header.alias,
+        body,
+    };
+    let (header_view, _) = split_compound_header_body(owned_view);
+    let chain = match leading_operator_anchor(header_view, context) {
+        Ok(Some(anchor)) => match super::expression::InfixChain::single(expression)
+            .with_resumption_anchor(anchor, context)
+        {
+            Ok(chain) => chain,
+            Err(message) => return Some(Err(error_at_view(header_view, message))),
         },
-        end,
-    )))
+        Ok(None) => super::expression::InfixChain::single(expression),
+        Err(diagnostics) => return Some(Err(diagnostics)),
+    };
+    Some(Ok(ParsedExpression::from_chain(chain, end)))
 }
 
 /// Selects the exact structural prefix owned by an object or `with`
@@ -556,18 +645,24 @@ fn structural_body_extent<'lex, 'source>(
             Ok((view_between(view, view.range().start(), end), end))
         }
         Some(StructuralBody::Layout { start }) => {
+            let header = trim_layout(view_between(view, view.range().start(), start));
+            let body_context = match leading_operator_anchor(header, context)? {
+                Some(anchor) => context.with_continuation_floor(anchor),
+                None => context,
+            };
             let body = view_between(view, start, view.range().end());
             let block = LayoutView::new(body)
                 .block(LayoutBase::FirstLine)
                 .map_err(|error| vec![Diagnostic::error(error.line(), error.message())])?;
-            if !block.statements().is_empty() && !context.accepts_layout_anchor(block.anchor()) {
+            if !block.statements().is_empty() && !body_context.accepts_layout_anchor(block.anchor())
+            {
                 let line = block.statements()[0].line();
                 return Err(vec![Diagnostic::error(
                     line,
                     format!(
                         "nested layout begins at indentation {}; expected more than continuation floor {}",
                         block.anchor(),
-                        context.continuation_floor()
+                        body_context.continuation_floor()
                     ),
                 )]);
             }
@@ -578,12 +673,60 @@ fn structural_body_extent<'lex, 'source>(
     }
 }
 
+fn leading_operator_anchor(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> ParseResult<Option<usize>> {
+    let mut anchor = None;
+    for line in LayoutView::new(view).lines() {
+        let Some((_, token)) = view
+            .subview(line.tokens())
+            .and_then(TokenView::first_significant)
+        else {
+            continue;
+        };
+        if syntax_operator(token).is_none() {
+            continue;
+        }
+        if !context.accepts_layout_anchor(line.indentation()) {
+            return Err(vec![Diagnostic::error(
+                line.line(),
+                format!(
+                    "leading infix operator is indented {} spaces; expected more than continuation floor {}",
+                    line.indentation(),
+                    context.continuation_floor()
+                ),
+            )]);
+        }
+        if let Some(expected) = anchor
+            && line.indentation() != expected
+        {
+            return Err(vec![Diagnostic::error(
+                line.line(),
+                format!(
+                    "leading infix operators must align at indentation {expected}; found indentation {}",
+                    line.indentation()
+                ),
+            )]);
+        }
+        anchor = Some(line.indentation());
+    }
+    Ok(anchor)
+}
+
 fn has_compound_with_body(view: TokenView<'_, '_>) -> bool {
     find_structural_body(view).is_some()
 }
 
 fn find_structural_body(view: TokenView<'_, '_>) -> Option<StructuralBody> {
+    let where_boundary = contextual_keywords(view, "where")
+        .into_iter()
+        .next()
+        .unwrap_or(view.range().end());
     for indexed in view.top_level() {
+        if indexed.index() >= where_boundary {
+            break;
+        }
         let TokenKind::Open {
             group,
             delimiter: Delimiter::Brace,
@@ -599,10 +742,17 @@ fn find_structural_body(view: TokenView<'_, '_>) -> Option<StructuralBody> {
         return Some(StructuralBody::Braced { end: close + 1 });
     }
 
-    let start = first_top_level_line_start(view)?;
-    let header = trim_layout(view_between(view, view.range().start(), start));
-    if last_significant_is_contextual_name(header, "with") {
-        return Some(StructuralBody::Layout { start });
+    let lines = LayoutView::new(view).lines();
+    for pair in lines.windows(2) {
+        if pair[0].tokens().start() >= where_boundary {
+            break;
+        }
+        let header_line = view.subview(pair[0].tokens())?;
+        if last_significant_is_contextual_name(header_line, "with") {
+            return Some(StructuralBody::Layout {
+                start: pair[1].start(),
+            });
+        }
     }
 
     None
@@ -974,7 +1124,7 @@ pub(in crate::g_syntax::parser) fn split_braced_members<'lex, 'source>(
 pub(in crate::g_syntax::parser) fn split_compound_header_body<'lex, 'source>(
     view: TokenView<'lex, 'source>,
 ) -> (TokenView<'lex, 'source>, Option<TokenView<'lex, 'source>>) {
-    if let Some(header_end) = first_top_level_line_start(view) {
+    if let Some(StructuralBody::Layout { start: header_end }) = find_structural_body(view) {
         return (
             view_between(view, view.range().start(), header_end),
             Some(view_between(view, header_end, view.range().end())),
@@ -1031,14 +1181,6 @@ pub(in crate::g_syntax::parser) fn parse_object_parents(
         parents.push(parse_expression_in_context(parent, context.complete())?);
     }
     Ok(parents)
-}
-
-pub(in crate::g_syntax::parser) fn first_top_level_line_start(
-    view: TokenView<'_, '_>,
-) -> Option<usize> {
-    view.top_level().find_map(|indexed| {
-        matches!(indexed.token().kind(), TokenKind::LineStart { .. }).then(|| indexed.index())
-    })
 }
 
 pub(in crate::g_syntax::parser) fn local_name<'source>(

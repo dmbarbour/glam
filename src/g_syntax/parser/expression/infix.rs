@@ -39,7 +39,7 @@ impl PartialExpr {
     }
 }
 
-pub(super) fn resolve_infix_chain(
+pub(in crate::g_syntax::parser) fn resolve_infix_chain(
     first: SyntaxExpr,
     rest: Vec<(SyntaxOperator, SyntaxExpr)>,
 ) -> Result<SyntaxExpr, String> {

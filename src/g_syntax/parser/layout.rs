@@ -25,6 +25,10 @@ impl LayoutLine {
         self.indentation
     }
 
+    pub(super) fn start(self) -> usize {
+        self.start
+    }
+
     pub(super) fn tokens(self) -> TokenRange {
         self.tokens
     }

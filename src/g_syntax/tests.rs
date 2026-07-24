@@ -1058,6 +1058,44 @@ fn where_binding_can_own_a_deeper_layout_with_expression() {
 }
 
 #[test]
+fn leading_infix_resumption_after_layout_do_and_with_evaluates() {
+    let source = concat!(
+        "language g0\n",
+        "finish _ = \"after-do\"\n",
+        "base = { text:\"before\" }\n",
+        "read_text value = value.text\n",
+        "asm.do_result =\n",
+        "  do\n",
+        "    .r \"before-do\"\n",
+        "  |> finish\n",
+        "asm.with_result = base with\n",
+        "    text := \"after-with\"\n",
+        "  |> read_text\n",
+    );
+    let parsed = parse(source);
+    assert_eq!(parsed.diagnostics, []);
+
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "do_result"]
+        ))),
+        b"after-do"
+    );
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "with_result"]
+        ))),
+        b"after-with"
+    );
+}
+
+#[test]
 fn braced_with_bodies_reject_semicolon_only_and_interior_empty_members() {
     for source in [
         "language g0\nobject bad with {;}\n",
