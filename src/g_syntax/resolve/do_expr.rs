@@ -1,4 +1,6 @@
-use super::super::recursive_do::{ForwardNameId, RecursiveDoPlan, RecursiveDoTracker};
+use super::super::recursive_do::{
+    ForwardNameId, ForwardNameRegistry, RecursiveDoEvent, RecursiveDoPlan, RecursiveDoStep,
+};
 use super::super::*;
 use crate::number::Number;
 
@@ -16,7 +18,12 @@ struct ResolvedForward {
 ///
 /// Pattern lowering appends to this stream directly; it never reconstructs a
 /// surface `DoExpr` or invents source-spellable temporary names.
-enum PrimitiveDoStep {
+struct PrimitiveDoStep {
+    recursion: RecursiveDoStep,
+    kind: PrimitiveDoStepKind,
+}
+
+enum PrimitiveDoStepKind {
     Abstract,
     Bind {
         operation: ResolvedExpr<Value>,
@@ -70,19 +77,20 @@ impl DoLowering<'_> {
     ) -> Result<PrimitiveDoBlock, Diagnostic> {
         let base_len = locals.len();
         let result = (|| {
-            let mut tracker = RecursiveDoTracker::default();
+            let mut forward_names = ForwardNameRegistry::default();
             let mut forwards = Vec::new();
             let mut steps = Vec::with_capacity(do_expr.steps.len());
 
             for step in &do_expr.steps {
-                let resolved = match &step.kind {
+                let (kind, recursion) = match &step.kind {
                     DoStepKind::Abstract(names) => {
-                        let ids = tracker.push_abstract(names, step.line)?;
+                        let ids = forward_names.declare(names, step.line)?;
                         debug_assert_eq!(ids.len(), names.len());
                         let first_slot = locals.len();
                         let bindings = locals
                             .extend_source_bindings(names.iter().map(String::as_str), step.line)?;
-                        for (offset, (id, binding)) in ids.into_iter().zip(bindings).enumerate() {
+                        for (offset, (id, binding)) in ids.iter().copied().zip(bindings).enumerate()
+                        {
                             debug_assert_eq!(
                                 id,
                                 forwards.len(),
@@ -94,7 +102,10 @@ impl DoLowering<'_> {
                                 ..ResolvedForward::default()
                             });
                         }
-                        PrimitiveDoStep::Abstract
+                        (
+                            PrimitiveDoStepKind::Abstract,
+                            RecursiveDoEvent::Declare(ids),
+                        )
                     }
                     DoStepKind::Bind { pattern, operation } => {
                         let operation = syntax_expr_to_resolved_in_semantic_scope(
@@ -104,14 +115,14 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
-                        let binding = resolve_step_binding(
-                            &mut tracker,
+                        let (binding, recursion) = resolve_step_binding(
+                            &mut forward_names,
                             pattern,
                             step.line,
                             locals,
                             &mut forwards,
                         )?;
-                        PrimitiveDoStep::Bind { operation, binding }
+                        (PrimitiveDoStepKind::Bind { operation, binding }, recursion)
                     }
                     DoStepKind::ValueBind { pattern, value } => {
                         let value = syntax_expr_to_resolved_in_semantic_scope(
@@ -121,14 +132,14 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
-                        let binding = resolve_step_binding(
-                            &mut tracker,
+                        let (binding, recursion) = resolve_step_binding(
+                            &mut forward_names,
                             pattern,
                             step.line,
                             locals,
                             &mut forwards,
                         )?;
-                        PrimitiveDoStep::ValueBind { value, binding }
+                        (PrimitiveDoStepKind::ValueBind { value, binding }, recursion)
                     }
                     DoStepKind::Then(operation) => {
                         let operation = syntax_expr_to_resolved_in_semantic_scope(
@@ -138,14 +149,22 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
-                        tracker.push_internal(step.line);
-                        PrimitiveDoStep::Then {
-                            operation,
-                            result: locals.fresh_binding(),
-                        }
+                        (
+                            PrimitiveDoStepKind::Then {
+                                operation,
+                                result: locals.fresh_binding(),
+                            },
+                            RecursiveDoEvent::None,
+                        )
                     }
                 };
-                steps.push(resolved);
+                steps.push(PrimitiveDoStep {
+                    recursion: RecursiveDoStep {
+                        line: step.line,
+                        event: recursion,
+                    },
+                    kind,
+                });
             }
 
             let result = syntax_expr_to_resolved_in_semantic_scope(
@@ -155,12 +174,10 @@ impl DoLowering<'_> {
                 self.scope,
                 locals,
             )?;
-            debug_assert_eq!(
-                steps.len(),
-                tracker.step_count(),
-                "every resolved primitive do step records one planning event"
-            );
-            let plan = tracker.finish()?;
+            let plan = RecursiveDoPlan::build(
+                steps.iter().map(|step| &step.recursion),
+                forward_names.into_forwards(),
+            )?;
             for forward in &mut forwards {
                 forward.future_binding = Some(locals.fresh_binding());
                 forward.fixed_result_binding = Some(locals.fresh_binding());
@@ -202,27 +219,27 @@ impl DoLowering<'_> {
 }
 
 fn resolve_step_binding(
-    tracker: &mut RecursiveDoTracker,
+    forward_names: &mut ForwardNameRegistry,
     pattern: &SyntaxPattern,
     line: usize,
     locals: &mut ResolverContext,
     forwards: &mut [ResolvedForward],
-) -> Result<BindingId, Diagnostic> {
+) -> Result<(BindingId, RecursiveDoEvent), Diagnostic> {
     let name = match direct_pattern_binding(pattern) {
         DirectPatternBinding::Capture(name) => name,
         DirectPatternBinding::Wildcard => {
-            tracker.push_internal(line);
-            return Ok(locals.fresh_binding());
+            return Ok((locals.fresh_binding(), RecursiveDoEvent::None));
         }
     };
 
-    let fulfillment = tracker.push_capture(name, line);
+    let fulfillment = forward_names.fulfill(name);
     let Some(id) = fulfillment else {
-        return Ok(locals
+        let binding = locals
             .extend_source_bindings([name], line)?
             .into_iter()
             .next()
-            .expect("one do binder produces one binding identity"));
+            .expect("one do binder produces one binding identity");
+        return Ok((binding, RecursiveDoEvent::None));
     };
 
     let binding = locals.fresh_binding();
@@ -234,7 +251,7 @@ fn resolve_step_binding(
     local.binding = Some(binding);
     locals[slot] = local;
     forward.resolved_binding = Some(binding);
-    Ok(binding)
+    Ok((binding, RecursiveDoEvent::Fulfill(id)))
 }
 
 impl DoEmitter<'_> {
@@ -269,16 +286,16 @@ impl DoEmitter<'_> {
             let step = self.steps[index]
                 .take()
                 .expect("planned recursive-do step is emitted exactly once");
-            continuation = match step {
-                PrimitiveDoStep::Abstract => continuation,
-                PrimitiveDoStep::Bind { operation, binding } => effect_call_resolved(
+            continuation = match step.kind {
+                PrimitiveDoStepKind::Abstract => continuation,
+                PrimitiveDoStepKind::Bind { operation, binding } => effect_call_resolved(
                     "seq",
                     [operation, ResolvedExpr::lambda(vec![binding], continuation)],
                 ),
-                PrimitiveDoStep::ValueBind { value, binding } => {
+                PrimitiveDoStepKind::ValueBind { value, binding } => {
                     ResolvedExpr::apply(ResolvedExpr::lambda(vec![binding], continuation), [value])
                 }
-                PrimitiveDoStep::Then { operation, result } => {
+                PrimitiveDoStepKind::Then { operation, result } => {
                     let body =
                         annotate_assert_unit_resolved(ResolvedExpr::Local(result), continuation);
                     effect_call_resolved(

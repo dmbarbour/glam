@@ -5,6 +5,12 @@ use super::*;
 pub(in crate::g_syntax) type ForwardNameId = usize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::g_syntax) struct ForwardName {
+    pub(in crate::g_syntax) canonical: String,
+    pub(in crate::g_syntax) written: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::g_syntax) struct ForwardNamePlan {
     pub(in crate::g_syntax) canonical: String,
     pub(in crate::g_syntax) written: String,
@@ -28,27 +34,36 @@ pub(in crate::g_syntax) struct RecursiveDoPlan {
     step_lines: Vec<usize>,
 }
 
-/// Incremental recursive-do planner driven by the primitive step stream.
-///
-/// Pattern expansion can insert internal steps and multiple source captures,
-/// so planning must observe emitted primitive bindings instead of recovering
-/// them from the surface `DoExpr`.
-#[derive(Default)]
-pub(in crate::g_syntax) struct RecursiveDoTracker {
-    forwards: Vec<ForwardNamePlan>,
-    declarations: Vec<DeclarationPlan>,
-    active: HashMap<String, ForwardNameId>,
-    step_lines: Vec<usize>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::g_syntax) enum RecursiveDoEvent {
+    None,
+    Declare(Vec<ForwardNameId>),
+    Fulfill(ForwardNameId),
 }
 
-impl RecursiveDoTracker {
-    pub(in crate::g_syntax) fn push_abstract(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::g_syntax) struct RecursiveDoStep {
+    pub(in crate::g_syntax) line: usize,
+    pub(in crate::g_syntax) event: RecursiveDoEvent,
+}
+
+/// Assigns forward identities while source names are resolved.
+///
+/// This registry establishes name availability only. It deliberately does not
+/// calculate recursive regions; `RecursiveDoPlan` derives those later from the
+/// completed primitive step stream.
+#[derive(Default)]
+pub(in crate::g_syntax) struct ForwardNameRegistry {
+    forwards: Vec<ForwardName>,
+    active: HashMap<String, ForwardNameId>,
+}
+
+impl ForwardNameRegistry {
+    pub(in crate::g_syntax) fn declare(
         &mut self,
         names: &[String],
         line: usize,
     ) -> Result<Vec<ForwardNameId>, Diagnostic> {
-        let step = self.step_lines.len();
-        self.step_lines.push(line);
         if names.is_empty() {
             return Err(Diagnostic::error(
                 line,
@@ -74,55 +89,75 @@ impl RecursiveDoTracker {
             canonical_names.push(canonical.clone());
 
             let id = self.forwards.len();
-            self.forwards.push(ForwardNamePlan {
+            self.forwards.push(ForwardName {
                 canonical: canonical.clone(),
                 written: written.clone(),
-                declaration_step: step,
-                fulfillment_step: usize::MAX,
-                semantic_start: step,
-                children: Vec::new(),
             });
             self.active.insert(canonical, id);
             declaration_names.push(id);
         }
-        self.declarations.push(DeclarationPlan {
-            step,
-            names: declaration_names.clone(),
-        });
         Ok(declaration_names)
     }
 
-    pub(in crate::g_syntax) fn push_capture(
-        &mut self,
-        written: &str,
-        line: usize,
-    ) -> Option<ForwardNameId> {
-        let step = self.step_lines.len();
-        self.step_lines.push(line);
+    pub(in crate::g_syntax) fn fulfill(&mut self, written: &str) -> Option<ForwardNameId> {
         let canonical = local_name_metadata(written).canonical?;
-        let id = self.active.remove(&canonical)?;
-        self.forwards[id].fulfillment_step = step;
-        Some(id)
+        self.active.remove(&canonical)
     }
 
-    pub(in crate::g_syntax) fn push_internal(&mut self, line: usize) {
-        self.step_lines.push(line);
+    pub(in crate::g_syntax) fn into_forwards(self) -> Vec<ForwardName> {
+        self.forwards
     }
+}
 
-    pub(in crate::g_syntax) fn step_count(&self) -> usize {
-        self.step_lines.len()
-    }
+impl RecursiveDoPlan {
+    pub(in crate::g_syntax) fn build<'a>(
+        steps: impl IntoIterator<Item = &'a RecursiveDoStep>,
+        names: Vec<ForwardName>,
+    ) -> Result<Self, Diagnostic> {
+        let steps = steps.into_iter().collect::<Vec<_>>();
+        let mut forwards = names
+            .into_iter()
+            .map(|name| ForwardNamePlan {
+                canonical: name.canonical,
+                written: name.written,
+                declaration_step: usize::MAX,
+                fulfillment_step: usize::MAX,
+                semantic_start: usize::MAX,
+                children: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let mut declarations = Vec::new();
 
-    pub(in crate::g_syntax) fn finish(mut self) -> Result<RecursiveDoPlan, Diagnostic> {
-        if !self.active.is_empty() {
-            let declaration_step = self
-                .active
-                .values()
-                .map(|id| self.forwards[*id].declaration_step)
-                .min()
-                .expect("nonempty active map has a declaration");
-            let unresolved = self
-                .forwards
+        for (step_index, step) in steps.iter().enumerate() {
+            match &step.event {
+                RecursiveDoEvent::None => {}
+                RecursiveDoEvent::Declare(ids) => {
+                    for id in ids.iter().copied() {
+                        let forward = &mut forwards[id];
+                        debug_assert_eq!(forward.declaration_step, usize::MAX);
+                        forward.declaration_step = step_index;
+                        forward.semantic_start = step_index;
+                    }
+                    declarations.push(DeclarationPlan {
+                        step: step_index,
+                        names: ids.clone(),
+                    });
+                }
+                RecursiveDoEvent::Fulfill(id) => {
+                    let forward = &mut forwards[*id];
+                    debug_assert_eq!(forward.fulfillment_step, usize::MAX);
+                    forward.fulfillment_step = step_index;
+                }
+            }
+        }
+
+        if let Some(declaration_step) = forwards
+            .iter()
+            .filter(|forward| forward.fulfillment_step == usize::MAX)
+            .map(|forward| forward.declaration_step)
+            .min()
+        {
+            let unresolved = forwards
                 .iter()
                 .filter(|forward| {
                     forward.declaration_step == declaration_step
@@ -131,7 +166,7 @@ impl RecursiveDoTracker {
                 .map(|forward| format!("`{}`", forward.canonical))
                 .collect::<Vec<_>>();
             return Err(Diagnostic::error(
-                self.step_lines[declaration_step],
+                steps[declaration_step].line,
                 format!(
                     "recursive do abstract declaration has no later fulfillment for {}",
                     unresolved.join(", ")
@@ -139,18 +174,22 @@ impl RecursiveDoTracker {
             ));
         }
 
-        align_crossing_starts(&mut self.forwards);
-        let roots = build_scope_tree(&mut self.forwards);
-        Ok(RecursiveDoPlan {
-            forwards: self.forwards,
-            declarations: self.declarations,
+        debug_assert!(
+            forwards
+                .iter()
+                .all(|forward| forward.declaration_step != usize::MAX),
+            "every registered forward appears in a primitive declaration step"
+        );
+        align_crossing_starts(&mut forwards);
+        let roots = build_scope_tree(&mut forwards);
+        Ok(Self {
+            forwards,
+            declarations,
             roots,
-            step_lines: self.step_lines,
+            step_lines: steps.iter().map(|step| step.line).collect(),
         })
     }
-}
 
-impl RecursiveDoPlan {
     pub(in crate::g_syntax) fn promotion_warnings(&self) -> Vec<Diagnostic> {
         self.declarations
             .iter()
@@ -263,28 +302,46 @@ mod tests {
     }
 
     fn plan_expr(do_expr: &DoExpr) -> RecursiveDoPlan {
-        let mut tracker = RecursiveDoTracker::default();
+        let mut registry = ForwardNameRegistry::default();
+        let mut steps = Vec::new();
         for step in &do_expr.steps {
             match &step.kind {
                 DoStepKind::Abstract(names) => {
-                    let _ = tracker.push_abstract(names, step.line).unwrap();
+                    let ids = registry.declare(names, step.line).unwrap();
+                    steps.push(RecursiveDoStep {
+                        line: step.line,
+                        event: RecursiveDoEvent::Declare(ids),
+                    });
                 }
                 DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
                     let mut emitted = false;
                     pattern.visit_events(&mut |event| match event {
                         SyntaxPatternEvent::Capture(name) => {
-                            tracker.push_capture(name, step.line);
+                            let event = registry
+                                .fulfill(name)
+                                .map_or(RecursiveDoEvent::None, RecursiveDoEvent::Fulfill);
+                            steps.push(RecursiveDoStep {
+                                line: step.line,
+                                event,
+                            });
                             emitted = true;
                         }
                     });
                     if !emitted {
-                        tracker.push_internal(step.line);
+                        steps.push(RecursiveDoStep {
+                            line: step.line,
+                            event: RecursiveDoEvent::None,
+                        });
                     }
                 }
-                DoStepKind::Then(_) => tracker.push_internal(step.line),
+                DoStepKind::Then(_) => steps.push(RecursiveDoStep {
+                    line: step.line,
+                    event: RecursiveDoEvent::None,
+                }),
             }
         }
-        tracker.finish().expect("recursive-do plan should be valid")
+        RecursiveDoPlan::build(steps.iter(), registry.into_forwards())
+            .expect("recursive-do plan should be valid")
     }
 
     fn plan(steps: Vec<DoStep>) -> RecursiveDoPlan {
@@ -392,20 +449,38 @@ mod tests {
     }
 
     #[test]
-    fn primitive_tracker_counts_internal_steps_without_treating_them_as_fulfillments() {
-        let mut tracker = RecursiveDoTracker::default();
-        assert_eq!(
-            tracker
-                .push_abstract(&["left".to_owned(), "right".to_owned()], 10)
-                .unwrap(),
-            [0, 1]
-        );
-        tracker.push_internal(11);
-        assert_eq!(tracker.push_capture("left", 12), Some(0));
-        tracker.push_internal(13);
-        assert_eq!(tracker.push_capture("right", 14), Some(1));
+    fn planner_counts_internal_steps_without_treating_them_as_fulfillments() {
+        let mut registry = ForwardNameRegistry::default();
+        let ids = registry
+            .declare(&["left".to_owned(), "right".to_owned()], 10)
+            .unwrap();
+        assert_eq!(ids, [0, 1]);
+        let left = registry.fulfill("left").unwrap();
+        let right = registry.fulfill("right").unwrap();
+        let steps = [
+            RecursiveDoStep {
+                line: 10,
+                event: RecursiveDoEvent::Declare(ids),
+            },
+            RecursiveDoStep {
+                line: 11,
+                event: RecursiveDoEvent::None,
+            },
+            RecursiveDoStep {
+                line: 12,
+                event: RecursiveDoEvent::Fulfill(left),
+            },
+            RecursiveDoStep {
+                line: 13,
+                event: RecursiveDoEvent::None,
+            },
+            RecursiveDoStep {
+                line: 14,
+                event: RecursiveDoEvent::Fulfill(right),
+            },
+        ];
 
-        let plan = tracker.finish().unwrap();
+        let plan = RecursiveDoPlan::build(steps.iter(), registry.into_forwards()).unwrap();
         assert_eq!(plan.forwards[0].fulfillment_step, 2);
         assert_eq!(plan.forwards[1].fulfillment_step, 4);
         assert_eq!(plan.roots, [1]);

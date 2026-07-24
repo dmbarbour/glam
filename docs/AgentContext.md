@@ -229,6 +229,9 @@ their detailed scheduling and representation contracts.
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or
   hierarchically; crossing intervals promote later starts with a warning while
-  withholding source visibility until the written declaration. The resolved
-  value and continuation use a compiler-private payload, with no dedicated
-  recursive-do representation in core or evaluation.
+  withholding source visibility until the written declaration. Recursive
+  planning scans the completed primitive-do stream and its explicit
+  declaration/fulfillment provenance; it must not infer regions from surface
+  patterns. The resolved value and continuation use a compiler-private
+  payload, with no dedicated recursive-do representation in core or
+  evaluation.

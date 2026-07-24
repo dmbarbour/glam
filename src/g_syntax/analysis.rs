@@ -428,7 +428,7 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
 }
 
 fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {
-    if let Ok(plan) = analyze_recursive_do_plan(do_expr) {
+    if let Ok(plan) = preview_recursive_do_plan(do_expr) {
         diagnostics.extend(plan.promotion_warnings());
     }
 
@@ -483,31 +483,55 @@ fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {
     }
 }
 
-fn analyze_recursive_do_plan(
+/// Builds only the primitive recursive provenance needed to preview warnings.
+///
+/// Resolution builds the authoritative stream alongside resolved primitive do
+/// steps. This source-level preview exists because unused-local analysis runs
+/// before resolution; `RecursiveDoPlan` itself remains pattern-agnostic.
+fn preview_recursive_do_plan(
     do_expr: &DoExpr,
 ) -> Result<recursive_do::RecursiveDoPlan, Diagnostic> {
-    let mut tracker = recursive_do::RecursiveDoTracker::default();
+    let mut registry = recursive_do::ForwardNameRegistry::default();
+    let mut steps = Vec::new();
     for step in &do_expr.steps {
         match &step.kind {
             DoStepKind::Abstract(names) => {
-                let _ = tracker.push_abstract(names, step.line)?;
+                let ids = registry.declare(names, step.line)?;
+                steps.push(recursive_do::RecursiveDoStep {
+                    line: step.line,
+                    event: recursive_do::RecursiveDoEvent::Declare(ids),
+                });
             }
             DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
                 let mut emitted = false;
                 pattern.visit_events(&mut |event| match event {
                     SyntaxPatternEvent::Capture(name) => {
-                        tracker.push_capture(name, step.line);
+                        let event = registry
+                            .fulfill(name)
+                            .map_or(recursive_do::RecursiveDoEvent::None, |id| {
+                                recursive_do::RecursiveDoEvent::Fulfill(id)
+                            });
+                        steps.push(recursive_do::RecursiveDoStep {
+                            line: step.line,
+                            event,
+                        });
                         emitted = true;
                     }
                 });
                 if !emitted {
-                    tracker.push_internal(step.line);
+                    steps.push(recursive_do::RecursiveDoStep {
+                        line: step.line,
+                        event: recursive_do::RecursiveDoEvent::None,
+                    });
                 }
             }
-            DoStepKind::Then(_) => tracker.push_internal(step.line),
+            DoStepKind::Then(_) => steps.push(recursive_do::RecursiveDoStep {
+                line: step.line,
+                event: recursive_do::RecursiveDoEvent::None,
+            }),
         }
     }
-    tracker.finish()
+    recursive_do::RecursiveDoPlan::build(steps.iter(), registry.into_forwards())
 }
 
 fn mark_used_do_locals(do_expr: &DoExpr, locals: &[LocalName], used: &mut [bool]) {
