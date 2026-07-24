@@ -134,7 +134,7 @@ fn infix_operator_relation(left: SyntaxOperator, right: SyntaxOperator) -> Opera
     };
 
     match (left, right) {
-        (BoolOr, BoolOr) | (BoolAnd, BoolAnd) => OperatorRelation::Same(Associativity::Left),
+        (BoolOr, BoolOr) | (BoolAnd, BoolAnd) => OperatorRelation::Same(Associativity::Right),
         (BoolOr, BoolAnd) | (BoolAnd, BoolOr) => OperatorRelation::Unrelated,
         (EffectBind, EffectBind)
         | (EffectBind, EffectThen)
