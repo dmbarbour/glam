@@ -39,6 +39,9 @@ The evaluator computes C3 linearization from `spec.deps`, then applies
 definitions from least to most derived.
 
 - Named specifications compare and deduplicate by the evaluated `name` key.
+  Every occurrence of one name must retain the same persistent dictionary
+  identity; independently constructed specifications with the same name are
+  an evaluation error.
 - Each anonymous specification receives a traversal-local identity and remains
   distinct even when its contents match another anonymous spec.
 - Anonymous direct dependencies must precede named direct dependencies.

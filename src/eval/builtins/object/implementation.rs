@@ -274,7 +274,7 @@ impl LinearizedObjectSpec {
 fn object_c3_linearization(
     context: &EvalContext,
     spec: &crate::core::Dict,
-    seen: &mut BTreeMap<Key, ()>,
+    seen: &mut BTreeMap<Key, crate::core::Dict>,
     next_anonymous_id: &mut u64,
 ) -> Result<Vec<LinearizedObjectSpec>, EvalError> {
     let entry = LinearizedObjectSpec::new(context, spec.clone(), next_anonymous_id)?;
@@ -386,11 +386,19 @@ fn is_anonymous_object_name(name: &Key) -> bool {
 
 fn remember_object_spec(
     name: &Key,
-    _spec: &crate::core::Dict,
-    seen: &mut BTreeMap<Key, ()>,
+    spec: &crate::core::Dict,
+    seen: &mut BTreeMap<Key, crate::core::Dict>,
 ) -> Result<(), EvalError> {
-    seen.insert(name.clone(), ());
-    Ok(())
+    match seen.get(name) {
+        Some(prior) if !prior.ptr_eq(spec) => Err(EvalError::new(format!(
+            "object specification name {name:?} identifies multiple specifications"
+        ))),
+        Some(_) => Ok(()),
+        None => {
+            seen.insert(name.clone(), spec.clone());
+            Ok(())
+        }
+    }
 }
 
 fn object_dep_specs(context: &EvalContext, deps: &Value) -> Result<Vec<Value>, EvalError> {

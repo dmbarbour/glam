@@ -3212,6 +3212,27 @@ fn object_dependencies_use_c3_deduplication() {
 }
 
 #[test]
+fn object_dependencies_reject_distinct_specs_with_the_same_name() {
+    let parsed = parse(
+        "language g0\nleft = object \"shared\" with\n  left = \"Left\"\nright = object \"shared\" with\n  right = \"Right\"\nobject child extends left, right\nasm.result = child\n",
+    );
+    let context = CompileContext::from_module_path(["assembly"]);
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    let error = fully_evaluated_error(
+        value_at_atom_path(&value, &["asm", "result"]).expect("assembly result should exist"),
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("identifies multiple specifications"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn object_dependencies_can_explicitly_inherit_from_dictionaries() {
     let parsed = parse(
         "language g0\nimport 'std\nbase = { hello:\"Hello\", target:\"Base\" }\nobject child extends object_from_dict base with\n  target := \"World\"\n  text = hello ++ \", \" ++ target ++ \"!\"\nasm.result = child.text\n",
