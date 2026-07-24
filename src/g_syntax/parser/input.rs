@@ -67,7 +67,6 @@ pub(super) struct TokenView<'lex, 'source> {
 }
 
 impl<'lex, 'source> TokenView<'lex, 'source> {
-    #[cfg(test)]
     pub(super) fn whole(source: &'lex LexedSource<'source>) -> Self {
         Self {
             source,
@@ -640,6 +639,10 @@ pub(super) fn parse_expression_fragment<O>(
     let lexical = super::lexical::lex_source(text);
     if lexical.has_errors() {
         return Err(lexical.diagnostics().to_vec());
+    }
+    let layout_diagnostics = super::layout::validate_delimited_layouts(&lexical);
+    if !layout_diagnostics.is_empty() {
+        return Err(layout_diagnostics);
     }
     let whole = TokenView::whole(&lexical);
     let start = whole

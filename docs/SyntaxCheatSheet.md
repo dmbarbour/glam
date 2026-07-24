@@ -77,6 +77,9 @@ foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
 , name1:Expr1
 , name2:Expr2
 }
+{name1:Expr1,        # opening-line items do not set the later anchor
+  name2:Expr2,
+  name3:Expr3}
 
 # 'with' updates (same =/:=/::= discipline as toplevel):
 d2 = d1 with
@@ -102,6 +105,14 @@ Dict as self with           # object-style scope: _x prior, ^a escapes to host
 , 1
 , 2
 ]
+[1,2,3,4,           # trailing separator: next member selects anchor
+  5,6,7,8]
+[1,2                 # leading separators select the same kind of anchor
+  ,3,4
+  ,5,6]
+[make                # ordinary expression continuation within one member
+    long_argument,
+  next_member]
 xs ++ ys            # append (no cons operator; lists are finger-tree ropes)
 [x] ++ xs           # "cons" via append; also valid in patterns
 list.at n xs         # zero-based lookup, errors out of bounds
@@ -109,6 +120,13 @@ list.at n xs         # zero-based lookup, errors out of bounds
 (,)                 # empty tuple: tuple:[]
 (a,)   (,a)         # singleton tuple: tuple:[a]
 (a,b)   (,a,b,)     # tuple; boundary commas are optional
+(first,              # first next-line member selects the content anchor
+  second,
+  third)
+
+# Inside (), [], and {}, commas/semicolons—not indentation—separate members.
+# Later member/separator lines align at the first post-opening contribution;
+# other lines continue that member expression. Closers use the terminal rule.
 
 "inline text"       # raw — NO escape characters, ever
 """

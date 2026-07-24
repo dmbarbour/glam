@@ -2,7 +2,7 @@ use chumsky::prelude::*;
 
 use super::*;
 use crate::diagnostic::Severity;
-use crate::g_syntax::parser::layout::{LayoutBase, LayoutView};
+use crate::g_syntax::parser::layout::{LayoutBase, LayoutView, validate_delimited_layouts};
 use crate::g_syntax::parser::lexical::lex_source;
 
 #[test]
@@ -288,6 +288,48 @@ fn hanging_layout_uses_the_inline_member_column_for_later_lines() {
     assert_eq!(block.statements()[0].line(), 1);
     assert_eq!(block.statements()[1].line(), 2);
     assert_eq!(block.boundary().map(|line| line.line()), Some(4));
+}
+
+#[test]
+fn delimited_layout_anchors_only_post_opening_group_contributions() {
+    for source in [
+        "[1,2,3,4,\n  5,6,7,\n  8,9,10]",
+        "[1,2\n  ,3,4\n  ,5,6]",
+        "[make\n    long_argument,\n  next_member]",
+        "[\n  make\n    long_argument,\n  next_member\n]",
+        "[\n  make\n  long_argument,\n  next_member\n]",
+        "(\n  first,\n  second\n)",
+        "{first:1,\n  second:2,\n  third:3}",
+        "do { first\n   ; second\n   ; third }",
+        ".with {first:1,\n  second:2,\n  third:3}",
+    ] {
+        let lexical = lex_source(source);
+        assert_eq!(validate_delimited_layouts(&lexical), [], "{source}");
+    }
+}
+
+#[test]
+fn delimited_layout_reports_misaligned_contributions() {
+    for (source, expected) in [
+        ("[1,2,\n  3,4,\n   5,6]", "expected content indentation 2"),
+        (
+            "do { first\n   ; second\n    ; third }",
+            "expected content indentation 3",
+        ),
+        (
+            "{first:1,\n  second:2,\n   third:3}",
+            "expected content indentation 2",
+        ),
+    ] {
+        let lexical = lex_source(source);
+        let diagnostics = validate_delimited_layouts(&lexical);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "`{source}` reported {diagnostics:#?}"
+        );
+    }
 }
 
 fn diagnostics<'lex, 'source>(

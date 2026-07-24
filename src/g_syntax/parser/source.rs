@@ -4,6 +4,7 @@ use super::declaration::{
 };
 use super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::input::{ParseSession, TokenView};
+use super::layout::validate_delimited_layouts;
 use super::lexical::{TokenKind, lex_source};
 
 pub fn parse_source(source: &[u8]) -> ParsedSource {
@@ -31,6 +32,7 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
         };
     }
     report_orphan_continuations(&lexical, &mut diagnostics);
+    diagnostics.extend(validate_delimited_layouts(&lexical));
 
     let mut declarations = Vec::with_capacity(lexical.declarations().len());
     let mut token_session = ParseSession::new(&lexical);

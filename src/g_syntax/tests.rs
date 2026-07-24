@@ -2507,6 +2507,59 @@ fn parses_multiline_literals_with_leading_commas() {
 }
 
 #[test]
+fn delimited_groups_anchor_post_opening_contribution_lines() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "dense = [1,2,3,4,\n",
+        "  5,6,7,8,9,10]\n",
+        "leading = [1,2\n",
+        "  ,3,4\n",
+        "  ,5,6]\n",
+        "continued = [\n",
+        "  make\n",
+        "    long_argument,\n",
+        "  next_member\n",
+        "]\n",
+        "tuple = (first,\n",
+        "  second,\n",
+        "  third)\n",
+        "dict = {first:1,\n",
+        "  second:2,\n",
+        "  third:3}\n",
+        "effect = do { .r ()\n",
+        "  ; .r ()\n",
+        "  ; .r () }\n",
+    ));
+
+    assert_eq!(parsed.diagnostics, []);
+}
+
+#[test]
+fn delimited_group_diagnostics_distinguish_members_and_floors() {
+    for (source, line, expected) in [
+        (
+            "language g0\nvalue = [1,2,\n  3,\n   4]\n",
+            4,
+            "expected content indentation 2",
+        ),
+        (
+            "language g0\nvalue = [\nmember,\n  next\n]\n",
+            3,
+            "expression continuation is indented 0 spaces; expected at least 1",
+        ),
+    ] {
+        let parsed = parse(source);
+        assert!(
+            parsed.diagnostics.iter().any(|diagnostic| {
+                diagnostic.line == line && diagnostic.message.contains(expected)
+            }),
+            "`{source}` reported {:#?}",
+            parsed.diagnostics
+        );
+    }
+}
+
+#[test]
 fn parses_expression_indexed_names_and_keys() {
     let parsed = parse("language g0\nd = { [42]:\"World\" }\nasm.result = d.[42] ++ d.['tail]\n");
 

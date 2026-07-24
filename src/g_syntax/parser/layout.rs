@@ -1,5 +1,7 @@
+use crate::g_syntax::Diagnostic;
+
 use super::input::{TokenRange, TokenView};
-use super::lexical::TokenKind;
+use super::lexical::{Delimiter, LeadingTrivia, LexedSource, TokenKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LayoutBase {
@@ -295,4 +297,126 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
         matches!(first.token().kind(), TokenKind::Close { .. })
             && tokens.all(|token| matches!(token.token().kind(), TokenKind::Close { .. }))
     }
+}
+
+/// Validates presentation inside every lexer-owned delimiter group once.
+///
+/// Commas or semicolons remain the sole member separators. Layout only checks
+/// the column of group-level contributions made after the opening line: the
+/// first member, a leading separator, or a member following a trailing
+/// separator. Ordinary expression-continuation lines neither establish nor
+/// move that anchor.
+pub(super) fn validate_delimited_layouts(source: &LexedSource<'_>) -> Vec<Diagnostic> {
+    let whole = TokenView::whole(source);
+    let mut diagnostics = Vec::new();
+
+    for (group_id, group) in source.groups().iter().enumerate() {
+        if group.close_token().is_none() {
+            continue;
+        }
+        let Some(contents) = whole.group_contents(group_id) else {
+            continue;
+        };
+        let separator = group_separator(source, group.delimiter(), group.open_token());
+        let contributions = delimited_contributions(contents, separator);
+
+        let Some((_, first_token)) = contributions.first().copied() else {
+            continue;
+        };
+        let first_line = whole.line_at_span(first_token.span()).unwrap_or(1);
+        let anchor = whole.column_at_span(first_token.span()).unwrap_or(0);
+        for (_, token) in contributions.into_iter().skip(1) {
+            let indentation = whole.column_at_span(token.span()).unwrap_or(0);
+            if indentation != anchor {
+                diagnostics.push(Diagnostic::error(
+                    whole.line_at_span(token.span()).unwrap_or(first_line),
+                    format!(
+                        "delimited group contribution is indented {indentation} spaces; expected content indentation {anchor}"
+                    ),
+                ));
+            }
+        }
+    }
+
+    diagnostics
+}
+
+fn group_separator(
+    source: &LexedSource<'_>,
+    delimiter: Delimiter,
+    open_index: usize,
+) -> &'static str {
+    if delimiter != Delimiter::Brace || !brace_has_compound_introducer(source, open_index) {
+        return ",";
+    }
+    ";"
+}
+
+fn brace_has_compound_introducer(source: &LexedSource<'_>, open_index: usize) -> bool {
+    let Some((prior_index, prior)) = source.tokens()[..open_index]
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, token)| !matches!(token.kind(), TokenKind::LineStart { .. }))
+    else {
+        return false;
+    };
+    let TokenKind::Name(name) = prior.kind() else {
+        return false;
+    };
+    if !matches!(*name, "do" | "let" | "where" | "with") {
+        return false;
+    }
+    if prior.leading() != LeadingTrivia::Joint {
+        return true;
+    }
+    !prior_index.checked_sub(1).is_some_and(|previous| {
+        matches!(
+            source.tokens()[previous].kind(),
+            TokenKind::Symbol("." | "'" | ":")
+        )
+    })
+}
+
+fn delimited_contributions<'lex, 'source>(
+    contents: TokenView<'lex, 'source>,
+    separator: &str,
+) -> Vec<(usize, &'lex super::lexical::SpannedToken<'source>)> {
+    let significant = contents
+        .top_level()
+        .filter(|indexed| !matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
+        .map(|indexed| (indexed.index(), indexed.token()))
+        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+
+    if let Some(first) = significant.first().copied() {
+        candidates.push(first);
+    }
+    for (position, current) in significant.iter().copied().enumerate() {
+        if !matches!(current.1.kind(), TokenKind::Symbol(symbol) if *symbol == separator) {
+            continue;
+        }
+        candidates.push(current);
+        if let Some(next) = significant.get(position + 1).copied() {
+            candidates.push(next);
+        }
+    }
+
+    candidates.sort_unstable_by_key(|(index, _)| *index);
+    candidates.dedup_by_key(|(index, _)| *index);
+    candidates.retain(|(index, token)| token_begins_line(contents, *index, token));
+    candidates
+}
+
+fn token_begins_line(
+    contents: TokenView<'_, '_>,
+    index: usize,
+    token: &super::lexical::SpannedToken<'_>,
+) -> bool {
+    token.leading() == LeadingTrivia::LineBreak
+        || index.checked_sub(1).is_some_and(|previous| {
+            contents
+                .token_at(previous)
+                .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
+        })
 }

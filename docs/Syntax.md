@@ -61,6 +61,41 @@ nested in an object body. The goal is to simplify error isolation, local
 reasoning, and parallel processing of declarations without sacrificing the
 ordinary aligned-closing style for delimited declarations.
 
+Balanced `()`, `[]`, and `{}` groups are hard expression boundaries, but
+newlines inside them still validate the visual structure. Commas and
+semicolons remain the only member separators; indentation never supplies a
+missing separator. Content written on the opening delimiter's line does not
+set an indentation anchor. Instead, the first later line that begins a member
+after a separator or contributes a leading separator establishes the group's
+content anchor:
+
+```g
+dense = [1,2,3,4,
+  5,6,7,8]
+
+leading = [1,2
+  ,3,4
+  ,5,6]
+```
+
+Later member or separator contribution lines align with that anchor. Other
+lines remain ordinary continuations of the current member expression and do
+not move the anchor:
+
+```g
+values = [
+  build
+    first_input,
+  second_value
+]
+```
+
+When the first item itself begins after the opening line, it establishes the
+same anchor. Every content line remains strictly to the right of the enclosing
+expression's floor. Closing delimiters retain the terminal-closer rule above.
+These acceptance rules permit dense and leading-separator styles; a formatter
+may consistently choose a stricter house style.
+
 Each declaration starts with either a keyword (such as `import`, `object`, or `unique`) or is a basic definition of form `name = Expr` or one of its variants (args in lhs, `:=`, `::=`, etc.). We'll favor basic definitions where feasible, thus keywords are mostly for special forms.
 
 In context of errors, the errors can be reported but we can also make a best effort to proceed with errors. This might depend on configuration options or command-line arguments.
@@ -546,6 +581,13 @@ Multi-line literal dictionaries accept a leading comma for convenient line-editi
         ...
         }
 
+They may instead keep initial members on the opening line. The first later
+member line selects the content anchor:
+
+        { name1:Expr1,
+          name2:Expr2,
+          name3:Expr3 }
+
 As a special rule, the usual syntax for dictionaries (literals, with notation) does not enable users to directly touch `spec`. The name `spec` is used by the compiler when modeling objects upon dictionaries. Escape hatches are provided via built-in functions, but I don't want people accidentally mismatching `spec` with object definitions. 
 
 Dictionaries and objects have access to a `with` syntax for definition-style updates. This supports explicit overrides. 
@@ -661,6 +703,16 @@ Multi-line lists admit a leading comma for consistent line editing.
         , 3
         ]
 
+Opening-line items need not determine later indentation. Both a trailing
+separator and a leading separator can introduce the content anchor:
+
+        [1,2,3,4,
+          5,6,7,8]
+
+        [1,2
+          ,3,4
+          ,5,6]
+
 We'll use `++` to compose lists by appending them. In contrast to Haskell's `x:xs`, there is no dedicated 'cons' operator, though we can define `cons x xs = [x]++xs`. One motive for this is symmetry: lists are typically implemented as finger-tree ropes, so we can work efficiently at either end (and split or append in log-time). We may generally use `++` in pattern matching, limited to one variable-length list, e.g. `[x]++xs` or `xs++[x]` or `[x0,x1]++xs++[xn]`. 
 
 We can introduce a few term annotations to manage representations, e.g. flattening a list into an array. We'll rely on accelerated functions on lists, too.
@@ -687,6 +739,13 @@ trailing comma for consistent multiline editing:
           , first
           , second
           )
+
+As with every delimited group, an opening-line element does not fix the later
+content anchor:
+
+        value = (first,
+          second,
+          third)
 
 Missing internal elements remain invalid, so `(a,,b)` is not a tuple. Commas
 are literal separators rather than Haskell-style tuple-section operators; write
