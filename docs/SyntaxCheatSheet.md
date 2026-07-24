@@ -391,6 +391,29 @@ match Expr with P -?> ...           # tentative arrow for match
 ```
 
 ```
+# Conditions are pass/fail effects:
+X and Y                 # sequence: X must pass before Y
+X or Y                  # raw ordered choice, equivalent to .alt X Y
+
+# A branching handler may continue once per successful alternative:
+list.pure do
+    X or Y
+    .r Result
+
+# Commit only after a complete path succeeds:
+.cut do
+    X or Y
+    LaterGuard
+    .r Result
+
+# Parentheses group but do not commit. This commits too early if
+# LaterGuard should be able to fall back from X to Y:
+(.cut (X or Y)) =>> LaterGuard
+
+# if/match supply an outer cut around their complete choice tree.
+```
+
+```
 # Patterns:
 name                # bind
 _name               # bind, no unused warning

@@ -313,6 +313,10 @@ a + (b * c)          # parentheses required
 A or (B and C)       # parentheses required
 ```
 
+For `or`, parentheses determine grouping but do not delimit its effectful
+choice. See *Conditionals* for the distinction between raw branching and a
+complete search enclosed by `.cut`.
+
 The same explicit-grouping rule applies to opposing directional operators
 such as `>>` and `<<`. Other deliberately useful relationships remain, such
 as arithmetic within a comparison and comparisons within a homogeneous
@@ -1234,9 +1238,43 @@ not become an empty, no-op dictionary union.
 
 ## Conditionals
 
-I propose to model conditional behavior as effectful and backtracking, i.e. in terms of `.alt/.fail/.cut`. 
+I propose to model conditional behavior as effectful and backtracking, i.e. in terms of `.alt/.fail/.cut`.
 
-Boolean expressions become pass/fail effects, i.e. `.r ()` and `.fail`. This impacts all boolean operators, e.g. `(3 > 4)` evaluates as `.fail`, `or` is modeled via `.alt`, `and` via `.seq`. Negation can be expressed via staged effect:
+Boolean expressions become pass/fail effects, i.e. `.r ()` and `.fail`. This
+impacts all boolean operators: `(3 > 4)` evaluates as `.fail`, `and` sequences
+with `.seq`, and `X or Y` constructs the raw ordered choice `.alt X Y`.
+
+`or` is not itself a Boolean value or an implicit commitment point. Under a
+branching handler, a continuation after `X or Y` may run once for each
+successful alternative. Parentheses only group that choice:
+
+```g
+list.pure do
+  X or Y
+  .r Result
+```
+
+To select one result manually, place `.cut` around the complete computation
+whose failure should permit reconsidering an alternative:
+
+```g
+.cut do
+  X or Y
+  LaterGuard
+  .r Result
+```
+
+This differs from `(.cut (X or Y)) =>> LaterGuard`, which commits to `X` or
+`Y` before learning whether `LaterGuard` succeeds. Whether a raw top-level
+`or` is accepted is handler policy: a branching handler such as `list.pure`
+supports it, while a general effect handler may require an enclosing `.cut`.
+
+Conditional forms such as `if` and `match` supply the correctly placed outer
+cut around their entire generated choice tree. They therefore return at most
+one result and do not expose branching merely because their guards contain
+`or`.
+
+Negation can be expressed via staged effect:
 
         not C = .alt (C =>> .r (.fail)) (.r (.r ())) >>= \ op -> op
         could C = not (not C)

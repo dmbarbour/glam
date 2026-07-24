@@ -223,9 +223,30 @@ Fixpoint is not compatible with all effects. But it is feasible to restrict some
 
 ### Effectful Pattern Matching
 
-I propose to desugar syntax for conditional behavior, such as pattern matching, into a choice effect. The choice effect supports deferred branching for cases sharing a common prefix, and empty choice expresses match failure or backtracking. A conventional `Pattern -> Outcome` syntax may desugar to `PatternEffect >>= \ vars -> Return Outcome` such that Pattern binds variables in scope of Outcome, and Return serves as a stage separator for further effects. We can introduce an alternative separator where the Return is explicit, perhaps `Pattern >> Return Outcome`, such that the RHS may be an effectful expression expanding to multiple Outcomes. 
+I propose to desugar syntax for conditional behavior, such as pattern matching, into a choice effect. The choice effect supports deferred branching for cases sharing a common prefix, and empty choice expresses match failure or backtracking. A conventional `Pattern -> Outcome` syntax may desugar to `PatternEffect >>= \ vars -> Return Outcome` such that Pattern binds variables in scope of Outcome, and Return serves as a stage separator for further effects. We can introduce an alternative separator where the Return is explicit, perhaps `Pattern >> Return Outcome`, such that the RHS may be an effectful expression expanding to multiple Outcomes.
 
-We should carefully distinguish global non-deterministic choice from local pattern branching. They have distinct intentions, connotations, use cases. With patterns, we predictably 'commit' to the first match, and choice is scoped syntactically. Fortunately, we don't need fully indexed choice because pattern matching is hierarchically structured. It seems adequate to support global 'Choice' and local 'Alt' as distinct constructors.
+We should carefully distinguish an explicitly branching effect from local
+conditional search. `X or Y` is effect-level sugar for the raw, ordered
+alternative `.alt X Y`. Under a branching handler, a following continuation
+may therefore run for every successful alternative. Parentheses group the
+effect but do not commit it.
+
+Conditional syntax instead places its complete generated choice tree under
+one top-level `.cut`. This commits to the first *complete* successful path,
+not merely the first guard that initially succeeds. Users requesting the same
+behavior manually should place the cut around the whole computation:
+
+```g
+.cut do
+  X or Y
+  LaterGuard
+  .r Result
+```
+
+Cutting only `(X or Y)` commits before `LaterGuard`; if that later guard
+fails, the handler cannot reconsider `Y`. Explicit raw choice remains useful,
+and whether an undelimited top-level `.alt` is accepted is handler policy.
+Conditional syntax itself never leaks multiple results.
 
 An intriguing opportunity is to mix choice with other effects. For example, a pattern reads from a queue and matches only some read values. Ideally, such operations are reverted when the match fails, implicitly checkpointing state. Generic integration is feasible by introducing a `(Cut altOps)` effect as a standard delimiter for backtracking of Alt branches.
 
