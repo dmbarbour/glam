@@ -2,8 +2,10 @@
 
 mod do_expr;
 mod expression;
+mod pattern;
 mod scope;
 
 pub(in crate::g_syntax) use do_expr::*;
 pub(in crate::g_syntax) use expression::*;
+pub(in crate::g_syntax) use pattern::*;
 pub(in crate::g_syntax) use scope::*;

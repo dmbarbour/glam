@@ -24,95 +24,105 @@ pub(in crate::g_syntax) struct DeclarationPlan {
 pub(in crate::g_syntax) struct RecursiveDoPlan {
     pub(in crate::g_syntax) forwards: Vec<ForwardNamePlan>,
     pub(in crate::g_syntax) declarations: Vec<DeclarationPlan>,
-    pub(in crate::g_syntax) declarations_at: Vec<Vec<ForwardNameId>>,
-    pub(in crate::g_syntax) fulfillment_at: Vec<Option<ForwardNameId>>,
     pub(in crate::g_syntax) roots: Vec<ForwardNameId>,
+    step_lines: Vec<usize>,
 }
 
-impl RecursiveDoPlan {
-    pub(in crate::g_syntax) fn build(do_expr: &DoExpr) -> Result<Self, Diagnostic> {
-        let mut forwards = Vec::<ForwardNamePlan>::new();
-        let mut declarations = Vec::<DeclarationPlan>::new();
-        let mut declarations_at = vec![Vec::new(); do_expr.steps.len()];
-        let mut fulfillment_at = vec![None; do_expr.steps.len()];
-        let mut active = HashMap::<String, ForwardNameId>::new();
+/// Incremental recursive-do planner driven by the primitive step stream.
+///
+/// Pattern expansion can insert internal steps and multiple source captures,
+/// so planning must observe emitted primitive bindings instead of recovering
+/// them from the surface `DoExpr`.
+#[derive(Default)]
+pub(in crate::g_syntax) struct RecursiveDoTracker {
+    forwards: Vec<ForwardNamePlan>,
+    declarations: Vec<DeclarationPlan>,
+    active: HashMap<String, ForwardNameId>,
+    step_lines: Vec<usize>,
+}
 
-        for (step_index, step) in do_expr.steps.iter().enumerate() {
-            match &step.kind {
-                DoStepKind::Abstract(names) => {
-                    if names.is_empty() {
-                        return Err(Diagnostic::error(
-                            step.line,
-                            "recursive do abstract declaration requires at least one name",
-                        ));
-                    }
-
-                    let mut declaration_names = Vec::with_capacity(names.len());
-                    let mut canonical_names = Vec::with_capacity(names.len());
-                    for written in names {
-                        let Some(canonical) = local_name_metadata(written).canonical else {
-                            return Err(Diagnostic::error(
-                                step.line,
-                                "recursive do abstract declarations require accessible local names",
-                            ));
-                        };
-                        if canonical_names.contains(&canonical) || active.contains_key(&canonical) {
-                            return Err(Diagnostic::error(
-                                step.line,
-                                format!(
-                                    "duplicate recursive do abstract declaration for `{canonical}`"
-                                ),
-                            ));
-                        }
-                        canonical_names.push(canonical.clone());
-
-                        let id = forwards.len();
-                        forwards.push(ForwardNamePlan {
-                            canonical: canonical.clone(),
-                            written: written.clone(),
-                            declaration_step: step_index,
-                            fulfillment_step: usize::MAX,
-                            semantic_start: step_index,
-                            children: Vec::new(),
-                        });
-                        active.insert(canonical, id);
-                        declaration_names.push(id);
-                    }
-                    declarations_at[step_index] = declaration_names.clone();
-                    declarations.push(DeclarationPlan {
-                        step: step_index,
-                        names: declaration_names,
-                    });
-                }
-                DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
-                    let captures = pattern.captures();
-                    debug_assert!(
-                        captures.len() <= 1,
-                        "primitive do planning currently receives at most one capture per pattern"
-                    );
-                    let Some(name) = captures.first().copied() else {
-                        continue;
-                    };
-                    let Some(canonical) = local_name_metadata(name).canonical else {
-                        continue;
-                    };
-                    let Some(id) = active.remove(&canonical) else {
-                        continue;
-                    };
-                    forwards[id].fulfillment_step = step_index;
-                    fulfillment_at[step_index] = Some(id);
-                }
-                DoStepKind::Then(_) => {}
-            }
+impl RecursiveDoTracker {
+    pub(in crate::g_syntax) fn push_abstract(
+        &mut self,
+        names: &[String],
+        line: usize,
+    ) -> Result<Vec<ForwardNameId>, Diagnostic> {
+        let step = self.step_lines.len();
+        self.step_lines.push(line);
+        if names.is_empty() {
+            return Err(Diagnostic::error(
+                line,
+                "recursive do abstract declaration requires at least one name",
+            ));
         }
 
-        if !active.is_empty() {
-            let declaration_step = active
+        let mut declaration_names = Vec::with_capacity(names.len());
+        let mut canonical_names = Vec::with_capacity(names.len());
+        for written in names {
+            let Some(canonical) = local_name_metadata(written).canonical else {
+                return Err(Diagnostic::error(
+                    line,
+                    "recursive do abstract declarations require accessible local names",
+                ));
+            };
+            if canonical_names.contains(&canonical) || self.active.contains_key(&canonical) {
+                return Err(Diagnostic::error(
+                    line,
+                    format!("duplicate recursive do abstract declaration for `{canonical}`"),
+                ));
+            }
+            canonical_names.push(canonical.clone());
+
+            let id = self.forwards.len();
+            self.forwards.push(ForwardNamePlan {
+                canonical: canonical.clone(),
+                written: written.clone(),
+                declaration_step: step,
+                fulfillment_step: usize::MAX,
+                semantic_start: step,
+                children: Vec::new(),
+            });
+            self.active.insert(canonical, id);
+            declaration_names.push(id);
+        }
+        self.declarations.push(DeclarationPlan {
+            step,
+            names: declaration_names.clone(),
+        });
+        Ok(declaration_names)
+    }
+
+    pub(in crate::g_syntax) fn push_capture(
+        &mut self,
+        written: &str,
+        line: usize,
+    ) -> Option<ForwardNameId> {
+        let step = self.step_lines.len();
+        self.step_lines.push(line);
+        let canonical = local_name_metadata(written).canonical?;
+        let id = self.active.remove(&canonical)?;
+        self.forwards[id].fulfillment_step = step;
+        Some(id)
+    }
+
+    pub(in crate::g_syntax) fn push_internal(&mut self, line: usize) {
+        self.step_lines.push(line);
+    }
+
+    pub(in crate::g_syntax) fn step_count(&self) -> usize {
+        self.step_lines.len()
+    }
+
+    pub(in crate::g_syntax) fn finish(mut self) -> Result<RecursiveDoPlan, Diagnostic> {
+        if !self.active.is_empty() {
+            let declaration_step = self
+                .active
                 .values()
-                .map(|id| forwards[*id].declaration_step)
+                .map(|id| self.forwards[*id].declaration_step)
                 .min()
                 .expect("nonempty active map has a declaration");
-            let unresolved = forwards
+            let unresolved = self
+                .forwards
                 .iter()
                 .filter(|forward| {
                     forward.declaration_step == declaration_step
@@ -121,7 +131,7 @@ impl RecursiveDoPlan {
                 .map(|forward| format!("`{}`", forward.canonical))
                 .collect::<Vec<_>>();
             return Err(Diagnostic::error(
-                do_expr.steps[declaration_step].line,
+                self.step_lines[declaration_step],
                 format!(
                     "recursive do abstract declaration has no later fulfillment for {}",
                     unresolved.join(", ")
@@ -129,18 +139,19 @@ impl RecursiveDoPlan {
             ));
         }
 
-        align_crossing_starts(&mut forwards);
-        let roots = build_scope_tree(&mut forwards);
-        Ok(Self {
-            forwards,
-            declarations,
-            declarations_at,
-            fulfillment_at,
+        align_crossing_starts(&mut self.forwards);
+        let roots = build_scope_tree(&mut self.forwards);
+        Ok(RecursiveDoPlan {
+            forwards: self.forwards,
+            declarations: self.declarations,
             roots,
+            step_lines: self.step_lines,
         })
     }
+}
 
-    pub(in crate::g_syntax) fn promotion_warnings(&self, do_expr: &DoExpr) -> Vec<Diagnostic> {
+impl RecursiveDoPlan {
+    pub(in crate::g_syntax) fn promotion_warnings(&self) -> Vec<Diagnostic> {
         self.declarations
             .iter()
             .filter_map(|declaration| {
@@ -160,10 +171,10 @@ impl RecursiveDoPlan {
                     .collect::<Vec<_>>()
                     .join(", ");
                 Some(Diagnostic::warn(
-                    do_expr.steps[declaration.step].line,
+                    self.step_lines[declaration.step],
                     format!(
                         "crossing recursive regions move {names} into a `.fix` begun on line {}; align the declarations to make the wider fixpoint scope explicit",
-                        do_expr.steps[earliest].line
+                        self.step_lines[earliest]
                     ),
                 ))
             })
@@ -251,13 +262,37 @@ mod tests {
         }
     }
 
+    fn plan_expr(do_expr: &DoExpr) -> RecursiveDoPlan {
+        let mut tracker = RecursiveDoTracker::default();
+        for step in &do_expr.steps {
+            match &step.kind {
+                DoStepKind::Abstract(names) => {
+                    let _ = tracker.push_abstract(names, step.line).unwrap();
+                }
+                DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
+                    let mut emitted = false;
+                    pattern.visit_events(&mut |event| match event {
+                        SyntaxPatternEvent::Capture(name) => {
+                            tracker.push_capture(name, step.line);
+                            emitted = true;
+                        }
+                    });
+                    if !emitted {
+                        tracker.push_internal(step.line);
+                    }
+                }
+                DoStepKind::Then(_) => tracker.push_internal(step.line),
+            }
+        }
+        tracker.finish().expect("recursive-do plan should be valid")
+    }
+
     fn plan(steps: Vec<DoStep>) -> RecursiveDoPlan {
-        RecursiveDoPlan::build(&DoExpr {
+        plan_expr(&DoExpr {
             steps,
             result: Box::new(SyntaxExpr::Unit),
             result_line: 99,
         })
-        .expect("recursive-do plan should be valid")
     }
 
     #[test]
@@ -272,20 +307,7 @@ mod tests {
         assert_eq!(original.roots, [2]);
         assert_eq!(original.forwards[2].children, [0]);
         assert_eq!(original.forwards[0].children, [1]);
-        assert!(
-            original
-                .promotion_warnings(&DoExpr {
-                    steps: vec![
-                        abstract_names(&["x", "y", "z"], 1),
-                        value_bind("y", 2),
-                        value_bind("x", 3),
-                        value_bind("z", 4),
-                    ],
-                    result: Box::new(SyntaxExpr::Unit),
-                    result_line: 99,
-                })
-                .is_empty()
-        );
+        assert!(original.promotion_warnings().is_empty());
 
         let reordered = plan(vec![
             abstract_names(&["z", "x", "y"], 1),
@@ -315,7 +337,7 @@ mod tests {
             result: Box::new(SyntaxExpr::Unit),
             result_line: 16,
         };
-        let plan = RecursiveDoPlan::build(&do_expr).unwrap();
+        let plan = plan_expr(&do_expr);
 
         assert_eq!(plan.forwards[0].semantic_start, 0);
         assert_eq!(plan.forwards[1].semantic_start, 0);
@@ -323,7 +345,7 @@ mod tests {
         assert_eq!(plan.roots, [2]);
         assert_eq!(plan.forwards[2].children, [1]);
         assert_eq!(plan.forwards[1].children, [0]);
-        let warnings = plan.promotion_warnings(&do_expr);
+        let warnings = plan.promotion_warnings();
         assert_eq!(warnings.len(), 2);
         assert_eq!(warnings[0].line, 11);
         assert_eq!(warnings[1].line, 12);
@@ -359,13 +381,34 @@ mod tests {
             result: Box::new(SyntaxExpr::Unit),
             result_line: 25,
         };
-        let plan = RecursiveDoPlan::build(&do_expr).unwrap();
-        let warnings = plan.promotion_warnings(&do_expr);
+        let plan = plan_expr(&do_expr);
+        let warnings = plan.promotion_warnings();
 
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].line, 21);
         assert!(warnings[0].message.contains("`b`"));
         assert!(!warnings[0].message.contains("`c`"));
         assert!(warnings[0].message.contains("line 20"));
+    }
+
+    #[test]
+    fn primitive_tracker_counts_internal_steps_without_treating_them_as_fulfillments() {
+        let mut tracker = RecursiveDoTracker::default();
+        assert_eq!(
+            tracker
+                .push_abstract(&["left".to_owned(), "right".to_owned()], 10)
+                .unwrap(),
+            [0, 1]
+        );
+        tracker.push_internal(11);
+        assert_eq!(tracker.push_capture("left", 12), Some(0));
+        tracker.push_internal(13);
+        assert_eq!(tracker.push_capture("right", 14), Some(1));
+
+        let plan = tracker.finish().unwrap();
+        assert_eq!(plan.forwards[0].fulfillment_step, 2);
+        assert_eq!(plan.forwards[1].fulfillment_step, 4);
+        assert_eq!(plan.roots, [1]);
+        assert_eq!(plan.forwards[1].children, [0]);
     }
 }

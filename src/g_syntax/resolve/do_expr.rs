@@ -1,4 +1,4 @@
-use super::super::recursive_do::{ForwardNameId, RecursiveDoPlan};
+use super::super::recursive_do::{ForwardNameId, RecursiveDoPlan, RecursiveDoTracker};
 use super::super::*;
 use crate::number::Number;
 
@@ -12,7 +12,11 @@ struct ResolvedForward {
     continuation_parameter: Option<BindingId>,
 }
 
-enum ResolvedDoStep {
+/// Resolved primitive do step consumed by recursive planning and emission.
+///
+/// Pattern lowering appends to this stream directly; it never reconstructs a
+/// surface `DoExpr` or invents source-spellable temporary names.
+enum PrimitiveDoStep {
     Abstract,
     Bind {
         operation: ResolvedExpr<Value>,
@@ -28,20 +32,20 @@ enum ResolvedDoStep {
     },
 }
 
-struct ResolvedDoBlock {
-    steps: Vec<ResolvedDoStep>,
+struct PrimitiveDoBlock {
+    steps: Vec<PrimitiveDoStep>,
     result: ResolvedExpr<Value>,
     forwards: Vec<ResolvedForward>,
+    plan: RecursiveDoPlan,
 }
 
 struct DoLowering<'a> {
     context: &'a CompileContext,
     scope: &'a NameScope<ResolvedRoot>,
-    plan: &'a RecursiveDoPlan,
 }
 
 struct DoEmitter<'a> {
-    steps: &'a mut [Option<ResolvedDoStep>],
+    steps: &'a mut [Option<PrimitiveDoStep>],
     forwards: &'a [ResolvedForward],
     plan: &'a RecursiveDoPlan,
     context: &'a CompileContext,
@@ -53,12 +57,7 @@ pub(in crate::g_syntax) fn lower_do_expr_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let plan = RecursiveDoPlan::build(do_expr)?;
-    let lowering = DoLowering {
-        context,
-        scope,
-        plan: &plan,
-    };
+    let lowering = DoLowering { context, scope };
     let block = lowering.resolve(do_expr, locals)?;
     Ok(lowering.emit(block))
 }
@@ -68,28 +67,34 @@ impl DoLowering<'_> {
         &self,
         do_expr: &DoExpr,
         locals: &mut ResolverContext,
-    ) -> Result<ResolvedDoBlock, Diagnostic> {
+    ) -> Result<PrimitiveDoBlock, Diagnostic> {
         let base_len = locals.len();
         let result = (|| {
-            let mut forwards = (0..self.plan.forwards.len())
-                .map(|_| ResolvedForward::default())
-                .collect::<Vec<_>>();
+            let mut tracker = RecursiveDoTracker::default();
+            let mut forwards = Vec::new();
             let mut steps = Vec::with_capacity(do_expr.steps.len());
 
-            for (step_index, step) in do_expr.steps.iter().enumerate() {
+            for step in &do_expr.steps {
                 let resolved = match &step.kind {
                     DoStepKind::Abstract(names) => {
-                        let ids = &self.plan.declarations_at[step_index];
+                        let ids = tracker.push_abstract(names, step.line)?;
                         debug_assert_eq!(ids.len(), names.len());
                         let first_slot = locals.len();
                         let bindings = locals
                             .extend_source_bindings(names.iter().map(String::as_str), step.line)?;
-                        for (offset, (id, binding)) in ids.iter().copied().zip(bindings).enumerate()
-                        {
-                            forwards[id].resolver_slot = Some(first_slot + offset);
-                            forwards[id].forward_binding = Some(binding);
+                        for (offset, (id, binding)) in ids.into_iter().zip(bindings).enumerate() {
+                            debug_assert_eq!(
+                                id,
+                                forwards.len(),
+                                "recursive-do IDs follow declaration order"
+                            );
+                            forwards.push(ResolvedForward {
+                                resolver_slot: Some(first_slot + offset),
+                                forward_binding: Some(binding),
+                                ..ResolvedForward::default()
+                            });
                         }
-                        ResolvedDoStep::Abstract
+                        PrimitiveDoStep::Abstract
                     }
                     DoStepKind::Bind { pattern, operation } => {
                         let operation = syntax_expr_to_resolved_in_semantic_scope(
@@ -100,13 +105,13 @@ impl DoLowering<'_> {
                             locals,
                         )?;
                         let binding = resolve_step_binding(
-                            self.plan.fulfillment_at[step_index],
+                            &mut tracker,
                             pattern,
                             step.line,
                             locals,
                             &mut forwards,
                         )?;
-                        ResolvedDoStep::Bind { operation, binding }
+                        PrimitiveDoStep::Bind { operation, binding }
                     }
                     DoStepKind::ValueBind { pattern, value } => {
                         let value = syntax_expr_to_resolved_in_semantic_scope(
@@ -117,13 +122,13 @@ impl DoLowering<'_> {
                             locals,
                         )?;
                         let binding = resolve_step_binding(
-                            self.plan.fulfillment_at[step_index],
+                            &mut tracker,
                             pattern,
                             step.line,
                             locals,
                             &mut forwards,
                         )?;
-                        ResolvedDoStep::ValueBind { value, binding }
+                        PrimitiveDoStep::ValueBind { value, binding }
                     }
                     DoStepKind::Then(operation) => {
                         let operation = syntax_expr_to_resolved_in_semantic_scope(
@@ -133,7 +138,8 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
-                        ResolvedDoStep::Then {
+                        tracker.push_internal(step.line);
+                        PrimitiveDoStep::Then {
                             operation,
                             result: locals.fresh_binding(),
                         }
@@ -149,6 +155,12 @@ impl DoLowering<'_> {
                 self.scope,
                 locals,
             )?;
+            debug_assert_eq!(
+                steps.len(),
+                tracker.step_count(),
+                "every resolved primitive do step records one planning event"
+            );
+            let plan = tracker.finish()?;
             for forward in &mut forwards {
                 forward.future_binding = Some(locals.fresh_binding());
                 forward.fixed_result_binding = Some(locals.fresh_binding());
@@ -156,29 +168,31 @@ impl DoLowering<'_> {
                 debug_assert!(forward.forward_binding.is_some());
                 debug_assert!(forward.resolved_binding.is_some());
             }
-            Ok(ResolvedDoBlock {
+            Ok(PrimitiveDoBlock {
                 steps,
                 result,
                 forwards,
+                plan,
             })
         })();
         locals.truncate(base_len);
         result
     }
 
-    fn emit(&self, block: ResolvedDoBlock) -> ResolvedExpr<Value> {
-        let ResolvedDoBlock {
+    fn emit(&self, block: PrimitiveDoBlock) -> ResolvedExpr<Value> {
+        let PrimitiveDoBlock {
             steps,
             result,
             forwards,
+            plan,
         } = block;
         let mut steps = steps.into_iter().map(Some).collect::<Vec<_>>();
         let end = steps.len();
-        let roots = self.plan.roots.clone();
+        let roots = plan.roots.clone();
         let emitted = DoEmitter {
             steps: &mut steps,
             forwards: &forwards,
-            plan: self.plan,
+            plan: &plan,
             context: self.context,
         }
         .emit_range(0, end, &roots, result);
@@ -188,25 +202,21 @@ impl DoLowering<'_> {
 }
 
 fn resolve_step_binding(
-    fulfillment: Option<ForwardNameId>,
+    tracker: &mut RecursiveDoTracker,
     pattern: &SyntaxPattern,
     line: usize,
     locals: &mut ResolverContext,
     forwards: &mut [ResolvedForward],
 ) -> Result<BindingId, Diagnostic> {
-    let captures = pattern.captures();
-    debug_assert!(
-        captures.len() <= 1,
-        "primitive do lowering currently receives at most one capture per pattern"
-    );
-    let Some(name) = captures.first().copied() else {
-        debug_assert!(
-            fulfillment.is_none(),
-            "a wildcard pattern cannot fulfill a recursive-do abstract"
-        );
-        return Ok(locals.fresh_binding());
+    let name = match direct_pattern_binding(pattern) {
+        DirectPatternBinding::Capture(name) => name,
+        DirectPatternBinding::Wildcard => {
+            tracker.push_internal(line);
+            return Ok(locals.fresh_binding());
+        }
     };
 
+    let fulfillment = tracker.push_capture(name, line);
     let Some(id) = fulfillment else {
         return Ok(locals
             .extend_source_bindings([name], line)?
@@ -260,15 +270,15 @@ impl DoEmitter<'_> {
                 .take()
                 .expect("planned recursive-do step is emitted exactly once");
             continuation = match step {
-                ResolvedDoStep::Abstract => continuation,
-                ResolvedDoStep::Bind { operation, binding } => effect_call_resolved(
+                PrimitiveDoStep::Abstract => continuation,
+                PrimitiveDoStep::Bind { operation, binding } => effect_call_resolved(
                     "seq",
                     [operation, ResolvedExpr::lambda(vec![binding], continuation)],
                 ),
-                ResolvedDoStep::ValueBind { value, binding } => {
+                PrimitiveDoStep::ValueBind { value, binding } => {
                     ResolvedExpr::apply(ResolvedExpr::lambda(vec![binding], continuation), [value])
                 }
-                ResolvedDoStep::Then { operation, result } => {
+                PrimitiveDoStep::Then { operation, result } => {
                     let body =
                         annotate_assert_unit_resolved(ResolvedExpr::Local(result), continuation);
                     effect_call_resolved(
