@@ -184,12 +184,12 @@ The active `g0` table is:
 | Role | Keywords |
 | --- | --- |
 | declaration heads | `language`, `import`, `abstract`, `unique`, `object`, `extend` |
-| expression forms | `let`, `where`, `do`, `object` |
+| expression forms | `let`, `where`, `do`, `object`, `abstract object` |
 | do statements | `abstract` |
 | expression operators | `and`, `or` |
 | special expression references | `module`, `self` |
 | special object/`with` alias | `self` |
-| contextual modifiers | `as`, `at`, `binary`, `extends`, `in`, `with` |
+| contextual modifiers | `abstract`, `as`, `at`, `binary`, `extends`, `in`, `with` |
 
 A word may have more than one role, but the parser still has one
 version-owned source of truth for whether it is reserved.
@@ -1051,10 +1051,10 @@ Object syntax can and should be compact by default. I propose:
             }
 
         # declaration
-        object Name (as Name)? (extends ExpressionList)? (with Body)?
+        (abstract)? object Name (as Name)? (extends ExpressionList)? (with Body)?
 
         # expression
-        object (NameExpr|_) (as Name)? (extends ExpressionList)? (with Body)?
+        (abstract)? object (NameExpr|_) (as Name)? (extends ExpressionList)? (with Body)?
 
 The `extends` and `with` sections are optional, with `spec.deps` and
 `spec.defs` respectively defaulting to the empty list and const function
@@ -1120,9 +1120,9 @@ Use of `^` composes, e.g. `^^^method` escapes three lexical levels. But it's bes
 
 For cases that require too many escapes, we also support an `as Name` modifier for object declarations and expressions. The default for object declarations is `as self`, which is why we have the default local names and `^` escapes. In some contexts, it is more convenient to use a local name so we don't need escapes.
 
-        object Name (as Name)? (extends ExpressionList)? (with Body)?       # object declaration
-        object (NameExpr|_) (as Name)? (extends ExpressionList)? (with Body)? # object expression
-        extend Name (as Name)? with Body                                    # extend declaration
+        (abstract)? object Name (as Name)? (extends ExpressionList)? (with Body)?       # object declaration
+        (abstract)? object (NameExpr|_) (as Name)? (extends ExpressionList)? (with Body)? # object expression
+        extend (abstract)? Name (as Name)? with Body                                    # extend declaration
 
 For example:
 
@@ -1148,9 +1148,17 @@ A named object may extend anonymous objects. Logically, `spec.defs` updates from
 
 ### Abstract Objects
 
-An abstract object has a full specification but the rest of the body missing, i.e. a singleton `spec:{:name, :defs, :deps}`. This is be expressed via `abstract object ...`, as declaration or expression. Note that declaring `abstract` methods does not make the object itself abstract. 
+An abstract object has a full specification but the instantiated members are
+absent, i.e. its value is the singleton `spec:{:name, :defs, :deps}`. This is
+expressed via `abstract object ...`, as either a declaration or expression.
+The body still constructs `spec.defs`; those definitions are applied only when
+the specification is later instantiated. Declaring abstract names or methods
+inside an ordinary object does not make that object abstract.
 
-For `extend Object` this is expressed as `extend abstract Object ...`. This results in an abstract object regardless of whether the original object was abstract.
+For `extend Object` this is expressed as `extend abstract Object ...`. It
+composes the extension into `spec.defs` but leaves the resulting object
+abstract regardless of the prior realization. Conversely, ordinary `extend`
+instantiates its result even when the prior object was abstract.
 
 ### Lightweight Extension
 

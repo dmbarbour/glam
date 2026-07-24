@@ -440,10 +440,12 @@ object foo as f extends bar with    # 'as f': local alias, no ^ needed
     A = f.B + a             # 'a' resolves to host directly now
     B = f.C + 2             # _f.B would be the prior B
 
-baz = object NameExpr extends foo with ...  # named object expression
-qux = object _ extends foo with ... # anonymous object expression
-abstract object proto with ...      # spec only, no instance
-extend foo with                     # update spec + re-instantiate
+baz = object NameExpr extends foo with ...           # named object expression
+qux = object _ extends foo with ...                   # anonymous object expression
+abstract object proto with ...                        # declaration: spec only
+template = abstract object _ extends proto with ...   # expression: spec only
+extend abstract foo with ...                          # update spec, remain abstract
+extend foo with                                       # update spec + instantiate
     def1 := ...
 
 # Lightweight extension — any expression, 'with' body is anonymous mixin:

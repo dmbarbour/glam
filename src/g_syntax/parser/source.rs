@@ -1,6 +1,7 @@
 use super::super::{Declaration, Diagnostic, ParsedSource};
 use super::declaration::{
-    SimpleDeclaration, parse_declaration, parse_simple_declaration, validate_language_position,
+    SimpleDeclaration, is_abstract_object_declaration, parse_declaration, parse_simple_declaration,
+    validate_language_position,
 };
 use super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::input::{ParseSession, TokenView};
@@ -43,7 +44,9 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
                 TokenKind::Name(name) => Some(*name),
                 _ => None,
             });
-        let simple = head.and_then(SimpleDeclaration::from_head);
+        let simple = head
+            .and_then(SimpleDeclaration::from_head)
+            .filter(|_| !is_abstract_object_declaration(view));
         let kind = if let Some(simple) = simple {
             let (_, mut floor_diagnostics) =
                 validate_expression_floor(view, ExpressionContext::for_owner(view));

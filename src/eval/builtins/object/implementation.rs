@@ -48,11 +48,24 @@ pub(super) fn eval_object_instance_from_parts_builtin(
     deps: Value,
     defs: Value,
 ) -> Result<Value, EvalError> {
-    let spec = crate::core::Dict::new_sync()
+    let spec = object_spec_from_parts(name, deps, defs);
+    eval_object_instance_builtin(context, &Value::Dict(spec))
+}
+
+pub(super) fn eval_object_abstract_from_parts_builtin(
+    name: Value,
+    deps: Value,
+    defs: Value,
+) -> Value {
+    let spec = object_spec_from_parts(name, deps, defs);
+    Value::Dict(crate::core::Dict::new_sync().insert((*keys::SPEC).clone(), Value::Dict(spec)))
+}
+
+fn object_spec_from_parts(name: Value, deps: Value, defs: Value) -> crate::core::Dict {
+    crate::core::Dict::new_sync()
         .insert((*keys::NAME).clone(), name)
         .insert((*keys::DEPS).clone(), deps)
-        .insert((*keys::DEFS).clone(), defs);
-    eval_object_instance_builtin(context, &Value::Dict(spec))
+        .insert((*keys::DEFS).clone(), defs)
 }
 
 /// Re-instantiates an object with an additional stateless definitions mixin.

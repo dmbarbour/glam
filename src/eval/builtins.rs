@@ -67,6 +67,7 @@ pub(super) fn apply_builtin(
         Builtin::ObjectSpec
         | Builtin::ObjectFromDict
         | Builtin::ObjectLocalName
+        | Builtin::ObjectAbstractFromParts
         | Builtin::ObjectInstanceFromParts
         | Builtin::ObjectInstance
         | Builtin::ObjectDefaultDefs

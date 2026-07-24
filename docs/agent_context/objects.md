@@ -20,6 +20,12 @@ linearized spec's `defs` to the accumulated base and that final self, then
 inserts the most-derived `spec` and fulfills the pending self. Every mixin must
 produce a dictionary.
 
+`abstract object` uses the parallel internal `ObjectAbstractFromParts`
+constructor. It returns the singleton object dictionary `{spec:...}` without
+applying `defs`. The specification retains the same name, dependencies, and
+curried definition mixin as an instantiated object; abstractness is a
+front-end realization choice rather than another core value kind.
+
 Ordinary dictionaries participate as anonymous object specifications through
 `ObjectSpec`: their dictionary content becomes a mixin, their name is empty,
 and they have no dependencies. This is bootstrap compatibility, not a final
@@ -44,8 +50,8 @@ spike rule and is no longer current.
 Object syntax is owned entirely by `g_syntax`:
 
 - named top-level and nested `object` declarations;
-- object expressions, including anonymous `_` names;
-- `extends` dependencies and `extend` declarations;
+- abstract or instantiated object expressions, including anonymous `_` names;
+- `extends` dependencies and abstract or instantiated `extend` declarations;
 - object aliases;
 - `with` expressions; and
 - lexical `^` escapes.
@@ -60,9 +66,10 @@ their specification name. Nested named objects derive a hierarchical name from
 the enclosing object's specification. Anonymous object expressions use the
 empty dictionary name.
 
-`extend target with ...` preserves the target's name and dependencies and
-composes the new definition mixin after the prior one before re-instantiating
-the object.
+`extend target with ...` preserves the target's name and dependencies,
+composes the new definition mixin after the prior one, and instantiates the
+result. `extend abstract target with ...` performs the same composition but
+returns the spec-only form, regardless of the target's prior realization.
 
 Named declarations also establish automatic reflection boundaries on their
 ordinary members, recursively including nested declarations. A boundary scans

@@ -24,6 +24,10 @@ pub(super) fn apply(
             let [host, parts] = super::exact(arguments, "object local name")?;
             eval_object_local_name_builtin(context, &host, &parts)
         }
+        Builtin::ObjectAbstractFromParts => {
+            let [name, deps, defs] = super::exact(arguments, "abstract object from parts")?;
+            Ok(eval_object_abstract_from_parts_builtin(name, deps, defs))
+        }
         Builtin::ObjectInstanceFromParts => {
             let [name, deps, defs] = super::exact(arguments, "object instance from parts")?;
             eval_object_instance_from_parts_builtin(context, name, deps, defs)

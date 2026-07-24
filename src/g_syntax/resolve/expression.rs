@@ -237,7 +237,8 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
         locals,
         false,
     )?;
-    Ok(object_instance_from_parts_resolved(
+    Ok(object_from_parts_resolved(
+        object.realization,
         name,
         ResolvedExpr::List(deps),
         defs,

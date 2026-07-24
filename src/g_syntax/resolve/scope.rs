@@ -269,6 +269,7 @@ mod resolver_context_tests {
         let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
         let mut resolver = ResolverContext::default();
         let syntax = SyntaxExpr::Object(ObjectExpr {
+            realization: ObjectRealization::Instance,
             name: None,
             alias: None,
             deps: Vec::new(),

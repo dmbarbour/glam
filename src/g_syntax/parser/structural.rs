@@ -6,7 +6,7 @@
 //! top-level object declarations.
 
 use super::super::keywords::{canonical_keyword, reserved_keyword_message};
-use super::super::{Diagnostic, ObjectExpr, Severity, SyntaxExpr};
+use super::super::{Diagnostic, ObjectExpr, ObjectRealization, Severity, SyntaxExpr};
 use super::declaration::{parse_nonempty_object_body, parse_object_body};
 use super::expression::{parse_expression_chain_view, syntax_operator};
 use super::expression_context::{ExpressionContext, ParsedExpression, validate_expression_floor};
@@ -18,6 +18,7 @@ type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
 #[derive(Debug, PartialEq, Eq)]
 struct ObjectHeader {
+    realization: ObjectRealization,
     name: Option<Box<SyntaxExpr>>,
     alias: Option<String>,
     deps: Vec<SyntaxExpr>,
@@ -485,10 +486,7 @@ fn parse_object(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
 ) -> Option<ParseResult<ParsedExpression>> {
-    let (_, head) = view.first_significant()?;
-    if !token_is_name(head, "object") {
-        return None;
-    }
+    object_expression_head(view)?;
     if !contextual_keywords(view, "where").is_empty() && !has_compound_with_body(view) {
         return None;
     }
@@ -536,6 +534,7 @@ fn parse_object(
     }
     Some(Ok(ParsedExpression::new(
         SyntaxExpr::Object(ObjectExpr {
+            realization: header.realization,
             name: header.name,
             alias: header.alias,
             deps: header.deps,
@@ -705,6 +704,8 @@ fn has_compound_with_body(view: TokenView<'_, '_>) -> bool {
 fn line_begins_object_member(view: TokenView<'_, '_>) -> bool {
     view.first_significant()
         .is_some_and(|(_, token)| token_is_name(token, "object") || token_is_name(token, "extend"))
+        || object_expression_head(view)
+            .is_some_and(|(realization, _)| realization == ObjectRealization::Abstract)
         || ["=", ":=", "::="]
             .into_iter()
             .any(|operator| !top_level_symbols(view, operator).is_empty())
@@ -866,10 +867,10 @@ fn parse_object_header(
     context: ExpressionContext,
 ) -> Option<ParseResult<ObjectHeader>> {
     let (header_view, body) = split_compound_header_body(view);
-    let (object_index, object_token) = header_view.first_significant()?;
-    if !token_is_name(object_token, "object") {
-        return None;
-    }
+    let (realization, object_index) = object_expression_head(header_view)?;
+    let object_token = header_view
+        .token_at(object_index)
+        .expect("object expression head remains within its header");
     let body_present = body.is_some();
     let mut header = trim_layout(view_between(
         header_view,
@@ -969,11 +970,25 @@ fn parse_object_header(
     };
 
     Some(Ok(ObjectHeader {
+        realization,
         name,
         alias,
         deps,
         has_with,
     }))
+}
+
+fn object_expression_head(view: TokenView<'_, '_>) -> Option<(ObjectRealization, usize)> {
+    let (head_index, head) = view.first_significant()?;
+    match head.kind() {
+        TokenKind::Name("object") => Some((ObjectRealization::Instance, head_index)),
+        TokenKind::Name("abstract") => {
+            let object = next_significant_after(view, head_index)?;
+            matches!(object.token().kind(), TokenKind::Name("object"))
+                .then_some((ObjectRealization::Abstract, object.index()))
+        }
+        _ => None,
+    }
 }
 
 fn parse_with_header(

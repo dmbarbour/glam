@@ -307,7 +307,11 @@ fn object_headers_match_the_complete_structural_parse() {
     ] {
         let parsed = parse_structural(source);
         let SyntaxExpr::Object(ObjectExpr {
-            name, alias, deps, ..
+            realization,
+            name,
+            alias,
+            deps,
+            ..
         }) = parsed
         else {
             panic!("parser did not produce an object");
@@ -315,6 +319,7 @@ fn object_headers_match_the_complete_structural_parse() {
         assert_eq!(
             token_object_header(source),
             ObjectHeader {
+                realization,
                 name,
                 alias,
                 deps,

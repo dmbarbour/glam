@@ -44,10 +44,17 @@ pub struct ImportDecl {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ObjectDecl {
+    pub realization: ObjectRealization,
     pub target: String,
     pub alias: Option<String>,
     pub deps: Vec<SyntaxExpr>,
     pub body: Vec<ObjectBodyDefinition>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectRealization {
+    Instance,
+    Abstract,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -88,6 +95,7 @@ impl ObjectBodyDefinition {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ObjectExtendDecl {
+    pub realization: ObjectRealization,
     pub target: String,
     pub alias: Option<String>,
     pub body: Vec<ObjectBodyDefinition>,
@@ -95,6 +103,7 @@ pub struct ObjectExtendDecl {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ObjectExpr {
+    pub realization: ObjectRealization,
     pub name: Option<Box<SyntaxExpr>>,
     pub alias: Option<String>,
     pub deps: Vec<SyntaxExpr>,

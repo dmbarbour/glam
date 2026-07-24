@@ -7,8 +7,8 @@
 use super::super::keywords::{g0_keyword, reserved_keyword_message};
 use super::super::{
     DeclarationKind, DefinitionDecl, DefinitionKind, Diagnostic, ObjectBodyDefinition,
-    ObjectBodyDefinitionKind, ObjectDecl, ObjectExtendDecl, Severity, SyntaxExpr, SyntaxKeyExpr,
-    warn_unused_locals, warn_unused_with_alias,
+    ObjectBodyDefinitionKind, ObjectDecl, ObjectExtendDecl, ObjectRealization, Severity,
+    SyntaxExpr, SyntaxKeyExpr, warn_unused_locals, warn_unused_with_alias,
 };
 use super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::input::TokenView;
@@ -77,11 +77,22 @@ fn parse_declaration_in_context(
     match head.kind() {
         TokenKind::Name("object") => parse_object_declaration(view, line, context, diagnostics)
             .map_or(DeclarationKind::Unknown, DeclarationKind::Object),
+        TokenKind::Name("abstract") if is_abstract_object_declaration(view) => {
+            parse_object_declaration(view, line, context, diagnostics)
+                .map_or(DeclarationKind::Unknown, DeclarationKind::Object)
+        }
         TokenKind::Name("extend") => parse_extend_declaration(view, line, context, diagnostics)
             .map_or(DeclarationKind::Unknown, DeclarationKind::Extend),
         _ => parse_definition(view, line, context, diagnostics)
             .map_or(DeclarationKind::Unknown, DeclarationKind::Definition),
     }
+}
+
+pub(super) fn is_abstract_object_declaration(view: TokenView<'_, '_>) -> bool {
+    matches!(
+        object_declaration_head(view),
+        Some((ObjectRealization::Abstract, _))
+    )
 }
 
 pub(in crate::g_syntax::parser) fn parse_object_body(
@@ -430,7 +441,7 @@ fn parse_object_declaration(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ObjectDecl> {
     let (header, body) = split_compound_header_body(view);
-    let head = header.first_significant()?.0;
+    let (realization, head) = object_declaration_head(header)?;
     let header = trim_layout(view_between(header, head + 1, header.range().end()));
     let parsed = parse_static_object_header(header, line, false, context, diagnostics)?;
     if body.is_some() && !parsed.has_with {
@@ -476,6 +487,7 @@ fn parse_object_declaration(
         warn_unused_with_alias(alias, &body, line, diagnostics);
     }
     Some(ObjectDecl {
+        realization,
         target: parsed.target,
         alias: parsed.alias,
         deps: parsed.deps,
@@ -491,7 +503,24 @@ fn parse_extend_declaration(
 ) -> Option<ObjectExtendDecl> {
     let (header, body) = split_compound_header_body(view);
     let head = header.first_significant()?.0;
-    let header = trim_layout(view_between(header, head + 1, header.range().end()));
+    let mut header = trim_layout(view_between(header, head + 1, header.range().end()));
+    let realization = if header
+        .first_significant()
+        .is_some_and(|(_, token)| matches!(token.kind(), TokenKind::Name("abstract")))
+    {
+        let abstract_index = header
+            .first_significant()
+            .map(|(index, _)| index)
+            .expect("nonempty extend header has a first token");
+        header = trim_layout(view_between(
+            header,
+            abstract_index + 1,
+            header.range().end(),
+        ));
+        ObjectRealization::Abstract
+    } else {
+        ObjectRealization::Instance
+    };
     let parsed = parse_static_object_header(header, line, true, context, diagnostics)?;
     if !parsed.has_with {
         diagnostics.push(Diagnostic::error(
@@ -522,10 +551,28 @@ fn parse_extend_declaration(
         warn_unused_with_alias(alias, &body, line, diagnostics);
     }
     Some(ObjectExtendDecl {
+        realization,
         target: parsed.target,
         alias: parsed.alias,
         body,
     })
+}
+
+fn object_declaration_head(view: TokenView<'_, '_>) -> Option<(ObjectRealization, usize)> {
+    let (head_index, head) = view.first_significant()?;
+    match head.kind() {
+        TokenKind::Name("object") => Some((ObjectRealization::Instance, head_index)),
+        TokenKind::Name("abstract") => {
+            let mut significant = view.top_level().filter(|indexed| {
+                indexed.index() > head_index
+                    && !matches!(indexed.token().kind(), TokenKind::LineStart { .. })
+            });
+            let object = significant.next()?;
+            matches!(object.token().kind(), TokenKind::Name("object"))
+                .then_some((ObjectRealization::Abstract, object.index()))
+        }
+        _ => None,
+    }
 }
 
 struct StaticObjectHeader {

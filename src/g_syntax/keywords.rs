@@ -39,7 +39,7 @@ use KeywordRole::{
 pub(super) const G0_KEYWORDS: &[Keyword] = &[
     Keyword {
         spelling: "abstract",
-        roles: &[Declaration, Statement],
+        roles: &[Declaration, Expression, Statement, Modifier],
     },
     Keyword {
         spelling: "and",
@@ -154,7 +154,7 @@ mod tests {
     fn keyword_roles_record_each_active_syntax_site() {
         assert_eq!(
             g0_keyword("abstract").map(Keyword::roles),
-            Some(&[Declaration, Statement][..])
+            Some(&[Declaration, Expression, Statement, Modifier][..])
         );
         assert_eq!(
             g0_keyword("object").map(Keyword::roles),

@@ -86,11 +86,26 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
         locals,
         declared_reflection,
     )?;
-    Ok(object_instance_from_parts_resolved(
+    Ok(object_from_parts_resolved(
+        object.realization,
         name,
         ResolvedExpr::List(deps),
         defs,
     ))
+}
+
+pub(in crate::g_syntax) fn object_from_parts_resolved(
+    realization: ObjectRealization,
+    name: ResolvedExpr<Value>,
+    deps: ResolvedExpr<Value>,
+    defs: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
+    match realization {
+        ObjectRealization::Instance => object_instance_from_parts_resolved(name, deps, defs),
+        ObjectRealization::Abstract => {
+            apply_builtin_resolved(Builtin::ObjectAbstractFromParts, [name, deps, defs])
+        }
+    }
 }
 
 pub(in crate::g_syntax) fn object_parents_resolved(
@@ -385,7 +400,8 @@ fn extend_object_resolved_in_scope(
             [prior_result, ResolvedExpr::Local(self_value)],
         ),
     );
-    let object_value = bindings.wrap(object_instance_from_parts_resolved(
+    let object_value = bindings.wrap(object_from_parts_resolved(
+        extend.realization,
         spec_member("name"),
         spec_member("deps"),
         composed_defs,
@@ -433,7 +449,8 @@ pub(in crate::g_syntax) fn extend_object_with_defs(
         ),
     );
     Ok(lower_resolved_expr(bindings.wrap(
-        object_instance_from_parts_resolved(
+        object_from_parts_resolved(
+            ObjectRealization::Instance,
             spec_member("name"),
             spec_member("deps"),
             composed_defs,

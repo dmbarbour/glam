@@ -724,6 +724,7 @@ fn parses_named_object_declarations() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Object(ObjectDecl {
+            realization: ObjectRealization::Instance,
             target: "child".to_owned(),
             alias: None,
             deps: vec![
@@ -853,6 +854,7 @@ fn parses_extend_declarations() {
     assert_eq!(
         parsed.declarations[1].kind,
         DeclarationKind::Extend(ObjectExtendDecl {
+            realization: ObjectRealization::Instance,
             target: "child".to_owned(),
             alias: None,
             body: vec![
@@ -934,10 +936,86 @@ fn parses_object_expressions() {
                 alias: Some(alias),
                 deps,
                 body,
+                ..
             })),
             ..
         }) if alias == "_h" && deps.len() == 1 && body.len() == 1
     ));
+}
+
+#[test]
+fn parses_abstract_object_declarations_expressions_and_extensions() {
+    let parsed = parse(
+        "language g0\nabstract object protocol with {}\nvalue = abstract object \"value\" with {}\nobject outer with {\n  abstract object nested with {};\n  extend abstract nested with {};\n}\nextend abstract protocol with {}\nabstract provided\n",
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    assert!(matches!(
+        &parsed.declarations[1].kind,
+        DeclarationKind::Object(ObjectDecl {
+            realization: ObjectRealization::Abstract,
+            target,
+            ..
+        }) if target == "protocol"
+    ));
+    assert!(matches!(
+        &parsed.declarations[2].kind,
+        DeclarationKind::Definition(DefinitionDecl {
+            expr: Some(SyntaxExpr::Object(ObjectExpr {
+                realization: ObjectRealization::Abstract,
+                ..
+            })),
+            ..
+        })
+    ));
+    let DeclarationKind::Object(ObjectDecl { body, .. }) = &parsed.declarations[3].kind else {
+        panic!("outer should parse as an object declaration");
+    };
+    assert!(matches!(
+        &body[0].kind,
+        ObjectBodyDefinitionKind::Object(ObjectDecl {
+            realization: ObjectRealization::Abstract,
+            ..
+        })
+    ));
+    assert!(matches!(
+        &body[1].kind,
+        ObjectBodyDefinitionKind::Extend(ObjectExtendDecl {
+            realization: ObjectRealization::Abstract,
+            ..
+        })
+    ));
+    assert!(matches!(
+        &parsed.declarations[4].kind,
+        DeclarationKind::Extend(ObjectExtendDecl {
+            realization: ObjectRealization::Abstract,
+            target,
+            ..
+        }) if target == "protocol"
+    ));
+    assert!(matches!(
+        &parsed.declarations[5].kind,
+        DeclarationKind::Abstract(names) if names == &["provided"]
+    ));
+}
+
+#[test]
+fn malformed_abstract_object_forms_report_errors() {
+    for source in [
+        "language g0\nabstract object\n",
+        "language g0\nabstract object _ with {}\n",
+        "language g0\nvalue = abstract object\n",
+        "language g0\nextend abstract target\n",
+    ] {
+        let parsed = parse(source);
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error),
+            "expected an abstract-object diagnostic for {source:?}"
+        );
+    }
 }
 
 #[test]
@@ -2844,6 +2922,80 @@ fn object_declarations_evaluate_as_object_instances() {
 fn object_expressions_evaluate_as_object_instances() {
     let parsed = parse(
         "language g0\nhello = object \"hello\" with\n  text = \"Hello, World!\"\nasm.result = hello.text\n",
+    );
+    let context = CompileContext::from_module_path(["assembly"]);
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"Hello, World!"
+    );
+}
+
+#[test]
+fn abstract_objects_retain_specs_without_instantiating_members() {
+    let parsed = parse(
+        "language g0\nabstract object protocol with\n  text = \"Hello\"\nexpression = abstract object _ with\n  punctuation = \"!\"\nobject concrete extends expression, protocol with\n  result = text ++ punctuation\nasm.result = concrete.result\n",
+    );
+    let context = CompileContext::from_module_path(["assembly"]);
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    let Value::Dict(protocol) = resolved_value_at_path(&value, &["protocol"]) else {
+        panic!("abstract declaration should evaluate to a dictionary");
+    };
+    assert_eq!(protocol.iter().count(), 1);
+    assert!(protocol.get(&*keys::SPEC).is_some());
+    assert!(protocol.get(&Key::atom_from_text("text")).is_none());
+
+    assert_eq!(
+        resolved_value_at_path(&value, &["expression", "spec", "name"]),
+        Value::Dict(Dict::new_sync())
+    );
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"Hello!"
+    );
+}
+
+#[test]
+fn abstract_and_instance_extensions_choose_the_final_realization() {
+    let parsed = parse(
+        "language g0\nobject base with\n  text = \"Hello\"\nextend abstract base with\n  text := _text ++ \", World\"\nobject derived extends base with\n  text := _text ++ \"!\"\nabstract object protocol with\n  text = \"Again\"\nextend protocol with {}\nasm.result = derived.text ++ \" \" ++ protocol.text\n",
+    );
+    let context = CompileContext::from_module_path(["assembly"]);
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    let Value::Dict(base) = resolved_value_at_path(&value, &["base"]) else {
+        panic!("abstract extension should leave a spec-only dictionary");
+    };
+    assert_eq!(base.iter().count(), 1);
+    assert!(base.get(&*keys::SPEC).is_some());
+    assert!(base.get(&Key::atom_from_text("text")).is_none());
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"Hello, World! Again"
+    );
+}
+
+#[test]
+fn nested_abstract_objects_participate_in_hierarchical_inheritance() {
+    let parsed = parse(
+        "language g0\nobject outer with\n  abstract object protocol with\n    text = \"Hello, World!\"\n  object concrete extends protocol\nasm.result = outer.concrete.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
