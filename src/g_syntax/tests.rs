@@ -2217,6 +2217,47 @@ fn do_lowering_sequences_binds_value_guards_and_bare_operations() {
 }
 
 #[test]
+fn literal_and_list_patterns_match_or_fall_through() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "asm.literal = list.pure do { .r 42 -> 42; .r \"L\" }\n",
+        "asm.fixed = list.pure do { .r [65,66,67] -> [65,middle,67]; (middle == 66) =>> .r \"B\" }\n",
+        "asm.segment = list.pure do { .r \"ABCD\" -> [65] ++ middle ++ [68]; .r middle }\n",
+        "asm.text_segment = list.pure do { .r \"AB\" -> \"A\" ++ rest; .r rest }\n",
+        "asm.quoted = list.pure do { .r ['foo,42,'bar] -> '.foo.[42,'bar]; .r \"Q\" }\n",
+        "asm.backward_pattern = list.pure do { [65,last] <- .r \"AB\"; (last == 66) =>> .r \"W\" }\n",
+        "asm.pure_pattern = list.pure do { [65,last] = \"AB\"; (last == 66) =>> .r \"P\" }\n",
+        "asm.literal_fallback = list.pure (.alt (do { .r 41 -> 42; .r \"bad\" }) (.r \"F\"))\n",
+        "asm.list_fallback = list.pure (.alt (do { .r [1] -> [1,2]; .r \"bad\" }) (.r \"S\"))\n",
+        "asm.kind_fallback = list.pure (.alt (do { .r 1 -> []; .r \"bad\" }) (.r \"K\"))\n",
+        "asm.recursive = list.pure do { abstract left, right; .r [65,66] -> [left,right]; ((left == 65) and (right == 66)) =>> .r \"AB\" }\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("literal", b"L".as_slice()),
+        ("fixed", b"B".as_slice()),
+        ("segment", b"BC".as_slice()),
+        ("text_segment", b"B".as_slice()),
+        ("quoted", b"Q".as_slice()),
+        ("backward_pattern", b"W".as_slice()),
+        ("pure_pattern", b"P".as_slice()),
+        ("literal_fallback", b"F".as_slice()),
+        ("list_fallback", b"S".as_slice()),
+        ("kind_fallback", b"K".as_slice()),
+        ("recursive", b"AB".as_slice()),
+    ] {
+        let result = fully_evaluated_value(resolved_value_at_path(&value, &["asm", path]));
+        assert_eq!(output_binary_result_list(&result), expected, "{path}");
+    }
+}
+
+#[test]
 fn bare_do_operations_reuse_the_effect_then_unit_policy() {
     let parsed = parse(concat!(
         "language g0\n",

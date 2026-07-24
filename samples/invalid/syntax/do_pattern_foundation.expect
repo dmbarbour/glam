@@ -1,10 +1,10 @@
 error|4|requires a pattern before `<-`
 error|8|requires a pattern after `->`
 error|12|requires a pattern before `=`
-error|16|pattern currently supports only
+error|16|only one variable-length segment
 error|20|`binary` is a reserved keyword
 error|23|requires an operation after `<-`
 error|25|requires a value after `=`
 error|27|requires an operation before `->`
 error|29|cannot end with a binding
-error|33|pattern currently supports only
+error|33|requires irrefutable patterns on both sides

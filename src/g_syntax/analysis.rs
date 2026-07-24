@@ -501,15 +501,8 @@ fn preview_recursive_do_plan(
                 });
             }
             DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
-                let captures = pattern.captures();
-                if captures.len() != 1 {
-                    steps.push(recursive_do::RecursiveDoStep {
-                        line: step.line,
-                        event: recursive_do::RecursiveDoEvent::None,
-                    });
-                }
-                for name in captures {
-                    let event = registry.fulfill(name).map_or(
+                pattern.visit_primitive_events(&mut |capture| {
+                    let event = capture.and_then(|name| registry.fulfill(name)).map_or(
                         recursive_do::RecursiveDoEvent::None,
                         recursive_do::RecursiveDoEvent::Fulfill,
                     );
@@ -517,7 +510,7 @@ fn preview_recursive_do_plan(
                         line: step.line,
                         event,
                     });
-                }
+                });
             }
             DoStepKind::Then(_) => steps.push(recursive_do::RecursiveDoStep {
                 line: step.line,

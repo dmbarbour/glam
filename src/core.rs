@@ -755,38 +755,11 @@ pub enum Builtin {
     ListHead,
     ListTail,
     /// Compiler-private pass/fail observations used by pattern lowering.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 4 runtime foundation is consumed by Phase 5 list-pattern lowering"
-        )
-    )]
     PatternIsList,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 4 runtime foundation is consumed by Phase 5 list-pattern lowering"
-        )
-    )]
     PatternListTryUncons,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 4 runtime foundation is consumed by Phase 5 list-pattern lowering"
-        )
-    )]
     PatternListTryUnsnoc,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 4 runtime foundation is consumed by Phase 5 list-pattern lowering"
-        )
-    )]
     PatternListIsEmpty,
+    PatternEqual,
     /// Splits binary-compatible text into shared line segments without their
     /// newline delimiters. Internal support for closed formatting functions.
     TextLines,
@@ -854,6 +827,7 @@ impl Builtin {
             Self::PatternListTryUncons => 1,
             Self::PatternListTryUnsnoc => 1,
             Self::PatternListIsEmpty => 1,
+            Self::PatternEqual => 2,
             Self::TextLines => 1,
             Self::ListEffect => 1,
             Self::ListEffectReturn => 1,

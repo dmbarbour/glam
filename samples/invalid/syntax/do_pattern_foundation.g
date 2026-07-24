@@ -13,7 +13,7 @@ missing_value = do
   .r ()
 
 unsupported = do
-  [first] <- .r [1]
+  [first] ++ rest ++ another <- .r [1]
   .r first
 
 reserved = do
@@ -29,6 +29,6 @@ missing_forward_operation = do { -> value; .r () }
 final_binding = do
   .r 1 -> value
 
-duplicate_capture = do
-  .r [1, 2] -> [item, item]
+refutable_as = do
+  .r [1, 2] -> 1 as item
   .r ()

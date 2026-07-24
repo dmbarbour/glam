@@ -228,6 +228,10 @@ their detailed scheduling and representation contracts.
 - Do patterns expand directly into resolved primitive-do steps. Multi-capture
   `P as Q` binds one internal subject and emits ordered source aliases; do not
   reconstruct a surface `DoExpr` or lower the subject more than once.
+- Literal and list-pattern observations are compiler-private pass/fail effects:
+  mismatches invoke `.fail`, while forcing errors still propagate. Quoted-path
+  patterns are exact fixed lists of literals; they do not admit computed path
+  splices. A list pattern has at most one irrefutable variable-length segment.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

@@ -2,6 +2,7 @@
 
 mod do_expr;
 mod expression;
+mod pattern;
 mod scope;
 
 pub(in crate::g_syntax) use do_expr::*;

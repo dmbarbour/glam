@@ -58,7 +58,8 @@ pub(super) fn apply_builtin(
         Builtin::PatternIsList
         | Builtin::PatternListTryUncons
         | Builtin::PatternListTryUnsnoc
-        | Builtin::PatternListIsEmpty => pattern::apply(context, builtin, arguments),
+        | Builtin::PatternListIsEmpty
+        | Builtin::PatternEqual => pattern::apply(context, builtin, arguments),
         Builtin::ListEffect
         | Builtin::ListEffectReturn
         | Builtin::ListEffectSeq

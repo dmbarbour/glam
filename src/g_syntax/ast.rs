@@ -136,8 +136,22 @@ pub struct SyntaxPattern {
 pub enum SyntaxPatternKind {
     Capture(String),
     Wildcard,
+    Literal(SyntaxPatternLiteral),
+    List {
+        prefix: Vec<SyntaxPattern>,
+        middle: Option<Box<SyntaxPattern>>,
+        suffix: Vec<SyntaxPattern>,
+    },
     Group(Box<SyntaxPattern>),
     As(Box<SyntaxPattern>, Box<SyntaxPattern>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SyntaxPatternLiteral {
+    Unit,
+    Number(Number),
+    Atom(String),
+    Text(String),
 }
 
 impl SyntaxPattern {
@@ -157,7 +171,22 @@ impl SyntaxPattern {
     pub(super) fn visit_captures<'a>(&'a self, visitor: &mut impl FnMut(&'a str)) {
         match &self.kind {
             SyntaxPatternKind::Capture(name) => visitor(name),
-            SyntaxPatternKind::Wildcard => {}
+            SyntaxPatternKind::Wildcard | SyntaxPatternKind::Literal(_) => {}
+            SyntaxPatternKind::List {
+                prefix,
+                middle,
+                suffix,
+            } => {
+                for pattern in prefix {
+                    pattern.visit_captures(visitor);
+                }
+                if let Some(pattern) = middle {
+                    pattern.visit_captures(visitor);
+                }
+                for pattern in suffix {
+                    pattern.visit_captures(visitor);
+                }
+            }
             SyntaxPatternKind::Group(pattern) => pattern.visit_captures(visitor),
             SyntaxPatternKind::As(left, right) => {
                 left.visit_captures(visitor);
@@ -170,6 +199,85 @@ impl SyntaxPattern {
         let mut captures = Vec::new();
         self.visit_captures(&mut |name| captures.push(name));
         captures
+    }
+
+    pub(super) fn is_irrefutable(&self) -> bool {
+        match &self.kind {
+            SyntaxPatternKind::Capture(_) | SyntaxPatternKind::Wildcard => true,
+            SyntaxPatternKind::Group(pattern) => pattern.is_irrefutable(),
+            SyntaxPatternKind::As(left, right) => left.is_irrefutable() && right.is_irrefutable(),
+            SyntaxPatternKind::Literal(_) | SyntaxPatternKind::List { .. } => false,
+        }
+    }
+
+    /// Visits the primitive recursive-do events produced by this pattern.
+    ///
+    /// `None` is a compiler-private step; `Some(name)` is the source capture
+    /// introduced by that step. This source preview mirrors resolved pattern
+    /// expansion solely so pre-resolution diagnostics retain exact step
+    /// indices.
+    pub(super) fn visit_primitive_events<'a>(&'a self, visitor: &mut impl FnMut(Option<&'a str>)) {
+        if self.is_irrefutable() {
+            self.visit_irrefutable_input_events(visitor);
+        } else {
+            visitor(None);
+            self.visit_match_events(visitor);
+        }
+    }
+
+    fn visit_value_events<'a>(&'a self, visitor: &mut impl FnMut(Option<&'a str>)) {
+        if self.is_irrefutable() {
+            self.visit_irrefutable_input_events(visitor);
+        } else {
+            visitor(None);
+            self.visit_match_events(visitor);
+        }
+    }
+
+    fn visit_irrefutable_input_events<'a>(&'a self, visitor: &mut impl FnMut(Option<&'a str>)) {
+        let captures = self.captures();
+        if captures.len() != 1 {
+            visitor(None);
+        }
+        for capture in captures {
+            visitor(Some(capture));
+        }
+    }
+
+    fn visit_match_events<'a>(&'a self, visitor: &mut impl FnMut(Option<&'a str>)) {
+        match &self.kind {
+            SyntaxPatternKind::Capture(name) => visitor(Some(name)),
+            SyntaxPatternKind::Wildcard => {}
+            SyntaxPatternKind::Literal(_) => visitor(None),
+            SyntaxPatternKind::Group(pattern) => pattern.visit_match_events(visitor),
+            SyntaxPatternKind::As(left, right) => {
+                left.visit_match_events(visitor);
+                right.visit_match_events(visitor);
+            }
+            SyntaxPatternKind::List {
+                prefix,
+                middle,
+                suffix,
+            } => {
+                visitor(None);
+                for pattern in prefix {
+                    visitor(None);
+                    pattern.visit_value_events(visitor);
+                }
+                for _ in suffix.iter().rev() {
+                    visitor(None);
+                    visitor(None);
+                }
+                if let Some(pattern) = middle {
+                    pattern.visit_value_events(visitor);
+                } else {
+                    visitor(None);
+                }
+                for pattern in suffix {
+                    pattern.visit_match_events(visitor);
+                }
+            }
+        }
     }
 }
 

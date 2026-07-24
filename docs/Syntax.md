@@ -364,8 +364,11 @@ vertical columns of assembly mnemonics. `Pattern = Expr` is the pure guard form
 and does not use `let`. General pattern matching either captures locals or
 evaluates to `.fail`.
 
-The current Rust bootstrap implements name-only statements in both layout and
-braced forms. A layout block is newline-delimited:
+The current Rust bootstrap implements pattern-bearing statements in both
+layout and braced forms. Patterns currently include names, `_`, irrefutable
+`P as Q`, unit, numbers, atoms, text, quoted paths, and list patterns with at
+most one irrefutable variable-length segment. A layout block is
+newline-delimited:
 
         my_effect = do
             .read 'left -> left
@@ -375,11 +378,12 @@ braced forms. A layout block is newline-delimited:
             .write total
             .r total
 
-`Name <- Operation` and `Operation -> Name` are equivalent monadic binds.
-`Name = Value` is currently an irrefutable lazy binding, optimized to ordinary
-lambda application. `_name` suppresses its unused-local warning and
+`Pattern <- Operation` and `Operation -> Pattern` are equivalent monadic
+binds. `Pattern = Value` is the pure form; a single irrefutable name remains
+optimized to ordinary lambda application. Structural or literal mismatch
+invokes the ambient `.fail`. `_name` suppresses its unused-local warning and
 `Operation -> _` explicitly discards any result. A producing expression is
-resolved before its new name enters scope, and active source locals cannot be
+resolved before its new names enter scope, and active source locals cannot be
 shadowed.
 
 A non-final bare operation uses the existing `=>>` behavior, including its
@@ -412,7 +416,8 @@ synthesize a result, so a block still cannot end with a binding. The special
 separator-free `do {}` means `.r ()`, while `do {;}` is invalid. Semicolons are
 owned by the nearest enclosing grammar: `do { x = do A; B }` has the two outer
 statements `x = do A` and `B`; the inner singleton do does not consume the
-semicolon. General do patterns remain unimplemented.
+semicolon. Dictionary, tagged, tuple, view, predicate, and guarded do patterns
+remain target syntax.
 
 Lightweight effects are supported: we desugar `.name` to `eff:(\api -> api.name)`, and we support application `(eff:f) x = eff:(\api -> f api x)`. This enables us to work with APIs concisely without redefining things:
 
@@ -1357,6 +1362,7 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         [KeyA,KeyB]:Pattern         # hierarchical path pattern
         (PathExpr):Pattern          # computed list-valued path
         'name                       # a constant, same as ["name"]:()
+        '.Path                      # a constant, same as a list of constants
 
         []                          # empty list
         [a,b,c]                     # list of three items

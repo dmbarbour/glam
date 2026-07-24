@@ -2,13 +2,14 @@ use super::super::recursive_do::{
     ForwardNameId, ForwardNameRegistry, RecursiveDoEvent, RecursiveDoPlan, RecursiveDoStep,
 };
 use super::super::*;
+use super::pattern::append_pattern_steps;
 use crate::number::Number;
 
 #[derive(Default)]
-struct ResolvedForward {
-    resolver_slot: Option<usize>,
+pub(super) struct ResolvedForward {
+    pub(super) resolver_slot: Option<usize>,
     forward_binding: Option<BindingId>,
-    resolved_binding: Option<BindingId>,
+    pub(super) resolved_binding: Option<BindingId>,
     future_binding: Option<BindingId>,
     fixed_result_binding: Option<BindingId>,
     continuation_parameter: Option<BindingId>,
@@ -18,12 +19,12 @@ struct ResolvedForward {
 ///
 /// Pattern lowering appends to this stream directly; it never reconstructs a
 /// surface `DoExpr` or invents source-spellable temporary names.
-struct PrimitiveDoStep {
+pub(super) struct PrimitiveDoStep {
     recursion: RecursiveDoStep,
-    kind: PrimitiveDoStepKind,
+    pub(super) kind: PrimitiveDoStepKind,
 }
 
-enum PrimitiveDoStepKind {
+pub(super) enum PrimitiveDoStepKind {
     Abstract,
     Bind {
         operation: ResolvedExpr<Value>,
@@ -39,13 +40,13 @@ enum PrimitiveDoStepKind {
     },
 }
 
-enum PrimitivePatternInput {
+pub(super) enum PrimitivePatternInput {
     Effect(ResolvedExpr<Value>),
     Value(ResolvedExpr<Value>),
 }
 
 impl PrimitivePatternInput {
-    fn into_step(self, binding: BindingId) -> PrimitiveDoStepKind {
+    pub(super) fn into_step(self, binding: BindingId) -> PrimitiveDoStepKind {
         match self {
             Self::Effect(operation) => PrimitiveDoStepKind::Bind { operation, binding },
             Self::Value(value) => PrimitiveDoStepKind::ValueBind { value, binding },
@@ -131,7 +132,7 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
-                        append_irrefutable_pattern_steps(
+                        append_pattern_steps(
                             &mut steps,
                             PrimitivePatternInput::Effect(operation),
                             &mut forward_names,
@@ -149,7 +150,7 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
-                        append_irrefutable_pattern_steps(
+                        append_pattern_steps(
                             &mut steps,
                             PrimitivePatternInput::Value(value),
                             &mut forward_names,
@@ -229,79 +230,7 @@ impl DoLowering<'_> {
     }
 }
 
-fn append_irrefutable_pattern_steps(
-    steps: &mut Vec<PrimitiveDoStep>,
-    input: PrimitivePatternInput,
-    forward_names: &mut ForwardNameRegistry,
-    pattern: &SyntaxPattern,
-    line: usize,
-    locals: &mut ResolverContext,
-    forwards: &mut [ResolvedForward],
-) -> Result<(), Diagnostic> {
-    let captures = pattern.captures();
-    if captures.len() <= 1 {
-        let (binding, recursion) = if let Some(name) = captures.first() {
-            resolve_capture_binding(forward_names, name, line, locals, forwards)?
-        } else {
-            (locals.fresh_binding(), RecursiveDoEvent::None)
-        };
-        push_primitive_step(steps, line, input.into_step(binding), recursion);
-        return Ok(());
-    }
-
-    let subject = locals.fresh_binding();
-    push_primitive_step(
-        steps,
-        line,
-        input.into_step(subject),
-        RecursiveDoEvent::None,
-    );
-    for name in captures {
-        let (binding, recursion) =
-            resolve_capture_binding(forward_names, name, line, locals, forwards)?;
-        push_primitive_step(
-            steps,
-            line,
-            PrimitiveDoStepKind::ValueBind {
-                value: ResolvedExpr::Local(subject),
-                binding,
-            },
-            recursion,
-        );
-    }
-    Ok(())
-}
-
-fn resolve_capture_binding(
-    forward_names: &mut ForwardNameRegistry,
-    name: &str,
-    line: usize,
-    locals: &mut ResolverContext,
-    forwards: &mut [ResolvedForward],
-) -> Result<(BindingId, RecursiveDoEvent), Diagnostic> {
-    let fulfillment = forward_names.fulfill(name);
-    let Some(id) = fulfillment else {
-        let binding = locals
-            .extend_source_bindings([name], line)?
-            .into_iter()
-            .next()
-            .expect("one do binder produces one binding identity");
-        return Ok((binding, RecursiveDoEvent::None));
-    };
-
-    let binding = locals.fresh_binding();
-    let forward = &mut forwards[id];
-    let slot = forward
-        .resolver_slot
-        .expect("planned fulfillment follows its abstract declaration");
-    let mut local = local_name_metadata(name);
-    local.binding = Some(binding);
-    locals[slot] = local;
-    forward.resolved_binding = Some(binding);
-    Ok((binding, RecursiveDoEvent::Fulfill(id)))
-}
-
-fn push_primitive_step(
+pub(super) fn push_primitive_step(
     steps: &mut Vec<PrimitiveDoStep>,
     line: usize,
     kind: PrimitiveDoStepKind,

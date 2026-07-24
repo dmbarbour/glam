@@ -799,6 +799,21 @@ fn run_pattern_builtin(builtin: Builtin, value: Value) -> Result<Vec<Value>, Eva
     list_to_value_items(&test_context(), &results)
 }
 
+fn run_pattern_equal(expected: Value, value: Value) -> Result<Vec<Value>, EvalError> {
+    let handled = eval_closed_expr(&builtin1_expr(
+        Builtin::ListEffect,
+        builtin2_expr(
+            Builtin::PatternEqual,
+            TestExpr::Value(expected),
+            TestExpr::Value(value),
+        ),
+    ))?;
+    let Value::List(results) = handled else {
+        panic!("the list effect handler should return a list");
+    };
+    list_to_value_items(&test_context(), &results)
+}
+
 fn builtin3_expr(builtin: Builtin, first: TestExpr, second: TestExpr, third: TestExpr) -> TestExpr {
     TestExpr::Apply(
         Arc::new(TestExpr::Apply(
@@ -1347,6 +1362,46 @@ fn compiler_pattern_list_predicates_return_pass_fail_effects() {
                 .is_empty()
         );
     }
+}
+
+#[test]
+fn compiler_pattern_equality_mismatches_incompatible_values() {
+    let atom = key_value(&Key::atom_from_text("tag"));
+    for (expected, actual) in [
+        ((*keys::UNIT_VALUE).clone(), (*keys::UNIT_VALUE).clone()),
+        (n(42), n(42)),
+        (atom.clone(), atom),
+        (
+            Value::binary_from_text("AB"),
+            Value::List(List::from_values(vec![n(65), n(66)])),
+        ),
+    ] {
+        assert_eq!(
+            run_pattern_equal(expected, actual).expect("matching literals should succeed"),
+            [(*keys::UNIT_VALUE).clone()]
+        );
+    }
+
+    for (expected, actual) in [
+        (n(42), Value::binary_from_text("42")),
+        (Value::binary_from_text("AB"), n(42)),
+        (
+            Value::binary_from_text("AB"),
+            Value::List(List::from_values(vec![n(65), Value::Builtin(Builtin::Add)])),
+        ),
+    ] {
+        assert!(
+            run_pattern_equal(expected, actual)
+                .expect("literal kind and value mismatches should be ordinary failure")
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        run_pattern_equal(n(1), Value::error("literal input failed"))
+            .expect_err("forcing failures must propagate")
+            .to_string(),
+        "literal input failed"
+    );
 }
 
 #[test]

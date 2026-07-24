@@ -314,22 +314,15 @@ mod tests {
                     });
                 }
                 DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
-                    let captures = pattern.captures();
-                    if captures.len() != 1 {
-                        steps.push(RecursiveDoStep {
-                            line: step.line,
-                            event: RecursiveDoEvent::None,
-                        });
-                    }
-                    for name in captures {
-                        let event = registry
-                            .fulfill(name)
+                    pattern.visit_primitive_events(&mut |capture| {
+                        let event = capture
+                            .and_then(|name| registry.fulfill(name))
                             .map_or(RecursiveDoEvent::None, RecursiveDoEvent::Fulfill);
                         steps.push(RecursiveDoStep {
                             line: step.line,
                             event,
                         });
-                    }
+                    });
                 }
                 DoStepKind::Then(_) => steps.push(RecursiveDoStep {
                     line: step.line,

@@ -1,4 +1,4 @@
-use crate::g_syntax::{DoExpr, DoStepKind, SyntaxExpr};
+use crate::g_syntax::{DoExpr, DoStepKind, SyntaxExpr, SyntaxPatternKind};
 
 use super::super::structural::parse_compound_expression_fragment;
 
@@ -124,6 +124,60 @@ fn irrefutable_as_patterns_capture_each_view_in_source_order() {
 }
 
 #[test]
+fn literal_list_and_quoted_path_patterns_parse_structurally() {
+    let expr = parse_do_expression(concat!(
+        "do\n",
+        ".r () -> ()\n",
+        ".r 42 -> 42\n",
+        ".r 'tag -> 'tag\n",
+        ".r \"text\" -> \"text\"\n",
+        ".r [1,2,3,4] -> [1, first] ++ middle ++ [last, 4]\n",
+        ".r ['foo,42,'bar] -> '.foo.[42,'bar]\n",
+        ".r [first, middle, last]\n",
+    ));
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = expr else {
+        panic!("expected a do expression");
+    };
+    for step in steps.iter().take(4) {
+        assert!(matches!(
+            &step.kind,
+            DoStepKind::Bind {
+                pattern: crate::g_syntax::SyntaxPattern {
+                    kind: SyntaxPatternKind::Literal(_),
+                },
+                ..
+            }
+        ));
+    }
+    assert!(matches!(
+        &steps[4].kind,
+        DoStepKind::Bind { pattern, .. }
+            if pattern.captures() == ["first", "middle", "last"]
+                && matches!(
+                    &pattern.kind,
+                    SyntaxPatternKind::List {
+                        prefix,
+                        middle: Some(_),
+                        suffix,
+                    } if prefix.len() == 2 && suffix.len() == 2
+                )
+    ));
+    assert!(matches!(
+        &steps[5].kind,
+        DoStepKind::Bind { pattern, .. }
+            if pattern.captures().is_empty()
+                && matches!(
+                    &pattern.kind,
+                    SyntaxPatternKind::List {
+                        prefix,
+                        middle: None,
+                        suffix,
+                    } if prefix.len() == 3 && suffix.is_empty()
+                )
+    ));
+}
+
+#[test]
 fn braced_do_is_a_structural_atom_in_containers_and_other_do_blocks() {
     for source in [
         "consume [do { .r 1 }, do { text = \"a;b\"; .r text }, do { x = do .r 2; .r x }]",
@@ -152,7 +206,7 @@ fn braced_do_semicolons_currently_separate_unparenthesized_where_expressions() {
             diagnostics.iter().any(|diagnostic| {
                 diagnostic
                     .message
-                    .contains("pattern currently supports only")
+                    .contains("expected a capture, literal, list pattern")
             }),
             "unexpected diagnostics for `{source}`: {diagnostics:#?}"
         );
@@ -200,12 +254,12 @@ fn token_do_reports_structural_statement_errors() {
         ("do { .r ();; .r () }", "empty statement"),
         ("do { value <- .r 1; }", "cannot end with a binding"),
         (
-            "do\n[first] <- .read\n.r first",
-            "pattern currently supports only",
+            "do\n[first,,second] <- .read\n.r first",
+            "empty item between commas",
         ),
         (
             "do\n.read -> first second\n.r ()",
-            "pattern currently supports only",
+            "expected a capture, literal, list pattern",
         ),
         (
             "do\n.r 1 -> left as\n.r left",
@@ -227,8 +281,24 @@ fn token_do_reports_structural_statement_errors() {
             "`binary` is a reserved keyword",
         ),
         (
-            "do\n() <- .r ()\n.r ()",
-            "unit patterns are not supported yet",
+            "do\n[head] ++ first ++ second <- .r []\n.r head",
+            "only one variable-length segment",
+        ),
+        (
+            "do\n[head] ++ 42 ++ [last] <- .r []\n.r head",
+            "variable-length list segment must be an irrefutable pattern",
+        ),
+        (
+            "do\n1 as value <- .r 1\n.r value",
+            "requires irrefutable patterns on both sides",
+        ),
+        (
+            "do\n'.foo.(path) <- .r []\n.r ()",
+            "cannot contain computed path splices",
+        ),
+        (
+            "do\n'.foo.[path] <- .r []\n.r ()",
+            "components must be literals",
         ),
         (
             "do\nabstract\n.r ()",
