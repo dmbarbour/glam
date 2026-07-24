@@ -39,8 +39,76 @@ fn let_and_where_parse() {
         "x where x = y where y = 1",
         "f ('where) where x = \"in = where\"",
         "x + y where\nx = 1\ny = 2",
+        "x + y where x = 1\n            y = 2",
     ] {
         parse_structural(source);
+    }
+}
+
+#[test]
+fn where_and_with_support_hanging_member_layout() {
+    let parsed =
+        parse_structural("first + second where first = 1\n                     second = 2");
+    assert!(matches!(
+        parsed,
+        SyntaxExpr::Let { bindings, .. }
+            if bindings.iter().map(|(name, _)| name.as_str()).eq(["first", "second"])
+    ));
+
+    let parsed = parse_structural("base with first := 1\n          second = 2");
+    assert!(matches!(
+        parsed,
+        SyntaxExpr::With { body, .. } if body.len() == 2
+    ));
+
+    let parsed = parse_structural("object _ with first = 1\n              second = 2");
+    assert!(matches!(
+        parsed,
+        SyntaxExpr::Object(ObjectExpr { body, .. }) if body.len() == 2
+    ));
+
+    let outer_anchor = "base with ".len();
+    let inner_anchor = "base with child = object _ with ".len();
+    let source = format!(
+        "base with child = object _ with first = 1\n{inner:inner_anchor$}second = 2\n{outer:outer_anchor$}sibling = 3",
+        inner = "",
+        outer = "",
+    );
+    let parsed = parse_structural(&source);
+    let SyntaxExpr::With { body, .. } = parsed else {
+        panic!("outer hanging body should remain a with expression");
+    };
+    assert_eq!(body.len(), 2);
+    assert!(matches!(
+        &body[0].kind,
+        crate::g_syntax::ObjectBodyDefinitionKind::Definition(definition)
+            if matches!(
+                definition.expr.as_ref(),
+                Some(SyntaxExpr::Object(ObjectExpr { body, .. })) if body.len() == 2
+            )
+    ));
+}
+
+#[test]
+fn hanging_where_and_with_report_the_expected_sibling_indentation() {
+    for (source, expected) in [
+        (
+            "value where first = 1\n  second = 2",
+            "multi-line where binding is indented 2 spaces; expected sibling indentation 12",
+        ),
+        (
+            "base with first = 1\n  second = 2",
+            "hanging `with` member is indented 2 spaces; expected sibling indentation 10",
+        ),
+    ] {
+        let diagnostics = parse_compound_expression_fragment(source.as_bytes())
+            .expect_err("under-indented hanging members must be rejected");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.line == 2 && diagnostic.message == expected),
+            "`{source}` reported {diagnostics:#?}"
+        );
     }
 }
 
@@ -313,6 +381,10 @@ fn multiline_let_and_where_use_lexical_indentation_lines() {
         parse_compound_expression_fragment(b"value where\n    first = 1\n  second = 2")
             .expect_err("misaligned where bindings must be rejected");
     assert!(where_diagnostics.iter().any(|diagnostic| {
-        diagnostic.line == 3 && diagnostic.message.contains("binding names must align")
+        diagnostic.line == 3
+            && diagnostic.message.contains("indented 2 spaces")
+            && diagnostic
+                .message
+                .contains("expected sibling indentation 4")
     }));
 }

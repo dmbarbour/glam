@@ -273,8 +273,9 @@ fn parse_where_suffix(
         .top_level()
         .any(|indexed| matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
     {
-        let block = LayoutView::new(all_bindings)
-            .block(LayoutBase::FirstLine)
+        let layout = LayoutView::new(all_bindings);
+        let block = layout
+            .block(layout.inferred_base())
             .map_err(|error| vec![Diagnostic::error(error.line(), error.message())])?;
         if !block.statements().is_empty() && !context.accepts_layout_anchor(block.anchor()) {
             return Err(vec![Diagnostic::error(
@@ -293,7 +294,11 @@ fn parse_where_suffix(
         {
             return Err(vec![Diagnostic::error(
                 boundary.line(),
-                "multi-line where binding names must align under the first binding",
+                format!(
+                    "multi-line where binding is indented {} spaces; expected sibling indentation {}",
+                    boundary.indentation(),
+                    block.anchor()
+                ),
             )]);
         }
         (
@@ -316,7 +321,8 @@ fn parse_where_suffix(
         .top_level()
         .any(|indexed| matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
     {
-        let statements = match LayoutView::new(bindings_view).statements(LayoutBase::FirstLine) {
+        let layout = LayoutView::new(bindings_view);
+        let statements = match layout.statements(layout.inferred_base()) {
             Ok(statements) => statements,
             Err(error) => {
                 return Err(vec![Diagnostic::error(error.line(), error.message())]);
@@ -651,8 +657,10 @@ fn structural_body_extent<'lex, 'source>(
                 None => context,
             };
             let body = view_between(view, start, view.range().end());
-            let block = LayoutView::new(body)
-                .block(LayoutBase::FirstLine)
+            let layout = LayoutView::new(body);
+            let base = layout.inferred_base();
+            let block = layout
+                .block(base)
                 .map_err(|error| vec![Diagnostic::error(error.line(), error.message())])?;
             if !block.statements().is_empty() && !body_context.accepts_layout_anchor(block.anchor())
             {
@@ -663,6 +671,21 @@ fn structural_body_extent<'lex, 'source>(
                         "nested layout begins at indentation {}; expected more than continuation floor {}",
                         block.anchor(),
                         body_context.continuation_floor()
+                    ),
+                )]);
+            }
+            if matches!(base, LayoutBase::Hanging(_))
+                && let Some(boundary) = block.boundary()
+                && body
+                    .subview(boundary.tokens())
+                    .is_some_and(line_begins_object_member)
+            {
+                return Err(vec![Diagnostic::error(
+                    boundary.line(),
+                    format!(
+                        "hanging `with` member is indented {} spaces; expected sibling indentation {}",
+                        boundary.indentation(),
+                        block.anchor()
                     ),
                 )]);
             }
@@ -718,6 +741,14 @@ fn has_compound_with_body(view: TokenView<'_, '_>) -> bool {
     find_structural_body(view).is_some()
 }
 
+fn line_begins_object_member(view: TokenView<'_, '_>) -> bool {
+    view.first_significant()
+        .is_some_and(|(_, token)| token_is_name(token, "object") || token_is_name(token, "extend"))
+        || ["=", ":=", "::="]
+            .into_iter()
+            .any(|operator| !top_level_symbols(view, operator).is_empty())
+}
+
 fn find_structural_body(view: TokenView<'_, '_>) -> Option<StructuralBody> {
     let where_boundary = contextual_keywords(view, "where")
         .into_iter()
@@ -740,6 +771,24 @@ fn find_structural_body(view: TokenView<'_, '_>) -> Option<StructuralBody> {
         }
         let close = view.group(*group).and_then(|group| group.close_token())?;
         return Some(StructuralBody::Braced { end: close + 1 });
+    }
+
+    for with_index in contextual_keywords(view, "with") {
+        if with_index >= where_boundary {
+            break;
+        }
+        let with_token = view.token_at(with_index)?;
+        let Some(next) = next_significant_after(view, with_index) else {
+            continue;
+        };
+        if next.index() >= where_boundary {
+            continue;
+        }
+        if view.line_at_span(with_token.span()) == view.line_at_span(next.token().span()) {
+            return Some(StructuralBody::Layout {
+                start: next.index(),
+            });
+        }
     }
 
     let lines = LayoutView::new(view).lines();

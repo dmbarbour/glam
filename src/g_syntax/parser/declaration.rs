@@ -12,7 +12,7 @@ use super::super::{
 };
 use super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::input::TokenView;
-use super::layout::{LayoutBase, LayoutView};
+use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, TokenKind};
 use super::structural::{
     braced_contents, contextual_keywords, is_layout_empty, local_name, object_alias_name,
@@ -108,7 +108,8 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
             return Vec::new();
         }
         None => {
-            let statements = match LayoutView::new(view).statements(LayoutBase::FirstLine) {
+            let layout = LayoutView::new(view);
+            let statements = match layout.statements(layout.inferred_base()) {
                 Ok(statements) => statements,
                 Err(error) => {
                     diagnostics.push(Diagnostic::error(error.line(), error.message()));

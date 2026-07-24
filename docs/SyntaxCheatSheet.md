@@ -82,6 +82,8 @@ foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
 d2 = d1 with
     x := 10                 # override existing
     y = 20                  # introduce new
+d2h = d1 with x := 10       # inline first member sets hanging sibling column
+              y = 20
 d3 = d2 with { x := 11; z = 30 } # semicolon-delimited equivalent
 d4 = d3 with {}             # explicit no-op update
 Dict as d with              # capture: _d.x = prior, d.x = result
@@ -161,6 +163,8 @@ Body where {}               # explicit empty group; equivalent to Body
 Body where
   n1 = d1
   n2 = d2
+Body where n1 = d1          # inline first binding sets hanging sibling column
+           n2 = d2
 
 # `where` is low-precedence and left-associative. These are separate groups;
 # the later group is the outer scope.
@@ -386,6 +390,9 @@ object foo extends bar, baz with
     def1 = ...              # names bind to self by default
     def2 := ...             # override inherited def2; _def2 = prior
     def3 = ^a + def1        # ^a escapes to host scope (^^a two levels)
+
+object hanging with def1 = ...
+                    def2 = ... # hanging layout is also accepted
 
 object compact with {;      # braced bodies share the recursive vocabulary
   value = 1;

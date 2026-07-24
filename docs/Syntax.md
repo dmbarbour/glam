@@ -455,6 +455,10 @@ We'll support Haskell-style locals.
           Name3 = This is a very long definition and it
             continues on the next line past the name
 
+        # An inline first binding may establish the same hanging layout.
+        Body where Name1 = Def1
+                   Name2 = Def2
+
 `where` is a low-precedence, left-associative postfix construct. Each suffix
 introduces a separate mutually recursive binding group:
 
@@ -549,6 +553,10 @@ Dictionaries and objects have access to a `with` syntax for definition-style upd
         {name1:Expr1a} with
             name1 := Expr1b
             name2 = Expr2
+
+        # An inline first definition establishes a hanging sibling anchor.
+        {name1:Expr1a} with name1 := Expr1b
+                            name2 = Expr2
 
         # equivalent semicolon-delimited form
         {name1:Expr1a} with { name1 := Expr1b; name2 = Expr2 }
@@ -912,8 +920,11 @@ unique names, but it's sufficient that we don't reuse a name for two different
 specs across transitive deps.
 
 Every object, `extend`, and dictionary/object-update `with` body accepts either
-the layout form shown above or a brace-delimited form:
+the next-line layout form shown above, a hanging layout whose first definition
+follows `with`, or a brace-delimited form:
 
+        object hanging with value = 1
+                            other = 2
         object child with {
           value = 1;
           object nested with { other = 2 };
@@ -924,7 +935,9 @@ the layout form shown above or a brace-delimited form:
 Braced bodies use the same recursive definition vocabulary and source ordering
 as layout bodies. Members are separated by semicolons, and one leading or
 trailing semicolon is permitted. Empty braces are an explicit no-op body;
-omitting the body after `with` remains an error.
+omitting the body after `with` remains an error. In hanging layout, the first
+definition's token column is the sibling anchor; deeper lines continue the
+preceding definition and a dedent returns to the enclosing expression.
 
 `ExpressionList` is one or more ordinary expressions separated by top-level
 commas. Each expression is resolved in the scope surrounding the object and

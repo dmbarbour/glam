@@ -755,6 +755,28 @@ fn parses_named_object_declarations() {
 }
 
 #[test]
+fn hanging_object_and_extend_declarations_parse() {
+    let object_anchor = "object child with ".len();
+    let extend_anchor = "extend child with ".len();
+    let source = format!(
+        "language g0\nobject child with first = 1\n{object:object_anchor$}second = 2\nextend child with first := 3\n{extend:extend_anchor$}third = 4\n",
+        object = "",
+        extend = "",
+    );
+    let parsed = parse(&source);
+
+    assert_eq!(parsed.diagnostics, []);
+    assert!(matches!(
+        &parsed.declarations[1].kind,
+        DeclarationKind::Object(ObjectDecl { body, .. }) if body.len() == 2
+    ));
+    assert!(matches!(
+        &parsed.declarations[2].kind,
+        DeclarationKind::Extend(ObjectExtendDecl { body, .. }) if body.len() == 2
+    ));
+}
+
+#[test]
 fn object_declarations_parse_expression_valued_parents() {
     let parsed =
         parse("language g0\nobject child extends configured_parent options, (choose left right)\n");
@@ -1674,6 +1696,36 @@ fn hanging_do_and_let_layout_evaluate() {
         assert_eq!(
             fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
             Value::Number(n(72)),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn hanging_where_and_with_layout_evaluate() {
+    let where_header = "where_result = first + second where ";
+    let object_header = "object values with ";
+    let with_header = "updated = values with ";
+    let source = format!(
+        "language g0\n{where_header}first = 40\n{where_indent:where_width$}second = 2\n{object_header}first = 40\n{object_indent:object_width$}second = 2\n{with_header}first := 70\n{with_indent:with_width$}second := 2\nasm.where_result = where_result\nasm.with_result = updated.first + updated.second\n",
+        where_indent = "",
+        where_width = where_header.len(),
+        object_indent = "",
+        object_width = object_header.len(),
+        with_indent = "",
+        with_width = with_header.len(),
+    );
+    let parsed = parse(&source);
+    assert_eq!(parsed.diagnostics, []);
+
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [("where_result", 42), ("with_result", 72)] {
+        assert_eq!(
+            fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
+            Value::Number(n(expected)),
             "{path}"
         );
     }

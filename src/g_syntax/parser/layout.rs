@@ -111,6 +111,28 @@ impl<'lex, 'source> LayoutView<'lex, 'source> {
         Self { tokens }
     }
 
+    /// Selects next-line or hanging policy from the first significant member.
+    ///
+    /// A member beginning after earlier source on its physical line has a
+    /// token column deeper than that line's indentation and therefore owns a
+    /// hanging anchor. Source-only blank and comment lines have no tokens and
+    /// cannot affect this decision.
+    pub(super) fn inferred_base(self) -> LayoutBase {
+        let Some((index, token)) = self.tokens.first_significant() else {
+            return LayoutBase::FirstLine;
+        };
+        let indentation = self.tokens.line_indentation_at(index).unwrap_or(0);
+        let column = self
+            .tokens
+            .column_at_span(token.span())
+            .unwrap_or(indentation);
+        if column > indentation {
+            LayoutBase::Hanging(column)
+        } else {
+            LayoutBase::FirstLine
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn tokens(self) -> TokenView<'lex, 'source> {
         self.tokens
