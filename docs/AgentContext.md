@@ -243,7 +243,9 @@ their detailed scheduling and representation contracts.
   still mismatches. Computed dictionary paths are evaluated once immediately
   before their payload match and may use earlier captures. Computed
   `[KeyExpr,...]:Pattern` and `(PathExpr):Pattern` tags are the same singleton
-  dictionary decomposition without braces.
+  dictionary decomposition without braces. A final dictionary remainder is an
+  ordinary pattern over the residual dictionary and may be refutable; omitting
+  it instead requires the residual dictionary to be logically empty.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

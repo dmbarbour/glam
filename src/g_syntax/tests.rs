@@ -2366,6 +2366,35 @@ fn computed_tag_patterns_use_prior_captures_and_match_singleton_dicts() {
 }
 
 #[test]
+fn refutable_dictionary_remainders_match_the_residual_dictionary() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "asm.match = list.pure do { .r {selector:'target,target:73} -> {selector:key,{[key]:value}}; (value == 73) =>> .r \"M\" }\n",
+        "asm.empty = list.pure do { .r {selected:74} -> {selected:value,{}}; (value == 74) =>> .r \"E\" }\n",
+        "asm.missing = list.pure (.alt (do { .r {selected:75} -> {selected:_value,{required:other}}; .r other }) (.r \"A\"))\n",
+        "asm.extra = list.pure (.alt (do { .r {selected:76,required:77,extra:78} -> {selected:_value,{required:other}}; .r other }) (.r \"X\"))\n",
+        "asm.recursive = list.pure do { abstract key,value; .r {selector:'target,target:79} -> {selector:key,{[key]:value}}; ((key == 'target) and (value == 79)) =>> .r \"R\" }\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("match", b"M".as_slice()),
+        ("empty", b"E".as_slice()),
+        ("missing", b"A".as_slice()),
+        ("extra", b"X".as_slice()),
+        ("recursive", b"R".as_slice()),
+    ] {
+        let result = fully_evaluated_value(resolved_value_at_path(&value, &["asm", path]));
+        assert_eq!(output_binary_result_list(&result), expected, "{path}");
+    }
+}
+
+#[test]
 fn bare_do_operations_reuse_the_effect_then_unit_policy() {
     let parsed = parse(concat!(
         "language g0\n",

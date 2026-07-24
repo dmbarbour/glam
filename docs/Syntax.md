@@ -1356,6 +1356,7 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         {}                          # empty dict
         {d}                         # any dict
         {x:Pattern, y:Pattern, rem} # dict of at least x,y with matching data
+        {x:Pattern, {y:Pattern}}    # match residual dict with another pattern
         {x?:Pattern, rem}           # absent/undefined x feeds {} to Pattern
         {x?:{}}                     # explicitly accept a missing x
         {:x,:y,:z}                  # same as {x:x, y:y, z:z} (as tag:Name)

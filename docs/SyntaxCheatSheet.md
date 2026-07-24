@@ -400,6 +400,7 @@ P1 as P2            # both views
 {}                  # EMPTY dict only
 {d}                 # any dict
 {x:P, y:Q, rem}     # partial match, 'rem' captures rest (default {} = exact)
+{x:P, {y:Q}}        # run a refutable pattern against the residual dictionary
 {x?:P, rem}         # absent/undefined x feeds {} to P; remainder unchanged
 {x?:{}}             # explicitly accept a missing x (`{x:{}}` remains required)
 {:x, :y}            # ≡ {x:x, y:y}

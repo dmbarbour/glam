@@ -296,14 +296,7 @@ fn parse_dict_pattern(contents: TokenView<'_, '_>) -> ParseResult<SyntaxPattern>
                     "dictionary remainder must be the final pattern item",
                 ));
             }
-            let pattern = parse_pattern(member)?;
-            if !pattern.is_irrefutable() {
-                return Err(error_at_view(
-                    member,
-                    "dictionary remainder must be an irrefutable pattern",
-                ));
-            }
-            remainder = Some(Box::new(pattern));
+            remainder = Some(Box::new(parse_pattern(member)?));
             continue;
         };
 

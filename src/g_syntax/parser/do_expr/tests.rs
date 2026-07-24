@@ -1,4 +1,6 @@
-use crate::g_syntax::{DoExpr, DoStepKind, SyntaxExpr, SyntaxKeyExpr, SyntaxPatternKind};
+use crate::g_syntax::{
+    DoExpr, DoStepKind, SyntaxExpr, SyntaxKeyExpr, SyntaxPattern, SyntaxPatternKind,
+};
 
 use super::super::structural::parse_compound_expression_fragment;
 
@@ -326,6 +328,33 @@ fn computed_dictionary_quoted_and_tag_paths_parse_as_owned_expressions() {
 }
 
 #[test]
+fn dictionary_remainders_accept_refutable_patterns() {
+    let expr = parse_do_expression(concat!(
+        "do\n",
+        ".r {first:1,second:2} -> {first:left,{second:right}}\n",
+        ".r [left,right]\n",
+    ));
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = expr else {
+        panic!("expected a do expression");
+    };
+    assert!(matches!(
+        &steps[0].kind,
+        DoStepKind::Bind {
+            pattern: SyntaxPattern {
+                kind:
+                    SyntaxPatternKind::Dict {
+                        entries,
+                        remainder: Some(remainder),
+                    },
+            },
+            ..
+        } if entries[0].pattern.captures() == ["left"]
+            && matches!(&remainder.kind, SyntaxPatternKind::Dict { .. })
+            && remainder.captures() == ["right"]
+    ));
+}
+
+#[test]
 fn braced_do_is_a_structural_atom_in_containers_and_other_do_blocks() {
     for source in [
         "consume [do { .r 1 }, do { text = \"a;b\"; .r text }, do { x = do .r 2; .r x }]",
@@ -459,10 +488,6 @@ fn token_do_reports_structural_statement_errors() {
         (
             "do\n.r {} -> {foo:value, rest, bar:other}\n.r value",
             "remainder must be the final pattern item",
-        ),
-        (
-            "do\n.r {} -> {foo:value, []}\n.r value",
-            "remainder must be an irrefutable pattern",
         ),
         (
             "do\n.r {} -> {foo:value, foo:other}\n.r value",
