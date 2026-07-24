@@ -315,17 +315,15 @@ mod tests {
                 }
                 DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
                     let mut emitted = false;
-                    pattern.visit_events(&mut |event| match event {
-                        SyntaxPatternEvent::Capture(name) => {
-                            let event = registry
-                                .fulfill(name)
-                                .map_or(RecursiveDoEvent::None, RecursiveDoEvent::Fulfill);
-                            steps.push(RecursiveDoStep {
-                                line: step.line,
-                                event,
-                            });
-                            emitted = true;
-                        }
+                    pattern.visit_captures(&mut |name| {
+                        let event = registry
+                            .fulfill(name)
+                            .map_or(RecursiveDoEvent::None, RecursiveDoEvent::Fulfill);
+                        steps.push(RecursiveDoStep {
+                            line: step.line,
+                            event,
+                        });
+                        emitted = true;
                     });
                     if !emitted {
                         steps.push(RecursiveDoStep {

@@ -139,14 +139,6 @@ pub enum SyntaxPatternKind {
     Group(Box<SyntaxPattern>),
 }
 
-/// Source-visible events produced while a pattern is matched.
-///
-/// Later pattern forms add observations of pattern-owned expressions here so
-/// name and use analysis can follow the same progressive scope as matching.
-pub(super) enum SyntaxPatternEvent<'a> {
-    Capture(&'a str),
-}
-
 impl SyntaxPattern {
     pub(super) fn capture(name: impl Into<String>) -> Self {
         Self {
@@ -160,20 +152,19 @@ impl SyntaxPattern {
         }
     }
 
-    pub(super) fn visit_events<'a>(&'a self, visitor: &mut impl FnMut(SyntaxPatternEvent<'a>)) {
+    /// Visits source captures in their semantic binding order.
+    pub(super) fn visit_captures<'a>(&'a self, visitor: &mut impl FnMut(&'a str)) {
         match &self.kind {
-            SyntaxPatternKind::Capture(name) => visitor(SyntaxPatternEvent::Capture(name)),
+            SyntaxPatternKind::Capture(name) => visitor(name),
             SyntaxPatternKind::Wildcard => {}
-            SyntaxPatternKind::Group(pattern) => pattern.visit_events(visitor),
+            SyntaxPatternKind::Group(pattern) => pattern.visit_captures(visitor),
         }
     }
 
     #[cfg(test)]
     pub(super) fn captures(&self) -> Vec<&str> {
         let mut captures = Vec::new();
-        self.visit_events(&mut |event| match event {
-            SyntaxPatternEvent::Capture(name) => captures.push(name),
-        });
+        self.visit_captures(&mut |name| captures.push(name));
         captures
     }
 }

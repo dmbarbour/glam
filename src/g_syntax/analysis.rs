@@ -456,13 +456,11 @@ fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {
                 }
             }
             DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
-                pattern.visit_events(&mut |event| match event {
-                    SyntaxPatternEvent::Capture(name) => {
-                        if !fulfills_abstract(name, &mut unresolved_abstracts) {
-                            locals.push(local_name_metadata(name));
-                            used.push(false);
-                            binding_lines.push(step.line);
-                        }
+                pattern.visit_captures(&mut |name| {
+                    if !fulfills_abstract(name, &mut unresolved_abstracts) {
+                        locals.push(local_name_metadata(name));
+                        used.push(false);
+                        binding_lines.push(step.line);
                     }
                 });
             }
@@ -504,19 +502,16 @@ fn preview_recursive_do_plan(
             }
             DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
                 let mut emitted = false;
-                pattern.visit_events(&mut |event| match event {
-                    SyntaxPatternEvent::Capture(name) => {
-                        let event = registry
-                            .fulfill(name)
-                            .map_or(recursive_do::RecursiveDoEvent::None, |id| {
-                                recursive_do::RecursiveDoEvent::Fulfill(id)
-                            });
-                        steps.push(recursive_do::RecursiveDoStep {
-                            line: step.line,
-                            event,
-                        });
-                        emitted = true;
-                    }
+                pattern.visit_captures(&mut |name| {
+                    let event = registry.fulfill(name).map_or(
+                        recursive_do::RecursiveDoEvent::None,
+                        recursive_do::RecursiveDoEvent::Fulfill,
+                    );
+                    steps.push(recursive_do::RecursiveDoStep {
+                        line: step.line,
+                        event,
+                    });
+                    emitted = true;
                 });
                 if !emitted {
                     steps.push(recursive_do::RecursiveDoStep {
@@ -558,12 +553,10 @@ fn mark_used_do_locals(do_expr: &DoExpr, locals: &[LocalName], used: &mut [bool]
                 }
             }
             DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
-                pattern.visit_events(&mut |event| match event {
-                    SyntaxPatternEvent::Capture(name) => {
-                        if !fulfills_abstract(name, &mut unresolved_abstracts) {
-                            combined.push(local_name_metadata(name));
-                            combined_used.push(false);
-                        }
+                pattern.visit_captures(&mut |name| {
+                    if !fulfills_abstract(name, &mut unresolved_abstracts) {
+                        combined.push(local_name_metadata(name));
+                        combined_used.push(false);
                     }
                 });
             }

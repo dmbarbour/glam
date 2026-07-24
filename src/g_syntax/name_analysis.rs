@@ -390,21 +390,17 @@ impl FileNameAnalysis {
                 }
                 DoStepKind::Bind { pattern, operation } => {
                     self.visit_expr(operation, step.line, scope, locals);
-                    pattern.visit_events(&mut |event| match event {
-                        SyntaxPatternEvent::Capture(name) => {
-                            if !fulfills_abstract_name(name, &mut unresolved) {
-                                self.push_source_local(name, step.line, scope, locals);
-                            }
+                    pattern.visit_captures(&mut |name| {
+                        if !fulfills_abstract_name(name, &mut unresolved) {
+                            self.push_source_local(name, step.line, scope, locals);
                         }
                     });
                 }
                 DoStepKind::ValueBind { pattern, value } => {
                     self.visit_expr(value, step.line, scope, locals);
-                    pattern.visit_events(&mut |event| match event {
-                        SyntaxPatternEvent::Capture(name) => {
-                            if !fulfills_abstract_name(name, &mut unresolved) {
-                                self.push_source_local(name, step.line, scope, locals);
-                            }
+                    pattern.visit_captures(&mut |name| {
+                        if !fulfills_abstract_name(name, &mut unresolved) {
+                            self.push_source_local(name, step.line, scope, locals);
                         }
                     });
                 }
