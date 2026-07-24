@@ -247,16 +247,12 @@ fn parse_tag_pattern(view: TokenView<'_, '_>, colon: usize) -> ParseResult<Synta
     if colon_token.leading() != LeadingTrivia::Joint {
         return Err(error_at_view(
             view,
-            "tag pattern `:` must be joint with its static path",
+            "tag pattern `:` must be joint with its path",
         ));
     }
-    let path = parse_static_path(left, "tag pattern")?;
+    let path = parse_pattern_path(left, "tag pattern", false)?;
     Ok(dict_pattern(
-        vec![dict_entry(
-            static_pattern_path(path.iter().map(String::as_str)),
-            false,
-            parse_pattern(right)?,
-        )],
+        vec![dict_entry(path, false, parse_pattern(right)?)],
         None,
     ))
 }
@@ -358,41 +354,6 @@ fn parse_dict_pattern(contents: TokenView<'_, '_>) -> ParseResult<SyntaxPattern>
     }
 
     Ok(dict_pattern(entries, remainder))
-}
-
-fn parse_static_path(view: TokenView<'_, '_>, context: &str) -> ParseResult<Vec<String>> {
-    let tokens = view
-        .top_level()
-        .filter(|indexed| !matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
-        .collect::<Vec<_>>();
-    let mut path = Vec::new();
-    let mut expect_name = true;
-    for token in tokens {
-        if expect_name {
-            let TokenKind::Name(name) = token.token().kind() else {
-                return Err(error_at_view(
-                    view,
-                    format!("{context} requires a static name path"),
-                ));
-            };
-            path.push((*name).to_owned());
-        } else if !matches!(token.token().kind(), TokenKind::Symbol("."))
-            || token.token().leading() != LeadingTrivia::Joint
-        {
-            return Err(error_at_view(
-                view,
-                format!("{context} requires a joint static name path"),
-            ));
-        }
-        expect_name = !expect_name;
-    }
-    if path.is_empty() || expect_name {
-        return Err(error_at_view(
-            view,
-            format!("{context} requires a complete static name path"),
-        ));
-    }
-    Ok(path)
 }
 
 fn parse_pattern_path(

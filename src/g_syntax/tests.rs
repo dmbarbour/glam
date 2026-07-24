@@ -2339,6 +2339,33 @@ fn dictionary_tag_and_tuple_patterns_match_or_fall_through() {
 }
 
 #[test]
+fn computed_tag_patterns_use_prior_captures_and_match_singleton_dicts() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "asm.key = list.pure do { .r ('target,target:69) -> (tag,[tag]:value); (value == 69) =>> .r \"K\" }\n",
+        "asm.path = list.pure do { .r (['root,'target],root.target:70) -> (path,(path):value); (value == 70) =>> .r \"P\" }\n",
+        "asm.fallback = list.pure (.alt (do { .r ('missing,target:71) -> (tag,[tag]:_value); .r \"bad\" }) (.r \"F\"))\n",
+        "asm.recursive = list.pure do { abstract tag,value; .r ('target,target:72) -> (tag,[tag]:value); ((tag == 'target) and (value == 72)) =>> .r \"R\" }\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("key", b"K".as_slice()),
+        ("path", b"P".as_slice()),
+        ("fallback", b"F".as_slice()),
+        ("recursive", b"R".as_slice()),
+    ] {
+        let result = fully_evaluated_value(resolved_value_at_path(&value, &["asm", path]));
+        assert_eq!(output_binary_result_list(&result), expected, "{path}");
+    }
+}
+
+#[test]
 fn bare_do_operations_reuse_the_effect_then_unit_policy() {
     let parsed = parse(concat!(
         "language g0\n",

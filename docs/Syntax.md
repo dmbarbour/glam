@@ -368,11 +368,11 @@ The current Rust bootstrap implements pattern-bearing statements in both
 layout and braced forms. Patterns currently include names, `_`, irrefutable
 `P as Q`, unit, numbers, atoms, text, fixed quoted paths, list patterns with at
 most one irrefutable variable-length segment, computed-path dictionaries and
-quoted paths, static tags, and tuples. Dictionary entries are required by
-default; `path?:Pattern` explicitly passes `{}` to the payload pattern when the
-path is absent or undefined. Computed paths are evaluated once in source order
-and may use captures from earlier subpatterns. Computed tag syntax remains
-deferred. A layout block is newline-delimited:
+quoted paths, static and computed tags, and tuples. Dictionary entries are
+required by default; `path?:Pattern` explicitly passes `{}` to the payload
+pattern when the path is absent or undefined. Computed paths are evaluated once
+in source order and may use captures from earlier subpatterns. A layout block
+is newline-delimited:
 
         my_effect = do
             .read 'left -> left
@@ -1366,9 +1366,9 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
 
         tag:Pattern                 # same as {tag:Pattern}
         :tag                        # same as tag:tag 
-        [KeyExpr]:Pattern           # one computed-key path component
-        [KeyA,KeyB]:Pattern         # hierarchical path pattern
-        (PathExpr):Pattern          # computed list-valued path
+        [KeyExpr]:Pattern           # same as {[KeyExpr]:Pattern}
+        [KeyA,KeyB]:Pattern         # same as {[KeyA,KeyB]:Pattern}
+        (PathExpr):Pattern          # same as {(PathExpr):Pattern}
         'name                       # a constant, same as ["name"]:()
         '.Path                      # a constant path, matches equal list
         '.foo.[Expr].(PathExpr)     # computed components; prior captures visible

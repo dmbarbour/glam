@@ -241,8 +241,9 @@ their detailed scheduling and representation contracts.
   on absent/undefined paths; explicit `path?:Pattern` entries pass `{}` to the
   payload and preserve the original remainder. A defined non-dict path prefix
   still mismatches. Computed dictionary paths are evaluated once immediately
-  before their payload match and may use earlier captures; computed tag syntax
-  remains deferred.
+  before their payload match and may use earlier captures. Computed
+  `[KeyExpr,...]:Pattern` and `(PathExpr):Pattern` tags are the same singleton
+  dictionary decomposition without braces.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

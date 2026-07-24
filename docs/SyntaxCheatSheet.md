@@ -408,8 +408,9 @@ P1 as P2            # both views
 {selector:key, root.[key]:P, rem}  # computed hierarchical component
 {path:p, (p):P, rem}               # splice a computed list-valued path
 tag:P    :tag    'name
-# Target computed-tag forms (not implemented by the bootstrap yet):
-[KeyA,KeyB]:P    (PathExpr):P
+[KeyExpr]:P       # computed singleton tag; prior captures are in scope
+[KeyA,KeyB]:P     # computed hierarchical singleton tag
+(PathExpr):P      # singleton tag from a computed list-valued path
 []   [a,b,c]
 [x]++xs   xs++[x]   [x0]++mid++[xN]     # ONE variable segment max
 "foo"    "foo"++rest                    # texts are lists

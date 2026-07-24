@@ -234,7 +234,7 @@ fn dictionary_tag_and_tuple_patterns_share_dictionary_structure() {
 }
 
 #[test]
-fn computed_dictionary_and_quoted_paths_parse_as_owned_expressions() {
+fn computed_dictionary_quoted_and_tag_paths_parse_as_owned_expressions() {
     let expr = parse_do_expression(concat!(
         "do\n",
         ".r {selector:'target,target:1} -> {selector:key, [key]:value}\n",
@@ -243,7 +243,9 @@ fn computed_dictionary_and_quoted_paths_parse_as_owned_expressions() {
         ".r {} -> {[key]?:{}}\n",
         ".r (42,['foo,42]) -> (index, '.foo.[index])\n",
         ".r (['foo,42],['foo,42]) -> (whole_path, '.(whole_path))\n",
-        ".r [value, nested, spliced, index]\n",
+        ".r ('target,target:4) -> (tag, [tag]:tagged)\n",
+        ".r (['root,'target],root.target:5) -> (tag_path, (tag_path):deep_tagged)\n",
+        ".r [value, nested, spliced, index, tagged, deep_tagged]\n",
     ));
     let SyntaxExpr::Do(DoExpr { steps, .. }) = expr else {
         panic!("expected a do expression");
@@ -281,6 +283,46 @@ fn computed_dictionary_and_quoted_paths_parse_as_owned_expressions() {
                         && matches!(expr.as_ref(), SyntaxExpr::Name(index) if index == "index")
             )
     ));
+
+    let DoStepKind::Bind { pattern, .. } = &steps[6].kind else {
+        panic!("expected a tuple-pattern binding");
+    };
+    let SyntaxPatternKind::Dict { entries, .. } = &pattern.kind else {
+        panic!("tuple patterns use dictionary structure");
+    };
+    let SyntaxPatternKind::List { prefix, .. } = &entries[0].pattern.kind else {
+        panic!("tuple payload should be a fixed list pattern");
+    };
+    assert!(matches!(
+        &prefix[1].kind,
+        SyntaxPatternKind::Dict { entries, .. }
+            if matches!(
+                entries[0].path.as_slice(),
+                [SyntaxKeyExpr::Index(expr)]
+                    if matches!(expr.as_ref(), SyntaxExpr::Name(name) if name == "tag")
+            )
+    ));
+    assert_eq!(pattern.captures(), ["tag", "tagged"]);
+
+    let DoStepKind::Bind { pattern, .. } = &steps[7].kind else {
+        panic!("expected a tuple-pattern binding");
+    };
+    let SyntaxPatternKind::Dict { entries, .. } = &pattern.kind else {
+        panic!("tuple patterns use dictionary structure");
+    };
+    let SyntaxPatternKind::List { prefix, .. } = &entries[0].pattern.kind else {
+        panic!("tuple payload should be a fixed list pattern");
+    };
+    assert!(matches!(
+        &prefix[1].kind,
+        SyntaxPatternKind::Dict { entries, .. }
+            if matches!(
+                entries[0].path.as_slice(),
+                [SyntaxKeyExpr::PathIndex(expr)]
+                    if matches!(expr.as_ref(), SyntaxExpr::Name(name) if name == "tag_path")
+            )
+    ));
+    assert_eq!(pattern.captures(), ["tag_path", "deep_tagged"]);
 }
 
 #[test]
@@ -400,6 +442,14 @@ fn token_do_reports_structural_statement_errors() {
         ),
         (
             "do\n'.foo.() <- .r []\n.r ()",
+            "path splice requires an expression",
+        ),
+        (
+            "do\n.r {} -> []:value\n.r value",
+            "requires at least one path component",
+        ),
+        (
+            "do\n.r {} -> ():value\n.r value",
             "path splice requires an expression",
         ),
         (
