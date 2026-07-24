@@ -9,6 +9,7 @@ mod list_effect;
 mod net;
 mod numeric;
 mod object;
+mod pattern;
 mod strategy;
 
 use super::*;
@@ -54,6 +55,10 @@ pub(super) fn apply_builtin(
         | Builtin::ListHead
         | Builtin::ListTail
         | Builtin::TextLines => list::apply(context, builtin, arguments),
+        Builtin::PatternIsList
+        | Builtin::PatternListTryUncons
+        | Builtin::PatternListTryUnsnoc
+        | Builtin::PatternListIsEmpty => pattern::apply(context, builtin, arguments),
         Builtin::ListEffect
         | Builtin::ListEffectReturn
         | Builtin::ListEffectSeq

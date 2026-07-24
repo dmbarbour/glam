@@ -59,6 +59,10 @@ protocol_key!(BLOCKED, "blocked");
 protocol_key!(CANCELED, "canceled");
 protocol_key!(LEFT, "left");
 protocol_key!(RIGHT, "right");
+protocol_key!(HEAD, "head");
+protocol_key!(TAIL, "tail");
+protocol_key!(INIT, "init");
+protocol_key!(LAST, "last");
 protocol_key!(TUPLE, "tuple");
 pub(crate) static TUPLE_VALUE: LazyLock<Value> = LazyLock::new(|| atom_value(&TUPLE));
 

@@ -788,6 +788,17 @@ fn builtin1_expr(builtin: Builtin, value: TestExpr) -> TestExpr {
     )
 }
 
+fn run_pattern_builtin(builtin: Builtin, value: Value) -> Result<Vec<Value>, EvalError> {
+    let handled = eval_closed_expr(&builtin1_expr(
+        Builtin::ListEffect,
+        builtin1_expr(builtin, TestExpr::Value(value)),
+    ))?;
+    let Value::List(results) = handled else {
+        panic!("the list effect handler should return a list");
+    };
+    list_to_value_items(&test_context(), &results)
+}
+
 fn builtin3_expr(builtin: Builtin, first: TestExpr, second: TestExpr, third: TestExpr) -> TestExpr {
     TestExpr::Apply(
         Arc::new(TestExpr::Apply(
@@ -1293,6 +1304,141 @@ fn evaluates_zero_based_list_at_for_lists_and_compact_binaries() {
         negative.to_string(),
         "list at builtin requires non-negative integer indices"
     );
+}
+
+#[test]
+fn compiler_pattern_list_predicates_return_pass_fail_effects() {
+    for value in [
+        Value::binary_from_text(""),
+        Value::binary_from_text("A"),
+        Value::List(List::empty()),
+        Value::List(List::from_values(vec![n(1)])),
+        Value::List(List::from_thunk(
+            LazyValue::error("list predicate forced its contents").into(),
+        )),
+    ] {
+        assert_eq!(
+            run_pattern_builtin(Builtin::PatternIsList, value)
+                .expect("logical list values should match"),
+            [(*keys::UNIT_VALUE).clone()]
+        );
+    }
+    assert!(
+        run_pattern_builtin(Builtin::PatternIsList, n(1))
+            .expect("a kind mismatch should be an ordinary failure")
+            .is_empty()
+    );
+
+    for value in [Value::binary_from_text(""), Value::List(List::empty())] {
+        assert_eq!(
+            run_pattern_builtin(Builtin::PatternListIsEmpty, value)
+                .expect("empty logical lists should match"),
+            [(*keys::UNIT_VALUE).clone()]
+        );
+    }
+    for value in [
+        Value::binary_from_text("A"),
+        Value::List(List::from_values(vec![n(1)])),
+        n(1),
+    ] {
+        assert!(
+            run_pattern_builtin(Builtin::PatternListIsEmpty, value)
+                .expect("nonempty and wrong-kind values should mismatch")
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn compiler_pattern_list_decomposition_preserves_compact_remainders() {
+    let [uncons]: [Value; 1] =
+        run_pattern_builtin(Builtin::PatternListTryUncons, Value::binary_from_text("AB"))
+            .expect("a compact binary should uncons")
+            .try_into()
+            .expect("a successful match should have one result");
+    let Value::Dict(uncons) = uncons else {
+        panic!("uncons should return a parts dictionary");
+    };
+    assert_eq!(uncons.get(&*keys::HEAD), Some(&n(i64::from(b'A'))));
+    assert_eq!(
+        uncons.get(&*keys::TAIL),
+        Some(&Value::binary_from_text("B"))
+    );
+
+    let [uncons]: [Value; 1] = run_pattern_builtin(
+        Builtin::PatternListTryUncons,
+        Value::List(List::from_values(vec![n(1), n(2)])),
+    )
+    .expect("a flat value list should uncons")
+    .try_into()
+    .expect("a successful match should have one result");
+    let Value::Dict(uncons) = uncons else {
+        panic!("uncons should return a parts dictionary");
+    };
+    assert_eq!(uncons.get(&*keys::HEAD), Some(&n(1)));
+    let Some(Value::List(tail)) = uncons.get(&*keys::TAIL) else {
+        panic!("a value-list remainder should stay a list");
+    };
+    assert_eq!(
+        pop_list_front(&test_context(), tail)
+            .expect("flat tail should be readable")
+            .map(|(head, _)| head),
+        Some(n(2))
+    );
+
+    let [unsnoc]: [Value; 1] =
+        run_pattern_builtin(Builtin::PatternListTryUnsnoc, Value::binary_from_text("AB"))
+            .expect("a compact binary should unsnoc")
+            .try_into()
+            .expect("a successful match should have one result");
+    let Value::Dict(unsnoc) = unsnoc else {
+        panic!("unsnoc should return a parts dictionary");
+    };
+    assert_eq!(
+        unsnoc.get(&*keys::INIT),
+        Some(&Value::binary_from_text("A"))
+    );
+    assert_eq!(unsnoc.get(&*keys::LAST), Some(&n(i64::from(b'B'))));
+}
+
+#[test]
+fn compiler_pattern_list_decomposition_mismatches_without_masking_failures() {
+    for builtin in [Builtin::PatternListTryUncons, Builtin::PatternListTryUnsnoc] {
+        for value in [
+            Value::binary_from_text(""),
+            Value::List(List::empty()),
+            n(1),
+        ] {
+            assert!(
+                run_pattern_builtin(builtin, value)
+                    .expect("empty and wrong-kind values should mismatch")
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            run_pattern_builtin(builtin, Value::error("pattern input failed"))
+                .expect_err("forcing failures must propagate")
+                .to_string(),
+            "pattern input failed"
+        );
+    }
+}
+
+#[test]
+fn compiler_pattern_unsnoc_does_not_force_an_unrelated_prefix_hole() {
+    let list = List::concat(
+        List::from_thunk(LazyValue::error("prefix was forced").into()),
+        List::from_values(vec![n(9)]),
+    );
+    let [parts]: [Value; 1] = run_pattern_builtin(Builtin::PatternListTryUnsnoc, Value::List(list))
+        .expect("a known suffix should unsnoc without its prefix")
+        .try_into()
+        .expect("a successful match should have one result");
+    let Value::Dict(parts) = parts else {
+        panic!("unsnoc should return a parts dictionary");
+    };
+    assert_eq!(parts.get(&*keys::LAST), Some(&n(9)));
+    assert!(matches!(parts.get(&*keys::INIT), Some(Value::List(_))));
 }
 
 #[test]

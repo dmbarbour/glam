@@ -225,6 +225,9 @@ their detailed scheduling and representation contracts.
   resolution. A bare intermediate statement reuses `=>>` and therefore
   requires unit; the final expression is the continuation itself and is not
   implicitly wrapped in `.r`.
+- Do patterns expand directly into resolved primitive-do steps. Multi-capture
+  `P as Q` binds one internal subject and emits ordered source aliases; do not
+  reconstruct a surface `DoExpr` or lower the subject more than once.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

@@ -2138,6 +2138,36 @@ fn do_lowering_rejects_shadowing_at_the_binding_statement() {
 }
 
 #[test]
+fn irrefutable_as_patterns_reject_duplicate_captures() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "bad = do\n",
+        "  .r 1 -> same as same\n",
+        "  .r same\n",
+    ));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != Severity::Error)
+    );
+
+    let lowered = lower_parsed_source(parsed, &CompileContext::default());
+    let errors = lowered
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .collect::<Vec<_>>();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].line, 3);
+    assert!(
+        errors[0]
+            .message
+            .contains("local `same` shadows existing local `same`")
+    );
+}
+
+#[test]
 fn do_lowering_sequences_binds_value_guards_and_bare_operations() {
     let parsed = parse(concat!(
         "language g0\n",
@@ -2155,6 +2185,9 @@ fn do_lowering_sequences_binds_value_guards_and_bare_operations() {
         "asm.drop = list.pure do\n",
         "  .r \"ignored\" -> _\n",
         "  .r 69\n",
+        "asm.alias = list.pure do\n",
+        "  .r \"G\" -> first as second\n",
+        "  ((first == \"G\") and (second == \"G\")) =>> .r 71\n",
         "asm.scope = list.pure do\n",
         "  selected <- .r source_value\n",
         "  .r selected\n",
@@ -2169,6 +2202,7 @@ fn do_lowering_sequences_binds_value_guards_and_bare_operations() {
         ("backward", b"A".as_slice()),
         ("forward", b"C".as_slice()),
         ("drop", b"E".as_slice()),
+        ("alias", b"G".as_slice()),
         ("scope", b"F".as_slice()),
     ] {
         assert_eq!(

@@ -137,6 +137,7 @@ pub enum SyntaxPatternKind {
     Capture(String),
     Wildcard,
     Group(Box<SyntaxPattern>),
+    As(Box<SyntaxPattern>, Box<SyntaxPattern>),
 }
 
 impl SyntaxPattern {
@@ -158,6 +159,10 @@ impl SyntaxPattern {
             SyntaxPatternKind::Capture(name) => visitor(name),
             SyntaxPatternKind::Wildcard => {}
             SyntaxPatternKind::Group(pattern) => pattern.visit_captures(visitor),
+            SyntaxPatternKind::As(left, right) => {
+                left.visit_captures(visitor);
+                right.visit_captures(visitor);
+            }
         }
     }
 

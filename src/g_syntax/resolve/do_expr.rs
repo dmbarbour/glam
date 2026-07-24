@@ -39,6 +39,20 @@ enum PrimitiveDoStepKind {
     },
 }
 
+enum PrimitivePatternInput {
+    Effect(ResolvedExpr<Value>),
+    Value(ResolvedExpr<Value>),
+}
+
+impl PrimitivePatternInput {
+    fn into_step(self, binding: BindingId) -> PrimitiveDoStepKind {
+        match self {
+            Self::Effect(operation) => PrimitiveDoStepKind::Bind { operation, binding },
+            Self::Value(value) => PrimitiveDoStepKind::ValueBind { value, binding },
+        }
+    }
+}
+
 struct PrimitiveDoBlock {
     steps: Vec<PrimitiveDoStep>,
     result: ResolvedExpr<Value>,
@@ -82,7 +96,7 @@ impl DoLowering<'_> {
             let mut steps = Vec::with_capacity(do_expr.steps.len());
 
             for step in &do_expr.steps {
-                let (kind, recursion) = match &step.kind {
+                match &step.kind {
                     DoStepKind::Abstract(names) => {
                         let ids = forward_names.declare(names, step.line)?;
                         debug_assert_eq!(ids.len(), names.len());
@@ -102,10 +116,12 @@ impl DoLowering<'_> {
                                 ..ResolvedForward::default()
                             });
                         }
-                        (
+                        push_primitive_step(
+                            &mut steps,
+                            step.line,
                             PrimitiveDoStepKind::Abstract,
                             RecursiveDoEvent::Declare(ids),
-                        )
+                        );
                     }
                     DoStepKind::Bind { pattern, operation } => {
                         let operation = syntax_expr_to_resolved_in_semantic_scope(
@@ -115,14 +131,15 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
-                        let (binding, recursion) = resolve_step_binding(
+                        append_irrefutable_pattern_steps(
+                            &mut steps,
+                            PrimitivePatternInput::Effect(operation),
                             &mut forward_names,
                             pattern,
                             step.line,
                             locals,
                             &mut forwards,
                         )?;
-                        (PrimitiveDoStepKind::Bind { operation, binding }, recursion)
                     }
                     DoStepKind::ValueBind { pattern, value } => {
                         let value = syntax_expr_to_resolved_in_semantic_scope(
@@ -132,14 +149,15 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
-                        let (binding, recursion) = resolve_step_binding(
+                        append_irrefutable_pattern_steps(
+                            &mut steps,
+                            PrimitivePatternInput::Value(value),
                             &mut forward_names,
                             pattern,
                             step.line,
                             locals,
                             &mut forwards,
                         )?;
-                        (PrimitiveDoStepKind::ValueBind { value, binding }, recursion)
                     }
                     DoStepKind::Then(operation) => {
                         let operation = syntax_expr_to_resolved_in_semantic_scope(
@@ -149,22 +167,15 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
-                        (
-                            PrimitiveDoStepKind::Then {
-                                operation,
-                                result: locals.fresh_binding(),
-                            },
+                        let result = locals.fresh_binding();
+                        push_primitive_step(
+                            &mut steps,
+                            step.line,
+                            PrimitiveDoStepKind::Then { operation, result },
                             RecursiveDoEvent::None,
-                        )
+                        );
                     }
-                };
-                steps.push(PrimitiveDoStep {
-                    recursion: RecursiveDoStep {
-                        line: step.line,
-                        event: recursion,
-                    },
-                    kind,
-                });
+                }
             }
 
             let result = syntax_expr_to_resolved_in_semantic_scope(
@@ -218,20 +229,56 @@ impl DoLowering<'_> {
     }
 }
 
-fn resolve_step_binding(
+fn append_irrefutable_pattern_steps(
+    steps: &mut Vec<PrimitiveDoStep>,
+    input: PrimitivePatternInput,
     forward_names: &mut ForwardNameRegistry,
     pattern: &SyntaxPattern,
     line: usize,
     locals: &mut ResolverContext,
     forwards: &mut [ResolvedForward],
-) -> Result<(BindingId, RecursiveDoEvent), Diagnostic> {
-    let name = match direct_pattern_binding(pattern) {
-        DirectPatternBinding::Capture(name) => name,
-        DirectPatternBinding::Wildcard => {
-            return Ok((locals.fresh_binding(), RecursiveDoEvent::None));
-        }
-    };
+) -> Result<(), Diagnostic> {
+    let captures = irrefutable_captures(pattern);
+    if captures.len() <= 1 {
+        let (binding, recursion) = if let Some(name) = captures.first() {
+            resolve_capture_binding(forward_names, name, line, locals, forwards)?
+        } else {
+            (locals.fresh_binding(), RecursiveDoEvent::None)
+        };
+        push_primitive_step(steps, line, input.into_step(binding), recursion);
+        return Ok(());
+    }
 
+    let subject = locals.fresh_binding();
+    push_primitive_step(
+        steps,
+        line,
+        input.into_step(subject),
+        RecursiveDoEvent::None,
+    );
+    for name in captures {
+        let (binding, recursion) =
+            resolve_capture_binding(forward_names, name, line, locals, forwards)?;
+        push_primitive_step(
+            steps,
+            line,
+            PrimitiveDoStepKind::ValueBind {
+                value: ResolvedExpr::Local(subject),
+                binding,
+            },
+            recursion,
+        );
+    }
+    Ok(())
+}
+
+fn resolve_capture_binding(
+    forward_names: &mut ForwardNameRegistry,
+    name: &str,
+    line: usize,
+    locals: &mut ResolverContext,
+    forwards: &mut [ResolvedForward],
+) -> Result<(BindingId, RecursiveDoEvent), Diagnostic> {
     let fulfillment = forward_names.fulfill(name);
     let Some(id) = fulfillment else {
         let binding = locals
@@ -252,6 +299,18 @@ fn resolve_step_binding(
     locals[slot] = local;
     forward.resolved_binding = Some(binding);
     Ok((binding, RecursiveDoEvent::Fulfill(id)))
+}
+
+fn push_primitive_step(
+    steps: &mut Vec<PrimitiveDoStep>,
+    line: usize,
+    kind: PrimitiveDoStepKind,
+    event: RecursiveDoEvent,
+) {
+    steps.push(PrimitiveDoStep {
+        recursion: RecursiveDoStep { line, event },
+        kind,
+    });
 }
 
 impl DoEmitter<'_> {
@@ -382,6 +441,12 @@ mod tests {
         let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
         syntax_expr_to_resolved_in_scope(expr, 1, &context, &scope, &mut ResolverContext::default())
             .expect("do expression should resolve")
+    }
+
+    fn as_pattern(left: SyntaxPattern, right: SyntaxPattern) -> SyntaxPattern {
+        SyntaxPattern {
+            kind: SyntaxPatternKind::As(Box::new(left), Box::new(right)),
+        }
     }
 
     fn count_embedded_value(expr: &ResolvedExpr<Value>, target: &Value) -> usize {
@@ -526,6 +591,68 @@ mod tests {
                     [ResolvedExpr::Embedded(Value::Number(number))]
                         if *number == Number::from(42_i64))
         ));
+    }
+
+    #[test]
+    fn irrefutable_as_pattern_shares_one_resolved_subject() {
+        let resolved = resolve(&SyntaxExpr::Do(DoExpr {
+            steps: vec![DoStep {
+                line: 2,
+                kind: DoStepKind::ValueBind {
+                    pattern: as_pattern(
+                        SyntaxPattern::capture("left"),
+                        SyntaxPattern::capture("right"),
+                    ),
+                    value: SyntaxExpr::Number(42.into()),
+                },
+            }],
+            result_line: 3,
+            result: Box::new(SyntaxExpr::List(vec![
+                SyntaxExpr::Name("left".to_owned()),
+                SyntaxExpr::Name("right".to_owned()),
+            ])),
+        }));
+
+        assert_eq!(
+            count_embedded_value(&resolved, &Value::Number(Number::from(42_i64))),
+            1
+        );
+    }
+
+    #[test]
+    fn irrefutable_as_captures_fulfill_independent_recursive_regions() {
+        let resolved = resolve(&SyntaxExpr::Do(DoExpr {
+            steps: vec![
+                DoStep {
+                    line: 2,
+                    kind: DoStepKind::Abstract(vec!["left".to_owned(), "right".to_owned()]),
+                },
+                DoStep {
+                    line: 3,
+                    kind: DoStepKind::ValueBind {
+                        pattern: as_pattern(
+                            SyntaxPattern::capture("left"),
+                            SyntaxPattern::capture("right"),
+                        ),
+                        value: SyntaxExpr::Number(42.into()),
+                    },
+                },
+            ],
+            result_line: 4,
+            result: Box::new(SyntaxExpr::Unit),
+        }));
+
+        assert_eq!(
+            count_embedded_value(
+                &resolved,
+                &crate::g_syntax::compiler_values::effect_value("fix")
+            ),
+            2
+        );
+        assert_eq!(
+            count_embedded_value(&resolved, &Value::Number(Number::from(42_i64))),
+            1
+        );
     }
 
     #[test]

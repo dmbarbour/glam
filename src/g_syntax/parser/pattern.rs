@@ -7,7 +7,7 @@
 use crate::g_syntax::keywords::{canonical_keyword, reserved_keyword_message};
 use crate::g_syntax::{Diagnostic, SyntaxPattern, SyntaxPatternKind};
 
-use super::input::TokenView;
+use super::input::{TokenRange, TokenView};
 use super::lexical::{Delimiter, TokenKind};
 use super::structural::trim_layout;
 
@@ -23,6 +23,44 @@ pub(in crate::g_syntax::parser) fn parse_pattern(
     let (last_index, _) = view
         .last_significant()
         .expect("a pattern with a first token has a last token");
+
+    let as_indices = view
+        .top_level()
+        .filter(|indexed| matches!(indexed.token().kind(), TokenKind::Name(name) if *name == "as"))
+        .map(|indexed| indexed.index())
+        .collect::<Vec<_>>();
+    if !as_indices.is_empty() {
+        let mut start = view.range().start();
+        let mut parts = Vec::with_capacity(as_indices.len() + 1);
+        for as_index in as_indices {
+            let part = trim_layout(view_between(view, start, as_index));
+            if part.first_significant().is_none() {
+                return Err(error_at_view(
+                    view,
+                    "pattern `as` requires a pattern on both sides",
+                ));
+            }
+            parts.push(part);
+            start = as_index + 1;
+        }
+        let final_part = trim_layout(view_between(view, start, view.range().end()));
+        if final_part.first_significant().is_none() {
+            return Err(error_at_view(
+                view,
+                "pattern `as` requires a pattern on both sides",
+            ));
+        }
+        parts.push(final_part);
+
+        let mut parts = parts.into_iter();
+        let mut pattern = parse_pattern(parts.next().expect("as pattern has a left side"))?;
+        for right in parts {
+            pattern = SyntaxPattern {
+                kind: SyntaxPatternKind::As(Box::new(pattern), Box::new(parse_pattern(right)?)),
+            };
+        }
+        return Ok(pattern);
+    }
 
     match first.kind() {
         TokenKind::Name(name) if first_index == last_index => {
@@ -66,7 +104,7 @@ pub(in crate::g_syntax::parser) fn parse_pattern(
 
     Err(error_at_view(
         view,
-        "pattern currently supports only a local name, `_`, or a parenthesized pattern",
+        "pattern currently supports only local names, `_`, `P as Q`, or parenthesized patterns",
     ))
 }
 
@@ -83,4 +121,13 @@ fn error_at_view(view: TokenView<'_, '_>, message: impl Into<String>) -> Vec<Dia
         .and_then(|(_, token)| view.line_at_span(token.span()))
         .unwrap_or(1);
     vec![Diagnostic::error(line, message)]
+}
+
+fn view_between<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+    start: usize,
+    end: usize,
+) -> TokenView<'lex, 'source> {
+    view.subview(TokenRange::new(start, end).expect("ordered token indices form a range"))
+        .expect("pattern range remains within its source view")
 }

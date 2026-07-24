@@ -241,6 +241,16 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::ListAt) => "list.at",
         SyntaxOperator::Builtin(crate::core::Builtin::ListHead) => "list.head",
         SyntaxOperator::Builtin(crate::core::Builtin::ListTail) => "list.tail",
+        SyntaxOperator::Builtin(crate::core::Builtin::PatternIsList) => "pattern_is_list",
+        SyntaxOperator::Builtin(crate::core::Builtin::PatternListTryUncons) => {
+            "pattern_list_try_uncons"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::PatternListTryUnsnoc) => {
+            "pattern_list_try_unsnoc"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::PatternListIsEmpty) => {
+            "pattern_list_is_empty"
+        }
         SyntaxOperator::Builtin(crate::core::Builtin::TextLines) => "text.lines",
         SyntaxOperator::Builtin(crate::core::Builtin::ListEffect) => "list.pure",
         SyntaxOperator::Builtin(crate::core::Builtin::ListEffectReturn) => "list.pure.r",

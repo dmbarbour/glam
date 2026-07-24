@@ -346,6 +346,52 @@ impl<V: Clone, T: Clone> List<V, T> {
         }
     }
 
+    /// Removes the final item while forcing only lazy chunks which must be
+    /// crossed from the right edge to find it.
+    pub fn try_pop_back<E>(
+        &self,
+        force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
+    ) -> Result<Option<(Self, ListItem<V>)>, E> {
+        match self.0.as_ref() {
+            ListNode::Empty => Ok(None),
+            ListNode::Bytes(bytes) => Ok(bytes.last().map(|byte| {
+                (
+                    Self::from_bytes(bytes.slice(0..bytes.len() - 1)),
+                    ListItem::Byte(*byte),
+                )
+            })),
+            ListNode::Values(values) => {
+                let Some(last) = values.as_slice().last() else {
+                    return Ok(None);
+                };
+                Ok(Some((
+                    Self::from_value_slice(values.slice(0, values.len() - 1)),
+                    ListItem::Value(last.clone()),
+                )))
+            }
+            ListNode::Concat(left, right) => {
+                if let Some((right_init, last)) = right.try_pop_back(force_thunk)? {
+                    Ok(Some((Self::concat(left.clone(), right_init), last)))
+                } else {
+                    left.try_pop_back(force_thunk)
+                }
+            }
+            ListNode::Finger(finger) => {
+                let Some((chunk, mut rest)) = finger.view_right() else {
+                    return Ok(None);
+                };
+                let Some(value) = chunk.item_at(chunk.len() - 1) else {
+                    unreachable!("finger trees do not store empty chunks");
+                };
+                if let Some(chunk_init) = chunk.slice(0, chunk.len() - 1) {
+                    rest = rest.push_right(chunk_init);
+                }
+                Ok(Some((Self::from_finger(rest), value)))
+            }
+            ListNode::Thunk(thunk) => force_thunk(thunk)?.try_pop_back(force_thunk),
+        }
+    }
+
     fn lookup_at_with<E>(
         &self,
         index: usize,
@@ -854,5 +900,60 @@ mod tests {
             Some(ListItem::Value(3))
         );
         assert_eq!(list.try_at(3, &mut force).unwrap(), None);
+    }
+
+    #[test]
+    fn back_lookup_preserves_compact_and_finger_tree_segments() {
+        let list = TestList::concat(
+            TestList::from_bytes(Bytes::from_static(b"AB")),
+            TestList::from_values(vec![3]),
+        )
+        .balanced();
+        let mut force =
+            |_: &&str| -> Result<TestList, ()> { unreachable!("balanced list has no lazy holes") };
+
+        let (init, last) = list.try_pop_back(&mut force).unwrap().unwrap();
+        assert_eq!(last, ListItem::Value(3));
+        let (init, last) = init.try_pop_back(&mut force).unwrap().unwrap();
+        assert_eq!(last, ListItem::Byte(b'B'));
+        let (_, last) = init.try_pop_back(&mut force).unwrap().unwrap();
+        assert_eq!(last, ListItem::Byte(b'A'));
+    }
+
+    #[test]
+    fn back_lookup_does_not_force_an_unrelated_lazy_prefix() {
+        let list = TestList::concat(
+            TestList::from_thunk("unused prefix"),
+            TestList::from_values(vec![1, 2]),
+        );
+        let mut force = |_: &&str| -> Result<TestList, ()> {
+            panic!("finding a known suffix must not force its lazy prefix")
+        };
+
+        let (init, last) = list.try_pop_back(&mut force).unwrap().unwrap();
+        assert_eq!(last, ListItem::Value(2));
+        let (_, last) = init.try_pop_back(&mut force).unwrap().unwrap();
+        assert_eq!(last, ListItem::Value(1));
+    }
+
+    #[test]
+    fn back_lookup_forces_only_trailing_holes_needed_to_find_an_item() {
+        let list = TestList::concat(
+            TestList::from_thunk("unused prefix"),
+            TestList::from_thunk("tail"),
+        );
+        let forced = std::cell::RefCell::new(Vec::new());
+        let mut force = |name: &&str| {
+            forced.borrow_mut().push((*name).to_owned());
+            Ok::<_, ()>(match *name {
+                "tail" => TestList::from_values(vec![2]),
+                "unused prefix" => TestList::from_values(vec![1]),
+                _ => unreachable!(),
+            })
+        };
+
+        let (_, last) = list.try_pop_back(&mut force).unwrap().unwrap();
+        assert_eq!(last, ListItem::Value(2));
+        assert_eq!(*forced.borrow(), ["tail"]);
     }
 }

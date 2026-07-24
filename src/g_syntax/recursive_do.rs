@@ -314,8 +314,16 @@ mod tests {
                     });
                 }
                 DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
-                    let mut emitted = false;
-                    pattern.visit_captures(&mut |name| {
+                    let mut captures = Vec::new();
+                    pattern.visit_captures(&mut |name| captures.push(name));
+                    let no_captures = captures.is_empty();
+                    if captures.len() > 1 {
+                        steps.push(RecursiveDoStep {
+                            line: step.line,
+                            event: RecursiveDoEvent::None,
+                        });
+                    }
+                    for name in captures {
                         let event = registry
                             .fulfill(name)
                             .map_or(RecursiveDoEvent::None, RecursiveDoEvent::Fulfill);
@@ -323,9 +331,8 @@ mod tests {
                             line: step.line,
                             event,
                         });
-                        emitted = true;
-                    });
-                    if !emitted {
+                    }
+                    if no_captures {
                         steps.push(RecursiveDoStep {
                             line: step.line,
                             event: RecursiveDoEvent::None,

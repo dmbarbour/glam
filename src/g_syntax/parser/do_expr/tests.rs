@@ -101,6 +101,29 @@ fn initial_patterns_are_shared_by_all_do_binding_directions() {
 }
 
 #[test]
+fn irrefutable_as_patterns_capture_each_view_in_source_order() {
+    let expr = parse_do_expression(
+        "do\n.r 1 -> left as right\n(first as _) <- .r 2\npure as second = 3\n.r [left, right, first, pure, second]",
+    );
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = expr else {
+        panic!("expected a do expression");
+    };
+
+    assert!(matches!(
+        &steps[0].kind,
+        DoStepKind::Bind { pattern, .. } if pattern.captures() == ["left", "right"]
+    ));
+    assert!(matches!(
+        &steps[1].kind,
+        DoStepKind::Bind { pattern, .. } if pattern.captures() == ["first"]
+    ));
+    assert!(matches!(
+        &steps[2].kind,
+        DoStepKind::ValueBind { pattern, .. } if pattern.captures() == ["pure", "second"]
+    ));
+}
+
+#[test]
 fn braced_do_is_a_structural_atom_in_containers_and_other_do_blocks() {
     for source in [
         "consume [do { .r 1 }, do { text = \"a;b\"; .r text }, do { x = do .r 2; .r x }]",
@@ -183,6 +206,14 @@ fn token_do_reports_structural_statement_errors() {
         (
             "do\n.read -> first second\n.r ()",
             "pattern currently supports only",
+        ),
+        (
+            "do\n.r 1 -> left as\n.r left",
+            "pattern `as` requires a pattern on both sides",
+        ),
+        (
+            "do\nas right <- .r 1\n.r right",
+            "pattern `as` requires a pattern on both sides",
         ),
         (
             "do\n-> result\n.r result",

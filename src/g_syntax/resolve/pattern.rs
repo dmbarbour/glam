@@ -1,22 +1,13 @@
 //! Pattern-to-primitive-do lowering.
 //!
-//! Surface patterns stop at this boundary. A direct binding can reuse the
-//! operation's primitive step; structural patterns will instead append
-//! decomposition and source-capture steps through the primitive-do builder.
+//! Surface patterns stop at this boundary. Irrefutable captures are reported
+//! in semantic order so do lowering can either reuse the operation's primitive
+//! step or append aliases of one internal result binding.
 
-use super::super::{SyntaxPattern, SyntaxPatternKind};
+use super::super::SyntaxPattern;
 
-pub(in crate::g_syntax) enum DirectPatternBinding<'a> {
-    Capture(&'a str),
-    Wildcard,
-}
-
-pub(in crate::g_syntax) fn direct_pattern_binding(
-    pattern: &SyntaxPattern,
-) -> DirectPatternBinding<'_> {
-    match &pattern.kind {
-        SyntaxPatternKind::Capture(name) => DirectPatternBinding::Capture(name),
-        SyntaxPatternKind::Wildcard => DirectPatternBinding::Wildcard,
-        SyntaxPatternKind::Group(pattern) => direct_pattern_binding(pattern),
-    }
+pub(in crate::g_syntax) fn irrefutable_captures(pattern: &SyntaxPattern) -> Vec<&str> {
+    let mut captures = Vec::new();
+    pattern.visit_captures(&mut |name| captures.push(name));
+    captures
 }
