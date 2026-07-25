@@ -2267,7 +2267,7 @@ fn dictionary_tag_and_tuple_patterns_match_or_fall_through() {
         "asm.remainder = list.pure do { .r {foo:65,extra:66} -> {foo:value,rest}; ((value == 65) and (rest.extra == 66)) =>> .r \"R\" }\n",
         "asm.whole = list.pure do { .r {foo:65} -> {whole}; (whole.foo == 65) =>> .r \"W\" }\n",
         "asm.tag = list.pure do { .r tag:65 -> tag:value; (value == 65) =>> .r \"T\" }\n",
-        "asm.tag_short = list.pure do { .r tag:65 -> :tag; (tag == 65) =>> .r \"S\" }\n",
+        "asm.tag_short = list.pure do { .r tag:65 -> {:tag}; (tag == 65) =>> .r \"S\" }\n",
         "asm.tuple = list.pure do { .r (65,66) -> (left,right); ((left == 65) and (right == 66)) =>> .r \"U\" }\n",
         "asm.backward = list.pure do { {:value} <- .r {value:66}; (value == 66) =>> .r \"B\" }\n",
         "asm.pure = list.pure do { {:value} = {value:67}; (value == 67) =>> .r \"C\" }\n",
@@ -2898,6 +2898,50 @@ fn parses_dictionary_unions() {
             ])),
         })
     );
+}
+
+#[test]
+fn dictionary_puns_are_brace_scoped_and_constructor_unions_are_parenthesized() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "left = \"L\"\n",
+        "right = \"R\"\n",
+        "punned = {:left,:right}\n",
+        "tagged = {(:tag left)}\n",
+        "asm.result = punned.left ++ punned.right ++ tagged.tag\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    assert!(matches!(
+        &parsed.declarations[3].kind,
+        DeclarationKind::Definition(DefinitionDecl {
+            expr: Some(SyntaxExpr::DictUnion(items)),
+            ..
+        }) if matches!(
+            items.as_slice(),
+            [
+                SyntaxExpr::PathDict(left_path, left),
+                SyntaxExpr::PathDict(right_path, right),
+            ] if left_path == &[SyntaxKeyExpr::Atom("left".to_owned())]
+                && right_path == &[SyntaxKeyExpr::Atom("right".to_owned())]
+                && matches!(left.as_ref(), SyntaxExpr::Name(name) if name == "left")
+                && matches!(right.as_ref(), SyntaxExpr::Name(name) if name == "right")
+        )
+    ));
+
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+    let value = evaluated_module_value(&context, &lowered);
+    let result = resolved_value_at_path(&value, &["asm", "result"]);
+    assert_eq!(output_bytes(&fully_evaluated_value(result)), b"LRL");
+
+    let unparenthesized = parse("language g0\nbad = {:tag left}\n");
+    assert!(unparenthesized.diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == Severity::Error
+            && diagnostic
+                .message
+                .contains("tag-constructor dictionary members must be parenthesized")
+    }));
 }
 
 #[test]

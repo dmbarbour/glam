@@ -188,7 +188,7 @@ fn dictionary_tag_and_tuple_patterns_share_dictionary_structure() {
         ".r {foo:{bar:1}} -> {foo.bar:value}\n",
         ".r {foo:1, other:2} -> {foo:first, rest}\n",
         ".r tag:1 -> tag:payload\n",
-        ".r tag:1 -> :tag\n",
+        ".r tag:1 -> {:tag}\n",
         ".r (1,2) -> (left,right)\n",
         ".r {foo:1} -> {whole}\n",
         "{:backward} <- .r {backward:3}\n",
@@ -656,7 +656,11 @@ fn token_do_reports_structural_statement_errors() {
         ),
         (
             "do\n.r {} -> :42\n.r ()",
-            "`:name` pattern shorthand requires one capture name",
+            "dictionary shorthand is valid only inside braces",
+        ),
+        (
+            "do\n.r {} -> :value\n.r ()",
+            "dictionary shorthand is valid only inside braces",
         ),
         (
             "do\nabstract\n.r ()",

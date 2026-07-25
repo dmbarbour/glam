@@ -24,7 +24,8 @@ use super::input::{
     ParseSession, TokenExtra, TokenInput, TokenView, close, joint, keyword, line_start, name,
     number, open, space_before, symbol, text_id,
 };
-use super::lexical::{ByteSpan, Delimiter, SpannedToken, TokenKind};
+use super::lexical::{ByteSpan, Delimiter, GroupId, LeadingTrivia, SpannedToken, TokenKind};
+use super::structural::{split_top_level, trim_layout};
 
 mod infix;
 
@@ -336,7 +337,16 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                 }
             });
         let data_path = choice((named_path.clone(), computed_path.clone())).boxed();
+        let dict_pun = symbol(":")
+            .ignore_then(joint(expr_name.clone()))
+            .map(|name| {
+                SyntaxExpr::PathDict(
+                    vec![SyntaxKeyExpr::Atom(name.clone())],
+                    Box::new(SyntaxExpr::Name(name)),
+                )
+            });
         let dict_item = choice((
+            dict_pun,
             data_path
                 .clone()
                 .then_ignore(padded(symbol(":")))
@@ -345,6 +355,11 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             resolved(expr.clone()),
         ));
         let dict = open(Delimiter::Brace)
+            .try_map(move |group, span| {
+                validate_dict_colon_members(view, group)
+                    .map(|()| group)
+                    .map_err(|message| Rich::custom(span, message))
+            })
             .ignore_then(
                 padded(dict_item)
                     .separated_by(padded(symbol(",")))
@@ -596,6 +611,45 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             })
             .boxed()
     })
+}
+
+fn validate_dict_colon_members(view: TokenView<'_, '_>, group: GroupId) -> Result<(), String> {
+    let contents = view
+        .group_contents(group)
+        .ok_or_else(|| "dictionary literal refers to an unknown delimiter group".to_owned())?;
+
+    for member in split_top_level(contents, ",").into_iter().map(trim_layout) {
+        let mut tokens = member
+            .top_level()
+            .filter(|indexed| !matches!(indexed.token().kind(), TokenKind::LineStart { .. }));
+        let Some(first) = tokens.next() else {
+            continue;
+        };
+        if !matches!(first.token().kind(), TokenKind::Symbol(":")) {
+            continue;
+        }
+
+        let Some(name) = tokens.next() else {
+            return Err(
+                "dictionary shorthand `:name` requires a bare value name after `:`".to_owned(),
+            );
+        };
+        let only_bare_name = name.token().leading() == LeadingTrivia::Joint
+            && matches!(name.token().kind(), TokenKind::Name(_))
+            && tokens.next().is_none();
+        if !only_bare_name {
+            return Err(
+                "tag-constructor dictionary members must be parenthesized; write `{(:path value)}`"
+                    .to_owned(),
+            );
+        }
+
+        let TokenKind::Name(name) = name.token().kind() else {
+            unreachable!("a dictionary pun has already selected a name token");
+        };
+        validate_expr_name(name)?;
+    }
+    Ok(())
 }
 
 fn resolved<'lex, 'source: 'lex, P>(

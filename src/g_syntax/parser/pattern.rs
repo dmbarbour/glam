@@ -459,20 +459,9 @@ fn parse_tag_pattern(view: TokenView<'_, '_>, colon: usize) -> ParseResult<Synta
     }
 
     if is_layout_empty(left) {
-        let payload = parse_pattern(right)?;
-        let SyntaxPatternKind::Capture(name) = &payload.kind else {
-            return Err(error_at_view(
-                right,
-                "`:name` pattern shorthand requires one capture name",
-            ));
-        };
-        return Ok(dict_pattern(
-            vec![dict_entry(
-                static_pattern_path([canonical_capture_name(name)]),
-                false,
-                payload,
-            )],
-            None,
+        return Err(error_at_view(
+            view,
+            "dictionary shorthand is valid only inside braces; write `{:name}`",
         ));
     }
 
@@ -557,6 +546,15 @@ fn parse_dict_pattern(contents: TokenView<'_, '_>) -> ParseResult<SyntaxPattern>
                 return Err(error_at_view(
                     member,
                     "optional dictionary entry pattern requires a path before `?:`",
+                ));
+            }
+            let Some((_, payload_first)) = payload.first_significant() else {
+                unreachable!("nonempty dictionary shorthand has a payload");
+            };
+            if payload_first.leading() != LeadingTrivia::Joint {
+                return Err(error_at_view(
+                    member,
+                    "dictionary shorthand must be written as joint `:name`",
                 ));
             }
             let payload = parse_pattern(payload)?;

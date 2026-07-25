@@ -657,7 +657,9 @@ expression.
         g tag:f x y z       # parses as g (tag:f) x y z
         g tag:(f x y) z     # clear coupling of arguments
 
-In contrast, `:tag` always parses as a function expression. 
+Outside a brace-delimited dictionary member, `:tag` always parses as a
+function expression. Within a dictionary, an exact `:name` member is instead
+entry punning syntax, described below.
 
 ## Atoms
 
@@ -671,9 +673,27 @@ For access control and conflict avoidance, we can leverage the namespace as a st
 
 ## Dicts
 
-In expression contexts, `{}` is the empty dictionary, and `{ Path1:Expr1, Path2:Expr2, ...}` expresses a literal dictionary. Computed paths are expressed as list literals or parenthetical expressions of lists. `{ [0]:A, [1,2]:B, ([1] ++ [3,4]):C }`. 
+In expression contexts, `{}` is the empty dictionary, and `{ Path1:Expr1,
+Path2:Expr2, ...}` expresses a literal dictionary. Computed paths are expressed
+as list literals or parenthetical expressions of lists:
+`{ [0]:A, [1,2]:B, ([1] ++ [3,4]):C }`. An exact `:name` member is shorthand
+for `name:name`, so `{:key,:value}` constructs
+`{key:key,value:value}`. This shorthand is limited to one bare value name.
 
-Within a dictionary, `{}` serves as the 'undefined' value. For example, `{foo:{}}` is equivalent to `{}`. Only a finite subset of dictionary elements may be defined. In general, we can compose dictionaries: `{ D1, D2, D3 }` is a hierarchical union of three dictionaries. For example: `{{foo:{bar:0}}, {foo:{baz:1}}}` evaluates as `{foo:{bar:0, baz:1}}`. We can also write this as `{:foo {:bar 0, :baz 1}}`, leveraging the `:Path` tagged data constructors as singleton dictionaries. 
+Within a dictionary, `{}` serves as the 'undefined' value. For example,
+`{foo:{}}` is equivalent to `{}`. Only a finite subset of dictionary elements
+may be defined. In general, we can compose dictionaries: `{ D1, D2, D3 }` is a
+hierarchical union of three dictionaries. For example:
+`{{foo:{bar:0}}, {foo:{baz:1}}}` evaluates as
+`{foo:{bar:0, baz:1}}`.
+
+A tag-constructor application used as a dictionary-union member must be
+parenthesized, both to distinguish it visually from entry punning and to make
+the member boundary explicit:
+
+        {:value}             # {value:value}
+        {(:foo Value), D}    # union of foo:Value and D
+        {:foo Value}         # invalid; parenthesize the constructor call
 
 However, it is an error the dictionaries share any defined elements. Even `{foo:1, foo:1}` is an error: there is no generalized unification, and hierarchical union applies only to dictionaries. This error is lazy and only applies to the specific overlapping elements, thus in `D = {foo:1, {foo:1, bar:2}}`, we'd have an error when observing `D.foo` but not for `D.bar`. 
 
@@ -726,7 +746,11 @@ Users may also capture the dictionary via `Dict as Name with ...`, or even suppo
             x := _x + 1
             y = x + ^a      # access 'a' in host scope
 
-Pattern matching on dictionaries generally have the form `{Path1:Pattern1, Path2:Pattern2, RemainingPattern }`. There is at most one remaining pattern, default `{}` thus requiring a full match. Users may write `{:x,:y,:z}` as shorthand for `{x:x, y:y, z:z}`.
+Pattern matching on dictionaries generally has the form
+`{Path1:Pattern1, Path2:Pattern2, RemainingPattern}`. There is at most one
+remaining pattern, default `{}` thus requiring a full match. Users may write
+`{:x,:y,:z}` as shorthand for `{x:x, y:y, z:z}`. The shorthand belongs to
+dictionary members: standalone `:x` is not a pattern.
 
 ## Embedded Texts
 
@@ -1431,14 +1455,13 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         {x:Pattern, {y:Pattern}}    # match residual dict with another pattern
         {x?:Pattern, rem}           # absent/undefined x feeds {} to Pattern
         {x?:{}}                     # explicitly accept a missing x
-        {:x,:y,:z}                  # same as {x:x, y:y, z:z} (as tag:Name)
+        {:x,:y,:z}                  # same as {x:x, y:y, z:z}
         {foo.bar.baz:Pattern, _}    # deep refs
         {selector:key, [key]:Pattern}
         {selector:key, root.[key]:Pattern}
         { (Expr):Pattern, _}        # eval list-path expr, extract, match Pattern
 
         tag:Pattern                 # same as {tag:Pattern}
-        :tag                        # same as tag:tag 
         [KeyExpr]:Pattern           # same as {[KeyExpr]:Pattern}
         [KeyA,KeyB]:Pattern         # same as {[KeyA,KeyB]:Pattern}
         (PathExpr):Pattern          # same as {(PathExpr):Pattern}

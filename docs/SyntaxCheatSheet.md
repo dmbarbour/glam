@@ -78,8 +78,11 @@ foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
 
 {}                  # empty dict; ALSO the 'undefined' value
 {foo:1, bar.baz:2}  # literal; paths ok; {foo:{}} ≡ {}
+{:foo, :bar}        # entry puns: {foo:foo, bar:bar}
 { [0]:'a, [1,2]:'b, ([1] ++ [3,4]):'c } # computed paths
 { D1, D2 }          # union; ERROR if defined keys overlap
+{(:tag Value), D}   # constructor application as a union member needs ()
+{:tag Value}        # invalid: ambiguous with the :tag entry pun
 {                   # multi-line: leading commas
 , name1:Expr1
 , name2:Expr2
@@ -443,12 +446,12 @@ P1 as P2            # both views
 {x:P, {y:Q}}        # run a refutable pattern against the residual dictionary
 {x?:P, rem}         # absent/undefined x feeds {} to P; remainder unchanged
 {x?:{}}             # explicitly accept a missing x (`{x:{}}` remains required)
-{:x, :y}            # ≡ {x:x, y:y}
+{:x, :y}            # ≡ {x:x, y:y}; shorthand is brace-scoped
 {a.b.c:P, _}        # deep path
 {selector:key, [key]:P, rem}       # prior capture selects a computed key
 {selector:key, root.[key]:P, rem}  # computed hierarchical component
 {path:p, (p):P, rem}               # splice a computed list-valued path
-tag:P    :tag    'name
+tag:P    'name      # standalone :tag is not a pattern
 [KeyExpr]:P       # computed singleton tag; prior captures are in scope
 [KeyA,KeyB]:P     # computed hierarchical singleton tag
 (PathExpr):P      # singleton tag from a computed list-valued path
