@@ -3269,6 +3269,97 @@ fn prefix_if_preserves_selected_result_laziness_and_guard_errors() {
 }
 
 #[test]
+fn flat_match_supports_patterns_guards_and_ordered_fallback() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "increment value = .r (value + 1)\n",
+        "equals expected actual = expected == actual\n",
+        "asm.literal = match 42 with\n",
+        "  41 => \"bad\"\n",
+        "  42 => \"literal\"\n",
+        "  _ => \"fallback\"\n",
+        "asm.binary = match \"ABCD\" with\n",
+        "  [65] ++ middle ++ [68] => middle\n",
+        "  _ => \"bad\"\n",
+        "asm.dict = match {selector:'target,target:68} with\n",
+        "  {selector:key,{[key]:value}} when value == 68 => \"dict\"\n",
+        "  _ => \"bad\"\n",
+        "asm.view = match 64 with\n",
+        "  increment -> value when value == 65 => \"view\"\n",
+        "  _ => \"bad\"\n",
+        "asm.predicate = match 66 with\n",
+        "  (equals 66 value) => value\n",
+        "  _ => 0\n",
+        "asm.guards = match 65 with\n",
+        "  value when next = value + 1 and checked <- .r next and .r checked -> final and final == 66 => \"guards\"\n",
+        "  _ => \"bad\"\n",
+        "asm.siblings = match 2 with\n",
+        "  value when value == 1 => \"bad\"\n",
+        "  value when value == 2 => \"siblings\"\n",
+        "  _ => \"bad\"\n",
+        "asm.braced = match 0 with {; 1 => \"bad\"; _ => \"braced\";}\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("literal", b"literal".as_slice()),
+        ("binary", b"BC".as_slice()),
+        ("dict", b"dict".as_slice()),
+        ("view", b"view".as_slice()),
+        ("guards", b"guards".as_slice()),
+        ("siblings", b"siblings".as_slice()),
+        ("braced", b"braced".as_slice()),
+    ] {
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", path]
+            ))),
+            expected,
+            "{path}"
+        );
+    }
+    assert_eq!(
+        resolved_value_at_path(&value, &["asm", "predicate"]),
+        Value::Number(Number::from(66_i64))
+    );
+}
+
+#[test]
+fn flat_match_exhaustion_and_selected_result_errors_are_distinct() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "asm.exhausted = match 1 with {}\n",
+        "asm.selected_error = match 1 with { 1 => 1 / 0; _ => \"fallback\"; }\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    let exhausted = fully_evaluated_error(
+        value_at_atom_path(&value, &["asm", "exhausted"])
+            .expect("exhausted match binding should exist"),
+    );
+    assert_eq!(exhausted.to_string(), "match exhausted");
+
+    let selected_error = fully_evaluated_error(
+        value_at_atom_path(&value, &["asm", "selected_error"])
+            .expect("selected error binding should exist"),
+    );
+    assert!(
+        selected_error.to_string().contains("divide"),
+        "selected result errors must not fall through to a later match arm: {selected_error}"
+    );
+}
+
+#[test]
 fn quoted_paths_lower_to_ordinary_path_lists() {
     let parsed =
         parse("language g0\nasm.result = { foo:{ [42]:{ bar:\"quoted\" } } }.('.foo.([42]).bar)\n");

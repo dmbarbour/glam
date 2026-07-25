@@ -257,10 +257,14 @@ their detailed scheduling and representation contracts.
   matches one shared subject left to right.
 - Prefix `if Guards then A else B` is syntax-owned pure search. Both arms lower
   through the shared conditional effect-step builder under one `.cut`; the
-  second arm is unconditional. A cached closed compiler helper runs that
-  search with `list.pure` and extracts its sole result. Guard captures are
-  progressively visible only in `A`; `B` starts from the pre-guard scope.
-  Missing host effects are evaluator errors, not fallback.
+  second arm is unconditional. Flat `match Subject with` binds its subject
+  once outside the same ordered search, then gives each full pattern and its
+  optional guards an isolated sibling scope. Cached closed compiler helpers
+  run pure searches and apply syntax-specific result policies: `if` has a
+  required fallback, while an empty or exhausted `match` reports
+  `match exhausted`. Guard and pattern captures are progressively visible
+  only in their result arm. Missing host effects and selected-result failures
+  are evaluator errors, not fallback.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

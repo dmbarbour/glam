@@ -160,6 +160,21 @@ pub struct IfExpr {
     pub else_result: Box<SyntaxExpr>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct MatchExpr {
+    pub subject: Box<SyntaxExpr>,
+    pub arms: Vec<MatchArm>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct MatchArm {
+    pub line: usize,
+    pub pattern: SyntaxPattern,
+    pub guards: Vec<SyntaxGuardClause>,
+    pub result_line: usize,
+    pub result: SyntaxExpr,
+}
+
 pub(super) enum SyntaxPatternScopeEvent<'a> {
     Expression(&'a SyntaxExpr),
     Capture(&'a str),
@@ -522,6 +537,7 @@ pub enum SyntaxExpr {
     Lambda(Vec<String>, Box<SyntaxExpr>),
     Do(DoExpr),
     If(IfExpr),
+    Match(MatchExpr),
     Let {
         bindings: Vec<(String, SyntaxExpr)>,
         body: Box<SyntaxExpr>,

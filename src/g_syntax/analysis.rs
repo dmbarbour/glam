@@ -82,6 +82,18 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
             analyze_guard_branch_locals(&if_expr.guards, &if_expr.then_result, line, diagnostics);
             analyze_expr_locals(&if_expr.else_result, line, diagnostics);
         }
+        SyntaxExpr::Match(match_expr) => {
+            analyze_expr_locals(&match_expr.subject, line, diagnostics);
+            for arm in &match_expr.arms {
+                analyze_pattern_guard_branch_locals(
+                    &arm.pattern,
+                    &arm.guards,
+                    &arm.result,
+                    arm.line,
+                    diagnostics,
+                );
+            }
+        }
         SyntaxExpr::Let { bindings, body } => {
             let params = bindings
                 .iter()
@@ -260,6 +272,24 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
             mark_used_prior_alias(&if_expr.then_result, alias, used);
             mark_used_prior_alias(&if_expr.else_result, alias, used);
         }
+        SyntaxExpr::Match(match_expr) => {
+            mark_used_prior_alias(&match_expr.subject, alias, used);
+            for arm in &match_expr.arms {
+                arm.pattern.visit_scope_events(&mut |event| {
+                    if let SyntaxPatternScopeEvent::Expression(expr) = event {
+                        mark_used_prior_alias(expr, alias, used);
+                    }
+                });
+                for guard in &arm.guards {
+                    guard.visit_scope_events(&mut |event| {
+                        if let SyntaxPatternScopeEvent::Expression(expr) = event {
+                            mark_used_prior_alias(expr, alias, used);
+                        }
+                    });
+                }
+                mark_used_prior_alias(&arm.result, alias, used);
+            }
+        }
         SyntaxExpr::Let { bindings, body } => {
             for (_, value) in bindings {
                 mark_used_prior_alias(value, alias, used);
@@ -403,6 +433,18 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             mark_used_guard_branch(&if_expr.guards, &if_expr.then_result, locals, used);
             mark_used_locals(&if_expr.else_result, locals, used);
         }
+        SyntaxExpr::Match(match_expr) => {
+            mark_used_locals(&match_expr.subject, locals, used);
+            for arm in &match_expr.arms {
+                mark_used_pattern_guard_branch(
+                    &arm.pattern,
+                    &arm.guards,
+                    &arm.result,
+                    locals,
+                    used,
+                );
+            }
+        }
         SyntaxExpr::Let { bindings, body } => {
             for (_, value) in bindings {
                 mark_used_locals(value, locals, used);
@@ -452,8 +494,40 @@ fn analyze_guard_branch_locals(
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    analyze_branch_locals(None, guards, result, line, diagnostics);
+}
+
+fn analyze_pattern_guard_branch_locals(
+    pattern: &SyntaxPattern,
+    guards: &[SyntaxGuardClause],
+    result: &SyntaxExpr,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    analyze_branch_locals(Some(pattern), guards, result, line, diagnostics);
+}
+
+fn analyze_branch_locals(
+    pattern: Option<&SyntaxPattern>,
+    guards: &[SyntaxGuardClause],
+    result: &SyntaxExpr,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let mut locals = Vec::new();
     let mut used = Vec::new();
+    if let Some(pattern) = pattern {
+        pattern.visit_scope_events(&mut |event| match event {
+            SyntaxPatternScopeEvent::Expression(expr) => {
+                mark_used_locals(expr, &locals, &mut used);
+                analyze_expr_locals(expr, line, diagnostics);
+            }
+            SyntaxPatternScopeEvent::Capture(name) => {
+                locals.push(local_name_metadata(name));
+                used.push(false);
+            }
+        });
+    }
     for guard in guards {
         guard.visit_scope_events(&mut |event| match event {
             SyntaxPatternScopeEvent::Expression(expr) => {
@@ -484,9 +558,40 @@ fn mark_used_guard_branch(
     locals: &[LocalName],
     used: &mut [bool],
 ) {
+    mark_used_branch(None, guards, result, locals, used);
+}
+
+fn mark_used_pattern_guard_branch(
+    pattern: &SyntaxPattern,
+    guards: &[SyntaxGuardClause],
+    result: &SyntaxExpr,
+    locals: &[LocalName],
+    used: &mut [bool],
+) {
+    mark_used_branch(Some(pattern), guards, result, locals, used);
+}
+
+fn mark_used_branch(
+    pattern: Option<&SyntaxPattern>,
+    guards: &[SyntaxGuardClause],
+    result: &SyntaxExpr,
+    locals: &[LocalName],
+    used: &mut [bool],
+) {
     let outer_len = locals.len();
     let mut combined = locals.to_vec();
     let mut combined_used = used.to_vec();
+    if let Some(pattern) = pattern {
+        pattern.visit_scope_events(&mut |event| match event {
+            SyntaxPatternScopeEvent::Expression(expr) => {
+                mark_used_locals(expr, &combined, &mut combined_used);
+            }
+            SyntaxPatternScopeEvent::Capture(name) => {
+                combined.push(local_name_metadata(name));
+                combined_used.push(false);
+            }
+        });
+    }
     for guard in guards {
         guard.visit_scope_events(&mut |event| match event {
             SyntaxPatternScopeEvent::Expression(expr) => {

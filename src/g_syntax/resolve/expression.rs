@@ -93,6 +93,9 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::If(if_expr) => {
             super::conditional::lower_if_expr_resolved(if_expr, line, context, scope, locals)?
         }
+        SyntaxExpr::Match(match_expr) => {
+            super::conditional::lower_match_expr_resolved(match_expr, line, context, scope, locals)?
+        }
         SyntaxExpr::Let { bindings, body } => {
             lower_let_expr_resolved(bindings, body, line, context, scope, locals)?
         }

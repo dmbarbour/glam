@@ -163,6 +163,19 @@ pub(in crate::g_syntax) fn run_pure_conditional_resolved(
     )
 }
 
+pub(in crate::g_syntax) fn run_pure_match_resolved(
+    operation: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
+    ResolvedExpr::apply(
+        ResolvedExpr::Embedded(
+            COMPILER_VALUES
+                .pure_conditional_runner(Builtin::MatchResult)
+                .clone(),
+        ),
+        [operation],
+    )
+}
+
 pub(in crate::g_syntax) fn effect_value(name: &str) -> Value {
     effect_path_value(&[name])
 }

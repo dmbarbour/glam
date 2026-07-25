@@ -7,6 +7,7 @@
 
 use super::super::keywords::{canonical_keyword, reserved_keyword_message};
 use super::super::{Diagnostic, ObjectExpr, ObjectRealization, Severity, SyntaxExpr};
+use super::conditional::parse_match_expression;
 use super::declaration::{parse_nonempty_object_body, parse_object_body};
 use super::expression::{parse_expression_chain_view, syntax_operator};
 use super::expression_context::{ExpressionContext, ParsedExpression, validate_expression_floor};
@@ -73,6 +74,10 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         ParsedExpression::new(result?, view.range().end())
     } else if let Some(result) = parse_object(view, context) {
         result?
+    } else if let Some((match_index, token)) = view.first_significant()
+        && token_is_name(token, "match")
+    {
+        parse_match_expression(view, match_index, context.may_yield())?
     } else if let Some(result) = parse_with(view, context) {
         result?
     } else if let Some(where_index) = contextual_keywords(view, "where").into_iter().next() {
@@ -133,10 +138,11 @@ fn parse_parenthesized_structural(
 
     let contents = trim_layout(view.group_contents(*group)?);
     let context = context.complete();
-    let starts_structural = contents
-        .first_significant()
-        .is_some_and(|(_, token)| token_is_name(token, "let") || token_is_name(token, "object"))
-        || !contextual_keywords(contents, "where").is_empty()
+    let starts_structural = contents.first_significant().is_some_and(|(_, token)| {
+        token_is_name(token, "let")
+            || token_is_name(token, "match")
+            || token_is_name(token, "object")
+    }) || !contextual_keywords(contents, "where").is_empty()
         || has_compound_with_body(contents);
     starts_structural.then(|| {
         parse_expression_extent(contents, context).and_then(|parsed| {

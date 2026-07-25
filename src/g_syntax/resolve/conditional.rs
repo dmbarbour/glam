@@ -6,7 +6,9 @@
 
 use super::super::*;
 use super::effect_steps::{ResolvedEffectStep, ResolvedPatternInput, emit_effect_steps};
-use super::pattern::{PatternLoweringContext, PatternStepSink, append_guard_steps};
+use super::pattern::{
+    PatternLoweringContext, PatternStepSink, append_guard_steps, append_pattern_steps,
+};
 
 pub(super) struct GuardChoiceArm<'a> {
     pub(super) line: usize,
@@ -22,6 +24,15 @@ struct ResolvedGuardChoice {
 struct ResolvedGuardAlternative {
     steps: Vec<ResolvedEffectStep>,
     result: ResolvedExpr<Value>,
+}
+
+struct ChoiceArmSpec<'a> {
+    pattern: Option<(BindingId, &'a SyntaxPattern)>,
+    guards: &'a [SyntaxGuardClause],
+    line: usize,
+    result_line: usize,
+    result: &'a SyntaxExpr,
+    unit_assertion_context: &'static str,
 }
 
 struct ConditionalPatternStepSink<'a> {
@@ -89,6 +100,52 @@ pub(super) fn lower_if_expr_resolved(
     Ok(compiler_values::run_pure_conditional_resolved(search))
 }
 
+pub(super) fn lower_match_expr_resolved(
+    match_expr: &MatchExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let subject = syntax_expr_to_resolved_in_semantic_scope(
+        &match_expr.subject,
+        line,
+        context,
+        scope,
+        locals,
+    )?;
+    let base_len = locals.len();
+    let subject_binding = locals.fresh_binding();
+    let resolved = (|| {
+        let mut alternatives = Vec::with_capacity(match_expr.arms.len());
+        for arm in &match_expr.arms {
+            let alternative = resolve_alternative(
+                ChoiceArmSpec {
+                    pattern: Some((subject_binding, &arm.pattern)),
+                    guards: &arm.guards,
+                    line: arm.line,
+                    result_line: arm.result_line,
+                    result: &arm.result,
+                    unit_assertion_context: "match condition",
+                },
+                context,
+                scope,
+                locals,
+            )?;
+            locals.truncate(base_len);
+            alternatives.push(alternative);
+        }
+        let search = ResolvedGuardChoice { alternatives }.emit();
+        let selected = compiler_values::run_pure_match_resolved(search);
+        Ok(ResolvedExpr::apply(
+            ResolvedExpr::lambda(vec![subject_binding], selected),
+            [subject],
+        ))
+    })();
+    locals.truncate(base_len);
+    resolved
+}
+
 fn resolve_guard_choice(
     alternatives: &[GuardChoiceArm<'_>],
     context: &CompileContext,
@@ -99,26 +156,19 @@ fn resolve_guard_choice(
     let mut resolved = Vec::with_capacity(alternatives.len());
 
     for alternative in alternatives {
-        let branch = (|| {
-            let mut steps = Vec::with_capacity(alternative.guards.len());
-            {
-                let mut sink = ConditionalPatternStepSink {
-                    steps: &mut steps,
-                    locals,
-                };
-                let mut lowering = PatternLoweringContext::new(context, scope, &mut sink)
-                    .with_unit_assertion_context("conditional guard");
-                append_guard_steps(alternative.guards, alternative.line, &mut lowering)?;
-            }
-            let result = syntax_expr_to_resolved_in_semantic_scope(
-                alternative.result,
-                alternative.result_line,
-                context,
-                scope,
-                locals,
-            )?;
-            Ok(ResolvedGuardAlternative { steps, result })
-        })();
+        let branch = resolve_alternative(
+            ChoiceArmSpec {
+                pattern: None,
+                guards: alternative.guards,
+                line: alternative.line,
+                result_line: alternative.result_line,
+                result: alternative.result,
+                unit_assertion_context: "conditional guard",
+            },
+            context,
+            scope,
+            locals,
+        );
         locals.truncate(base_len);
         resolved.push(branch?);
     }
@@ -126,6 +176,40 @@ fn resolve_guard_choice(
     Ok(ResolvedGuardChoice {
         alternatives: resolved,
     })
+}
+
+fn resolve_alternative(
+    arm: ChoiceArmSpec<'_>,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedGuardAlternative, Diagnostic> {
+    let mut steps = Vec::with_capacity(arm.guards.len() + usize::from(arm.pattern.is_some()));
+    {
+        let mut sink = ConditionalPatternStepSink {
+            steps: &mut steps,
+            locals,
+        };
+        let mut lowering = PatternLoweringContext::new(context, scope, &mut sink)
+            .with_unit_assertion_context(arm.unit_assertion_context);
+        if let Some((subject, pattern)) = arm.pattern {
+            append_pattern_steps(
+                ResolvedPatternInput::Value(ResolvedExpr::Local(subject)),
+                pattern,
+                arm.line,
+                &mut lowering,
+            )?;
+        }
+        append_guard_steps(arm.guards, arm.line, &mut lowering)?;
+    }
+    let result = syntax_expr_to_resolved_in_semantic_scope(
+        arm.result,
+        arm.result_line,
+        context,
+        scope,
+        locals,
+    )?;
+    Ok(ResolvedGuardAlternative { steps, result })
 }
 
 impl ResolvedGuardChoice {
@@ -379,6 +463,47 @@ mod tests {
         assert_eq!(count_embedded_number(&resolved, 73), 1);
         assert_eq!(count_embedded_number(&resolved, 1), 1);
         assert_eq!(count_embedded_number(&resolved, 2), 1);
+    }
+
+    #[test]
+    fn subject_match_resolves_the_subject_and_each_result_once() {
+        let match_expr = MatchExpr {
+            subject: Box::new(number(73)),
+            arms: vec![
+                MatchArm {
+                    line: 1,
+                    pattern: SyntaxPattern {
+                        kind: SyntaxPatternKind::Literal(SyntaxPatternLiteral::Number(
+                            Number::from(1_i64),
+                        )),
+                    },
+                    guards: Vec::new(),
+                    result_line: 1,
+                    result: number(2),
+                },
+                MatchArm {
+                    line: 2,
+                    pattern: SyntaxPattern::wildcard(),
+                    guards: Vec::new(),
+                    result_line: 2,
+                    result: number(3),
+                },
+            ],
+        };
+        let context = CompileContext::default();
+        let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
+        let resolved = lower_match_expr_resolved(
+            &match_expr,
+            1,
+            &context,
+            &scope.resolved(),
+            &mut ResolverContext::default(),
+        )
+        .expect("subject match should resolve");
+
+        assert_eq!(count_embedded_number(&resolved, 73), 1);
+        assert_eq!(count_embedded_number(&resolved, 2), 1);
+        assert_eq!(count_embedded_number(&resolved, 3), 1);
     }
 
     fn value_binding(alternative: &ResolvedGuardAlternative) -> BindingId {

@@ -366,8 +366,8 @@ do
 ## Conditionals & Patterns
 
 ```
-# Current bootstrap: prefix `if`; postfix `if`, `match`, and `try` remain
-# target syntax.
+# Current bootstrap: prefix `if` and flat subject `match`. Postfix `if`,
+# hierarchical/guard-only `match`, and `try` remain target syntax.
 if C then A else B
 A if C else B
 if (a,b) = Expr and a > b then A else B     # C is guard: patterns + effects + 'and'
@@ -377,6 +377,13 @@ value if (value, rest) = split input else fallback
 match Expr with
     Pattern1 => Result1
     P2 when C2 => R2               # guard clause
+    _ => Default
+
+match Expr with { Pattern1 => Result1; _ => Default; }
+match Expr with {}                 # valid empty search; errors on exhaustion
+
+# Target hierarchical extension:
+match Expr with
     P3 when                        # branching guards, nestable
         C3a => R3a
         C3b => R3b

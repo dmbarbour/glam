@@ -13,7 +13,7 @@ use super::super::keywords::{canonical_keyword, g0_keyword, reserved_keyword_mes
 use super::super::{
     Diagnostic, PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, flatten_path_suffixes,
 };
-use super::conditional::parse_if_expression;
+use super::conditional::{parse_if_expression, parse_match_expression};
 use super::do_expr::parse_do_expression;
 use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{
@@ -432,6 +432,10 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .then(path_suffix.clone())
             .map(|(base, suffixes)| access_if_path(base, suffixes))
             .boxed();
+        let match_expr = match_expr(view, context)
+            .then(path_suffix.clone())
+            .map(|(base, suffixes)| access_if_path(base, suffixes))
+            .boxed();
 
         let literal_atom = choice((
             unit,
@@ -451,6 +455,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .map(|(base, suffixes)| access_if_path(base, suffixes))
             .boxed();
         let base_atom = choice((
+            match_expr,
             if_expr,
             do_expr,
             literal_expr,
@@ -597,6 +602,17 @@ fn if_expr<'lex, 'source: 'lex>(
         view,
         context,
         parse_if_expression,
+    ))
+}
+
+fn match_expr<'lex, 'source: 'lex>(
+    view: TokenView<'lex, 'source>,
+    context: ExpressionContext,
+) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
+    keyword("match").ignore_then(structural_atom_after_head(
+        view,
+        context,
+        parse_match_expression,
     ))
 }
 

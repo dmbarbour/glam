@@ -1,4 +1,4 @@
-# Initial Syntax
+# Glam Initial Syntax
 
 This document describes an initial syntax for ".g" files, and design motives for it. Design goals include:
 
@@ -73,9 +73,11 @@ content anchor:
 dense = [1,2,3,4,
   5,6,7,8]
 
-leading = [1,2
+leading = [
+  ,1,2
   ,3,4
-  ,5,6]
+  ,5,6
+  ]
 ```
 
 Later member or separator contribution lines align with that anchor. Other
