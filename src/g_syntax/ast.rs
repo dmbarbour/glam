@@ -140,9 +140,10 @@ pub struct SyntaxDictPatternEntry {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum SyntaxPatternGuard {
+pub enum SyntaxGuardClause {
+    Pass,
     Effect(SyntaxExpr),
-    Bind {
+    EffectBind {
         pattern: SyntaxPattern,
         operation: SyntaxExpr,
     },
@@ -184,7 +185,7 @@ pub enum SyntaxPatternKind {
     },
     Guarded {
         pattern: Box<SyntaxPattern>,
-        guards: Vec<SyntaxPatternGuard>,
+        guards: Vec<SyntaxGuardClause>,
     },
 }
 
@@ -402,11 +403,12 @@ impl SyntaxPattern {
     }
 }
 
-impl SyntaxPatternGuard {
+impl SyntaxGuardClause {
     fn visit_scope_events<'a>(&'a self, visitor: &mut impl FnMut(SyntaxPatternScopeEvent<'a>)) {
         match self {
+            Self::Pass => {}
             Self::Effect(expr) => visitor(SyntaxPatternScopeEvent::Expression(expr)),
-            Self::Bind { pattern, operation } => {
+            Self::EffectBind { pattern, operation } => {
                 visitor(SyntaxPatternScopeEvent::Expression(operation));
                 pattern.visit_scope_events(visitor);
             }
@@ -419,8 +421,9 @@ impl SyntaxPatternGuard {
 
     fn visit_primitive_events<'a>(&'a self, visitor: &mut impl FnMut(Option<&'a str>)) {
         match self {
+            Self::Pass => {}
             Self::Effect(_) => visitor(None),
-            Self::Bind { pattern, .. } | Self::ValueBind { pattern, .. } => {
+            Self::EffectBind { pattern, .. } | Self::ValueBind { pattern, .. } => {
                 pattern.visit_primitive_events(visitor);
             }
         }

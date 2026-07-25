@@ -1,168 +1,157 @@
-//! Pattern-to-primitive-do expansion.
+//! Pattern-to-resolved-effect-step expansion.
 //!
 //! Every runtime operation observes one syntax-independent fact. Pattern
 //! structure remains front-end syntax and source captures enter the resolver
 //! exactly where their subpatterns succeed.
 
-use super::super::recursive_do::{ForwardNameRegistry, RecursiveDoEvent};
 use super::super::*;
-use super::do_expr::{
-    PrimitiveDoStep, PrimitiveDoStepKind, PrimitivePatternInput, ResolvedForward,
-    push_primitive_step,
-};
+use super::effect_steps::{ResolvedEffectStep, ResolvedEffectStepKind, ResolvedPatternInput};
+
+pub(super) trait PatternStepSink {
+    fn locals(&mut self) -> &mut ResolverContext;
+    fn push_step(&mut self, step: ResolvedEffectStep);
+    fn push_capture(
+        &mut self,
+        input: ResolvedPatternInput,
+        name: &str,
+        line: usize,
+    ) -> Result<(), Diagnostic>;
+}
 
 pub(super) struct PatternLoweringContext<'a> {
-    forward_names: &'a mut ForwardNameRegistry,
     context: &'a CompileContext,
     scope: &'a NameScope<ResolvedRoot>,
-    locals: &'a mut ResolverContext,
-    forwards: &'a mut [ResolvedForward],
+    sink: &'a mut dyn PatternStepSink,
 }
 
 impl<'a> PatternLoweringContext<'a> {
     pub(super) fn new(
-        forward_names: &'a mut ForwardNameRegistry,
         context: &'a CompileContext,
         scope: &'a NameScope<ResolvedRoot>,
-        locals: &'a mut ResolverContext,
-        forwards: &'a mut [ResolvedForward],
+        sink: &'a mut dyn PatternStepSink,
     ) -> Self {
         Self {
-            forward_names,
             context,
             scope,
-            locals,
-            forwards,
+            sink,
         }
+    }
+
+    fn resolve_expression(
+        &mut self,
+        expression: &SyntaxExpr,
+        line: usize,
+    ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+        syntax_expr_to_resolved_in_semantic_scope(
+            expression,
+            line,
+            self.context,
+            self.scope,
+            self.sink.locals(),
+        )
+    }
+
+    fn fresh_binding(&mut self) -> BindingId {
+        self.sink.locals().fresh_binding()
+    }
+
+    fn push_step(&mut self, line: usize, kind: ResolvedEffectStepKind) {
+        self.sink.push_step(ResolvedEffectStep { line, kind });
     }
 }
 
 pub(super) fn append_pattern_steps(
-    steps: &mut Vec<PrimitiveDoStep>,
-    input: PrimitivePatternInput,
+    input: ResolvedPatternInput,
     pattern: &SyntaxPattern,
     line: usize,
     lowering: &mut PatternLoweringContext<'_>,
 ) -> Result<(), Diagnostic> {
     if pattern.is_irrefutable() {
-        return append_irrefutable_input(steps, input, pattern, line, lowering);
+        return append_irrefutable_input(input, pattern, line, lowering);
     }
 
-    let subject = lowering.locals.fresh_binding();
-    push_primitive_step(
-        steps,
-        line,
-        input.into_step(subject),
-        RecursiveDoEvent::None,
-    );
-    append_match_steps(steps, subject, pattern, line, lowering)
+    let subject = lowering.fresh_binding();
+    lowering.sink.push_step(input.into_step(line, subject));
+    append_match_steps(subject, pattern, line, lowering)
 }
 
 fn append_value_pattern(
-    steps: &mut Vec<PrimitiveDoStep>,
     value: ResolvedExpr<Value>,
     pattern: &SyntaxPattern,
     line: usize,
     lowering: &mut PatternLoweringContext<'_>,
 ) -> Result<(), Diagnostic> {
-    append_pattern_steps(
-        steps,
-        PrimitivePatternInput::Value(value),
-        pattern,
-        line,
-        lowering,
-    )
+    append_pattern_steps(ResolvedPatternInput::Value(value), pattern, line, lowering)
 }
 
 fn append_irrefutable_input(
-    steps: &mut Vec<PrimitiveDoStep>,
-    input: PrimitivePatternInput,
+    input: ResolvedPatternInput,
     pattern: &SyntaxPattern,
     line: usize,
     lowering: &mut PatternLoweringContext<'_>,
 ) -> Result<(), Diagnostic> {
     let captures = pattern.captures();
     if captures.len() <= 1 {
-        let (binding, recursion) = if let Some(name) = captures.first() {
-            resolve_capture_binding(
-                lowering.forward_names,
-                name,
-                line,
-                lowering.locals,
-                lowering.forwards,
-            )?
-        } else {
-            (lowering.locals.fresh_binding(), RecursiveDoEvent::None)
-        };
-        push_primitive_step(steps, line, input.into_step(binding), recursion);
+        if let Some(name) = captures.first() {
+            return lowering.sink.push_capture(input, name, line);
+        }
+
+        let binding = lowering.fresh_binding();
+        lowering.sink.push_step(input.into_step(line, binding));
         return Ok(());
     }
 
-    let subject = lowering.locals.fresh_binding();
-    push_primitive_step(
-        steps,
-        line,
-        input.into_step(subject),
-        RecursiveDoEvent::None,
-    );
+    let subject = lowering.fresh_binding();
+    lowering.sink.push_step(input.into_step(line, subject));
     for name in captures {
-        append_capture(steps, subject, name, line, lowering)?;
+        lowering.sink.push_capture(
+            ResolvedPatternInput::Value(ResolvedExpr::Local(subject)),
+            name,
+            line,
+        )?;
     }
     Ok(())
 }
 
 fn append_match_steps(
-    steps: &mut Vec<PrimitiveDoStep>,
     subject: BindingId,
     pattern: &SyntaxPattern,
     line: usize,
     lowering: &mut PatternLoweringContext<'_>,
 ) -> Result<(), Diagnostic> {
     match &pattern.kind {
-        SyntaxPatternKind::Capture(name) => append_capture(steps, subject, name, line, lowering),
+        SyntaxPatternKind::Capture(name) => lowering.sink.push_capture(
+            ResolvedPatternInput::Value(ResolvedExpr::Local(subject)),
+            name,
+            line,
+        ),
         SyntaxPatternKind::Wildcard => Ok(()),
-        SyntaxPatternKind::Group(pattern) => {
-            append_match_steps(steps, subject, pattern, line, lowering)
-        }
+        SyntaxPatternKind::Group(pattern) => append_match_steps(subject, pattern, line, lowering),
         SyntaxPatternKind::As(left, right) => {
-            append_match_steps(steps, subject, left, line, lowering)?;
-            append_match_steps(steps, subject, right, line, lowering)
+            append_match_steps(subject, left, line, lowering)?;
+            append_match_steps(subject, right, line, lowering)
         }
         SyntaxPatternKind::View { view, pattern } => {
-            let view = syntax_expr_to_resolved_in_semantic_scope(
-                view,
-                line,
-                lowering.context,
-                lowering.scope,
-                lowering.locals,
-            )?;
+            let view = lowering.resolve_expression(view, line)?;
             let operation = ResolvedExpr::apply(view, [ResolvedExpr::Local(subject)]);
-            let viewed = append_bind(steps, operation, line, lowering.locals);
-            append_match_steps(steps, viewed, pattern, line, lowering)
+            let viewed = append_bind(operation, line, lowering);
+            append_match_steps(viewed, pattern, line, lowering)
         }
         SyntaxPatternKind::Predicate { predicate, pattern } => {
-            let predicate = syntax_expr_to_resolved_in_semantic_scope(
-                predicate,
-                line,
-                lowering.context,
-                lowering.scope,
-                lowering.locals,
-            )?;
+            let predicate = lowering.resolve_expression(predicate, line)?;
             append_then(
-                steps,
                 ResolvedExpr::apply(predicate, [ResolvedExpr::Local(subject)]),
                 line,
-                lowering.locals,
+                lowering,
             );
-            append_match_steps(steps, subject, pattern, line, lowering)
+            append_match_steps(subject, pattern, line, lowering)
         }
         SyntaxPatternKind::Guarded { pattern, guards } => {
-            append_match_steps(steps, subject, pattern, line, lowering)?;
-            append_guard_steps(steps, guards, line, lowering)
+            append_match_steps(subject, pattern, line, lowering)?;
+            append_guard_steps(guards, line, lowering)
         }
         SyntaxPatternKind::Literal(literal) => {
             append_then(
-                steps,
                 pattern_builtin(
                     Builtin::PatternEqual,
                     [
@@ -171,32 +160,27 @@ fn append_match_steps(
                     ],
                 ),
                 line,
-                lowering.locals,
+                lowering,
             );
             Ok(())
         }
-        SyntaxPatternKind::List { .. } => {
-            append_list_match(steps, subject, pattern, line, lowering)
-        }
-        SyntaxPatternKind::Dict { .. } => {
-            append_dict_match(steps, subject, pattern, line, lowering)
-        }
+        SyntaxPatternKind::List { .. } => append_list_match(subject, pattern, line, lowering),
+        SyntaxPatternKind::Dict { .. } => append_dict_match(subject, pattern, line, lowering),
         SyntaxPatternKind::QuotedPath(path) => {
             let expected = syntax_path_resolved(
                 path,
                 line,
                 lowering.context,
                 lowering.scope,
-                lowering.locals,
+                lowering.sink.locals(),
             )?;
             append_then(
-                steps,
                 pattern_builtin(
                     Builtin::PatternPathEqual,
                     [expected, ResolvedExpr::Local(subject)],
                 ),
                 line,
-                lowering.locals,
+                lowering,
             );
             Ok(())
         }
@@ -204,54 +188,29 @@ fn append_match_steps(
 }
 
 fn append_guard_steps(
-    steps: &mut Vec<PrimitiveDoStep>,
-    guards: &[SyntaxPatternGuard],
+    guards: &[SyntaxGuardClause],
     line: usize,
     lowering: &mut PatternLoweringContext<'_>,
 ) -> Result<(), Diagnostic> {
     for guard in guards {
         match guard {
-            SyntaxPatternGuard::Effect(expr) => {
-                let operation = syntax_expr_to_resolved_in_semantic_scope(
-                    expr,
-                    line,
-                    lowering.context,
-                    lowering.scope,
-                    lowering.locals,
-                )?;
-                append_then(steps, operation, line, lowering.locals);
+            SyntaxGuardClause::Pass => {}
+            SyntaxGuardClause::Effect(expr) => {
+                let operation = lowering.resolve_expression(expr, line)?;
+                append_then(operation, line, lowering);
             }
-            SyntaxPatternGuard::Bind { pattern, operation } => {
-                let operation = syntax_expr_to_resolved_in_semantic_scope(
-                    operation,
-                    line,
-                    lowering.context,
-                    lowering.scope,
-                    lowering.locals,
-                )?;
+            SyntaxGuardClause::EffectBind { pattern, operation } => {
+                let operation = lowering.resolve_expression(operation, line)?;
                 append_pattern_steps(
-                    steps,
-                    PrimitivePatternInput::Effect(operation),
+                    ResolvedPatternInput::Effect(operation),
                     pattern,
                     line,
                     lowering,
                 )?;
             }
-            SyntaxPatternGuard::ValueBind { pattern, value } => {
-                let value = syntax_expr_to_resolved_in_semantic_scope(
-                    value,
-                    line,
-                    lowering.context,
-                    lowering.scope,
-                    lowering.locals,
-                )?;
-                append_pattern_steps(
-                    steps,
-                    PrimitivePatternInput::Value(value),
-                    pattern,
-                    line,
-                    lowering,
-                )?;
+            SyntaxGuardClause::ValueBind { pattern, value } => {
+                let value = lowering.resolve_expression(value, line)?;
+                append_pattern_steps(ResolvedPatternInput::Value(value), pattern, line, lowering)?;
             }
         }
     }
@@ -259,7 +218,6 @@ fn append_guard_steps(
 }
 
 fn append_list_match(
-    steps: &mut Vec<PrimitiveDoStep>,
     subject: BindingId,
     pattern: &SyntaxPattern,
     line: usize,
@@ -274,71 +232,58 @@ fn append_list_match(
         unreachable!("list expansion receives a list pattern");
     };
     append_then(
-        steps,
         pattern_builtin(Builtin::PatternIsList, [ResolvedExpr::Local(subject)]),
         line,
-        lowering.locals,
+        lowering,
     );
 
     let mut remainder = ResolvedExpr::Local(subject);
     for pattern in prefix {
         let parts = append_bind(
-            steps,
             pattern_builtin(Builtin::PatternListTryUncons, [remainder]),
             line,
-            lowering.locals,
-        );
-        append_value_pattern(
-            steps,
-            part_access(parts, &keys::HEAD),
-            pattern,
-            line,
             lowering,
-        )?;
+        );
+        append_value_pattern(part_access(parts, &keys::HEAD), pattern, line, lowering)?;
         remainder = part_access(parts, &keys::TAIL);
     }
 
     let mut extracted_suffix = Vec::with_capacity(suffix.len());
     for pattern in suffix.iter().rev() {
         let parts = append_bind(
-            steps,
             pattern_builtin(Builtin::PatternListTryUnsnoc, [remainder]),
             line,
-            lowering.locals,
+            lowering,
         );
-        let last = lowering.locals.fresh_binding();
-        push_primitive_step(
-            steps,
+        let last = lowering.fresh_binding();
+        lowering.push_step(
             line,
-            PrimitiveDoStepKind::ValueBind {
+            ResolvedEffectStepKind::ValueBind {
                 value: part_access(parts, &keys::LAST),
                 binding: last,
             },
-            RecursiveDoEvent::None,
         );
         extracted_suffix.push((pattern, last));
         remainder = part_access(parts, &keys::INIT);
     }
 
     if let Some(middle) = middle.as_deref() {
-        append_value_pattern(steps, remainder, middle, line, lowering)?;
+        append_value_pattern(remainder, middle, line, lowering)?;
     } else {
         append_then(
-            steps,
             pattern_builtin(Builtin::PatternListIsEmpty, [remainder]),
             line,
-            lowering.locals,
+            lowering,
         );
     }
 
     for (pattern, subject) in extracted_suffix.into_iter().rev() {
-        append_match_steps(steps, subject, pattern, line, lowering)?;
+        append_match_steps(subject, pattern, line, lowering)?;
     }
     Ok(())
 }
 
 fn append_dict_match(
-    steps: &mut Vec<PrimitiveDoStep>,
     subject: BindingId,
     pattern: &SyntaxPattern,
     line: usize,
@@ -348,10 +293,9 @@ fn append_dict_match(
         unreachable!("dictionary expansion receives a dictionary pattern");
     };
     append_then(
-        steps,
         pattern_builtin(Builtin::PatternIsDict, [ResolvedExpr::Local(subject)]),
         line,
-        lowering.locals,
+        lowering,
     );
 
     let mut rest = ResolvedExpr::Local(subject);
@@ -366,16 +310,10 @@ fn append_dict_match(
             line,
             lowering.context,
             lowering.scope,
-            lowering.locals,
+            lowering.sink.locals(),
         )?;
-        let parts = append_bind(
-            steps,
-            pattern_builtin(builtin, [path, rest]),
-            line,
-            lowering.locals,
-        );
+        let parts = append_bind(pattern_builtin(builtin, [path, rest]), line, lowering);
         append_value_pattern(
-            steps,
             part_access(parts, &keys::VALUE),
             &entry.pattern,
             line,
@@ -385,102 +323,37 @@ fn append_dict_match(
     }
 
     if let Some(remainder) = remainder.as_deref() {
-        append_value_pattern(steps, rest, remainder, line, lowering)
+        append_value_pattern(rest, remainder, line, lowering)
     } else {
         append_then(
-            steps,
             pattern_builtin(Builtin::PatternDictIsEmpty, [rest]),
             line,
-            lowering.locals,
+            lowering,
         );
         Ok(())
     }
 }
 
-fn append_capture(
-    steps: &mut Vec<PrimitiveDoStep>,
-    subject: BindingId,
-    name: &str,
-    line: usize,
-    lowering: &mut PatternLoweringContext<'_>,
-) -> Result<(), Diagnostic> {
-    let (binding, recursion) = resolve_capture_binding(
-        lowering.forward_names,
-        name,
-        line,
-        lowering.locals,
-        lowering.forwards,
-    )?;
-    push_primitive_step(
-        steps,
-        line,
-        PrimitiveDoStepKind::ValueBind {
-            value: ResolvedExpr::Local(subject),
-            binding,
-        },
-        recursion,
-    );
-    Ok(())
-}
-
-fn resolve_capture_binding(
-    forward_names: &mut ForwardNameRegistry,
-    name: &str,
-    line: usize,
-    locals: &mut ResolverContext,
-    forwards: &mut [ResolvedForward],
-) -> Result<(BindingId, RecursiveDoEvent), Diagnostic> {
-    let fulfillment = forward_names.fulfill(name);
-    let Some(id) = fulfillment else {
-        let binding = locals
-            .extend_source_bindings([name], line)?
-            .into_iter()
-            .next()
-            .expect("one do binder produces one binding identity");
-        return Ok((binding, RecursiveDoEvent::None));
-    };
-
-    let binding = locals.fresh_binding();
-    let forward = &mut forwards[id];
-    let slot = forward
-        .resolver_slot
-        .expect("planned fulfillment follows its abstract declaration");
-    let mut local = local_name_metadata(name);
-    local.binding = Some(binding);
-    locals[slot] = local;
-    forward.resolved_binding = Some(binding);
-    Ok((binding, RecursiveDoEvent::Fulfill(id)))
-}
-
 fn append_bind(
-    steps: &mut Vec<PrimitiveDoStep>,
     operation: ResolvedExpr<Value>,
     line: usize,
-    locals: &mut ResolverContext,
+    lowering: &mut PatternLoweringContext<'_>,
 ) -> BindingId {
-    let binding = locals.fresh_binding();
-    push_primitive_step(
-        steps,
+    let binding = lowering.fresh_binding();
+    lowering.push_step(
         line,
-        PrimitiveDoStepKind::Bind { operation, binding },
-        RecursiveDoEvent::None,
+        ResolvedEffectStepKind::EffectBind { operation, binding },
     );
     binding
 }
 
 fn append_then(
-    steps: &mut Vec<PrimitiveDoStep>,
     operation: ResolvedExpr<Value>,
     line: usize,
-    locals: &mut ResolverContext,
+    lowering: &mut PatternLoweringContext<'_>,
 ) {
-    let result = locals.fresh_binding();
-    push_primitive_step(
-        steps,
-        line,
-        PrimitiveDoStepKind::Then { operation, result },
-        RecursiveDoEvent::None,
-    );
+    let result = lowering.fresh_binding();
+    lowering.push_step(line, ResolvedEffectStepKind::Then { operation, result });
 }
 
 fn pattern_builtin(

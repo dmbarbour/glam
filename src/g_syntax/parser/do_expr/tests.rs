@@ -1,5 +1,5 @@
 use crate::g_syntax::{
-    DoExpr, DoStepKind, SyntaxExpr, SyntaxKeyExpr, SyntaxPattern, SyntaxPatternGuard,
+    DoExpr, DoStepKind, SyntaxExpr, SyntaxGuardClause, SyntaxKeyExpr, SyntaxPattern,
     SyntaxPatternKind,
 };
 
@@ -463,16 +463,32 @@ fn effectful_patterns_parse_with_progressive_capture_order() {
         panic!("expected a guarded pattern");
     };
     assert_eq!(guarded.captures(), ["first", "second"]);
-    assert!(matches!(&guards[0], SyntaxPatternGuard::Effect(_)));
+    assert!(matches!(&guards[0], SyntaxGuardClause::Effect(_)));
     assert!(matches!(
         &guards[1],
-        SyntaxPatternGuard::Bind { pattern, .. } if pattern.captures() == ["next"]
+        SyntaxGuardClause::EffectBind { pattern, .. } if pattern.captures() == ["next"]
     ));
     assert!(matches!(
         &guards[2],
-        SyntaxPatternGuard::ValueBind { pattern, .. } if pattern.captures() == ["doubled"]
+        SyntaxGuardClause::ValueBind { pattern, .. } if pattern.captures() == ["doubled"]
     ));
     assert_eq!(pattern.captures(), ["first", "second", "next", "doubled"]);
+}
+
+#[test]
+fn wildcard_pattern_guard_is_a_pass_clause() {
+    let expr = parse_do_expression("do { .r 1 -> (_ when _); .r () }");
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = expr else {
+        panic!("expected a do expression");
+    };
+    let DoStepKind::Bind { pattern, .. } = &steps[0].kind else {
+        panic!("expected a guarded pattern binding");
+    };
+    let SyntaxPatternKind::Guarded { guards, .. } = &pattern.kind else {
+        panic!("expected a guarded pattern");
+    };
+
+    assert_eq!(guards, &[SyntaxGuardClause::Pass]);
 }
 
 #[test]

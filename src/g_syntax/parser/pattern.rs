@@ -6,8 +6,8 @@
 
 use crate::g_syntax::keywords::{canonical_keyword, reserved_keyword_message};
 use crate::g_syntax::{
-    Diagnostic, SyntaxDictPatternEntry, SyntaxExpr, SyntaxKeyExpr, SyntaxPattern,
-    SyntaxPatternGuard, SyntaxPatternKind, SyntaxPatternLiteral,
+    Diagnostic, SyntaxDictPatternEntry, SyntaxExpr, SyntaxGuardClause, SyntaxKeyExpr,
+    SyntaxPattern, SyntaxPatternKind, SyntaxPatternLiteral,
 };
 use crate::number::Number;
 
@@ -342,12 +342,9 @@ fn parse_predicate_pattern(view: TokenView<'_, '_>) -> Option<SyntaxPattern> {
     None
 }
 
-fn parse_guard_clause(view: TokenView<'_, '_>) -> ParseResult<SyntaxPatternGuard> {
+fn parse_guard_clause(view: TokenView<'_, '_>) -> ParseResult<SyntaxGuardClause> {
     if is_wildcard_guard(view) {
-        return Ok(SyntaxPatternGuard::Effect(SyntaxExpr::Apply(
-            Box::new(SyntaxExpr::Effect(vec!["r".to_owned()])),
-            Box::new(SyntaxExpr::Unit),
-        )));
+        return Ok(SyntaxGuardClause::Pass);
     }
 
     if let Some(arrow) = top_level_symbols(view, "<-").into_iter().next() {
@@ -359,7 +356,7 @@ fn parse_guard_clause(view: TokenView<'_, '_>) -> ParseResult<SyntaxPatternGuard
                 "guard binding requires a pattern before `<-` and an operation after it",
             ));
         }
-        return Ok(SyntaxPatternGuard::Bind {
+        return Ok(SyntaxGuardClause::EffectBind {
             pattern: parse_pattern(pattern)?,
             operation: parse_pattern_expression(operation)?,
         });
@@ -374,14 +371,14 @@ fn parse_guard_clause(view: TokenView<'_, '_>) -> ParseResult<SyntaxPatternGuard
                 "guard value binding requires a pattern before `=` and a value after it",
             ));
         }
-        return Ok(SyntaxPatternGuard::ValueBind {
+        return Ok(SyntaxGuardClause::ValueBind {
             pattern: parse_pattern(pattern)?,
             value: parse_pattern_expression(value)?,
         });
     }
 
     if let Ok(effect) = parse_pattern_expression(view) {
-        return Ok(SyntaxPatternGuard::Effect(effect));
+        return Ok(SyntaxGuardClause::Effect(effect));
     }
 
     for arrow in top_level_symbols(view, "->").into_iter().rev() {
@@ -393,7 +390,7 @@ fn parse_guard_clause(view: TokenView<'_, '_>) -> ParseResult<SyntaxPatternGuard
         let Ok(pattern) = parse_pattern(pattern) else {
             continue;
         };
-        return Ok(SyntaxPatternGuard::Bind { pattern, operation });
+        return Ok(SyntaxGuardClause::EffectBind { pattern, operation });
     }
 
     Err(error_at_view(

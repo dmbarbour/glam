@@ -2,7 +2,10 @@ use super::super::recursive_do::{
     ForwardNameId, ForwardNameRegistry, RecursiveDoEvent, RecursiveDoPlan, RecursiveDoStep,
 };
 use super::super::*;
-use super::pattern::{PatternLoweringContext, append_pattern_steps};
+use super::effect_steps::{
+    ResolvedEffectStep, ResolvedEffectStepKind, ResolvedPatternInput, emit_effect_steps,
+};
+use super::pattern::{PatternLoweringContext, PatternStepSink, append_pattern_steps};
 use crate::number::Number;
 
 #[derive(Default)]
@@ -15,47 +18,17 @@ pub(super) struct ResolvedForward {
     continuation_parameter: Option<BindingId>,
 }
 
-/// Resolved primitive do step consumed by recursive planning and emission.
+/// A resolved effect step decorated only with recursive-do planning metadata.
 ///
-/// Pattern lowering appends to this stream directly; it never reconstructs a
-/// surface `DoExpr` or invents source-spellable temporary names.
-pub(super) struct PrimitiveDoStep {
+/// Pattern lowering emits syntax-independent `ResolvedEffectStep`s through a
+/// do-specific sink; it never acquires recursive-do state itself.
+struct RecursiveEffectStep {
     recursion: RecursiveDoStep,
-    pub(super) kind: PrimitiveDoStepKind,
+    effect: Option<ResolvedEffectStep>,
 }
 
-pub(super) enum PrimitiveDoStepKind {
-    Abstract,
-    Bind {
-        operation: ResolvedExpr<Value>,
-        binding: BindingId,
-    },
-    ValueBind {
-        value: ResolvedExpr<Value>,
-        binding: BindingId,
-    },
-    Then {
-        operation: ResolvedExpr<Value>,
-        result: BindingId,
-    },
-}
-
-pub(super) enum PrimitivePatternInput {
-    Effect(ResolvedExpr<Value>),
-    Value(ResolvedExpr<Value>),
-}
-
-impl PrimitivePatternInput {
-    pub(super) fn into_step(self, binding: BindingId) -> PrimitiveDoStepKind {
-        match self {
-            Self::Effect(operation) => PrimitiveDoStepKind::Bind { operation, binding },
-            Self::Value(value) => PrimitiveDoStepKind::ValueBind { value, binding },
-        }
-    }
-}
-
-struct PrimitiveDoBlock {
-    steps: Vec<PrimitiveDoStep>,
+struct ResolvedDoBlock {
+    steps: Vec<RecursiveEffectStep>,
     result: ResolvedExpr<Value>,
     forwards: Vec<ResolvedForward>,
     plan: RecursiveDoPlan,
@@ -67,10 +40,45 @@ struct DoLowering<'a> {
 }
 
 struct DoEmitter<'a> {
-    steps: &'a mut [Option<PrimitiveDoStep>],
+    steps: &'a mut [Option<RecursiveEffectStep>],
     forwards: &'a [ResolvedForward],
     plan: &'a RecursiveDoPlan,
     context: &'a CompileContext,
+}
+
+struct DoPatternStepSink<'a> {
+    steps: &'a mut Vec<RecursiveEffectStep>,
+    forward_names: &'a mut ForwardNameRegistry,
+    locals: &'a mut ResolverContext,
+    forwards: &'a mut [ResolvedForward],
+}
+
+impl PatternStepSink for DoPatternStepSink<'_> {
+    fn locals(&mut self) -> &mut ResolverContext {
+        self.locals
+    }
+
+    fn push_step(&mut self, step: ResolvedEffectStep) {
+        let line = step.line;
+        push_recursive_step(self.steps, line, Some(step), RecursiveDoEvent::None);
+    }
+
+    fn push_capture(
+        &mut self,
+        input: ResolvedPatternInput,
+        name: &str,
+        line: usize,
+    ) -> Result<(), Diagnostic> {
+        let (binding, event) =
+            resolve_capture_binding(self.forward_names, name, line, self.locals, self.forwards)?;
+        push_recursive_step(
+            self.steps,
+            line,
+            Some(input.into_step(line, binding)),
+            event,
+        );
+        Ok(())
+    }
 }
 
 pub(in crate::g_syntax) fn lower_do_expr_resolved(
@@ -89,7 +97,7 @@ impl DoLowering<'_> {
         &self,
         do_expr: &DoExpr,
         locals: &mut ResolverContext,
-    ) -> Result<PrimitiveDoBlock, Diagnostic> {
+    ) -> Result<ResolvedDoBlock, Diagnostic> {
         let base_len = locals.len();
         let result = (|| {
             let mut forward_names = ForwardNameRegistry::default();
@@ -117,10 +125,10 @@ impl DoLowering<'_> {
                                 ..ResolvedForward::default()
                             });
                         }
-                        push_primitive_step(
+                        push_recursive_step(
                             &mut steps,
                             step.line,
-                            PrimitiveDoStepKind::Abstract,
+                            None,
                             RecursiveDoEvent::Declare(ids),
                         );
                     }
@@ -132,16 +140,16 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
-                        let mut pattern_lowering = PatternLoweringContext::new(
-                            &mut forward_names,
-                            self.context,
-                            self.scope,
+                        let mut sink = DoPatternStepSink {
+                            steps: &mut steps,
+                            forward_names: &mut forward_names,
                             locals,
-                            &mut forwards,
-                        );
+                            forwards: &mut forwards,
+                        };
+                        let mut pattern_lowering =
+                            PatternLoweringContext::new(self.context, self.scope, &mut sink);
                         append_pattern_steps(
-                            &mut steps,
-                            PrimitivePatternInput::Effect(operation),
+                            ResolvedPatternInput::Effect(operation),
                             pattern,
                             step.line,
                             &mut pattern_lowering,
@@ -155,16 +163,16 @@ impl DoLowering<'_> {
                             self.scope,
                             locals,
                         )?;
-                        let mut pattern_lowering = PatternLoweringContext::new(
-                            &mut forward_names,
-                            self.context,
-                            self.scope,
+                        let mut sink = DoPatternStepSink {
+                            steps: &mut steps,
+                            forward_names: &mut forward_names,
                             locals,
-                            &mut forwards,
-                        );
+                            forwards: &mut forwards,
+                        };
+                        let mut pattern_lowering =
+                            PatternLoweringContext::new(self.context, self.scope, &mut sink);
                         append_pattern_steps(
-                            &mut steps,
-                            PrimitivePatternInput::Value(value),
+                            ResolvedPatternInput::Value(value),
                             pattern,
                             step.line,
                             &mut pattern_lowering,
@@ -179,10 +187,13 @@ impl DoLowering<'_> {
                             locals,
                         )?;
                         let result = locals.fresh_binding();
-                        push_primitive_step(
+                        push_recursive_step(
                             &mut steps,
                             step.line,
-                            PrimitiveDoStepKind::Then { operation, result },
+                            Some(ResolvedEffectStep {
+                                line: step.line,
+                                kind: ResolvedEffectStepKind::Then { operation, result },
+                            }),
                             RecursiveDoEvent::None,
                         );
                     }
@@ -207,7 +218,7 @@ impl DoLowering<'_> {
                 debug_assert!(forward.forward_binding.is_some());
                 debug_assert!(forward.resolved_binding.is_some());
             }
-            Ok(PrimitiveDoBlock {
+            Ok(ResolvedDoBlock {
                 steps,
                 result,
                 forwards,
@@ -218,8 +229,8 @@ impl DoLowering<'_> {
         result
     }
 
-    fn emit(&self, block: PrimitiveDoBlock) -> ResolvedExpr<Value> {
-        let PrimitiveDoBlock {
+    fn emit(&self, block: ResolvedDoBlock) -> ResolvedExpr<Value> {
+        let ResolvedDoBlock {
             steps,
             result,
             forwards,
@@ -240,16 +251,46 @@ impl DoLowering<'_> {
     }
 }
 
-pub(super) fn push_primitive_step(
-    steps: &mut Vec<PrimitiveDoStep>,
+fn push_recursive_step(
+    steps: &mut Vec<RecursiveEffectStep>,
     line: usize,
-    kind: PrimitiveDoStepKind,
+    effect: Option<ResolvedEffectStep>,
     event: RecursiveDoEvent,
 ) {
-    steps.push(PrimitiveDoStep {
+    debug_assert!(effect.as_ref().is_none_or(|effect| effect.line == line));
+    steps.push(RecursiveEffectStep {
         recursion: RecursiveDoStep { line, event },
-        kind,
+        effect,
     });
+}
+
+fn resolve_capture_binding(
+    forward_names: &mut ForwardNameRegistry,
+    name: &str,
+    line: usize,
+    locals: &mut ResolverContext,
+    forwards: &mut [ResolvedForward],
+) -> Result<(BindingId, RecursiveDoEvent), Diagnostic> {
+    let fulfillment = forward_names.fulfill(name);
+    let Some(id) = fulfillment else {
+        let binding = locals
+            .extend_source_bindings([name], line)?
+            .into_iter()
+            .next()
+            .expect("one pattern capture produces one binding identity");
+        return Ok((binding, RecursiveDoEvent::None));
+    };
+
+    let binding = locals.fresh_binding();
+    let forward = &mut forwards[id];
+    let slot = forward
+        .resolver_slot
+        .expect("planned fulfillment follows its abstract declaration");
+    let mut local = local_name_metadata(name);
+    local.binding = Some(binding);
+    locals[slot] = local;
+    forward.resolved_binding = Some(binding);
+    Ok((binding, RecursiveDoEvent::Fulfill(id)))
 }
 
 impl DoEmitter<'_> {
@@ -278,32 +319,16 @@ impl DoEmitter<'_> {
         &mut self,
         start: usize,
         end: usize,
-        mut continuation: ResolvedExpr<Value>,
+        continuation: ResolvedExpr<Value>,
     ) -> ResolvedExpr<Value> {
-        for index in (start..end).rev() {
-            let step = self.steps[index]
+        let steps = &mut self.steps;
+        let effects = (start..end).filter_map(|index| {
+            steps[index]
                 .take()
-                .expect("planned recursive-do step is emitted exactly once");
-            continuation = match step.kind {
-                PrimitiveDoStepKind::Abstract => continuation,
-                PrimitiveDoStepKind::Bind { operation, binding } => effect_call_resolved(
-                    "seq",
-                    [operation, ResolvedExpr::lambda(vec![binding], continuation)],
-                ),
-                PrimitiveDoStepKind::ValueBind { value, binding } => {
-                    ResolvedExpr::apply(ResolvedExpr::lambda(vec![binding], continuation), [value])
-                }
-                PrimitiveDoStepKind::Then { operation, result } => {
-                    let body =
-                        annotate_assert_unit_resolved(ResolvedExpr::Local(result), continuation);
-                    effect_call_resolved(
-                        "seq",
-                        [operation, ResolvedExpr::lambda(vec![result], body)],
-                    )
-                }
-            };
-        }
-        continuation
+                .expect("planned recursive-do step is emitted exactly once")
+                .effect
+        });
+        emit_effect_steps(effects, continuation)
     }
 
     fn emit_fix_scope(
@@ -530,6 +555,35 @@ mod tests {
         assert_eq!(
             count_embedded_value(&resolved, &Value::Builtin(Builtin::PatternEqual)),
             1
+        );
+    }
+
+    #[test]
+    fn wildcard_guard_emits_no_effect_step() {
+        fn expression(pattern: SyntaxPattern) -> SyntaxExpr {
+            SyntaxExpr::Do(DoExpr {
+                steps: vec![DoStep {
+                    line: 2,
+                    kind: DoStepKind::ValueBind {
+                        pattern,
+                        value: SyntaxExpr::Number(42.into()),
+                    },
+                }],
+                result_line: 3,
+                result: Box::new(SyntaxExpr::Unit),
+            })
+        }
+
+        let guarded = SyntaxPattern {
+            kind: SyntaxPatternKind::Guarded {
+                pattern: Box::new(SyntaxPattern::wildcard()),
+                guards: vec![SyntaxGuardClause::Pass],
+            },
+        };
+
+        assert_eq!(
+            resolve(&expression(guarded)),
+            resolve(&expression(SyntaxPattern::wildcard()))
         );
     }
 

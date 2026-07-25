@@ -489,9 +489,10 @@ fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {
 
 /// Builds only the primitive recursive provenance needed to preview warnings.
 ///
-/// Resolution builds the authoritative stream alongside resolved primitive do
-/// steps. This source-level preview exists because unused-local analysis runs
-/// before resolution; `RecursiveDoPlan` itself remains pattern-agnostic.
+/// Resolution builds the authoritative stream by decorating resolved effect
+/// steps in the do adapter. This source-level preview exists because
+/// unused-local analysis runs before resolution; `RecursiveDoPlan` itself
+/// remains pattern-agnostic.
 fn preview_recursive_do_plan(
     do_expr: &DoExpr,
 ) -> Result<recursive_do::RecursiveDoPlan, Diagnostic> {

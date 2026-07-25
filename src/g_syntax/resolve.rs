@@ -1,6 +1,7 @@
 //! Name resolution and syntax-to-semantic lowering.
 
 mod do_expr;
+mod effect_steps;
 mod expression;
 mod pattern;
 mod scope;
