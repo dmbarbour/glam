@@ -3410,6 +3410,37 @@ fn hierarchical_match_shares_prefixes_and_falls_back_at_each_level() {
 }
 
 #[test]
+fn host_try_variants_use_reflection_state_and_rollback_failed_branches() {
+    let source = r#"language g0
+import 'std
+refl.try_access = .heap.set ['visible] 42 =>> (try 42 <- .heap.get ['visible] then () else 1 / 0)
+refl.try_rollback = (try (.heap.set ['try_rolled_back] "bad" =>> .fail) then 1 / 0 else ()) =>> (.heap.get ['try_rolled_back] >>= (\value -> (value == {}) =>> .r ()))
+refl.try_match_rollback = try_match 42 with {
+  42 when (.heap.set ['rolled_back] "bad" =>> .fail) => ();
+  42 when {} <- .heap.get ['rolled_back] => ();
+}
+refl.try_match_when = try_match when { 42 <- .heap.get ['visible] => (); }
+refl.try_match_exhaustion = try (try_match 1 with {}) then 1 / 0 else ()
+ordinary = "ordinary"
+"#;
+    let (assembler, context, module, diagnostics) =
+        reflection_test_module(source, &["host_try_test"], &[]);
+
+    assert_eq!(
+        resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
+        Value::binary_from_text("ordinary")
+    );
+    let report = assembler.drain_reasoning();
+    assert_eq!(report.status(), crate::api::ReasoningStatus::Complete);
+    assert_eq!(report.failures(), []);
+    assert_eq!(report.unfinished(), []);
+    assert!(
+        take_reflection_diagnostics(&diagnostics).is_empty(),
+        "successful host choices must not emit diagnostics"
+    );
+}
+
+#[test]
 fn quoted_paths_lower_to_ordinary_path_lists() {
     let parsed =
         parse("language g0\nasm.result = { foo:{ [42]:{ bar:\"quoted\" } } }.('.foo.([42]).bar)\n");

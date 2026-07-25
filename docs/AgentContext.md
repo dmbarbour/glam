@@ -271,6 +271,11 @@ their detailed scheduling and representation contracts.
   children share progressive parent captures and work, child exhaustion may
   fall through to the next parent arm, and only the complete match owns a
   `.cut`.
+- `try` and `try_match` use those same syntax and resolved choice shapes in
+  host mode. They return the one root `.cut` operation to the ambient effect
+  handler instead of using the cached isolated pure runner. Consequently host
+  effects and transactional rollback are available; exhausted `try_match`
+  remains `.fail`, while required `else` keeps `try` total.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

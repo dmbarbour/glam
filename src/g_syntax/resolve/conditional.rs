@@ -102,7 +102,10 @@ pub(super) fn lower_if_expr_resolved(
         },
     ];
     let search = lower_guard_choices_resolved(&alternatives, context, scope, locals)?;
-    Ok(compiler_values::run_pure_conditional_resolved(search))
+    Ok(match if_expr.mode {
+        ConditionalMode::Pure => compiler_values::run_pure_conditional_resolved(search),
+        ConditionalMode::Host => search,
+    })
 }
 
 pub(super) fn lower_match_expr_resolved(
@@ -124,7 +127,10 @@ pub(super) fn lower_match_expr_resolved(
     let resolved = (|| {
         let search =
             resolve_match_choice(&match_expr.arms, subject_binding, context, scope, locals)?.emit();
-        let selected = compiler_values::run_pure_match_resolved(search);
+        let selected = match match_expr.mode {
+            ConditionalMode::Pure => compiler_values::run_pure_match_resolved(search),
+            ConditionalMode::Host => search,
+        };
         Ok(ResolvedExpr::apply(
             ResolvedExpr::lambda(vec![subject_binding], selected),
             [subject],
@@ -141,7 +147,10 @@ pub(super) fn lower_match_when_expr_resolved(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let search = resolve_when_choice(&match_when.arms, context, scope, locals)?.emit();
-    Ok(compiler_values::run_pure_match_resolved(search))
+    Ok(match match_when.mode {
+        ConditionalMode::Pure => compiler_values::run_pure_match_resolved(search),
+        ConditionalMode::Host => search,
+    })
 }
 
 fn resolve_guard_choice(
@@ -388,6 +397,15 @@ mod tests {
         SyntaxExpr::Number(value.into())
     }
 
+    fn is_root_effect_call(expression: &ResolvedExpr<Value>, name: &str) -> bool {
+        matches!(
+            expression,
+            ResolvedExpr::Apply { function, .. }
+                if function.as_ref()
+                    == &ResolvedExpr::Embedded(compiler_values::effect_value(name))
+        )
+    }
+
     fn returned(value: i64) -> ResolvedExpr<Value> {
         effect_call_resolved(
             "r",
@@ -572,6 +590,7 @@ mod tests {
     #[test]
     fn prefix_if_resolves_each_owned_expression_once() {
         let if_expr = IfExpr {
+            mode: ConditionalMode::Pure,
             guards: vec![SyntaxGuardClause::ValueBind {
                 pattern: SyntaxPattern::wildcard(),
                 value: number(73),
@@ -596,8 +615,45 @@ mod tests {
     }
 
     #[test]
+    fn host_conditionals_return_their_root_cut_without_an_isolated_runner() {
+        let context = CompileContext::default();
+        let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
+
+        let host_if = IfExpr {
+            mode: ConditionalMode::Host,
+            guards: vec![SyntaxGuardClause::Pass],
+            then_result: Box::new(number(1)),
+            else_result: Box::new(number(2)),
+        };
+        let resolved_if = lower_if_expr_resolved(
+            &host_if,
+            1,
+            &context,
+            &scope.resolved(),
+            &mut ResolverContext::default(),
+        )
+        .expect("host try should resolve");
+        assert!(is_root_effect_call(&resolved_if, "cut"));
+
+        let host_match_when = MatchWhenExpr {
+            mode: ConditionalMode::Host,
+            arms: Vec::new(),
+        };
+        let resolved_match = lower_match_when_expr_resolved(
+            &host_match_when,
+            &context,
+            &scope.resolved(),
+            &mut ResolverContext::default(),
+        )
+        .expect("empty host try_match should resolve");
+        assert!(is_root_effect_call(&resolved_match, "cut"));
+        assert!(contains_effect(&resolved_match, "fail"));
+    }
+
+    #[test]
     fn subject_match_resolves_the_subject_and_each_result_once() {
         let match_expr = MatchExpr {
+            mode: ConditionalMode::Pure,
             subject: Box::new(number(73)),
             arms: vec![
                 MatchArm {
@@ -647,6 +703,7 @@ mod tests {
             Box::new(number(73)),
         );
         let match_expr = MatchExpr {
+            mode: ConditionalMode::Pure,
             subject: Box::new(number(74)),
             arms: vec![MatchArm {
                 line: 1,

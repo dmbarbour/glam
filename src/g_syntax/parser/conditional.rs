@@ -5,7 +5,8 @@
 //! enclosing conditional.
 
 use crate::g_syntax::{
-    Diagnostic, IfExpr, MatchArm, MatchExpr, MatchOutcome, MatchWhenExpr, SyntaxExpr, WhenArm,
+    ConditionalMode, Diagnostic, IfExpr, MatchArm, MatchExpr, MatchOutcome, MatchWhenExpr,
+    SyntaxExpr, WhenArm,
 };
 
 use super::expression_context::{ExpressionContext, ParsedExpression};
@@ -30,28 +31,50 @@ pub(in crate::g_syntax::parser) fn parse_if_expression(
     if_index: usize,
     context: ExpressionContext,
 ) -> ParseResult<ParsedExpression> {
-    let Some(if_token) = view.token_at(if_index) else {
+    parse_if_like_expression(view, if_index, context, "if", ConditionalMode::Pure)
+}
+
+pub(in crate::g_syntax::parser) fn parse_try_expression(
+    view: TokenView<'_, '_>,
+    try_index: usize,
+    context: ExpressionContext,
+) -> ParseResult<ParsedExpression> {
+    parse_if_like_expression(view, try_index, context, "try", ConditionalMode::Host)
+}
+
+fn parse_if_like_expression(
+    view: TokenView<'_, '_>,
+    head_index: usize,
+    context: ExpressionContext,
+    head: &str,
+    mode: ConditionalMode,
+) -> ParseResult<ParsedExpression> {
+    let Some(head_token) = view.token_at(head_index) else {
         return Err(error_at_view(
             view,
-            "if expression starts outside its token view",
+            format!("{head} expression starts outside its token view"),
         ));
     };
-    if !token_is_name(if_token, "if") {
-        return Err(error_at_token(view, if_token, "expected `if`"));
+    if !token_is_name(head_token, head) {
+        return Err(error_at_token(
+            view,
+            head_token,
+            format!("expected `{head}`"),
+        ));
     }
 
-    let end = conditional_hard_end(view, if_index);
-    let owned = view_between(view, if_index, end);
-    let (then_index, else_index) = conditional_boundaries(owned, if_index)?;
-    let guards = trim_layout(view_between(owned, if_index + 1, then_index));
+    let end = conditional_hard_end(view, head_index);
+    let owned = view_between(view, head_index, end);
+    let (then_index, else_index) = conditional_boundaries(owned, head_index, head)?;
+    let guards = trim_layout(view_between(owned, head_index + 1, then_index));
     let then_result = trim_layout(view_between(owned, then_index + 1, else_index));
     let else_result = trim_layout(view_between(owned, else_index + 1, owned.range().end()));
 
     if is_layout_empty(guards) {
         return Err(error_at_token(
             owned,
-            if_token,
-            "if expression requires a guard before `then`",
+            head_token,
+            format!("{head} expression requires a guard before `then`"),
         ));
     }
     if is_layout_empty(then_result) {
@@ -60,7 +83,7 @@ pub(in crate::g_syntax::parser) fn parse_if_expression(
             owned
                 .token_at(then_index)
                 .expect("selected `then` belongs to the conditional"),
-            "if expression requires a result after `then`",
+            format!("{head} expression requires a result after `then`"),
         ));
     }
     if is_layout_empty(else_result) {
@@ -69,16 +92,17 @@ pub(in crate::g_syntax::parser) fn parse_if_expression(
             owned
                 .token_at(else_index)
                 .expect("selected `else` belongs to the conditional"),
-            "if expression requires a fallback after `else`",
+            format!("{head} expression requires a fallback after `else`"),
         ));
     }
 
-    let guards = parse_guard_clauses(guards, "if guard")?;
+    let guards = parse_guard_clauses(guards, &format!("{head} guard"))?;
     let then_result = parse_expression_in_context(then_result, context.child_owner(then_result))?;
     let else_result = parse_expression_in_context(else_result, context.child_owner(else_result))?;
 
     Ok(ParsedExpression::new(
         SyntaxExpr::If(IfExpr {
+            mode,
             guards,
             then_result: Box::new(then_result),
             else_result: Box::new(else_result),
@@ -92,27 +116,55 @@ pub(in crate::g_syntax::parser) fn parse_match_expression(
     match_index: usize,
     context: ExpressionContext,
 ) -> ParseResult<ParsedExpression> {
-    let Some(match_token) = view.token_at(match_index) else {
+    parse_match_like_expression(view, match_index, context, "match", ConditionalMode::Pure)
+}
+
+pub(in crate::g_syntax::parser) fn parse_try_match_expression(
+    view: TokenView<'_, '_>,
+    try_match_index: usize,
+    context: ExpressionContext,
+) -> ParseResult<ParsedExpression> {
+    parse_match_like_expression(
+        view,
+        try_match_index,
+        context,
+        "try_match",
+        ConditionalMode::Host,
+    )
+}
+
+fn parse_match_like_expression(
+    view: TokenView<'_, '_>,
+    head_index: usize,
+    context: ExpressionContext,
+    head: &str,
+    mode: ConditionalMode,
+) -> ParseResult<ParsedExpression> {
+    let Some(head_token) = view.token_at(head_index) else {
         return Err(error_at_view(
             view,
-            "match expression starts outside its token view",
+            format!("{head} expression starts outside its token view"),
         ));
     };
-    if !token_is_name(match_token, "match") {
-        return Err(error_at_token(view, match_token, "expected `match`"));
+    if !token_is_name(head_token, head) {
+        return Err(error_at_token(
+            view,
+            head_token,
+            format!("expected `{head}`"),
+        ));
     }
 
-    let after_match = trim_layout(view_between(view, match_index + 1, view.range().end()));
-    if let Some((when_index, when_token)) = after_match.first_significant()
+    let after_head = trim_layout(view_between(view, head_index + 1, view.range().end()));
+    if let Some((when_index, when_token)) = after_head.first_significant()
         && token_is_name(when_token, "when")
-        && is_contextual_keyword(after_match, when_index)
+        && is_contextual_keyword(after_head, when_index)
     {
-        let body = view_between(after_match, when_index + 1, after_match.range().end());
+        let body = view_between(after_head, when_index + 1, after_head.range().end());
         let (members, end) = choice_member_views(
             body,
             context,
-            "match-when body",
-            "layout `match when` requires at least one arm",
+            &format!("{head}-when body"),
+            &format!("layout `{head} when` requires at least one arm"),
             true,
         )?;
         let arms = members
@@ -120,7 +172,7 @@ pub(in crate::g_syntax::parser) fn parse_match_expression(
             .map(|arm| parse_when_arm(arm, context))
             .collect::<ParseResult<Vec<_>>>()?;
         return Ok(ParsedExpression::new(
-            SyntaxExpr::MatchWhen(MatchWhenExpr { arms }),
+            SyntaxExpr::MatchWhen(MatchWhenExpr { mode, arms }),
             end,
         ));
     }
@@ -128,7 +180,7 @@ pub(in crate::g_syntax::parser) fn parse_match_expression(
     let with_index = view
         .top_level()
         .find(|indexed| {
-            indexed.index() > match_index
+            indexed.index() > head_index
                 && is_contextual_keyword(view, indexed.index())
                 && token_is_name(indexed.token(), "with")
         })
@@ -136,16 +188,18 @@ pub(in crate::g_syntax::parser) fn parse_match_expression(
         .ok_or_else(|| {
             error_at_token(
                 view,
-                match_token,
-                "match expression requires `with` and at least one layout arm or an explicit `{}` body",
+                head_token,
+                format!(
+                    "{head} expression requires `with` and at least one layout arm or an explicit `{{}}` body"
+                ),
             )
         })?;
-    let subject = trim_layout(view_between(view, match_index + 1, with_index));
+    let subject = trim_layout(view_between(view, head_index + 1, with_index));
     if is_layout_empty(subject) {
         return Err(error_at_token(
             view,
-            match_token,
-            "match expression requires a subject before `with`",
+            head_token,
+            format!("{head} expression requires a subject before `with`"),
         ));
     }
     let subject = parse_expression_in_context(subject, context.child_owner(subject))?;
@@ -154,8 +208,8 @@ pub(in crate::g_syntax::parser) fn parse_match_expression(
     let (members, end) = choice_member_views(
         after_with,
         context,
-        "match body",
-        "layout match expression requires at least one arm",
+        &format!("{head} body"),
+        &format!("layout {head} expression requires at least one arm"),
         true,
     )?;
     let arms = members
@@ -164,6 +218,7 @@ pub(in crate::g_syntax::parser) fn parse_match_expression(
         .collect::<ParseResult<Vec<_>>>()?;
     Ok(ParsedExpression::new(
         SyntaxExpr::Match(MatchExpr {
+            mode,
             subject: Box::new(subject),
             arms,
         }),
@@ -393,16 +448,20 @@ fn line_of_view(view: TokenView<'_, '_>) -> usize {
         .unwrap_or(1)
 }
 
-fn conditional_boundaries(view: TokenView<'_, '_>, if_index: usize) -> ParseResult<(usize, usize)> {
+fn conditional_boundaries(
+    view: TokenView<'_, '_>,
+    head_index: usize,
+    head: &str,
+) -> ParseResult<(usize, usize)> {
     let mut phases = vec![IfPhase::Guards];
     let mut outer_then = None;
 
     for indexed in view.top_level() {
-        if indexed.index() <= if_index || !is_contextual_keyword(view, indexed.index()) {
+        if indexed.index() <= head_index || !is_contextual_keyword(view, indexed.index()) {
             continue;
         }
         match indexed.token().kind() {
-            TokenKind::Name("if") => phases.push(IfPhase::Guards),
+            TokenKind::Name("if" | "try") => phases.push(IfPhase::Guards),
             TokenKind::Name("then") => {
                 let Some(phase) = phases.last_mut() else {
                     continue;
@@ -411,7 +470,7 @@ fn conditional_boundaries(view: TokenView<'_, '_>, if_index: usize) -> ParseResu
                     return Err(error_at_token(
                         view,
                         indexed.token(),
-                        "unexpected `then`; an if branch is already active",
+                        format!("unexpected `then`; a {head} branch is already active"),
                     ));
                 }
                 *phase = IfPhase::Then;
@@ -427,7 +486,7 @@ fn conditional_boundaries(view: TokenView<'_, '_>, if_index: usize) -> ParseResu
                     return Err(error_at_token(
                         view,
                         indexed.token(),
-                        "if expression requires `then` before `else`",
+                        format!("{head} expression requires `then` before `else`"),
                     ));
                 }
                 if phases.len() == 1 {
@@ -443,32 +502,32 @@ fn conditional_boundaries(view: TokenView<'_, '_>, if_index: usize) -> ParseResu
     }
 
     let message = if outer_then.is_some() {
-        "if expression requires `else` and a fallback result"
+        format!("{head} expression requires `else` and a fallback result")
     } else {
-        "if expression requires `then` and `else`"
+        format!("{head} expression requires `then` and `else`")
     };
     Err(error_at_view(view, message))
 }
 
-fn conditional_hard_end(view: TokenView<'_, '_>, if_index: usize) -> usize {
+fn conditional_hard_end(view: TokenView<'_, '_>, head_index: usize) -> usize {
     let containing_close = view
         .source()
         .groups()
         .iter()
         .filter_map(|group| {
             let close = group.close_token()?;
-            (group.open_token() < if_index && if_index < close)
+            (group.open_token() < head_index && head_index < close)
                 .then_some((group.open_token(), close))
         })
         .max_by_key(|(open, _)| *open)
         .map(|(_, close)| close)
         .unwrap_or(view.range().end())
         .min(view.range().end());
-    let candidate = view_between(view, if_index, containing_close);
+    let candidate = view_between(view, head_index, containing_close);
     candidate
         .top_level()
         .find_map(|indexed| {
-            (indexed.index() > if_index
+            (indexed.index() > head_index
                 && matches!(indexed.token().kind(), TokenKind::Symbol("," | ";")))
             .then_some(indexed.index())
         })
@@ -539,6 +598,7 @@ mod tests {
         let SyntaxExpr::If(if_expr) = parse("if value = 42 and _ then value else 0") else {
             panic!("prefix syntax should produce an if expression");
         };
+        assert_eq!(if_expr.mode, ConditionalMode::Pure);
         assert_eq!(if_expr.guards.len(), 2);
         assert!(matches!(
             &if_expr.guards[0],
@@ -600,6 +660,40 @@ mod tests {
     }
 
     #[test]
+    fn malformed_try_variants_report_their_host_construct() {
+        for (source, expected) in [
+            (
+                "try _ else 0",
+                "try expression requires `then` before `else`",
+            ),
+            (
+                "try _ then 1",
+                "try expression requires `else` and a fallback result",
+            ),
+            ("try_match value", "try_match expression requires `with`"),
+            (
+                "try_match value with",
+                "layout try_match expression requires at least one arm",
+            ),
+        ] {
+            let diagnostics =
+                super::super::input::parse_expression_fragment(source.as_bytes(), |view| {
+                    super::super::structural::parse_expression_in_context(
+                        view,
+                        ExpressionContext::for_fragment(view),
+                    )
+                })
+                .expect_err("malformed host conditional should fail");
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(expected)),
+                "`{source}` reported {diagnostics:#?} instead of `{expected}`"
+            );
+        }
+    }
+
+    #[test]
     fn flat_match_parses_layout_and_braced_arms() {
         let SyntaxExpr::Match(layout) = parse(
             "match subject with\n  1 => \"one\"\n  value when value == 2 => \"two\"\n  _ => \"other\"",
@@ -640,6 +734,67 @@ mod tests {
             panic!("an explicit empty match should remain a match expression");
         };
         assert!(empty.arms.is_empty());
+    }
+
+    #[test]
+    fn try_variants_reuse_conditional_shapes_in_host_mode() {
+        let SyntaxExpr::If(try_expr) = parse("try value = 42 and _ then value else 0") else {
+            panic!("try syntax should produce the shared if expression");
+        };
+        assert_eq!(try_expr.mode, ConditionalMode::Host);
+        assert_eq!(try_expr.guards.len(), 2);
+
+        let SyntaxExpr::Match(subject) =
+            parse("try_match value with { 42 => \"yes\"; _ => \"no\"; }")
+        else {
+            panic!("try_match subject syntax should produce the shared match expression");
+        };
+        assert_eq!(subject.mode, ConditionalMode::Host);
+        assert_eq!(subject.arms.len(), 2);
+
+        let SyntaxExpr::MatchWhen(guard_only) =
+            parse("try_match when { _ when { _ => \"nested\"; }; }")
+        else {
+            panic!("try_match when should produce the shared guard-only match expression");
+        };
+        assert_eq!(guard_only.mode, ConditionalMode::Host);
+        assert!(matches!(
+            guard_only.arms[0].outcome,
+            MatchOutcome::Nested(_)
+        ));
+
+        let SyntaxExpr::MatchWhen(empty) = parse("try_match when {}") else {
+            panic!("explicit empty try_match when should remain a host search");
+        };
+        assert_eq!(empty.mode, ConditionalMode::Host);
+        assert!(empty.arms.is_empty());
+    }
+
+    #[test]
+    fn nested_if_and_try_boundaries_remain_owned_by_their_heads() {
+        let SyntaxExpr::If(outer_try) = parse("try _ then if _ then 1 else 2 else 3") else {
+            panic!("source should produce an outer try expression");
+        };
+        assert_eq!(outer_try.mode, ConditionalMode::Host);
+        assert!(matches!(
+            outer_try.then_result.as_ref(),
+            SyntaxExpr::If(IfExpr {
+                mode: ConditionalMode::Pure,
+                ..
+            })
+        ));
+
+        let SyntaxExpr::If(outer_if) = parse("if _ then try _ then 1 else 2 else 3") else {
+            panic!("source should produce an outer if expression");
+        };
+        assert_eq!(outer_if.mode, ConditionalMode::Pure);
+        assert!(matches!(
+            outer_if.then_result.as_ref(),
+            SyntaxExpr::If(IfExpr {
+                mode: ConditionalMode::Host,
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -186,12 +186,12 @@ The active `g0` table is:
 | Role | Keywords |
 | --- | --- |
 | declaration heads | `language`, `import`, `abstract`, `unique`, `object`, `extend` |
-| expression forms | `let`, `where`, `do`, `if`, `object`, `abstract object` |
+| expression forms | `let`, `where`, `do`, `if`, `match`, `try`, `try_match`, `object`, `abstract object` |
 | do statements | `abstract` |
 | expression operators | `and`, `or` |
 | special expression references | `module`, `self` |
 | special object/`with` alias | `self` |
-| contextual modifiers | `abstract`, `as`, `at`, `binary`, `else`, `extends`, `in`, `then`, `with` |
+| contextual modifiers | `abstract`, `as`, `at`, `binary`, `else`, `extends`, `in`, `then`, `when`, `with` |
 
 A word may have more than one role, but the parser still has one
 version-owned source of truth for whether it is reserved.
@@ -204,8 +204,7 @@ request paths such as `'.where` and `.where` likewise remain valid. Bare
 spellings such as `where = ...`, `\where -> ...`, and an ordinary reference to
 `where` are errors.
 
-Words proposed for later syntax, including `using`, `without`, `match`, `try`,
-`when`, and `try_match`, are not active `g0` keywords
+Words proposed for later syntax, including `using` and `without`, are not active `g0` keywords
 until their language-version feature is introduced. The recognized table may
 therefore vary by base language version and extension without retroactively
 changing an older version.
@@ -235,7 +234,7 @@ Users refer to prior versions of names via `_name`, i.e. `_` prefix. This applie
 
 The compiler enforces explicit overrides by implicit assertions analogous to: `name = assert (_name == {}) Expr` or `name := assert(_name <> {}) Expr` (where `{}` is the 'undefined' value). As an escape hatch, I propose a non-observing `name ::= \ prior -> Expr`. This also serves as an in-place update, i.e. `name ::= Update`. Users have more freedom with `::=`. 
 
-### Abstract Definitions
+### Abstract Definitions (Tentative)
 
 To localize errors, and to simplify analysis of name shadowing, names in use shall be defined or declared. I propose a lightweight declaration for names that we assume to be provided externally:
 
@@ -1296,8 +1295,8 @@ I support `if/then/else` for reasons of familiarity and convenience. We'll desug
             C => A
             _ => B
 
-The current Rust bootstrap implements the prefix form. The postfix form and
-the explicit `match` syntax below remain later implementation slices.
+The current Rust bootstrap implements the prefix form and the explicit
+`match` syntax below. The postfix form remains a later implementation slice.
 
 Note that conditions are not expressions. Instead, they're guard clauses, i.e. a sequence of `Guard (and Guard)*`. Relevantly, this admits pattern guards, which are often convenient, and effects guards, which can express branching conditions.
 
@@ -1319,7 +1318,14 @@ order.
 
 ### Try Variants
 
-I propose to model a 'pure' `if/then/else` or `match` syntax in terms of the compiler providing a local effects handler implementing the stateless subset of standard effects (`.alt/.fail/.cut/.r/.seq/.fix`). Effectful variants `try/then/else` and `try_match` instead run in the host environment. Essentially, this gives us backtracking conditional behavior, providing access to state or 'would this work' conditions.
+Pure `if/then/else` and `match` syntax uses a compiler-provided local effects
+handler implementing the stateless subset of standard effects
+(`.alt/.fail/.cut/.r/.seq/.fix`). Effectful `try/then/else`, `try_match`, and
+guard-only `try_match when` instead return their root `.cut` operation to the
+host environment. This gives them transactional backtracking and access to
+host state or “would this work” conditions. `try` requires `else` and is
+therefore total; an exhausted `try_match` remains `.fail` for the ambient
+handler.
 
 ### Tentative Choice
 

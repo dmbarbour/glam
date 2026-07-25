@@ -121,7 +121,7 @@ fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
     for keyword in crate::g_syntax::keywords::G0_KEYWORDS {
         if matches!(
             keyword.spelling(),
-            "do" | "if" | "match" | "module" | "self"
+            "do" | "if" | "match" | "module" | "self" | "try" | "try_match"
         ) {
             continue;
         }
@@ -163,6 +163,22 @@ fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
         diagnostic
             .message
             .contains("match expression requires `with`")
+    }));
+
+    let try_diagnostics = parse_expression_fragment(b"try")
+        .expect_err("a bare `try` should be diagnosed as a malformed try expression");
+    assert!(try_diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("try expression requires `then` and `else`")
+    }));
+
+    let try_match_diagnostics = parse_expression_fragment(b"try_match")
+        .expect_err("a bare `try_match` should be diagnosed as a malformed try_match expression");
+    assert!(try_match_diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("try_match expression requires `with`")
     }));
 }
 

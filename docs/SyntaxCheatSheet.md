@@ -366,8 +366,9 @@ do
 ## Conditionals & Patterns
 
 ```
-# Current bootstrap: prefix `if`, subject `match`, guard-only `match when`,
-# and hierarchical choices. Postfix `if` and `try` remain target syntax.
+# Current bootstrap: prefix `if`/`try`, subject `match`/`try_match`,
+# guard-only `match when`/`try_match when`, and hierarchical choices.
+# Postfix `if` and tentative results remain target syntax.
 if C then A else B
 A if C else B
 if (a,b) = Expr and a > b then A else B     # C is guard: patterns + effects + 'and'
@@ -391,8 +392,9 @@ match when                          # no scrutinee: guard-only dispatch
         C2a => R2a
         _ => R2b
 
-try C then A else B                 # effectful variants: run in host with
-try_match Expr with ...             #    backtracking, state access
+try C then A else B                 # effectful variants: return one root .cut
+try_match Expr with ...             #    to the host for rollback/state access
+try_match when ...                  # guard-only host search
 
 if C then? .r A else B              # tentative choice: branch must
 if C then? .fail else B             #   explicitly .r Result or .fail

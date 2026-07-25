@@ -118,6 +118,14 @@ pub(super) const G0_KEYWORDS: &[Keyword] = &[
         roles: &[Modifier],
     },
     Keyword {
+        spelling: "try",
+        roles: &[Expression],
+    },
+    Keyword {
+        spelling: "try_match",
+        roles: &[Expression],
+    },
+    Keyword {
         spelling: "unique",
         roles: &[Declaration],
     },
@@ -199,6 +207,14 @@ mod tests {
         assert_eq!(
             g0_keyword("when").map(Keyword::roles),
             Some(&[Modifier][..])
+        );
+        assert_eq!(
+            g0_keyword("try").map(Keyword::roles),
+            Some(&[Expression][..])
+        );
+        assert_eq!(
+            g0_keyword("try_match").map(Keyword::roles),
+            Some(&[Expression][..])
         );
         assert_eq!(
             g0_keyword("self").map(Keyword::roles),

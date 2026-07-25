@@ -13,7 +13,9 @@ use super::super::keywords::{canonical_keyword, g0_keyword, reserved_keyword_mes
 use super::super::{
     Diagnostic, PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, flatten_path_suffixes,
 };
-use super::conditional::{parse_if_expression, parse_match_expression};
+use super::conditional::{
+    parse_if_expression, parse_match_expression, parse_try_expression, parse_try_match_expression,
+};
 use super::do_expr::parse_do_expression;
 use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{
@@ -436,6 +438,14 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .then(path_suffix.clone())
             .map(|(base, suffixes)| access_if_path(base, suffixes))
             .boxed();
+        let try_expr = try_expr(view, context)
+            .then(path_suffix.clone())
+            .map(|(base, suffixes)| access_if_path(base, suffixes))
+            .boxed();
+        let try_match_expr = try_match_expr(view, context)
+            .then(path_suffix.clone())
+            .map(|(base, suffixes)| access_if_path(base, suffixes))
+            .boxed();
 
         let literal_atom = choice((
             unit,
@@ -455,6 +465,8 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .map(|(base, suffixes)| access_if_path(base, suffixes))
             .boxed();
         let base_atom = choice((
+            try_match_expr,
+            try_expr,
             match_expr,
             if_expr,
             do_expr,
@@ -613,6 +625,28 @@ fn match_expr<'lex, 'source: 'lex>(
         view,
         context,
         parse_match_expression,
+    ))
+}
+
+fn try_expr<'lex, 'source: 'lex>(
+    view: TokenView<'lex, 'source>,
+    context: ExpressionContext,
+) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
+    keyword("try").ignore_then(structural_atom_after_head(
+        view,
+        context,
+        parse_try_expression,
+    ))
+}
+
+fn try_match_expr<'lex, 'source: 'lex>(
+    view: TokenView<'lex, 'source>,
+    context: ExpressionContext,
+) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
+    keyword("try_match").ignore_then(structural_atom_after_head(
+        view,
+        context,
+        parse_try_match_expression,
     ))
 }
 
