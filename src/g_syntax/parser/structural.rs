@@ -7,7 +7,10 @@
 
 use super::super::keywords::{canonical_keyword, reserved_keyword_message};
 use super::super::{Diagnostic, ObjectExpr, ObjectRealization, Severity, SyntaxExpr};
-use super::conditional::{parse_match_expression, parse_try_match_expression};
+use super::conditional::{
+    is_postfix_if_candidate, parse_if_expression, parse_match_expression, parse_postfix_if_suffix,
+    parse_try_expression, parse_try_match_expression,
+};
 use super::declaration::{parse_nonempty_object_body, parse_object_body};
 use super::expression::{parse_expression_chain_view, syntax_operator};
 use super::expression_context::{ExpressionContext, ParsedExpression, validate_expression_floor};
@@ -74,6 +77,14 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         ParsedExpression::new(result?, view.range().end())
     } else if let Some(result) = parse_object(view, context) {
         result?
+    } else if let Some((if_index, token)) = view.first_significant()
+        && token_is_name(token, "if")
+    {
+        parse_if_expression(view, if_index, context.may_yield())?
+    } else if let Some((try_index, token)) = view.first_significant()
+        && token_is_name(token, "try")
+    {
+        parse_try_expression(view, try_index, context.may_yield())?
     } else if let Some((match_index, token)) = view.first_significant()
         && token_is_name(token, "match")
     {
@@ -84,6 +95,17 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         parse_try_match_expression(view, try_match_index, context.may_yield())?
     } else if let Some(result) = parse_with(view, context) {
         result?
+    } else if let Some(if_index) = postfix_if_suffix(view) {
+        let body = trim_layout(view_between(view, view.range().start(), if_index));
+        if is_layout_empty(body) {
+            return Err(error_at_token(
+                view,
+                view.token_at(if_index)
+                    .expect("selected postfix `if` remains inside its expression view"),
+                "postfix `if` requires a successful result before its guards",
+            ));
+        }
+        parse_expression_extent(body, context.complete())?
     } else if let Some(where_index) = contextual_keywords(view, "where").into_iter().next() {
         let where_token = view
             .token_at(where_index)
@@ -149,6 +171,7 @@ fn parse_parenthesized_structural(
             || token_is_name(token, "try")
             || token_is_name(token, "object")
     }) || !contextual_keywords(contents, "where").is_empty()
+        || postfix_if_suffix(contents).is_some()
         || has_compound_with_body(contents);
     starts_structural.then(|| {
         parse_expression_extent(contents, context).and_then(|parsed| {
@@ -360,6 +383,17 @@ fn resume_expression_suffixes(
             parsed = parse_where_suffix(view, context, boundary_index, body)?;
             continue;
         }
+        if token_is_name(token, "if")
+            && is_postfix_if_candidate(view, boundary_index)
+            && (token.leading() != LeadingTrivia::Joint
+                || begins_layout_line(view, boundary_index, token))
+        {
+            let then_result = parsed
+                .into_expression()
+                .map_err(|message| error_at_view(tail, message))?;
+            parsed = parse_postfix_if_suffix(view, boundary_index, context, then_result)?;
+            continue;
+        }
 
         let Some(operator) = syntax_operator(token) else {
             break;
@@ -431,9 +465,18 @@ fn next_resumption_boundary(
         view.subview(line.tokens())
             .and_then(TokenView::first_significant)
             .is_some_and(|(_, token)| {
-                syntax_operator(token).is_some() || token_is_name(token, "where")
+                syntax_operator(token).is_some()
+                    || token_is_name(token, "where")
+                    || token_is_name(token, "if")
             })
     })
+}
+
+fn postfix_if_suffix(view: TokenView<'_, '_>) -> Option<usize> {
+    contextual_keywords(view, "if")
+        .into_iter()
+        .next()
+        .filter(|index| is_postfix_if_candidate(view, *index))
 }
 
 fn parse_braced_bindings(

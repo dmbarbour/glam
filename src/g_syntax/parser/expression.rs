@@ -11,10 +11,12 @@ use crate::number::Number;
 use self::infix::resolve_infix_chain;
 use super::super::keywords::{canonical_keyword, g0_keyword, reserved_keyword_message};
 use super::super::{
-    Diagnostic, PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, flatten_path_suffixes,
+    Diagnostic, IfExpr, PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator,
+    flatten_path_suffixes,
 };
 use super::conditional::{
-    parse_if_expression, parse_match_expression, parse_try_expression, parse_try_match_expression,
+    is_postfix_if_candidate, parse_if_expression, parse_match_expression, parse_postfix_if_suffix,
+    parse_try_expression, parse_try_match_expression,
 };
 use super::do_expr::parse_do_expression;
 use super::expression_context::{ExpressionContext, ParsedExpression};
@@ -555,7 +557,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .boxed();
         let tail_infix_operand = choice((lambda.clone(), application.clone())).boxed();
 
-        choice((
+        let ordinary = choice((
             lambda.map(InfixChain::single),
             application
                 .clone()
@@ -578,7 +580,21 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                     Ok(chain)
                 }),
         ))
-        .boxed()
+        .boxed();
+
+        ordinary
+            .then(postfix_if_tail(view, context).or_not())
+            .try_map(|(left, postfix), span| {
+                let Some(mut postfix) = postfix else {
+                    return Ok(left);
+                };
+                postfix.then_result = Box::new(
+                    left.resolve()
+                        .map_err(|message| Rich::custom(span, message))?,
+                );
+                Ok(InfixChain::single(SyntaxExpr::If(postfix)))
+            })
+            .boxed()
     })
 }
 
@@ -648,6 +664,67 @@ fn try_match_expr<'lex, 'source: 'lex>(
         context,
         parse_try_match_expression,
     ))
+}
+
+fn postfix_if_tail<'lex, 'source: 'lex>(
+    view: TokenView<'lex, 'source>,
+    context: ExpressionContext,
+) -> impl Parser<'lex, TokenInput<'lex, 'source>, IfExpr, TokenExtra<'lex, 'source>> {
+    keyword("if").ignore_then(custom::<
+        _,
+        TokenInput<'lex, 'source>,
+        IfExpr,
+        TokenExtra<'lex, 'source>,
+    >(move |input| {
+        let before = input.cursor();
+        let next_span = input.peek().map(|token| token.span());
+        let next_index = next_span.and_then(|span| {
+            view.tokens()
+                .iter()
+                .position(|candidate| candidate.span() == span)
+                .and_then(|relative| view.absolute_index(relative))
+        });
+        let if_index = next_index
+            .and_then(|next| next.checked_sub(1))
+            .unwrap_or_else(|| view.range().end().saturating_sub(1));
+        if !is_postfix_if_candidate(view, if_index) {
+            return Err(Rich::custom(
+                input.span_since(&before),
+                "postfix `if` requires guards followed by `else`",
+            ));
+        }
+        let parsed = parse_postfix_if_suffix(view, if_index, context.may_yield(), SyntaxExpr::Unit)
+            .map_err(|diagnostics| {
+                let span = diagnostics
+                    .first()
+                    .and_then(|diagnostic| view.line_span(diagnostic.line))
+                    .unwrap_or_else(|| input.span_since(&before));
+                Rich::custom(
+                    span,
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| diagnostic.message)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                )
+            })?;
+        let end = parsed.end();
+        for _ in if_index + 1..end {
+            if input.next().is_none() {
+                return Err(Rich::custom(
+                    input.span_since(&before),
+                    "postfix conditional extends beyond its token range",
+                ));
+            }
+        }
+        let SyntaxExpr::If(postfix) = parsed
+            .into_expression()
+            .map_err(|message| Rich::custom(input.span_since(&before), message))?
+        else {
+            unreachable!("postfix conditional parser must produce an if expression");
+        };
+        Ok(postfix)
+    }))
 }
 
 type StructuralAtomParser = for<'lex, 'source> fn(

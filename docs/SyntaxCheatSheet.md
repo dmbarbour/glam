@@ -368,7 +368,7 @@ do
 ```
 # Current bootstrap: prefix `if`/`try`, subject `match`/`try_match`,
 # guard-only `match when`/`try_match when`, hierarchical choices, and
-# tentative `then?`/`=>?` results. Postfix `if` remains target syntax.
+# tentative `then?`/`=>?` results, plus postfix `if`.
 if C then A else B
 A if C else B
 if (a,b) = Expr and a > b then A else B     # C is guard: patterns + effects + 'and'

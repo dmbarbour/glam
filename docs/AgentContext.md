@@ -284,6 +284,11 @@ their detailed scheduling and representation contracts.
   `.fail` therefore falls through under the same root `.cut`. Keep this as an
   explicit result mode through syntax and resolved choice IR rather than
   inferring it from the result expression.
+- Postfix `A if Guards else B` is a structural suffix over the same pure
+  `IfExpr` as prefix syntax. Resolve and analyze `Guards` before `A`; captures
+  are visible only in `A`, never in `B` or the surrounding expression. A
+  following prefix `if ... then ... else ...` remains an application argument,
+  distinguished by its owned `then`.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

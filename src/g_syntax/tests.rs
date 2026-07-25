@@ -3226,6 +3226,94 @@ fn prefix_if_selects_first_success_and_fallback_with_progressive_captures() {
 }
 
 #[test]
+fn postfix_if_runs_guards_before_its_textually_earlier_success_result() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "asm.capture = value if value = \"captured\" else \"bad\"\n",
+        "asm.fallback = \"bad\" if 42 = 41 else \"fallback\"\n",
+        "asm.nested = \"bad\" if 1 = 2 else if _ then \"nested\" else \"worse\"\n",
+        "asm.layout = \"layout\"\n",
+        "  if\n",
+        "    _\n",
+        "  else\n",
+        "    \"bad\"\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("capture", b"captured".as_slice()),
+        ("fallback", b"fallback".as_slice()),
+        ("nested", b"nested".as_slice()),
+        ("layout", b"layout".as_slice()),
+    ] {
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", path]
+            ))),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn postfix_if_captures_do_not_enter_the_fallback_or_surrounding_scope() {
+    for source in [
+        "language g0\nasm.result = value if value = 1 else value\n",
+        "language g0\nasm.result = [value if value = 1 else 0, value]\n",
+    ] {
+        let parsed = parse(source);
+        assert_eq!(parsed.diagnostics, []);
+        let lowered = lower_parsed_source(parsed, &CompileContext::default());
+        assert!(
+            lowered.diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("local `value` shadows external `value` used by this file")),
+            "`{source}` should resolve the out-of-branch `value` as an external name: {:#?}",
+            lowered.diagnostics
+        );
+    }
+}
+
+#[test]
+fn raw_or_still_enumerates_while_conditionals_own_a_root_cut() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "raw = list.pure do\n",
+        "  .r () or .r ()\n",
+        "  .r \"R\"\n",
+        "asm.raw = list.at 0 raw ++ list.at 1 raw\n",
+        "asm.conditional = if (.r () or .r ()) then \"C\" else \"bad\"\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "raw"]
+        ))),
+        b"RR"
+    );
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "conditional"]
+        ))),
+        b"C"
+    );
+}
+
+#[test]
 fn prefix_if_preserves_selected_result_laziness_and_guard_errors() {
     let parsed = parse(concat!(
         "language g0\n",

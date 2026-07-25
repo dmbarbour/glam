@@ -49,6 +49,77 @@ pub(in crate::g_syntax::parser) fn parse_try_expression(
     parse_if_like_expression(view, try_index, context, "try", ConditionalMode::Host)
 }
 
+pub(in crate::g_syntax::parser) fn is_postfix_if_candidate(
+    view: TokenView<'_, '_>,
+    if_index: usize,
+) -> bool {
+    matches!(
+        postfix_if_boundary(view, if_index),
+        PostfixIfBoundary::Postfix(_)
+    )
+}
+
+pub(in crate::g_syntax::parser) fn parse_postfix_if_suffix(
+    view: TokenView<'_, '_>,
+    if_index: usize,
+    context: ExpressionContext,
+    then_result: SyntaxExpr,
+) -> ParseResult<ParsedExpression> {
+    let if_token = view
+        .token_at(if_index)
+        .expect("a selected postfix `if` remains inside its expression view");
+    let end = conditional_hard_end(view, if_index);
+    let owned = view_between(view, if_index, end);
+    let else_index = match postfix_if_boundary(owned, if_index) {
+        PostfixIfBoundary::Prefix => {
+            return Err(error_at_token(
+                owned,
+                if_token,
+                "postfix `if` does not use `then`; parenthesize a prefix `if` used inside its guard",
+            ));
+        }
+        PostfixIfBoundary::Postfix(Some(index)) => index,
+        PostfixIfBoundary::Postfix(None) => {
+            return Err(error_at_token(
+                owned,
+                if_token,
+                "postfix `if` requires `else` and a fallback result",
+            ));
+        }
+    };
+    let guards = trim_layout(view_between(owned, if_index + 1, else_index));
+    let else_result = trim_layout(view_between(owned, else_index + 1, owned.range().end()));
+    if is_layout_empty(guards) {
+        return Err(error_at_token(
+            owned,
+            if_token,
+            "postfix `if` requires guards before `else`",
+        ));
+    }
+    if is_layout_empty(else_result) {
+        return Err(error_at_token(
+            owned,
+            owned
+                .token_at(else_index)
+                .expect("selected `else` belongs to the postfix conditional"),
+            "postfix `if` requires a fallback after `else`",
+        ));
+    }
+
+    let guards = parse_guard_clauses(guards, "if guard")?;
+    let else_result = parse_expression_in_context(else_result, context.child_owner(else_result))?;
+    Ok(ParsedExpression::new(
+        SyntaxExpr::If(IfExpr {
+            mode: ConditionalMode::Pure,
+            guards,
+            then_mode: ConditionalResultMode::Ordinary,
+            then_result: Box::new(then_result),
+            else_result: Box::new(else_result),
+        }),
+        end,
+    ))
+}
+
 fn parse_if_like_expression(
     view: TokenView<'_, '_>,
     head_index: usize,
@@ -145,6 +216,37 @@ pub(in crate::g_syntax::parser) fn parse_try_match_expression(
         "try_match",
         ConditionalMode::Host,
     )
+}
+
+#[derive(Clone, Copy)]
+enum PostfixIfBoundary {
+    Prefix,
+    Postfix(Option<usize>),
+}
+
+fn postfix_if_boundary(view: TokenView<'_, '_>, if_index: usize) -> PostfixIfBoundary {
+    let mut nested = Vec::new();
+    for indexed in view.top_level() {
+        if indexed.index() <= if_index || !is_contextual_keyword(view, indexed.index()) {
+            continue;
+        }
+        match indexed.token().kind() {
+            TokenKind::Name("if" | "try") => nested.push(IfPhase::Guards),
+            TokenKind::Name("then") => {
+                if let Some(phase) = nested.last_mut() {
+                    *phase = IfPhase::Then;
+                } else {
+                    return PostfixIfBoundary::Prefix;
+                }
+            }
+            TokenKind::Name("else") if nested.pop().is_none() => {
+                return PostfixIfBoundary::Postfix(Some(indexed.index()));
+            }
+            TokenKind::Name("else") => {}
+            _ => {}
+        }
+    }
+    PostfixIfBoundary::Postfix(None)
 }
 
 fn parse_match_like_expression(
@@ -711,6 +813,97 @@ mod tests {
 
         let next_line = parse("if _ then\n  first\n  else\n    second");
         assert!(matches!(next_line, SyntaxExpr::If(_)));
+    }
+
+    #[test]
+    fn postfix_if_reorders_its_source_result_behind_the_guards() {
+        let SyntaxExpr::If(if_expr) = parse("value if value = 42 else 0") else {
+            panic!("postfix syntax should produce the shared if expression");
+        };
+        assert_eq!(if_expr.mode, ConditionalMode::Pure);
+        assert_eq!(if_expr.then_mode, ConditionalResultMode::Ordinary);
+        assert!(matches!(
+            if_expr.guards.as_slice(),
+            [SyntaxGuardClause::ValueBind { pattern, .. }]
+                if matches!(&pattern.kind, SyntaxPatternKind::Capture(name) if name == "value")
+        ));
+        assert!(matches!(
+            if_expr.then_result.as_ref(),
+            SyntaxExpr::Name(name) if name == "value"
+        ));
+        assert!(matches!(
+            if_expr.else_result.as_ref(),
+            SyntaxExpr::Number(_)
+        ));
+    }
+
+    #[test]
+    fn postfix_if_supports_layout_results_and_structural_success_values() {
+        for source in [
+            "value if value = 42\n      else 0",
+            "value if\n  value = 42\nelse\n  0",
+            "(value if value = 42 else 0)",
+        ] {
+            assert!(
+                matches!(parse(source), SyntaxExpr::If(_)),
+                "`{source}` should produce a postfix conditional"
+            );
+        }
+
+        let SyntaxExpr::If(structural) = parse("do\n  .r 1\nif _ else .r 0") else {
+            panic!("a completed structural result should resume into postfix `if`");
+        };
+        assert!(matches!(structural.then_result.as_ref(), SyntaxExpr::Do(_)));
+    }
+
+    #[test]
+    fn postfix_fallback_may_be_a_right_nested_prefix_if() {
+        let SyntaxExpr::If(outer) = parse("1 if _ else if _ then 2 else 3") else {
+            panic!("source should produce an outer postfix conditional");
+        };
+        assert!(matches!(outer.then_result.as_ref(), SyntaxExpr::Number(_)));
+        assert!(matches!(outer.else_result.as_ref(), SyntaxExpr::If(_)));
+    }
+
+    #[test]
+    fn prefix_if_remains_a_structural_application_argument() {
+        let SyntaxExpr::Apply(_, argument) = parse("f if _ then 1 else 2") else {
+            panic!("a prefix conditional after a function should remain its argument");
+        };
+        assert!(matches!(argument.as_ref(), SyntaxExpr::If(_)));
+    }
+
+    #[test]
+    fn malformed_postfix_if_reports_its_missing_guard_or_fallback() {
+        for (source, expected) in [
+            (
+                "value if guard",
+                "postfix `if` requires `else` and a fallback result",
+            ),
+            (
+                "value if else fallback",
+                "postfix `if` requires guards before `else`",
+            ),
+            (
+                "value if guard else",
+                "postfix `if` requires a fallback after `else`",
+            ),
+        ] {
+            let diagnostics =
+                super::super::input::parse_expression_fragment(source.as_bytes(), |view| {
+                    super::super::structural::parse_expression_in_context(
+                        view,
+                        ExpressionContext::for_fragment(view),
+                    )
+                })
+                .expect_err("malformed postfix conditional should fail");
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(expected)),
+                "`{source}` reported {diagnostics:#?} instead of `{expected}`"
+            );
+        }
     }
 
     #[test]

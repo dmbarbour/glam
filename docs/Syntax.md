@@ -1295,8 +1295,8 @@ I support `if/then/else` for reasons of familiarity and convenience. We'll desug
             C => A
             _ => B
 
-The current Rust bootstrap implements the prefix form and the explicit
-`match` syntax below. The postfix form remains a later implementation slice.
+The Rust bootstrap implements both forms and the explicit `match` syntax
+below.
 
 Note that conditions are not expressions. Instead, they're guard clauses, i.e. a sequence of `Guard (and Guard)*`. Relevantly, this admits pattern guards, which are often convenient, and effects guards, which can express branching conditions.
 
