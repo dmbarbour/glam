@@ -176,6 +176,12 @@ pub(in crate::g_syntax) fn run_pure_match_resolved(
     )
 }
 
+pub(in crate::g_syntax) fn run_pure_open_match_resolved(
+    operation: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
+    apply_builtin(Builtin::ListEffect, [operation])
+}
+
 pub(in crate::g_syntax) fn effect_value(name: &str) -> Value {
     effect_path_value(&[name])
 }

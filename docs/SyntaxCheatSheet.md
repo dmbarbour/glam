@@ -385,6 +385,8 @@ match Expr with
 
 match Expr with { Pattern1 => Result1; _ => Default; }
 match Expr with {}                 # valid empty search; errors on exhaustion
+match* Expr with ...                # lazy list of every successful result
+match* Expr with {}                 # []
 
 match when                          # no scrutinee: guard-only dispatch
     C1 => R1
@@ -395,6 +397,8 @@ match when                          # no scrutinee: guard-only dispatch
 try C then A else B                 # effectful variants: return one root .cut
 try_match Expr with ...             #    to the host for rollback/state access
 try_match when ...                  # guard-only host search
+try_match* Expr with ...            # no root cut; ambient handler owns choice
+try_match* when ...                 # exhaustion remains .fail
 
 if C then? .r A else B              # tentative choice: branch must
 if C then? .fail else B             #   explicitly .r Result or .fail
@@ -423,6 +427,7 @@ list.pure do
 (.cut (X or Y)) =>> LaterGuard
 
 # if/match supply an outer cut around their complete choice tree.
+# match*/try_match* deliberately omit that cut; match* collects a lazy list.
 ```
 
 ```

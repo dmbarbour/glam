@@ -944,9 +944,13 @@ direct expression of nets.
 
 We can use annotations to indicate known errors or issues.
 
-        anno 'error         recognized errors
+        anno 'error         produces an error value
         anno 'TBD           incomplete definitions
-        anno 'deprecated    transitional code
+        anno 'deprecated    transitional code, no-op
+
+We could also decorate errors within a context, something like:
+
+        anno context:Context Expr       decorates error values from Expr
 
 In these cases, `Expr` may indicate the nature of the error or future intentions for a TBD. For deprecated code, it should be valid, but we'll report a warning.
 
@@ -1239,13 +1243,13 @@ not become an empty, no-op dictionary union.
 
 ## Conditionals
 
-I propose to model conditional behavior as effectful and backtracking, i.e. in terms of `.alt/.fail/.cut`.
+We model conditional behavior as effectful and backtracking, i.e. in terms of `.alt/.fail/.cut`.
 
 Boolean expressions become pass/fail effects, i.e. `.r ()` and `.fail`. This
 impacts all boolean operators: `(3 > 4)` evaluates as `.fail`, `and` sequences
 with `.seq`, and `X or Y` constructs the raw ordered choice `.alt X Y`.
 
-`or` is not itself a Boolean value or an implicit commitment point. Under a
+`or` is not itself a Boolean value or an implicit cut point. Under a
 branching handler, a continuation after `X or Y` may run once for each
 successful alternative. Parentheses only group that choice:
 
@@ -1513,14 +1517,28 @@ complete match-arm pattern unambiguous, so only `do` bindings and nested
 pattern positions require the outer parentheses. If users want to run the
 predicate after the match, use `(Pattern as tmp when Pred tmp)` instead.
 
-### Open Conditionals (Tentative)
+### Open Matches
 
-A viable extension is to support `match` or `try_match` without the implicit cut.
+The starred match forms omit the complete match's implicit `.cut`.
 
-* `match*` returns a lazy list of results
-* `try_match*` enables backtracking of the outcomes to an earlier cut
+* `match*` runs the open search through the stateless list handler and returns
+  its lazy list of results, in source alternative order.
+* `try_match*` returns the open search to the ambient effects handler, allowing
+  an enclosing choice or cut to decide how many outcomes to observe.
 
-These would be contextually useful.
+Both subject and guard-only forms are supported:
+
+        matches = match* Value with
+            PatternA => ResultA
+            PatternB => ResultB
+
+        search = try_match* when
+            GuardA => ResultA
+            GuardB => ResultB
+
+An exhausted `match*` is `[]`. It does not add an error result as another
+alternative. An exhausted `try_match*` is `.fail`. Ordinary `match` and
+`try_match` retain their one root `.cut`.
 
 ## Loops
 

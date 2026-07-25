@@ -5,8 +5,8 @@
 //! enclosing conditional.
 
 use crate::g_syntax::{
-    ConditionalMode, ConditionalResultMode, Diagnostic, IfExpr, MatchArm, MatchExpr, MatchOutcome,
-    MatchWhenExpr, SyntaxExpr, WhenArm,
+    ConditionalMode, ConditionalResultMode, Diagnostic, IfExpr, MatchArm, MatchCommitment,
+    MatchExpr, MatchOutcome, MatchWhenExpr, SyntaxExpr, WhenArm,
 };
 
 use super::expression_context::{ExpressionContext, ParsedExpression};
@@ -270,7 +270,32 @@ fn parse_match_like_expression(
         ));
     }
 
-    let after_head = trim_layout(view_between(view, head_index + 1, view.range().end()));
+    let star = view.token_at(head_index + 1).filter(|token| {
+        matches!(token.kind(), TokenKind::Symbol("*")) && token.leading() == LeadingTrivia::Joint
+    });
+    if let Some(token) = view.token_at(head_index + 1)
+        && matches!(token.kind(), TokenKind::Symbol("*"))
+        && token.leading() != LeadingTrivia::Joint
+    {
+        return Err(error_at_token(
+            view,
+            token,
+            format!("the open form is spelled `{head}*` without intervening whitespace"),
+        ));
+    }
+    let commitment = if star.is_some() {
+        MatchCommitment::Open
+    } else {
+        MatchCommitment::Cut
+    };
+    let body_start = head_index + 1 + usize::from(star.is_some());
+    let display_head = if star.is_some() {
+        format!("{head}*")
+    } else {
+        head.to_owned()
+    };
+
+    let after_head = trim_layout(view_between(view, body_start, view.range().end()));
     if let Some((when_index, when_token)) = after_head.first_significant()
         && token_is_name(when_token, "when")
         && is_contextual_keyword(after_head, when_index)
@@ -279,8 +304,8 @@ fn parse_match_like_expression(
         let (members, end) = choice_member_views(
             body,
             context,
-            &format!("{head}-when body"),
-            &format!("layout `{head} when` requires at least one arm"),
+            &format!("{display_head}-when body"),
+            &format!("layout `{display_head} when` requires at least one arm"),
             true,
         )?;
         let arms = members
@@ -288,7 +313,11 @@ fn parse_match_like_expression(
             .map(|arm| parse_when_arm(arm, context))
             .collect::<ParseResult<Vec<_>>>()?;
         return Ok(ParsedExpression::new(
-            SyntaxExpr::MatchWhen(MatchWhenExpr { mode, arms }),
+            SyntaxExpr::MatchWhen(MatchWhenExpr {
+                mode,
+                commitment,
+                arms,
+            }),
             end,
         ));
     }
@@ -306,16 +335,16 @@ fn parse_match_like_expression(
                 view,
                 head_token,
                 format!(
-                    "{head} expression requires `with` and at least one layout arm or an explicit `{{}}` body"
+                    "{display_head} expression requires `with` and at least one layout arm or an explicit `{{}}` body"
                 ),
             )
         })?;
-    let subject = trim_layout(view_between(view, head_index + 1, with_index));
+    let subject = trim_layout(view_between(view, body_start, with_index));
     if is_layout_empty(subject) {
         return Err(error_at_token(
             view,
             head_token,
-            format!("{head} expression requires a subject before `with`"),
+            format!("{display_head} expression requires a subject before `with`"),
         ));
     }
     let subject = parse_expression_in_context(subject, context.child_owner(subject))?;
@@ -324,8 +353,8 @@ fn parse_match_like_expression(
     let (members, end) = choice_member_views(
         after_with,
         context,
-        &format!("{head} body"),
-        &format!("layout {head} expression requires at least one arm"),
+        &format!("{display_head} body"),
+        &format!("layout {display_head} expression requires at least one arm"),
         true,
     )?;
     let arms = members
@@ -335,6 +364,7 @@ fn parse_match_like_expression(
     Ok(ParsedExpression::new(
         SyntaxExpr::Match(MatchExpr {
             mode,
+            commitment,
             subject: Box::new(subject),
             arms,
         }),
@@ -1022,6 +1052,7 @@ mod tests {
             panic!("try_match subject syntax should produce the shared match expression");
         };
         assert_eq!(subject.mode, ConditionalMode::Host);
+        assert_eq!(subject.commitment, MatchCommitment::Cut);
         assert_eq!(subject.arms.len(), 2);
 
         let SyntaxExpr::MatchWhen(guard_only) =
@@ -1030,6 +1061,7 @@ mod tests {
             panic!("try_match when should produce the shared guard-only match expression");
         };
         assert_eq!(guard_only.mode, ConditionalMode::Host);
+        assert_eq!(guard_only.commitment, MatchCommitment::Cut);
         assert!(matches!(
             guard_only.arms[0].outcome,
             MatchOutcome::Nested(_)
@@ -1039,7 +1071,56 @@ mod tests {
             panic!("explicit empty try_match when should remain a host search");
         };
         assert_eq!(empty.mode, ConditionalMode::Host);
+        assert_eq!(empty.commitment, MatchCommitment::Cut);
         assert!(empty.arms.is_empty());
+    }
+
+    #[test]
+    fn starred_match_forms_are_joint_open_choices() {
+        let SyntaxExpr::Match(subject) = parse("match* value with { 42 => \"yes\"; _ => \"no\"; }")
+        else {
+            panic!("match* subject syntax should produce a match expression");
+        };
+        assert_eq!(subject.mode, ConditionalMode::Pure);
+        assert_eq!(subject.commitment, MatchCommitment::Open);
+        assert_eq!(subject.arms.len(), 2);
+
+        let SyntaxExpr::MatchWhen(guard_only) =
+            parse("try_match* when { _ when { _ => \"nested\"; }; }")
+        else {
+            panic!("try_match* when should produce a match-when expression");
+        };
+        assert_eq!(guard_only.mode, ConditionalMode::Host);
+        assert_eq!(guard_only.commitment, MatchCommitment::Open);
+        assert!(matches!(
+            guard_only.arms[0].outcome,
+            MatchOutcome::Nested(_)
+        ));
+
+        assert!(matches!(
+            parse("(try_match* value with { _ => value; })"),
+            SyntaxExpr::Match(MatchExpr {
+                mode: ConditionalMode::Host,
+                commitment: MatchCommitment::Open,
+                ..
+            })
+        ));
+
+        let diagnostics = super::super::input::parse_expression_fragment(
+            b"match * value with { _ => 1; }",
+            |view| {
+                super::super::structural::parse_expression_in_context(
+                    view,
+                    ExpressionContext::for_fragment(view),
+                )
+            },
+        )
+        .expect_err("whitespace must not separate a starred match head");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("open form is spelled `match*` without intervening whitespace")
+        }));
     }
 
     #[test]

@@ -279,6 +279,13 @@ their detailed scheduling and representation contracts.
   handler instead of using the cached isolated pure runner. Consequently host
   effects and transactional rollback are available; exhausted `try_match`
   remains `.fail`, while required `else` keeps `try` total.
+- Starred matches are the explicit open-search forms. `match*` runs the uncut
+  choice tree through the isolated list handler and returns its lazy result
+  list; exhaustion is `[]`. `try_match*` returns that same uncut tree to the
+  ambient handler; exhaustion is `.fail`. Keep root commitment orthogonal to
+  pure-versus-host handling in syntax and lowering. In particular, never add
+  the ordinary pure-match exhaustion error as a hidden `.alt` branch of
+  `match*`.
 - Ordinary `then`/`=>` results are staged with compiler-owned `.r`; tentative
   `then?`/`=>?` results are emitted as effect operations directly. A tentative
   `.fail` therefore falls through under the same root `.cut`. Keep this as an

@@ -130,12 +130,9 @@ pub(super) fn lower_match_expr_resolved(
     let base_len = locals.len();
     let subject_binding = locals.fresh_binding();
     let resolved = (|| {
-        let search =
-            resolve_match_choice(&match_expr.arms, subject_binding, context, scope, locals)?.emit();
-        let selected = match match_expr.mode {
-            ConditionalMode::Pure => compiler_values::run_pure_match_resolved(search),
-            ConditionalMode::Host => search,
-        };
+        let selected =
+            resolve_match_choice(&match_expr.arms, subject_binding, context, scope, locals)?
+                .emit_match(match_expr.mode, match_expr.commitment);
         Ok(ResolvedExpr::apply(
             ResolvedExpr::lambda(vec![subject_binding], selected),
             [subject],
@@ -151,11 +148,10 @@ pub(super) fn lower_match_when_expr_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let search = resolve_when_choice(&match_when.arms, context, scope, locals)?.emit();
-    Ok(match match_when.mode {
-        ConditionalMode::Pure => compiler_values::run_pure_match_resolved(search),
-        ConditionalMode::Host => search,
-    })
+    Ok(
+        resolve_when_choice(&match_when.arms, context, scope, locals)?
+            .emit_match(match_when.mode, match_when.commitment),
+    )
 }
 
 fn resolve_guard_choice(
@@ -343,6 +339,19 @@ fn resolve_prefix_steps(
 }
 
 impl ResolvedChoice {
+    fn emit_match(self, mode: ConditionalMode, commitment: MatchCommitment) -> ResolvedExpr<Value> {
+        match (mode, commitment) {
+            (ConditionalMode::Pure, MatchCommitment::Cut) => {
+                compiler_values::run_pure_match_resolved(self.emit())
+            }
+            (ConditionalMode::Pure, MatchCommitment::Open) => {
+                compiler_values::run_pure_open_match_resolved(self.emit_search())
+            }
+            (ConditionalMode::Host, MatchCommitment::Cut) => self.emit(),
+            (ConditionalMode::Host, MatchCommitment::Open) => self.emit_search(),
+        }
+    }
+
     fn emit(self) -> ResolvedExpr<Value> {
         effect_call_resolved("cut", [self.emit_search()])
     }
@@ -673,6 +682,7 @@ mod tests {
 
         let host_match_when = MatchWhenExpr {
             mode: ConditionalMode::Host,
+            commitment: MatchCommitment::Cut,
             arms: Vec::new(),
         };
         let resolved_match = lower_match_when_expr_resolved(
@@ -687,9 +697,48 @@ mod tests {
     }
 
     #[test]
+    fn open_match_forms_do_not_emit_a_root_cut_or_result_selector() {
+        let context = CompileContext::default();
+        let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
+
+        let host = MatchWhenExpr {
+            mode: ConditionalMode::Host,
+            commitment: MatchCommitment::Open,
+            arms: Vec::new(),
+        };
+        let resolved_host = lower_match_when_expr_resolved(
+            &host,
+            &context,
+            &scope.resolved(),
+            &mut ResolverContext::default(),
+        )
+        .expect("empty open host match should resolve");
+        assert_eq!(resolved_host, lower_effect_expr_resolved("fail"));
+
+        let pure = MatchWhenExpr {
+            mode: ConditionalMode::Pure,
+            commitment: MatchCommitment::Open,
+            arms: Vec::new(),
+        };
+        let resolved_pure = lower_match_when_expr_resolved(
+            &pure,
+            &context,
+            &scope.resolved(),
+            &mut ResolverContext::default(),
+        )
+        .expect("empty open pure match should resolve");
+        assert_eq!(
+            resolved_pure,
+            compiler_values::run_pure_open_match_resolved(lower_effect_expr_resolved("fail"))
+        );
+        assert!(!contains_effect(&resolved_pure, "cut"));
+    }
+
+    #[test]
     fn subject_match_resolves_the_subject_and_each_result_once() {
         let match_expr = MatchExpr {
             mode: ConditionalMode::Pure,
+            commitment: MatchCommitment::Cut,
             subject: Box::new(number(73)),
             arms: vec![
                 MatchArm {
@@ -742,6 +791,7 @@ mod tests {
         );
         let match_expr = MatchExpr {
             mode: ConditionalMode::Pure,
+            commitment: MatchCommitment::Cut,
             subject: Box::new(number(74)),
             arms: vec![MatchArm {
                 line: 1,

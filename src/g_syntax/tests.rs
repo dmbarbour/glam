@@ -3492,6 +3492,46 @@ fn flat_match_exhaustion_and_selected_result_errors_are_distinct() {
 }
 
 #[test]
+fn open_match_forms_preserve_all_results_and_ordinary_exhaustion() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "asm.pure = match* 1 with { 1 => \"A\"; _ => \"B\"; }\n",
+        "asm.pure_empty = match* 1 with {}\n",
+        "host = try_match* 1 with { 1 => \"C\"; _ => \"D\"; }\n",
+        "host_empty = try_match* 1 with {}\n",
+        "host_cut = try_match* 1 with { 1 => \"E\"; _ => \"bad\"; }\n",
+        "asm.host = list.pure host\n",
+        "asm.host_empty = list.pure host_empty\n",
+        "asm.host_cut = list.pure (.cut host_cut)\n",
+        "asm.host_fallback = list.pure (.alt host_empty (.r \"F\"))\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("pure", b"AB".as_slice()),
+        ("pure_empty", b"".as_slice()),
+        ("host", b"CD".as_slice()),
+        ("host_empty", b"".as_slice()),
+        ("host_cut", b"E".as_slice()),
+        ("host_fallback", b"F".as_slice()),
+    ] {
+        assert_eq!(
+            output_binary_result_list(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", path]
+            ))),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn hierarchical_match_shares_prefixes_and_falls_back_at_each_level() {
     let parsed = parse(concat!(
         "language g0\n",

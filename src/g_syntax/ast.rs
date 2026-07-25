@@ -169,6 +169,12 @@ pub enum ConditionalMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchCommitment {
+    Cut,
+    Open,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionalResultMode {
     Ordinary,
     Tentative,
@@ -177,6 +183,7 @@ pub enum ConditionalResultMode {
 #[derive(Debug, PartialEq, Eq)]
 pub struct MatchExpr {
     pub mode: ConditionalMode,
+    pub commitment: MatchCommitment,
     pub subject: Box<SyntaxExpr>,
     pub arms: Vec<MatchArm>,
 }
@@ -184,6 +191,7 @@ pub struct MatchExpr {
 #[derive(Debug, PartialEq, Eq)]
 pub struct MatchWhenExpr {
     pub mode: ConditionalMode,
+    pub commitment: MatchCommitment,
     pub arms: Vec<WhenArm>,
 }
 
