@@ -187,7 +187,7 @@ fn append_match_steps(
     }
 }
 
-fn append_guard_steps(
+pub(super) fn append_guard_steps(
     guards: &[SyntaxGuardClause],
     line: usize,
     lowering: &mut PatternLoweringContext<'_>,
