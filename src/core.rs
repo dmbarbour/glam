@@ -919,6 +919,20 @@ fn list_to_key_items(list: &List) -> Option<Arc<[Key]>> {
 }
 
 impl Value {
+    pub(crate) fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Atom(_) => "Atom",
+            Self::Number(_) => "Number",
+            Self::Binary(_) => "Binary",
+            Self::List(_) => "List",
+            Self::Dict(_) => "Dict",
+            Self::Builtin(_) | Self::PartialBuiltin(_) | Self::Function(_) => "Function",
+            Self::Net(_) => "Net",
+            Self::Lazy(_) | Self::Promised(_) => "Lazy",
+            Self::Opaque(_) => "Opaque",
+        }
+    }
+
     pub fn binary_from_text(text: &str) -> Self {
         Self::Binary(Bytes::copy_from_slice(text.as_bytes()))
     }

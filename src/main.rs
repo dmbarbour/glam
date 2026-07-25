@@ -701,6 +701,7 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
             match EffectRun::new(&custom, MainEffects::new(effect_assembler), host.clone())
                 .with_runtime(&evaluation_runtime)
                 .with_reflection_children(reflection_host)
+                .asserting_unit_result("configured logger result")
                 .requiring_unit_result()
                 .run()
             {

@@ -18,7 +18,7 @@ pub(in crate::eval) fn assert_unit(
         return Ok(target.clone());
     }
 
-    let received = value_kind_name(&value);
+    let received = value.kind_name();
     let message = match diagnostic_context {
         Some(diagnostic_context) => {
             let diagnostic_context = eval_value(context, diagnostic_context)?;
@@ -35,18 +35,4 @@ pub(in crate::eval) fn assert_unit(
         None => format!("unit expected, received {received}"),
     };
     Err(EvalError::new(message))
-}
-
-fn value_kind_name(value: &Value) -> &'static str {
-    match value {
-        Value::Atom(_) => "Atom",
-        Value::Number(_) => "Number",
-        Value::Binary(_) => "Binary",
-        Value::List(_) => "List",
-        Value::Dict(_) => "Dict",
-        Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Function(_) => "Function",
-        Value::Net(_) => "Net",
-        Value::Lazy(_) | Value::Promised(_) => "Lazy",
-        Value::Opaque(_) => "Opaque",
-    }
 }

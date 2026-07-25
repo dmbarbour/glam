@@ -35,7 +35,7 @@ use search::SearchPolicy;
 
 use crate::api::{EvaluationRuntime, Value as PublicValue};
 use crate::core::{
-    Atom, Dict, FunctionValue, Key, LazyValue, List, NetValue, PromisedValue, Value, keys,
+    Atom, Builtin, Dict, FunctionValue, Key, LazyValue, List, NetValue, PromisedValue, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::eval;
@@ -383,6 +383,7 @@ pub struct EffectRun<S: TaskSpecialization> {
     runtime: Option<EvaluationRuntime>,
     reflection_children: Option<Arc<dyn ReflectionHost<ReflectionEffects>>>,
     result_policy: EffectResultPolicy,
+    result_assertion_context: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,6 +401,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
             runtime: None,
             reflection_children: None,
             result_policy: EffectResultPolicy::Return,
+            result_assertion_context: None,
         }
     }
 
@@ -418,10 +420,20 @@ impl<S: TaskSpecialization> EffectRun<S> {
         self
     }
 
-    /// Requires the task's discarded result to be unit, as with
-    /// `(effect =>> .r ())`.
+    /// Requires the task endpoint to return unit.
+    ///
+    /// This is a provenance-free safety policy. Providers that know why the
+    /// result is discarded should also install [`Self::asserting_unit_result`]
+    /// with their own diagnostic context.
     pub fn requiring_unit_result(mut self) -> Self {
         self.result_policy = EffectResultPolicy::RequireUnit;
+        self
+    }
+
+    /// Checks the result through the ordinary parameterized unit assertion
+    /// before applying the task endpoint's generic result policy.
+    pub fn asserting_unit_result(mut self, diagnostic_context: impl Into<Arc<str>>) -> Self {
+        self.result_assertion_context = Some(diagnostic_context.into());
         self
     }
 
@@ -433,6 +445,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
             runtime,
             reflection_children,
             result_policy,
+            result_assertion_context,
         } = self;
         let session = match runtime {
             Some(runtime) => EvaluationSession::shared(runtime.executor()),
@@ -452,6 +465,9 @@ impl<S: TaskSpecialization> EffectRun<S> {
         )?;
         if result_policy == EffectResultPolicy::RequireUnit {
             task = task.requiring_unit_result();
+        }
+        if let Some(diagnostic_context) = result_assertion_context {
+            task = task.asserting_unit_result(diagnostic_context);
         }
         if drain_children {
             run_composed_effect_task(task)
@@ -549,7 +565,9 @@ impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
         )
         .map_err(|error| Arc::from(error.to_string()))?;
         Ok(match kind {
-            ReflectionTaskKind::Annotation => Box::new(AnnotationEffectTask(task)),
+            ReflectionTaskKind::Annotation => Box::new(AnnotationEffectTask(
+                task.asserting_unit_result(Arc::from("reflection annotation result")),
+            )),
             ReflectionTaskKind::Joinable => Box::new(JoinableEffectTask(task)),
         })
     }
@@ -721,6 +739,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .control
             .sequence
             .push(Continuation::RequireUnit);
+        self
+    }
+
+    fn asserting_unit_result(mut self, diagnostic_context: Arc<str>) -> Self {
+        self.execution
+            .work
+            .branch_mut()
+            .expect("a fresh effect task must contain its initial branch")
+            .control
+            .sequence
+            .push(Continuation::AssertUnit(Value::binary_from_text(
+                &diagnostic_context,
+            )));
         self
     }
 
@@ -1490,12 +1521,26 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     let value = evaluate(&self.eval_context, value)?;
                     if value != unit_value() {
                         return Err(TaskError::new(format!(
-                            "`=>>` requires discarded effect results to be unit, got {value:?}"
+                            "effect task returned {}; expected unit",
+                            value.kind_name()
                         )));
                     }
                     branch.control.sequence.pop();
                     Ok(MachineStep::Continue(MachineWork::Deliver {
                         value: unit_value(),
+                        branch,
+                        scope_depth,
+                    }))
+                }
+                Continuation::AssertUnit(diagnostic_context) => {
+                    let assertion = Value::builtin_call(
+                        Builtin::AssertUnit,
+                        vec![diagnostic_context, value, unit_value()],
+                    );
+                    let value = evaluate(&self.eval_context, assertion)?;
+                    branch.control.sequence.pop();
+                    Ok(MachineStep::Continue(MachineWork::Deliver {
+                        value,
                         branch,
                         scope_depth,
                     }))
@@ -2206,8 +2251,8 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for AnnotationEffectTask<S> {
                 EvaluationMachinePoll::Complete((*keys::UNIT_VALUE).clone())
             }
             EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Failed(Arc::from(format!(
-                "reflection annotation requires its effect to return unit, got {:?}",
-                value.as_core()
+                "effect task returned {}; expected unit",
+                value.as_core().kind_name()
             ))),
             EffectTaskPoll::Failed(error) => {
                 EvaluationMachinePoll::Failed(Arc::from(error.to_string()))
@@ -2549,6 +2594,7 @@ struct Control {
 enum Continuation {
     Glam(Value),
     RequireUnit,
+    AssertUnit(Value),
     Fix(PromisedValue),
     CloseScope(Value),
     RestoreScopedValue(Value),
@@ -4361,6 +4407,30 @@ mod tests {
             TaskOutcome::Complete(_)
         ));
         assert_eq!(host.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn effect_run_separates_provider_assertions_from_its_generic_unit_policy() {
+        let (_assembler, effect) = compile_effect(".r 42");
+
+        let generic = EffectRun::new(&effect, TestEffects, Arc::new(TestHost::default()))
+            .requiring_unit_result()
+            .run()
+            .expect_err("the generic endpoint must reject non-unit results");
+        assert_eq!(
+            generic.to_string(),
+            "effect task returned Number; expected unit"
+        );
+
+        let contextual = EffectRun::new(&effect, TestEffects, Arc::new(TestHost::default()))
+            .asserting_unit_result("test task result")
+            .requiring_unit_result()
+            .run()
+            .expect_err("the provider assertion must reject non-unit results first");
+        assert_eq!(
+            contextual.to_string(),
+            "test task result: unit expected, received Number"
+        );
     }
 
     #[test]

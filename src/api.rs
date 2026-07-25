@@ -2355,7 +2355,7 @@ mod tests {
                 .to_binary(&result)
                 .unwrap_err()
                 .to_string()
-                .contains("reflection annotation requires its effect to return unit")
+                .contains("reflection annotation result: unit expected, received Binary")
         );
     }
 

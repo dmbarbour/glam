@@ -774,7 +774,7 @@ fn configured_logger_requires_a_unit_result() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("configured logger failed")
-            && stderr.contains("requires discarded effect results to be unit"),
+            && stderr.contains("configured logger result: unit expected, received Binary"),
         "non-unit logger result was not reported:\n{stderr}"
     );
 }

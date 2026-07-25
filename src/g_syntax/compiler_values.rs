@@ -357,7 +357,7 @@ fn build_reflection_annotator() -> Value {
     let require_unit = effect_then(
         item_field("value"),
         effect_call("r", [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())]),
-        "automatic reflection task result",
+        "`refl.*` task result",
         &mut locals,
     );
     let handle = locals.push_internal_binding("<reflection-task-handle>");
