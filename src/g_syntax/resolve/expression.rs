@@ -439,7 +439,7 @@ pub(in crate::g_syntax) fn lower_syntax_operator_values_resolved(
             ResolvedExpr::Embedded(Value::Builtin(builtin)),
             [left, right],
         ),
-        SyntaxOperator::BoolAnd => effect_then_resolved(left, right, locals),
+        SyntaxOperator::BoolAnd => effect_then_resolved(left, right, "`and` left operand", locals),
         SyntaxOperator::BoolOr => effect_call_resolved("alt", [left, right]),
         SyntaxOperator::PipeForward => ResolvedExpr::apply(right, [left]),
         SyntaxOperator::PipeBackward => ResolvedExpr::apply(left, [right]),
@@ -449,7 +449,9 @@ pub(in crate::g_syntax) fn lower_syntax_operator_values_resolved(
         SyntaxOperator::ComposeBackward => compose_resolved(right, left, locals),
         SyntaxOperator::EffectBind => effect_call_resolved("seq", [left, right]),
         SyntaxOperator::KleisliCompose => kleisli_compose_resolved(left, right, locals),
-        SyntaxOperator::EffectThen => effect_then_resolved(left, right, locals),
+        SyntaxOperator::EffectThen => {
+            effect_then_resolved(left, right, "`=>>` discarded result", locals)
+        }
     }
 }
 
@@ -515,11 +517,12 @@ pub(in crate::g_syntax) fn kleisli_compose_resolved(
 pub(in crate::g_syntax) fn effect_then_resolved(
     operation: ResolvedExpr<Value>,
     next: ResolvedExpr<Value>,
+    diagnostic_context: &'static str,
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
     let base_len = locals.len();
     let result = locals.push_internal_binding("<effect-result>");
-    let body = annotate_assert_unit_resolved(ResolvedExpr::Local(result), next);
+    let body = assert_unit_resolved(diagnostic_context, ResolvedExpr::Local(result), next);
     let continuation = ResolvedExpr::lambda(vec![result], body);
     locals.truncate(base_len);
     effect_call_resolved("seq", [operation, continuation])
@@ -532,28 +535,18 @@ pub(in crate::g_syntax) fn effect_call_resolved(
     ResolvedExpr::apply(lower_effect_expr_resolved(name), arguments)
 }
 
-pub(in crate::g_syntax) fn annotate_assert_unit_resolved(
+pub(in crate::g_syntax) fn assert_unit_resolved(
+    diagnostic_context: &'static str,
     value: ResolvedExpr<Value>,
     target: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
-    let singleton = || ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton));
-    let payload = ResolvedExpr::apply(
-        singleton(),
-        [
-            ResolvedExpr::Embedded(Value::Atom(atom_from_str("value"))),
-            value,
-        ],
-    );
-    let annotation = ResolvedExpr::apply(
-        singleton(),
-        [
-            ResolvedExpr::Embedded(Value::Atom(atom_from_str("assert_unit"))),
-            payload,
-        ],
-    );
     ResolvedExpr::apply(
-        ResolvedExpr::Embedded(Value::Builtin(Builtin::Anno)),
-        [annotation, target],
+        ResolvedExpr::Embedded(Value::Builtin(Builtin::AssertUnit)),
+        [
+            ResolvedExpr::Embedded(Value::binary_from_text(diagnostic_context)),
+            value,
+            target,
+        ],
     )
 }
 

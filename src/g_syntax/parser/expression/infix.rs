@@ -225,6 +225,7 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::EffectThen => "=>>",
         SyntaxOperator::Builtin(crate::core::Builtin::Fixpoint) => "fixpoint",
         SyntaxOperator::Builtin(crate::core::Builtin::Anno) => "anno",
+        SyntaxOperator::Builtin(crate::core::Builtin::AssertUnit) => "assert_unit",
         SyntaxOperator::Builtin(crate::core::Builtin::Seq) => "seq",
         SyntaxOperator::Builtin(crate::core::Builtin::Spark) => "spark",
         SyntaxOperator::Builtin(crate::core::Builtin::InteractionNet) => "interaction_net",

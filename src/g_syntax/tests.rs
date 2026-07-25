@@ -2529,10 +2529,9 @@ fn local_pattern_guards_require_unit_when_their_result_is_discarded() {
 
     let value = evaluated_module_value(&context, &lowered);
     let result = value_at_atom_path(&value, &["asm", "result"]).expect("result should exist");
-    assert!(
-        fully_evaluated_error(result)
-            .to_string()
-            .contains("requires discarded effect results to be unit")
+    assert_eq!(
+        fully_evaluated_error(result).to_string(),
+        "pattern condition: unit expected, received Number"
     );
 }
 
@@ -2553,10 +2552,9 @@ fn bare_do_operations_reuse_the_effect_then_unit_policy() {
 
     let value = evaluated_module_value(&context, &lowered);
     let result = value_at_atom_path(&value, &["asm", "result"]).expect("result should exist");
-    assert!(
-        fully_evaluated_error(result)
-            .to_string()
-            .contains("requires discarded effect results to be unit")
+    assert_eq!(
+        fully_evaluated_error(result).to_string(),
+        "effect-only `do` statement: unit expected, received Binary"
     );
 }
 
@@ -3254,9 +3252,9 @@ fn prefix_if_preserves_selected_result_laziness_and_guard_errors() {
         value_at_atom_path(&value, &["asm", "non_unit_guard"])
             .expect("non-unit guard binding should exist"),
     );
-    assert!(
-        non_unit.to_string().contains("unit"),
-        "effect-only guards must reject implicit data loss: {non_unit}"
+    assert_eq!(
+        non_unit.to_string(),
+        "conditional guard: unit expected, received Number"
     );
 
     let unsupported = fully_evaluated_error(
@@ -4530,9 +4528,9 @@ fn effect_then_requires_unit_result_when_observed() {
             Err(err) => break err,
         }
     };
-    assert!(
-        err.to_string()
-            .contains("requires discarded effect results to be unit")
+    assert_eq!(
+        err.to_string(),
+        "`=>>` discarded result: unit expected, received Binary"
     );
 }
 

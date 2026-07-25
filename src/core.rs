@@ -738,6 +738,9 @@ pub enum Builtin {
     Less,
     Fixpoint,
     Anno,
+    /// Compiler-private assertion gate. Accepts a diagnostic context, the
+    /// value that must evaluate to unit, and the target returned on success.
+    AssertUnit,
     Seq,
     Spark,
     InteractionNet,
@@ -812,6 +815,7 @@ impl Builtin {
             Self::Less => 2,
             Self::Fixpoint => 1,
             Self::Anno => 2,
+            Self::AssertUnit => 3,
             Self::Seq => 2,
             Self::Spark => 2,
             Self::InteractionNet => 1,

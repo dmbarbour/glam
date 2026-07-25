@@ -106,7 +106,8 @@ fn resolve_guard_choice(
                     steps: &mut steps,
                     locals,
                 };
-                let mut lowering = PatternLoweringContext::new(context, scope, &mut sink);
+                let mut lowering = PatternLoweringContext::new(context, scope, &mut sink)
+                    .with_unit_assertion_context("conditional guard");
                 append_guard_steps(alternative.guards, alternative.line, &mut lowering)?;
             }
             let result = syntax_expr_to_resolved_in_semantic_scope(

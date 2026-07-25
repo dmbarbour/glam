@@ -1,6 +1,7 @@
 //! Saturation and semantic-family dispatch for core builtins.
 
 mod annotation;
+mod assertion;
 mod comparison;
 mod dict;
 mod effect;
@@ -93,6 +94,7 @@ pub(super) fn apply_builtin(
         | Builtin::EffectMapContinue => effect::apply(context, builtin, arguments),
         Builtin::Seq | Builtin::Spark => strategy::apply(context, builtin, arguments),
         Builtin::InteractionNet | Builtin::NetArity => net::apply(context, builtin, arguments),
+        Builtin::AssertUnit => assertion::apply(context, arguments),
         Builtin::Anno => annotation::apply(context, arguments),
     }
 }

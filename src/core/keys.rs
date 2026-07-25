@@ -51,6 +51,7 @@ protocol_key!(REQUEST, "request");
 protocol_key!(EXTENDS, "extends");
 
 protocol_key!(VALUE, "value");
+protocol_key!(CONTEXT, "context");
 protocol_key!(KEY, "key");
 protocol_key!(OK, "ok");
 protocol_key!(ERR, "err");

@@ -22,6 +22,7 @@ pub(super) struct PatternLoweringContext<'a> {
     context: &'a CompileContext,
     scope: &'a NameScope<ResolvedRoot>,
     sink: &'a mut dyn PatternStepSink,
+    unit_assertion_context: &'static str,
 }
 
 impl<'a> PatternLoweringContext<'a> {
@@ -34,7 +35,16 @@ impl<'a> PatternLoweringContext<'a> {
             context,
             scope,
             sink,
+            unit_assertion_context: "pattern condition",
         }
+    }
+
+    pub(super) fn with_unit_assertion_context(
+        mut self,
+        unit_assertion_context: &'static str,
+    ) -> Self {
+        self.unit_assertion_context = unit_assertion_context;
+        self
     }
 
     fn resolve_expression(
@@ -353,7 +363,14 @@ fn append_then(
     lowering: &mut PatternLoweringContext<'_>,
 ) {
     let result = lowering.fresh_binding();
-    lowering.push_step(line, ResolvedEffectStepKind::Then { operation, result });
+    lowering.push_step(
+        line,
+        ResolvedEffectStepKind::Then {
+            operation,
+            result,
+            diagnostic_context: lowering.unit_assertion_context,
+        },
+    );
 }
 
 fn pattern_builtin(

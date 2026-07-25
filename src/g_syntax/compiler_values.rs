@@ -207,33 +207,33 @@ fn effect_path_call(
     ResolvedExpr::apply(ResolvedExpr::Embedded(effect_path_value(path)), arguments)
 }
 
-fn assert_unit(value: ResolvedExpr<Value>, target: ResolvedExpr<Value>) -> ResolvedExpr<Value> {
-    let payload = apply_builtin(
-        Builtin::DictSingleton,
+fn assert_unit(
+    diagnostic_context: &'static str,
+    value: ResolvedExpr<Value>,
+    target: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
+    apply_builtin(
+        Builtin::AssertUnit,
         [
-            ResolvedExpr::Embedded(Value::Atom(atom_from_str("value"))),
+            ResolvedExpr::Embedded(Value::binary_from_text(diagnostic_context)),
             value,
+            target,
         ],
-    );
-    let annotation = apply_builtin(
-        Builtin::DictSingleton,
-        [
-            ResolvedExpr::Embedded(Value::Atom(atom_from_str("assert_unit"))),
-            payload,
-        ],
-    );
-    apply_builtin(Builtin::Anno, [annotation, target])
+    )
 }
 
 fn effect_then(
     operation: ResolvedExpr<Value>,
     next: ResolvedExpr<Value>,
+    diagnostic_context: &'static str,
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
     let base_len = locals.len();
     let result = locals.push_internal_binding("<effect-result>");
-    let continuation =
-        ResolvedExpr::lambda(vec![result], assert_unit(ResolvedExpr::Local(result), next));
+    let continuation = ResolvedExpr::lambda(
+        vec![result],
+        assert_unit(diagnostic_context, ResolvedExpr::Local(result), next),
+    );
     locals.truncate(base_len);
     effect_call("seq", [operation, continuation])
 }
@@ -264,6 +264,7 @@ fn build_not() -> Value {
     let fail_if_condition_succeeds = effect_then(
         ResolvedExpr::Local(condition),
         returned_failure,
+        "`not` condition",
         &mut locals,
     );
     let succeed_if_condition_fails = effect_call("r", [true_operation]);
@@ -356,6 +357,7 @@ fn build_reflection_annotator() -> Value {
     let require_unit = effect_then(
         item_field("value"),
         effect_call("r", [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())]),
+        "automatic reflection task result",
         &mut locals,
     );
     let handle = locals.push_internal_binding("<reflection-task-handle>");
@@ -434,7 +436,12 @@ fn build_reflection_annotator() -> Value {
             ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
         ],
     );
-    let start_if_missing = effect_then(guard_is_empty, launch_and_remember, &mut locals);
+    let start_if_missing = effect_then(
+        guard_is_empty,
+        launch_and_remember,
+        "automatic reflection boundary claim test",
+        &mut locals,
+    );
     let already_started = effect_call("r", [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())]);
     let choose = effect_call("alt", [start_if_missing, already_started]);
     let ensure_tasks = effect_call(

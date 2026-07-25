@@ -23,6 +23,7 @@ pub(super) enum ResolvedEffectStepKind {
     Then {
         operation: ResolvedExpr<Value>,
         result: BindingId,
+        diagnostic_context: &'static str,
     },
 }
 
@@ -67,8 +68,16 @@ fn emit_effect_step(
         ResolvedEffectStepKind::ValueBind { value, binding } => {
             ResolvedExpr::apply(ResolvedExpr::lambda(vec![binding], continuation), [value])
         }
-        ResolvedEffectStepKind::Then { operation, result } => {
-            let body = annotate_assert_unit_resolved(ResolvedExpr::Local(result), continuation);
+        ResolvedEffectStepKind::Then {
+            operation,
+            result,
+            diagnostic_context,
+        } => {
+            let body = assert_unit_resolved(
+                diagnostic_context,
+                ResolvedExpr::Local(result),
+                continuation,
+            );
             effect_call_resolved("seq", [operation, ResolvedExpr::lambda(vec![result], body)])
         }
     }

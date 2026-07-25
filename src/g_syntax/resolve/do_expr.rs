@@ -192,7 +192,11 @@ impl DoLowering<'_> {
                             step.line,
                             Some(ResolvedEffectStep {
                                 line: step.line,
-                                kind: ResolvedEffectStepKind::Then { operation, result },
+                                kind: ResolvedEffectStepKind::Then {
+                                    operation,
+                                    result,
+                                    diagnostic_context: "effect-only `do` statement",
+                                },
                             }),
                             RecursiveDoEvent::None,
                         );

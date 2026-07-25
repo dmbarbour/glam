@@ -2563,6 +2563,77 @@ fn anno_builtin_reports_failed_assertions_during_demand() {
 }
 
 #[test]
+fn assert_unit_builtin_uses_its_diagnostic_context() {
+    let target = n(42);
+    let value = eval_closed_expr(&builtin3_expr(
+        Builtin::AssertUnit,
+        TestExpr::Value(Value::binary_from_text("test operation result")),
+        TestExpr::Value((*keys::UNIT_VALUE).clone()),
+        TestExpr::Value(target.clone()),
+    ))
+    .expect("unit assertion should return its target");
+    assert_eq!(value, target);
+
+    let error = eval_closed_expr(&builtin3_expr(
+        Builtin::AssertUnit,
+        TestExpr::Value(Value::binary_from_text("test operation result")),
+        TestExpr::Value(Value::Dict(Dict::new_sync())),
+        TestExpr::Value(n(42)),
+    ))
+    .expect_err("non-unit assertion value should fail");
+    assert_eq!(
+        error.to_string(),
+        "test operation result: unit expected, received Dict"
+    );
+}
+
+#[test]
+fn assert_unit_annotation_has_optional_diagnostic_context() {
+    let annotation = |payload| {
+        singleton_expr(
+            Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
+                "assert_unit",
+            ))),
+            payload,
+        )
+    };
+    let value_payload = || {
+        singleton_expr(
+            Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text("value"))),
+            TestExpr::Value(n(1)),
+        )
+    };
+
+    let generic_error = eval_closed_expr(&builtin2_expr(
+        Builtin::Anno,
+        annotation(value_payload()),
+        TestExpr::Value(n(42)),
+    ))
+    .expect_err("context-free unit annotation should fail generically");
+    assert_eq!(generic_error.to_string(), "unit expected, received Number");
+
+    let contextual_payload = dict_union_expr(
+        value_payload(),
+        singleton_expr(
+            Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
+                "context",
+            ))),
+            TestExpr::Value(Value::binary_from_text("annotated operation result")),
+        ),
+    );
+    let contextual_error = eval_closed_expr(&builtin2_expr(
+        Builtin::Anno,
+        annotation(contextual_payload),
+        TestExpr::Value(n(42)),
+    ))
+    .expect_err("contextual unit annotation should fail");
+    assert_eq!(
+        contextual_error.to_string(),
+        "annotated operation result: unit expected, received Number"
+    );
+}
+
+#[test]
 fn list_annotations_rebalance_and_flatten_lists() {
     let deque = eval_closed_expr(&builtin2_expr(
         Builtin::Anno,
