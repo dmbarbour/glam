@@ -1460,10 +1460,7 @@ View patterns have an opportunity to filter, rewrite, and search (branch) on dat
         (View -> Pattern)     # or equivalently
         (Pattern <- View)
 
-Parentheses remain required where the view arrow would conflict with another
-`->` owner, notably inside a forward `do` binding. A view occupying the
-complete pattern head of a match arm may omit them because `=>` marks the
-distinct result boundary:
+Parentheses are required where the view arrow would be lexically or visually ambiguous with another `->` or `<-` owner, e.g. inside a `do` binding, or when chaining views. A view occupying the complete pattern head of a match arm may omit them because `=>` marks the distinct result boundary:
 
 ```g
 match Subject with
