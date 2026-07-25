@@ -64,6 +64,31 @@ pub(super) fn lower_guard_choices_resolved(
     Ok(resolve_guard_choice(alternatives, context, scope, locals)?.emit())
 }
 
+pub(super) fn lower_if_expr_resolved(
+    if_expr: &IfExpr,
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let alternatives = [
+        GuardChoiceArm {
+            line,
+            guards: &if_expr.guards,
+            result_line: line,
+            result: &if_expr.then_result,
+        },
+        GuardChoiceArm {
+            line,
+            guards: &[],
+            result_line: line,
+            result: &if_expr.else_result,
+        },
+    ];
+    let search = lower_guard_choices_resolved(&alternatives, context, scope, locals)?;
+    Ok(compiler_values::run_pure_conditional_resolved(search))
+}
+
 fn resolve_guard_choice(
     alternatives: &[GuardChoiceArm<'_>],
     context: &CompileContext,
@@ -329,6 +354,32 @@ mod tests {
         assert!(locals.is_empty());
     }
 
+    #[test]
+    fn prefix_if_resolves_each_owned_expression_once() {
+        let if_expr = IfExpr {
+            guards: vec![SyntaxGuardClause::ValueBind {
+                pattern: SyntaxPattern::wildcard(),
+                value: number(73),
+            }],
+            then_result: Box::new(number(1)),
+            else_result: Box::new(number(2)),
+        };
+        let context = CompileContext::default();
+        let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
+        let resolved = lower_if_expr_resolved(
+            &if_expr,
+            1,
+            &context,
+            &scope.resolved(),
+            &mut ResolverContext::default(),
+        )
+        .expect("prefix if should resolve");
+
+        assert_eq!(count_embedded_number(&resolved, 73), 1);
+        assert_eq!(count_embedded_number(&resolved, 1), 1);
+        assert_eq!(count_embedded_number(&resolved, 2), 1);
+    }
+
     fn value_binding(alternative: &ResolvedGuardAlternative) -> BindingId {
         let [
             ResolvedEffectStep {
@@ -375,6 +426,53 @@ mod tests {
                     || arguments
                         .iter()
                         .any(|argument| contains_effect(argument, name))
+            }
+        }
+    }
+
+    fn count_embedded_number(expression: &ResolvedExpr<Value>, expected: i64) -> usize {
+        match expression {
+            ResolvedExpr::Embedded(Value::Number(number))
+            | ResolvedExpr::Provided(Value::Number(number)) => {
+                usize::from(number == &Number::from(expected))
+            }
+            ResolvedExpr::Embedded(_) | ResolvedExpr::Provided(_) | ResolvedExpr::Local(_) => 0,
+            ResolvedExpr::List(items) => items
+                .iter()
+                .map(|item| count_embedded_number(item, expected))
+                .sum(),
+            ResolvedExpr::Access { base, path } => {
+                count_embedded_number(base, expected)
+                    + path
+                        .iter()
+                        .map(|part| match part {
+                            ResolvedPathPart::Key(_) => 0,
+                            ResolvedPathPart::Index(expression)
+                            | ResolvedPathPart::PathIndex(expression) => {
+                                count_embedded_number(expression, expected)
+                            }
+                        })
+                        .sum::<usize>()
+            }
+            ResolvedExpr::Lambda { body, .. } => count_embedded_number(body, expected),
+            ResolvedExpr::Apply {
+                function,
+                arguments,
+            } => {
+                count_embedded_number(function, expected)
+                    + arguments
+                        .iter()
+                        .map(|argument| count_embedded_number(argument, expected))
+                        .sum::<usize>()
+            }
+            ResolvedExpr::ApplyLambda {
+                body, arguments, ..
+            } => {
+                count_embedded_number(body, expected)
+                    + arguments
+                        .iter()
+                        .map(|argument| count_embedded_number(argument, expected))
+                        .sum::<usize>()
             }
         }
     }

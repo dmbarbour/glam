@@ -255,6 +255,12 @@ their detailed scheduling and representation contracts.
   effect-bind, and value-bind clauses run left to right, and their captures
   remain visible after the complete guarded pattern succeeds. General `P as Q`
   matches one shared subject left to right.
+- Prefix `if Guards then A else B` is syntax-owned pure search. Both arms lower
+  through the shared conditional effect-step builder under one `.cut`; the
+  second arm is unconditional. A cached closed compiler helper runs that
+  search with `list.pure` and extracts its sole result. Guard captures are
+  progressively visible only in `A`; `B` starts from the pre-guard scope.
+  Missing host effects are evaluator errors, not fallback.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

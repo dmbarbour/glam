@@ -1,5 +1,6 @@
 //! Parsing façade for G source files and expressions.
 
+mod conditional;
 mod declaration;
 mod do_expr;
 mod expression;

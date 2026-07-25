@@ -119,7 +119,7 @@ fn dot_leading_application_arguments_require_parentheses() {
 #[test]
 fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
     for keyword in crate::g_syntax::keywords::G0_KEYWORDS {
-        if matches!(keyword.spelling(), "do" | "module" | "self") {
+        if matches!(keyword.spelling(), "do" | "if" | "module" | "self") {
             continue;
         }
         let source = keyword.spelling();
@@ -144,6 +144,14 @@ fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
         diagnostic
             .message
             .contains("do expression requires a newline-delimited block")
+    }));
+
+    let if_diagnostics = parse_expression_fragment(b"if")
+        .expect_err("a bare `if` should be diagnosed as a malformed if expression");
+    assert!(if_diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("if expression requires `then` and `else`")
     }));
 }
 

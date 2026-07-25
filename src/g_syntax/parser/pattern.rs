@@ -233,18 +233,7 @@ fn parse_guarded_pattern(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxPa
 
     Some((|| {
         let pattern = parse_pattern(pattern)?;
-        let clauses = split_top_level_names(guards, "and");
-        let mut parsed = Vec::with_capacity(clauses.len());
-        for clause in clauses {
-            let clause = trim_layout(clause);
-            if is_layout_empty(clause) {
-                return Err(error_at_view(
-                    guards,
-                    "local pattern guard contains an empty clause around `and`",
-                ));
-            }
-            parsed.push(parse_guard_clause(clause)?);
-        }
+        let parsed = parse_guard_clauses(guards, "local pattern guard")?;
         Ok(SyntaxPattern {
             kind: SyntaxPatternKind::Guarded {
                 pattern: Box::new(pattern),
@@ -252,6 +241,25 @@ fn parse_guarded_pattern(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxPa
             },
         })
     })())
+}
+
+pub(in crate::g_syntax::parser) fn parse_guard_clauses(
+    guards: TokenView<'_, '_>,
+    construct: &str,
+) -> ParseResult<Vec<SyntaxGuardClause>> {
+    let clauses = split_top_level_names(guards, "and");
+    let mut parsed = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        let clause = trim_layout(clause);
+        if is_layout_empty(clause) {
+            return Err(error_at_view(
+                guards,
+                format!("{construct} contains an empty clause around `and`"),
+            ));
+        }
+        parsed.push(parse_guard_clause(clause)?);
+    }
+    Ok(parsed)
 }
 
 fn parse_view_pattern(view: TokenView<'_, '_>) -> Option<ParseResult<SyntaxPattern>> {
@@ -945,9 +953,15 @@ fn top_level_symbols(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
 
 fn top_level_names(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
     view.top_level()
-        .filter(
-            |indexed| matches!(indexed.token().kind(), TokenKind::Name(name) if *name == expected),
-        )
+        .filter(|indexed| {
+            (indexed.index() == view.range().start()
+                || indexed.token().leading() != LeadingTrivia::Joint
+                || indexed.index().checked_sub(1).is_some_and(|previous| {
+                    view.token_at(previous)
+                        .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
+                }))
+                && matches!(indexed.token().kind(), TokenKind::Name(name) if *name == expected)
+        })
         .map(|indexed| indexed.index())
         .collect()
 }

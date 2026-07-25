@@ -331,6 +331,22 @@ impl FileNameAnalysis {
                 locals.truncate(base_len);
             }
             SyntaxExpr::Do(do_expr) => self.visit_do_expr(do_expr, scope, locals),
+            SyntaxExpr::If(if_expr) => {
+                let base_len = locals.len();
+                for guard in &if_expr.guards {
+                    guard.visit_scope_events(&mut |event| match event {
+                        SyntaxPatternScopeEvent::Expression(expr) => {
+                            self.visit_expr(expr, line, scope, locals);
+                        }
+                        SyntaxPatternScopeEvent::Capture(name) => {
+                            self.push_source_local(name, line, scope, locals);
+                        }
+                    });
+                }
+                self.visit_expr(&if_expr.then_result, line, scope, locals);
+                locals.truncate(base_len);
+                self.visit_expr(&if_expr.else_result, line, scope, locals);
+            }
             SyntaxExpr::Let { bindings, body } => {
                 for (_, value) in bindings {
                     self.visit_expr(value, line, scope, locals);

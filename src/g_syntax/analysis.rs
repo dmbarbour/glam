@@ -78,6 +78,10 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
         SyntaxExpr::Do(do_expr) => {
             analyze_do_expr_locals(do_expr, diagnostics);
         }
+        SyntaxExpr::If(if_expr) => {
+            analyze_guard_branch_locals(&if_expr.guards, &if_expr.then_result, line, diagnostics);
+            analyze_expr_locals(&if_expr.else_result, line, diagnostics);
+        }
         SyntaxExpr::Let { bindings, body } => {
             let params = bindings
                 .iter()
@@ -245,6 +249,17 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
             }
             mark_used_prior_alias(&do_expr.result, alias, used);
         }
+        SyntaxExpr::If(if_expr) => {
+            for guard in &if_expr.guards {
+                guard.visit_scope_events(&mut |event| {
+                    if let SyntaxPatternScopeEvent::Expression(expr) = event {
+                        mark_used_prior_alias(expr, alias, used);
+                    }
+                });
+            }
+            mark_used_prior_alias(&if_expr.then_result, alias, used);
+            mark_used_prior_alias(&if_expr.else_result, alias, used);
+        }
         SyntaxExpr::Let { bindings, body } => {
             for (_, value) in bindings {
                 mark_used_prior_alias(value, alias, used);
@@ -384,6 +399,10 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
         SyntaxExpr::Do(do_expr) => {
             mark_used_do_locals(do_expr, locals, used);
         }
+        SyntaxExpr::If(if_expr) => {
+            mark_used_guard_branch(&if_expr.guards, &if_expr.then_result, locals, used);
+            mark_used_locals(&if_expr.else_result, locals, used);
+        }
         SyntaxExpr::Let { bindings, body } => {
             for (_, value) in bindings {
                 mark_used_locals(value, locals, used);
@@ -425,6 +444,62 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             mark_used_locals(right, locals, used);
         }
     }
+}
+
+fn analyze_guard_branch_locals(
+    guards: &[SyntaxGuardClause],
+    result: &SyntaxExpr,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut locals = Vec::new();
+    let mut used = Vec::new();
+    for guard in guards {
+        guard.visit_scope_events(&mut |event| match event {
+            SyntaxPatternScopeEvent::Expression(expr) => {
+                mark_used_locals(expr, &locals, &mut used);
+                analyze_expr_locals(expr, line, diagnostics);
+            }
+            SyntaxPatternScopeEvent::Capture(name) => {
+                locals.push(local_name_metadata(name));
+                used.push(false);
+            }
+        });
+    }
+    mark_used_locals(result, &locals, &mut used);
+    analyze_expr_locals(result, line, diagnostics);
+    for (local, used) in locals.iter().zip(used) {
+        if !used && local.canonical.is_some() && !local.suppress_unused_warning {
+            diagnostics.push(Diagnostic::warn(
+                line,
+                format!("unused local `{}`", local.raw),
+            ));
+        }
+    }
+}
+
+fn mark_used_guard_branch(
+    guards: &[SyntaxGuardClause],
+    result: &SyntaxExpr,
+    locals: &[LocalName],
+    used: &mut [bool],
+) {
+    let outer_len = locals.len();
+    let mut combined = locals.to_vec();
+    let mut combined_used = used.to_vec();
+    for guard in guards {
+        guard.visit_scope_events(&mut |event| match event {
+            SyntaxPatternScopeEvent::Expression(expr) => {
+                mark_used_locals(expr, &combined, &mut combined_used);
+            }
+            SyntaxPatternScopeEvent::Capture(name) => {
+                combined.push(local_name_metadata(name));
+                combined_used.push(false);
+            }
+        });
+    }
+    mark_used_locals(result, &combined, &mut combined_used);
+    used.copy_from_slice(&combined_used[..outer_len]);
 }
 
 fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {

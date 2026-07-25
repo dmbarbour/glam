@@ -184,12 +184,12 @@ The active `g0` table is:
 | Role | Keywords |
 | --- | --- |
 | declaration heads | `language`, `import`, `abstract`, `unique`, `object`, `extend` |
-| expression forms | `let`, `where`, `do`, `object`, `abstract object` |
+| expression forms | `let`, `where`, `do`, `if`, `object`, `abstract object` |
 | do statements | `abstract` |
 | expression operators | `and`, `or` |
 | special expression references | `module`, `self` |
 | special object/`with` alias | `self` |
-| contextual modifiers | `abstract`, `as`, `at`, `binary`, `extends`, `in`, `with` |
+| contextual modifiers | `abstract`, `as`, `at`, `binary`, `else`, `extends`, `in`, `then`, `with` |
 
 A word may have more than one role, but the parser still has one
 version-owned source of truth for whether it is reserved.
@@ -202,8 +202,8 @@ request paths such as `'.where` and `.where` likewise remain valid. Bare
 spellings such as `where = ...`, `\where -> ...`, and an ordinary reference to
 `where` are errors.
 
-Words proposed for later syntax, including `using`, `without`, `if`, `then`,
-`else`, `match`, `try`, `when`, and `try_match`, are not active `g0` keywords
+Words proposed for later syntax, including `using`, `without`, `match`, `try`,
+`when`, and `try_match`, are not active `g0` keywords
 until their language-version feature is introduced. The recognized table may
 therefore vary by base language version and extension without retroactively
 changing an older version.
@@ -1293,6 +1293,9 @@ I support `if/then/else` for reasons of familiarity and convenience. We'll desug
         match when
             C => A
             _ => B
+
+The current Rust bootstrap implements the prefix form. The postfix form and
+the explicit `match` syntax below remain later implementation slices.
 
 Note that conditions are not expressions. Instead, they're guard clauses, i.e. a sequence of `Guard (and Guard)*`. Relevantly, this admits pattern guards, which are often convenient, and effects guards, which can express branching conditions.
 

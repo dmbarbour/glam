@@ -13,8 +13,8 @@ language g0 with utf8  # BaseVer with Extensions
 ```
 # Names: [a-zA-Z][a-zA-Z0-9]* parts, joined by single underscores.
 # Active g0 keywords are reserved as bare names and local binders:
-# abstract and as at binary do extend extends import in language let
-# module object or self unique where with
+# abstract and as at binary do else extend extends if import in language let
+# module object or self then unique where with
 # Explicit keys may use them: module.where, where:Value, or .['where] = Value.
 foo = 42                    # introduce (ERROR if foo already defined)
 foo := 43                   # override (ERROR if foo NOT already defined)
@@ -366,6 +366,8 @@ do
 ## Conditionals & Patterns
 
 ```
+# Current bootstrap: prefix `if`; postfix `if`, `match`, and `try` remain
+# target syntax.
 if C then A else B
 A if C else B
 if (a,b) = Expr and a > b then A else B     # C is guard: patterns + effects + 'and'

@@ -3198,6 +3198,78 @@ fn lowers_list_expressions_to_core_terms() {
 }
 
 #[test]
+fn prefix_if_selects_first_success_and_fallback_with_progressive_captures() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "asm.first = if _ then \"first\" else 1 / 0\n",
+        "asm.fallback = if 42 = 41 then \"bad\" else \"fallback\"\n",
+        "asm.capture = if .r \"captured\" -> value and (value == \"captured\") then value else \"bad\"\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("first", b"first".as_slice()),
+        ("fallback", b"fallback".as_slice()),
+        ("capture", b"captured".as_slice()),
+    ] {
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", path]
+            ))),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn prefix_if_preserves_selected_result_laziness_and_guard_errors() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "asm.lazy_error = if _ then 1 / 0 else \"fallback\"\n",
+        "asm.non_unit_guard = if .r 42 then \"bad\" else \"fallback\"\n",
+        "asm.unsupported_effect = if .heap.get [] then \"bad\" else \"fallback\"\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    let lazy_error = fully_evaluated_error(
+        value_at_atom_path(&value, &["asm", "lazy_error"])
+            .expect("lazy error binding should exist"),
+    );
+    assert!(
+        lazy_error.to_string().contains("divide"),
+        "selected lazy result should retain its own error: {lazy_error}"
+    );
+
+    let non_unit = fully_evaluated_error(
+        value_at_atom_path(&value, &["asm", "non_unit_guard"])
+            .expect("non-unit guard binding should exist"),
+    );
+    assert!(
+        non_unit.to_string().contains("unit"),
+        "effect-only guards must reject implicit data loss: {non_unit}"
+    );
+
+    let unsupported = fully_evaluated_error(
+        value_at_atom_path(&value, &["asm", "unsupported_effect"])
+            .expect("unsupported-effect binding should exist"),
+    );
+    assert!(
+        unsupported.to_string().contains("function value"),
+        "the isolated conditional handler must reject its missing host capability: {unsupported}"
+    );
+}
+
+#[test]
 fn quoted_paths_lower_to_ordinary_path_lists() {
     let parsed =
         parse("language g0\nasm.result = { foo:{ [42]:{ bar:\"quoted\" } } }.('.foo.([42]).bar)\n");

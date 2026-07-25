@@ -23,6 +23,7 @@ struct GCompilerValues {
     empty_object_defs: Value,
     constant_object_defs: Value,
     reflection_annotator: Value,
+    pure_conditional_runner: Value,
 }
 
 static EFFECT_VALUES: LazyLock<Mutex<HashMap<Key, Value>>> =
@@ -95,6 +96,7 @@ impl GCompilerValues {
             empty_object_defs: build_empty_object_defs(),
             constant_object_defs,
             reflection_annotator: build_reflection_annotator(),
+            pure_conditional_runner: build_pure_conditional_runner(),
         }
     }
 }
@@ -136,6 +138,15 @@ pub(in crate::g_syntax) fn reflection_annotator_value(guard: Value, final_defs: 
         ResolvedExpr::Provided(guard),
         ResolvedExpr::Provided(final_defs),
     ))
+}
+
+pub(in crate::g_syntax) fn run_pure_conditional_resolved(
+    operation: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
+    ResolvedExpr::apply(
+        ResolvedExpr::Embedded(COMPILER_VALUES.pure_conditional_runner.clone()),
+        [operation],
+    )
 }
 
 pub(in crate::g_syntax) fn effect_value(name: &str) -> Value {
@@ -279,6 +290,14 @@ fn build_could(not: Value) -> Value {
         vec![condition],
         ResolvedExpr::apply(ResolvedExpr::Embedded(not), [inner]),
     ))
+}
+
+fn build_pure_conditional_runner() -> Value {
+    let mut locals = ResolverContext::default();
+    let operation = locals.push_internal_binding("<conditional-operation>");
+    let results = apply_builtin(Builtin::ListEffect, [ResolvedExpr::Local(operation)]);
+    let selected = apply_builtin(Builtin::ListHead, [results]);
+    evaluate_closed(ResolvedExpr::lambda(vec![operation], selected))
 }
 
 fn build_empty_object_defs() -> Value {
@@ -460,6 +479,10 @@ mod tests {
         assert!(matches!(first_std.definitions, Value::Function(_)));
         assert!(matches!(
             COMPILER_VALUES.reflection_annotator,
+            Value::Function(_)
+        ));
+        assert!(matches!(
+            COMPILER_VALUES.pure_conditional_runner,
             Value::Function(_)
         ));
     }

@@ -153,6 +153,13 @@ pub enum SyntaxGuardClause {
     },
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct IfExpr {
+    pub guards: Vec<SyntaxGuardClause>,
+    pub then_result: Box<SyntaxExpr>,
+    pub else_result: Box<SyntaxExpr>,
+}
+
 pub(super) enum SyntaxPatternScopeEvent<'a> {
     Expression(&'a SyntaxExpr),
     Capture(&'a str),
@@ -404,7 +411,10 @@ impl SyntaxPattern {
 }
 
 impl SyntaxGuardClause {
-    fn visit_scope_events<'a>(&'a self, visitor: &mut impl FnMut(SyntaxPatternScopeEvent<'a>)) {
+    pub(super) fn visit_scope_events<'a>(
+        &'a self,
+        visitor: &mut impl FnMut(SyntaxPatternScopeEvent<'a>),
+    ) {
         match self {
             Self::Pass => {}
             Self::Effect(expr) => visitor(SyntaxPatternScopeEvent::Expression(expr)),
@@ -511,6 +521,7 @@ pub enum SyntaxExpr {
     Tuple(Vec<SyntaxExpr>),
     Lambda(Vec<String>, Box<SyntaxExpr>),
     Do(DoExpr),
+    If(IfExpr),
     Let {
         bindings: Vec<(String, SyntaxExpr)>,
         body: Box<SyntaxExpr>,

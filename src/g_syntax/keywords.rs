@@ -62,12 +62,20 @@ pub(super) const G0_KEYWORDS: &[Keyword] = &[
         roles: &[Expression],
     },
     Keyword {
+        spelling: "else",
+        roles: &[Modifier],
+    },
+    Keyword {
         spelling: "extend",
         roles: &[Declaration],
     },
     Keyword {
         spelling: "extends",
         roles: &[Modifier],
+    },
+    Keyword {
+        spelling: "if",
+        roles: &[Expression],
     },
     Keyword {
         spelling: "import",
@@ -100,6 +108,10 @@ pub(super) const G0_KEYWORDS: &[Keyword] = &[
     Keyword {
         spelling: "self",
         roles: &[SpecialReference, ObjectAlias],
+    },
+    Keyword {
+        spelling: "then",
+        roles: &[Modifier],
     },
     Keyword {
         spelling: "unique",
@@ -167,6 +179,10 @@ mod tests {
         assert_eq!(
             g0_keyword("with").map(Keyword::roles),
             Some(&[Modifier][..])
+        );
+        assert_eq!(
+            g0_keyword("if").map(Keyword::roles),
+            Some(&[Expression][..])
         );
         assert_eq!(
             g0_keyword("self").map(Keyword::roles),
