@@ -271,6 +271,8 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::ListEffectAlt) => "list.pure.alt",
         SyntaxOperator::Builtin(crate::core::Builtin::ListEffectCut) => "list.pure.cut",
         SyntaxOperator::Builtin(crate::core::Builtin::ListEffectFix) => "list.pure.fix",
+        SyntaxOperator::Builtin(crate::core::Builtin::IfResult) => "if_result",
+        SyntaxOperator::Builtin(crate::core::Builtin::MatchResult) => "match_result",
         SyntaxOperator::Builtin(crate::core::Builtin::DictSingleton) => ":",
         SyntaxOperator::Builtin(crate::core::Builtin::DictUnion) => "{,}",
         SyntaxOperator::Builtin(crate::core::Builtin::DictUpdate) => "dict_update",

@@ -777,6 +777,9 @@ pub enum Builtin {
     ListEffectAlt,
     ListEffectCut,
     ListEffectFix,
+    /// Compiler-private selectors for pure conditional search results.
+    IfResult,
+    MatchResult,
     DictSingleton,
     DictUnion,
     DictUpdate,
@@ -849,6 +852,8 @@ impl Builtin {
             Self::ListEffectAlt => 2,
             Self::ListEffectCut => 1,
             Self::ListEffectFix => 1,
+            Self::IfResult => 1,
+            Self::MatchResult => 1,
             Self::DictSingleton => 2,
             Self::DictUnion => 2,
             Self::DictUpdate => 3,

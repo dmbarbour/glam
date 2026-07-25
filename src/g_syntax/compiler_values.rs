@@ -23,7 +23,8 @@ struct GCompilerValues {
     empty_object_defs: Value,
     constant_object_defs: Value,
     reflection_annotator: Value,
-    pure_conditional_runner: Value,
+    pure_if_runner: Value,
+    pure_match_runner: Value,
 }
 
 static EFFECT_VALUES: LazyLock<Mutex<HashMap<Key, Value>>> =
@@ -96,7 +97,16 @@ impl GCompilerValues {
             empty_object_defs: build_empty_object_defs(),
             constant_object_defs,
             reflection_annotator: build_reflection_annotator(),
-            pure_conditional_runner: build_pure_conditional_runner(),
+            pure_if_runner: build_pure_conditional_runner(Builtin::IfResult),
+            pure_match_runner: build_pure_conditional_runner(Builtin::MatchResult),
+        }
+    }
+
+    fn pure_conditional_runner(&self, selector: Builtin) -> &Value {
+        match selector {
+            Builtin::IfResult => &self.pure_if_runner,
+            Builtin::MatchResult => &self.pure_match_runner,
+            _ => unreachable!("pure conditional runner requires a result selector"),
         }
     }
 }
@@ -144,7 +154,11 @@ pub(in crate::g_syntax) fn run_pure_conditional_resolved(
     operation: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
     ResolvedExpr::apply(
-        ResolvedExpr::Embedded(COMPILER_VALUES.pure_conditional_runner.clone()),
+        ResolvedExpr::Embedded(
+            COMPILER_VALUES
+                .pure_conditional_runner(Builtin::IfResult)
+                .clone(),
+        ),
         [operation],
     )
 }
@@ -293,11 +307,12 @@ fn build_could(not: Value) -> Value {
     ))
 }
 
-fn build_pure_conditional_runner() -> Value {
+fn build_pure_conditional_runner(selector: Builtin) -> Value {
+    assert!(matches!(selector, Builtin::IfResult | Builtin::MatchResult));
     let mut locals = ResolverContext::default();
     let operation = locals.push_internal_binding("<conditional-operation>");
     let results = apply_builtin(Builtin::ListEffect, [ResolvedExpr::Local(operation)]);
-    let selected = apply_builtin(Builtin::ListHead, [results]);
+    let selected = apply_builtin(selector, [results]);
     evaluate_closed(ResolvedExpr::lambda(vec![operation], selected))
 }
 
@@ -488,8 +503,9 @@ mod tests {
             COMPILER_VALUES.reflection_annotator,
             Value::Function(_)
         ));
+        assert!(matches!(COMPILER_VALUES.pure_if_runner, Value::Function(_)));
         assert!(matches!(
-            COMPILER_VALUES.pure_conditional_runner,
+            COMPILER_VALUES.pure_match_runner,
             Value::Function(_)
         ));
     }
