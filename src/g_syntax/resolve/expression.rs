@@ -62,6 +62,9 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
             scope,
             locals,
         )?,
+        SyntaxExpr::Using { namespace, body } => {
+            lower_using_expr_resolved(namespace, body, line, context, scope, locals)?
+        }
         SyntaxExpr::List(items) => ResolvedExpr::List(
             items
                 .iter()
@@ -328,6 +331,36 @@ pub(in crate::g_syntax) fn dict_with_body_scope(
         reflection: None,
         parent: Some(Box::new(parent)),
     }
+}
+
+fn lower_using_expr_resolved(
+    namespace: &SyntaxExpr,
+    body: &SyntaxExpr,
+    line: usize,
+    context: &CompileContext,
+    parent_scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let namespace =
+        syntax_expr_to_resolved_in_semantic_scope(namespace, line, context, parent_scope, locals)?;
+    let base_len = locals.len();
+    let namespace_binding = locals.push_internal_binding("<using-namespace>");
+    let namespace_root = ResolvedRoot::Local(namespace_binding);
+    let using_scope = object_body_scope_resolved(
+        None,
+        namespace_root,
+        ResolvedRoot::Provided(Value::Dict(Dict::new_sync())),
+        parent_scope.clone(),
+        None,
+    );
+    let body =
+        syntax_expr_to_resolved_in_semantic_scope(body, line, context, &using_scope, locals)?;
+    locals.truncate(base_len);
+
+    Ok(ResolvedExpr::apply(
+        ResolvedExpr::lambda(vec![namespace_binding], body),
+        [namespace],
+    ))
 }
 
 pub(in crate::g_syntax) fn lower_builtin_expr_resolved(

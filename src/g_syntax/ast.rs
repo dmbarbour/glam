@@ -573,6 +573,10 @@ pub enum SyntaxExpr {
         alias: Option<String>,
         body: Vec<ObjectBodyDefinition>,
     },
+    Using {
+        namespace: Box<SyntaxExpr>,
+        body: Box<SyntaxExpr>,
+    },
     /// A dictionary containing one defined path. Braces may be omitted for
     /// path-tagged data such as `tag:value` or `[first, second]:value`.
     PathDict(Vec<SyntaxKeyExpr>, Box<SyntaxExpr>),

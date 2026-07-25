@@ -1,4 +1,5 @@
-//! Structural expression parsing for `let`, `where`, objects, and `with`.
+//! Structural expression parsing for `let`, `where`, `using`, objects, and
+//! `with`.
 //!
 //! Each parser consumes a lexer-owned hard range or returns an exact yielded
 //! boundary. Postfix `where` and leading infix operators resume from those
@@ -166,6 +167,7 @@ fn parse_parenthesized_structural(
     let context = context.complete();
     let starts_structural = contents.first_significant().is_some_and(|(_, token)| {
         token_is_name(token, "let")
+            || token_is_name(token, "using")
             || token_is_name(token, "match")
             || token_is_name(token, "try_match")
             || token_is_name(token, "try")
@@ -180,6 +182,94 @@ fn parse_parenthesized_structural(
                 .map_err(|message| error_at_view(contents, message))
         })
     })
+}
+
+pub(in crate::g_syntax::parser) fn parse_using_expression(
+    view: TokenView<'_, '_>,
+    using_index: usize,
+    context: ExpressionContext,
+) -> ParseResult<ParsedExpression> {
+    let using_token = view
+        .token_at(using_index)
+        .expect("a selected `using` head remains inside its expression view");
+    let hard_end = structural_expression_hard_end(view, using_index);
+    let rest = trim_layout(view_between(view, using_index + 1, hard_end));
+    if is_layout_empty(rest) {
+        return Err(error_at_token(
+            view,
+            using_token,
+            "using expression requires a namespace and `in` or `do` body",
+        ));
+    }
+
+    let in_boundary = contextual_keywords(rest, "in").into_iter().next();
+    let (boundary, body_start) = if let Some(boundary) = in_boundary {
+        (boundary, boundary + 1)
+    } else if let Some(boundary) = contextual_keywords(rest, "do").into_iter().next() {
+        (boundary, boundary)
+    } else {
+        return Err(error_at_token(
+            view,
+            using_token,
+            "using expression requires `in` or a trailing `do` body",
+        ));
+    };
+
+    let namespace_view = trim_layout(view_between(rest, rest.range().start(), boundary));
+    if is_layout_empty(namespace_view) {
+        return Err(error_at_token(
+            view,
+            using_token,
+            "using expression requires a namespace before its body",
+        ));
+    }
+    let body_view = trim_layout(view_between(rest, body_start, rest.range().end()));
+    if is_layout_empty(body_view) {
+        return Err(error_at_token(
+            view,
+            using_token,
+            "using expression requires a body",
+        ));
+    }
+
+    let namespace = parse_expression_in_context(namespace_view, context.complete())?;
+    let body = parse_expression_extent(body_view, context.may_yield())?;
+    let end = body.end();
+    let body = body
+        .into_expression()
+        .map_err(|message| error_at_view(body_view, message))?;
+    Ok(ParsedExpression::new(
+        SyntaxExpr::Using {
+            namespace: Box::new(namespace),
+            body: Box::new(body),
+        },
+        end,
+    ))
+}
+
+fn structural_expression_hard_end(view: TokenView<'_, '_>, head_index: usize) -> usize {
+    let containing_close = view
+        .source()
+        .groups()
+        .iter()
+        .filter_map(|group| {
+            let close = group.close_token()?;
+            (group.open_token() < head_index && head_index < close)
+                .then_some((group.open_token(), close))
+        })
+        .max_by_key(|(open, _)| *open)
+        .map(|(_, close)| close)
+        .unwrap_or(view.range().end())
+        .min(view.range().end());
+    let candidate = view_between(view, head_index, containing_close);
+    candidate
+        .top_level()
+        .find_map(|indexed| {
+            (indexed.index() > head_index
+                && matches!(indexed.token().kind(), TokenKind::Symbol("," | ";")))
+            .then_some(indexed.index())
+        })
+        .unwrap_or(containing_close)
 }
 
 fn parse_let(

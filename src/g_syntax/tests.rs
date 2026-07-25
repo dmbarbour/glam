@@ -2853,6 +2853,50 @@ fn explicit_module_and_prior_references_do_not_select_unqualified_globals() {
 }
 
 #[test]
+fn using_scopes_bind_temporary_namespaces_and_preserve_outer_escapes() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "outer = \"O\"\n",
+        "namespace = {outer:\"I\",value:\"V\",emit:(\\value -> .r value)}\n",
+        "choose value = using namespace in value\n",
+        "asm.scope = using namespace in outer ++ self.value ++ ^outer\n",
+        "asm.local = choose \"L\"\n",
+        "asm.namespace = using {copied:outer} in copied\n",
+        "asm.short = list.pure (using namespace do emit \"D\")\n",
+        "asm.explicit = list.pure (using namespace in do emit \"E\")\n",
+        "asm.prior = list.pure do { using namespace in (_self == {}); .r \"P\" }\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+    let value = evaluated_module_value(&context, &lowered);
+
+    for (path, expected) in [
+        ("scope", b"IVO".as_slice()),
+        ("local", b"L".as_slice()),
+        ("namespace", b"O".as_slice()),
+    ] {
+        let result = resolved_value_at_path(&value, &["asm", path]);
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(result)),
+            expected,
+            "{path}"
+        );
+    }
+    for (path, expected) in [
+        ("short", b"D".as_slice()),
+        ("explicit", b"E".as_slice()),
+        ("prior", b"P".as_slice()),
+    ] {
+        let result = fully_evaluated_value(resolved_value_at_path(&value, &["asm", path]));
+        assert_eq!(output_binary_result_list(&result), expected, "{path}");
+    }
+}
+
+#[test]
 fn parses_dictionary_literals() {
     let parsed = parse("language g0\nd = { hello:\"Hello\", world:\"World\" }\n");
 

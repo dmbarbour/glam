@@ -221,6 +221,12 @@ their detailed scheduling and representation contracts.
   keyword lists. Explicit member/key positions may use keyword spellings:
   `module.where`, `where:Value`, and `.['where] = Value` are valid. `module`
   and `self` remain special bare references.
+- `using Dict in Expr` lowers entirely in `g_syntax`: evaluate and share
+  `Dict` in the surrounding scope, use it as the temporary final namespace and
+  `self`, use `{}` as the prior namespace and `_self`, and retain the
+  surrounding scope as the `^` escape target. `using Dict do Body` is only
+  syntax sugar for a do-valued body; it does not create an object or runtime
+  scope agent.
 - Layout `do` is front-end sugar and must disappear during g-syntax
   resolution. A bare intermediate statement reuses `=>>` and therefore
   requires unit; the final expression is the continuation itself and is not

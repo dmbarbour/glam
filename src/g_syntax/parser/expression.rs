@@ -25,7 +25,7 @@ use super::input::{
     number, open, space_before, symbol, text_id,
 };
 use super::lexical::{ByteSpan, Delimiter, GroupId, LeadingTrivia, SpannedToken, TokenKind};
-use super::structural::{split_top_level, trim_layout};
+use super::structural::{parse_using_expression, split_top_level, trim_layout};
 
 mod infix;
 
@@ -447,6 +447,10 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .then(path_suffix.clone())
             .map(|(base, suffixes)| access_if_path(base, suffixes))
             .boxed();
+        let using_expr = using_expr(view, context)
+            .then(path_suffix.clone())
+            .map(|(base, suffixes)| access_if_path(base, suffixes))
+            .boxed();
         let if_expr = if_expr(view, context)
             .then(path_suffix.clone())
             .map(|(base, suffixes)| access_if_path(base, suffixes))
@@ -486,6 +490,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             try_expr,
             match_expr,
             if_expr,
+            using_expr,
             do_expr,
             literal_expr,
             escaped_expr,
@@ -673,6 +678,17 @@ fn do_expr<'lex, 'source: 'lex>(
         view,
         context,
         parse_do_expression,
+    ))
+}
+
+fn using_expr<'lex, 'source: 'lex>(
+    view: TokenView<'lex, 'source>,
+    context: ExpressionContext,
+) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
+    keyword("using").ignore_then(structural_atom_after_head(
+        view,
+        context,
+        parse_using_expression,
     ))
 }
 

@@ -130,6 +130,10 @@ pub(super) const G0_KEYWORDS: &[Keyword] = &[
         roles: &[Declaration],
     },
     Keyword {
+        spelling: "using",
+        roles: &[Expression],
+    },
+    Keyword {
         spelling: "when",
         roles: &[Modifier],
     },

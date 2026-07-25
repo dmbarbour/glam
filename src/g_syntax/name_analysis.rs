@@ -306,6 +306,17 @@ impl FileNameAnalysis {
                     locals,
                 );
             }
+            SyntaxExpr::Using { namespace, body } => {
+                self.visit_expr(namespace, line, scope, locals);
+                let namespace = self.push_namespace();
+                let using_scope = self.push_scope(ResolutionScope {
+                    definitions: namespace,
+                    lookup: namespace,
+                    object_alias: None,
+                    parent: Some(scope),
+                });
+                self.visit_expr(body, line, using_scope, locals);
+            }
             SyntaxExpr::PathDict(path, value) => {
                 for key in path {
                     self.visit_key_expr(key, line, scope, locals);

@@ -46,6 +46,49 @@ fn let_and_where_parse() {
 }
 
 #[test]
+fn using_parses_explicit_and_do_bodies() {
+    for source in [
+        "using namespace in value",
+        "using namespace in do .r value",
+        "using namespace do .r value",
+        "using (choose left right) in self.value",
+        "using namespace in ^outer",
+    ] {
+        let parsed = parse_structural(source);
+        assert!(
+            matches!(parsed, SyntaxExpr::Using { .. }),
+            "`{source}` did not produce a using expression"
+        );
+    }
+
+    let shorthand = parse_structural("using namespace do .r value");
+    let SyntaxExpr::Using { namespace, body } = shorthand else {
+        panic!("using-do shorthand should produce a using expression");
+    };
+    assert!(matches!(*namespace, SyntaxExpr::Name(ref name) if name == "namespace"));
+    assert!(matches!(*body, SyntaxExpr::Do(_)));
+}
+
+#[test]
+fn malformed_using_expressions_report_the_missing_boundary() {
+    for (source, expected) in [
+        ("using", "requires a namespace and `in` or `do` body"),
+        ("using namespace", "requires `in` or a trailing `do` body"),
+        ("using in value", "requires a namespace before its body"),
+        ("using namespace in", "requires a body"),
+    ] {
+        let diagnostics = parse_compound_expression_fragment(source.as_bytes())
+            .expect_err("malformed using expression should be diagnosed");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "`{source}` reported {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
 fn where_and_with_support_hanging_member_layout() {
     let parsed =
         parse_structural("first + second where first = 1\n                     second = 2");

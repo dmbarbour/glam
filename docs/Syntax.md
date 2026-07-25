@@ -186,7 +186,7 @@ The active `g0` table is:
 | Role | Keywords |
 | --- | --- |
 | declaration heads | `language`, `import`, `abstract`, `unique`, `object`, `extend` |
-| expression forms | `let`, `where`, `do`, `if`, `match`, `try`, `try_match`, `object`, `abstract object` |
+| expression forms | `let`, `where`, `using`, `do`, `if`, `match`, `try`, `try_match`, `object`, `abstract object` |
 | do statements | `abstract` |
 | expression operators | `and`, `or` |
 | special expression references | `module`, `self` |
@@ -204,7 +204,7 @@ request paths such as `'.where` and `.where` likewise remain valid. Bare
 spellings such as `where = ...`, `\where -> ...`, and an ordinary reference to
 `where` are errors.
 
-Words proposed for later syntax, including `using` and `without`, are not active `g0` keywords
+Words proposed for later syntax, including `without`, are not active `g0` keywords
 until their language-version feature is introduced. The recognized table may
 therefore vary by base language version and extension without retroactively
 changing an older version.
@@ -271,9 +271,18 @@ references do not select an unqualified global; expression-valued keys do. Names
 A using scope enables any dictionary as an object namespace.
 
         using Dict in Expr
-        using Dict do Body      # short for `using Expr in do Body`
+        using Dict do Body      # short for `using Dict in do Body`
 
-Evaluates `Expr` in context of a temporary object. Within that scope, `self` is equivalent to `Dict`, `_self` is equivalent to `{}`. Users escape the scope just as they do for objects, via `^name` (or `^(Expr)`). *Note:* `Dict` doesn't need to be a valid object. 
+The namespace expression is bound outside the temporary scope, then lazily
+evaluated and shared when that namespace is observed within `Expr`. Lexical
+locals continue to take precedence, allowing a function such as
+`write message = using api do ... message ...` to use both its arguments and
+the temporary API naturally. Within the scope, `self` is equivalent to `Dict`
+and `_self` is equivalent to `{}`.
+Users escape to the surrounding scope just as they do for objects, via
+`^name` or `^(Expr)`. `Dict` needs only to provide the dictionary members that
+are actually observed; it does not need to be a valid object and gains no
+object specification implicitly.
 
 The main use case for `using` is to manage namespaces without polluting them. Not suitable for subexpressions that require many escapes.
 

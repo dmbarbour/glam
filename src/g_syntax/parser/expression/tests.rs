@@ -121,7 +121,7 @@ fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
     for keyword in crate::g_syntax::keywords::G0_KEYWORDS {
         if matches!(
             keyword.spelling(),
-            "do" | "if" | "match" | "module" | "self" | "try" | "try_match"
+            "do" | "if" | "match" | "module" | "self" | "try" | "try_match" | "using"
         ) {
             continue;
         }
@@ -179,6 +179,14 @@ fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
         diagnostic
             .message
             .contains("try_match expression requires `with`")
+    }));
+
+    let using_diagnostics = parse_expression_fragment(b"using")
+        .expect_err("a bare `using` should be diagnosed as a malformed using expression");
+    assert!(using_diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("using expression requires a namespace")
     }));
 }
 
