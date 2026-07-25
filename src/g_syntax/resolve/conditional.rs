@@ -17,13 +17,18 @@ pub(super) struct GuardChoiceArm<'a> {
     pub(super) result: &'a SyntaxExpr,
 }
 
-struct ResolvedGuardChoice {
-    alternatives: Vec<ResolvedGuardAlternative>,
+struct ResolvedChoice {
+    alternatives: Vec<ResolvedAlternative>,
 }
 
-struct ResolvedGuardAlternative {
+struct ResolvedAlternative {
     steps: Vec<ResolvedEffectStep>,
-    result: ResolvedExpr<Value>,
+    outcome: ResolvedChoiceOutcome,
+}
+
+enum ResolvedChoiceOutcome {
+    Value(ResolvedExpr<Value>),
+    Nested(ResolvedChoice),
 }
 
 struct ChoiceArmSpec<'a> {
@@ -117,25 +122,8 @@ pub(super) fn lower_match_expr_resolved(
     let base_len = locals.len();
     let subject_binding = locals.fresh_binding();
     let resolved = (|| {
-        let mut alternatives = Vec::with_capacity(match_expr.arms.len());
-        for arm in &match_expr.arms {
-            let alternative = resolve_alternative(
-                ChoiceArmSpec {
-                    pattern: Some((subject_binding, &arm.pattern)),
-                    guards: &arm.guards,
-                    line: arm.line,
-                    result_line: arm.result_line,
-                    result: &arm.result,
-                    unit_assertion_context: "match condition",
-                },
-                context,
-                scope,
-                locals,
-            )?;
-            locals.truncate(base_len);
-            alternatives.push(alternative);
-        }
-        let search = ResolvedGuardChoice { alternatives }.emit();
+        let search =
+            resolve_match_choice(&match_expr.arms, subject_binding, context, scope, locals)?.emit();
         let selected = compiler_values::run_pure_match_resolved(search);
         Ok(ResolvedExpr::apply(
             ResolvedExpr::lambda(vec![subject_binding], selected),
@@ -146,12 +134,22 @@ pub(super) fn lower_match_expr_resolved(
     resolved
 }
 
+pub(super) fn lower_match_when_expr_resolved(
+    match_when: &MatchWhenExpr,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let search = resolve_when_choice(&match_when.arms, context, scope, locals)?.emit();
+    Ok(compiler_values::run_pure_match_resolved(search))
+}
+
 fn resolve_guard_choice(
     alternatives: &[GuardChoiceArm<'_>],
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
-) -> Result<ResolvedGuardChoice, Diagnostic> {
+) -> Result<ResolvedChoice, Diagnostic> {
     let base_len = locals.len();
     let mut resolved = Vec::with_capacity(alternatives.len());
 
@@ -173,7 +171,7 @@ fn resolve_guard_choice(
         resolved.push(branch?);
     }
 
-    Ok(ResolvedGuardChoice {
+    Ok(ResolvedChoice {
         alternatives: resolved,
     })
 }
@@ -183,25 +181,16 @@ fn resolve_alternative(
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
-) -> Result<ResolvedGuardAlternative, Diagnostic> {
-    let mut steps = Vec::with_capacity(arm.guards.len() + usize::from(arm.pattern.is_some()));
-    {
-        let mut sink = ConditionalPatternStepSink {
-            steps: &mut steps,
-            locals,
-        };
-        let mut lowering = PatternLoweringContext::new(context, scope, &mut sink)
-            .with_unit_assertion_context(arm.unit_assertion_context);
-        if let Some((subject, pattern)) = arm.pattern {
-            append_pattern_steps(
-                ResolvedPatternInput::Value(ResolvedExpr::Local(subject)),
-                pattern,
-                arm.line,
-                &mut lowering,
-            )?;
-        }
-        append_guard_steps(arm.guards, arm.line, &mut lowering)?;
-    }
+) -> Result<ResolvedAlternative, Diagnostic> {
+    let steps = resolve_prefix_steps(
+        arm.pattern,
+        arm.guards,
+        arm.line,
+        arm.unit_assertion_context,
+        context,
+        scope,
+        locals,
+    )?;
     let result = syntax_expr_to_resolved_in_semantic_scope(
         arm.result,
         arm.result_line,
@@ -209,15 +198,139 @@ fn resolve_alternative(
         scope,
         locals,
     )?;
-    Ok(ResolvedGuardAlternative { steps, result })
+    Ok(ResolvedAlternative {
+        steps,
+        outcome: ResolvedChoiceOutcome::Value(result),
+    })
 }
 
-impl ResolvedGuardChoice {
+fn resolve_match_choice(
+    arms: &[MatchArm],
+    subject: BindingId,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedChoice, Diagnostic> {
+    let base_len = locals.len();
+    let mut alternatives = Vec::with_capacity(arms.len());
+    for arm in arms {
+        let branch = resolve_match_alternative(arm, subject, context, scope, locals);
+        locals.truncate(base_len);
+        alternatives.push(branch?);
+    }
+    Ok(ResolvedChoice { alternatives })
+}
+
+fn resolve_match_alternative(
+    arm: &MatchArm,
+    subject: BindingId,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedAlternative, Diagnostic> {
+    let steps = resolve_prefix_steps(
+        Some((subject, &arm.pattern)),
+        &arm.guards,
+        arm.line,
+        "match condition",
+        context,
+        scope,
+        locals,
+    )?;
+    let outcome = resolve_match_outcome(&arm.outcome, context, scope, locals)?;
+    Ok(ResolvedAlternative { steps, outcome })
+}
+
+fn resolve_when_choice(
+    arms: &[WhenArm],
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedChoice, Diagnostic> {
+    let base_len = locals.len();
+    let mut alternatives = Vec::with_capacity(arms.len());
+    for arm in arms {
+        let branch = resolve_when_alternative(arm, context, scope, locals);
+        locals.truncate(base_len);
+        alternatives.push(branch?);
+    }
+    Ok(ResolvedChoice { alternatives })
+}
+
+fn resolve_when_alternative(
+    arm: &WhenArm,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedAlternative, Diagnostic> {
+    let steps = resolve_prefix_steps(
+        None,
+        &arm.guards,
+        arm.line,
+        "match condition",
+        context,
+        scope,
+        locals,
+    )?;
+    let outcome = resolve_match_outcome(&arm.outcome, context, scope, locals)?;
+    Ok(ResolvedAlternative { steps, outcome })
+}
+
+fn resolve_match_outcome(
+    outcome: &MatchOutcome,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<ResolvedChoiceOutcome, Diagnostic> {
+    match outcome {
+        MatchOutcome::Value { line, expression } => {
+            syntax_expr_to_resolved_in_semantic_scope(expression, *line, context, scope, locals)
+                .map(ResolvedChoiceOutcome::Value)
+        }
+        MatchOutcome::Nested(arms) => {
+            resolve_when_choice(arms, context, scope, locals).map(ResolvedChoiceOutcome::Nested)
+        }
+    }
+}
+
+fn resolve_prefix_steps(
+    pattern: Option<(BindingId, &SyntaxPattern)>,
+    guards: &[SyntaxGuardClause],
+    line: usize,
+    unit_assertion_context: &'static str,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<Vec<ResolvedEffectStep>, Diagnostic> {
+    let mut steps = Vec::with_capacity(guards.len() + usize::from(pattern.is_some()));
+    let mut sink = ConditionalPatternStepSink {
+        steps: &mut steps,
+        locals,
+    };
+    let mut lowering = PatternLoweringContext::new(context, scope, &mut sink)
+        .with_unit_assertion_context(unit_assertion_context);
+    if let Some((subject, pattern)) = pattern {
+        append_pattern_steps(
+            ResolvedPatternInput::Value(ResolvedExpr::Local(subject)),
+            pattern,
+            line,
+            &mut lowering,
+        )?;
+    }
+    append_guard_steps(guards, line, &mut lowering)?;
+    Ok(steps)
+}
+
+impl ResolvedChoice {
     fn emit(self) -> ResolvedExpr<Value> {
+        effect_call_resolved("cut", [self.emit_search()])
+    }
+
+    fn emit_search(self) -> ResolvedExpr<Value> {
         let mut alternatives = self
             .alternatives
             .into_iter()
-            .map(ResolvedGuardAlternative::emit)
+            .map(ResolvedAlternative::emit)
             .rev();
         let mut search = alternatives
             .next()
@@ -225,14 +338,22 @@ impl ResolvedGuardChoice {
         for alternative in alternatives {
             search = effect_call_resolved("alt", [alternative, search]);
         }
-        effect_call_resolved("cut", [search])
+        search
     }
 }
 
-impl ResolvedGuardAlternative {
+impl ResolvedAlternative {
     fn emit(self) -> ResolvedExpr<Value> {
-        let returned = effect_call_resolved("r", [self.result]);
-        emit_effect_steps(self.steps, returned)
+        emit_effect_steps(self.steps, self.outcome.emit())
+    }
+}
+
+impl ResolvedChoiceOutcome {
+    fn emit(self) -> ResolvedExpr<Value> {
+        match self {
+            Self::Value(result) => effect_call_resolved("r", [result]),
+            Self::Nested(choice) => choice.emit_search(),
+        }
     }
 }
 
@@ -367,7 +488,10 @@ mod tests {
             matches!(value, ResolvedExpr::Embedded(Value::Number(number))
                 if *number == Number::from(42_i64))
         );
-        assert_eq!(&alternative.result, &ResolvedExpr::Local(*binding));
+        assert_eq!(
+            alternative_value(alternative),
+            &ResolvedExpr::Local(*binding)
+        );
         assert!(locals.is_empty());
     }
 
@@ -434,8 +558,14 @@ mod tests {
         let first_binding = value_binding(first);
         let second_binding = value_binding(second);
         assert_ne!(first_binding, second_binding);
-        assert_eq!(first.result, ResolvedExpr::Local(first_binding));
-        assert_eq!(second.result, ResolvedExpr::Local(second_binding));
+        assert_eq!(
+            alternative_value(first),
+            &ResolvedExpr::Local(first_binding)
+        );
+        assert_eq!(
+            alternative_value(second),
+            &ResolvedExpr::Local(second_binding)
+        );
         assert!(locals.is_empty());
     }
 
@@ -478,15 +608,19 @@ mod tests {
                         )),
                     },
                     guards: Vec::new(),
-                    result_line: 1,
-                    result: number(2),
+                    outcome: MatchOutcome::Value {
+                        line: 1,
+                        expression: number(2),
+                    },
                 },
                 MatchArm {
                     line: 2,
                     pattern: SyntaxPattern::wildcard(),
                     guards: Vec::new(),
-                    result_line: 2,
-                    result: number(3),
+                    outcome: MatchOutcome::Value {
+                        line: 2,
+                        expression: number(3),
+                    },
                 },
             ],
         };
@@ -506,7 +640,62 @@ mod tests {
         assert_eq!(count_embedded_number(&resolved, 3), 1);
     }
 
-    fn value_binding(alternative: &ResolvedGuardAlternative) -> BindingId {
+    #[test]
+    fn hierarchical_match_resolves_a_shared_view_only_once() {
+        let view = SyntaxExpr::Apply(
+            Box::new(SyntaxExpr::Effect(vec!["r".to_owned()])),
+            Box::new(number(73)),
+        );
+        let match_expr = MatchExpr {
+            subject: Box::new(number(74)),
+            arms: vec![MatchArm {
+                line: 1,
+                pattern: SyntaxPattern {
+                    kind: SyntaxPatternKind::View {
+                        view: Box::new(view),
+                        pattern: Box::new(SyntaxPattern::capture("value")),
+                    },
+                },
+                guards: Vec::new(),
+                outcome: MatchOutcome::Nested(vec![
+                    WhenArm {
+                        line: 2,
+                        guards: vec![SyntaxGuardClause::Pass],
+                        outcome: MatchOutcome::Value {
+                            line: 2,
+                            expression: SyntaxExpr::Name("value".to_owned()),
+                        },
+                    },
+                    WhenArm {
+                        line: 3,
+                        guards: vec![SyntaxGuardClause::Pass],
+                        outcome: MatchOutcome::Value {
+                            line: 3,
+                            expression: number(0),
+                        },
+                    },
+                ]),
+            }],
+        };
+        let context = CompileContext::default();
+        let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
+        let resolved = lower_match_expr_resolved(
+            &match_expr,
+            1,
+            &context,
+            &scope.resolved(),
+            &mut ResolverContext::default(),
+        )
+        .expect("hierarchical match should resolve");
+
+        assert_eq!(
+            count_embedded_number(&resolved, 73),
+            1,
+            "nested child alternatives must not duplicate their shared view prefix"
+        );
+    }
+
+    fn value_binding(alternative: &ResolvedAlternative) -> BindingId {
         let [
             ResolvedEffectStep {
                 kind: ResolvedEffectStepKind::ValueBind { binding, .. },
@@ -517,6 +706,13 @@ mod tests {
             panic!("expected one value binding");
         };
         *binding
+    }
+
+    fn alternative_value(alternative: &ResolvedAlternative) -> &ResolvedExpr<Value> {
+        let ResolvedChoiceOutcome::Value(value) = &alternative.outcome else {
+            panic!("expected a value alternative");
+        };
+        value
     }
 
     fn contains_effect(expression: &ResolvedExpr<Value>, name: &str) -> bool {

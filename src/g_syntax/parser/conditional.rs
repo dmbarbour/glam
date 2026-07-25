@@ -4,12 +4,14 @@
 //! nested `if` expressions therefore cannot donate `then` or `else` to an
 //! enclosing conditional.
 
-use crate::g_syntax::{Diagnostic, IfExpr, MatchArm, MatchExpr, SyntaxExpr};
+use crate::g_syntax::{
+    Diagnostic, IfExpr, MatchArm, MatchExpr, MatchOutcome, MatchWhenExpr, SyntaxExpr, WhenArm,
+};
 
 use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{TokenRange, TokenView};
 use super::layout::LayoutView;
-use super::lexical::{LeadingTrivia, SpannedToken, TokenKind};
+use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 use super::pattern::{parse_complete_pattern, parse_guard_clauses};
 use super::structural::{
     is_layout_empty, parse_expression_in_context, split_braced_members, trim_layout,
@@ -100,6 +102,29 @@ pub(in crate::g_syntax::parser) fn parse_match_expression(
         return Err(error_at_token(view, match_token, "expected `match`"));
     }
 
+    let after_match = trim_layout(view_between(view, match_index + 1, view.range().end()));
+    if let Some((when_index, when_token)) = after_match.first_significant()
+        && token_is_name(when_token, "when")
+        && is_contextual_keyword(after_match, when_index)
+    {
+        let body = view_between(after_match, when_index + 1, after_match.range().end());
+        let (members, end) = choice_member_views(
+            body,
+            context,
+            "match-when body",
+            "layout `match when` requires at least one arm",
+            true,
+        )?;
+        let arms = members
+            .into_iter()
+            .map(|arm| parse_when_arm(arm, context))
+            .collect::<ParseResult<Vec<_>>>()?;
+        return Ok(ParsedExpression::new(
+            SyntaxExpr::MatchWhen(MatchWhenExpr { arms }),
+            end,
+        ));
+    }
+
     let with_index = view
         .top_level()
         .find(|indexed| {
@@ -126,92 +151,16 @@ pub(in crate::g_syntax::parser) fn parse_match_expression(
     let subject = parse_expression_in_context(subject, context.child_owner(subject))?;
 
     let after_with = view_between(view, with_index + 1, view.range().end());
-    let Some((body_start, body_token)) = after_with.first_significant() else {
-        return Err(error_at_token(
-            view,
-            view.token_at(with_index)
-                .expect("selected match `with` belongs to its view"),
-            "layout match expression requires at least one arm",
-        ));
-    };
-
-    if let TokenKind::Open {
-        group,
-        delimiter: super::lexical::Delimiter::Brace,
-    } = body_token.kind()
-    {
-        let delimiter = view
-            .group(*group)
-            .expect("lexed match brace refers to its delimiter group");
-        let Some(close) = delimiter.close_token() else {
-            return Err(error_at_token(
-                view,
-                body_token,
-                "braced match expression has an unmatched or mismatched `}`",
-            ));
-        };
-        if body_start != delimiter.open_token() {
-            return Err(error_at_token(
-                view,
-                body_token,
-                "braced match body must begin immediately after `with`",
-            ));
-        }
-        let after_group = trim_layout(view_between(
-            after_with,
-            close + 1,
-            after_with.range().end(),
-        ));
-        let group_is_arm_pattern = after_group.first_significant().is_some_and(|(_, token)| {
-            matches!(token.kind(), TokenKind::Symbol("=>")) || token_is_name(token, "when")
-        });
-        if !group_is_arm_pattern {
-            let body = view_between(view, body_start, close + 1);
-            let members = split_braced_members(body, "match body")
-                .expect("match body begins with a complete brace group")?;
-            let arms = members
-                .into_iter()
-                .map(|arm| parse_match_arm(arm, context))
-                .collect::<ParseResult<Vec<_>>>()?;
-            return Ok(ParsedExpression::new(
-                SyntaxExpr::Match(MatchExpr {
-                    subject: Box::new(subject),
-                    arms,
-                }),
-                close + 1,
-            ));
-        }
-    }
-
-    let block = LayoutView::new(after_with).block();
-    if block.statements().is_empty() {
-        return Err(error_at_token(
-            view,
-            view.token_at(with_index)
-                .expect("selected match `with` belongs to its view"),
-            "layout match expression requires at least one arm",
-        ));
-    }
-    if !context.accepts_layout_anchor(block.anchor()) {
-        return Err(vec![Diagnostic::error(
-            block.statements()[0].line(),
-            format!(
-                "match arm layout begins at indentation {}; expected more than continuation floor {}",
-                block.anchor(),
-                context.continuation_floor()
-            ),
-        )]);
-    }
-    let end = block.end();
-    let arms = block
-        .into_statements()
+    let (members, end) = choice_member_views(
+        after_with,
+        context,
+        "match body",
+        "layout match expression requires at least one arm",
+        true,
+    )?;
+    let arms = members
         .into_iter()
-        .map(|statement| {
-            let arm = after_with
-                .subview(statement.tokens())
-                .expect("layout match arm remains within its body");
-            parse_match_arm(arm, context)
-        })
+        .map(|arm| parse_match_arm(arm, context))
         .collect::<ParseResult<Vec<_>>>()?;
     Ok(ParsedExpression::new(
         SyntaxExpr::Match(MatchExpr {
@@ -224,35 +173,7 @@ pub(in crate::g_syntax::parser) fn parse_match_expression(
 
 fn parse_match_arm(view: TokenView<'_, '_>, context: ExpressionContext) -> ParseResult<MatchArm> {
     let view = trim_layout(view);
-    let arrows = top_level_symbols(view, "=>");
-    if arrows.is_empty() {
-        return Err(error_at_view(
-            view,
-            "match arm requires `=>` between its pattern and result",
-        ));
-    }
-    if arrows.len() > 1 {
-        return Err(error_at_view(
-            view,
-            "match arm permits exactly one top-level `=>`",
-        ));
-    }
-    let arrow = arrows[0];
-    let head = trim_layout(view_between(view, view.range().start(), arrow));
-    let result = trim_layout(view_between(view, arrow + 1, view.range().end()));
-    if is_layout_empty(head) {
-        return Err(error_at_view(
-            view,
-            "match arm requires a pattern before `=>`",
-        ));
-    }
-    if is_layout_empty(result) {
-        return Err(error_at_view(
-            view,
-            "match arm requires a result after `=>`",
-        ));
-    }
-
+    let (head, outcome) = split_choice_arm(view, context, "match arm")?;
     let when = top_level_contextual_names(head, "when");
     if when.len() > 1 {
         return Err(error_at_view(
@@ -283,16 +204,169 @@ fn parse_match_arm(view: TokenView<'_, '_>, context: ExpressionContext) -> Parse
         (parse_complete_pattern(head)?, Vec::new())
     };
 
-    let line = line_of_view(view);
-    let result_line = line_of_view(result);
-    let result = parse_expression_in_context(result, context.child_owner(result))?;
     Ok(MatchArm {
-        line,
+        line: line_of_view(view),
         pattern,
         guards,
-        result_line,
-        result,
+        outcome,
     })
+}
+
+fn parse_when_arm(view: TokenView<'_, '_>, context: ExpressionContext) -> ParseResult<WhenArm> {
+    let view = trim_layout(view);
+    let (guards, outcome) = split_choice_arm(view, context, "match-when arm")?;
+    if is_layout_empty(guards) {
+        return Err(error_at_view(
+            view,
+            "match-when arm requires guards before its outcome",
+        ));
+    }
+    Ok(WhenArm {
+        line: line_of_view(view),
+        guards: parse_guard_clauses(guards, "match-when arm guard")?,
+        outcome,
+    })
+}
+
+fn split_choice_arm<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+    context: ExpressionContext,
+    label: &str,
+) -> ParseResult<(TokenView<'lex, 'source>, MatchOutcome)> {
+    let required_head = if label == "match arm" {
+        "a pattern"
+    } else {
+        "guards"
+    };
+    let lines = LayoutView::new(view).lines();
+    let Some(first_line) = lines.first().copied() else {
+        return Err(error_at_view(view, format!("{label} cannot be empty")));
+    };
+    let first = trim_layout(
+        view.subview(first_line.tokens())
+            .expect("choice arm first line remains inside its view"),
+    );
+    let arrows = top_level_symbols(first, "=>");
+    if arrows.len() > 1 {
+        return Err(error_at_view(
+            first,
+            format!("{label} permits exactly one top-level `=>`"),
+        ));
+    }
+    if let Some(arrow) = arrows.first().copied() {
+        let head = trim_layout(view_between(first, first.range().start(), arrow));
+        let result = trim_layout(view_between(view, arrow + 1, view.range().end()));
+        if is_layout_empty(head) {
+            return Err(error_at_view(
+                view,
+                format!("{label} requires {required_head} before `=>`"),
+            ));
+        }
+        if is_layout_empty(result) {
+            return Err(error_at_view(
+                view,
+                format!("{label} requires a result after `=>`"),
+            ));
+        }
+        let line = line_of_view(result);
+        let expression = parse_expression_in_context(result, context.child_owner(result))?;
+        return Ok((head, MatchOutcome::Value { line, expression }));
+    }
+
+    let nested_when = top_level_contextual_names(first, "when")
+        .into_iter()
+        .next_back()
+        .ok_or_else(|| {
+            error_at_view(
+                first,
+                format!("{label} requires `=>` or a trailing `when` child block"),
+            )
+        })?;
+    let head = trim_layout(view_between(first, first.range().start(), nested_when));
+    if is_layout_empty(head) {
+        return Err(error_at_view(
+            first,
+            format!("{label} requires {required_head} before nested `when`"),
+        ));
+    }
+    let nested_body = view_between(view, nested_when + 1, view.range().end());
+    let nested_context = context.with_continuation_floor(first_line.indentation());
+    let (members, _) = choice_member_views(
+        nested_body,
+        nested_context,
+        "nested match-when body",
+        "nested `when` requires at least one child arm",
+        false,
+    )?;
+    let arms = members
+        .into_iter()
+        .map(|arm| parse_when_arm(arm, nested_context))
+        .collect::<ParseResult<Vec<_>>>()?;
+    Ok((head, MatchOutcome::Nested(arms)))
+}
+
+fn choice_member_views<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+    context: ExpressionContext,
+    body_label: &str,
+    missing_layout_message: &str,
+    brace_can_start_member: bool,
+) -> ParseResult<(Vec<TokenView<'lex, 'source>>, usize)> {
+    let Some((body_start, body_token)) = view.first_significant() else {
+        return Err(error_at_view(view, missing_layout_message));
+    };
+    if let TokenKind::Open {
+        group,
+        delimiter: Delimiter::Brace,
+    } = body_token.kind()
+    {
+        let delimiter = view
+            .group(*group)
+            .expect("lexed choice brace refers to its delimiter group");
+        let Some(close) = delimiter.close_token() else {
+            return Err(error_at_token(
+                view,
+                body_token,
+                format!("{body_label} has an unmatched or mismatched `}}`"),
+            ));
+        };
+        let after_group = trim_layout(view_between(view, close + 1, view.range().end()));
+        let group_is_member_head = brace_can_start_member
+            && after_group.first_significant().is_some_and(|(_, token)| {
+                matches!(token.kind(), TokenKind::Symbol("=>")) || token_is_name(token, "when")
+            });
+        if !group_is_member_head {
+            let body = view_between(view, body_start, close + 1);
+            let members = split_braced_members(body, body_label)
+                .expect("choice body begins with a complete brace group")?;
+            return Ok((members, close + 1));
+        }
+    }
+
+    let block = LayoutView::new(view).block();
+    if block.statements().is_empty() {
+        return Err(error_at_view(view, missing_layout_message));
+    }
+    if !context.accepts_layout_anchor(block.anchor()) {
+        return Err(vec![Diagnostic::error(
+            block.statements()[0].line(),
+            format!(
+                "{body_label} begins at indentation {}; expected more than continuation floor {}",
+                block.anchor(),
+                context.continuation_floor()
+            ),
+        )]);
+    }
+    let end = block.end();
+    let members = block
+        .into_statements()
+        .into_iter()
+        .map(|statement| {
+            view.subview(statement.tokens())
+                .expect("layout choice arm remains within its body")
+        })
+        .collect();
+    Ok((members, end))
 }
 
 fn top_level_contextual_names(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
@@ -569,6 +643,43 @@ mod tests {
     }
 
     #[test]
+    fn match_when_and_hierarchical_outcomes_parse_as_choice_trees() {
+        let SyntaxExpr::MatchWhen(guard_only) = parse(
+            "match when\n  value = 1 when\n    value == 2 => \"bad\"\n    value == 1 => value\n  _ => 0",
+        ) else {
+            panic!("guard-only syntax should produce a match-when expression");
+        };
+        assert_eq!(guard_only.arms.len(), 2);
+        let MatchOutcome::Nested(children) = &guard_only.arms[0].outcome else {
+            panic!("the first guard-only arm should own nested choices");
+        };
+        assert_eq!(children.len(), 2);
+
+        let SyntaxExpr::Match(subject) = parse(
+            "match subject with\n  value when value == 1 when\n    next = value + 1 => next\n    _ => value\n  _ => 0",
+        ) else {
+            panic!("source should produce a subject match");
+        };
+        let MatchOutcome::Nested(children) = &subject.arms[0].outcome else {
+            panic!("the first subject arm should own nested choices");
+        };
+        assert_eq!(subject.arms[0].guards.len(), 1);
+        assert_eq!(children.len(), 2);
+
+        let SyntaxExpr::MatchWhen(braced) =
+            parse("match when { _ when { 1 == 2 => \"bad\"; _ => \"ok\"; }; }")
+        else {
+            panic!("braced nested choices should produce a match-when expression");
+        };
+        assert!(matches!(braced.arms[0].outcome, MatchOutcome::Nested(_)));
+
+        let SyntaxExpr::MatchWhen(empty) = parse("match when {}") else {
+            panic!("an explicit empty guard-only search should remain a match-when expression");
+        };
+        assert!(empty.arms.is_empty());
+    }
+
+    #[test]
     fn complete_match_patterns_accept_unparenthesized_views() {
         let SyntaxExpr::Match(forward) = parse("match subject with { inspect -> value => value; }")
         else {
@@ -621,6 +732,40 @@ mod tests {
                     )
                 })
                 .expect_err("malformed match should fail");
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(expected)),
+                "`{source}` reported {diagnostics:#?} instead of `{expected}`"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_hierarchical_match_reports_missing_prefixes_and_children() {
+        for (source, expected) in [
+            (
+                "match when",
+                "layout `match when` requires at least one arm",
+            ),
+            (
+                "match when\n  _ when",
+                "nested `when` requires at least one child arm",
+            ),
+            (
+                "match value with\n  when\n    _ => 1",
+                "requires a pattern before nested `when`",
+            ),
+            ("match when\n  => 1", "requires guards before `=>`"),
+        ] {
+            let diagnostics =
+                super::super::input::parse_expression_fragment(source.as_bytes(), |view| {
+                    super::super::structural::parse_expression_in_context(
+                        view,
+                        ExpressionContext::for_fragment(view),
+                    )
+                })
+                .expect_err("malformed hierarchical match should fail");
             assert!(
                 diagnostics
                     .iter()

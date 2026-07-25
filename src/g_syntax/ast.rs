@@ -167,12 +167,29 @@ pub struct MatchExpr {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct MatchWhenExpr {
+    pub arms: Vec<WhenArm>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct MatchArm {
     pub line: usize,
     pub pattern: SyntaxPattern,
     pub guards: Vec<SyntaxGuardClause>,
-    pub result_line: usize,
-    pub result: SyntaxExpr,
+    pub outcome: MatchOutcome,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct WhenArm {
+    pub line: usize,
+    pub guards: Vec<SyntaxGuardClause>,
+    pub outcome: MatchOutcome,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MatchOutcome {
+    Value { line: usize, expression: SyntaxExpr },
+    Nested(Vec<WhenArm>),
 }
 
 pub(super) enum SyntaxPatternScopeEvent<'a> {
@@ -538,6 +555,7 @@ pub enum SyntaxExpr {
     Do(DoExpr),
     If(IfExpr),
     Match(MatchExpr),
+    MatchWhen(MatchWhenExpr),
     Let {
         bindings: Vec<(String, SyntaxExpr)>,
         body: Box<SyntaxExpr>,

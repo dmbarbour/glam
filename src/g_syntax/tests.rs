@@ -3360,6 +3360,56 @@ fn flat_match_exhaustion_and_selected_result_errors_are_distinct() {
 }
 
 #[test]
+fn hierarchical_match_shares_prefixes_and_falls_back_at_each_level() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "import 'std\n",
+        "asm.child = match [65,66] with\n",
+        "  [first] ++ rest when first == 65 when\n",
+        "    second = list.head rest and second == 66 => [first,second]\n",
+        "    _ => \"bad child\"\n",
+        "  _ => \"bad outer\"\n",
+        "asm.outer = match 1 with\n",
+        "  value when\n",
+        "    value == 2 => \"bad child\"\n",
+        "  1 => \"outer fallback\"\n",
+        "  _ => \"bad outer\"\n",
+        "asm.guard_only = match when\n",
+        "  base = 64 when\n",
+        "    .r (base + 1) -> value and value == 65 => \"guard only\"\n",
+        "    _ => \"bad child\"\n",
+        "  _ => \"bad outer\"\n",
+        "asm.deep = match when { _ when { _ when { _ => \"deep\"; }; }; }\n",
+        "asm.child_scope = match when\n",
+        "  _ when\n",
+        "    value = 1 and value == 0 => \"bad\"\n",
+        "    value = 2 and value == 2 => \"child scope\"\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("child", b"AB".as_slice()),
+        ("outer", b"outer fallback".as_slice()),
+        ("guard_only", b"guard only".as_slice()),
+        ("deep", b"deep".as_slice()),
+        ("child_scope", b"child scope".as_slice()),
+    ] {
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", path]
+            ))),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn quoted_paths_lower_to_ordinary_path_lists() {
     let parsed =
         parse("language g0\nasm.result = { foo:{ [42]:{ bar:\"quoted\" } } }.('.foo.([42]).bar)\n");

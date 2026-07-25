@@ -32,7 +32,7 @@ not define future language semantics or collect subsystem invariants.
 | `g_syntax/parser/lexical.rs` | Authoritative spanned tokens, text values, delimiter groups, indentation facts, and declaration ranges |
 | `g_syntax/parser/input.rs` | Checked token-range views, group-aware iteration, mapped Chumsky input, token predicates, and parser diagnostics |
 | `g_syntax/parser/layout.rs`, `expression_context.rs` | Delimiter-depth lines, inferred layout blocks, continuation floors, exact expression extents, and yielded boundaries |
-| `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs`, `conditional.rs` | Ordinary precedence grammar, structural/postfix resumption, `let`/object/`with` forms, do statements, prefix `if`, and flat subject matches |
+| `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs`, `conditional.rs` | Ordinary precedence grammar, structural/postfix resumption, `let`/object/`with` forms, do statements, prefix `if`, and hierarchical subject/guard-only match trees |
 | `g_syntax/parser/declaration.rs`, `declaration/simple.rs` | Top-level and recursive object-body declarations, including simple language/import/abstract/unique forms |
 | `g_syntax/keywords.rs` | Language-version-owned `g0` reserved words and their syntactic roles |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs`, `name_analysis.rs` | Lexical resolution, affine semantic IR, local-use warnings, and file-wide local/global shadow checks |

@@ -351,27 +351,12 @@ impl FileNameAnalysis {
                 self.visit_expr(&match_expr.subject, line, scope, locals);
                 let base_len = locals.len();
                 for arm in &match_expr.arms {
-                    arm.pattern.visit_scope_events(&mut |event| match event {
-                        SyntaxPatternScopeEvent::Expression(expr) => {
-                            self.visit_expr(expr, arm.line, scope, locals);
-                        }
-                        SyntaxPatternScopeEvent::Capture(name) => {
-                            self.push_source_local(name, arm.line, scope, locals);
-                        }
-                    });
-                    for guard in &arm.guards {
-                        guard.visit_scope_events(&mut |event| match event {
-                            SyntaxPatternScopeEvent::Expression(expr) => {
-                                self.visit_expr(expr, arm.line, scope, locals);
-                            }
-                            SyntaxPatternScopeEvent::Capture(name) => {
-                                self.push_source_local(name, arm.line, scope, locals);
-                            }
-                        });
-                    }
-                    self.visit_expr(&arm.result, arm.result_line, scope, locals);
+                    self.visit_match_arm(arm, scope, locals);
                     locals.truncate(base_len);
                 }
+            }
+            SyntaxExpr::MatchWhen(match_when) => {
+                self.visit_when_arms(&match_when.arms, scope, locals);
             }
             SyntaxExpr::Let { bindings, body } => {
                 for (_, value) in bindings {
@@ -408,6 +393,71 @@ impl FileNameAnalysis {
                 self.visit_expr(left, line, scope, locals);
                 self.visit_expr(right, line, scope, locals);
             }
+        }
+    }
+
+    fn visit_match_arm(
+        &mut self,
+        arm: &MatchArm,
+        scope: ResolutionScopeId,
+        locals: &mut Vec<String>,
+    ) {
+        arm.pattern.visit_scope_events(&mut |event| match event {
+            SyntaxPatternScopeEvent::Expression(expr) => {
+                self.visit_expr(expr, arm.line, scope, locals);
+            }
+            SyntaxPatternScopeEvent::Capture(name) => {
+                self.push_source_local(name, arm.line, scope, locals);
+            }
+        });
+        self.visit_guards(&arm.guards, arm.line, scope, locals);
+        self.visit_match_outcome(&arm.outcome, scope, locals);
+    }
+
+    fn visit_when_arms(
+        &mut self,
+        arms: &[WhenArm],
+        scope: ResolutionScopeId,
+        locals: &mut Vec<String>,
+    ) {
+        let base_len = locals.len();
+        for arm in arms {
+            self.visit_guards(&arm.guards, arm.line, scope, locals);
+            self.visit_match_outcome(&arm.outcome, scope, locals);
+            locals.truncate(base_len);
+        }
+    }
+
+    fn visit_guards(
+        &mut self,
+        guards: &[SyntaxGuardClause],
+        line: usize,
+        scope: ResolutionScopeId,
+        locals: &mut Vec<String>,
+    ) {
+        for guard in guards {
+            guard.visit_scope_events(&mut |event| match event {
+                SyntaxPatternScopeEvent::Expression(expr) => {
+                    self.visit_expr(expr, line, scope, locals);
+                }
+                SyntaxPatternScopeEvent::Capture(name) => {
+                    self.push_source_local(name, line, scope, locals);
+                }
+            });
+        }
+    }
+
+    fn visit_match_outcome(
+        &mut self,
+        outcome: &MatchOutcome,
+        scope: ResolutionScopeId,
+        locals: &mut Vec<String>,
+    ) {
+        match outcome {
+            MatchOutcome::Value { line, expression } => {
+                self.visit_expr(expression, *line, scope, locals);
+            }
+            MatchOutcome::Nested(arms) => self.visit_when_arms(arms, scope, locals),
         }
     }
 

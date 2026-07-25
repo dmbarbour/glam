@@ -265,6 +265,12 @@ their detailed scheduling and representation contracts.
   `match exhausted`. Guard and pattern captures are progressively visible
   only in their result arm. Missing host effects and selected-result failures
   are evaluator errors, not fallback.
+- `match when` is the distinct guard-only form. In either match form, an arm
+  ending in `when` owns deeper layout or braced child arms. The resolved
+  parent pattern/guard step stream wraps the child `.alt` search directly:
+  children share progressive parent captures and work, child exhaustion may
+  fall through to the next parent arm, and only the complete match owns a
+  `.cut`.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

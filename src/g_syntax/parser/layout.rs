@@ -331,7 +331,7 @@ fn brace_has_compound_introducer(source: &LexedSource<'_>, open_index: usize) ->
     let TokenKind::Name(name) = prior.kind() else {
         return false;
     };
-    if !matches!(*name, "do" | "let" | "where" | "with") {
+    if !matches!(*name, "do" | "let" | "when" | "where" | "with") {
         return false;
     }
     if prior.leading() != LeadingTrivia::Joint {
