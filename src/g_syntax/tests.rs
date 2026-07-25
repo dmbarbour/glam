@@ -3269,6 +3269,50 @@ fn prefix_if_preserves_selected_result_laziness_and_guard_errors() {
 }
 
 #[test]
+fn tentative_conditional_results_return_explicitly_or_fall_through() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "asm.if_fallback = if _ then? .fail else \"if fallback\"\n",
+        "asm.if_return = if _ then? .r \"if return\" else \"bad\"\n",
+        "asm.match_fallback = match 1 with { 1 =>? .fail; _ => \"match fallback\"; }\n",
+        "asm.match_return = match 1 with { 1 =>? .r \"match return\"; _ => \"bad\"; }\n",
+        "asm.nested = match when { _ when { _ =>? .fail; _ => \"nested fallback\"; }; _ => \"bad\"; }\n",
+        "asm.non_effect = if _ then? 42 else \"bad\"\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("if_fallback", b"if fallback".as_slice()),
+        ("if_return", b"if return".as_slice()),
+        ("match_fallback", b"match fallback".as_slice()),
+        ("match_return", b"match return".as_slice()),
+        ("nested", b"nested fallback".as_slice()),
+    ] {
+        assert_eq!(
+            output_bytes(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", path]
+            ))),
+            expected,
+            "{path}"
+        );
+    }
+
+    let non_effect = fully_evaluated_error(
+        value_at_atom_path(&value, &["asm", "non_effect"])
+            .expect("non-effect tentative result should exist"),
+    );
+    assert_eq!(
+        non_effect.to_string(),
+        "list effect handler requires an effect dictionary, got Number(42)"
+    );
+}
+
+#[test]
 fn flat_match_supports_patterns_guards_and_ordered_fallback() {
     let parsed = parse(concat!(
         "language g0\n",
@@ -3421,6 +3465,11 @@ refl.try_match_rollback = try_match 42 with {
 }
 refl.try_match_when = try_match when { 42 <- .heap.get ['visible] => (); }
 refl.try_match_exhaustion = try (try_match 1 with {}) then 1 / 0 else ()
+refl.try_tentative_rollback = (try _ then? (.heap.set ['tentative_try] "bad" =>> .fail) else ()) =>> (.heap.get ['tentative_try] >>= (\value -> (value == {}) =>> .r ()))
+refl.try_match_tentative_rollback = (try_match when {
+  _ =>? (.heap.set ['tentative_match] "bad" =>> .fail);
+  {} <- .heap.get ['tentative_match] => ();
+})
 ordinary = "ordinary"
 "#;
     let (assembler, context, module, diagnostics) =

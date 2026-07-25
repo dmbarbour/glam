@@ -454,7 +454,9 @@ impl FileNameAnalysis {
         locals: &mut Vec<String>,
     ) {
         match outcome {
-            MatchOutcome::Value { line, expression } => {
+            MatchOutcome::Result {
+                line, expression, ..
+            } => {
                 self.visit_expr(expression, *line, scope, locals);
             }
             MatchOutcome::Nested(arms) => self.visit_when_arms(arms, scope, locals),

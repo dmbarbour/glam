@@ -157,6 +157,7 @@ pub enum SyntaxGuardClause {
 pub struct IfExpr {
     pub mode: ConditionalMode,
     pub guards: Vec<SyntaxGuardClause>,
+    pub then_mode: ConditionalResultMode,
     pub then_result: Box<SyntaxExpr>,
     pub else_result: Box<SyntaxExpr>,
 }
@@ -165,6 +166,12 @@ pub struct IfExpr {
 pub enum ConditionalMode {
     Pure,
     Host,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionalResultMode {
+    Ordinary,
+    Tentative,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -197,7 +204,11 @@ pub struct WhenArm {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum MatchOutcome {
-    Value { line: usize, expression: SyntaxExpr },
+    Result {
+        line: usize,
+        mode: ConditionalResultMode,
+        expression: SyntaxExpr,
+    },
     Nested(Vec<WhenArm>),
 }
 

@@ -279,6 +279,11 @@ their detailed scheduling and representation contracts.
   handler instead of using the cached isolated pure runner. Consequently host
   effects and transactional rollback are available; exhausted `try_match`
   remains `.fail`, while required `else` keeps `try` total.
+- Ordinary `then`/`=>` results are staged with compiler-owned `.r`; tentative
+  `then?`/`=>?` results are emitted as effect operations directly. A tentative
+  `.fail` therefore falls through under the same root `.cut`. Keep this as an
+  explicit result mode through syntax and resolved choice IR rather than
+  inferring it from the result expression.
 - Recursive do is never implicit. A direct `abstract Name, ...` step delimits
   one independently completable standard-effect `.fix` per name, ending at
   that name's fulfillment. Per-name intervals lower sequentially or

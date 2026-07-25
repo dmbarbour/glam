@@ -367,8 +367,8 @@ do
 
 ```
 # Current bootstrap: prefix `if`/`try`, subject `match`/`try_match`,
-# guard-only `match when`/`try_match when`, and hierarchical choices.
-# Postfix `if` and tentative results remain target syntax.
+# guard-only `match when`/`try_match when`, hierarchical choices, and
+# tentative `then?`/`=>?` results. Postfix `if` remains target syntax.
 if C then A else B
 A if C else B
 if (a,b) = Expr and a > b then A else B     # C is guard: patterns + effects + 'and'
@@ -398,7 +398,8 @@ try_match when ...                  # guard-only host search
 
 if C then? .r A else B              # tentative choice: branch must
 if C then? .fail else B             #   explicitly .r Result or .fail
-match Expr with P =>? ...           # tentative arrow: result returns or fails
+match Expr with P =>? .r Result     # tentative arrow: direct effect result
+try C then? HostOperation else B    # host effects share the same root cut
 ```
 
 ```

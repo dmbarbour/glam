@@ -14,6 +14,7 @@ pub(super) struct GuardChoiceArm<'a> {
     pub(super) line: usize,
     pub(super) guards: &'a [SyntaxGuardClause],
     pub(super) result_line: usize,
+    pub(super) result_mode: ConditionalResultMode,
     pub(super) result: &'a SyntaxExpr,
 }
 
@@ -28,6 +29,7 @@ struct ResolvedAlternative {
 
 enum ResolvedChoiceOutcome {
     Value(ResolvedExpr<Value>),
+    Effect(ResolvedExpr<Value>),
     Nested(ResolvedChoice),
 }
 
@@ -36,6 +38,7 @@ struct ChoiceArmSpec<'a> {
     guards: &'a [SyntaxGuardClause],
     line: usize,
     result_line: usize,
+    result_mode: ConditionalResultMode,
     result: &'a SyntaxExpr,
     unit_assertion_context: &'static str,
 }
@@ -92,12 +95,14 @@ pub(super) fn lower_if_expr_resolved(
             line,
             guards: &if_expr.guards,
             result_line: line,
+            result_mode: if_expr.then_mode,
             result: &if_expr.then_result,
         },
         GuardChoiceArm {
             line,
             guards: &[],
             result_line: line,
+            result_mode: ConditionalResultMode::Ordinary,
             result: &if_expr.else_result,
         },
     ];
@@ -169,6 +174,7 @@ fn resolve_guard_choice(
                 guards: alternative.guards,
                 line: alternative.line,
                 result_line: alternative.result_line,
+                result_mode: alternative.result_mode,
                 result: alternative.result,
                 unit_assertion_context: "conditional guard",
             },
@@ -207,10 +213,11 @@ fn resolve_alternative(
         scope,
         locals,
     )?;
-    Ok(ResolvedAlternative {
-        steps,
-        outcome: ResolvedChoiceOutcome::Value(result),
-    })
+    let outcome = match arm.result_mode {
+        ConditionalResultMode::Ordinary => ResolvedChoiceOutcome::Value(result),
+        ConditionalResultMode::Tentative => ResolvedChoiceOutcome::Effect(result),
+    };
+    Ok(ResolvedAlternative { steps, outcome })
 }
 
 fn resolve_match_choice(
@@ -292,10 +299,15 @@ fn resolve_match_outcome(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedChoiceOutcome, Diagnostic> {
     match outcome {
-        MatchOutcome::Value { line, expression } => {
-            syntax_expr_to_resolved_in_semantic_scope(expression, *line, context, scope, locals)
-                .map(ResolvedChoiceOutcome::Value)
-        }
+        MatchOutcome::Result {
+            line,
+            mode,
+            expression,
+        } => syntax_expr_to_resolved_in_semantic_scope(expression, *line, context, scope, locals)
+            .map(|result| match mode {
+                ConditionalResultMode::Ordinary => ResolvedChoiceOutcome::Value(result),
+                ConditionalResultMode::Tentative => ResolvedChoiceOutcome::Effect(result),
+            }),
         MatchOutcome::Nested(arms) => {
             resolve_when_choice(arms, context, scope, locals).map(ResolvedChoiceOutcome::Nested)
         }
@@ -361,6 +373,7 @@ impl ResolvedChoiceOutcome {
     fn emit(self) -> ResolvedExpr<Value> {
         match self {
             Self::Value(result) => effect_call_resolved("r", [result]),
+            Self::Effect(result) => result,
             Self::Nested(choice) => choice.emit_search(),
         }
     }
@@ -389,6 +402,7 @@ mod tests {
             line: 1,
             guards: &[],
             result_line: 1,
+            result_mode: ConditionalResultMode::Ordinary,
             result,
         }
     }
@@ -431,6 +445,21 @@ mod tests {
     }
 
     #[test]
+    fn tentative_results_are_emitted_as_effects_without_an_automatic_return() {
+        let result = SyntaxExpr::Effect(vec!["fail".to_owned()]);
+        assert_eq!(
+            resolve(&[GuardChoiceArm {
+                line: 1,
+                guards: &[],
+                result_line: 1,
+                result_mode: ConditionalResultMode::Tentative,
+                result: &result,
+            }]),
+            effect_call_resolved("cut", [lower_effect_expr_resolved("fail")])
+        );
+    }
+
+    #[test]
     fn pass_guard_adds_no_semantic_step() {
         let guards = [SyntaxGuardClause::Pass];
         let result = number(1);
@@ -439,6 +468,7 @@ mod tests {
                 line: 1,
                 guards: &guards,
                 result_line: 1,
+                result_mode: ConditionalResultMode::Ordinary,
                 result: &result,
             }]),
             resolve(&[pass(&result)])
@@ -482,6 +512,7 @@ mod tests {
                 line: 2,
                 guards: &guards,
                 result_line: 3,
+                result_mode: ConditionalResultMode::Ordinary,
                 result: &result,
             }],
             &context,
@@ -528,6 +559,7 @@ mod tests {
             line: 2,
             guards: &guards,
             result_line: 3,
+            result_mode: ConditionalResultMode::Ordinary,
             result: &result,
         }]);
 
@@ -555,12 +587,14 @@ mod tests {
                     line: 2,
                     guards: &first_guards,
                     result_line: 3,
+                    result_mode: ConditionalResultMode::Ordinary,
                     result: &first_result,
                 },
                 GuardChoiceArm {
                     line: 4,
                     guards: &second_guards,
                     result_line: 5,
+                    result_mode: ConditionalResultMode::Ordinary,
                     result: &second_result,
                 },
             ],
@@ -595,6 +629,7 @@ mod tests {
                 pattern: SyntaxPattern::wildcard(),
                 value: number(73),
             }],
+            then_mode: ConditionalResultMode::Ordinary,
             then_result: Box::new(number(1)),
             else_result: Box::new(number(2)),
         };
@@ -622,6 +657,7 @@ mod tests {
         let host_if = IfExpr {
             mode: ConditionalMode::Host,
             guards: vec![SyntaxGuardClause::Pass],
+            then_mode: ConditionalResultMode::Ordinary,
             then_result: Box::new(number(1)),
             else_result: Box::new(number(2)),
         };
@@ -664,8 +700,9 @@ mod tests {
                         )),
                     },
                     guards: Vec::new(),
-                    outcome: MatchOutcome::Value {
+                    outcome: MatchOutcome::Result {
                         line: 1,
+                        mode: ConditionalResultMode::Ordinary,
                         expression: number(2),
                     },
                 },
@@ -673,8 +710,9 @@ mod tests {
                     line: 2,
                     pattern: SyntaxPattern::wildcard(),
                     guards: Vec::new(),
-                    outcome: MatchOutcome::Value {
+                    outcome: MatchOutcome::Result {
                         line: 2,
+                        mode: ConditionalResultMode::Ordinary,
                         expression: number(3),
                     },
                 },
@@ -718,16 +756,18 @@ mod tests {
                     WhenArm {
                         line: 2,
                         guards: vec![SyntaxGuardClause::Pass],
-                        outcome: MatchOutcome::Value {
+                        outcome: MatchOutcome::Result {
                             line: 2,
+                            mode: ConditionalResultMode::Ordinary,
                             expression: SyntaxExpr::Name("value".to_owned()),
                         },
                     },
                     WhenArm {
                         line: 3,
                         guards: vec![SyntaxGuardClause::Pass],
-                        outcome: MatchOutcome::Value {
+                        outcome: MatchOutcome::Result {
                             line: 3,
+                            mode: ConditionalResultMode::Ordinary,
                             expression: number(0),
                         },
                     },

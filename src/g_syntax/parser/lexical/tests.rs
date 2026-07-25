@@ -237,12 +237,13 @@ fn lexical_boundaries_preserve_names_numbers_symbols_and_adjacency() {
             ],
         ),
         (
-            "::= >>= >=> =>> := <- -> !> <! >= == <> =< >> << |> <| ++",
+            "::= >>= >=> =>> =>? := <- -> !> <! >= == <> =< >> << |> <| ++",
             vec![
                 "symbol:::=",
                 "symbol:>>=",
                 "symbol:>=>",
                 "symbol:=>>",
+                "symbol:=>?",
                 "symbol::=",
                 "symbol:<-",
                 "symbol:->",

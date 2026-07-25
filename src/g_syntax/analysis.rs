@@ -599,7 +599,9 @@ fn analyze_outcome_locals(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     match outcome {
-        MatchOutcome::Value { line, expression } => {
+        MatchOutcome::Result {
+            line, expression, ..
+        } => {
             mark_used_locals(expression, locals, used);
             analyze_expr_locals(expression, *line, diagnostics);
         }
@@ -754,7 +756,7 @@ fn mark_used_outcome_branch(
         });
     }
     match outcome {
-        MatchOutcome::Value { expression, .. } => {
+        MatchOutcome::Result { expression, .. } => {
             mark_used_locals(expression, &combined, &mut combined_used);
         }
         MatchOutcome::Nested(arms) => {
@@ -768,7 +770,7 @@ fn mark_used_outcome_branch(
 
 fn mark_used_prior_alias_in_outcome(outcome: &MatchOutcome, alias: Option<&str>, used: &mut bool) {
     match outcome {
-        MatchOutcome::Value { expression, .. } => mark_used_prior_alias(expression, alias, used),
+        MatchOutcome::Result { expression, .. } => mark_used_prior_alias(expression, alias, used),
         MatchOutcome::Nested(arms) => {
             for arm in arms {
                 for guard in &arm.guards {

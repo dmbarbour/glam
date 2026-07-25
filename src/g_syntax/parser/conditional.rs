@@ -5,8 +5,8 @@
 //! enclosing conditional.
 
 use crate::g_syntax::{
-    ConditionalMode, Diagnostic, IfExpr, MatchArm, MatchExpr, MatchOutcome, MatchWhenExpr,
-    SyntaxExpr, WhenArm,
+    ConditionalMode, ConditionalResultMode, Diagnostic, IfExpr, MatchArm, MatchExpr, MatchOutcome,
+    MatchWhenExpr, SyntaxExpr, WhenArm,
 };
 
 use super::expression_context::{ExpressionContext, ParsedExpression};
@@ -24,6 +24,13 @@ type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 enum IfPhase {
     Guards,
     Then,
+}
+
+#[derive(Clone, Copy)]
+struct ThenBoundary {
+    keyword: usize,
+    result_start: usize,
+    mode: ConditionalResultMode,
 }
 
 pub(in crate::g_syntax::parser) fn parse_if_expression(
@@ -65,9 +72,9 @@ fn parse_if_like_expression(
 
     let end = conditional_hard_end(view, head_index);
     let owned = view_between(view, head_index, end);
-    let (then_index, else_index) = conditional_boundaries(owned, head_index, head)?;
-    let guards = trim_layout(view_between(owned, head_index + 1, then_index));
-    let then_result = trim_layout(view_between(owned, then_index + 1, else_index));
+    let (then_boundary, else_index) = conditional_boundaries(owned, head_index, head)?;
+    let guards = trim_layout(view_between(owned, head_index + 1, then_boundary.keyword));
+    let then_result = trim_layout(view_between(owned, then_boundary.result_start, else_index));
     let else_result = trim_layout(view_between(owned, else_index + 1, owned.range().end()));
 
     if is_layout_empty(guards) {
@@ -81,9 +88,15 @@ fn parse_if_like_expression(
         return Err(error_at_token(
             owned,
             owned
-                .token_at(then_index)
+                .token_at(then_boundary.keyword)
                 .expect("selected `then` belongs to the conditional"),
-            format!("{head} expression requires a result after `then`"),
+            format!(
+                "{head} expression requires a result after `{}`",
+                match then_boundary.mode {
+                    ConditionalResultMode::Ordinary => "then",
+                    ConditionalResultMode::Tentative => "then?",
+                }
+            ),
         ));
     }
     if is_layout_empty(else_result) {
@@ -104,6 +117,7 @@ fn parse_if_like_expression(
         SyntaxExpr::If(IfExpr {
             mode,
             guards,
+            then_mode: then_boundary.mode,
             then_result: Box::new(then_result),
             else_result: Box::new(else_result),
         }),
@@ -301,14 +315,21 @@ fn split_choice_arm<'lex, 'source>(
         view.subview(first_line.tokens())
             .expect("choice arm first line remains inside its view"),
     );
-    let arrows = top_level_symbols(first, "=>");
+    let arrows = first
+        .top_level()
+        .filter_map(|indexed| match indexed.token().kind() {
+            TokenKind::Symbol("=>") => Some((indexed.index(), ConditionalResultMode::Ordinary)),
+            TokenKind::Symbol("=>?") => Some((indexed.index(), ConditionalResultMode::Tentative)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     if arrows.len() > 1 {
         return Err(error_at_view(
             first,
-            format!("{label} permits exactly one top-level `=>`"),
+            format!("{label} permits exactly one top-level `=>` or `=>?`"),
         ));
     }
-    if let Some(arrow) = arrows.first().copied() {
+    if let Some((arrow, mode)) = arrows.first().copied() {
         let head = trim_layout(view_between(first, first.range().start(), arrow));
         let result = trim_layout(view_between(view, arrow + 1, view.range().end()));
         if is_layout_empty(head) {
@@ -325,7 +346,14 @@ fn split_choice_arm<'lex, 'source>(
         }
         let line = line_of_view(result);
         let expression = parse_expression_in_context(result, context.child_owner(result))?;
-        return Ok((head, MatchOutcome::Value { line, expression }));
+        return Ok((
+            head,
+            MatchOutcome::Result {
+                line,
+                mode,
+                expression,
+            },
+        ));
     }
 
     let nested_when = top_level_contextual_names(first, "when")
@@ -334,7 +362,7 @@ fn split_choice_arm<'lex, 'source>(
         .ok_or_else(|| {
             error_at_view(
                 first,
-                format!("{label} requires `=>` or a trailing `when` child block"),
+                format!("{label} requires `=>`, `=>?`, or a trailing `when` child block"),
             )
         })?;
     let head = trim_layout(view_between(first, first.range().start(), nested_when));
@@ -388,7 +416,8 @@ fn choice_member_views<'lex, 'source>(
         let after_group = trim_layout(view_between(view, close + 1, view.range().end()));
         let group_is_member_head = brace_can_start_member
             && after_group.first_significant().is_some_and(|(_, token)| {
-                matches!(token.kind(), TokenKind::Symbol("=>")) || token_is_name(token, "when")
+                matches!(token.kind(), TokenKind::Symbol("=>" | "=>?"))
+                    || token_is_name(token, "when")
             });
         if !group_is_member_head {
             let body = view_between(view, body_start, close + 1);
@@ -433,15 +462,6 @@ fn top_level_contextual_names(view: TokenView<'_, '_>, expected: &str) -> Vec<us
         .collect()
 }
 
-fn top_level_symbols(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
-    view.top_level()
-        .filter(|indexed| {
-            matches!(indexed.token().kind(), TokenKind::Symbol(symbol) if *symbol == expected)
-        })
-        .map(|indexed| indexed.index())
-        .collect()
-}
-
 fn line_of_view(view: TokenView<'_, '_>) -> usize {
     view.first_significant()
         .and_then(|(_, token)| view.line_at_span(token.span()))
@@ -452,7 +472,7 @@ fn conditional_boundaries(
     view: TokenView<'_, '_>,
     head_index: usize,
     head: &str,
-) -> ParseResult<(usize, usize)> {
+) -> ParseResult<(ThenBoundary, usize)> {
     let mut phases = vec![IfPhase::Guards];
     let mut outer_then = None;
 
@@ -475,7 +495,19 @@ fn conditional_boundaries(
                 }
                 *phase = IfPhase::Then;
                 if phases.len() == 1 {
-                    outer_then = Some(indexed.index());
+                    let tentative = view.token_at(indexed.index() + 1).is_some_and(|token| {
+                        token.leading() == LeadingTrivia::Joint
+                            && matches!(token.kind(), TokenKind::Symbol("?"))
+                    });
+                    outer_then = Some(ThenBoundary {
+                        keyword: indexed.index(),
+                        result_start: indexed.index() + usize::from(tentative) + 1,
+                        mode: if tentative {
+                            ConditionalResultMode::Tentative
+                        } else {
+                            ConditionalResultMode::Ordinary
+                        },
+                    });
                 }
             }
             TokenKind::Name("else") => {
@@ -599,6 +631,7 @@ mod tests {
             panic!("prefix syntax should produce an if expression");
         };
         assert_eq!(if_expr.mode, ConditionalMode::Pure);
+        assert_eq!(if_expr.then_mode, ConditionalResultMode::Ordinary);
         assert_eq!(if_expr.guards.len(), 2);
         assert!(matches!(
             &if_expr.guards[0],
@@ -613,6 +646,52 @@ mod tests {
         assert!(matches!(
             if_expr.else_result.as_ref(),
             SyntaxExpr::Number(_)
+        ));
+    }
+
+    #[test]
+    fn tentative_result_markers_are_owned_by_their_conditional_branches() {
+        let SyntaxExpr::If(if_expr) = parse("if _ then? .r 1 else 2") else {
+            panic!("tentative prefix syntax should produce an if expression");
+        };
+        assert_eq!(if_expr.then_mode, ConditionalResultMode::Tentative);
+        assert!(matches!(
+            if_expr.then_result.as_ref(),
+            SyntaxExpr::Apply(_, _)
+        ));
+
+        let SyntaxExpr::Match(subject) = parse("match value with { 1 =>? .fail; _ => 2; }") else {
+            panic!("tentative arrow syntax should produce a match expression");
+        };
+        assert!(matches!(
+            subject.arms[0].outcome,
+            MatchOutcome::Result {
+                mode: ConditionalResultMode::Tentative,
+                ..
+            }
+        ));
+        assert!(matches!(
+            subject.arms[1].outcome,
+            MatchOutcome::Result {
+                mode: ConditionalResultMode::Ordinary,
+                ..
+            }
+        ));
+
+        let SyntaxExpr::MatchWhen(nested) =
+            parse("match when { _ when { _ =>? .fail; _ => 3; }; }")
+        else {
+            panic!("nested tentative syntax should preserve its choice tree");
+        };
+        let MatchOutcome::Nested(children) = &nested.arms[0].outcome else {
+            panic!("outer arm should own child alternatives");
+        };
+        assert!(matches!(
+            children[0].outcome,
+            MatchOutcome::Result {
+                mode: ConditionalResultMode::Tentative,
+                ..
+            }
         ));
     }
 

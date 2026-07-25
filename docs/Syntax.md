@@ -1355,6 +1355,11 @@ The motive for this is to support refactoring of conditional *structures*, facto
 
 The `then?` branch has access to the same effects as guard conditions, and must explicitly return the branch result or fail. This isn't convenient: we manually wrap `E2` and `E3` (with `.r`) and add `.fail` on the `else` branch. But it is possible, and it generalizes. 
 
+The effectful `try` and `try_match` variants use the same `then?` and `=>?`
+markers. Their tentative operation runs in the ambient host handler, and a
+failed operation rolls back before the next sibling is attempted under the
+conditional's root `.cut`.
+
 ### Match
 
 I borrow a lot of inspiration from Haskell's syntax for `match`. Common use cases are basically the same.
