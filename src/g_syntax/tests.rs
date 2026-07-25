@@ -3466,7 +3466,10 @@ fn flat_match_supports_patterns_guards_and_ordered_fallback() {
 fn flat_match_exhaustion_and_selected_result_errors_are_distinct() {
     let parsed = parse(concat!(
         "language g0\n",
-        "asm.exhausted = match 1 with {}\n",
+        "asm.exhausted =\n",
+        "  match 1 with {}\n",
+        "asm.exhausted_when =\n",
+        "  match when {}\n",
         "asm.selected_error = match 1 with { 1 => 1 / 0; _ => \"fallback\"; }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
@@ -3479,7 +3482,13 @@ fn flat_match_exhaustion_and_selected_result_errors_are_distinct() {
         value_at_atom_path(&value, &["asm", "exhausted"])
             .expect("exhausted match binding should exist"),
     );
-    assert_eq!(exhausted.to_string(), "match exhausted");
+    assert_eq!(exhausted.to_string(), "match exhausted on line 3");
+
+    let exhausted_when = fully_evaluated_error(
+        value_at_atom_path(&value, &["asm", "exhausted_when"])
+            .expect("exhausted guard-only match binding should exist"),
+    );
+    assert_eq!(exhausted_when.to_string(), "match exhausted on line 5");
 
     let selected_error = fully_evaluated_error(
         value_at_atom_path(&value, &["asm", "selected_error"])

@@ -24,7 +24,9 @@ pub(super) fn apply(
         None if builtin == Builtin::IfResult => Err(EvalError::new(
             "if search exhausted despite its required `else` branch",
         )),
-        None => Err(EvalError::new("match exhausted")),
+        None => Err(EvalError::new(
+            "match search exhausted despite its compiler-provided fallback",
+        )),
     }
 }
 
@@ -86,6 +88,9 @@ mod tests {
     fn empty_match_result_reports_match_exhaustion() {
         let error =
             select(Builtin::MatchResult, vec![]).expect_err("an empty match should be diagnosed");
-        assert_eq!(error.to_string(), "match exhausted");
+        assert_eq!(
+            error.to_string(),
+            "match search exhausted despite its compiler-provided fallback"
+        );
     }
 }

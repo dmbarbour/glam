@@ -1517,6 +1517,18 @@ complete match-arm pattern unambiguous, so only `do` bindings and nested
 pattern positions require the outer parentheses. If users want to run the
 predicate after the match, use `(Pattern as tmp when Pred tmp)` instead.
 
+### Exhaustion
+
+An ordinary pure `match` commits to the first complete successful path. If no
+path succeeds, observing the result reports `match exhausted on line N`, using
+the source line where the enclosing `match` begins. A rejected component or
+guard is ordinary `.fail`; the diagnostic does not select or rank a “closest”
+failed arm.
+
+An evaluator error raised while running a view or guard remains that evaluator
+error. Likewise, an error in the selected result does not cause fallback to a
+later arm.
+
 ### Open Matches
 
 The starred match forms omit the complete match's implicit `.cut`.

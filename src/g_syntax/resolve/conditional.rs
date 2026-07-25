@@ -115,14 +115,13 @@ pub(super) fn lower_if_expr_resolved(
 
 pub(super) fn lower_match_expr_resolved(
     match_expr: &MatchExpr,
-    line: usize,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let subject = syntax_expr_to_resolved_in_semantic_scope(
         &match_expr.subject,
-        line,
+        match_expr.line,
         context,
         scope,
         locals,
@@ -132,7 +131,7 @@ pub(super) fn lower_match_expr_resolved(
     let resolved = (|| {
         let selected =
             resolve_match_choice(&match_expr.arms, subject_binding, context, scope, locals)?
-                .emit_match(match_expr.mode, match_expr.commitment);
+                .emit_match(match_expr.mode, match_expr.commitment, match_expr.line);
         Ok(ResolvedExpr::apply(
             ResolvedExpr::lambda(vec![subject_binding], selected),
             [subject],
@@ -149,8 +148,11 @@ pub(super) fn lower_match_when_expr_resolved(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     Ok(
-        resolve_when_choice(&match_when.arms, context, scope, locals)?
-            .emit_match(match_when.mode, match_when.commitment),
+        resolve_when_choice(&match_when.arms, context, scope, locals)?.emit_match(
+            match_when.mode,
+            match_when.commitment,
+            match_when.line,
+        ),
     )
 }
 
@@ -339,10 +341,15 @@ fn resolve_prefix_steps(
 }
 
 impl ResolvedChoice {
-    fn emit_match(self, mode: ConditionalMode, commitment: MatchCommitment) -> ResolvedExpr<Value> {
+    fn emit_match(
+        self,
+        mode: ConditionalMode,
+        commitment: MatchCommitment,
+        line: usize,
+    ) -> ResolvedExpr<Value> {
         match (mode, commitment) {
             (ConditionalMode::Pure, MatchCommitment::Cut) => {
-                compiler_values::run_pure_match_resolved(self.emit())
+                compiler_values::run_pure_match_resolved(self.emit_search(), line)
             }
             (ConditionalMode::Pure, MatchCommitment::Open) => {
                 compiler_values::run_pure_open_match_resolved(self.emit_search())
@@ -681,6 +688,7 @@ mod tests {
         assert!(is_root_effect_call(&resolved_if, "cut"));
 
         let host_match_when = MatchWhenExpr {
+            line: 1,
             mode: ConditionalMode::Host,
             commitment: MatchCommitment::Cut,
             arms: Vec::new(),
@@ -702,6 +710,7 @@ mod tests {
         let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
 
         let host = MatchWhenExpr {
+            line: 1,
             mode: ConditionalMode::Host,
             commitment: MatchCommitment::Open,
             arms: Vec::new(),
@@ -716,6 +725,7 @@ mod tests {
         assert_eq!(resolved_host, lower_effect_expr_resolved("fail"));
 
         let pure = MatchWhenExpr {
+            line: 1,
             mode: ConditionalMode::Pure,
             commitment: MatchCommitment::Open,
             arms: Vec::new(),
@@ -737,6 +747,7 @@ mod tests {
     #[test]
     fn subject_match_resolves_the_subject_and_each_result_once() {
         let match_expr = MatchExpr {
+            line: 1,
             mode: ConditionalMode::Pure,
             commitment: MatchCommitment::Cut,
             subject: Box::new(number(73)),
@@ -771,7 +782,6 @@ mod tests {
         let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
         let resolved = lower_match_expr_resolved(
             &match_expr,
-            1,
             &context,
             &scope.resolved(),
             &mut ResolverContext::default(),
@@ -790,6 +800,7 @@ mod tests {
             Box::new(number(73)),
         );
         let match_expr = MatchExpr {
+            line: 1,
             mode: ConditionalMode::Pure,
             commitment: MatchCommitment::Cut,
             subject: Box::new(number(74)),
@@ -828,7 +839,6 @@ mod tests {
         let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
         let resolved = lower_match_expr_resolved(
             &match_expr,
-            1,
             &context,
             &scope.resolved(),
             &mut ResolverContext::default(),

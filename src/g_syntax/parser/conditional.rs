@@ -294,6 +294,7 @@ fn parse_match_like_expression(
     } else {
         head.to_owned()
     };
+    let line = view.line_at_span(head_token.span()).unwrap_or(1);
 
     let after_head = trim_layout(view_between(view, body_start, view.range().end()));
     if let Some((when_index, when_token)) = after_head.first_significant()
@@ -314,6 +315,7 @@ fn parse_match_like_expression(
             .collect::<ParseResult<Vec<_>>>()?;
         return Ok(ParsedExpression::new(
             SyntaxExpr::MatchWhen(MatchWhenExpr {
+                line,
                 mode,
                 commitment,
                 arms,
@@ -363,6 +365,7 @@ fn parse_match_like_expression(
         .collect::<ParseResult<Vec<_>>>()?;
     Ok(ParsedExpression::new(
         SyntaxExpr::Match(MatchExpr {
+            line,
             mode,
             commitment,
             subject: Box::new(subject),

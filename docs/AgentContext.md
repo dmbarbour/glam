@@ -265,9 +265,12 @@ their detailed scheduling and representation contracts.
   optional guards an isolated sibling scope. Cached closed compiler helpers
   run pure searches and apply syntax-specific result policies: `if` has a
   required fallback, while an empty or exhausted `match` reports
-  `match exhausted`. Guard and pattern captures are progressively visible
-  only in their result arm. Missing host effects and selected-result failures
-  are evaluator errors, not fallback.
+  `match exhausted on line N`, where `N` is the enclosing match's source line.
+  Lowering supplies that lazy terminal result before the root cut; the generic
+  result selector's empty-list error is only a compiler-invariant diagnostic.
+  Guard and pattern captures are progressively visible only in their result
+  arm. Missing host effects and selected-result failures are evaluator errors,
+  not fallback.
 - `match when` is the distinct guard-only form. In either match form, an arm
   ending in `when` owns deeper layout or braced child arms. The resolved
   parent pattern/guard step stream wraps the child `.alt` search directly:

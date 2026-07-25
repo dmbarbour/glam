@@ -164,8 +164,16 @@ pub(in crate::g_syntax) fn run_pure_conditional_resolved(
 }
 
 pub(in crate::g_syntax) fn run_pure_match_resolved(
-    operation: ResolvedExpr<Value>,
+    search: ResolvedExpr<Value>,
+    line: usize,
 ) -> ResolvedExpr<Value> {
+    let exhausted = effect_call(
+        "r",
+        [ResolvedExpr::Embedded(Value::error(format!(
+            "match exhausted on line {line}"
+        )))],
+    );
+    let operation = effect_call("cut", [effect_call("alt", [search, exhausted])]);
     ResolvedExpr::apply(
         ResolvedExpr::Embedded(
             COMPILER_VALUES

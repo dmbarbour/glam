@@ -182,6 +182,7 @@ pub enum ConditionalResultMode {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct MatchExpr {
+    pub line: usize,
     pub mode: ConditionalMode,
     pub commitment: MatchCommitment,
     pub subject: Box<SyntaxExpr>,
@@ -190,6 +191,7 @@ pub struct MatchExpr {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct MatchWhenExpr {
+    pub line: usize,
     pub mode: ConditionalMode,
     pub commitment: MatchCommitment,
     pub arms: Vec<WhenArm>,

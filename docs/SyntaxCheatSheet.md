@@ -384,7 +384,7 @@ match Expr with
     _ => Default
 
 match Expr with { Pattern1 => Result1; _ => Default; }
-match Expr with {}                 # valid empty search; errors on exhaustion
+match Expr with {}                 # error: match exhausted on its source line
 match* Expr with ...                # lazy list of every successful result
 match* Expr with {}                 # []
 
