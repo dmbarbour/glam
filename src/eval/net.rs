@@ -293,12 +293,12 @@ pub(super) fn lower_core_callable(
         )))),
         Value::PartialBuiltin(call) => Ok(Callable::Operator(builtin_operator(call))),
         value @ Value::Dict(_) => Ok(Callable::Operator(applicable_operator(value))),
-        Value::Atom(_)
+        value @ (Value::Atom(_)
         | Value::Number(_)
         | Value::Binary(_)
         | Value::List(_)
         | Value::Function(_)
-        | Value::Opaque(_) => Err(EvalError::new("application requires a function value")),
+        | Value::Opaque(_)) => Err(non_callable_error(&value)),
         Value::Lazy(_) | Value::Promised(_) => {
             unreachable!("callable value shell must be fully forced")
         }

@@ -922,7 +922,10 @@ fn checked_net_builder_constructs_an_opaque_identity_net() {
     let error = assembler
         .apply(&identity, [Value::integer(42)])
         .expect_err("raw nets require an explicit lambda-style arity bridge");
-    assert_eq!(error.to_string(), "application requires a function value");
+    assert_eq!(
+        error.to_string(),
+        "application requires a function value, received Net"
+    );
 }
 
 #[test]

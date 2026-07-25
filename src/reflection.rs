@@ -1522,7 +1522,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     if value != unit_value() {
                         return Err(TaskError::new(format!(
                             "effect task returned {}; expected unit",
-                            value.kind_name()
+                            value.diagnostic_kind_name()
                         )));
                     }
                     branch.control.sequence.pop();
@@ -2252,7 +2252,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for AnnotationEffectTask<S> {
             }
             EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Failed(Arc::from(format!(
                 "effect task returned {}; expected unit",
-                value.as_core().kind_name()
+                value.as_core().diagnostic_kind_name()
             ))),
             EffectTaskPoll::Failed(error) => {
                 EvaluationMachinePoll::Failed(Arc::from(error.to_string()))

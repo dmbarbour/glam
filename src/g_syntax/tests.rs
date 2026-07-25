@@ -3261,9 +3261,10 @@ fn prefix_if_preserves_selected_result_laziness_and_guard_errors() {
         value_at_atom_path(&value, &["asm", "unsupported_effect"])
             .expect("unsupported-effect binding should exist"),
     );
-    assert!(
-        unsupported.to_string().contains("function value"),
-        "the isolated conditional handler must reject its missing host capability: {unsupported}"
+    assert_eq!(
+        unsupported.to_string(),
+        "application requires a function value, received Undefined",
+        "the isolated conditional handler must identify its missing host capability as undefined"
     );
 }
 

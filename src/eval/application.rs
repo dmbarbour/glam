@@ -14,14 +14,14 @@ pub(super) fn apply_value(
             argument,
         ),
         Value::Function(function) => apply_function_values(context, function, vec![argument]),
-        Value::Dict(dict) => apply_dict_value(context, &dict, argument),
+        Value::Dict(dict) => apply_dict_value(context, dict, argument),
         Value::Lazy(thunk) => apply_value(context, eval_lazy(context, &thunk)?, argument),
         Value::Promised(promise) => apply_value(
             context,
             eval_value(context, &Value::Promised(promise))?,
             argument,
         ),
-        _ => Err(EvalError::new("application requires a function value")),
+        value => Err(non_callable_error(&value)),
     }
 }
 
@@ -91,7 +91,7 @@ pub(super) fn apply_function_values(
 
 pub(super) fn apply_dict_value(
     context: &EvalContext,
-    dict: &crate::core::Dict,
+    dict: crate::core::Dict,
     argument: Value,
 ) -> Result<Value, EvalError> {
     if let Some(function) = dict.tagged_payload(context, &keys::EFF)? {
@@ -106,7 +106,14 @@ pub(super) fn apply_dict_value(
         return apply_value(context, eval_value(context, function)?, argument);
     }
 
-    Err(EvalError::new("application requires a function value"))
+    Err(non_callable_error(&Value::Dict(dict)))
+}
+
+pub(super) fn non_callable_error(value: &Value) -> EvalError {
+    EvalError::new(format!(
+        "application requires a function value, received {}",
+        value.diagnostic_kind_name()
+    ))
 }
 
 pub(super) fn apply_effect_function_value(function: Value, argument: Value) -> Value {

@@ -18,7 +18,7 @@ pub(in crate::eval) fn assert_unit(
         return Ok(target.clone());
     }
 
-    let received = value.kind_name();
+    let received = value.diagnostic_kind_name();
     let message = match diagnostic_context {
         Some(diagnostic_context) => {
             let diagnostic_context = eval_value(context, diagnostic_context)?;

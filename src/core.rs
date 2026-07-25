@@ -924,12 +924,16 @@ fn list_to_key_items(list: &List) -> Option<Arc<[Key]>> {
 }
 
 impl Value {
-    pub(crate) fn kind_name(&self) -> &'static str {
+    /// Names the most useful semantic category for diagnostics without
+    /// changing the representation-oriented public value kind.
+    pub(crate) fn diagnostic_kind_name(&self) -> &'static str {
         match self {
+            Self::Atom(atom) if atom.key() == &*keys::UNIT => "Unit",
             Self::Atom(_) => "Atom",
             Self::Number(_) => "Number",
             Self::Binary(_) => "Binary",
             Self::List(_) => "List",
+            Self::Dict(dict) if dict.is_empty() => "Undefined",
             Self::Dict(_) => "Dict",
             Self::Builtin(_) | Self::PartialBuiltin(_) | Self::Function(_) => "Function",
             Self::Net(_) => "Net",

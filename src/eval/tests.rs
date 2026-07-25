@@ -125,7 +125,7 @@ fn early_function_data_is_left_to_ordinary_stuck_net_semantics() {
         )
         .unwrap_err()
         .to_string(),
-        "application requires a function value"
+        "application requires a function value, received Number"
     );
 }
 
@@ -2009,7 +2009,32 @@ fn effect_application_requires_singleton_eff_tag() {
     ))
     .unwrap_err();
 
-    assert_eq!(err.to_string(), "application requires a function value");
+    assert_eq!(
+        err.to_string(),
+        "application requires a function value, received Dict"
+    );
+}
+
+#[test]
+fn non_callable_application_reports_semantic_value_kinds() {
+    for (value, expected) in [
+        (
+            Value::Dict(Dict::new_sync()),
+            "application requires a function value, received Undefined",
+        ),
+        (
+            (*keys::UNIT_VALUE).clone(),
+            "application requires a function value, received Unit",
+        ),
+        (
+            n(42),
+            "application requires a function value, received Number",
+        ),
+    ] {
+        let error = apply_value(&test_context(), value, n(0))
+            .expect_err("applying a non-callable value should fail");
+        assert_eq!(error.to_string(), expected);
+    }
 }
 
 #[test]
@@ -2583,7 +2608,7 @@ fn assert_unit_builtin_uses_its_diagnostic_context() {
     .expect_err("non-unit assertion value should fail");
     assert_eq!(
         error.to_string(),
-        "test operation result: unit expected, received Dict"
+        "test operation result: unit expected, received Undefined"
     );
 }
 
