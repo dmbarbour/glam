@@ -835,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_match_patterns_accept_unparenthesized_views() {
+    fn complete_match_patterns_accept_unparenthesized_views_and_predicates() {
         let SyntaxExpr::Match(forward) = parse("match subject with { inspect -> value => value; }")
         else {
             panic!("source should produce a match expression");
@@ -853,6 +853,16 @@ mod tests {
         assert!(matches!(
             backward.arms[0].pattern.kind,
             SyntaxPatternKind::View { .. }
+        ));
+
+        let SyntaxExpr::Match(predicate) =
+            parse("match subject with { equals 42 value => value; }")
+        else {
+            panic!("source should produce a match expression");
+        };
+        assert!(matches!(
+            predicate.arms[0].pattern.kind,
+            SyntaxPatternKind::Predicate { .. }
         ));
     }
 

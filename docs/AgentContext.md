@@ -251,6 +251,9 @@ their detailed scheduling and representation contracts.
   applies its expression to the subject, binds the resulting effect, then
   matches the produced value. A predicate appends the original subject to its
   expression, requires unit success, then matches that unchanged subject.
+  Complete match-arm patterns may omit the usual outer parentheses around
+  either form because `=>` owns their exact range; `do` and nested patterns
+  retain the grouping requirement.
   Local `when` guards run after their enclosed pattern; `and`-separated effect,
   effect-bind, and value-bind clauses run left to right, and their captures
   remain visible after the complete guarded pattern succeeds. General `P as Q`

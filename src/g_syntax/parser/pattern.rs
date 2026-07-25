@@ -206,13 +206,16 @@ pub(in crate::g_syntax::parser) fn parse_pattern(
 /// Parses a pattern that owns its complete structural range.
 ///
 /// Match-arm `=>` gives the left side an unambiguous end, so a top-level view
-/// arrow does not need the parentheses required in do-binding positions.
+/// arrow or predicate application does not need the parentheses required in
+/// do-binding and nested-pattern positions.
 pub(in crate::g_syntax::parser) fn parse_complete_pattern(
     view: TokenView<'_, '_>,
 ) -> ParseResult<SyntaxPattern> {
     let view = trim_layout(view);
     if let Some(pattern) = parse_view_pattern(view) {
         pattern
+    } else if let Some(pattern) = parse_predicate_pattern(view) {
+        Ok(pattern)
     } else {
         parse_pattern(view)
     }

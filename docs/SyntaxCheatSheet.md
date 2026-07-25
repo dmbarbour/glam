@@ -458,6 +458,7 @@ View -> P => Result # whole match-arm view may omit outer parentheses
 (P <- View)
 (Nat n)             # predicate pattern: pass/fail, captures ORIGINAL input
 (Prefix "x-" rest)  # last arg is the pattern
+Prefix "x-" rest => Result # complete match arm may omit outer parentheses
 (P when Guard)      # local guard
 ```
 

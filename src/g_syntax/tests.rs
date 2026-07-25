@@ -3289,7 +3289,7 @@ fn flat_match_supports_patterns_guards_and_ordered_fallback() {
         "  increment -> value when value == 65 => \"view\"\n",
         "  _ => \"bad\"\n",
         "asm.predicate = match 66 with\n",
-        "  (equals 66 value) => value\n",
+        "  equals 66 value => value\n",
         "  _ => 0\n",
         "asm.guards = match 65 with\n",
         "  value when next = value + 1 and checked <- .r next and .r checked -> final and final == 66 => \"guards\"\n",

@@ -1400,19 +1400,17 @@ Several forms of guard clauses:
   - accept `.r Result when Pattern = Result`
 - `Pattern = Expr` - semantically equivalent to `Pattern <- .r Expr`, but
   lowers as a direct value binding without an actual `.r` request
-- `_` - eqv. to `.r ()` 
+- `_` - pass, eqv. to `.r ()`
 
-Guard clauses compose sequentially via 'and': `Guard (and Guard)*`. 
-
-This supports both booleans and effects via ad hoc polymorphism, but note that we do not *mix* effects into a boolean expression. 
+Guard clauses compose sequentially via 'and': `Guard (and Guard)*`. This is essentially the same as boolean 'and'.
 
 ### Pattern Matching
 
 Patterns offer a concise way of extracting data from similar structure. I'm borrowing or adapting a lot from Haskell here.
 
         Name                        # bind as local name 
-        _Name                         # don't warn if Name unused
-        _                             # drop unused data
+        _Name                       # don't warn if Name unused
+        _                           # drop unused data
         Pattern as Pattern          # many views of same element
         (Pattern)                   # scope control
 
@@ -1444,7 +1442,7 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         [x]++xs                     # we can use append notation in patterns
         xs++[x]                      
         [x0]++xs++[xN]
-        [x0]++([y]++ys)++[xN]      # middle slice runs an ordinary pattern
+        [x0]++([y]++ys)++[xN]       # middle slice runs an ordinary pattern
         # lhs++rhs                  # ILLEGAL - limit one variable sublist
 
         "foo"                       # match text
@@ -1462,6 +1460,7 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         (Pattern <- View)
         View -> Pattern => Result   # whole match-arm view may omit parens
         (Predicate Pattern)         # predicate patterns (special view)
+        Predicate Pattern => Result # whole match-arm predicate may omit parens
         (Pattern when Guard)        # local guards
 
 ### View Patterns
@@ -1495,11 +1494,28 @@ Predicate patterns are a specialized case of view patterns. The predicate is pas
         (UTF8 text)
         (Prefix "foo-" text)    # only last arg is pattern
 
+        # complete match-arm patterns may omit the outer parentheses
+        match Value with
+            Prefix "foo-" text => text
+
         # as a view pattern
         (p2v Pred -> Pattern)
             where p2v p x = do { p x; .r x }
 
-Consistent with view patterns, we forward the argument to the inner pattern only on pass, i.e. the predicate runs first. If users want to run the predicate after the match, use `(Pattern as tmp when Pred tmp)` instead. 
+Consistent with view patterns, we forward the argument to the inner pattern
+only on pass, i.e. the predicate runs first. The `=>` boundary makes the
+complete match-arm pattern unambiguous, so only `do` bindings and nested
+pattern positions require the outer parentheses. If users want to run the
+predicate after the match, use `(Pattern as tmp when Pred tmp)` instead.
+
+### Open Conditionals (Tentative)
+
+A viable extension is to support `match` or `try_match` without the implicit cut.
+
+* `match*` returns a lazy list of results
+* `try_match*` enables backtracking of the outcomes to an earlier cut
+
+These would be contextually useful.
 
 ## Loops
 
