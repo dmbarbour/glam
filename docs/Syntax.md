@@ -512,27 +512,17 @@ parentheses.
 
 Because `.r` is concise, users can directly write `.r f <! op1 <! op2`. No need for a `<$>` equivalent.
 
-## Macros
+## Macros (Tentative)
 
-In context of lazy loading, the compiler must *know* when a macro is being called. Two approaches: declare macros, e.g. a set of macros in `meta.*`, or a distinct invocation syntax. I favor the latter because it also lets readers locally recognize special forms. Proposed syntactic forms:
+Proposed syntactic form:
 
-        @(Expr)                 general form
-        @macro_name             short for @(_module.macro_name)
+        @macro.path
 
-The `@macro_name` form is preferred for user-defined macros, but `@(Expr)` form is more general. `Expr` must evaluate as an effect. The compiler provides an effects API to read and write source at flexible levels of abstraction (text or AST). Macros are parameterized in terms of effectfully reading their parameters, e.g. in `@foo arg1 arg2` we expect `@foo` to read its arguments.
+This searches for a macro definition at `_module.macro.path`. This definition should evaluate as an effect. The compiler provides an API to rewrite source following the invocation. This API respects scope: brackets, braces, parentheses, and indentation structure. A macro invoked in anchor position (e.g. toplevel or a do statement) is limited to reading one remaining expression, but may write many anchored steps. There is no countable observation of whitespace, and macros also cannot see other macro invocations; those are evaluated before observation. 
 
-There are several structural constraints enforced by the API: 
+The effects API may include features to simplify rewrites and integration: data embedding is not limited to texts and numbers, and opaque allocation of fresh local variables. 
 
-- macros cannot escape their scope (brackets, braces, parentheses, indentation)
-- macros cannot partially read or write an embedded text, whole chunks only
-- macros cannot read other macro invocations (instead, awaits macro output)
-- macros cannot read comments or count whitespace (whitespace is stretchy)
-
-These are enforced by restrictions on readers and writers, e.g. all reads or writes of parentheses are balanced pairs, and the `#` and `@` characters are processed before macros ever see them. Regarding flexible abstraction, macros may *write* a lazy thunk as an abstract embedded data AST node, which provides a simple means to move data from compile-time to assembly-time.
-
-There is no dedicated syntax for defining macros. It is convenient to define macros within objects: we need `_names` for inheritance and extraction, but we can use normal `name` internally to the object. With careful naming, we can also support an acceptable aesthetics without extraction, e.g. `@table.create`. Eventually, `@macro.rules` might help users define macros directly.
-
-*Aside:* Most conventional use cases for macros evaporate between lazy evaluation and first-class effects, but we still benefit from embedded DSLs or abstracting namespace boilerplate.
+*Aside:* Many use cases for macros are eliminated between lazy evaluation and first-class effects. One remaining use case is macro DSLs.
 
 ## Annotations
 
