@@ -29,6 +29,21 @@ pub(super) struct MacroInvocation {
     pub(super) input: MacroInput,
 }
 
+#[derive(Clone)]
+pub(super) struct OriginalMacroInvocation {
+    pub(super) id: usize,
+    pub(super) path: Vec<String>,
+    pub(super) start: usize,
+    pub(super) line: usize,
+}
+
+pub(super) struct DeclarationMacroWork {
+    line: usize,
+    invocations: Vec<OriginalMacroInvocation>,
+    text: String,
+    embedded_values: Vec<Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LogicalToken<'source> {
     kind: LogicalTokenKind<'source>,
@@ -175,10 +190,10 @@ impl<'source> LogicalSource<'source> {
     }
 }
 
-pub(super) fn find_macro_invocation(
+fn collect_macro_invocations(
     source: &LexedSource<'_>,
     declaration: &DeclarationSection,
-) -> Result<Option<MacroInvocation>, Diagnostic> {
+) -> Result<Vec<OriginalMacroInvocation>, Diagnostic> {
     let tokens = source.tokens();
     let range = declaration.tokens();
     let mut invocations = Vec::new();
@@ -218,43 +233,212 @@ pub(super) fn find_macro_invocation(
             path.push((*component).to_owned());
             index += 1;
         }
-        let input_start = tokens[index - 1].span().end();
-        let input_token_end = source
-            .groups()
-            .iter()
-            .filter_map(|group| {
-                let close = group.close_token()?;
-                (group.open_token() < invocation && invocation < close).then_some(close)
-            })
-            .min()
-            .unwrap_or(range.end);
-        let input_end = if input_token_end < range.end {
-            tokens[input_token_end].span().start()
-        } else {
-            declaration.span().end()
-        };
-        invocations.push(MacroInvocation {
+        invocations.push(OriginalMacroInvocation {
+            id: invocations.len(),
             path,
             start: tokens[invocation].span().start(),
-            input: macro_input(source, index..input_token_end, input_start, input_end)?,
+            line: source
+                .line_at_byte(tokens[invocation].span().start())
+                .unwrap_or(declaration.line()),
         });
     }
-    match invocations.len() {
-        0 => Ok(None),
-        1 => Ok(invocations.pop()),
-        _ => Err(Diagnostic::error(
-            declaration.line(),
-            "multiple macro invocations in one declaration require reverse expansion support",
-        )),
+    Ok(invocations)
+}
+
+impl DeclarationMacroWork {
+    pub(super) fn from_original(
+        source: &LexedSource<'_>,
+        declaration: &DeclarationSection,
+    ) -> Result<Option<Self>, Diagnostic> {
+        let mut invocations = collect_macro_invocations(source, declaration)?;
+        if invocations.is_empty() {
+            return Ok(None);
+        }
+        let declaration_start = declaration.span().start();
+        for invocation in &mut invocations {
+            invocation.start -= declaration_start;
+        }
+        invocations.sort_by_key(|invocation| std::cmp::Reverse(invocation.start));
+        let text = source
+            .source_slice(declaration.span())
+            .expect("declaration spans should remain within their source")
+            .to_owned();
+        Ok(Some(Self {
+            line: declaration.line(),
+            invocations,
+            text,
+            embedded_values: Vec::new(),
+        }))
+    }
+
+    pub(super) fn invocations(&self) -> &[OriginalMacroInvocation] {
+        &self.invocations
+    }
+
+    pub(super) fn current_invocation(
+        &self,
+        original: &OriginalMacroInvocation,
+    ) -> Result<MacroInvocation, Vec<Diagnostic>> {
+        let lexical = self.lexical()?;
+        let Some(declaration) = lexical.declarations().first() else {
+            return Err(vec![Diagnostic::error(
+                original.line,
+                format!(
+                    "macro invocation {} disappeared before it could expand",
+                    original.id
+                ),
+            )]);
+        };
+        let invocation =
+            macro_invocation_at(&lexical, declaration, original.start).map_err(|diagnostic| {
+                vec![Diagnostic::error(
+                    original.line,
+                    format!(
+                        "macro invocation {} became invalid: {}",
+                        original.id, diagnostic.message
+                    ),
+                )]
+            })?;
+        if invocation.path != original.path {
+            return Err(vec![Diagnostic::error(
+                original.line,
+                format!(
+                    "macro invocation {} changed from `{}` to `{}` before expansion",
+                    original.id,
+                    original.path.join("."),
+                    invocation.path.join(".")
+                ),
+            )]);
+        }
+        Ok(invocation)
+    }
+
+    pub(super) fn splice(
+        &mut self,
+        invocation: &MacroInvocation,
+        consumed_end: usize,
+        output: &[MacroOutput],
+        line: usize,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let (generated, embedded) = generated_output(output, line)?;
+        if !(invocation.start <= consumed_end && consumed_end <= self.text.len()) {
+            return Err(vec![Diagnostic::error(
+                line,
+                "macro reader produced an invalid source range",
+            )]);
+        }
+        if !self.text.is_char_boundary(invocation.start)
+            || !self.text.is_char_boundary(consumed_end)
+        {
+            return Err(vec![Diagnostic::error(
+                line,
+                "macro reader stopped outside a UTF-8 boundary",
+            )]);
+        }
+        let embedded_start = marker_count(&self.text[..invocation.start]);
+        let embedded_end =
+            embedded_start + marker_count(&self.text[invocation.start..consumed_end]);
+        self.text
+            .replace_range(invocation.start..consumed_end, &generated);
+        self.embedded_values
+            .splice(embedded_start..embedded_end, embedded);
+        Ok(())
+    }
+
+    pub(super) fn materialize(&self) -> (String, Vec<Value>) {
+        let mut source = "\n".repeat(self.line.saturating_sub(1));
+        source.push_str(&self.text);
+        (source, self.embedded_values.clone())
+    }
+
+    fn lexical(&self) -> Result<LexedSource<'_>, Vec<Diagnostic>> {
+        let lexical = lex_source(&self.text)
+            .replace_unknowns_with_embedded(EMBEDDED_MARKER, self.embedded_values.clone())
+            .map_err(|error| vec![Diagnostic::error(self.line, error)])?;
+        if lexical.has_errors() {
+            let mut diagnostics = lexical.diagnostics().to_vec();
+            for diagnostic in &mut diagnostics {
+                diagnostic.line += self.line - 1;
+            }
+            return Err(diagnostics);
+        }
+        Ok(lexical)
     }
 }
 
-pub(super) fn rewritten_declaration(
+fn macro_invocation_at(
     source: &LexedSource<'_>,
     declaration: &DeclarationSection,
-    invocation: &MacroInvocation,
-    consumed_end: usize,
+    start: usize,
+) -> Result<MacroInvocation, Diagnostic> {
+    let tokens = source.tokens();
+    let range = declaration.tokens();
+    let Some(invocation) = range.clone().find(|index| {
+        tokens[*index].span().start() == start
+            && matches!(tokens[*index].kind(), TokenKind::Symbol("@"))
+    }) else {
+        return Err(Diagnostic::error(
+            declaration.line(),
+            "macro invocation no longer starts on a token boundary",
+        ));
+    };
+    if !matches!(tokens[invocation].kind(), TokenKind::Symbol("@")) {
+        return Err(macro_head_error(source, tokens[invocation].span()));
+    }
+    let mut index = invocation + 1;
+    let Some(first) = tokens.get(index).filter(|_| index < range.end) else {
+        return Err(macro_head_error(source, tokens[invocation].span()));
+    };
+    if first.leading() != LeadingTrivia::Joint {
+        return Err(macro_head_error(source, tokens[invocation].span()));
+    }
+    let TokenKind::Name(first) = first.kind() else {
+        return Err(macro_head_error(source, tokens[invocation].span()));
+    };
+    let mut path = vec![(*first).to_owned()];
+    index += 1;
+    while index < range.end
+        && matches!(tokens[index].kind(), TokenKind::Symbol("."))
+        && tokens[index].leading() == LeadingTrivia::Joint
+    {
+        index += 1;
+        let Some(component) = tokens.get(index).filter(|_| index < range.end) else {
+            return Err(macro_head_error(source, tokens[invocation].span()));
+        };
+        if component.leading() != LeadingTrivia::Joint {
+            return Err(macro_head_error(source, tokens[invocation].span()));
+        }
+        let TokenKind::Name(component) = component.kind() else {
+            return Err(macro_head_error(source, tokens[invocation].span()));
+        };
+        path.push((*component).to_owned());
+        index += 1;
+    }
+    let input_start = tokens[index - 1].span().end();
+    let input_token_end = source
+        .groups()
+        .iter()
+        .filter_map(|group| {
+            let close = group.close_token()?;
+            (group.open_token() < invocation && invocation < close).then_some(close)
+        })
+        .min()
+        .unwrap_or(range.end);
+    let input_end = if input_token_end < range.end {
+        tokens[input_token_end].span().start()
+    } else {
+        declaration.span().end()
+    };
+    Ok(MacroInvocation {
+        path,
+        start,
+        input: macro_input(source, index..input_token_end, input_start, input_end)?,
+    })
+}
+
+fn generated_output(
     output: &[MacroOutput],
+    line: usize,
 ) -> Result<(String, Vec<Value>), Vec<Diagnostic>> {
     let mut generated = String::new();
     let mut embedded = Vec::new();
@@ -270,44 +454,23 @@ pub(super) fn rewritten_declaration(
     }
     if generated.contains(['\r', '\n']) {
         return Err(vec![Diagnostic::error(
-            declaration.line(),
+            line,
             "macro layout output is not available until layout expansion support",
         )]);
     }
     GeneratedText::classify(generated.clone()).map_err(|mut diagnostics| {
         for diagnostic in &mut diagnostics {
-            diagnostic.line += declaration.line() - 1;
+            diagnostic.line += line - 1;
         }
         diagnostics
     })?;
+    Ok((generated, embedded))
+}
 
-    let span = declaration.span();
-    if !(span.start() <= invocation.start
-        && invocation.start <= consumed_end
-        && consumed_end <= span.end())
-    {
-        return Err(vec![Diagnostic::error(
-            declaration.line(),
-            "macro reader produced an invalid source range",
-        )]);
-    }
-    let Some(prefix) = source.source().get(span.start()..invocation.start) else {
-        return Err(vec![Diagnostic::error(
-            declaration.line(),
-            "macro source prefix was not on a UTF-8 boundary",
-        )]);
-    };
-    let Some(suffix) = source.source().get(consumed_end..span.end()) else {
-        return Err(vec![Diagnostic::error(
-            declaration.line(),
-            "macro source suffix was not on a UTF-8 boundary",
-        )]);
-    };
-    let mut rewritten = "\n".repeat(declaration.line().saturating_sub(1));
-    rewritten.push_str(prefix);
-    rewritten.push_str(&generated);
-    rewritten.push_str(suffix);
-    Ok((rewritten, embedded))
+fn marker_count(text: &str) -> usize {
+    text.chars()
+        .filter(|scalar| *scalar == EMBEDDED_MARKER)
+        .count()
 }
 
 fn macro_input(

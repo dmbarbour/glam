@@ -491,3 +491,114 @@ fn macro_reader_must_balance_only_the_delimiters_it_opens() {
     .expect_err("a successful branch may not leave its input delimiter open");
     assert!(error.message().contains("input delimiter"));
 }
+
+#[test]
+fn declaration_macros_expand_right_to_left_and_share_the_evolving_view() {
+    let assembler = Assembler::default();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let _subscription = assembler
+        .diagnostic_bus()
+        .subscribe(DiagnosticMessages(observed.clone()));
+    let module = assembler
+        .module(["reverse_macro_test"])
+        .script(
+            "g",
+            r#"language g0
+import 'std
+meta.macro.env = {}
+meta.pass = .read.sep =>> .read.data >>= (\value -> .write.data value =>> .r ())
+meta.choose = .alt (.read.text "never" =>> .fail) (.read.sep =>> .read.data >>= (\value -> .write.data value =>> .r ()))
+meta.inner = .log 'info { msg:{ text:"inner once" } } =>> .write.data 42
+meta.left = .log 'info { msg:{ text:"left source order" } } =>> .write.text "40"
+meta.right = .log 'info { msg:{ text:"right source order" } } =>> .write.data 2
+forwarded = @meta.pass @meta.inner
+chosen = @meta.choose @meta.inner
+sum = @meta.left + @meta.right
+nested = list.at 0 [(@meta.right)]
+layout = list.at 1 [
+  @meta.left,
+  @meta.right]
+"#,
+        )
+        .build()
+        .expect("right-to-left source macros should compile");
+
+    for (name, expected) in [
+        ("forwarded", 42),
+        ("chosen", 42),
+        ("sum", 42),
+        ("nested", 2),
+        ("layout", 2),
+    ] {
+        let value = assembler
+            .get(module.value(), name)
+            .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
+        assert_eq!(
+            assembler
+                .evaluate(&value)
+                .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
+            PublicValue::integer(expected),
+        );
+    }
+
+    let messages = observed
+        .lock()
+        .expect("diagnostic observation mutex should not be poisoned");
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.as_str() == "inner once")
+            .count(),
+        2,
+        "each original inner invocation should execute exactly once"
+    );
+    let source_order = messages
+        .iter()
+        .filter(|message| message.contains("source order"))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        source_order,
+        [
+            "left source order",
+            "right source order",
+            "right source order",
+            "left source order",
+            "right source order",
+        ],
+        "direct macro diagnostics should publish in source order per declaration"
+    );
+}
+
+#[test]
+fn rightward_replacement_size_and_deletion_do_not_invalidate_left_invocations() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["stable_macro_worklist_test"])
+        .script(
+            "g",
+            r#"language g0
+import 'std
+meta.macro.env = {}
+meta.left = .write.text "40"
+meta.wide = .write.text "(1 + 1)"
+meta.delete = .r ()
+sum = @meta.left + @meta.wide
+second = list.at 1 [@meta.left, @meta.delete @meta.wide]
+"#,
+        )
+        .build()
+        .expect("rightward edits should leave left invocation IDs stable");
+
+    for (name, expected) in [("sum", 42), ("second", 2)] {
+        let value = assembler
+            .get(module.value(), name)
+            .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
+        assert_eq!(
+            assembler
+                .evaluate(&value)
+                .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
+            PublicValue::integer(expected),
+        );
+    }
+}

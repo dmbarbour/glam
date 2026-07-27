@@ -8,7 +8,7 @@ use super::input::{ParseSession, TokenView};
 use super::layout::validate_delimited_layouts;
 use super::lexical::{DeclarationSection, LexedSource, TokenKind, lex_source};
 use super::logical::LogicalSource;
-use super::logical::{EMBEDDED_MARKER, find_macro_invocation, rewritten_declaration};
+use super::logical::{DeclarationMacroWork, EMBEDDED_MARKER};
 use crate::compiler::CompileContext;
 use crate::core::{Atom, Dict, Key, List, Value};
 use crate::evaluation::EvaluationPumpOutcome;
@@ -132,8 +132,8 @@ impl<'source> StagedSourceParser<'source> {
         }
         let declaration = lexical.declarations().get(self.next_declaration)?.clone();
         self.next_declaration += 1;
-        let invocation = match find_macro_invocation(lexical, &declaration) {
-            Ok(Some(invocation)) => invocation,
+        let mut work = match DeclarationMacroWork::from_original(lexical, &declaration) {
+            Ok(Some(work)) => work,
             Ok(None) => {
                 return Some(vec![parse_lexical_declaration(
                     lexical,
@@ -160,31 +160,6 @@ impl<'source> StagedSourceParser<'source> {
             ));
             return Some(Vec::new());
         };
-        let keys = invocation
-            .path
-            .iter()
-            .map(Key::atom_from_text)
-            .collect::<Vec<_>>();
-        let effect = match macro_lookup(execution, prior_definitions, &keys, true) {
-            Ok(effect) if effect != Value::Dict(Dict::new_sync()) => effect,
-            Ok(_) => {
-                self.diagnostics.push(Diagnostic::error(
-                    declaration.line(),
-                    format!("macro `{}` is not defined", invocation.path.join(".")),
-                ));
-                return Some(Vec::new());
-            }
-            Err(error) => {
-                self.diagnostics.push(Diagnostic::error(
-                    declaration.line(),
-                    format!(
-                        "macro `{}` could not be selected: {error}",
-                        invocation.path.join(".")
-                    ),
-                ));
-                return Some(Vec::new());
-            }
-        };
         let base_environment = match macro_lookup(
             execution,
             prior_definitions,
@@ -208,49 +183,83 @@ impl<'source> StagedSourceParser<'source> {
             base_environment,
             declared_language_value(language),
         );
-        let run = match super::super::macro_expansion::run_macro_effect(
-            execution,
-            effect,
-            environment,
-            invocation.input.clone(),
-        ) {
-            Ok(run) => run,
-            Err(diagnostic) => {
-                self.diagnostics.push(Diagnostic::error(
-                    declaration.line(),
-                    format!(
-                        "macro `{}` failed: {}",
-                        invocation.path.join("."),
-                        diagnostic.message()
-                    ),
-                ));
-                return Some(Vec::new());
-            }
-        };
-        let (rewritten, embedded) = match rewritten_declaration(
-            lexical,
-            &declaration,
-            &invocation,
-            run.consumed_end(),
-            run.output(),
-        ) {
-            Ok(rewritten) => rewritten,
-            Err(mut diagnostics) => {
+        let invocations = work.invocations().to_vec();
+        let mut macro_diagnostics = Vec::new();
+        for original in invocations {
+            let invocation = match work.current_invocation(&original) {
+                Ok(invocation) => invocation,
+                Err(mut diagnostics) => {
+                    self.diagnostics.append(&mut diagnostics);
+                    return Some(Vec::new());
+                }
+            };
+            let keys = original
+                .path
+                .iter()
+                .map(Key::atom_from_text)
+                .collect::<Vec<_>>();
+            let effect = match macro_lookup(execution, prior_definitions, &keys, true) {
+                Ok(effect) if effect != Value::Dict(Dict::new_sync()) => effect,
+                Ok(_) => {
+                    self.diagnostics.push(Diagnostic::error(
+                        original.line,
+                        format!("macro `{}` is not defined", original.path.join(".")),
+                    ));
+                    return Some(Vec::new());
+                }
+                Err(error) => {
+                    self.diagnostics.push(Diagnostic::error(
+                        original.line,
+                        format!(
+                            "macro `{}` could not be selected: {error}",
+                            original.path.join(".")
+                        ),
+                    ));
+                    return Some(Vec::new());
+                }
+            };
+            let run = match super::super::macro_expansion::run_macro_effect(
+                execution,
+                effect,
+                environment.clone(),
+                invocation.input.clone(),
+            ) {
+                Ok(run) => run,
+                Err(diagnostic) => {
+                    self.diagnostics.push(Diagnostic::error(
+                        original.line,
+                        format!(
+                            "macro `{}` failed: {}",
+                            original.path.join("."),
+                            diagnostic.message()
+                        ),
+                    ));
+                    return Some(Vec::new());
+                }
+            };
+            if let Err(mut diagnostics) =
+                work.splice(&invocation, run.consumed_end(), run.output(), original.line)
+            {
                 self.diagnostics.append(&mut diagnostics);
                 return Some(Vec::new());
             }
-        };
+            macro_diagnostics.push((original.start, run.diagnostics().to_vec()));
+        }
+        let (rewritten, embedded) = work.materialize();
         let diagnostics_before = self.diagnostics.len();
         let declarations = parse_expanded_declaration(&rewritten, embedded, &mut self.diagnostics);
         let accepted = !self.diagnostics[diagnostics_before..]
             .iter()
             .any(|diagnostic| diagnostic.severity == crate::diagnostic::Severity::Error);
         if accepted {
-            for diagnostic in run.diagnostics() {
-                context.emit_diagnostic(
-                    diagnostic.severity(),
-                    diagnostic.emission().as_core().clone(),
-                );
+            macro_diagnostics.sort_by_key(|(start, _)| *start);
+            for (_, diagnostics) in macro_diagnostics {
+                for diagnostic in diagnostics {
+                    context.emit_diagnostic(
+                        diagnostic.severity(),
+                        diagnostic.emission().as_core().clone(),
+                    );
+                }
             }
         }
         Some(declarations)
