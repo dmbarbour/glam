@@ -8,6 +8,7 @@ use crate::core::{Dict, Key, List, Value, keys};
 use crate::diagnostic::Severity;
 use crate::eval;
 
+use super::effects::validate_written_text;
 use super::io::{
     MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroInputLayout, MacroOutput,
 };
@@ -410,7 +411,7 @@ import 'std
 meta.macro.env = {}
 meta.consume = .read.sep =>> .read.data >>= (\value -> .write.data value =>> .r ())
 meta.rollback = .alt (.write.data 0 =>> .read.text "missing") (.read.sep =>> .read.data >>= (\value -> .write.data value =>> .r ()))
-meta.prefix = .write.text "40 +"
+meta.prefix = .write.text "40" =>> .write.sep =>> .write.text "+"
 meta.language = .env '.language.base >>= (\base -> .write.data base =>> .r ())
 meta.delete = .r ()
 consumed = @meta.consume 41
@@ -501,7 +502,7 @@ meta.macro.env = {}
 meta.one = .read.layout (.read.anchor =>> .read.data >>= (\value -> .read.end =>> .write.data value =>> .r ()))
 meta.sum = .read.layout (.read.anchor =>> .read.data >>= (\left -> .read.anchor =>> .read.data >>= (\right -> .read.end =>> .write.data (left + right) =>> .r ())))
 meta.nested = .read.layout (.read.anchor =>> .read.data >>= (\outer -> .read.layout (.read.anchor =>> .read.data >>= (\left -> .read.anchor =>> .read.data >>= (\right -> .read.end =>> .write.data (outer + left + right) =>> .r ()))) =>> .read.end))
-meta.boundary = .alt (.read.sep =>> .read.text "peer" =>> .write.text "own = 0") (.write.text "own = 42")
+meta.boundary = .alt (.read.sep =>> .read.text "peer" =>> .write.text "own" =>> .write.sep =>> .write.text "=" =>> .write.sep =>> .write.text "0") (.write.text "own" =>> .write.sep =>> .write.text "=" =>> .write.sep =>> .write.text "42")
 hanging = @meta.one 42
 sum = @meta.sum
   20
@@ -554,9 +555,9 @@ fn source_macros_write_nested_and_same_anchor_layouts() {
 import 'std
 meta.macro.env = {}
 meta.list = .write.text "[" =>> .write.layout (.write.anchor =>> .write.data 1 =>> .write.text "," =>> .write.anchor =>> .write.data 2) =>> .write.text "]"
-meta.declarations = .read.end =>> .write.anchor =>> .write.text "first = " =>> .write.data 40 =>> .write.anchor =>> .write.text "second = " =>> .write.data 42
-meta.members = .read.end =>> .write.anchor =>> .write.text "first = " =>> .write.data 40 =>> .write.anchor =>> .write.text "second = " =>> .write.data 42
-meta.steps = .read.end =>> .write.anchor =>> .write.text ".r ()" =>> .write.anchor =>> .write.text ".r " =>> .write.data 42
+meta.declarations = .read.end =>> .write.anchor =>> .write.text "first" =>> .write.sep =>> .write.text "=" =>> .write.sep =>> .write.data 40 =>> .write.anchor =>> .write.text "second" =>> .write.sep =>> .write.text "=" =>> .write.sep =>> .write.data 42
+meta.members = .read.end =>> .write.anchor =>> .write.text "first" =>> .write.sep =>> .write.text "=" =>> .write.sep =>> .write.data 40 =>> .write.anchor =>> .write.text "second" =>> .write.sep =>> .write.text "=" =>> .write.sep =>> .write.data 42
+meta.steps = .read.end =>> .write.anchor =>> .write.text ".r" =>> .write.sep =>> .write.text "()" =>> .write.anchor =>> .write.text ".r" =>> .write.sep =>> .write.data 42
 meta.consume_comma = .read.text "," =>> .read.sep =>> (.read.data >>= (\_ -> .read.end =>> .write.data 42))
 meta.delete = .r ()
 list_second = list.at 1 @meta.list
@@ -628,8 +629,8 @@ fn source_macro_layout_dedents_resume_inside_delimiter_groups() {
             r#"language g0
 import 'std
 meta.macro.env = {}
-meta.prelude = .read.end =>> .write.anchor =>> .write.text ".r ()" =>> .write.anchor =>> .write.text ".r ()"
-meta.body = .read.end =>> .write.anchor =>> .write.text ".r ()" =>> .write.anchor =>> .write.text ".r 42"
+meta.prelude = .read.end =>> .write.anchor =>> .write.text ".r" =>> .write.sep =>> .write.text "()" =>> .write.anchor =>> .write.text ".r" =>> .write.sep =>> .write.text "()"
+meta.body = .read.end =>> .write.anchor =>> .write.text ".r" =>> .write.sep =>> .write.text "()" =>> .write.anchor =>> .write.text ".r" =>> .write.sep =>> .write.text "42"
 where_effect =
   (do @meta.prelude
       user_op
@@ -665,12 +666,12 @@ list_second = list.head (list.pure (list.at 1 list_effects))
 fn source_macro_anchor_contract_rejects_ambiguous_or_empty_items() {
     for (body, invocation, expected) in [
         (
-            ".write.anchor =>> .write.text \"generated = 42\"",
+            ".write.anchor =>> .write.data 42",
             "answer = @meta.bad",
             "start of its logical item",
         ),
         (
-            ".write.anchor =>> .write.text \"generated = 42\"",
+            ".write.anchor =>> .write.data 42",
             "answer = consume @meta.bad",
             "start of its logical item",
         ),
@@ -680,17 +681,17 @@ fn source_macro_anchor_contract_rejects_ambiguous_or_empty_items() {
             "start of its logical item",
         ),
         (
-            ".write.anchor =>> .write.text \"generated = 42\"",
+            ".write.anchor =>> .write.data 42",
             "@meta.bad 1",
             "complete input item",
         ),
         (
-            ".write.anchor =>> .write.text \".r 42\"",
+            ".write.anchor =>> .write.text \".r\" =>> .write.sep =>> .write.data 42",
             "answer = (do @meta.bad where x = 1)",
             "complete input item",
         ),
         (
-            ".write.anchor =>> .write.text \".r 42\"",
+            ".write.anchor =>> .write.text \".r\" =>> .write.sep =>> .write.data 42",
             "answer = (do @meta.bad, do .r 1)",
             "complete input item",
         ),
@@ -700,12 +701,12 @@ fn source_macro_anchor_contract_rejects_ambiguous_or_empty_items() {
             "empty expansion item",
         ),
         (
-            ".write.text \"generated = 42\" =>> .write.anchor",
+            ".write.data 42 =>> .write.anchor",
             "@meta.bad",
             "first output operation",
         ),
         (
-            ".write.anchor =>> .write.text \"generated = 42\" =>> .write.anchor",
+            ".write.anchor =>> .write.data 42 =>> .write.anchor",
             "@meta.bad",
             "empty or unclosed layout item",
         ),
@@ -742,10 +743,11 @@ fn source_macro_rejects_reserved_or_unbalanced_generated_text() {
     for (body, expected) in [
         (".write.text \"@next\"", "cannot emit `@`"),
         (".write.text \"(\"", "unclosed delimiter"),
-        (
-            ".write.text \"first\nsecond\"",
-            "use `.write.layout` for layout",
-        ),
+        (".write.text \" \"", "cannot emit whitespace"),
+        (".write.text \" leading\"", "cannot emit whitespace"),
+        (".write.text \"trailing \"", "cannot emit whitespace"),
+        (".write.text \"inner space\"", "cannot emit whitespace"),
+        (".write.text \"first\nsecond\"", "cannot emit whitespace"),
     ] {
         let assembler = Assembler::default();
         let observed = Arc::new(Mutex::new(Vec::new()));
@@ -770,6 +772,22 @@ fn source_macro_rejects_reserved_or_unbalanced_generated_text() {
             "unexpected diagnostics for {body}: {messages:?}"
         );
     }
+}
+
+#[test]
+fn macro_text_writer_rejects_every_ascii_whitespace_scalar() {
+    for whitespace in [' ', '\t', '\n', '\r', '\u{000b}', '\u{000c}'] {
+        let text = format!("left{whitespace}right");
+        assert_eq!(
+            validate_written_text(&text),
+            Err(
+                "macro `.write.text` cannot emit whitespace; use `.write.sep` within an item or `.write.anchor` between layout items"
+            ),
+            "ASCII whitespace U+{:04X} escaped the logical writer boundary",
+            u32::from(whitespace),
+        );
+    }
+    assert_eq!(validate_written_text("left.right"), Ok(()));
 }
 
 #[test]
@@ -918,7 +936,7 @@ fn rightward_replacement_size_and_deletion_do_not_invalidate_left_invocations() 
 import 'std
 meta.macro.env = {}
 meta.left = .write.text "40"
-meta.wide = .write.text "(1 + 1)"
+meta.wide = .write.text "(1" =>> .write.sep =>> .write.text "+" =>> .write.sep =>> .write.text "1)"
 meta.delete = .r ()
 sum = @meta.left + @meta.wide
 second = list.at 1 [@meta.left, @meta.delete @meta.wide]

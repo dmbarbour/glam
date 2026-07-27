@@ -421,16 +421,29 @@ fn write_text(
         TaskError::new("macro `.write.text` received the wrong number of arguments")
     })?;
     let text = text_value(context, text, "macro `.write.text`")?;
-    if text.contains(['@', '#', '\r', '\n', '\u{e000}']) {
-        return Err(TaskError::new(
-            "macro `.write.text` cannot emit `@`, `#`, line breaks, or the reserved embedded-data marker; use `.write.layout` for layout",
-        ));
-    }
+    validate_written_text(&text).map_err(TaskError::new)?;
     macro_transaction(context, "macro `.write.text`")?
         .parts()
         .1
         .write_text(text);
     Ok(RequestResult::ReturnUnit)
+}
+
+pub(super) fn validate_written_text(text: &str) -> Result<(), &'static str> {
+    if text
+        .bytes()
+        .any(|byte| byte == b' ' || matches!(byte, b'\t'..=b'\r'))
+    {
+        return Err(
+            "macro `.write.text` cannot emit whitespace; use `.write.sep` within an item or `.write.anchor` between layout items",
+        );
+    }
+    if text.contains(['@', '#', '\u{e000}']) {
+        return Err(
+            "macro `.write.text` cannot emit `@`, `#`, or the reserved embedded-data marker",
+        );
+    }
+    Ok(())
 }
 
 fn write_data(
