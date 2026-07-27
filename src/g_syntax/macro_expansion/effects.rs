@@ -430,18 +430,13 @@ fn write_text(
 }
 
 pub(super) fn validate_written_text(text: &str) -> Result<(), &'static str> {
-    if text
-        .bytes()
-        .any(|byte| byte == b' ' || matches!(byte, b'\t'..=b'\r'))
-    {
+    if text.bytes().any(|byte| byte <= b' ' || byte == 0x7f) {
         return Err(
-            "macro `.write.text` cannot emit whitespace; use `.write.sep` within an item or `.write.anchor` between layout items",
+            "macro `.write.text` cannot emit ASCII C0 controls, SP, or DEL; use `.write.sep` within an item or `.write.anchor` between layout items",
         );
     }
-    if text.contains(['@', '#', '\u{e000}']) {
-        return Err(
-            "macro `.write.text` cannot emit `@`, `#`, or the reserved embedded-data marker",
-        );
+    if text.contains(['@', '#']) {
+        return Err("macro `.write.text` cannot emit `@` or `#`");
     }
     Ok(())
 }

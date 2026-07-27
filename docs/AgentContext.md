@@ -45,7 +45,7 @@ notes instead of appending history; put subsystem details in
   indentation, including when that nested layout is bounded by a delimiter.
   Macro input discovery never treats `,` or `;` as a boundary; punctuation is
   ordinary macro text until the ordinary parser interprets the expanded
-  source. Macro `.write.text` is joint and ASCII-whitespace-free; only
+  source. Macro `.write.text` excludes ASCII C0 controls, SP, and DEL; only
   `.write.sep` and `.write.anchor` emit logical whitespace. `ExpressionContext`
   decides whether a postfix/infix owner may resume at a dedent.
 - Keep current implementation claims out of target-state design documents, and

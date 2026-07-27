@@ -743,11 +743,17 @@ fn source_macro_rejects_reserved_or_unbalanced_generated_text() {
     for (body, expected) in [
         (".write.text \"@next\"", "cannot emit `@`"),
         (".write.text \"(\"", "unclosed delimiter"),
-        (".write.text \" \"", "cannot emit whitespace"),
-        (".write.text \" leading\"", "cannot emit whitespace"),
-        (".write.text \"trailing \"", "cannot emit whitespace"),
-        (".write.text \"inner space\"", "cannot emit whitespace"),
-        (".write.text \"first\nsecond\"", "cannot emit whitespace"),
+        (".write.text \" \"", "cannot emit ASCII C0 controls"),
+        (".write.text \" leading\"", "cannot emit ASCII C0 controls"),
+        (".write.text \"trailing \"", "cannot emit ASCII C0 controls"),
+        (
+            ".write.text \"inner space\"",
+            "cannot emit ASCII C0 controls",
+        ),
+        (
+            ".write.text \"first\nsecond\"",
+            "cannot emit ASCII C0 controls",
+        ),
     ] {
         let assembler = Assembler::default();
         let observed = Arc::new(Mutex::new(Vec::new()));
@@ -775,19 +781,21 @@ fn source_macro_rejects_reserved_or_unbalanced_generated_text() {
 }
 
 #[test]
-fn macro_text_writer_rejects_every_ascii_whitespace_scalar() {
-    for whitespace in [' ', '\t', '\n', '\r', '\u{000b}', '\u{000c}'] {
-        let text = format!("left{whitespace}right");
+fn macro_text_writer_rejects_c0_space_and_delete() {
+    for scalar in (0_u32..=0x20).chain(std::iter::once(0x7f)) {
+        let scalar = char::from_u32(scalar).expect("tested ASCII scalar should be valid");
+        let text = format!("left{scalar}right");
         assert_eq!(
             validate_written_text(&text),
             Err(
-                "macro `.write.text` cannot emit whitespace; use `.write.sep` within an item or `.write.anchor` between layout items"
+                "macro `.write.text` cannot emit ASCII C0 controls, SP, or DEL; use `.write.sep` within an item or `.write.anchor` between layout items"
             ),
-            "ASCII whitespace U+{:04X} escaped the logical writer boundary",
-            u32::from(whitespace),
+            "restricted ASCII scalar U+{:04X} escaped the logical writer boundary",
+            u32::from(scalar),
         );
     }
     assert_eq!(validate_written_text("left.right"), Ok(()));
+    assert_eq!(validate_written_text("λ"), Ok(()));
 }
 
 #[test]

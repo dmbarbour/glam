@@ -24,7 +24,8 @@ use super::lexical::{
 };
 
 type ExpansionOriginId = usize;
-pub(super) const EMBEDDED_MARKER: char = '\u{e000}';
+/// ASCII SUB, excluded from macro text writes with the rest of C0.
+pub(super) const EMBEDDED_MARKER: char = '\u{001a}';
 
 pub(super) struct MacroInvocation {
     pub(super) path: Vec<String>,
