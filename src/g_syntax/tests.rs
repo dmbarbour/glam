@@ -256,6 +256,50 @@ fn parses_language_declaration_with_extensions() {
 }
 
 #[test]
+fn staged_module_lowering_matches_batch_module_values() {
+    let source = "language g0\nanswer = 42\n";
+    let batch_context = CompileContext::default();
+    let batch = lower_parsed_source(parse(source), &batch_context);
+    let staged_context = CompileContext::default();
+    let staged = lower_source(source.as_bytes(), &staged_context);
+
+    assert_eq!(batch.diagnostics, staged.diagnostics);
+    let batch = evaluated_module_value(&batch_context, &batch);
+    let staged = evaluated_module_value(&staged_context, &staged);
+    assert_eq!(
+        resolved_value_at_path(&batch, &["answer"]),
+        resolved_value_at_path(&staged, &["answer"])
+    );
+}
+
+#[test]
+fn staged_module_lowering_preserves_diagnostic_order() {
+    let source = "\
+language g0
+language g0
+import 'missing
+foo = \\foo -> foo
+";
+    let batch = lower_parsed_source(parse(source), &CompileContext::default());
+    let staged = lower_source(source.as_bytes(), &CompileContext::default());
+
+    assert_eq!(batch.diagnostics, staged.diagnostics);
+    assert_eq!(staged.diagnostics.len(), 3);
+    assert_eq!(
+        staged.diagnostics[0].message,
+        "language declaration must appear before all other declarations"
+    );
+    assert_eq!(
+        staged.diagnostics[1].message,
+        "local `foo` shadows external `foo` defined on line 4"
+    );
+    assert_eq!(
+        staged.diagnostics[2].message,
+        "unknown built-in module `'missing`"
+    );
+}
+
+#[test]
 fn g0_keywords_are_reserved_across_source_name_positions() {
     for (keyword, source) in [
         ("where", "language g0\nwhere = 1\n"),

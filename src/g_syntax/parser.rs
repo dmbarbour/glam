@@ -17,4 +17,5 @@ mod pattern;
 mod source;
 mod structural;
 
+pub(in crate::g_syntax) use source::StagedSourceParser;
 pub use source::parse_source;

@@ -18,7 +18,6 @@ mod resolved;
 
 use analysis::{warn_unused_locals, warn_unused_with_alias};
 pub use ast::*;
-use module_lowering::lower_parsed_source;
 use module_lowering::*;
 use name_analysis::check_file_global_local_shadowing;
 use resolve::*;
@@ -46,7 +45,7 @@ pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
     let LoweredSource {
         definitions,
         diagnostics,
-    } = lower_parsed_source(parse_source(source), context);
+    } = lower_source(source, context);
     for diagnostic in diagnostics {
         let message = crate::diagnostic::text_message(Some(diagnostic.line), &diagnostic.message);
         context.emit_diagnostic(diagnostic.severity, message);

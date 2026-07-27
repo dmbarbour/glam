@@ -104,19 +104,22 @@ raw source bytes
   -> one lexer-owned token/group/declaration structure
   -> source-wide floor and delimiter-layout diagnostics
   -> declaration token ranges
-  -> contextual expression parse
-       -> complete hard range, or
-       -> exact dedent boundary resumed by postfix/infix grammar
-  -> parser-owned SyntaxExpr and declarations
-  -> resolver-owned BindingId locals and ResolvedExpr<Value>
-  -> module lowering or net lowering
+  -> for each declaration in source order
+       -> contextual expression parse
+            -> complete hard range, or
+            -> exact dedent boundary resumed by postfix/infix grammar
+       -> resolver-owned BindingId locals and ResolvedExpr<Value>
+       -> module lowering or net lowering
+  -> retained declarations feed language-position and file-wide name analysis
   -> closed Value / FunctionCode / NetValue
 ```
 
 Syntax and sugar end in `g_syntax`. `ResolvedExpr<Value>` is moved through a
 single lowering; no syntax or core expression tree survives into evaluation.
-Module lowering owns declaration order and the open module fixpoint. Net
-lowering emits complete bind and application spines.
+`StagedSourceParser` and `ModuleLowerer` alternate parsing and lowering over
+the one lexical result; the batch parser/lowerer path is test-only
+compatibility coverage. Module lowering owns declaration order and the open
+module fixpoint. Net lowering emits complete bind and application spines.
 
 `LayoutView` selects one next-line or hanging sibling anchor and returns the
 first dedented line without consuming it. `ExpressionContext` carries the

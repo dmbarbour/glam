@@ -91,6 +91,7 @@ impl<'lex, 'source> TokenView<'lex, 'source> {
         Self::new(source, range).expect("lexical declaration range must remain within its source")
     }
 
+    #[cfg(test)]
     pub(super) fn declarations(
         source: &'lex LexedSource<'source>,
     ) -> impl ExactSizeIterator<Item = (usize, Self)> + 'lex {
@@ -591,10 +592,6 @@ impl ParseSession {
             diagnostic.line = line;
             diagnostic
         }));
-    }
-
-    pub(super) fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
-        std::mem::take(&mut self.diagnostics)
     }
 
     pub(super) fn into_diagnostics(self) -> Vec<Diagnostic> {
