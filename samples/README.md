@@ -18,6 +18,8 @@ Use cases:
   - `hello/libs/` contains their relative-import fixtures.
 - `assembly/` other assembly and multi-input fixtures.
   - early samples may produce raw binary text.
+- `contracts/` pre-implementation executable contracts that are intentionally
+  excluded from ordinary `.g` sample parsing.
 - `invalid/` for testing of diagnostics and runtime failures.
 
 Glam forbids parent-relative paths (`"../"`) in imports, and samples shall not reference remote repos. Thus, sample folders are self-contained. The preference is to keep samples small and focused. To avoid repetition, common utility functions can be written once then provided via configuration (defining `conf.env`). 
