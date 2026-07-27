@@ -36,6 +36,27 @@ fn scans_validation_structure_and_declarations_together() {
 }
 
 #[test]
+fn validates_numeric_data_before_grammar_or_future_macro_expansion() {
+    let source = "language g0\nhidden = 1e999999999999999999999\nnext = 42\n";
+    let lexed = lex_source(source);
+
+    assert!(lexed.has_errors());
+    assert!(matches!(
+        significant_token(&lexed, 4).kind(),
+        TokenKind::InvalidNumber(_)
+    ));
+    assert!(lexed.diagnostics().iter().any(|diagnostic| {
+        diagnostic.line == 2 && diagnostic.message.contains("invalid number literal")
+    }));
+
+    let parsed = parse_source(source.as_bytes());
+    assert!(parsed.declarations.is_empty());
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.line == 2 && diagnostic.message.contains("invalid number literal")
+    }));
+}
+
+#[test]
 fn decodes_multiline_text_once_and_excludes_source_only_lines() {
     let source = concat!(
         "language g0\n",
@@ -476,8 +497,13 @@ fn token_labels(lexed: &LexedSource<'_>) -> Vec<String> {
         .filter_map(|token| {
             Some(match token.kind() {
                 TokenKind::Name(name) => format!("name:{name}"),
-                TokenKind::Number(number) => format!("number:{number}"),
+                TokenKind::Number(_) => format!(
+                    "number:{}",
+                    lexed.source_slice(token.span()).unwrap_or("<invalid span>")
+                ),
+                TokenKind::InvalidNumber(number) => format!("invalid-number:{number}"),
                 TokenKind::Text(id) => format!("text:{}", lexed.text(*id).unwrap().value()),
+                TokenKind::Embedded(_) => "embedded".to_owned(),
                 TokenKind::Symbol(symbol) => format!("symbol:{symbol}"),
                 TokenKind::Open { delimiter, .. } => {
                     format!("open:{}", delimiter_symbol(*delimiter, true))

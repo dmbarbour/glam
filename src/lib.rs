@@ -13,6 +13,7 @@ mod list;
 mod number;
 pub mod reflection;
 mod source;
+mod text_pattern;
 
 pub use api::{
     Assembler, AssemblerBuilder, BuiltModule, Diagnostic, DiagnosticBus, DiagnosticCounts,

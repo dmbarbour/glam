@@ -649,7 +649,7 @@ fn missing_configured_cli_has_no_completion_candidates() {
 }
 
 #[test]
-fn token_regex_rejects_captures_and_any_consumes_one_unicode_scalar() {
+fn token_regex_rejects_syntax_outside_g0_and_any_consumes_one_unicode_scalar() {
     let (assembler, unicode_configuration) = configuration(
         "language g0\nimport 'std\nconf.cli = .read.token \"unicode pair\" (.token.any >>= (\\a -> .token.any >>= (\\_ -> .token.end =>> .r a))) >>= (\\body -> .read.end =>> .write.script \"g\" body)\n",
     );
@@ -662,36 +662,38 @@ fn token_regex_rejects_captures_and_any_consumes_one_unicode_scalar() {
     assert_eq!(expansion.plan().process_args(), ["--script.g", "λ"]);
 
     let (assembler, regex_configuration) = configuration(
-        "language g0\nimport 'std\nconf.cli = .read.token \"capture-free text\" (.token.regex \"(x)\") =>> .read.end =>> .write.script \"g\" \"ok\"\n",
+        "language g0\nimport 'std\nconf.cli = .read.token \"portable text pattern\" (.token.regex \"(?:x)\") =>> .read.end =>> .write.script \"g\" \"ok\"\n",
     );
     let error = expand_configured(
         &assembler,
         &regex_configuration,
         configured_arguments(&["x"]),
     )
-    .expect_err("capturing token regex should be rejected");
+    .expect_err("backend-specific noncapturing groups should be rejected");
     assert!(
-        error.to_string().contains("does not permit capture"),
+        error
+            .to_string()
+            .contains("quantifier has no preceding atom"),
         "{error}"
     );
 }
 
 #[test]
-fn token_regex_is_anchored_capture_free_and_leftmost_first() {
+fn token_regex_is_anchored_grouped_and_leftmost_first() {
     let source = |pattern: &str| {
         format!(
             "language g0\nimport 'std\nconf.cli = .read.token \"choice\" (.token.regex \"{pattern}\") >>= (\\_ -> .read.end =>> .write.script \"g\" \"ok\")\n"
         )
     };
-    let (assembler, longest_configuration) = configuration(&source("(?:foofoo|foo)"));
+    let (assembler, longest_configuration) = configuration(&source("(foofoo|foo)"));
     expand_configured(
         &assembler,
         &longest_configuration,
         configured_arguments(&["foofoo"]),
     )
-    .expect("non-capturing groups should be accepted");
+    .expect("plain g0 groups should be accepted");
 
-    let (assembler, shortest_configuration) = configuration(&source("(?:foo|foofoo)"));
+    let (assembler, shortest_configuration) = configuration(&source("(foo|foofoo)"));
     expand_configured(
         &assembler,
         &shortest_configuration,

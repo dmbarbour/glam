@@ -4,8 +4,9 @@ use crate::eval;
 use crate::reflection::{
     EffectRequestSpec, RequestContext, RequestResult, TaskError, TaskSpecialization,
 };
+use crate::text_pattern::TextPattern;
 
-use super::{TokenHost, TokenJournal, literal_completion, record_expectation, regex};
+use super::{TokenHost, TokenJournal, literal_completion, record_expectation};
 
 #[derive(Clone, Copy)]
 pub(super) struct TokenEffects;
@@ -118,23 +119,22 @@ fn regex_span(
         .try_into()
         .map_err(|_| TaskError::new("`.token.regex` received the wrong number of arguments"))?;
     let pattern = text_value(context, pattern, "`.token.regex`")?;
-    let matcher = regex::compile(&pattern).map_err(TaskError::new)?;
+    let matcher = TextPattern::parse(&pattern)
+        .map_err(|error| TaskError::new(format!("invalid `.token.regex` pattern: {error}")))?;
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskError::new("token reader escaped its isolated transaction"))?;
     let (snapshot, journal) = transaction.parts();
     let cursor = journal.cursor;
     let remaining = &snapshot.input[cursor..];
-    let matched = matcher
-        .find(remaining)
-        .filter(|matched| matched.start() == 0);
+    let matched = matcher.match_prefix(remaining);
     let Some(matched) = matched else {
         record_expectation(journal, cursor, "matching text");
         return Ok(RequestResult::Fail);
     };
     if snapshot
         .completion_offset
-        .is_some_and(|split| cursor <= split && cursor + matched.end() > split)
+        .is_some_and(|split| cursor <= split && cursor + matched.len() > split)
     {
         let split = snapshot
             .completion_offset
@@ -142,10 +142,10 @@ fn regex_span(
         record_expectation(journal, split, "matching text");
         return Ok(RequestResult::Fail);
     }
-    journal.cursor = cursor + matched.end();
+    journal.cursor = cursor + matched.len();
     Ok(RequestResult::Return(Value::record([(
         "span",
-        Value::text(matched.as_str()),
+        Value::text(matched),
     )])))
 }
 

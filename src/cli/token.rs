@@ -1,7 +1,6 @@
 //! Restricted parser for structured contents of one UTF-8 command-line token.
 
 mod effects;
-mod regex;
 
 use std::sync::Arc;
 

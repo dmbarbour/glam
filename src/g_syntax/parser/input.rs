@@ -12,9 +12,10 @@ use chumsky::prelude::*;
 
 use super::super::Diagnostic;
 use super::lexical::{
-    ByteSpan, DeclarationSection, Delimiter, DelimiterGroup, GroupId, LeadingTrivia, LexedSource,
-    LexedText, SpannedToken, TextId, TokenKind,
+    ByteSpan, DeclarationSection, Delimiter, DelimiterGroup, EmbeddedValueId, GroupId,
+    LeadingTrivia, LexedSource, LexedText, NumberId, SpannedToken, TextId, TokenKind,
 };
+use crate::number::Number;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TokenRange {
@@ -219,6 +220,14 @@ impl<'lex, 'source> TokenView<'lex, 'source> {
         self.source.text(id)
     }
 
+    pub(super) fn number(self, id: NumberId) -> Option<&'lex Number> {
+        self.source.number(id)
+    }
+
+    pub(super) fn embedded_value(self, id: EmbeddedValueId) -> Option<&'lex crate::core::Value> {
+        self.source.embedded_value(id)
+    }
+
     pub(super) fn group(self, id: GroupId) -> Option<&'lex DelimiterGroup> {
         self.source.group(id)
     }
@@ -401,10 +410,10 @@ pub(super) fn keyword<'lex, 'source: 'lex>(
 }
 
 pub(super) fn number<'lex, 'source: 'lex>()
--> impl Parser<'lex, TokenInput<'lex, 'source>, &'source str, TokenExtra<'lex, 'source>> {
+-> impl Parser<'lex, TokenInput<'lex, 'source>, NumberId, TokenExtra<'lex, 'source>> {
     chumsky::primitive::select_ref(|token: &'lex SpannedToken<'source>, _| {
-        if let TokenKind::Number(number) = token.kind() {
-            Some(*number)
+        if let TokenKind::Number(id) = token.kind() {
+            Some(*id)
         } else {
             None
         }
@@ -422,6 +431,18 @@ pub(super) fn text_id<'lex, 'source: 'lex>()
         }
     })
     .labelled("text")
+}
+
+pub(super) fn embedded_value_id<'lex, 'source: 'lex>()
+-> impl Parser<'lex, TokenInput<'lex, 'source>, EmbeddedValueId, TokenExtra<'lex, 'source>> {
+    chumsky::primitive::select_ref(|token: &'lex SpannedToken<'source>, _| {
+        if let TokenKind::Embedded(id) = token.kind() {
+            Some(*id)
+        } else {
+            None
+        }
+    })
+    .labelled("embedded data")
 }
 
 pub(super) fn symbol<'lex, 'source: 'lex>(

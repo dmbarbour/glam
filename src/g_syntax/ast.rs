@@ -1,4 +1,4 @@
-use crate::core::Builtin;
+use crate::core::{Builtin, Value};
 use crate::number::Number;
 
 use super::Diagnostic;
@@ -559,6 +559,8 @@ pub enum DefinitionKind {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SyntaxExpr {
     Unit,
+    /// Closed semantic data inserted by a source transformation.
+    Embedded(Value),
     Number(Number),
     Text(String),
     Atom(String),

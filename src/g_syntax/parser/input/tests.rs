@@ -83,7 +83,11 @@ fn top_level_iteration_jumps_balanced_groups() {
 fn mapped_input_parsers_preserve_token_categories_and_adjacency() {
     let parsed = parse_expression_fragment(b"command 42->value", |view| {
         let parser = keyword("command")
-            .ignore_then(space_before(number().map(str::to_owned)))
+            .ignore_then(space_before(number().map(|id| {
+                view.number(id)
+                    .expect("number token should own parsed data")
+                    .to_string()
+            })))
             .then_ignore(joint(symbol("->")))
             .then(joint(name().map(str::to_owned)))
             .then_ignore(end());

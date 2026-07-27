@@ -7,6 +7,7 @@ use super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::input::{ParseSession, TokenView};
 use super::layout::validate_delimited_layouts;
 use super::lexical::{TokenKind, lex_source};
+use super::logical::LogicalSource;
 
 pub fn parse_source(source: &[u8]) -> ParsedSource {
     let text = match std::str::from_utf8(source) {
@@ -25,6 +26,14 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
     let lexical = lex_source(text);
     debug_assert!(lexical.invariants_hold());
     let has_lexical_errors = lexical.has_errors();
+    if !has_lexical_errors {
+        debug_assert!(LogicalSource::from_original(&lexical).round_trips(&lexical));
+    }
+    parse_lexed(&lexical)
+}
+
+pub(super) fn parse_lexed(lexical: &super::lexical::LexedSource<'_>) -> ParsedSource {
+    let has_lexical_errors = lexical.has_errors();
     let mut diagnostics = lexical.diagnostics().to_vec();
     if has_lexical_errors {
         return ParsedSource {
@@ -32,12 +41,12 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
             diagnostics,
         };
     }
-    report_orphan_continuations(&lexical, &mut diagnostics);
-    diagnostics.extend(validate_delimited_layouts(&lexical));
+    report_orphan_continuations(lexical, &mut diagnostics);
+    diagnostics.extend(validate_delimited_layouts(lexical));
 
     let mut declarations = Vec::with_capacity(lexical.declarations().len());
-    let mut token_session = ParseSession::new(&lexical);
-    for (line, view) in TokenView::declarations(&lexical) {
+    let mut token_session = ParseSession::new(lexical);
+    for (line, view) in TokenView::declarations(lexical) {
         let head = view
             .first_significant()
             .and_then(|(_, token)| match token.kind() {

@@ -22,14 +22,15 @@ not define future language semantics or collect subsystem invariants.
 | `cli/effects.rs`, `cli/host.rs` | Serial CLI reader/writer effect specialization and immutable invocation host |
 | `cli/completion.rs`, `cli/basic.rs` | Optional-cursor completion requests, candidates/frontiers, lexical routing, and bootstrap-option completion |
 | `cli/path.rs`, `cli/adapters.rs` | Shared filesystem completion plus replaceable minimal Bash/Zsh bindings over the shell-neutral protocol |
-| `cli/token.rs`, `cli/token/` | Restricted nested token-effect search plus literal, Unicode-scalar, end, and capture-free regex readers |
+| `cli/token.rs`, `cli/token/` | Restricted nested token-effect search plus literal, Unicode-scalar, end, and capture-free Glam text-pattern readers |
 | `source.rs` | Immutable source artifacts, identities and digests, relative resolvers, host compatibility, and tracked local files |
 | `lib.rs`, `api.rs` | Embedding facade: staged assembler construction, opaque values, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
 | `g_source.rs` | Narrow public inspection report for the built-in `.g` parser; no syntax tree or lowering context escapes |
 | `compiler.rs` | Per-source capabilities, hidden artifact/import provenance, loaders, namespace qualification, and diagnostic emission |
 | `g_syntax.rs` | Private built-in `.g` front-end facade |
 | `g_syntax/parser/source.rs` | UTF-8 entry point, one lexical pass, source-wide validation, declaration orchestration, and recovery |
-| `g_syntax/parser/lexical.rs` | Authoritative spanned tokens, text values, delimiter groups, indentation facts, and declaration ranges |
+| `g_syntax/parser/lexical.rs` | Authoritative spanned tokens, eagerly parsed numeric/text data, delimiter groups, indentation facts, and declaration ranges |
+| `g_syntax/parser/logical.rs` | Logical token/payload arenas, local generated-text classification, structural reindexing, and parser-token materialization |
 | `g_syntax/parser/input.rs` | Checked token-range views, group-aware iteration, mapped Chumsky input, token predicates, and parser diagnostics |
 | `g_syntax/parser/layout.rs`, `expression_context.rs` | Delimiter-depth lines, inferred layout blocks, continuation floors, exact expression extents, and yielded boundaries |
 | `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs`, `conditional.rs` | Ordinary precedence grammar, structural/postfix resumption, `let`/object/`with` forms, do statements, pure `if`/`match`, host `try` variants, and hierarchical choice trees |
@@ -40,6 +41,7 @@ not define future language semantics or collect subsystem invariants.
 | `g_syntax/module_lowering/` | Imports, definitions, objects, and module fixpoint orchestration |
 | `g_syntax/net_lowering.rs` | Resolved functions and applications to closed interaction nets |
 | `g_syntax/diagnostic_formatter.rs` | Cached closed Glam default `Diagnostic -> Bytes` formatter |
+| `text_pattern.rs` | Versioned capture-free text-pattern grammar and replaceable matching backend shared by source-facing effects |
 | `core.rs`, `core/` | Syntax-independent values, functions, computed lazies, named promises, dictionaries, keys, and builtin IDs |
 | `core_net.rs` | Core data/operator specialization of generic interaction nets |
 | `interaction_net/model.rs`, `builder.rs` | Generic identities, agents, specialization protocol, and checked construction |

@@ -10,6 +10,7 @@ mod floor_tests;
 mod input;
 mod layout;
 mod lexical;
+mod logical;
 #[cfg(test)]
 mod macro_contract;
 mod pattern;

@@ -6,8 +6,6 @@
 use chumsky::error::Rich;
 use chumsky::prelude::*;
 
-use crate::number::Number;
-
 use self::infix::resolve_infix_chain;
 use super::super::keywords::{canonical_keyword, g0_keyword, reserved_keyword_message};
 use super::super::{
@@ -21,8 +19,8 @@ use super::conditional::{
 use super::do_expr::parse_do_expression;
 use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{
-    ParseSession, TokenExtra, TokenInput, TokenView, close, joint, keyword, line_start, name,
-    number, open, space_before, symbol, text_id,
+    ParseSession, TokenExtra, TokenInput, TokenView, close, embedded_value_id, joint, keyword,
+    line_start, name, number, open, space_before, symbol, text_id,
 };
 use super::lexical::{ByteSpan, Delimiter, GroupId, LeadingTrivia, SpannedToken, TokenKind};
 use super::structural::{parse_using_expression, split_top_level, trim_layout};
@@ -278,12 +276,19 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             })
             .boxed();
 
-        let number = number().try_map(|text, span| {
-            Number::parse(text)
-                .map(SyntaxExpr::Number)
-                .map_err(|error| {
-                    Rich::custom(span, format!("invalid number literal `{text}`: {error}"))
-                })
+        let number = number().map(move |id| {
+            SyntaxExpr::Number(
+                view.number(id)
+                    .expect("number tokens must refer to lexer-owned values")
+                    .clone(),
+            )
+        });
+        let embedded = embedded_value_id().map(move |id| {
+            SyntaxExpr::Embedded(
+                view.embedded_value(id)
+                    .expect("embedded tokens must refer to lexer-owned values")
+                    .clone(),
+            )
         });
         let text = text_id().map(move |id| {
             SyntaxExpr::Text(
@@ -470,6 +475,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
 
         let literal_atom = choice((
             unit,
+            embedded,
             text,
             quoted_literal,
             list,

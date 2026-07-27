@@ -1,9 +1,10 @@
 # `language g0` Macro Contract Fixtures
 
 These are phase-zero contracts for the built-in compiler. Production macro
-expansion is not implemented yet. Executable token and text-pattern cases live
-in `src/g_syntax/parser/macro_contract.rs`; this note records the effect
-semantics that require later runner and layout machinery.
+expansion is not implemented yet. Executable macro-head cases live in
+`src/g_syntax/parser/macro_contract.rs`; the production text-pattern contract
+and conformance cases live in `src/text_pattern.rs`. This note records the
+effect semantics that require later runner and layout machinery.
 
 ## Accepted macro heads
 

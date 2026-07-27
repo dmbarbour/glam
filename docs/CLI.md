@@ -221,11 +221,14 @@ the parser to consume that argument completely.
 | `.token.any` | `Text` | Consume one Unicode scalar value. |
 | `.token.end` | `()` | Succeed only at the end of the argument. |
 
-`.token.regex` currently uses `regex-lite` syntax and forbids explicit capture
-groups. Its `span` field is the whole matched text; the record leaves room for
-future capture metadata without changing the reader's outer result shape.
-Regex alternatives follow the engine's leftmost-first preference. Literal
-token readers can enumerate completion candidates, while a general regex
+`.token.regex` uses Glam's versioned, capture-free text-pattern language.
+Its `span` field is the whole matched text; the record leaves room for future
+capture metadata without changing the reader's outer result shape. Matching is
+anchored at the current cursor. Alternatives are ordered and leftmost-first,
+and repetition is greedy. Plain parentheses group without capturing. The
+supported atoms are literals, `.`, classes, and groups; `?`, `*`, and `+` are
+the only quantifiers. Backend-specific regex constructs are rejected. Literal
+token readers can enumerate completion candidates, while a general pattern
 contributes an expectation but does not enumerate its language.
 
 Token parsing is its own restricted effect context. It has fresh task-local

@@ -11,6 +11,7 @@ pub(super) fn warn_unused_locals(
 fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diagnostic>) {
     match expr {
         SyntaxExpr::Unit
+        | SyntaxExpr::Embedded(_)
         | SyntaxExpr::Number(_)
         | SyntaxExpr::Text(_)
         | SyntaxExpr::Atom(_)
@@ -215,6 +216,7 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
     match expr {
         SyntaxExpr::PriorName(name) if Some(name.as_str()) == alias => *used = true,
         SyntaxExpr::Unit
+        | SyntaxExpr::Embedded(_)
         | SyntaxExpr::Number(_)
         | SyntaxExpr::Text(_)
         | SyntaxExpr::Atom(_)
@@ -385,6 +387,7 @@ fn mark_used_prior_alias_in_key(key: &SyntaxKeyExpr, alias: Option<&str>, used: 
 fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) {
     match expr {
         SyntaxExpr::Unit
+        | SyntaxExpr::Embedded(_)
         | SyntaxExpr::Number(_)
         | SyntaxExpr::Text(_)
         | SyntaxExpr::Atom(_)

@@ -255,6 +255,7 @@ impl FileNameAnalysis {
     ) {
         match expr {
             SyntaxExpr::Unit
+            | SyntaxExpr::Embedded(_)
             | SyntaxExpr::Number(_)
             | SyntaxExpr::Text(_)
             | SyntaxExpr::Atom(_)

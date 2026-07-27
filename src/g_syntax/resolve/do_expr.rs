@@ -475,6 +475,14 @@ mod tests {
     }
 
     #[test]
+    fn embedded_semantic_data_lowers_without_reconstruction() {
+        let value = Value::Number(Number::from(42_i64));
+        let resolved = resolve(&SyntaxExpr::Embedded(value.clone()));
+
+        assert_eq!(resolved, ResolvedExpr::Embedded(value));
+    }
+
+    #[test]
     fn irrefutable_value_binding_uses_fused_lambda_application() {
         let resolved = resolve(&SyntaxExpr::Do(DoExpr {
             steps: vec![DoStep {

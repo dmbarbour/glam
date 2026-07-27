@@ -20,6 +20,7 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     Ok(match expr {
         SyntaxExpr::Unit => ResolvedExpr::Embedded(context.unit_value()),
+        SyntaxExpr::Embedded(value) => ResolvedExpr::Embedded(value.clone()),
         SyntaxExpr::Number(number) => ResolvedExpr::Embedded(Value::Number(number.clone())),
         SyntaxExpr::Text(text) => ResolvedExpr::Embedded(Value::binary_from_text(text)),
         SyntaxExpr::Atom(name) => ResolvedExpr::Embedded(Value::Atom(atom_from_str(name))),

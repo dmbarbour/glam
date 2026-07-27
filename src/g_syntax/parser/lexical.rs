@@ -7,6 +7,8 @@
 use std::ops::Range;
 
 use super::super::Diagnostic;
+use crate::core::Value;
+use crate::number::Number;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ByteSpan {
@@ -94,14 +96,18 @@ impl Delimiter {
     }
 }
 
+pub(super) type EmbeddedValueId = usize;
 pub(super) type GroupId = usize;
+pub(super) type NumberId = usize;
 pub(super) type TextId = usize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TokenKind<'source> {
     Name(&'source str),
-    Number(&'source str),
+    Number(NumberId),
+    InvalidNumber(&'source str),
     Text(TextId),
+    Embedded(EmbeddedValueId),
     Symbol(&'source str),
     Open {
         group: GroupId,
@@ -125,6 +131,14 @@ pub(super) struct SpannedToken<'source> {
 }
 
 impl<'source> SpannedToken<'source> {
+    pub(super) fn new(kind: TokenKind<'source>, span: ByteSpan, leading: LeadingTrivia) -> Self {
+        Self {
+            kind,
+            span,
+            leading,
+        }
+    }
+
     pub(super) fn kind(&self) -> &TokenKind<'source> {
         &self.kind
     }
@@ -210,11 +224,13 @@ impl DeclarationSection {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct LexedSource<'source> {
     source: &'source str,
     tokens: Vec<SpannedToken<'source>>,
+    numbers: Vec<Number>,
     texts: Vec<LexedText>,
+    embedded_values: Vec<Value>,
     groups: Vec<DelimiterGroup>,
     declarations: Vec<DeclarationSection>,
     line_starts: Vec<usize>,
@@ -233,6 +249,29 @@ impl<'source> LexedSource<'source> {
 
     pub(super) fn texts(&self) -> &[LexedText] {
         &self.texts
+    }
+
+    pub(super) fn numbers(&self) -> &[Number] {
+        &self.numbers
+    }
+
+    pub(super) fn number(&self, id: NumberId) -> Option<&Number> {
+        self.numbers.get(id)
+    }
+
+    pub(super) fn embedded_value(&self, id: EmbeddedValueId) -> Option<&Value> {
+        self.embedded_values.get(id)
+    }
+
+    pub(super) fn embedded_values(&self) -> &[Value] {
+        &self.embedded_values
+    }
+
+    pub(super) fn with_tokens(&self, tokens: Vec<SpannedToken<'source>>) -> Self {
+        Self {
+            tokens,
+            ..self.clone()
+        }
     }
 
     pub(super) fn groups(&self) -> &[DelimiterGroup] {
@@ -307,7 +346,9 @@ impl<'source> LexedSource<'source> {
             && self.tokens().iter().all(|token| {
                 let span = token.span();
                 let token_reference_is_valid = match token.kind() {
+                    TokenKind::Number(id) => self.number(*id).is_some(),
                     TokenKind::Text(id) => self.text(*id).is_some(),
+                    TokenKind::Embedded(id) => self.embedded_value(*id).is_some(),
                     TokenKind::Open { group, delimiter }
                     | TokenKind::Close { group, delimiter } => self
                         .group(*group)
@@ -391,6 +432,26 @@ pub(super) fn lex_source(source: &str) -> LexedSource<'_> {
     Lexer::new(source).run()
 }
 
+#[cfg(test)]
+pub(super) fn embedded_source(value: Value) -> LexedSource<'static> {
+    LexedSource {
+        source: "",
+        tokens: vec![SpannedToken {
+            kind: TokenKind::Embedded(0),
+            span: ByteSpan::new(0, 0),
+            leading: LeadingTrivia::Joint,
+        }],
+        numbers: Vec::new(),
+        texts: Vec::new(),
+        embedded_values: vec![value],
+        groups: Vec::new(),
+        declarations: Vec::new(),
+        line_starts: vec![0],
+        diagnostics: Vec::new(),
+        has_errors: false,
+    }
+}
+
 struct OpenDeclaration {
     token_start: usize,
     byte_start: usize,
@@ -409,7 +470,9 @@ struct Lexer<'source> {
     newline_kinds: u8,
     last_invalid_whitespace_line: Option<usize>,
     tokens: Vec<SpannedToken<'source>>,
+    numbers: Vec<Number>,
     texts: Vec<LexedText>,
+    embedded_values: Vec<Value>,
     groups: Vec<DelimiterGroup>,
     group_stack: Vec<GroupId>,
     declarations: Vec<DeclarationSection>,
@@ -433,7 +496,9 @@ impl<'source> Lexer<'source> {
             newline_kinds: 0,
             last_invalid_whitespace_line: None,
             tokens: Vec::new(),
+            numbers: Vec::new(),
             texts: Vec::new(),
+            embedded_values: Vec::new(),
             groups: Vec::new(),
             group_stack: Vec::new(),
             declarations: Vec::new(),
@@ -516,7 +581,9 @@ impl<'source> Lexer<'source> {
         LexedSource {
             source: self.source,
             tokens: self.tokens,
+            numbers: self.numbers,
             texts: self.texts,
+            embedded_values: self.embedded_values,
             groups: self.groups,
             declarations: self.declarations,
             line_starts: self.line_starts,
@@ -834,11 +901,21 @@ impl<'source> Lexer<'source> {
                 break;
             }
         }
-        self.emit(
-            TokenKind::Number(&self.source[start..self.index]),
-            start,
-            self.index,
-        );
+        let text = &self.source[start..self.index];
+        match Number::parse(text) {
+            Ok(number) => {
+                let id = self.numbers.len();
+                self.numbers.push(number);
+                self.emit(TokenKind::Number(id), start, self.index);
+            }
+            Err(error) => {
+                self.structural_diagnostics.push(Diagnostic::error(
+                    self.line,
+                    format!("invalid number literal `{text}`: {error}"),
+                ));
+                self.emit(TokenKind::InvalidNumber(text), start, self.index);
+            }
+        }
     }
 
     fn consume_name(&mut self) {

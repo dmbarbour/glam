@@ -85,14 +85,13 @@ pub(in crate::g_syntax::parser) fn parse_pattern(
     }
 
     match first.kind() {
-        TokenKind::Number(number) if first_index == last_index => {
-            return Number::parse(number)
-                .map(|number| SyntaxPattern {
-                    kind: SyntaxPatternKind::Literal(SyntaxPatternLiteral::Number(number)),
-                })
-                .map_err(|error| {
-                    error_at_view(view, format!("invalid number literal `{number}`: {error}"))
-                });
+        TokenKind::Number(id) if first_index == last_index => {
+            let Some(number) = view.number(*id) else {
+                return Err(error_at_view(view, "pattern refers to unknown number data"));
+            };
+            return Ok(SyntaxPattern {
+                kind: SyntaxPatternKind::Literal(SyntaxPatternLiteral::Number(number.clone())),
+            });
         }
         TokenKind::Text(id) if first_index == last_index => {
             let Some(text) = view.text(*id) else {
