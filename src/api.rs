@@ -792,6 +792,157 @@ struct AssemblerReflectionState {
     store: ReflectionStore,
 }
 
+/// Execution resources shared by every source and recursive import in one
+/// top-level module build.
+///
+/// Macro lookup runs in the assembler reasoning session. Macro effects and
+/// explicit reflection annotations run in a separate session on the same
+/// executor, with private task, heap, and diagnostic state.
+pub(crate) struct CompilationExecution {
+    lookup: EvalContext,
+    macros: EvalContext,
+    #[cfg(test)]
+    macro_host: Arc<AssemblerReflectionHost>,
+    macro_diagnostics: DiagnosticBus,
+    _diagnostic_forwarder: DiagnosticSubscription,
+}
+
+impl CompilationExecution {
+    fn new(
+        reasoning: &ReasoningSession,
+        build_diagnostics: Arc<Mutex<Vec<Diagnostic>>>,
+    ) -> Result<Self, Error> {
+        let diagnostics = DiagnosticBus::new();
+        let host = Arc::new(AssemblerReflectionHost::new_unsealed(
+            allocate_reasoning_session_id(),
+            diagnostics.clone(),
+            reasoning.conflict_analysis(),
+        ));
+        host.seal_environment(reflection_environment_for_role(
+            &reasoning.environment(),
+            "macro",
+        ))?;
+        let evaluation = EvaluationSession::shared(reasoning.runtime.executor());
+        evaluation
+            .install_reflection_launcher(task_launcher(ReflectionEffects, host.clone()))
+            .map_err(|error| Error::new(error.as_ref()))?;
+
+        let assembler_diagnostics = reasoning.diagnostics();
+        let forwarder = diagnostics.subscribe(DiagnosticCallback(move |event: DiagnosticEvent| {
+            let diagnostic = macro_reflection_diagnostic(event.diagnostic());
+            build_diagnostics
+                .lock()
+                .expect("build diagnostic mutex should not be poisoned")
+                .push(diagnostic.clone());
+            assembler_diagnostics.publish(diagnostic);
+        }));
+
+        Ok(Self {
+            lookup: reasoning.eval_context(),
+            macros: EvalContext::patient(evaluation),
+            #[cfg(test)]
+            macro_host: host,
+            macro_diagnostics: diagnostics,
+            _diagnostic_forwarder: forwarder,
+        })
+    }
+
+    #[expect(
+        dead_code,
+        reason = "macro lookup starts using this context in expansion Phase 4"
+    )]
+    pub(crate) fn lookup_context(&self) -> &EvalContext {
+        &self.lookup
+    }
+
+    pub(crate) fn macro_context(&self) -> &EvalContext {
+        &self.macros
+    }
+
+    #[cfg(test)]
+    pub(crate) fn macro_diagnostic_counts(&self) -> DiagnosticCounts {
+        self.macro_diagnostics.counts()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn macro_heap(&self) -> Value {
+        self.macro_host
+            .state
+            .lock()
+            .expect("macro reflection state mutex should not be poisoned")
+            .store
+            .root()
+            .clone()
+    }
+
+    fn drain(&self) -> bool {
+        let run = self.macros.run_until_quiescent();
+        let (kind, report) = match run {
+            EvaluationSessionRun::Complete(report) => (None, report),
+            EvaluationSessionRun::Quiescent(report) => (Some("became quiescent"), report),
+            EvaluationSessionRun::Deadlocked(report) => (Some("deadlocked"), report),
+        };
+        for failure in report.failures {
+            self.macro_diagnostics.publish(Diagnostic::new(
+                Severity::Error,
+                format!(
+                    "macro reflection task {} failed: {}",
+                    failure.task.get(),
+                    failure.error
+                ),
+            ));
+        }
+        if let Some(kind) = kind {
+            let mut details = Vec::new();
+            for task in report.unfinished {
+                let dependency = task
+                    .dependency
+                    .map(|dependency| format!(" waiting on task {}", dependency.get()))
+                    .unwrap_or_default();
+                details.push(format!(
+                    "task {} is {:?}{dependency}",
+                    task.task.get(),
+                    task.state
+                ));
+            }
+            self.macro_diagnostics.publish(Diagnostic::new(
+                Severity::Error,
+                format!(
+                    "macro reflection scheduler {kind} with {} unfinished task{}{}",
+                    details.len(),
+                    if details.len() == 1 { "" } else { "s" },
+                    if details.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", details.join("; "))
+                    }
+                ),
+            ));
+        }
+        self.macro_diagnostics.counts().errors() != 0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drain_for_test(&self) -> bool {
+        self.drain()
+    }
+}
+
+fn macro_reflection_diagnostic(diagnostic: &Diagnostic) -> Diagnostic {
+    let reasoning = CoreValue::Dict(Dict::new_sync().insert(
+        Key::atom_from_text("role"),
+        Value::atom_from_text("macro").into_core(),
+    ));
+    let origin =
+        CoreValue::Dict(Dict::new_sync().insert(Key::atom_from_text("reasoning"), reasoning));
+    Diagnostic::from_parts(
+        diagnostic.source.clone(),
+        diagnostic.severity,
+        diagnostic.emission.as_core().clone(),
+        Some(origin),
+    )
+}
+
 impl AssemblerReflectionHost {
     fn new_unsealed(
         reasoning_session: ReasoningSessionId,
@@ -1055,6 +1206,7 @@ struct CompileSetup {
     module_loader: ModuleLoader,
     binary_loader: BinaryFileLoader,
     session: Arc<Mutex<Vec<Diagnostic>>>,
+    execution: Arc<CompilationExecution>,
 }
 
 #[derive(Debug, Clone)]
@@ -1500,6 +1652,26 @@ impl Assembler {
         Self::default()
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_compilation_execution(&self) -> Arc<CompilationExecution> {
+        Arc::new(
+            CompilationExecution::new(&self.reasoning, Arc::new(Mutex::new(Vec::new())))
+                .expect("test compilation execution must be constructible"),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reflection_heap(&self) -> Value {
+        self.reasoning
+            .host
+            .state
+            .lock()
+            .expect("assembler reflection state mutex should not be poisoned")
+            .store
+            .root()
+            .clone()
+    }
+
     /// Creates a host-resolved promised value and its unique resolver.
     ///
     /// Resolving, failing, or dropping the resolver wakes this assembler's
@@ -1729,23 +1901,29 @@ impl Assembler {
         initial_definitions: Value,
     ) -> Result<BuiltModule, Error> {
         let session = Arc::new(Mutex::new(Vec::new()));
+        let execution = Arc::new(CompilationExecution::new(&self.reasoning, session.clone())?);
         let result = self.build_module_inner(
             module_path,
             inputs,
             initial_definitions.into_core(),
             session.clone(),
+            execution.clone(),
         );
+        let execution_failed = execution.drain();
         let diagnostics = session
             .lock()
             .expect("build diagnostic mutex should not be poisoned")
             .clone();
 
-        match result {
-            Ok(value) => Ok(BuiltModule {
+        match (result, execution_failed) {
+            (Ok(_), true) => {
+                Err(Error::new("module macro reasoning failed").with_diagnostics(diagnostics))
+            }
+            (Ok(value), false) => Ok(BuiltModule {
                 value: Value::from_core(value),
                 diagnostics,
             }),
-            Err(error) => Err(error.with_diagnostics(diagnostics)),
+            (Err(error), _) => Err(error.with_diagnostics(diagnostics)),
         }
     }
 
@@ -1755,8 +1933,9 @@ impl Assembler {
         inputs: Vec<ModuleInput>,
         mut definitions: CoreValue,
         session: Arc<Mutex<Vec<Diagnostic>>>,
+        execution: Arc<CompilationExecution>,
     ) -> Result<CoreValue, Error> {
-        let module_loader = self.module_loader(session.clone());
+        let module_loader = self.module_loader(session.clone(), execution.clone());
         let binary_loader = self.binary_loader();
         let module_context = CompileContext::from_module_path(module_path.iter().cloned())
             .with_local_module_loader(module_loader.clone())
@@ -1774,6 +1953,7 @@ impl Assembler {
                     module_loader: module_loader.clone(),
                     binary_loader: binary_loader.clone(),
                     session: session.clone(),
+                    execution: execution.clone(),
                 },
             )?;
             definitions = compile_source(prepared.source.bytes(), &prepared.context);
@@ -1801,6 +1981,7 @@ impl Assembler {
             module_loader,
             binary_loader,
             session,
+            execution,
         } = setup;
         match input {
             ModuleInput::File(path) => {
@@ -1822,6 +2003,7 @@ impl Assembler {
                     .with_final_defs(final_defs)
                     .with_local_module_loader(module_loader)
                     .with_local_binary_loader(binary_loader)
+                    .with_compilation_execution(execution)
                     .with_diagnostic_emitter(self.compile_diagnostic_emitter(
                         trace,
                         session,
@@ -1851,6 +2033,7 @@ impl Assembler {
                     .with_final_defs(final_defs)
                     .with_local_module_loader(module_loader)
                     .with_local_binary_loader(binary_loader)
+                    .with_compilation_execution(execution)
                     .with_diagnostic_emitter(self.compile_diagnostic_emitter(
                         trace,
                         session,
@@ -1865,9 +2048,13 @@ impl Assembler {
         }
     }
 
-    fn module_loader(&self, session: Arc<Mutex<Vec<Diagnostic>>>) -> ModuleLoader {
+    fn module_loader(
+        &self,
+        session: Arc<Mutex<Vec<Diagnostic>>>,
+        execution: Arc<CompilationExecution>,
+    ) -> ModuleLoader {
         let assembler = self.clone();
-        Arc::new(move |args| assembler.load_local_module(args, session.clone()))
+        Arc::new(move |args| assembler.load_local_module(args, session.clone(), execution.clone()))
     }
 
     fn binary_loader(&self) -> BinaryFileLoader {
@@ -1879,6 +2066,7 @@ impl Assembler {
         &self,
         args: ModuleLoadArgs,
         session: Arc<Mutex<Vec<Diagnostic>>>,
+        execution: Arc<CompilationExecution>,
     ) -> Result<CoreValue, String> {
         let importer = args.importer_source.as_ref().ok_or_else(|| {
             format!(
@@ -1891,7 +2079,7 @@ impl Assembler {
                 .load_relative(&args.request)
                 .map_err(|error| error.to_string())?,
         );
-        let module_loader = self.module_loader(session.clone());
+        let module_loader = self.module_loader(session.clone(), execution.clone());
         let binary_loader = self.binary_loader();
         let had_errors = Arc::new(AtomicBool::new(false));
         let trace = match args.importer_trace {
@@ -1916,6 +2104,7 @@ impl Assembler {
             .with_final_defs(args.final_defs)
             .with_local_module_loader(module_loader)
             .with_local_binary_loader(binary_loader)
+            .with_compilation_execution(execution)
             .with_diagnostic_emitter(self.compile_diagnostic_emitter(
                 trace,
                 session,

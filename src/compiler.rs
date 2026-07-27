@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::api::CompilationExecution;
 use crate::core::{Atom, Dict, Key, PromisedValue, Value, keys};
 use crate::diagnostic::{CompilationTrace, Severity};
 use crate::source::{RelativeSourcePath, SourceArtifact};
@@ -47,6 +48,7 @@ pub(crate) struct CompileContext {
     local_module_loader: Option<ModuleLoader>,
     local_binary_loader: Option<BinaryFileLoader>,
     diagnostic_emitter: Option<CompileDiagnosticEmitter>,
+    compilation_execution: Option<Arc<CompilationExecution>>,
 }
 
 impl Default for CompileContext {
@@ -60,6 +62,7 @@ impl Default for CompileContext {
             local_module_loader: None,
             local_binary_loader: None,
             diagnostic_emitter: None,
+            compilation_execution: None,
         }
     }
 }
@@ -123,12 +126,28 @@ impl CompileContext {
         self
     }
 
+    pub(crate) fn with_compilation_execution(
+        mut self,
+        execution: Arc<CompilationExecution>,
+    ) -> Self {
+        self.compilation_execution = Some(execution);
+        self
+    }
+
     pub(crate) fn prior_defs(&self) -> &Value {
         &self.prior_defs
     }
 
     pub(crate) fn final_defs(&self) -> &Value {
         &self.final_defs
+    }
+
+    #[expect(
+        dead_code,
+        reason = "source macro expansion reads this capability beginning in Phase 4"
+    )]
+    pub(crate) fn compilation_execution(&self) -> Option<&Arc<CompilationExecution>> {
+        self.compilation_execution.as_ref()
     }
 
     /// Returns the abstract global-path value for a path relative to the

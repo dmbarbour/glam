@@ -224,7 +224,7 @@ mod resolver_context_tests {
     }
 
     #[test]
-    fn with_expression_keeps_its_fixpoint_local_in_resolved_ir() {
+    fn with_expression_keeps_its_definition_mixin_local_in_resolved_ir() {
         let context = CompileContext::default();
         let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
         let mut resolver = ResolverContext::default();
@@ -250,16 +250,14 @@ mod resolver_context_tests {
 
         assert!(matches!(
             resolved,
-            ResolvedExpr::ApplyLambda { parameters, body, arguments }
-                if parameters.len() == 1
-                && arguments.len() == 1
-                && matches!(body.as_ref(), ResolvedExpr::Apply { function, arguments }
-                    if matches!(function.as_ref(),
-                        ResolvedExpr::Embedded(Value::Builtin(Builtin::Fixpoint)))
-                    && matches!(arguments.as_slice(),
-                        [ResolvedExpr::Lambda { parameters, body }]
-                        if parameters.len() == 1
-                        && body.free_bindings().contains(&parameters[0])))
+            ResolvedExpr::Apply { function, arguments }
+                if matches!(function.as_ref(),
+                    ResolvedExpr::Embedded(Value::Builtin(Builtin::ObjectWithDefs)))
+                && matches!(arguments.as_slice(),
+                    [_, ResolvedExpr::Lambda { parameters, body }]
+                    if parameters.len() == 2
+                    && body.free_bindings().contains(&parameters[0])
+                    && body.free_bindings().contains(&parameters[1]))
         ));
     }
 

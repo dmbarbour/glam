@@ -38,6 +38,7 @@ not define future language semantics or collect subsystem invariants.
 | `g_syntax/keywords.rs` | Language-version-owned `g0` reserved words and their syntactic roles |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs`, `name_analysis.rs` | Lexical resolution, affine semantic IR, local-use warnings, and file-wide local/global shadow checks |
 | `g_syntax/compiler_values.rs` | Shared closed helpers and built-in modules owned by the g compiler |
+| `g_syntax/macro_expansion/` | Restricted macro-effect API, branch journals, immutable invocation hosts, and isolated all-results execution |
 | `g_syntax/module_lowering/` | Imports, definitions, objects, and module fixpoint orchestration |
 | `g_syntax/net_lowering.rs` | Resolved functions and applications to closed interaction nets |
 | `g_syntax/diagnostic_formatter.rs` | Cached closed Glam default `Diagnostic -> Bytes` formatter |
@@ -65,6 +66,7 @@ submodules rather than homes for another implementation layer.
 main or embedding client
   -> AssemblerBuilder fixes SourceSystem + reasoning resources
   -> Assembler + ModuleBuilder
+  -> one CompilationExecution for the complete top-level build
   -> SourceSystem supplies immutable SourceArtifact
   -> artifact supplies bytes + identity + digest + relative resolver
   -> CompileContext supplies source-scoped capabilities
@@ -73,8 +75,11 @@ main or embedding client
   -> explicit evaluation/extraction
 ```
 
-Imports re-enter the same assembler session through artifact-installed relative
-resolvers.
+Imports re-enter the same assembler session and compilation execution through
+artifact-installed relative resolvers. The compilation execution owns a
+private macro evaluation session whose reflection heap, tasks, and diagnostic
+counts do not alias assembler reasoning; both sessions share only the
+configured executor.
 For a bare command, the CLI first loads configuration with a dormant runtime,
 runs `conf.cli` as an isolated all-results search, resolves the promised
 canonical argument environment, and only then activates the selected worker
@@ -119,7 +124,10 @@ single lowering; no syntax or core expression tree survives into evaluation.
 `StagedSourceParser` and `ModuleLowerer` alternate parsing and lowering over
 the one lexical result; the batch parser/lowerer path is test-only
 compatibility coverage. Module lowering owns declaration order and the open
-module fixpoint. Net lowering emits complete bind and application spines.
+module fixpoint. The staged seam is also where source macro expansion will run;
+its restricted effect runner and compilation-private session already exist,
+but source invocation recognition begins in the next implementation phase.
+Net lowering emits complete bind and application spines.
 
 `LayoutView` selects one next-line or hanging sibling anchor and returns the
 first dedented line without consuming it. `ExpressionContext` carries the

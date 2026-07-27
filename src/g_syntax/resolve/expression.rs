@@ -268,13 +268,12 @@ pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let base_len = locals.len();
-    let mut outer_bindings = ResolvedBindings::default();
     let prior_value =
         syntax_expr_to_resolved_in_semantic_scope(base, line, context, scope, locals)?;
-    let prior_defs = outer_bindings.bind(locals, "<with-prior-defs>", prior_value);
+    let prior_binding = locals.push_internal_binding("<with-prior-defs>");
     let final_binding = locals.push_internal_binding("<with-final-defs>");
     let final_defs = ResolvedRoot::Local(final_binding);
-    let mut definitions = prior_defs;
+    let mut definitions = ResolvedRoot::Local(prior_binding);
     let mut body_bindings = ResolvedBindings::default();
 
     for body_definition in body {
@@ -295,13 +294,13 @@ pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
     }
 
     let lambda_body = body_bindings.wrap(definitions.expr());
-    let fixed = ResolvedExpr::apply(
-        ResolvedExpr::Embedded(Value::Builtin(Builtin::Fixpoint)),
-        [ResolvedExpr::lambda(vec![final_binding], lambda_body)],
+    let extension_defs = ResolvedExpr::lambda(vec![prior_binding, final_binding], lambda_body);
+    let extended = ResolvedExpr::apply(
+        ResolvedExpr::Embedded(Value::Builtin(Builtin::ObjectWithDefs)),
+        [prior_value, extension_defs],
     );
-    let result = outer_bindings.wrap(fixed);
     locals.truncate(base_len);
-    Ok(result)
+    Ok(extended)
 }
 
 pub(in crate::g_syntax) fn dict_with_body_scope(

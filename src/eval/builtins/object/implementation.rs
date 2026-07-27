@@ -59,17 +59,32 @@ fn object_spec_from_parts(name: Value, deps: Value, defs: Value) -> crate::core:
         .insert((*keys::DEFS).clone(), defs)
 }
 
-/// Re-instantiates an object with an additional stateless definitions mixin.
+/// Applies an additional stateless definitions mixin through ordinary `with`.
 ///
-/// The composed definitions are retained in the resulting `spec`; directly
-/// updating the instance dictionary would lose the extension when a later
-/// observer inherits the object again.
+/// Objects are re-instantiated and retain the composed definitions in their
+/// resulting `spec`. Plain dictionaries use the same fixpoint application but
+/// remain dictionaries.
 pub(super) fn eval_object_with_defs_builtin(
     context: &EvalContext,
     object: &Value,
     extension_defs: Value,
 ) -> Result<Value, EvalError> {
-    let spec = object_spec_dict(context, &eval_object_spec_builtin(context, object)?)?;
+    let object = eval_value(context, object)?;
+    let Value::Dict(object_dict) = &object else {
+        return Err(EvalError::new(
+            "ordinary `with` requires a dictionary or object value",
+        ));
+    };
+    let Some(spec) = object_dict.get(&*keys::SPEC) else {
+        let extension = apply_value(context, extension_defs, object)?;
+        return super::super::apply_builtin(context, Builtin::Fixpoint, Vec::new(), extension);
+    };
+    let spec = eval_value(context, spec)?;
+    if is_undefined_dict_value(&spec) {
+        let extension = apply_value(context, extension_defs, object)?;
+        return super::super::apply_builtin(context, Builtin::Fixpoint, Vec::new(), extension);
+    }
+    let spec = object_spec_dict(context, &spec)?;
     let name = object_spec_name_value(&spec);
     let deps = spec
         .get(&*keys::DEPS)

@@ -616,7 +616,7 @@ fn observe_query_change<S: TaskSpecialization>(
     }
 }
 
-fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskError> {
+pub(crate) fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskError> {
     let CoreValue::Dict(mut message) = evaluate(context, message.into_core())? else {
         return Err(TaskError::new("`.log` message must evaluate to an object"));
     };
@@ -626,7 +626,7 @@ fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskE
     Ok(Value::from_core(CoreValue::Dict(message)))
 }
 
-fn parse_severity(context: &EvalContext, value: Value) -> Result<Severity, TaskError> {
+pub(crate) fn parse_severity(context: &EvalContext, value: Value) -> Result<Severity, TaskError> {
     let value = evaluate(context, value.into_core())?;
     if severity_matches(&value, "info", &keys::INFO_VALUE) {
         Ok(Severity::Info)

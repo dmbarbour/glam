@@ -8,6 +8,7 @@ mod ast;
 mod compiler_values;
 mod diagnostic_formatter;
 mod keywords;
+mod macro_expansion;
 mod module_lowering;
 mod name_analysis;
 mod net_lowering;

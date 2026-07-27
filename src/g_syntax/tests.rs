@@ -4460,6 +4460,25 @@ fn extend_declarations_reinstantiate_objects() {
 }
 
 #[test]
+fn with_expressions_reinstantiate_adapting_objects() {
+    let parsed = parse(
+        "language g0\nobject environment as self with\n  adapted = self.language\nconfigured = environment with\n  .['language] = \"g0\"\nasm.result = configured.adapted\n",
+    );
+    let context = CompileContext::from_module_path(["assembly"]);
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"g0"
+    );
+}
+
+#[test]
 fn object_body_edits_do_not_observe_direct_spec_definitions() {
     let parsed = parse(
         "language g0\nobject hello with\n  spec = { bad:\"bad\" }\n  text = { [{}]:\"Hello, World!\" }.[_spec]\nasm.result = hello.text\n",

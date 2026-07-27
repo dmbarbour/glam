@@ -27,13 +27,15 @@ requests `asm.result`, and decides process output and exit status.
 
 ```text
 ModuleBuilder + ordered ModuleInput values
+  -> allocate one CompilationExecution for this top-level build
   -> Assembler::build_module_inner
        -> SourceSystem returns an immutable SourceArtifact
        -> artifact supplies identity, SHA-256 digest, and relative resolver
        -> CompileContext hides source/import provenance
        -> selected front end parses and lowers one source
-       -> imports re-enter the same Assembler session
+       -> imports re-enter the same Assembler session and CompilationExecution
   -> module final-definition promise closes the module fixpoint
+  -> drain compilation-private macro reflection reasoning
   -> assembled module Value
 ```
 
@@ -48,6 +50,16 @@ retain a compact root-to-parent chain of relative requests, namespace
 extensions, tagged source identities, and the digest of every artifact's exact
 bytes, without retaining module values or environments. Observers choose when
 to enrich that provenance into `msg.origin`.
+
+`CompilationExecution` is narrower than `Assembler` or `ReasoningSession`. It
+supplies the lookup context plus one private macro evaluation session shared by
+all source inputs and recursive imports in the build. Macro reflection uses a
+separate heap, task registry, and diagnostic bus while sharing the assembler's
+executor. Its diagnostic events are bridged into build diagnostics with a
+`macro` reasoning origin, but the two buses retain independent sequence
+numbers and severity counts. Compilation drains detached macro reflection
+children without a timeout; terminal failures and stable deadlocks fail the
+build.
 
 ## Diagnostics and Logging
 

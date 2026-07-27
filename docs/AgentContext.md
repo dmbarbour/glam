@@ -70,6 +70,12 @@ notes instead of appending history; put subsystem details in
 - The built-in compiler's closed helpers and built-in modules are lowered once
   in `g_syntax/compiler_values.rs`. Per-module paths, environments, promises,
   and reflection tasks remain local.
+- One top-level module build creates one `CompilationExecution` and propagates
+  it through every input and recursive import. Macro effects use its private
+  evaluation/reflection session, not assembler reasoning: heaps, tasks, and
+  diagnostic counts remain distinct even though both sessions share an
+  executor. Direct macro journals backtrack; committed `anno refl:` work does
+  not.
 
 ### Diagnostics
 

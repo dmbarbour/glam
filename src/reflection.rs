@@ -13,11 +13,11 @@ pub use search::{
     IsolatedEffectSearch, IsolatedSearchBlock, IsolatedSearchBranch, IsolatedSearchPoll,
 };
 
-pub(crate) use requests::environment_log_request_specs;
 pub use requests::{
     ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionServices,
     ReflectionTransaction, handle_reflection_request, reflection_request_specs,
 };
+pub(crate) use requests::{environment_log_request_specs, parse_severity, prepare_message};
 pub use store::{
     CoarseConflictAnalysis, ConflictAnalysisStrategy, ConflictObservationIndex, ConflictPath,
     EvaluationQueryHandle, ExactConflictAnalysis, FingerprintConflictAnalysis, ReflectionStore,
@@ -3268,7 +3268,11 @@ fn value_key(context: &EvalContext, value: Value) -> Result<Key, TaskError> {
         .ok_or_else(|| TaskError::new("effect index is not keyable"))
 }
 
-fn get_value_path(context: &EvalContext, value: &Value, path: &[Key]) -> Result<Value, TaskError> {
+pub(crate) fn get_value_path(
+    context: &EvalContext,
+    value: &Value,
+    path: &[Key],
+) -> Result<Value, TaskError> {
     let mut current = value.clone();
     for key in path {
         let Value::Dict(dict) = evaluate(context, current)? else {

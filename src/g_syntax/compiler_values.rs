@@ -25,6 +25,14 @@ struct GCompilerValues {
     reflection_annotator: Value,
     pure_if_runner: Value,
     pure_match_runner: Value,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "macro source expansion begins using this cached helper in Phase 4"
+        )
+    )]
+    macro_environment: Value,
 }
 
 static EFFECT_VALUES: LazyLock<Mutex<HashMap<Key, Value>>> =
@@ -99,6 +107,7 @@ impl GCompilerValues {
             reflection_annotator: build_reflection_annotator(),
             pure_if_runner: build_pure_conditional_runner(Builtin::IfResult),
             pure_match_runner: build_pure_conditional_runner(Builtin::MatchResult),
+            macro_environment: build_macro_environment(),
         }
     }
 
@@ -188,6 +197,19 @@ pub(in crate::g_syntax) fn run_pure_open_match_resolved(
     operation: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
     apply_builtin(Builtin::ListEffect, [operation])
+}
+
+/// Extends a file-provided macro environment through the language's ordinary
+/// `with` operation, introducing the authoritative language declaration.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "macro source expansion begins using this cached helper in Phase 4"
+    )
+)]
+pub(in crate::g_syntax) fn macro_environment(base: Value, language: Value) -> Value {
+    apply_closed(COMPILER_VALUES.macro_environment.clone(), [base, language])
 }
 
 pub(in crate::g_syntax) fn effect_value(name: &str) -> Value {
@@ -341,6 +363,62 @@ fn build_pure_conditional_runner(selector: Builtin) -> Value {
     let results = apply_builtin(Builtin::ListEffect, [ResolvedExpr::Local(operation)]);
     let selected = apply_builtin(selector, [results]);
     evaluate_closed(ResolvedExpr::lambda(vec![operation], selected))
+}
+
+fn build_macro_environment() -> Value {
+    let mut locals = ResolverContext::default();
+    let environment_parameter = locals.push_internal_binding("<macro-environment>");
+    let language_parameter = locals.push_internal_binding("<macro-language>");
+    let prior = locals.push_internal_binding("<macro-environment-prior>");
+    let final_environment = locals.push_internal_binding("<macro-environment-final>");
+
+    let singleton = |key: &str, value| {
+        apply_builtin(
+            Builtin::DictSingleton,
+            [
+                ResolvedExpr::Embedded(Value::Atom(atom_from_str(key))),
+                value,
+            ],
+        )
+    };
+    let prior_language = ResolvedExpr::Access {
+        base: Box::new(ResolvedExpr::Local(prior)),
+        path: vec![ResolvedPathPart::Key(name_as_key("language"))],
+    };
+    let assertion_payload = apply_builtin(
+        Builtin::DictUnion,
+        [
+            singleton(
+                "name",
+                ResolvedExpr::Embedded(Value::binary_from_text("language")),
+            ),
+            singleton("value", prior_language),
+        ],
+    );
+    let assertion = singleton("assert_undefined", assertion_payload);
+    let language = apply_builtin(
+        Builtin::Anno,
+        [assertion, ResolvedExpr::Local(language_parameter)],
+    );
+    let extended = apply_builtin(
+        Builtin::DictUpdate,
+        [
+            ResolvedExpr::List(vec![ResolvedExpr::Embedded(Value::Atom(atom_from_str(
+                "language",
+            )))]),
+            language,
+            ResolvedExpr::Local(prior),
+        ],
+    );
+    let definitions = ResolvedExpr::lambda(vec![prior, final_environment], extended);
+    let result = apply_builtin(
+        Builtin::ObjectWithDefs,
+        [ResolvedExpr::Local(environment_parameter), definitions],
+    );
+    evaluate_closed(ResolvedExpr::lambda(
+        vec![environment_parameter, language_parameter],
+        result,
+    ))
 }
 
 fn build_empty_object_defs() -> Value {
@@ -513,6 +591,7 @@ fn build_reflection_annotator() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::number::Number;
 
     #[test]
     fn closed_compiler_values_are_cached_after_exposing_their_functions() {
@@ -535,5 +614,66 @@ mod tests {
             COMPILER_VALUES.pure_match_runner,
             Value::Function(_)
         ));
+        assert!(matches!(
+            COMPILER_VALUES.macro_environment,
+            Value::Function(_)
+        ));
+    }
+
+    #[test]
+    fn macro_environment_extends_a_dictionary_with_ordinary_introduction_rules() {
+        let base = Value::Dict(
+            Dict::new_sync().insert(name_as_key("existing"), Value::Number(Number::integer(1))),
+        );
+        let environment = macro_environment(base, Value::binary_from_text("g0"));
+
+        let existing = evaluate_closed(ResolvedExpr::Access {
+            base: Box::new(ResolvedExpr::Provided(environment.clone())),
+            path: vec![ResolvedPathPart::Key(name_as_key("existing"))],
+        });
+        let language = evaluate_closed(ResolvedExpr::Access {
+            base: Box::new(ResolvedExpr::Provided(environment)),
+            path: vec![ResolvedPathPart::Key(name_as_key("language"))],
+        });
+        assert_eq!(existing, Value::Number(Number::integer(1)));
+        assert_eq!(language, Value::binary_from_text("g0"));
+    }
+
+    #[test]
+    fn macro_environment_reinstantiates_an_adapting_object() {
+        let mut locals = ResolverContext::default();
+        let base = locals.push_internal_binding("<base>");
+        let self_value = locals.push_internal_binding("<self>");
+        let language = ResolvedExpr::Access {
+            base: Box::new(ResolvedExpr::Local(self_value)),
+            path: vec![ResolvedPathPart::Key(name_as_key("language"))],
+        };
+        let definitions = ResolvedExpr::lambda(
+            vec![base, self_value],
+            apply_builtin(
+                Builtin::DictUpdate,
+                [
+                    ResolvedExpr::List(vec![ResolvedExpr::Embedded(Value::Atom(atom_from_str(
+                        "adapted",
+                    )))]),
+                    language,
+                    ResolvedExpr::Local(base),
+                ],
+            ),
+        );
+        let object = evaluate_closed(apply_builtin(
+            Builtin::ObjectInstanceFromParts,
+            [
+                ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
+                ResolvedExpr::List(Vec::new()),
+                definitions,
+            ],
+        ));
+        let environment = macro_environment(object, Value::binary_from_text("g0"));
+        let adapted = evaluate_closed(ResolvedExpr::Access {
+            base: Box::new(ResolvedExpr::Provided(environment)),
+            path: vec![ResolvedPathPart::Key(name_as_key("adapted"))],
+        });
+        assert_eq!(adapted, Value::binary_from_text("g0"));
     }
 }
