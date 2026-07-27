@@ -19,9 +19,10 @@ use super::conditional::{
 use super::do_expr::parse_do_expression;
 use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{
-    ParseSession, TokenExtra, TokenInput, TokenView, close, embedded_value_id, joint, keyword,
-    line_start, name, number, open, space_before, symbol, text_id,
+    ParseSession, TokenExtra, TokenInput, TokenRange, TokenView, close, embedded_value_id, joint,
+    keyword, line_start, name, number, open, space_before, symbol, text_id,
 };
+use super::layout::group_separator;
 use super::lexical::{ByteSpan, Delimiter, GroupId, LeadingTrivia, SpannedToken, TokenKind};
 use super::structural::{parse_using_expression, split_top_level, trim_layout};
 
@@ -837,8 +838,9 @@ fn structural_atom_after_head<'lex, 'source: 'lex>(
             .map_or(context, |indentation| {
                 context.with_physical_line_floor(indentation)
             });
-        let parsed =
-            parse(view, head_index, structural_context.may_yield()).map_err(|diagnostics| {
+        let structural_view = structural_view_at(view, head_index);
+        let parsed = parse(structural_view, head_index, structural_context.may_yield()).map_err(
+            |diagnostics| {
                 let span = diagnostics
                     .first()
                     .and_then(|diagnostic| view.line_span(diagnostic.line))
@@ -851,7 +853,8 @@ fn structural_atom_after_head<'lex, 'source: 'lex>(
                         .collect::<Vec<_>>()
                         .join("; "),
                 )
-            })?;
+            },
+        )?;
         let end = parsed.end();
         for _ in head_index + 1..end {
             if input.next().is_none() {
@@ -865,6 +868,53 @@ fn structural_atom_after_head<'lex, 'source: 'lex>(
             .into_expression()
             .map_err(|message| Rich::custom(input.span_since(&before), message))
     })
+}
+
+fn structural_view_at<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+    head_index: usize,
+) -> TokenView<'lex, 'source> {
+    let Some(group) = view
+        .source()
+        .groups()
+        .iter()
+        .filter(|group| {
+            group
+                .close_token()
+                .is_some_and(|close| group.open_token() < head_index && head_index < close)
+        })
+        .min_by_key(|group| {
+            group
+                .close_token()
+                .expect("filtered groups are closed")
+                .saturating_sub(group.open_token())
+        })
+    else {
+        return view;
+    };
+    let close = group.close_token().expect("filtered groups are closed");
+    let contents = TokenView::new(
+        view.source(),
+        TokenRange::new(group.open_token() + 1, close)
+            .expect("delimiter contents are an ordered range"),
+    )
+    .expect("delimiter contents remain within the source");
+    let separator = group_separator(view.source(), group.delimiter(), group.open_token());
+    let end = contents
+        .top_level()
+        .find(|indexed| {
+            indexed.index() > head_index
+                && matches!(
+                    indexed.token().kind(),
+                    TokenKind::Symbol(symbol) if *symbol == separator
+                )
+        })
+        .map_or(close, |indexed| indexed.index());
+    TokenView::new(
+        view.source(),
+        TokenRange::new(head_index, end).expect("structural group member is an ordered range"),
+    )
+    .expect("structural group member remains within the source")
 }
 
 fn glam_name<'lex, 'source: 'lex>()

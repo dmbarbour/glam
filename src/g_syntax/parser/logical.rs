@@ -499,7 +499,7 @@ fn logical_item(
         }
     }
 
-    if !inside_group && hanging_layout_follows(source, member_start, invocation) {
+    if hanging_layout_follows(source, member_start, invocation) {
         let view = TokenView::new(
             source,
             TokenRange::new(invocation, member_end).expect("hanging macro layout view is ordered"),

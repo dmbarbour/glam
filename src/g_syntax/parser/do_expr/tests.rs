@@ -22,6 +22,10 @@ fn layout_do_parses() {
         "interaction_net do\n.bind -> ports\n.r ports",
         "\\api -> do\n.r api",
         "\\api -> interaction_net do\n.bind -> ports\n.r ports",
+        "(do .r 1)",
+        "(do .r ()\n    .r 1)",
+        "consume (do .r ()\n            .r 1)",
+        "(do .r 1, do .r 2)",
     ] {
         parse_do_expression(source);
     }

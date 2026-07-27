@@ -42,7 +42,9 @@ notes instead of appending history; put subsystem details in
   add a second indentation algorithm for macros. It returns rather than
   consumes its first dedent. A leading macro anchor after a layout-introducing
   keyword uses the first hanging member's column, not its physical line
-  indentation. `ExpressionContext` decides whether a postfix/infix owner may
+  indentation, including when that nested layout is bounded by a delimiter.
+  Delimiter members remain comma/semicolon-separated and are not anchor
+  positions. `ExpressionContext` decides whether a postfix/infix owner may
   resume at a dedent.
 - Keep current implementation claims out of target-state design documents, and
   keep chronological spike notes out of this file.

@@ -131,7 +131,9 @@ Macro cursors reuse `LayoutView` for bounded child layouts; output journals
 materialize abstract anchors relative to the invocation floor. A macro may own
 the first member of a hanging `do`, `let`, `when`, `where`, or `with` layout;
 the inferred member column, rather than the physical line indentation, anchors
-generated siblings. Generated text is never scanned for macro calls, and macro
+generated siblings. The same layout ownership works inside balanced delimiter
+groups, but an ordinary comma/semicolon-delimited member does not become an
+anchor expansion. Generated text is never scanned for macro calls, and macro
 syntax never enters the syntax AST. Net lowering emits complete bind and
 application spines.
 

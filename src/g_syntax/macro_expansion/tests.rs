@@ -571,6 +571,8 @@ do_effect = do
 do_value = list.head (list.pure do_effect)
 hanging_do_effect = do @meta.steps
 hanging_do_value = list.head (list.pure hanging_do_effect)
+parenthesized_do_value = list.head (list.pure (do @meta.steps))
+tuple_effects = (do @meta.steps, do .r 3)
 "#,
         )
         .build()
@@ -582,6 +584,7 @@ hanging_do_value = list.head (list.pure hanging_do_effect)
         ("second", 42),
         ("do_value", 42),
         ("hanging_do_value", 42),
+        ("parenthesized_do_value", 42),
     ] {
         let value = assembler
             .get(module.value(), name)
