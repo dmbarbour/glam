@@ -502,7 +502,6 @@ meta.one = .read.layout (.read.anchor =>> .read.data >>= (\value -> .read.end =>
 meta.sum = .read.layout (.read.anchor =>> .read.data >>= (\left -> .read.anchor =>> .read.data >>= (\right -> .read.end =>> .write.data (left + right) =>> .r ())))
 meta.nested = .read.layout (.read.anchor =>> .read.data >>= (\outer -> .read.layout (.read.anchor =>> .read.data >>= (\left -> .read.anchor =>> .read.data >>= (\right -> .read.end =>> .write.data (outer + left + right) =>> .r ()))) =>> .read.end))
 meta.boundary = .alt (.read.sep =>> .read.text "peer" =>> .write.text "own = 0") (.write.text "own = 42")
-meta.member = .alt (.read.text "," =>> .write.data 0) (.write.data 42)
 hanging = @meta.one 42
 sum = @meta.sum
   20
@@ -514,13 +513,12 @@ nested = @meta.nested
 object bounded with
   @meta.boundary
   peer = 99
-member = list.at 0 [@meta.member, 99]
 "#,
         )
         .build()
         .expect("layout-aware source macros should compile");
 
-    for (name, expected) in [("hanging", 42), ("sum", 42), ("nested", 42), ("member", 42)] {
+    for (name, expected) in [("hanging", 42), ("sum", 42), ("nested", 42)] {
         let value = assembler
             .get(module.value(), name)
             .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
@@ -559,8 +557,10 @@ meta.list = .write.text "[" =>> .write.layout (.write.anchor =>> .write.data 1 =
 meta.declarations = .read.end =>> .write.anchor =>> .write.text "first = " =>> .write.data 40 =>> .write.anchor =>> .write.text "second = " =>> .write.data 42
 meta.members = .read.end =>> .write.anchor =>> .write.text "first = " =>> .write.data 40 =>> .write.anchor =>> .write.text "second = " =>> .write.data 42
 meta.steps = .read.end =>> .write.anchor =>> .write.text ".r ()" =>> .write.anchor =>> .write.text ".r " =>> .write.data 42
+meta.consume_comma = .read.text "," =>> .read.sep =>> (.read.data >>= (\_ -> .read.end =>> .write.data 42))
 meta.delete = .r ()
 list_second = list.at 1 @meta.list
+comma_is_macro_text = list.at 0 [@meta.consume_comma, 99]
 @meta.declarations
 object values with
   @meta.delete
@@ -572,7 +572,7 @@ do_value = list.head (list.pure do_effect)
 hanging_do_effect = do @meta.steps
 hanging_do_value = list.head (list.pure hanging_do_effect)
 parenthesized_do_value = list.head (list.pure (do @meta.steps))
-tuple_effects = (do @meta.steps, do .r 3)
+tuple_effects = ((do @meta.steps), do .r 3)
 "#,
         )
         .build()
@@ -580,6 +580,7 @@ tuple_effects = (do @meta.steps, do .r 3)
 
     for (name, expected) in [
         ("list_second", 2),
+        ("comma_is_macro_text", 42),
         ("first", 40),
         ("second", 42),
         ("do_value", 42),
@@ -638,6 +639,16 @@ fn source_macro_anchor_contract_rejects_ambiguous_or_empty_items() {
         (
             ".write.anchor =>> .write.text \"generated = 42\"",
             "@meta.bad 1",
+            "complete input item",
+        ),
+        (
+            ".write.anchor =>> .write.text \".r 42\"",
+            "answer = (do @meta.bad where x = 1)",
+            "complete input item",
+        ),
+        (
+            ".write.anchor =>> .write.text \".r 42\"",
+            "answer = (do @meta.bad, do .r 1)",
             "complete input item",
         ),
         (

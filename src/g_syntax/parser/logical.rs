@@ -17,7 +17,7 @@ use super::super::macro_expansion::{
     MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroInputLayout, MacroOutput,
 };
 use super::input::{TokenRange, TokenView};
-use super::layout::{LayoutView, group_separator};
+use super::layout::LayoutView;
 use super::lexical::{
     ByteSpan, DeclarationSection, Delimiter, EmbeddedValueId, GroupId, LeadingTrivia, LexedSource,
     NumberId, TextId, TokenKind, lex_source,
@@ -478,25 +478,6 @@ fn logical_item(
         let close = group.close_token().expect("filtered groups are closed");
         member_start = group.open_token() + 1;
         member_end = close;
-        let contents = TokenView::new(
-            source,
-            TokenRange::new(member_start, member_end)
-                .expect("delimiter contents are an ordered range"),
-        )
-        .expect("delimiter contents remain within the source");
-        let separator = group_separator(source, group.delimiter(), group.open_token());
-        for indexed in contents.top_level() {
-            if !matches!(indexed.token().kind(), TokenKind::Symbol(symbol) if *symbol == separator)
-            {
-                continue;
-            }
-            if indexed.index() < invocation {
-                member_start = indexed.index() + 1;
-            } else {
-                member_end = indexed.index();
-                break;
-            }
-        }
     }
 
     if hanging_layout_follows(source, member_start, invocation) {

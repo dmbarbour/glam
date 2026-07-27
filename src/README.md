@@ -132,10 +132,11 @@ materialize abstract anchors relative to the invocation floor. A macro may own
 the first member of a hanging `do`, `let`, `when`, `where`, or `with` layout;
 the inferred member column, rather than the physical line indentation, anchors
 generated siblings. The same layout ownership works inside balanced delimiter
-groups, but an ordinary comma/semicolon-delimited member does not become an
-anchor expansion. Generated text is never scanned for macro calls, and macro
-syntax never enters the syntax AST. Net lowering emits complete bind and
-application spines.
+groups. Macro input discovery does not interpret commas or semicolons as
+boundaries: they remain ordinary text until the resulting source reaches the
+tuple, collection, or braced-body parser. Generated text is never scanned for
+macro calls, and macro syntax never enters the syntax AST. Net lowering emits
+complete bind and application spines.
 
 `LayoutView` selects one next-line or hanging sibling anchor and returns the
 first dedented line without consuming it. `ExpressionContext` carries the
