@@ -370,6 +370,26 @@ impl DeclarationMacroWork {
         (source, self.embedded_values.clone())
     }
 
+    pub(super) fn position_at(&self, offset: usize) -> (usize, usize) {
+        let offset = offset.min(self.text.len());
+        let prefix = &self.text[..offset];
+        let relative_line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+        let line_start = prefix.rfind('\n').map_or(0, |newline| newline + 1);
+        (self.line + relative_line, offset - line_start + 1)
+    }
+
+    pub(super) fn normalized_excerpt(&self) -> String {
+        const EXCERPT_SCALARS: usize = 160;
+
+        let display = self.text.replace(EMBEDDED_MARKER, "<embedded-data>");
+        let normalized = display.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut excerpt = normalized.chars().take(EXCERPT_SCALARS).collect::<String>();
+        if normalized.chars().count() > EXCERPT_SCALARS {
+            excerpt.push('…');
+        }
+        excerpt
+    }
+
     fn lexical(&self) -> Result<LexedSource<'_>, Vec<Diagnostic>> {
         let lexical = lex_source(&self.text)
             .replace_unknowns_with_embedded(EMBEDDED_MARKER, self.embedded_values.clone())

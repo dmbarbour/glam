@@ -22,6 +22,37 @@ pub(in crate::g_syntax) struct MacroRun {
     output: Vec<MacroOutput>,
 }
 
+#[derive(Debug)]
+pub(in crate::g_syntax) struct MacroFailure {
+    diagnostic: Diagnostic,
+    frontier: Option<usize>,
+    cases: Vec<PublicValue>,
+}
+
+impl MacroFailure {
+    pub(in crate::g_syntax) fn message(&self) -> &str {
+        self.diagnostic.message()
+    }
+
+    pub(in crate::g_syntax) fn frontier(&self) -> Option<usize> {
+        self.frontier
+    }
+
+    pub(in crate::g_syntax) fn cases(&self) -> &[PublicValue] {
+        &self.cases
+    }
+
+    fn with_context(
+        mut self: Box<Self>,
+        frontier: usize,
+        cases: impl IntoIterator<Item = PublicValue>,
+    ) -> Box<Self> {
+        self.frontier = Some(frontier);
+        self.cases = unique_values(cases);
+        self
+    }
+}
+
 impl MacroRun {
     pub(in crate::g_syntax) fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
@@ -46,7 +77,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
     effect: Value,
     environment: Value,
     input: MacroInput,
-) -> Result<MacroRun, Box<Diagnostic>> {
+) -> Result<MacroRun, Box<MacroFailure>> {
     let effect = PublicValue::from_core(effect);
     let host = Arc::new(MacroHost::new(
         PublicValue::from_core(environment),
@@ -58,7 +89,11 @@ pub(in crate::g_syntax) fn run_macro_effect(
         host,
         execution.macro_context().clone(),
     )
-    .map_err(|error| macro_error(format!("macro effect could not start: {error}")))?;
+    .map_err(|error| {
+        macro_error(format!(
+            "selected macro value is not a runnable effect: {error}"
+        ))
+    })?;
 
     let branches = loop {
         match search.poll(STEP_BUDGET) {
@@ -95,9 +130,25 @@ pub(in crate::g_syntax) fn run_macro_effect(
         }
     };
 
+    // Do not replay a macro merely to collect failure diagnostics: demanded
+    // reflection annotations commit outside the branch journal and would run
+    // twice. Cases remain lazy handles, so retaining the furthest branch
+    // frontier in this single execution is the inexpensive safe path.
     let mut successful = branches.iter().filter(|branch| branch.value().is_some());
     let Some(branch) = successful.next() else {
-        return Err(macro_error("macro effect produced no successful result"));
+        let frontier = branches
+            .iter()
+            .map(|branch| branch.journal().cursor.consumed_end(&input))
+            .max()
+            .unwrap_or_else(|| input.start());
+        let cases = branches
+            .iter()
+            .filter(|branch| branch.journal().cursor.consumed_end(&input) == frontier)
+            .flat_map(|branch| branch.journal().active_cases.iter().cloned());
+        return Err(
+            macro_error("macro input did not match any successful alternative")
+                .with_context(frontier, cases),
+        );
     };
     if successful.next().is_some() {
         return Err(macro_error(
@@ -108,7 +159,12 @@ pub(in crate::g_syntax) fn run_macro_effect(
         .value()
         .expect("successful branch was selected above")
         .as_core();
-    let value = force_result(execution, value.clone())?;
+    let value = force_result(execution, value.clone()).map_err(|error| {
+        error.with_context(
+            branch.journal().cursor.consumed_end(&input),
+            branch.journal().active_cases.iter().cloned(),
+        )
+    })?;
     if value != *keys::UNIT_VALUE {
         return Err(macro_error(format!(
             "macro effect terminated with {}, expected unit",
@@ -140,7 +196,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
 fn force_result(
     execution: &CompilationExecution,
     mut value: Value,
-) -> Result<Value, Box<Diagnostic>> {
+) -> Result<Value, Box<MacroFailure>> {
     loop {
         match eval::eval_value(execution.macro_context(), &value) {
             Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => value = next,
@@ -166,6 +222,57 @@ fn force_result(
     }
 }
 
-fn macro_error(message: impl Into<std::sync::Arc<str>>) -> Box<Diagnostic> {
-    Box::new(Diagnostic::new(Severity::Error, message))
+pub(in crate::g_syntax) fn render_macro_case(
+    execution: &CompilationExecution,
+    value: &PublicValue,
+) -> String {
+    let value = match force_result(execution, value.as_core().clone()) {
+        Ok(value) => value,
+        Err(error) => return format!("explanation unavailable ({})", error.message()),
+    };
+    if let Value::Binary(bytes) = &value {
+        return String::from_utf8(bytes.to_vec())
+            .unwrap_or_else(|_| "explanation is non-UTF-8 binary data".to_owned());
+    }
+    let Value::Dict(dict) = &value else {
+        return format!("explanation has kind {}", value.diagnostic_kind_name());
+    };
+    let field = |name| {
+        dict.get(&crate::core::Key::atom_from_text(name))
+            .and_then(|value| force_result(execution, value.clone()).ok())
+            .and_then(|value| match value {
+                Value::Binary(bytes) => String::from_utf8(bytes.to_vec()).ok(),
+                _ => None,
+            })
+    };
+    let usage = field("usage");
+    let summary = field("summary");
+    let details = field("details");
+    match (usage, summary, details) {
+        (Some(usage), Some(summary), _) => format!("{usage} — {summary}"),
+        (Some(usage), None, _) => usage,
+        (None, Some(summary), _) => summary,
+        (None, None, Some(details)) => details,
+        (None, None, None) => {
+            "explanation has no textual `usage`, `summary`, or `details`".to_owned()
+        }
+    }
+}
+
+fn unique_values(values: impl IntoIterator<Item = PublicValue>) -> Vec<PublicValue> {
+    let mut unique = Vec::new();
+    for value in values {
+        if !unique.contains(&value) {
+            unique.push(value);
+        }
+    }
+    unique
+}
+
+fn macro_error(message: impl Into<std::sync::Arc<str>>) -> Box<MacroFailure> {
+    Box::new(MacroFailure {
+        diagnostic: Diagnostic::new(Severity::Error, message),
+        frontier: None,
+        cases: Vec::new(),
+    })
 }

@@ -137,8 +137,12 @@ boundaries: they remain ordinary text until the resulting source reaches the
 tuple, collection, or braced-body parser. Generated text is never scanned for
 macro calls. Text writes exclude ASCII C0 controls, SP, and DEL; `.write.sep`
 and `.write.anchor` exclusively emit logical separation and sibling
-boundaries. Macro syntax never enters the syntax AST. Net lowering emits
-complete bind and application spines.
+boundaries. Failed searches report only the furthest cursor's active `.case`
+values; successful direct logs publish in source order after the expanded
+declaration parses and carry compiler-owned invocation frames. Invalid
+expanded syntax retains those frames plus a normalized declaration excerpt.
+Macro syntax never enters the syntax AST. Net lowering emits complete bind and
+application spines.
 
 `LayoutView` selects one next-line or hanging sibling anchor and returns the
 first dedented line without consuming it. `ExpressionContext` carries the

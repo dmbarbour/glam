@@ -12,8 +12,8 @@ pub(in crate::g_syntax) use io::{
     MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroInputLayout, MacroOutput,
 };
 #[cfg(test)]
-pub(in crate::g_syntax) use runner::MacroRun;
-pub(in crate::g_syntax) use runner::run_macro_effect;
+pub(in crate::g_syntax) use runner::{MacroFailure, MacroRun};
+pub(in crate::g_syntax) use runner::{render_macro_case, run_macro_effect};
 
 #[cfg(test)]
 mod tests;

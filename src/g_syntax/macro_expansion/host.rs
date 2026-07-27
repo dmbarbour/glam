@@ -19,6 +19,7 @@ pub(super) struct MacroSnapshot {
 pub(super) struct MacroJournal {
     diagnostics: Arc<Vec<crate::api::Diagnostic>>,
     pub(super) active_cases: Vec<Value>,
+    #[cfg(test)]
     pub(super) visited_cases: Vec<Value>,
     pub(super) cursor: MacroCursor,
     output: Vec<MacroOutput>,

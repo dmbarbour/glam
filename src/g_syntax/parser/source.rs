@@ -8,10 +8,12 @@ use super::input::{ParseSession, TokenView};
 use super::layout::validate_delimited_layouts;
 use super::lexical::{DeclarationSection, LexedSource, TokenKind, lex_source};
 use super::logical::LogicalSource;
-use super::logical::{DeclarationMacroWork, EMBEDDED_MARKER};
+use super::logical::{DeclarationMacroWork, EMBEDDED_MARKER, OriginalMacroInvocation};
+use crate::api::Value as PublicValue;
 use crate::compiler::CompileContext;
 use crate::core::{Atom, Dict, Key, List, Value};
 use crate::evaluation::EvaluationPumpOutcome;
+use crate::number::Number;
 use crate::{api::CompilationExecution, eval};
 
 const MACRO_LOOKUP_STEP_BUDGET: usize = 256;
@@ -201,19 +203,25 @@ impl<'source> StagedSourceParser<'source> {
             let effect = match macro_lookup(execution, prior_definitions, &keys, true) {
                 Ok(effect) if effect != Value::Dict(Dict::new_sync()) => effect,
                 Ok(_) => {
-                    self.diagnostics.push(Diagnostic::error(
-                        original.line,
+                    self.diagnostics.push(macro_compiler_diagnostic(
+                        &original,
                         format!("macro `{}` is not defined", original.path.join(".")),
+                        None,
+                        &[],
+                        std::slice::from_ref(&original),
                     ));
                     return Some(Vec::new());
                 }
                 Err(error) => {
-                    self.diagnostics.push(Diagnostic::error(
-                        original.line,
+                    self.diagnostics.push(macro_compiler_diagnostic(
+                        &original,
                         format!(
                             "macro `{}` could not be selected: {error}",
                             original.path.join(".")
                         ),
+                        None,
+                        &[],
+                        std::slice::from_ref(&original),
                     ));
                     return Some(Vec::new());
                 }
@@ -225,25 +233,58 @@ impl<'source> StagedSourceParser<'source> {
                 invocation.input.clone(),
             ) {
                 Ok(run) => run,
-                Err(diagnostic) => {
-                    self.diagnostics.push(Diagnostic::error(
-                        original.line,
+                Err(failure) => {
+                    let position = failure.frontier().map(|frontier| {
+                        let (line, column) = work.position_at(frontier);
+                        (frontier, line, column)
+                    });
+                    let case_detail = failure
+                        .cases()
+                        .iter()
+                        .map(|case| {
+                            format!(
+                                "\n  while parsing: {}",
+                                super::super::macro_expansion::render_macro_case(execution, case)
+                            )
+                        })
+                        .collect::<String>();
+                    let position_detail = position.map_or_else(String::new, |(_, line, column)| {
+                        format!(" at input line {line}, column {column}")
+                    });
+                    self.diagnostics.push(macro_compiler_diagnostic(
+                        &original,
                         format!(
-                            "macro `{}` failed: {}",
+                            "macro `{}` failed{position_detail}: {}{case_detail}",
                             original.path.join("."),
-                            diagnostic.message()
+                            failure.message()
                         ),
+                        position,
+                        failure.cases(),
+                        std::slice::from_ref(&original),
                     ));
                     return Some(Vec::new());
                 }
             };
-            if let Err(mut diagnostics) =
+            if let Err(diagnostics) =
                 work.splice(&invocation, run.consumed_end(), run.output(), original.line)
             {
-                self.diagnostics.append(&mut diagnostics);
+                self.diagnostics
+                    .extend(diagnostics.into_iter().map(|diagnostic| {
+                        macro_compiler_diagnostic(
+                            &original,
+                            format!(
+                                "macro `{}` generated invalid source structure: {}",
+                                original.path.join("."),
+                                diagnostic.message
+                            ),
+                            None,
+                            &[],
+                            std::slice::from_ref(&original),
+                        )
+                    }));
                 return Some(Vec::new());
             }
-            macro_diagnostics.push((original.start, run.diagnostics().to_vec()));
+            macro_diagnostics.push((original.start, original.clone(), run.diagnostics().to_vec()));
         }
         let (rewritten, embedded) = work.materialize();
         let diagnostics_before = self.diagnostics.len();
@@ -252,14 +293,45 @@ impl<'source> StagedSourceParser<'source> {
             .iter()
             .any(|diagnostic| diagnostic.severity == crate::diagnostic::Severity::Error);
         if accepted {
-            macro_diagnostics.sort_by_key(|(start, _)| *start);
-            for (_, diagnostics) in macro_diagnostics {
+            macro_diagnostics.sort_by_key(|(start, _, _)| *start);
+            for (_, original, diagnostics) in macro_diagnostics {
                 for diagnostic in diagnostics {
-                    context.emit_diagnostic(
-                        diagnostic.severity(),
+                    let emission = apply_macro_context(
                         diagnostic.emission().as_core().clone(),
+                        None,
+                        &[],
+                        std::slice::from_ref(&original),
                     );
+                    context.emit_diagnostic(diagnostic.severity(), emission);
                 }
+            }
+        } else {
+            let excerpt = work.normalized_excerpt();
+            let mut frames = work.invocations().to_vec();
+            frames.sort_by_key(|frame| frame.start);
+            let primary = frames
+                .first()
+                .expect("macro work must retain at least one invocation");
+            for diagnostic in &mut self.diagnostics[diagnostics_before..] {
+                if diagnostic.severity != crate::diagnostic::Severity::Error {
+                    continue;
+                }
+                let parser_line = diagnostic.line;
+                let parser_message = std::mem::take(&mut diagnostic.message);
+                let excerpt = if excerpt.is_empty() {
+                    "<empty>".to_owned()
+                } else {
+                    excerpt.clone()
+                };
+                *diagnostic = macro_compiler_diagnostic(
+                    primary,
+                    format!(
+                        "expanded declaration is invalid `.g` syntax (generated line {parser_line}): {parser_message}; expansion: `{excerpt}`"
+                    ),
+                    None,
+                    &[],
+                    &frames,
+                );
             }
         }
         Some(declarations)
@@ -271,6 +343,87 @@ impl<'source> StagedSourceParser<'source> {
         }
         self.diagnostics
     }
+}
+
+fn macro_compiler_diagnostic(
+    invocation: &OriginalMacroInvocation,
+    message: String,
+    frontier: Option<(usize, usize, usize)>,
+    cases: &[PublicValue],
+    frames: &[OriginalMacroInvocation],
+) -> Diagnostic {
+    let emission = crate::diagnostic::text_message(Some(invocation.line), &message);
+    let emission = apply_macro_context(emission, frontier, cases, frames);
+    Diagnostic::error(invocation.line, message).with_emission(emission)
+}
+
+fn apply_macro_context(
+    message: Value,
+    frontier: Option<(usize, usize, usize)>,
+    cases: &[PublicValue],
+    frames: &[OriginalMacroInvocation],
+) -> Value {
+    let mut context = Dict::new_sync().insert(
+        Key::atom_from_text("frames"),
+        Value::List(List::from_values(
+            frames.iter().map(macro_frame_value).collect(),
+        )),
+    );
+    if let Some((byte, line, column)) = frontier {
+        let position = Dict::new_sync()
+            .insert(
+                Key::atom_from_text("byte"),
+                Value::Number(Number::from_usize(byte)),
+            )
+            .insert(
+                Key::atom_from_text("line"),
+                Value::Number(Number::from_usize(line)),
+            )
+            .insert(
+                Key::atom_from_text("column"),
+                Value::Number(Number::from_usize(column)),
+            );
+        context = context.insert(Key::atom_from_text("input_position"), Value::Dict(position));
+    }
+    if !cases.is_empty() {
+        context = context.insert(
+            Key::atom_from_text("cases"),
+            Value::List(List::from_values(
+                cases.iter().map(|case| case.as_core().clone()).collect(),
+            )),
+        );
+    }
+    let updates =
+        Value::Dict(Dict::new_sync().insert(Key::atom_from_text("macro"), Value::Dict(context)));
+    crate::diagnostic::apply_emission_updates(message.clone(), updates).unwrap_or(message)
+}
+
+fn macro_frame_value(frame: &OriginalMacroInvocation) -> Value {
+    let path = Value::List(List::from_values(
+        frame
+            .path
+            .iter()
+            .map(|part| Value::binary_from_text(part))
+            .collect(),
+    ));
+    let invocation = Dict::new_sync()
+        .insert(
+            Key::atom_from_text("id"),
+            Value::Number(Number::from_usize(frame.id)),
+        )
+        .insert(
+            Key::atom_from_text("line"),
+            Value::Number(Number::from_usize(frame.line)),
+        )
+        .insert(
+            Key::atom_from_text("declaration_byte"),
+            Value::Number(Number::from_usize(frame.start)),
+        );
+    Value::Dict(
+        Dict::new_sync()
+            .insert(Key::atom_from_text("path"), path)
+            .insert(Key::atom_from_text("invocation"), Value::Dict(invocation)),
+    )
 }
 
 fn macro_lookup(

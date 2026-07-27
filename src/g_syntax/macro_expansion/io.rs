@@ -61,6 +61,10 @@ impl MacroInput {
         self
     }
 
+    pub(super) fn start(&self) -> usize {
+        self.start
+    }
+
     #[cfg(test)]
     pub(super) fn empty() -> Self {
         Self::new(Vec::new(), 0, 0)

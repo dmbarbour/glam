@@ -40,6 +40,7 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub line: usize,
     pub message: String,
+    emission: Option<Value>,
 }
 
 pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
@@ -48,8 +49,8 @@ pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
         diagnostics,
     } = lower_source(source, context);
     for diagnostic in diagnostics {
-        let message = crate::diagnostic::text_message(Some(diagnostic.line), &diagnostic.message);
-        context.emit_diagnostic(diagnostic.severity, message);
+        let severity = diagnostic.severity;
+        context.emit_diagnostic(severity, diagnostic.into_emission());
     }
     definitions
 }
@@ -64,6 +65,7 @@ impl Diagnostic {
             severity: Severity::Warning,
             line,
             message: message.into(),
+            emission: None,
         }
     }
 
@@ -72,7 +74,18 @@ impl Diagnostic {
             severity: Severity::Error,
             line,
             message: message.into(),
+            emission: None,
         }
+    }
+
+    fn with_emission(mut self, emission: Value) -> Self {
+        self.emission = Some(emission);
+        self
+    }
+
+    fn into_emission(self) -> Value {
+        self.emission
+            .unwrap_or_else(|| crate::diagnostic::text_message(Some(self.line), &self.message))
     }
 }
 

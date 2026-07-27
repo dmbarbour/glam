@@ -213,8 +213,9 @@ fn enter_case(
         .transaction()
         .ok_or_else(|| TaskError::new("macro `.case` escaped its isolated transaction"))?;
     let (_, journal) = transaction.parts();
-    journal.active_cases.push(explanation.clone());
-    journal.visited_cases.push(explanation);
+    #[cfg(test)]
+    journal.visited_cases.push(explanation.clone());
+    journal.active_cases.push(explanation);
     Ok(RequestResult::Scoped {
         operation: parser,
         close: case_exit_effect(),

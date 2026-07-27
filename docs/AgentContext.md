@@ -47,7 +47,11 @@ notes instead of appending history; put subsystem details in
   ordinary macro text until the ordinary parser interprets the expanded
   source. Macro `.write.text` excludes ASCII C0 controls, SP, and DEL; only
   `.write.sep` and `.write.anchor` emit logical whitespace. `ExpressionContext`
-  decides whether a postfix/infix owner may resume at a dedent.
+  decides whether a postfix/infix owner may resume at a dedent. Diagnose a
+  failed macro from the furthest branch cursor and its active `.case` values
+  in the original search. Never replay a macro for diagnostics: demanded
+  reflection annotations commit outside the branch journal and could execute
+  twice.
 - Keep current implementation claims out of target-state design documents, and
   keep chronological spike notes out of this file.
 

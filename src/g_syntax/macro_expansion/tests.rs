@@ -12,7 +12,7 @@ use super::effects::validate_written_text;
 use super::io::{
     MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroInputLayout, MacroOutput,
 };
-use super::{MacroRun, run_macro_effect};
+use super::{MacroFailure, MacroRun, run_macro_effect};
 
 struct DiagnosticMessages(Arc<Mutex<Vec<String>>>);
 
@@ -22,6 +22,17 @@ impl DiagnosticSubscriber for DiagnosticMessages {
             .lock()
             .expect("diagnostic observation mutex should not be poisoned")
             .push(event.diagnostic().message().to_owned());
+    }
+}
+
+struct CapturedDiagnostics(Arc<Mutex<Vec<Diagnostic>>>);
+
+impl DiagnosticSubscriber for CapturedDiagnostics {
+    fn receive(&self, event: DiagnosticEvent) {
+        self.0
+            .lock()
+            .expect("diagnostic observation mutex should not be poisoned")
+            .push(event.diagnostic().clone());
     }
 }
 
@@ -45,7 +56,7 @@ fn run(
     execution: &CompilationExecution,
     effect: &PublicValue,
     environment: Value,
-) -> Result<MacroRun, Box<Diagnostic>> {
+) -> Result<MacroRun, Box<MacroFailure>> {
     run_macro_effect(
         execution,
         effect.as_core().clone(),
@@ -99,7 +110,7 @@ fn macro_runner_selects_one_unit_branch_and_discards_other_journals() {
 #[test]
 fn macro_runner_rejects_zero_multiple_and_nonunit_results() {
     for (source, expected) in [
-        (".fail", "no successful result"),
+        (".fail", "did not match any successful alternative"),
         (
             ".alt (.r ()) (.r ())",
             "multiple results; use `.cut` to select one",
@@ -116,6 +127,60 @@ fn macro_runner_rejects_zero_multiple_and_nonunit_results() {
             error.message()
         );
     }
+}
+
+#[test]
+fn macro_runner_distinguishes_a_non_effect_value() {
+    let assembler = Assembler::default();
+    let error = run_macro_effect(
+        &assembler.test_compilation_execution(),
+        PublicValue::integer(42).as_core().clone(),
+        Value::Dict(Dict::new_sync()),
+        MacroInput::empty(),
+    )
+    .expect_err("ordinary data is not a source macro effect");
+    assert!(
+        error
+            .message()
+            .contains("reflection task requires an effect object"),
+        "unexpected diagnostic: {}",
+        error.message(),
+    );
+}
+
+#[test]
+fn macro_failure_keeps_only_furthest_active_cases() {
+    let (assembler, effect) = compile_effects(
+        ".alt (.case \"short case\" (.read.text \"ab\" =>> .read.text \"missing\")) (.case \"furthest case\" (.read.text \"abc\" =>> .read.text \"missing\"))",
+    );
+    let input = MacroInput::new(
+        vec![MacroInputElement {
+            kind: MacroInputKind::Text {
+                text: Arc::from("abc!"),
+                delimiter: None,
+            },
+            separated: false,
+            start: 10,
+            end: 14,
+        }],
+        10,
+        14,
+    );
+    let error = run_macro_effect(
+        &assembler.test_compilation_execution(),
+        effect.as_core().clone(),
+        Value::Dict(Dict::new_sync()),
+        input,
+    )
+    .expect_err("neither parsing alternative should succeed");
+
+    assert_eq!(error.frontier(), Some(13));
+    assert_eq!(error.cases().len(), 1);
+    assert_eq!(
+        error.cases()[0],
+        PublicValue::text("furthest case"),
+        "an earlier failed cursor must not contribute its active case",
+    );
 }
 
 #[test]
@@ -781,6 +846,83 @@ fn source_macro_rejects_reserved_or_unbalanced_generated_text() {
 }
 
 #[test]
+fn source_macro_failure_reports_frontier_case_and_structured_context() {
+    let assembler = Assembler::default();
+    let error = assembler
+        .module(["macro_failure_context_test"])
+        .script(
+            "g",
+            r#"language g0
+import 'std
+meta.macro.env = {}
+meta.expected = .case "the word `expected`" (.read.sep =>> .read.text "expected" =>> .r ())
+answer = @meta.expected actual
+"#,
+        )
+        .build()
+        .expect_err("the macro reader should reject the unexpected word");
+    let diagnostic = error
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.message().contains("while parsing"))
+        .expect("macro failure should retain its active case");
+    assert!(diagnostic.message().contains("at input line 5, column"));
+    assert!(diagnostic.message().contains("the word `expected`"));
+
+    let Value::Dict(message) = diagnostic.emission().as_core() else {
+        panic!("macro failure should remain an object diagnostic")
+    };
+    let Value::Dict(context) = message
+        .get(&Key::atom_from_text("macro"))
+        .expect("macro diagnostics should carry compiler-owned context")
+    else {
+        panic!("macro diagnostic context should be a dictionary")
+    };
+    assert!(matches!(
+        context.get(&Key::atom_from_text("input_position")),
+        Some(Value::Dict(_))
+    ));
+    assert!(matches!(
+        context.get(&Key::atom_from_text("cases")),
+        Some(Value::List(_))
+    ));
+    assert!(matches!(
+        context.get(&Key::atom_from_text("frames")),
+        Some(Value::List(_))
+    ));
+}
+
+#[test]
+fn invalid_expanded_source_reports_an_excerpt_and_expansion_frames() {
+    let assembler = Assembler::default();
+    let error = assembler
+        .module(["invalid_macro_expansion_test"])
+        .script(
+            "g",
+            "language g0\nimport 'std\nmeta.macro.env = {}\nmeta.bad = .write.text \"$\"\nanswer = @meta.bad\n",
+        )
+        .build()
+        .expect_err("macro output that is not a g expression should fail parsing");
+    let diagnostic = error
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("expanded declaration is invalid `.g` syntax")
+        })
+        .expect("invalid expanded syntax should receive macro context");
+    assert!(diagnostic.message().contains("expansion: `answer = $`"));
+    let Value::Dict(message) = diagnostic.emission().as_core() else {
+        panic!("invalid expansion should remain an object diagnostic")
+    };
+    assert!(matches!(
+        message.get(&Key::atom_from_text("macro")),
+        Some(Value::Dict(_))
+    ));
+}
+
+#[test]
 fn macro_text_writer_rejects_c0_space_and_delete() {
     for scalar in (0_u32..=0x20).chain(std::iter::once(0x7f)) {
         let scalar = char::from_u32(scalar).expect("tested ASCII scalar should be valid");
@@ -930,6 +1072,80 @@ layout = list.at 1 [
             "right source order",
         ],
         "direct macro diagnostics should publish in source order per declaration"
+    );
+}
+
+#[test]
+fn accepted_macro_logs_receive_context_without_changing_the_original_emission() {
+    let assembler = Assembler::default();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let _subscription = assembler
+        .diagnostic_bus()
+        .subscribe(CapturedDiagnostics(observed.clone()));
+    assembler
+        .module(["macro_log_context_test"])
+        .script(
+            "g",
+            r#"language g0
+import 'std
+meta.macro.env = {}
+meta.notice = .log 'info { msg:{ text:"macro notice" }, macro:{ supplied:"unchanged runner input" } } =>> .write.data 42
+answer = @meta.notice
+"#,
+        )
+        .build()
+        .expect("valid macro output should publish its direct log");
+
+    let diagnostics = observed
+        .lock()
+        .expect("diagnostic observation mutex should not be poisoned");
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.message() == "macro notice")
+        .expect("accepted macro log should be published");
+    let Value::Dict(message) = diagnostic.emission().as_core() else {
+        panic!("macro log should remain an object")
+    };
+    let Value::Dict(context) = message
+        .get(&Key::atom_from_text("macro"))
+        .expect("compiler context should replace the open macro metadata field")
+    else {
+        panic!("compiler macro context should be a dictionary")
+    };
+    assert!(matches!(
+        context.get(&Key::atom_from_text("frames")),
+        Some(Value::List(_))
+    ));
+}
+
+#[test]
+fn invalid_generated_source_discards_direct_macro_logs() {
+    let assembler = Assembler::default();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let _subscription = assembler
+        .diagnostic_bus()
+        .subscribe(DiagnosticMessages(observed.clone()));
+    assembler
+        .module(["discard_invalid_macro_log_test"])
+        .script(
+            "g",
+            r#"language g0
+import 'std
+meta.macro.env = {}
+meta.bad = .log 'warn { msg:{ text:"discard this macro log" } } =>> .write.text "$"
+answer = @meta.bad
+"#,
+        )
+        .build()
+        .expect_err("invalid generated syntax should reject the declaration");
+
+    assert!(
+        !observed
+            .lock()
+            .expect("diagnostic observation mutex should not be poisoned")
+            .iter()
+            .any(|message| message == "discard this macro log"),
+        "direct macro logs must not publish before generated syntax is accepted",
     );
 }
 

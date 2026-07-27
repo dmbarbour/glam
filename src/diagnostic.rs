@@ -207,6 +207,14 @@ pub(crate) fn apply_updates(message: Value, updates: Value) -> Result<Value, Str
     eval::eval_value(&context, &value).map_err(|error| error.to_string())
 }
 
+/// Turns a diagnostic emission into an object when needed, then applies an
+/// independent compiler- or observer-owned mixin without changing the source
+/// emission.
+pub(crate) fn apply_emission_updates(message: Value, updates: Value) -> Result<Value, String> {
+    let message = diagnostic_object(message)?;
+    apply_updates(message, updates)
+}
+
 /// Applies assembler-owned metadata as a real object definitions mixin so the
 /// resulting `spec` also records the extension for subsequent observers.
 pub(crate) fn enrich(
@@ -214,6 +222,11 @@ pub(crate) fn enrich(
     severity: Severity,
     origin: Option<Value>,
 ) -> Result<Value, String> {
+    let message = diagnostic_object(message)?;
+    apply_updates(message, Value::Dict(assembler_metadata(severity, origin)))
+}
+
+fn diagnostic_object(message: Value) -> Result<Value, String> {
     let context = crate::evaluation::EvalContext::standalone();
     let message = eval::eval_value(&context, &message).map_err(|error| error.to_string())?;
     let has_defined_spec = match &message {
@@ -237,7 +250,7 @@ pub(crate) fn enrich(
         .map_err(|error| error.to_string())?;
         eval::eval_value(&context, &message).map_err(|error| error.to_string())?
     };
-    apply_updates(message, Value::Dict(assembler_metadata(severity, origin)))
+    Ok(message)
 }
 
 pub(crate) fn conventional_summary(message: &Value) -> (Option<usize>, Option<Arc<str>>) {
