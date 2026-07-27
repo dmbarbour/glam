@@ -13,8 +13,10 @@ use crate::number::Number;
 
 use super::super::Diagnostic;
 use super::super::macro_expansion::{
-    MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroOutput,
+    MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroInputLayout, MacroOutput,
 };
+use super::input::{TokenRange, TokenView};
+use super::layout::{LayoutView, group_separator};
 use super::lexical::{
     ByteSpan, DeclarationSection, Delimiter, EmbeddedValueId, GroupId, LeadingTrivia, LexedSource,
     NumberId, TextId, TokenKind, lex_source,
@@ -26,6 +28,8 @@ pub(super) const EMBEDDED_MARKER: char = '\u{e000}';
 pub(super) struct MacroInvocation {
     pub(super) path: Vec<String>,
     pub(super) start: usize,
+    anchor_position: bool,
+    indentation: usize,
     pub(super) input: MacroInput,
 }
 
@@ -320,7 +324,14 @@ impl DeclarationMacroWork {
         output: &[MacroOutput],
         line: usize,
     ) -> Result<(), Vec<Diagnostic>> {
-        let (generated, embedded) = generated_output(output, line)?;
+        let anchor_expansion = matches!(output.first(), Some(MacroOutput::Anchor));
+        if anchor_expansion && !invocation.anchor_position {
+            return Err(vec![Diagnostic::error(
+                line,
+                "anchored macro output requires an invocation at the start of its logical item",
+            )]);
+        }
+        let (generated, embedded) = generated_output(output, line, invocation.indentation)?;
         if !(invocation.start <= consumed_end && consumed_end <= self.text.len()) {
             return Err(vec![Diagnostic::error(
                 line,
@@ -415,15 +426,8 @@ fn macro_invocation_at(
         index += 1;
     }
     let input_start = tokens[index - 1].span().end();
-    let input_token_end = source
-        .groups()
-        .iter()
-        .filter_map(|group| {
-            let close = group.close_token()?;
-            (group.open_token() < invocation && invocation < close).then_some(close)
-        })
-        .min()
-        .unwrap_or(range.end);
+    let item = logical_item(source, declaration, invocation);
+    let input_token_end = item.end();
     let input_end = if input_token_end < range.end {
         tokens[input_token_end].span().start()
     } else {
@@ -432,31 +436,136 @@ fn macro_invocation_at(
     Ok(MacroInvocation {
         path,
         start,
+        anchor_position: invocation == item.start()
+            && !source.groups().iter().any(|group| {
+                group
+                    .close_token()
+                    .is_some_and(|close| group.open_token() < invocation && invocation < close)
+            }),
+        indentation: TokenView::whole(source)
+            .line_indentation_at(item.start())
+            .unwrap_or(0),
         input: macro_input(source, index..input_token_end, input_start, input_end)?,
     })
+}
+
+fn logical_item(
+    source: &LexedSource<'_>,
+    declaration: &DeclarationSection,
+    invocation: usize,
+) -> TokenRange {
+    let declaration_range = declaration.tokens();
+    let mut member_start = declaration_range.start;
+    let mut member_end = declaration_range.end;
+
+    if let Some(group) = source
+        .groups()
+        .iter()
+        .filter(|group| {
+            group
+                .close_token()
+                .is_some_and(|close| group.open_token() < invocation && invocation < close)
+        })
+        .min_by_key(|group| {
+            group
+                .close_token()
+                .expect("filtered groups are closed")
+                .saturating_sub(group.open_token())
+        })
+    {
+        let close = group.close_token().expect("filtered groups are closed");
+        member_start = group.open_token() + 1;
+        member_end = close;
+        let contents = TokenView::new(
+            source,
+            TokenRange::new(member_start, member_end)
+                .expect("delimiter contents are an ordered range"),
+        )
+        .expect("delimiter contents remain within the source");
+        let separator = group_separator(source, group.delimiter(), group.open_token());
+        for indexed in contents.top_level() {
+            if !matches!(indexed.token().kind(), TokenKind::Symbol(symbol) if *symbol == separator)
+            {
+                continue;
+            }
+            if indexed.index() < invocation {
+                member_start = indexed.index() + 1;
+            } else {
+                member_end = indexed.index();
+                break;
+            }
+        }
+    }
+
+    let line_start = source.tokens()[member_start..invocation]
+        .iter()
+        .rposition(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
+        .map_or(member_start, |relative| member_start + relative + 1);
+    let view = TokenView::new(
+        source,
+        TokenRange::new(line_start, member_end).expect("logical item view is ordered"),
+    )
+    .expect("logical item view remains within the source");
+    LayoutView::new(view)
+        .block()
+        .statements()
+        .iter()
+        .find(|statement| statement.tokens().contains(invocation))
+        .map_or_else(
+            || {
+                TokenRange::new(member_start, member_end)
+                    .expect("delimiter member range remains ordered")
+            },
+            |statement| statement.tokens(),
+        )
 }
 
 fn generated_output(
     output: &[MacroOutput],
     line: usize,
+    root_indentation: usize,
 ) -> Result<(String, Vec<Value>), Vec<Diagnostic>> {
     let mut generated = String::new();
     let mut embedded = Vec::new();
+    let mut indentation = vec![root_indentation];
+    let mut first_root_anchor = true;
+    let mut resume_parent = false;
     for item in output {
         match item {
-            MacroOutput::Text(text) => generated.push_str(text),
+            MacroOutput::Text(text) => {
+                resume_output_parent(&mut generated, &indentation, &mut resume_parent);
+                generated.push_str(text);
+            }
             MacroOutput::Data(value) => {
+                resume_output_parent(&mut generated, &indentation, &mut resume_parent);
                 generated.push(EMBEDDED_MARKER);
                 embedded.push(value.as_core().clone());
             }
-            MacroOutput::Separator => generated.push(' '),
+            MacroOutput::Separator => {
+                resume_output_parent(&mut generated, &indentation, &mut resume_parent);
+                generated.push(' ');
+            }
+            MacroOutput::LayoutStart => {
+                indentation.push(indentation.last().copied().unwrap_or(0) + 2);
+                resume_parent = false;
+            }
+            MacroOutput::LayoutEnd => {
+                indentation.pop();
+                resume_parent = true;
+            }
+            MacroOutput::Anchor => {
+                resume_parent = false;
+                if indentation.len() == 1 && first_root_anchor {
+                    first_root_anchor = false;
+                } else {
+                    generated.push('\n');
+                    generated.extend(std::iter::repeat_n(
+                        ' ',
+                        indentation.last().copied().unwrap_or(0),
+                    ));
+                }
+            }
         }
-    }
-    if generated.contains(['\r', '\n']) {
-        return Err(vec![Diagnostic::error(
-            line,
-            "macro layout output is not available until layout expansion support",
-        )]);
     }
     GeneratedText::classify(generated.clone()).map_err(|mut diagnostics| {
         for diagnostic in &mut diagnostics {
@@ -465,6 +574,18 @@ fn generated_output(
         diagnostics
     })?;
     Ok((generated, embedded))
+}
+
+fn resume_output_parent(generated: &mut String, indentation: &[usize], resume_parent: &mut bool) {
+    if !*resume_parent {
+        return;
+    }
+    generated.push('\n');
+    generated.extend(std::iter::repeat_n(
+        ' ',
+        indentation.last().copied().unwrap_or(0),
+    ));
+    *resume_parent = false;
 }
 
 fn marker_count(text: &str) -> usize {
@@ -480,8 +601,10 @@ fn macro_input(
     end: usize,
 ) -> Result<MacroInput, Diagnostic> {
     let mut elements = Vec::new();
+    let mut element_tokens = Vec::new();
     let mut line_break = false;
-    for token in &source.tokens()[range] {
+    for (relative, token) in source.tokens()[range.clone()].iter().enumerate() {
+        let token_index = range.start + relative;
         if matches!(token.kind(), TokenKind::LineStart { .. }) {
             line_break = true;
             continue;
@@ -537,8 +660,53 @@ fn macro_input(
             start: token.span().start(),
             end: token.span().end(),
         });
+        element_tokens.push(token_index);
     }
-    Ok(MacroInput::new(elements, start, end))
+    let layouts = macro_input_layouts(source, range, &element_tokens);
+    Ok(MacroInput::new(elements, start, end).with_layouts(layouts))
+}
+
+fn macro_input_layouts(
+    source: &LexedSource<'_>,
+    range: Range<usize>,
+    element_tokens: &[usize],
+) -> Vec<MacroInputLayout> {
+    element_tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(start_element, token_index)| {
+            if matches!(
+                source.tokens()[*token_index].kind(),
+                TokenKind::Close { .. }
+            ) {
+                return None;
+            }
+            let view = TokenView::new(
+                source,
+                TokenRange::new(*token_index, range.end)
+                    .expect("macro layout candidate range remains ordered"),
+            )?;
+            let block = LayoutView::new(view).block();
+            let items = block
+                .statements()
+                .iter()
+                .map(|statement| {
+                    element_boundary(element_tokens, statement.tokens().start())
+                        ..element_boundary(element_tokens, statement.tokens().end())
+                })
+                .filter(|item| !item.is_empty())
+                .collect::<Vec<_>>();
+            (!items.is_empty()).then(|| MacroInputLayout {
+                start: start_element,
+                end: element_boundary(element_tokens, block.end()),
+                items: items.into(),
+            })
+        })
+        .collect()
+}
+
+fn element_boundary(element_tokens: &[usize], token_boundary: usize) -> usize {
+    element_tokens.partition_point(|token| *token < token_boundary)
 }
 
 fn macro_delimiter(delimiter: Delimiter) -> MacroDelimiter {

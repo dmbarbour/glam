@@ -35,9 +35,12 @@ notes instead of appending history; put subsystem details in
   delimiter, indentation, and declaration-section recognition. Fatal lexical
   errors stop grammatical parsing. `parser/input.rs` is the only adapter from
   that one lexical result to token parsers; production parsers receive an
-  existing `TokenView` and never re-lex substrings. `LayoutView` infers one
-  next-line or hanging block at its current delimiter depth and returns rather
-  than consumes its first dedent. `ExpressionContext` decides whether a
+  existing `TokenView` and never re-lex source substrings. Source macro
+  replacement is the deliberate exception: it locally classifies each
+  evolving owned logical declaration before the ordinary parser sees it.
+  `LayoutView` infers both parser bodies and macro child-layout scopes; do not
+  add a second indentation algorithm for macros. It returns rather than
+  consumes its first dedent. `ExpressionContext` decides whether a
   postfix/infix owner may resume there.
 - Keep current implementation claims out of target-state design documents, and
   keep chronological spike notes out of this file.

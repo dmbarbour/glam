@@ -118,12 +118,22 @@ pub(in crate::g_syntax) fn run_macro_effect(
     if !branch.journal().cursor.balanced() {
         return Err(macro_error("macro reader left an input delimiter unclosed"));
     }
+    if !branch.journal().output_is_complete() {
+        return Err(macro_error(
+            "macro writer left an empty or unclosed layout item",
+        ));
+    }
+    if branch.journal().is_anchor_expansion() && !branch.journal().cursor.at_end(&input) {
+        return Err(macro_error(
+            "anchored macro output requires consuming the complete input item",
+        ));
+    }
     Ok(MacroRun {
         diagnostics: branch.journal().diagnostics().to_vec(),
         #[cfg(test)]
         visited_cases: branch.journal().visited_cases.clone(),
         consumed_end: branch.journal().cursor.consumed_end(&input),
-        output: branch.journal().output.clone(),
+        output: branch.journal().output().to_vec(),
     })
 }
 

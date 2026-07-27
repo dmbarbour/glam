@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::api::Value;
@@ -29,8 +30,16 @@ pub(in crate::g_syntax) struct MacroInputElement {
 #[derive(Debug, Clone)]
 pub(in crate::g_syntax) struct MacroInput {
     elements: Arc<[MacroInputElement]>,
+    layouts: Arc<[MacroInputLayout]>,
     start: usize,
     end: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::g_syntax) struct MacroInputLayout {
+    pub(in crate::g_syntax) start: usize,
+    pub(in crate::g_syntax) end: usize,
+    pub(in crate::g_syntax) items: Arc<[Range<usize>]>,
 }
 
 impl MacroInput {
@@ -41,9 +50,15 @@ impl MacroInput {
     ) -> Self {
         Self {
             elements: elements.into(),
+            layouts: Arc::new([]),
             start,
             end,
         }
+    }
+
+    pub(in crate::g_syntax) fn with_layouts(mut self, layouts: Vec<MacroInputLayout>) -> Self {
+        self.layouts = layouts.into();
+        self
     }
 
     #[cfg(test)]
@@ -54,6 +69,10 @@ impl MacroInput {
     fn element(&self, index: usize) -> Option<&MacroInputElement> {
         self.elements.get(index)
     }
+
+    fn layout(&self, start: usize) -> Option<&MacroInputLayout> {
+        self.layouts.iter().find(|layout| layout.start == start)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -62,6 +81,15 @@ pub(super) struct MacroCursor {
     offset: usize,
     separator_consumed: bool,
     delimiters: Vec<MacroDelimiter>,
+    layouts: Vec<MacroLayoutCursor>,
+}
+
+#[derive(Debug, Clone)]
+struct MacroLayoutCursor {
+    layout: MacroInputLayout,
+    next_item: usize,
+    item_end: Option<usize>,
+    delimiter_depth: usize,
 }
 
 impl MacroCursor {
@@ -120,6 +148,9 @@ impl MacroCursor {
     }
 
     pub(super) fn read_separator(&mut self, input: &MacroInput) -> bool {
+        if !self.within_active_item() {
+            return false;
+        }
         let Some(element) = input.element(self.element) else {
             return false;
         };
@@ -130,8 +161,70 @@ impl MacroCursor {
         true
     }
 
+    pub(super) fn enter_layout(&mut self, input: &MacroInput) -> bool {
+        if self.offset != 0 || self.separator_consumed {
+            return false;
+        }
+        let Some(layout) = input.layout(self.element).cloned() else {
+            return false;
+        };
+        if layout.items.is_empty()
+            || self
+                .active_item_end()
+                .is_some_and(|item_end| layout.end > item_end)
+        {
+            return false;
+        }
+        self.layouts.push(MacroLayoutCursor {
+            layout,
+            next_item: 0,
+            item_end: None,
+            delimiter_depth: self.delimiters.len(),
+        });
+        true
+    }
+
+    pub(super) fn read_anchor(&mut self) -> bool {
+        let Some(layout) = self.layouts.last_mut() else {
+            return false;
+        };
+        if self.offset != 0
+            || self.separator_consumed
+            || self.delimiters.len() != layout.delimiter_depth
+        {
+            return false;
+        }
+        if let Some(item_end) = layout.item_end
+            && self.element != item_end
+        {
+            return false;
+        }
+        let Some(item) = layout.layout.items.get(layout.next_item).cloned() else {
+            return false;
+        };
+        if self.element != item.start {
+            return false;
+        }
+        layout.next_item += 1;
+        layout.item_end = Some(item.end);
+        self.separator_consumed = true;
+        true
+    }
+
+    pub(super) fn exit_layout(&mut self) -> bool {
+        if !self.at_end_of_layout() {
+            return false;
+        }
+        self.layouts.pop();
+        true
+    }
+
     pub(super) fn at_end(&self, input: &MacroInput) -> bool {
-        self.element == input.elements.len() && self.delimiters.is_empty()
+        if self.layouts.is_empty() {
+            self.element == input.elements.len() && self.delimiters.is_empty()
+        } else {
+            self.at_end_of_layout()
+        }
     }
 
     pub(super) fn balanced(&self) -> bool {
@@ -140,7 +233,11 @@ impl MacroCursor {
 
     pub(super) fn consumed_end(&self, input: &MacroInput) -> usize {
         let Some(element) = input.element(self.element) else {
-            return input.end.max(input.start);
+            return if input.elements.is_empty() {
+                input.start
+            } else {
+                input.end.max(input.start)
+            };
         };
         if self.offset > 0 {
             element.start + self.offset
@@ -171,9 +268,32 @@ impl MacroCursor {
     }
 
     fn can_read_current(&self, input: &MacroInput) -> bool {
+        if !self.within_active_item() {
+            return false;
+        }
         input
             .element(self.element)
             .is_some_and(|element| self.offset > 0 || !element.separated || self.separator_consumed)
+    }
+
+    fn within_active_item(&self) -> bool {
+        self.active_item_end()
+            .is_none_or(|item_end| self.element < item_end)
+    }
+
+    fn active_item_end(&self) -> Option<usize> {
+        self.layouts.last().and_then(|layout| layout.item_end)
+    }
+
+    fn at_end_of_layout(&self) -> bool {
+        self.layouts.last().is_some_and(|layout| {
+            layout.next_item == layout.layout.items.len()
+                && layout.item_end == Some(layout.layout.end)
+                && self.element == layout.layout.end
+                && self.offset == 0
+                && !self.separator_consumed
+                && self.delimiters.len() == layout.delimiter_depth
+        })
     }
 
     fn advance_text(&mut self, input: &MacroInput, bytes: usize) -> bool {
@@ -214,4 +334,7 @@ pub(in crate::g_syntax) enum MacroOutput {
     Text(String),
     Data(Value),
     Separator,
+    LayoutStart,
+    LayoutEnd,
+    Anchor,
 }

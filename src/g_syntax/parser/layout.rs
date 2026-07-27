@@ -308,7 +308,7 @@ pub(super) fn validate_delimited_layouts(source: &LexedSource<'_>) -> Vec<Diagno
     diagnostics
 }
 
-fn group_separator(
+pub(super) fn group_separator(
     source: &LexedSource<'_>,
     delimiter: Delimiter,
     open_index: usize,

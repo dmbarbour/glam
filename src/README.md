@@ -124,9 +124,12 @@ single lowering; no syntax or core expression tree survives into evaluation.
 `StagedSourceParser` and `ModuleLowerer` alternate parsing and lowering over
 the one lexical result; the batch parser/lowerer path is test-only
 compatibility coverage. Module lowering owns declaration order and the open
-module fixpoint. The staged seam is also where source macro expansion will run;
-its restricted effect runner and compilation-private session already exist,
-but source invocation recognition begins in the next implementation phase.
+module fixpoint. At that staged seam, each macro-bearing original declaration
+captures one prior namespace and environment, expands its finite original
+invocation worklist right-to-left, and only then enters ordinary parsing.
+Macro cursors reuse `LayoutView` for bounded child layouts; output journals
+materialize abstract anchors relative to the invocation floor. Generated text
+is never scanned for macro calls, and macro syntax never enters the syntax AST.
 Net lowering emits complete bind and application spines.
 
 `LayoutView` selects one next-line or hanging sibling anchor and returns the

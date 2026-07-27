@@ -8,7 +8,9 @@ use crate::core::{Dict, Key, List, Value, keys};
 use crate::diagnostic::Severity;
 use crate::eval;
 
-use super::io::{MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroOutput};
+use super::io::{
+    MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroInputLayout, MacroOutput,
+};
 use super::{MacroRun, run_macro_effect};
 
 struct DiagnosticMessages(Arc<Mutex<Vec<String>>>);
@@ -266,7 +268,7 @@ fn inline_macro_readers_and_writers_are_transactional() {
         10,
         19,
     );
-    let run = run_macro_effect(
+    let layout_run = run_macro_effect(
         &execution,
         effect.as_core().clone(),
         Value::Dict(Dict::new_sync()),
@@ -274,13 +276,95 @@ fn inline_macro_readers_and_writers_are_transactional() {
     )
     .expect("fallback reader branch should succeed");
 
-    assert_eq!(run.consumed_end(), 19);
+    assert_eq!(layout_run.consumed_end(), 19);
     assert!(matches!(
-        run.output(),
+        layout_run.output(),
         [
             MacroOutput::Data(_),
             MacroOutput::Separator,
             MacroOutput::Data(_)
+        ]
+    ));
+}
+
+#[test]
+fn layout_readers_require_scoped_anchors_and_leave_root_anchor_as_failure() {
+    let (assembler, effect) = compile_effects(
+        ".read.layout (.read.anchor =>> .read.data >>= (\\first -> .read.anchor =>> .read.data >>= (\\second -> .read.end =>> .write.data first =>> .write.data second =>> .r ())))",
+    );
+    let input = MacroInput::new(
+        vec![
+            MacroInputElement {
+                kind: MacroInputKind::Data(PublicValue::integer(1)),
+                separated: true,
+                start: 2,
+                end: 3,
+            },
+            MacroInputElement {
+                kind: MacroInputKind::Data(PublicValue::integer(2)),
+                separated: true,
+                start: 6,
+                end: 7,
+            },
+        ],
+        0,
+        7,
+    )
+    .with_layouts(vec![MacroInputLayout {
+        start: 0,
+        end: 2,
+        items: vec![0..1, 1..2].into(),
+    }]);
+    let layout_run = run_macro_effect(
+        &assembler.test_compilation_execution(),
+        effect.as_core().clone(),
+        Value::Dict(Dict::new_sync()),
+        input,
+    )
+    .expect("anchored child layout should be consumed completely");
+    assert!(matches!(
+        layout_run.output(),
+        [MacroOutput::Data(_), MacroOutput::Data(_)]
+    ));
+
+    for source in [
+        ".alt (.read.anchor =>> .fail) (.write.data 42)",
+        ".alt (.read.layout (.r ())) (.write.data 42)",
+    ] {
+        let (assembler, effect) = compile_effects(source);
+        let run = run(
+            &assembler.test_compilation_execution(),
+            &effect,
+            Value::Dict(Dict::new_sync()),
+        )
+        .expect("an unavailable layout boundary should leave the fallback");
+        assert!(matches!(run.output(), [MacroOutput::Data(_)]));
+    }
+}
+
+#[test]
+fn layout_writers_record_nested_nonempty_items() {
+    let (assembler, effect) = compile_effects(
+        ".write.text \"[\" =>> .write.layout (.write.anchor =>> .write.data 1 =>> .write.text \",\" =>> .write.anchor =>> .write.data 2) =>> .write.text \"]\"",
+    );
+    let run = run(
+        &assembler.test_compilation_execution(),
+        &effect,
+        Value::Dict(Dict::new_sync()),
+    )
+    .expect("balanced layout output should succeed");
+    assert!(matches!(
+        run.output(),
+        [
+            MacroOutput::Text(_),
+            MacroOutput::LayoutStart,
+            MacroOutput::Anchor,
+            MacroOutput::Data(_),
+            MacroOutput::Text(_),
+            MacroOutput::Anchor,
+            MacroOutput::Data(_),
+            MacroOutput::LayoutEnd,
+            MacroOutput::Text(_),
         ]
     ));
 }
@@ -405,10 +489,193 @@ fn text_span_and_end_cover_the_current_nonstructural_run() {
 }
 
 #[test]
+fn source_macros_read_next_line_hanging_and_nested_layouts() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["macro_layout_reader_test"])
+        .script(
+            "g",
+            r#"language g0
+import 'std
+meta.macro.env = {}
+meta.one = .read.layout (.read.anchor =>> .read.data >>= (\value -> .read.end =>> .write.data value =>> .r ()))
+meta.sum = .read.layout (.read.anchor =>> .read.data >>= (\left -> .read.anchor =>> .read.data >>= (\right -> .read.end =>> .write.data (left + right) =>> .r ())))
+meta.nested = .read.layout (.read.anchor =>> .read.data >>= (\outer -> .read.layout (.read.anchor =>> .read.data >>= (\left -> .read.anchor =>> .read.data >>= (\right -> .read.end =>> .write.data (outer + left + right) =>> .r ()))) =>> .read.end))
+meta.boundary = .alt (.read.sep =>> .read.text "peer" =>> .write.text "own = 0") (.write.text "own = 42")
+meta.member = .alt (.read.text "," =>> .write.data 0) (.write.data 42)
+hanging = @meta.one 42
+sum = @meta.sum
+  20
+  22
+nested = @meta.nested
+  1
+    20
+    21
+object bounded with
+  @meta.boundary
+  peer = 99
+member = list.at 0 [@meta.member, 99]
+"#,
+        )
+        .build()
+        .expect("layout-aware source macros should compile");
+
+    for (name, expected) in [("hanging", 42), ("sum", 42), ("nested", 42), ("member", 42)] {
+        let value = assembler
+            .get(module.value(), name)
+            .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
+        assert_eq!(
+            assembler
+                .evaluate(&value)
+                .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
+            PublicValue::integer(expected),
+            "unexpected value for `{name}`",
+        );
+    }
+    let bounded = assembler
+        .get(module.value(), "bounded")
+        .expect("bounded object should exist");
+    let own = assembler
+        .get(&bounded, "own")
+        .expect("macro-generated member should exist");
+    assert_eq!(
+        assembler.evaluate(&own).expect("own should evaluate"),
+        PublicValue::integer(42),
+        "the root macro cursor must not cross into its peer layout item",
+    );
+}
+
+#[test]
+fn source_macros_write_nested_and_same_anchor_layouts() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["macro_layout_writer_test"])
+        .script(
+            "g",
+            r#"language g0
+import 'std
+meta.macro.env = {}
+meta.list = .write.text "[" =>> .write.layout (.write.anchor =>> .write.data 1 =>> .write.text "," =>> .write.anchor =>> .write.data 2) =>> .write.text "]"
+meta.declarations = .read.end =>> .write.anchor =>> .write.text "first = " =>> .write.data 40 =>> .write.anchor =>> .write.text "second = " =>> .write.data 42
+meta.members = .read.end =>> .write.anchor =>> .write.text "first = " =>> .write.data 40 =>> .write.anchor =>> .write.text "second = " =>> .write.data 42
+meta.steps = .read.end =>> .write.anchor =>> .write.text ".r ()" =>> .write.anchor =>> .write.text ".r " =>> .write.data 42
+meta.delete = .r ()
+list_second = list.at 1 @meta.list
+@meta.declarations
+object values with
+  @meta.delete
+  @meta.members
+do_effect = do
+  @meta.steps
+do_value = list.head (list.pure do_effect)
+"#,
+        )
+        .build()
+        .expect("anchored source macro output should compile");
+
+    for (name, expected) in [
+        ("list_second", 2),
+        ("first", 40),
+        ("second", 42),
+        ("do_value", 42),
+    ] {
+        let value = assembler
+            .get(module.value(), name)
+            .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
+        assert_eq!(
+            assembler
+                .evaluate(&value)
+                .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
+            PublicValue::integer(expected),
+            "unexpected value for `{name}`",
+        );
+    }
+    let values = assembler
+        .get(module.value(), "values")
+        .expect("generated object members should remain in their object");
+    for (name, expected) in [("first", 40), ("second", 42)] {
+        let value = assembler
+            .get(&values, name)
+            .unwrap_or_else(|error| panic!("object member `{name}` should exist: {error}"));
+        assert_eq!(
+            assembler
+                .evaluate(&value)
+                .unwrap_or_else(|error| panic!("object member `{name}` should evaluate: {error}")),
+            PublicValue::integer(expected),
+        );
+    }
+}
+
+#[test]
+fn source_macro_anchor_contract_rejects_ambiguous_or_empty_items() {
+    for (body, invocation, expected) in [
+        (
+            ".write.anchor =>> .write.text \"generated = 42\"",
+            "answer = @meta.bad",
+            "start of its logical item",
+        ),
+        (
+            ".write.anchor =>> .write.data 42",
+            "answer = [@meta.bad]",
+            "start of its logical item",
+        ),
+        (
+            ".write.anchor =>> .write.text \"generated = 42\"",
+            "@meta.bad 1",
+            "complete input item",
+        ),
+        (
+            ".write.anchor =>> .write.anchor",
+            "@meta.bad",
+            "empty expansion item",
+        ),
+        (
+            ".write.text \"generated = 42\" =>> .write.anchor",
+            "@meta.bad",
+            "first output operation",
+        ),
+        (
+            ".write.anchor =>> .write.text \"generated = 42\" =>> .write.anchor",
+            "@meta.bad",
+            "empty or unclosed layout item",
+        ),
+        (
+            ".write.layout (.r ())",
+            "answer = @meta.bad",
+            "requires at least one anchored item",
+        ),
+    ] {
+        let assembler = Assembler::default();
+        let error = assembler
+            .module(["invalid_macro_layout_test"])
+            .script(
+                "g",
+                format!(
+                    "language g0\nimport 'std\nmeta.macro.env = {{}}\nmeta.bad = {body}\n{invocation}\n"
+                ),
+            )
+            .build()
+            .expect_err("invalid anchored output should reject its module");
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains(expected)),
+            "unexpected diagnostics for `{body}` at `{invocation}`: {:?}",
+            error.diagnostics()
+        );
+    }
+}
+
+#[test]
 fn source_macro_rejects_reserved_or_unbalanced_generated_text() {
     for (body, expected) in [
         (".write.text \"@next\"", "cannot emit `@`"),
         (".write.text \"(\"", "unclosed delimiter"),
+        (
+            ".write.text \"first\nsecond\"",
+            "use `.write.layout` for layout",
+        ),
     ] {
         let assembler = Assembler::default();
         let observed = Arc::new(Mutex::new(Vec::new()));

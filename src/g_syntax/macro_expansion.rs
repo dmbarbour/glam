@@ -1,8 +1,7 @@
 //! Restricted effect execution used by the built-in compiler's source macros.
 //!
-//! Source recognition and rewriting arrive in later phases. This module first
-//! establishes the isolated effect, journal, and compilation-execution
-//! boundaries they will use.
+//! It owns the isolated effect runner, branch-local cursor and output journals,
+//! and the logical input/output structures used by staged source expansion.
 
 mod effects;
 mod host;
@@ -10,7 +9,7 @@ mod io;
 mod runner;
 
 pub(in crate::g_syntax) use io::{
-    MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroOutput,
+    MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroInputLayout, MacroOutput,
 };
 #[cfg(test)]
 pub(in crate::g_syntax) use runner::MacroRun;

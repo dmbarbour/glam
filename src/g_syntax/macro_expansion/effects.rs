@@ -8,9 +8,10 @@ use crate::reflection::{
 use crate::text_pattern::TextPattern;
 
 use super::host::{MacroHost, MacroJournal, MacroSnapshot};
-use super::io::MacroOutput;
 
 const CASE_EXIT_TAG: [&str; 5] = ["macro_runtime", "g0", "request", "case", "exit"];
+const READ_LAYOUT_EXIT_TAG: [&str; 5] = ["macro_runtime", "g0", "request", "read_layout", "exit"];
+const WRITE_LAYOUT_EXIT_TAG: [&str; 5] = ["macro_runtime", "g0", "request", "write_layout", "exit"];
 
 #[derive(Clone, Copy)]
 pub(super) struct MacroEffects;
@@ -26,10 +27,16 @@ pub(super) enum MacroRequest {
     ReadTextSpan,
     ReadData,
     ReadSeparator,
+    ReadLayout,
+    ReadAnchor,
+    ReadLayoutExit,
     ReadEnd,
     WriteText,
     WriteData,
     WriteSeparator,
+    WriteLayout,
+    WriteAnchor,
+    WriteLayoutExit,
 }
 
 impl TaskSpecialization for MacroEffects {
@@ -73,6 +80,19 @@ impl TaskSpecialization for MacroEffects {
             ),
             request(["read", "data"], "read_data", 0, MacroRequest::ReadData),
             request(["read", "sep"], "read_sep", 0, MacroRequest::ReadSeparator),
+            request(
+                ["read", "layout"],
+                "read_layout",
+                1,
+                MacroRequest::ReadLayout,
+            ),
+            request(
+                ["read", "anchor"],
+                "read_anchor",
+                0,
+                MacroRequest::ReadAnchor,
+            ),
+            EffectRequestSpec::hidden(READ_LAYOUT_EXIT_TAG, 0, MacroRequest::ReadLayoutExit),
             request(["read", "end"], "read_end", 0, MacroRequest::ReadEnd),
             request(["write", "text"], "write_text", 1, MacroRequest::WriteText),
             request(["write", "data"], "write_data", 1, MacroRequest::WriteData),
@@ -82,6 +102,19 @@ impl TaskSpecialization for MacroEffects {
                 0,
                 MacroRequest::WriteSeparator,
             ),
+            request(
+                ["write", "layout"],
+                "write_layout",
+                1,
+                MacroRequest::WriteLayout,
+            ),
+            request(
+                ["write", "anchor"],
+                "write_anchor",
+                0,
+                MacroRequest::WriteAnchor,
+            ),
+            EffectRequestSpec::hidden(WRITE_LAYOUT_EXIT_TAG, 0, MacroRequest::WriteLayoutExit),
         ]
     }
 
@@ -101,10 +134,16 @@ impl TaskSpecialization for MacroEffects {
             MacroRequest::ReadTextSpan => read_text_span(arguments, context),
             MacroRequest::ReadData => read_data(arguments, context),
             MacroRequest::ReadSeparator => read_separator(arguments, context),
+            MacroRequest::ReadLayout => read_layout(arguments, context),
+            MacroRequest::ReadAnchor => read_anchor(arguments, context),
+            MacroRequest::ReadLayoutExit => read_layout_exit(arguments, context),
             MacroRequest::ReadEnd => read_end(arguments, context),
             MacroRequest::WriteText => write_text(arguments, context),
             MacroRequest::WriteData => write_data(arguments, context),
             MacroRequest::WriteSeparator => write_separator(arguments, context),
+            MacroRequest::WriteLayout => write_layout(arguments, context),
+            MacroRequest::WriteAnchor => write_anchor(arguments, context),
+            MacroRequest::WriteLayoutExit => write_layout_exit(arguments, context),
         }
     }
 }
@@ -202,11 +241,7 @@ fn exit_case(
 }
 
 fn case_exit_effect() -> Value {
-    let request = CoreValue::Dict(Dict::new_sync().insert(
-        Key::abstract_global_path(CASE_EXIT_TAG),
-        CoreValue::List(List::empty()),
-    ));
-    Value::from_core(eval::constant_effect(request))
+    hidden_effect(CASE_EXIT_TAG)
 }
 
 fn read_text(
@@ -314,6 +349,54 @@ fn read_separator(
     }
 }
 
+fn read_layout(
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, MacroEffects>,
+) -> Result<RequestResult, TaskError> {
+    let [parser]: [Value; 1] = arguments.try_into().map_err(|_| {
+        TaskError::new("macro `.read.layout` received the wrong number of arguments")
+    })?;
+    let mut transaction = macro_transaction(context, "macro `.read.layout`")?;
+    let (snapshot, journal) = transaction.parts();
+    if !journal.cursor.enter_layout(&snapshot.input) {
+        return Ok(RequestResult::Fail);
+    }
+    Ok(RequestResult::Scoped {
+        operation: parser,
+        close: hidden_effect(READ_LAYOUT_EXIT_TAG),
+    })
+}
+
+fn read_anchor(
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, MacroEffects>,
+) -> Result<RequestResult, TaskError> {
+    let []: [Value; 0] = arguments
+        .try_into()
+        .map_err(|_| TaskError::new("macro `.read.anchor` received arguments"))?;
+    let mut transaction = macro_transaction(context, "macro `.read.anchor`")?;
+    if transaction.parts().1.cursor.read_anchor() {
+        Ok(RequestResult::ReturnUnit)
+    } else {
+        Ok(RequestResult::Fail)
+    }
+}
+
+fn read_layout_exit(
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, MacroEffects>,
+) -> Result<RequestResult, TaskError> {
+    let []: [Value; 0] = arguments
+        .try_into()
+        .map_err(|_| TaskError::new("internal macro read-layout close received arguments"))?;
+    let mut transaction = macro_transaction(context, "internal macro read-layout close")?;
+    if transaction.parts().1.cursor.exit_layout() {
+        Ok(RequestResult::ReturnUnit)
+    } else {
+        Ok(RequestResult::Fail)
+    }
+}
+
 fn read_end(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
@@ -338,16 +421,15 @@ fn write_text(
         TaskError::new("macro `.write.text` received the wrong number of arguments")
     })?;
     let text = text_value(context, text, "macro `.write.text`")?;
-    if text.contains(['@', '#', '\u{e000}']) {
+    if text.contains(['@', '#', '\r', '\n', '\u{e000}']) {
         return Err(TaskError::new(
-            "macro `.write.text` cannot emit `@`, `#`, or the reserved embedded-data marker",
+            "macro `.write.text` cannot emit `@`, `#`, line breaks, or the reserved embedded-data marker; use `.write.layout` for layout",
         ));
     }
     macro_transaction(context, "macro `.write.text`")?
         .parts()
         .1
-        .output
-        .push(MacroOutput::Text(text));
+        .write_text(text);
     Ok(RequestResult::ReturnUnit)
 }
 
@@ -361,8 +443,7 @@ fn write_data(
     macro_transaction(context, "macro `.write.data`")?
         .parts()
         .1
-        .output
-        .push(MacroOutput::Data(value));
+        .write_data(value);
     Ok(RequestResult::ReturnUnit)
 }
 
@@ -376,9 +457,63 @@ fn write_separator(
     macro_transaction(context, "macro `.write.sep`")?
         .parts()
         .1
-        .output
-        .push(MacroOutput::Separator);
+        .write_separator();
     Ok(RequestResult::ReturnUnit)
+}
+
+fn write_layout(
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, MacroEffects>,
+) -> Result<RequestResult, TaskError> {
+    let [writer]: [Value; 1] = arguments.try_into().map_err(|_| {
+        TaskError::new("macro `.write.layout` received the wrong number of arguments")
+    })?;
+    macro_transaction(context, "macro `.write.layout`")?
+        .parts()
+        .1
+        .enter_output_layout();
+    Ok(RequestResult::Scoped {
+        operation: writer,
+        close: hidden_effect(WRITE_LAYOUT_EXIT_TAG),
+    })
+}
+
+fn write_anchor(
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, MacroEffects>,
+) -> Result<RequestResult, TaskError> {
+    let []: [Value; 0] = arguments
+        .try_into()
+        .map_err(|_| TaskError::new("macro `.write.anchor` received arguments"))?;
+    macro_transaction(context, "macro `.write.anchor`")?
+        .parts()
+        .1
+        .write_anchor()
+        .map_err(TaskError::new)?;
+    Ok(RequestResult::ReturnUnit)
+}
+
+fn write_layout_exit(
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, MacroEffects>,
+) -> Result<RequestResult, TaskError> {
+    let []: [Value; 0] = arguments
+        .try_into()
+        .map_err(|_| TaskError::new("internal macro write-layout close received arguments"))?;
+    macro_transaction(context, "internal macro write-layout close")?
+        .parts()
+        .1
+        .exit_output_layout()
+        .map_err(TaskError::new)?;
+    Ok(RequestResult::ReturnUnit)
+}
+
+fn hidden_effect(tag: [&str; 5]) -> Value {
+    let request = CoreValue::Dict(Dict::new_sync().insert(
+        Key::abstract_global_path(tag),
+        CoreValue::List(List::empty()),
+    ));
+    Value::from_core(eval::constant_effect(request))
 }
 
 fn macro_transaction<'context, 'request>(
