@@ -518,11 +518,18 @@ Proposed syntactic form:
 
         @macro.path
 
-This searches for a macro definition at `_module.macro.path`. This definition should evaluate as an effect. The compiler provides an API to rewrite source following the invocation. This API respects scope: brackets, braces, parentheses, and indentation structure. A macro invoked in anchor position (e.g. toplevel or a do statement) is limited to reading one remaining expression, but may write many anchored steps. There is no countable observation of whitespace, and macros also cannot see other macro invocations; those are evaluated before observation. 
+The compiler looks for a macro definition at `_module.macro.path`, which should express an effect to rewrite the source. 
 
-The effects API may include features to simplify rewrites and integration: data embedding is not limited to texts and numbers, and opaque allocation of fresh local variables. 
+The effects API respects some structural conventions: balanced brackets, braces, parentheses, and structured indentation. Brackets, braces, and parentheses are enforced by a simple counting protocol. Indentation requires some careful attention: stretchy whitespace, anchored newlines. 
 
-*Aside:* Many use cases for macros are eliminated between lazy evaluation and first-class effects. One remaining use case is macro DSLs.
+- A macro may behave as if anchored even if expressed within a line. 
+  - This is achieved by 'reading' a newline first thing, then reading the remainder of the logical line.
+- To keep it simple, macros cannot see or emit more macro calls. Thus, the number of macro evaluations is visible at a glance.
+  - users compose macro definitions instead of assuming macros are in scope with specific names at point of invocation.
+
+To simplify, quoted texts and numbers are captured before macros apply, and macros may generally write embedded data as if it were a source element. 
+
+A consequence of this design is that macros are not hygienic. This is mitigated by rules against name shadowing and for explicit overrides.
 
 ## Annotations
 
