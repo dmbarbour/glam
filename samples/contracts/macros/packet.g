@@ -3,127 +3,25 @@ import 'std
 
 meta.macro.env = {}
 
-meta.packet.encode _packet_layout packet_input =
-  [list.at 0 packet_input] ++
-  [math.floor (list.at 1 packet_input / 256)] ++
-  [math.mod (list.at 1 packet_input) 256] ++
-  list.at 2 packet_input ++
-  [list.at 3 packet_input] ++
-  list.at 4 packet_input
+packet = object _ as packet_object with
+  encode _packet_layout packet_input =
+    [list.at 0 packet_input] ++
+    [math.floor (list.at 1 packet_input / 256)] ++
+    [math.mod (list.at 1 packet_input) 256] ++
+    list.at 2 packet_input ++
+    [list.at 3 packet_input] ++
+    list.at 4 packet_input
 
-meta.packet.decode _packet_layout packet_binary =
-  let { packet_length = (list.at 1 packet_binary * 256) + list.at 2 packet_binary } in [
-    list.at 0 packet_binary,
-    packet_length,
-    list.slice 3 (3 + packet_length) packet_binary,
-    list.at (3 + packet_length) packet_binary,
-    list.slice (4 + packet_length) (list.len packet_binary) packet_binary
-  ]
+  decode _packet_layout packet_binary =
+    let { packet_length = (list.at 1 packet_binary * 256) + list.at 2 packet_binary } in [
+      list.at 0 packet_binary,
+      packet_length,
+      list.slice 3 (3 + packet_length) packet_binary,
+      list.at (3 + packet_length) packet_binary,
+      list.slice (4 + packet_length) (list.len packet_binary) packet_binary
+    ]
 
-packet =
-  (\packet_read_field ->
-    .read.sep =>>
-    .read.regex "[a-z][A-Za-z0-9_]*" >>= \packet_name ->
-    .fix (\packet_read_fields ->
-      .r (
-        .alt
-          (.read.end =>> .r [])
-          (
-            .read.anchor =>>
-            packet_read_field >>= \packet_field ->
-            packet_read_fields >>= \packet_more_fields ->
-            .r ([packet_field] ++ packet_more_fields)
-          )
-      )
-    ) >>= \packet_read_fields ->
-    .fix (\packet_read_variants ->
-      .r (
-        .alt
-          (.read.end =>> .r [])
-          (
-            .read.anchor =>>
-            .case "a numeric packet choice followed by an indented field body" (
-              .read.data >>= \packet_variant_tag ->
-              .read.layout packet_read_fields >>= \packet_variant_fields ->
-              .r {
-                tag:packet_variant_tag,
-                fields:packet_variant_fields
-              }
-            ) >>= \packet_variant ->
-            packet_read_variants >>= \packet_more_variants ->
-            .r ([packet_variant] ++ packet_more_variants)
-          )
-      )
-    ) >>= \packet_read_variants ->
-    .fix (\packet_read_items ->
-      .r (
-        .alt
-          (.read.end =>> .r [])
-          (
-            .read.anchor =>>
-            .alt
-              (
-                .case "a packet byte order: endian big" (
-                  .read.text "endian" =>>
-                  .read.sep =>>
-                  .read.text "big" =>>
-                  .r (endian:"big")
-                )
-              )
-              (
-                .alt
-                  packet_read_field
-                  (
-                    .case "a packet choice: choice Name with numeric variants" (
-                      .read.text "choice" =>>
-                      .read.sep =>>
-                      .read.regex "[a-z][A-Za-z0-9_]*" >>= \packet_choice_name ->
-                      .read.layout packet_read_variants >>= \packet_variants ->
-                      .r (choice:{
-                        name:packet_choice_name.span,
-                        variants:packet_variants
-                      })
-                    )
-                  )
-              ) >>= \packet_item ->
-            packet_read_items >>= \packet_more_items ->
-            .r ([packet_item] ++ packet_more_items)
-          )
-      )
-    ) >>= \packet_read_items ->
-    .read.layout (
-      packet_read_items >>= \packet_layout ->
-      .write.text "object" =>>
-      .write.sep =>>
-      .write.text packet_name.span =>>
-      .write.sep =>>
-      .write.text "with" =>>
-      .write.layout (
-        .write.anchor =>>
-        .write.text "codec" =>>
-        .write.sep =>>
-        .write.text "=" =>>
-        .write.sep =>>
-        .write.data packet_layout =>>
-        .write.anchor =>>
-        .write.text "encode" =>>
-        .write.sep =>>
-        .write.text "=" =>>
-        .write.sep =>>
-        .write.text "module.meta.packet.encode" =>>
-        .write.sep =>>
-        .write.data packet_layout =>>
-        .write.anchor =>>
-        .write.text "decode" =>>
-        .write.sep =>>
-        .write.text "=" =>>
-        .write.sep =>>
-        .write.text "module.meta.packet.decode" =>>
-        .write.sep =>>
-        .write.data packet_layout
-      )
-    )
-  ) (
+  read_field =
     .case "a packet field: field Name Type [LengthField]" (
       .read.text "field" =>>
       .read.sep =>>
@@ -161,9 +59,105 @@ packet =
           })
         )
     )
-  )
 
-@packet message
+  read_fields _ =
+    .alt
+      (.read.end =>> .r [])
+      (
+        .read.anchor =>>
+        packet_object.read_field >>= \packet_field ->
+        packet_object.read_fields () >>= \packet_more_fields ->
+        .r ([packet_field] ++ packet_more_fields)
+      )
+
+  read_variants _ =
+    .alt
+      (.read.end =>> .r [])
+      (
+        .read.anchor =>>
+        .case "a numeric packet choice followed by an indented field body" (
+          .read.data >>= \packet_variant_tag ->
+          .read.layout (packet_object.read_fields ()) >>= \packet_variant_fields ->
+          .r {
+            tag:packet_variant_tag,
+            fields:packet_variant_fields
+          }
+        ) >>= \packet_variant ->
+        packet_object.read_variants () >>= \packet_more_variants ->
+        .r ([packet_variant] ++ packet_more_variants)
+      )
+
+  read_items _ =
+    .alt
+      (.read.end =>> .r [])
+      (
+        .read.anchor =>>
+        .alt
+          (
+            .case "a packet byte order: endian big" (
+              .read.text "endian" =>>
+              .read.sep =>>
+              .read.text "big" =>>
+              .r (endian:"big")
+            )
+          )
+          (
+            .alt
+              packet_object.read_field
+              (
+                .case "a packet choice: choice Name with numeric variants" (
+                  .read.text "choice" =>>
+                  .read.sep =>>
+                  .read.regex "[a-z][A-Za-z0-9_]*" >>= \packet_choice_name ->
+                  .read.layout (packet_object.read_variants ()) >>= \packet_variants ->
+                  .r (choice:{
+                    name:packet_choice_name.span,
+                    variants:packet_variants
+                  })
+                )
+              )
+          ) >>= \packet_item ->
+        packet_object.read_items () >>= \packet_more_items ->
+        .r ([packet_item] ++ packet_more_items)
+      )
+
+  expand =
+    .read.sep =>>
+    .read.regex "[a-z][A-Za-z0-9_]*" >>= \packet_name ->
+    .read.layout (
+      packet_object.read_items () >>= \packet_layout ->
+      .write.text "object" =>>
+      .write.sep =>>
+      .write.text packet_name.span =>>
+      .write.sep =>>
+      .write.text "with" =>>
+      .write.layout (
+        .write.anchor =>>
+        .write.text "codec" =>>
+        .write.sep =>>
+        .write.text "=" =>>
+        .write.sep =>>
+        .write.data packet_layout =>>
+        .write.anchor =>>
+        .write.text "encode" =>>
+        .write.sep =>>
+        .write.text "=" =>>
+        .write.sep =>>
+        .write.data packet_object.encode =>>
+        .write.sep =>>
+        .write.data packet_layout =>>
+        .write.anchor =>>
+        .write.text "decode" =>>
+        .write.sep =>>
+        .write.text "=" =>>
+        .write.sep =>>
+        .write.data packet_object.decode =>>
+        .write.sep =>>
+        .write.data packet_layout
+      )
+    )
+
+@packet.expand message
   endian big
   field version u8
   field length u16

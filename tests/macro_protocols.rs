@@ -60,8 +60,8 @@ fn rewrite_rule_macro_replays_balanced_and_anchored_source_fragments() {
 #[test]
 fn downstream_macro_rejects_a_flattened_replayed_layout() {
     let source = include_str!("../samples/contracts/macros/rewrite_rules.g").replace(
-        ".write.data layout_values.first =>>\n                .write.anchor =>>\n                .write.text \".r\"",
-        ".write.data layout_values.first =>>\n                .write.sep =>>\n                .write.text \".r\"",
+        ".write.data layout_values.first =>>\n              .write.anchor =>>",
+        ".write.data layout_values.first =>>\n              .write.sep =>>",
     );
 
     assert_protocol_failure(&source, "flattened_layout", "the replayed second anchor");
