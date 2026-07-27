@@ -6,17 +6,28 @@
 //! materializing ordinary parser tokens.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::core::Value;
 use crate::number::Number;
 
 use super::super::Diagnostic;
+use super::super::macro_expansion::{
+    MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroOutput,
+};
 use super::lexical::{
-    ByteSpan, Delimiter, EmbeddedValueId, GroupId, LeadingTrivia, LexedSource, NumberId, TextId,
-    TokenKind, lex_source,
+    ByteSpan, DeclarationSection, Delimiter, EmbeddedValueId, GroupId, LeadingTrivia, LexedSource,
+    NumberId, TextId, TokenKind, lex_source,
 };
 
 type ExpansionOriginId = usize;
+pub(super) const EMBEDDED_MARKER: char = '\u{e000}';
+
+pub(super) struct MacroInvocation {
+    pub(super) path: Vec<String>,
+    pub(super) start: usize,
+    pub(super) input: MacroInput,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LogicalToken<'source> {
@@ -164,6 +175,235 @@ impl<'source> LogicalSource<'source> {
     }
 }
 
+pub(super) fn find_macro_invocation(
+    source: &LexedSource<'_>,
+    declaration: &DeclarationSection,
+) -> Result<Option<MacroInvocation>, Diagnostic> {
+    let tokens = source.tokens();
+    let range = declaration.tokens();
+    let mut invocations = Vec::new();
+    let mut index = range.start;
+    while index < range.end {
+        if !matches!(tokens[index].kind(), TokenKind::Symbol("@")) {
+            index += 1;
+            continue;
+        }
+        let invocation = index;
+        index += 1;
+        let Some(first) = tokens.get(index).filter(|_| index < range.end) else {
+            return Err(macro_head_error(source, tokens[invocation].span()));
+        };
+        if first.leading() != LeadingTrivia::Joint {
+            return Err(macro_head_error(source, tokens[invocation].span()));
+        }
+        let TokenKind::Name(first) = first.kind() else {
+            return Err(macro_head_error(source, tokens[invocation].span()));
+        };
+        let mut path = vec![(*first).to_owned()];
+        index += 1;
+        while index < range.end
+            && matches!(tokens[index].kind(), TokenKind::Symbol("."))
+            && tokens[index].leading() == LeadingTrivia::Joint
+        {
+            index += 1;
+            let Some(component) = tokens.get(index).filter(|_| index < range.end) else {
+                return Err(macro_head_error(source, tokens[invocation].span()));
+            };
+            if component.leading() != LeadingTrivia::Joint {
+                return Err(macro_head_error(source, tokens[invocation].span()));
+            }
+            let TokenKind::Name(component) = component.kind() else {
+                return Err(macro_head_error(source, tokens[invocation].span()));
+            };
+            path.push((*component).to_owned());
+            index += 1;
+        }
+        let input_start = tokens[index - 1].span().end();
+        let input_token_end = source
+            .groups()
+            .iter()
+            .filter_map(|group| {
+                let close = group.close_token()?;
+                (group.open_token() < invocation && invocation < close).then_some(close)
+            })
+            .min()
+            .unwrap_or(range.end);
+        let input_end = if input_token_end < range.end {
+            tokens[input_token_end].span().start()
+        } else {
+            declaration.span().end()
+        };
+        invocations.push(MacroInvocation {
+            path,
+            start: tokens[invocation].span().start(),
+            input: macro_input(source, index..input_token_end, input_start, input_end)?,
+        });
+    }
+    match invocations.len() {
+        0 => Ok(None),
+        1 => Ok(invocations.pop()),
+        _ => Err(Diagnostic::error(
+            declaration.line(),
+            "multiple macro invocations in one declaration require reverse expansion support",
+        )),
+    }
+}
+
+pub(super) fn rewritten_declaration(
+    source: &LexedSource<'_>,
+    declaration: &DeclarationSection,
+    invocation: &MacroInvocation,
+    consumed_end: usize,
+    output: &[MacroOutput],
+) -> Result<(String, Vec<Value>), Vec<Diagnostic>> {
+    let mut generated = String::new();
+    let mut embedded = Vec::new();
+    for item in output {
+        match item {
+            MacroOutput::Text(text) => generated.push_str(text),
+            MacroOutput::Data(value) => {
+                generated.push(EMBEDDED_MARKER);
+                embedded.push(value.as_core().clone());
+            }
+            MacroOutput::Separator => generated.push(' '),
+        }
+    }
+    if generated.contains(['\r', '\n']) {
+        return Err(vec![Diagnostic::error(
+            declaration.line(),
+            "macro layout output is not available until layout expansion support",
+        )]);
+    }
+    GeneratedText::classify(generated.clone()).map_err(|mut diagnostics| {
+        for diagnostic in &mut diagnostics {
+            diagnostic.line += declaration.line() - 1;
+        }
+        diagnostics
+    })?;
+
+    let span = declaration.span();
+    if !(span.start() <= invocation.start
+        && invocation.start <= consumed_end
+        && consumed_end <= span.end())
+    {
+        return Err(vec![Diagnostic::error(
+            declaration.line(),
+            "macro reader produced an invalid source range",
+        )]);
+    }
+    let Some(prefix) = source.source().get(span.start()..invocation.start) else {
+        return Err(vec![Diagnostic::error(
+            declaration.line(),
+            "macro source prefix was not on a UTF-8 boundary",
+        )]);
+    };
+    let Some(suffix) = source.source().get(consumed_end..span.end()) else {
+        return Err(vec![Diagnostic::error(
+            declaration.line(),
+            "macro source suffix was not on a UTF-8 boundary",
+        )]);
+    };
+    let mut rewritten = "\n".repeat(declaration.line().saturating_sub(1));
+    rewritten.push_str(prefix);
+    rewritten.push_str(&generated);
+    rewritten.push_str(suffix);
+    Ok((rewritten, embedded))
+}
+
+fn macro_input(
+    source: &LexedSource<'_>,
+    range: Range<usize>,
+    start: usize,
+    end: usize,
+) -> Result<MacroInput, Diagnostic> {
+    let mut elements = Vec::new();
+    let mut line_break = false;
+    for token in &source.tokens()[range] {
+        if matches!(token.kind(), TokenKind::LineStart { .. }) {
+            line_break = true;
+            continue;
+        }
+        let separated = line_break || token.leading() != LeadingTrivia::Joint;
+        line_break = false;
+        let kind = match token.kind() {
+            TokenKind::Name(name) | TokenKind::InvalidNumber(name) | TokenKind::Symbol(name) => {
+                MacroInputKind::Text {
+                    text: Arc::from(*name),
+                    delimiter: None,
+                }
+            }
+            TokenKind::Number(id) => {
+                MacroInputKind::Data(crate::api::Value::from_core(Value::Number(
+                    source
+                        .number(*id)
+                        .expect("logical number token should reference its arena")
+                        .clone(),
+                )))
+            }
+            TokenKind::Text(id) => {
+                MacroInputKind::Data(crate::api::Value::from_core(Value::binary_from_text(
+                    source
+                        .text(*id)
+                        .expect("logical text token should reference its arena")
+                        .value(),
+                )))
+            }
+            TokenKind::Embedded(id) => MacroInputKind::Data(crate::api::Value::from_core(
+                source
+                    .embedded_value(*id)
+                    .expect("embedded token should reference its arena")
+                    .clone(),
+            )),
+            TokenKind::Open { delimiter, .. } => MacroInputKind::Text {
+                text: Arc::from(delimiter_text(*delimiter, true)),
+                delimiter: Some((macro_delimiter(*delimiter), true)),
+            },
+            TokenKind::Close { delimiter, .. } => MacroInputKind::Text {
+                text: Arc::from(delimiter_text(*delimiter, false)),
+                delimiter: Some((macro_delimiter(*delimiter), false)),
+            },
+            TokenKind::Unknown(scalar) => MacroInputKind::Text {
+                text: Arc::from(scalar.to_string()),
+                delimiter: None,
+            },
+            TokenKind::LineStart { .. } => unreachable!("line starts are skipped above"),
+        };
+        elements.push(MacroInputElement {
+            kind,
+            separated,
+            start: token.span().start(),
+            end: token.span().end(),
+        });
+    }
+    Ok(MacroInput::new(elements, start, end))
+}
+
+fn macro_delimiter(delimiter: Delimiter) -> MacroDelimiter {
+    match delimiter {
+        Delimiter::Parenthesis => MacroDelimiter::Parenthesis,
+        Delimiter::Bracket => MacroDelimiter::Bracket,
+        Delimiter::Brace => MacroDelimiter::Brace,
+    }
+}
+
+fn delimiter_text(delimiter: Delimiter, opening: bool) -> &'static str {
+    match (delimiter, opening) {
+        (Delimiter::Parenthesis, true) => "(",
+        (Delimiter::Parenthesis, false) => ")",
+        (Delimiter::Bracket, true) => "[",
+        (Delimiter::Bracket, false) => "]",
+        (Delimiter::Brace, true) => "{",
+        (Delimiter::Brace, false) => "}",
+    }
+}
+
+fn macro_head_error(source: &LexedSource<'_>, span: ByteSpan) -> Diagnostic {
+    Diagnostic::error(
+        source.line_at_byte(span.start()).unwrap_or(1),
+        "macro invocation requires a joint static name path after `@`",
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LogicalGroup {
     delimiter: Delimiter,
@@ -285,13 +525,6 @@ enum GeneratedTokenKind {
 }
 
 impl GeneratedText {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 1 foundation is consumed by the Phase 4 macro writer"
-        )
-    )]
     fn classify(text: String) -> Result<Self, Vec<Diagnostic>> {
         if text.contains(['@', '#']) {
             return Err(vec![Diagnostic::error(

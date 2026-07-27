@@ -8,6 +8,13 @@ use super::input::{ParseSession, TokenView};
 use super::layout::validate_delimited_layouts;
 use super::lexical::{DeclarationSection, LexedSource, TokenKind, lex_source};
 use super::logical::LogicalSource;
+use super::logical::{EMBEDDED_MARKER, find_macro_invocation, rewritten_declaration};
+use crate::compiler::CompileContext;
+use crate::core::{Atom, Dict, Key, List, Value};
+use crate::evaluation::EvaluationPumpOutcome;
+use crate::{api::CompilationExecution, eval};
+
+const MACRO_LOOKUP_STEP_BUDGET: usize = 256;
 
 pub fn parse_source(source: &[u8]) -> ParsedSource {
     let mut parser = StagedSourceParser::new(source);
@@ -113,12 +120,251 @@ impl<'source> StagedSourceParser<'source> {
         ))
     }
 
+    pub(in crate::g_syntax) fn next_expanded_declarations(
+        &mut self,
+        context: &CompileContext,
+        prior_definitions: &Value,
+        language: Option<&super::super::LanguageDecl>,
+    ) -> Option<Vec<Declaration>> {
+        let lexical = self.lexical.as_ref()?;
+        if lexical.has_errors() {
+            return None;
+        }
+        let declaration = lexical.declarations().get(self.next_declaration)?.clone();
+        self.next_declaration += 1;
+        let invocation = match find_macro_invocation(lexical, &declaration) {
+            Ok(Some(invocation)) => invocation,
+            Ok(None) => {
+                return Some(vec![parse_lexical_declaration(
+                    lexical,
+                    &declaration,
+                    &mut self.diagnostics,
+                )]);
+            }
+            Err(diagnostic) => {
+                self.diagnostics.push(diagnostic);
+                return Some(Vec::new());
+            }
+        };
+        let Some(language) = language else {
+            self.diagnostics.push(Diagnostic::error(
+                declaration.line(),
+                "source macros require a preceding `language` declaration",
+            ));
+            return Some(Vec::new());
+        };
+        let Some(execution) = context.compilation_execution() else {
+            self.diagnostics.push(Diagnostic::error(
+                declaration.line(),
+                "source macro expansion requires a compilation execution context",
+            ));
+            return Some(Vec::new());
+        };
+        let keys = invocation
+            .path
+            .iter()
+            .map(Key::atom_from_text)
+            .collect::<Vec<_>>();
+        let effect = match macro_lookup(execution, prior_definitions, &keys, true) {
+            Ok(effect) if effect != Value::Dict(Dict::new_sync()) => effect,
+            Ok(_) => {
+                self.diagnostics.push(Diagnostic::error(
+                    declaration.line(),
+                    format!("macro `{}` is not defined", invocation.path.join(".")),
+                ));
+                return Some(Vec::new());
+            }
+            Err(error) => {
+                self.diagnostics.push(Diagnostic::error(
+                    declaration.line(),
+                    format!(
+                        "macro `{}` could not be selected: {error}",
+                        invocation.path.join(".")
+                    ),
+                ));
+                return Some(Vec::new());
+            }
+        };
+        let base_environment = match macro_lookup(
+            execution,
+            prior_definitions,
+            &[
+                Key::atom_from_text("meta"),
+                Key::atom_from_text("macro"),
+                Key::atom_from_text("env"),
+            ],
+            false,
+        ) {
+            Ok(environment) => environment,
+            Err(error) => {
+                self.diagnostics.push(Diagnostic::error(
+                    declaration.line(),
+                    format!("macro environment could not be selected: {error}"),
+                ));
+                return Some(Vec::new());
+            }
+        };
+        let environment = super::super::compiler_values::macro_environment(
+            base_environment,
+            declared_language_value(language),
+        );
+        let run = match super::super::macro_expansion::run_macro_effect(
+            execution,
+            effect,
+            environment,
+            invocation.input.clone(),
+        ) {
+            Ok(run) => run,
+            Err(diagnostic) => {
+                self.diagnostics.push(Diagnostic::error(
+                    declaration.line(),
+                    format!(
+                        "macro `{}` failed: {}",
+                        invocation.path.join("."),
+                        diagnostic.message()
+                    ),
+                ));
+                return Some(Vec::new());
+            }
+        };
+        let (rewritten, embedded) = match rewritten_declaration(
+            lexical,
+            &declaration,
+            &invocation,
+            run.consumed_end(),
+            run.output(),
+        ) {
+            Ok(rewritten) => rewritten,
+            Err(mut diagnostics) => {
+                self.diagnostics.append(&mut diagnostics);
+                return Some(Vec::new());
+            }
+        };
+        let diagnostics_before = self.diagnostics.len();
+        let declarations = parse_expanded_declaration(&rewritten, embedded, &mut self.diagnostics);
+        let accepted = !self.diagnostics[diagnostics_before..]
+            .iter()
+            .any(|diagnostic| diagnostic.severity == crate::diagnostic::Severity::Error);
+        if accepted {
+            for diagnostic in run.diagnostics() {
+                context.emit_diagnostic(
+                    diagnostic.severity(),
+                    diagnostic.emission().as_core().clone(),
+                );
+            }
+        }
+        Some(declarations)
+    }
+
     pub(in crate::g_syntax) fn finish(mut self, declarations: &[Declaration]) -> Vec<Diagnostic> {
         if self.validate_language {
             validate_language_position(declarations, &mut self.diagnostics);
         }
         self.diagnostics
     }
+}
+
+fn macro_lookup(
+    execution: &CompilationExecution,
+    root: &Value,
+    path: &[Key],
+    force_result: bool,
+) -> Result<Value, String> {
+    let mut current = root.clone();
+    for key in path {
+        let evaluated = force_macro_lookup_value(execution, current)?;
+        let Value::Dict(dict) = evaluated else {
+            return Err("macro path traverses a non-dictionary value".to_owned());
+        };
+        current = dict
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| Value::Dict(Dict::new_sync()));
+    }
+    if force_result {
+        force_macro_lookup_value(execution, current)
+    } else {
+        Ok(current)
+    }
+}
+
+fn force_macro_lookup_value(
+    execution: &CompilationExecution,
+    mut value: Value,
+) -> Result<Value, String> {
+    loop {
+        match eval::eval_value(execution.lookup_context(), &value) {
+            Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => value = next,
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let Some(wait) = error.blocked_on() else {
+                    return Err(error.to_string());
+                };
+                match execution
+                    .lookup_context()
+                    .pump_wait(&wait.0, MACRO_LOOKUP_STEP_BUDGET)
+                {
+                    EvaluationPumpOutcome::TargetReady
+                    | EvaluationPumpOutcome::Busy
+                    | EvaluationPumpOutcome::BudgetExhausted => {}
+                    EvaluationPumpOutcome::NoProgress => {
+                        return Err(
+                            "macro lookup is waiting on a foreign or unavailable lazy producer"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn parse_expanded_declaration(
+    rewritten: &str,
+    embedded: Vec<Value>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<Declaration> {
+    let lexical =
+        match lex_source(rewritten).replace_unknowns_with_embedded(EMBEDDED_MARKER, embedded) {
+            Ok(lexical) => lexical,
+            Err(error) => {
+                diagnostics.push(Diagnostic::error(1, error));
+                return Vec::new();
+            }
+        };
+    diagnostics.extend(lexical.diagnostics().iter().cloned());
+    if lexical.has_errors() {
+        return Vec::new();
+    }
+    report_orphan_continuations(&lexical, diagnostics);
+    diagnostics.extend(validate_delimited_layouts(&lexical));
+    lexical
+        .declarations()
+        .iter()
+        .map(|declaration| parse_lexical_declaration(&lexical, declaration, diagnostics))
+        .collect()
+}
+
+fn declared_language_value(language: &super::super::LanguageDecl) -> Value {
+    Value::Dict(
+        Dict::new_sync()
+            .insert(
+                Key::atom_from_text("base"),
+                Value::Atom(Atom::from_key(&Key::binary_from_text(&language.base))),
+            )
+            .insert(
+                Key::atom_from_text("extensions"),
+                Value::List(List::from_values(
+                    language
+                        .extensions
+                        .iter()
+                        .map(|extension| {
+                            Value::Atom(Atom::from_key(&Key::binary_from_text(extension)))
+                        })
+                        .collect(),
+                )),
+            ),
+    )
 }
 
 fn parse_lexical_declaration(

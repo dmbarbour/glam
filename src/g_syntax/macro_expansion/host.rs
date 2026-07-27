@@ -7,10 +7,12 @@ use crate::reflection::{
 };
 
 use super::effects::MacroEffects;
+use super::io::{MacroCursor, MacroInput, MacroOutput};
 
 #[derive(Clone)]
 pub(super) struct MacroSnapshot {
     pub(super) environment: Value,
+    pub(super) input: Arc<MacroInput>,
 }
 
 #[derive(Clone, Default)]
@@ -18,6 +20,8 @@ pub(super) struct MacroJournal {
     diagnostics: Arc<Vec<crate::api::Diagnostic>>,
     pub(super) active_cases: Vec<Value>,
     pub(super) visited_cases: Vec<Value>,
+    pub(super) cursor: MacroCursor,
+    pub(super) output: Vec<MacroOutput>,
 }
 
 impl MacroJournal {
@@ -36,10 +40,11 @@ pub(super) struct MacroHost {
 }
 
 impl MacroHost {
-    pub(super) fn new(environment: Value) -> Self {
+    pub(super) fn new(environment: Value, input: MacroInput) -> Self {
         Self {
             snapshot: MacroSnapshot {
                 environment: environment.clone(),
+                input: Arc::new(input),
             },
             store: ReflectionStore::new(Arc::new(ExactConflictAnalysis)).snapshot(),
         }

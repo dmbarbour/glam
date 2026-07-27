@@ -847,10 +847,6 @@ impl CompilationExecution {
         })
     }
 
-    #[expect(
-        dead_code,
-        reason = "macro lookup starts using this context in expansion Phase 4"
-    )]
     pub(crate) fn lookup_context(&self) -> &EvalContext {
         &self.lookup
     }

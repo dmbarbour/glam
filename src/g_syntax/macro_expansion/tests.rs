@@ -8,6 +8,7 @@ use crate::core::{Dict, Key, List, Value, keys};
 use crate::diagnostic::Severity;
 use crate::eval;
 
+use super::io::{MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroOutput};
 use super::{MacroRun, run_macro_effect};
 
 struct DiagnosticMessages(Arc<Mutex<Vec<String>>>);
@@ -42,7 +43,12 @@ fn run(
     effect: &PublicValue,
     environment: Value,
 ) -> Result<MacroRun, Box<Diagnostic>> {
-    run_macro_effect(execution, effect.as_core().clone(), environment)
+    run_macro_effect(
+        execution,
+        effect.as_core().clone(),
+        environment,
+        MacroInput::empty(),
+    )
 }
 
 fn request_effect(path: &[&str], arguments: Vec<Value>) -> Value {
@@ -231,4 +237,257 @@ fn compilation_execution_drain_reports_detached_failure_and_deadlock() {
             "expected a macro reflection diagnostic containing `{expected}`"
         );
     }
+}
+
+#[test]
+fn inline_macro_readers_and_writers_are_transactional() {
+    let (assembler, effect) = compile_effects(
+        ".alt (.read.text \"wrong\" =>> .fail) (.read.text \"pre\" =>> .read.regex \"[a-z]+\" >>= (\\found -> .read.sep =>> .read.data >>= (\\value -> .write.data found.span =>> .write.sep =>> .write.data value =>> .r ())))",
+    );
+    let execution = assembler.test_compilation_execution();
+    let input = MacroInput::new(
+        vec![
+            MacroInputElement {
+                kind: MacroInputKind::Text {
+                    text: Arc::from("prefix"),
+                    delimiter: None,
+                },
+                separated: false,
+                start: 10,
+                end: 16,
+            },
+            MacroInputElement {
+                kind: MacroInputKind::Data(PublicValue::integer(42)),
+                separated: true,
+                start: 17,
+                end: 19,
+            },
+        ],
+        10,
+        19,
+    );
+    let run = run_macro_effect(
+        &execution,
+        effect.as_core().clone(),
+        Value::Dict(Dict::new_sync()),
+        input,
+    )
+    .expect("fallback reader branch should succeed");
+
+    assert_eq!(run.consumed_end(), 19);
+    assert!(matches!(
+        run.output(),
+        [
+            MacroOutput::Data(_),
+            MacroOutput::Separator,
+            MacroOutput::Data(_)
+        ]
+    ));
+}
+
+#[test]
+fn source_macro_embeds_data_through_the_ordinary_parser() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["macro_source_test"])
+        .script(
+            "g",
+            "language g0\nimport 'std\nmeta.macro.env = {}\nmeta.literal = .read.end =>> .write.data 42 =>> .r ()\nanswer = @meta.literal\ngrouped = (@meta.literal)\n",
+        )
+        .build()
+        .expect("inline source macro should compile");
+    let answer = assembler
+        .get(module.value(), "answer")
+        .expect("macro output should define answer");
+    assert_eq!(
+        assembler.evaluate(&answer).expect("answer should evaluate"),
+        PublicValue::integer(42)
+    );
+    let grouped = assembler
+        .get(module.value(), "grouped")
+        .expect("grouped macro output should exist");
+    assert_eq!(
+        assembler
+            .evaluate(&grouped)
+            .expect("grouped output should evaluate"),
+        PublicValue::integer(42)
+    );
+}
+
+#[test]
+fn source_macros_consume_rollback_delete_and_leave_suffixes() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["macro_source_io_test"])
+        .script(
+            "g",
+            r#"language g0
+import 'std
+meta.macro.env = {}
+meta.consume = .read.sep =>> .read.data >>= (\value -> .write.data value =>> .r ())
+meta.rollback = .alt (.write.data 0 =>> .read.text "missing") (.read.sep =>> .read.data >>= (\value -> .write.data value =>> .r ()))
+meta.prefix = .write.text "40 +"
+meta.language = .env '.language.base >>= (\base -> .write.data base =>> .r ())
+meta.delete = .r ()
+consumed = @meta.consume 41
+rolled_back = @meta.rollback 42
+suffix = @meta.prefix 2
+language_base = @meta.language
+@meta.delete
+after_delete = 43
+"#,
+        )
+        .build()
+        .expect("inline source macro IO fixture should compile");
+
+    for (name, expected) in [
+        ("consumed", PublicValue::integer(41)),
+        ("rolled_back", PublicValue::integer(42)),
+        ("suffix", PublicValue::integer(42)),
+        ("after_delete", PublicValue::integer(43)),
+    ] {
+        let value = assembler
+            .get(module.value(), name)
+            .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
+        assert_eq!(
+            assembler
+                .evaluate(&value)
+                .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
+            expected
+        );
+    }
+    let language = assembler
+        .get(module.value(), "language_base")
+        .expect("language macro should produce a value");
+    assert_eq!(
+        assembler
+            .evaluate(&language)
+            .expect("language should evaluate"),
+        PublicValue::atom_from_text("g0")
+    );
+}
+
+#[test]
+fn text_span_and_end_cover_the_current_nonstructural_run() {
+    let (assembler, effect) = compile_effects(
+        ".read.text_span >>= (\\found -> .read.end =>> .write.data found.span =>> .r ())",
+    );
+    let execution = assembler.test_compilation_execution();
+    let input = MacroInput::new(
+        vec![MacroInputElement {
+            kind: MacroInputKind::Text {
+                text: Arc::from("remaining"),
+                delimiter: None,
+            },
+            separated: false,
+            start: 3,
+            end: 12,
+        }],
+        3,
+        12,
+    );
+    let run = run_macro_effect(
+        &execution,
+        effect.as_core().clone(),
+        Value::Dict(Dict::new_sync()),
+        input,
+    )
+    .expect("text-span reader should consume its complete run");
+    let [MacroOutput::Data(span)] = run.output() else {
+        panic!("text-span macro should emit one data value")
+    };
+    assert_eq!(
+        assembler
+            .evaluate(span)
+            .expect("emitted span should evaluate"),
+        PublicValue::text("remaining")
+    );
+}
+
+#[test]
+fn source_macro_rejects_reserved_or_unbalanced_generated_text() {
+    for (body, expected) in [
+        (".write.text \"@next\"", "cannot emit `@`"),
+        (".write.text \"(\"", "unclosed delimiter"),
+    ] {
+        let assembler = Assembler::default();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let _subscription = assembler
+            .diagnostic_bus()
+            .subscribe(DiagnosticMessages(observed.clone()));
+        let result = assembler
+            .module(["invalid_macro_source_test"])
+            .script(
+                "g",
+                format!(
+                    "language g0\nimport 'std\nmeta.macro.env = {{}}\nmeta.bad = {body}\nanswer = @meta.bad\n"
+                ),
+            )
+            .build();
+        result.expect_err("invalid generated text should reject the module");
+        let messages = observed
+            .lock()
+            .expect("diagnostic observation mutex should not be poisoned");
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "unexpected diagnostics for {body}: {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn macro_reader_must_balance_only_the_delimiters_it_opens() {
+    let input = || {
+        MacroInput::new(
+            vec![
+                MacroInputElement {
+                    kind: MacroInputKind::Text {
+                        text: Arc::from("("),
+                        delimiter: Some((MacroDelimiter::Parenthesis, true)),
+                    },
+                    separated: false,
+                    start: 0,
+                    end: 1,
+                },
+                MacroInputElement {
+                    kind: MacroInputKind::Text {
+                        text: Arc::from("value"),
+                        delimiter: None,
+                    },
+                    separated: false,
+                    start: 1,
+                    end: 6,
+                },
+                MacroInputElement {
+                    kind: MacroInputKind::Text {
+                        text: Arc::from(")"),
+                        delimiter: Some((MacroDelimiter::Parenthesis, false)),
+                    },
+                    separated: false,
+                    start: 6,
+                    end: 7,
+                },
+            ],
+            0,
+            7,
+        )
+    };
+    let (assembler, balanced) = compile_effects(".read.text \"(value)\" =>> .read.end =>> .r ()");
+    run_macro_effect(
+        &assembler.test_compilation_execution(),
+        balanced.as_core().clone(),
+        Value::Dict(Dict::new_sync()),
+        input(),
+    )
+    .expect("balanced input delimiters should be accepted");
+
+    let (assembler, unbalanced) = compile_effects(".read.text \"(\" =>> .r ()");
+    let error = run_macro_effect(
+        &assembler.test_compilation_execution(),
+        unbalanced.as_core().clone(),
+        Value::Dict(Dict::new_sync()),
+        input(),
+    )
+    .expect_err("a successful branch may not leave its input delimiter open");
+    assert!(error.message().contains("input delimiter"));
 }

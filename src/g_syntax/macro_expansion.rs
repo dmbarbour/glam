@@ -4,17 +4,17 @@
 //! establishes the isolated effect, journal, and compilation-execution
 //! boundaries they will use.
 
-#![expect(
-    dead_code,
-    reason = "Phase 3 establishes the runner before Phase 4 invokes it from source expansion"
-)]
-
 mod effects;
 mod host;
+mod io;
 mod runner;
 
+pub(in crate::g_syntax) use io::{
+    MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroOutput,
+};
 #[cfg(test)]
-pub(in crate::g_syntax) use runner::{MacroRun, run_macro_effect};
+pub(in crate::g_syntax) use runner::MacroRun;
+pub(in crate::g_syntax) use runner::run_macro_effect;
 
 #[cfg(test)]
 mod tests;

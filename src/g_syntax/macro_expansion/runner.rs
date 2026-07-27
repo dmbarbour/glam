@@ -9,13 +9,17 @@ use crate::reflection::{IsolatedEffectSearch, IsolatedSearchPoll};
 
 use super::effects::MacroEffects;
 use super::host::MacroHost;
+use super::io::{MacroInput, MacroOutput};
 
 const STEP_BUDGET: usize = 256;
 
 #[derive(Debug)]
 pub(in crate::g_syntax) struct MacroRun {
     diagnostics: Vec<Diagnostic>,
+    #[cfg(test)]
     visited_cases: Vec<PublicValue>,
+    consumed_end: usize,
+    output: Vec<MacroOutput>,
 }
 
 impl MacroRun {
@@ -27,15 +31,27 @@ impl MacroRun {
     pub(super) fn visited_cases(&self) -> &[PublicValue] {
         &self.visited_cases
     }
+
+    pub(in crate::g_syntax) fn consumed_end(&self) -> usize {
+        self.consumed_end
+    }
+
+    pub(in crate::g_syntax) fn output(&self) -> &[MacroOutput] {
+        &self.output
+    }
 }
 
 pub(in crate::g_syntax) fn run_macro_effect(
     execution: &CompilationExecution,
     effect: Value,
     environment: Value,
+    input: MacroInput,
 ) -> Result<MacroRun, Box<Diagnostic>> {
     let effect = PublicValue::from_core(effect);
-    let host = Arc::new(MacroHost::new(PublicValue::from_core(environment)));
+    let host = Arc::new(MacroHost::new(
+        PublicValue::from_core(environment),
+        input.clone(),
+    ));
     let mut search = IsolatedEffectSearch::new_in_context(
         &effect,
         MacroEffects,
@@ -99,9 +115,15 @@ pub(in crate::g_syntax) fn run_macro_effect(
             value.diagnostic_kind_name()
         )));
     }
+    if !branch.journal().cursor.balanced() {
+        return Err(macro_error("macro reader left an input delimiter unclosed"));
+    }
     Ok(MacroRun {
         diagnostics: branch.journal().diagnostics().to_vec(),
+        #[cfg(test)]
         visited_cases: branch.journal().visited_cases.clone(),
+        consumed_end: branch.journal().cursor.consumed_end(&input),
+        output: branch.journal().output.clone(),
     })
 }
 

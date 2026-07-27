@@ -274,6 +274,30 @@ impl<'source> LexedSource<'source> {
         }
     }
 
+    pub(super) fn replace_unknowns_with_embedded(
+        mut self,
+        marker: char,
+        values: Vec<Value>,
+    ) -> Result<Self, String> {
+        let mut values = values.into_iter();
+        for token in &mut self.tokens {
+            if matches!(token.kind, TokenKind::Unknown(scalar) if scalar == marker) {
+                let Some(value) = values.next() else {
+                    return Err(
+                        "generated source contained an unexpected embedded marker".to_owned()
+                    );
+                };
+                let id = self.embedded_values.len();
+                self.embedded_values.push(value);
+                token.kind = TokenKind::Embedded(id);
+            }
+        }
+        if values.next().is_some() {
+            return Err("generated source lost an embedded macro value".to_owned());
+        }
+        Ok(self)
+    }
+
     pub(super) fn groups(&self) -> &[DelimiterGroup] {
         &self.groups
     }

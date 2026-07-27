@@ -25,13 +25,6 @@ struct GCompilerValues {
     reflection_annotator: Value,
     pure_if_runner: Value,
     pure_match_runner: Value,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "macro source expansion begins using this cached helper in Phase 4"
-        )
-    )]
     macro_environment: Value,
 }
 
@@ -201,13 +194,6 @@ pub(in crate::g_syntax) fn run_pure_open_match_resolved(
 
 /// Extends a file-provided macro environment through the language's ordinary
 /// `with` operation, introducing the authoritative language declaration.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "macro source expansion begins using this cached helper in Phase 4"
-    )
-)]
 pub(in crate::g_syntax) fn macro_environment(base: Value, language: Value) -> Value {
     apply_closed(COMPILER_VALUES.macro_environment.clone(), [base, language])
 }

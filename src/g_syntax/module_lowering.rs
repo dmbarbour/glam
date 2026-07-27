@@ -11,8 +11,16 @@ pub(in crate::g_syntax) use objects::*;
 pub(in crate::g_syntax) fn lower_source(source: &[u8], context: &CompileContext) -> LoweredSource {
     let mut parser = parser::StagedSourceParser::new(source);
     let mut lowerer = ModuleLowerer::new(context);
-    while let Some(declaration) = parser.next_declaration() {
-        lowerer.lower_declaration(declaration);
+    let mut language = None;
+    while let Some(declarations) =
+        parser.next_expanded_declarations(context, lowerer.definitions(), language.as_ref())
+    {
+        for declaration in declarations {
+            if let DeclarationKind::Language(declared) = &declaration.kind {
+                language = Some(declared.clone());
+            }
+            lowerer.lower_declaration(declaration);
+        }
     }
     let diagnostics = parser.finish(lowerer.parsed_declarations());
     lowerer.finish(diagnostics)
@@ -93,6 +101,10 @@ impl<'context> ModuleLowerer<'context> {
 
     pub(in crate::g_syntax) fn parsed_declarations(&self) -> &[Declaration] {
         &self.parsed_declarations
+    }
+
+    pub(in crate::g_syntax) fn definitions(&self) -> &Value {
+        &self.definitions
     }
 
     pub(in crate::g_syntax) fn finish(

@@ -142,10 +142,6 @@ impl CompileContext {
         &self.final_defs
     }
 
-    #[expect(
-        dead_code,
-        reason = "source macro expansion reads this capability beginning in Phase 4"
-    )]
     pub(crate) fn compilation_execution(&self) -> Option<&Arc<CompilationExecution>> {
         self.compilation_execution.as_ref()
     }
