@@ -733,22 +733,40 @@ fn macro_input_layouts(
                     .expect("macro layout candidate range remains ordered"),
             )?;
             let block = LayoutView::new(view).block();
+            let block_end = macro_layout_end(source, *token_index, block.end());
+            let layout_end = element_boundary(element_tokens, block_end);
             let items = block
                 .statements()
                 .iter()
                 .map(|statement| {
                     element_boundary(element_tokens, statement.tokens().start())
-                        ..element_boundary(element_tokens, statement.tokens().end())
+                        ..element_boundary(element_tokens, statement.tokens().end().min(block_end))
                 })
                 .filter(|item| !item.is_empty())
                 .collect::<Vec<_>>();
             (!items.is_empty()).then(|| MacroInputLayout {
                 start: start_element,
-                end: element_boundary(element_tokens, block.end()),
+                end: layout_end,
                 items: items.into(),
             })
         })
         .collect()
+}
+
+fn macro_layout_end(source: &LexedSource<'_>, start: usize, mut end: usize) -> usize {
+    while let Some(index) = end.checked_sub(1) {
+        let TokenKind::Close { group, .. } = source.tokens()[index].kind() else {
+            break;
+        };
+        let Some(parent) = source.group(*group) else {
+            break;
+        };
+        if parent.open_token() >= start {
+            break;
+        }
+        end = index;
+    }
+    end
 }
 
 fn element_boundary(element_tokens: &[usize], token_boundary: usize) -> usize {
@@ -1027,6 +1045,26 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("invalid number literal")),
             "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn macro_layout_ranges_exclude_a_dedented_parent_closer() {
+        let lexical = lex_source("(do\n  .r 1\n  .r (2)\n)\n");
+        let start = lexical
+            .tokens()
+            .iter()
+            .position(|token| matches!(token.kind(), TokenKind::Symbol(".")))
+            .expect("the layout should contain a first return");
+        let parent_close = lexical
+            .tokens()
+            .iter()
+            .rposition(|token| matches!(token.kind(), TokenKind::Close { .. }))
+            .expect("the parent group should be closed");
+
+        assert_eq!(
+            macro_layout_end(&lexical, start, parent_close + 1),
+            parent_close,
         );
     }
 }

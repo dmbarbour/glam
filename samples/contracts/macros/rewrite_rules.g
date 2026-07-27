@@ -84,130 +84,85 @@ rules =
       )
   )
 
-# This direct macro is the reader-granularity test. The recursive dispatcher
-# speculatively attempts `.read.layout` wherever a fragment may continue.
+# Try layout first, then rewind and accept an inline option. The bounded helper
+# keeps this protocol sample focused on speculative layout and anchor replay.
 layout_choose =
-  .fix (\fragment_capture ->
-    .r (\fragment_request ->
-      match fragment_request with
-        group:[fragment_open, fragment_close] => (
-          .read.text fragment_open =>>
-          .fix (\fragment_until ->
-            .r (\_ ->
-              .cut (
-                .alt
-                  (.read.text fragment_close =>> .r (.r ()))
-                  (.alt
-                    (
-                      fragment_capture 'layout >>= \fragment_nested_layout ->
-                      fragment_until () >>= \fragment_after_layout ->
-                      .r (fragment_nested_layout =>> fragment_after_layout)
-                    )
-                    (
-                      fragment_capture 'item >>= \fragment_item_writer ->
-                      fragment_until () >>= \fragment_after_item ->
-                      .r (fragment_item_writer =>> fragment_after_item)
-                    )
-                  )
-              )
+  (\read_option ->
+    .read.sep =>>
+    .alt
+      (.read.text "true" =>> .r 'yes)
+      (.read.text "false" =>> .r 'no) >>= \layout_selection ->
+    .read.sep =>>
+    read_option () >>= \layout_yes_writer ->
+    read_option () >>= \layout_no_writer ->
+    .read.end =>>
+    if layout_selection == 'yes
+      then layout_yes_writer
+      else layout_no_writer
+  ) (
+    \_ ->
+      .cut (
+        .alt
+          (.case "a two-item layout option" (
+            .read.layout (
+              .case "the first layout anchor" (.read.anchor) =>>
+              .case "the first layout value" (.read.data) >>= \layout_first ->
+              .case "the second layout anchor" (.read.anchor) =>>
+              .case "the second layout value" (.read.data) >>= \layout_second ->
+              .case "the end of the option layout" (.read.end) =>>
+              .r {first:layout_first, second:layout_second}
+            ) >>= \layout_values ->
+            .r (
+              .write.text "(do" =>>
+              .write.layout (
+                .write.anchor =>>
+                .write.text ".r" =>>
+                .write.sep =>>
+                .write.data layout_values.first =>>
+                .write.anchor =>>
+                .write.text ".r" =>>
+                .write.sep =>>
+                .write.data layout_values.second
+              ) =>>
+              .write.text ")"
             )
-          ) >>= \fragment_until ->
-          fragment_until () >>= \fragment_body_writer ->
-          .r (
-            .write.text fragment_open =>>
-            fragment_body_writer =>>
-            .write.text fragment_close
-          )
-        )
-
-        'layout => (
-          .read.layout (
-            .fix (\fragment_layout_loop ->
-              .r (\_ ->
-                .cut (
-                  .alt
-                    (.read.end =>> .r (.r ()))
-                    (.alt
-                      (
-                        .read.anchor =>>
-                        fragment_layout_loop () >>= \fragment_after_anchor ->
-                        .r (.write.anchor =>> fragment_after_anchor)
-                      )
-                      (.alt
-                        (
-                          fragment_capture 'layout >>= \fragment_nested_layout ->
-                          fragment_layout_loop () >>= \fragment_after_layout ->
-                          .r (fragment_nested_layout =>> fragment_after_layout)
-                        )
-                        (
-                          fragment_capture 'item >>= \fragment_layout_item ->
-                          fragment_layout_loop () >>= \fragment_after_item ->
-                          .r (fragment_layout_item =>> fragment_after_item)
-                        )
-                      )
-                    )
-                )
-              )
-            ) >>= \fragment_layout_loop ->
-            fragment_layout_loop ()
-          ) >>= \fragment_layout_writer ->
-          .r (.write.layout fragment_layout_writer)
-        )
-
-        'item => (
-          .alt
-            (fragment_capture (group:["(", ")"]))
-            (.alt
-              (fragment_capture (group:["[", "]"]))
-              (.alt
-                (fragment_capture (group:["{", "}"]))
-                (.alt
-                  (.read.data >>= \fragment_data ->
-                    .r (.write.data fragment_data))
-                  (.alt
-                    (.read.sep =>> .r (.write.sep))
-                    (.read.text_span >>= \fragment_span ->
-                      .r (.write.text fragment_span.span))
-                  )
-                )
-              )
+          ))
+          (.case "an inline option" (
+            .read.text "(" =>>
+            .read.data >>= \inline_value ->
+            .read.text ")" =>>
+            .r (
+              .write.text "(do" =>>
+              .write.sep =>>
+              .write.text ".r" =>>
+              .write.sep =>>
+              .write.data inline_value =>>
+              .write.text ")"
             )
-        )
-    )
-  ) >>= \fragment_capture ->
-  .read.text "(" =>>
-  .alt
-    (.read.text "true" =>> .r 'yes)
-    (.read.text "false" =>> .r 'no) >>= \layout_selection ->
-  .read.text "," =>>
-  fragment_capture (group:["(", ")"]) >>= \layout_yes_writer ->
-  .read.text "," =>>
-  fragment_capture (group:["(", ")"]) >>= \layout_no_writer ->
-  .read.text ")" =>>
-  .read.end =>>
-  if layout_selection == 'yes
-    then layout_yes_writer
-    else layout_no_writer
+          ))
+      )
+  )
 
 # This macro executes after `layout_choose` and treats the replayed layout as
 # structured input. It therefore observes missing, flattened, or extra anchors.
 layout_check =
-  .read.sep =>>
-  .read.text "(do" =>>
+  .case "separation before the replayed option" (.read.sep) =>>
+  .case "the replayed do header" (.read.text "(do") =>>
   .read.layout (
-    .read.anchor =>>
-    .read.text ".r" =>>
-    .read.sep =>>
-    .read.data >>= \_layout_first ->
-    .read.anchor =>>
-    .read.text ".r" =>>
-    .read.sep =>>
-    .read.data >>= \layout_second ->
-    .read.end =>>
+    .case "the replayed first anchor" (.read.anchor) =>>
+    .case "the replayed first return" (.read.text ".r") =>>
+    .case "separation before the replayed first value" (.read.sep) =>>
+    .case "the replayed first value" (.read.data) >>= \_layout_first ->
+    .case "the replayed second anchor" (.read.anchor) =>>
+    .case "the replayed second return" (.read.text ".r") =>>
+    .case "separation before the replayed second value" (.read.sep) =>>
+    .case "the replayed second value" (.read.data) >>= \layout_second ->
+    .case "the end of the replayed layout" (.read.end) =>>
     .r layout_second
   ) >>= \layout_selected ->
-  .read.text ")" =>>
-  .read.end =>>
+  .case "the dedent before the replayed do close" (.read.sep) =>>
+  .case "the replayed do close" (.read.text ")") =>>
+  .case "the end of the replayed option" (.read.end) =>>
   .write.data layout_selected
 
 @rules choose
@@ -218,10 +173,8 @@ inline_result = @choose(false,("wrong"++("!")),("rewrite"++"-ok"))
 
 # Expansion is right-to-left. `layout_check` receives only the logical source
 # replayed by `layout_choose`, not the original source layout.
-layout_result = @layout_check @layout_choose(false,(do
-  .r "wrong"
-  .r "still-wrong"),(do
-  .r "first"
-  .r "layout-ok"))
+layout_result = @layout_check @layout_choose false ("wrong")
+  "first"
+  "layout-ok"
 
 asm.result = inline_result ++ "," ++ layout_result

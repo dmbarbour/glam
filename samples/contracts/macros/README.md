@@ -3,7 +3,9 @@
 These began as phase-zero contracts for the built-in compiler. Production
 macro expansion now implements the contracts below. The executable protocol
 samples in this folder cover a recursive logic DSL, source rewrite rules, and
-a binary packet layout; `tests/macro_protocols.rs` compiles and runs them.
+a binary packet layout; `tests/macro_protocols.rs` compiles and runs them. The
+rewrite fixture also passes replayed layout through a second macro, including
+a negative test proving that the second reader observes anchor structure.
 
 ## Accepted macro heads
 
