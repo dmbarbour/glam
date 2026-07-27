@@ -619,6 +619,49 @@ tuple_effects = ((do @meta.steps), do .r 3)
 }
 
 #[test]
+fn source_macro_layout_dedents_resume_inside_delimiter_groups() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["macro_delimited_layout_resume_test"])
+        .script(
+            "g",
+            r#"language g0
+import 'std
+meta.macro.env = {}
+meta.prelude = .read.end =>> .write.anchor =>> .write.text ".r ()" =>> .write.anchor =>> .write.text ".r ()"
+meta.body = .read.end =>> .write.anchor =>> .write.text ".r ()" =>> .write.anchor =>> .write.text ".r 42"
+where_effect =
+  (do @meta.prelude
+      user_op
+    where
+      user_op = .r 42
+  )
+where_value = list.head (list.pure where_effect)
+list_effects =
+  [do @meta.body
+    , do .r 99]
+list_first = list.head (list.pure (list.at 0 list_effects))
+list_second = list.head (list.pure (list.at 1 list_effects))
+"#,
+        )
+        .build()
+        .expect("delimiter-contained macro layouts should resume at their dedents");
+
+    for (name, expected) in [("where_value", 42), ("list_first", 42), ("list_second", 99)] {
+        let value = assembler
+            .get(module.value(), name)
+            .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
+        assert_eq!(
+            assembler
+                .evaluate(&value)
+                .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
+            PublicValue::integer(expected),
+            "unexpected value for `{name}`",
+        );
+    }
+}
+
+#[test]
 fn source_macro_anchor_contract_rejects_ambiguous_or_empty_items() {
     for (body, invocation, expected) in [
         (
