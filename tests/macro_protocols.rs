@@ -43,7 +43,7 @@ fn recursive_logic_macro_compiles_nested_rules_and_runs_the_query() {
 }
 
 #[test]
-fn rewrite_rule_macro_replays_a_balanced_source_fragment() {
+fn rewrite_rule_macro_replays_balanced_and_anchored_source_fragments() {
     let (assembler, module) = compile(
         include_str!("../samples/contracts/macros/rewrite_rules.g"),
         "rewrite_rules",
@@ -52,8 +52,8 @@ fn rewrite_rule_macro_replays_a_balanced_source_fragment() {
     assert_eq!(
         assembler
             .binary_at(&module, "asm.result")
-            .expect("selected rewrite should produce text"),
-        b"rewrite-ok".as_slice(),
+            .expect("selected rewrites should preserve groups and layouts"),
+        b"rewrite-ok,layout-ok".as_slice(),
     );
 }
 
