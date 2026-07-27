@@ -128,9 +128,12 @@ module fixpoint. At that staged seam, each macro-bearing original declaration
 captures one prior namespace and environment, expands its finite original
 invocation worklist right-to-left, and only then enters ordinary parsing.
 Macro cursors reuse `LayoutView` for bounded child layouts; output journals
-materialize abstract anchors relative to the invocation floor. Generated text
-is never scanned for macro calls, and macro syntax never enters the syntax AST.
-Net lowering emits complete bind and application spines.
+materialize abstract anchors relative to the invocation floor. A macro may own
+the first member of a hanging `do`, `let`, `when`, `where`, or `with` layout;
+the inferred member column, rather than the physical line indentation, anchors
+generated siblings. Generated text is never scanned for macro calls, and macro
+syntax never enters the syntax AST. Net lowering emits complete bind and
+application spines.
 
 `LayoutView` selects one next-line or hanging sibling anchor and returns the
 first dedented line without consuming it. `ExpressionContext` carries the

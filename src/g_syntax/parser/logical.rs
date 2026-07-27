@@ -12,6 +12,7 @@ use crate::core::Value;
 use crate::number::Number;
 
 use super::super::Diagnostic;
+use super::super::keywords::g0_layout_introducer;
 use super::super::macro_expansion::{
     MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroInputLayout, MacroOutput,
 };
@@ -31,6 +32,12 @@ pub(super) struct MacroInvocation {
     anchor_position: bool,
     indentation: usize,
     pub(super) input: MacroInput,
+}
+
+struct MacroLogicalItem {
+    tokens: TokenRange,
+    anchor_position: bool,
+    indentation: usize,
 }
 
 #[derive(Clone)]
@@ -427,7 +434,7 @@ fn macro_invocation_at(
     }
     let input_start = tokens[index - 1].span().end();
     let item = logical_item(source, declaration, invocation);
-    let input_token_end = item.end();
+    let input_token_end = item.tokens.end();
     let input_end = if input_token_end < range.end {
         tokens[input_token_end].span().start()
     } else {
@@ -436,15 +443,8 @@ fn macro_invocation_at(
     Ok(MacroInvocation {
         path,
         start,
-        anchor_position: invocation == item.start()
-            && !source.groups().iter().any(|group| {
-                group
-                    .close_token()
-                    .is_some_and(|close| group.open_token() < invocation && invocation < close)
-            }),
-        indentation: TokenView::whole(source)
-            .line_indentation_at(item.start())
-            .unwrap_or(0),
+        anchor_position: item.anchor_position,
+        indentation: item.indentation,
         input: macro_input(source, index..input_token_end, input_start, input_end)?,
     })
 }
@@ -453,10 +453,11 @@ fn logical_item(
     source: &LexedSource<'_>,
     declaration: &DeclarationSection,
     invocation: usize,
-) -> TokenRange {
+) -> MacroLogicalItem {
     let declaration_range = declaration.tokens();
     let mut member_start = declaration_range.start;
     let mut member_end = declaration_range.end;
+    let mut inside_group = false;
 
     if let Some(group) = source
         .groups()
@@ -473,6 +474,7 @@ fn logical_item(
                 .saturating_sub(group.open_token())
         })
     {
+        inside_group = true;
         let close = group.close_token().expect("filtered groups are closed");
         member_start = group.open_token() + 1;
         member_end = close;
@@ -497,6 +499,24 @@ fn logical_item(
         }
     }
 
+    if !inside_group && hanging_layout_follows(source, member_start, invocation) {
+        let view = TokenView::new(
+            source,
+            TokenRange::new(invocation, member_end).expect("hanging macro layout view is ordered"),
+        )
+        .expect("hanging macro layout remains within the source");
+        let block = LayoutView::new(view).block();
+        if let Some(first) = block.statements().first()
+            && first.tokens().start() == invocation
+        {
+            return MacroLogicalItem {
+                tokens: first.tokens(),
+                anchor_position: true,
+                indentation: block.anchor(),
+            };
+        }
+    }
+
     let line_start = source.tokens()[member_start..invocation]
         .iter()
         .rposition(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
@@ -506,7 +526,7 @@ fn logical_item(
         TokenRange::new(line_start, member_end).expect("logical item view is ordered"),
     )
     .expect("logical item view remains within the source");
-    LayoutView::new(view)
+    let tokens = LayoutView::new(view)
         .block()
         .statements()
         .iter()
@@ -517,6 +537,30 @@ fn logical_item(
                     .expect("delimiter member range remains ordered")
             },
             |statement| statement.tokens(),
+        );
+    MacroLogicalItem {
+        anchor_position: invocation == tokens.start() && !inside_group,
+        indentation: TokenView::whole(source)
+            .line_indentation_at(tokens.start())
+            .unwrap_or(0),
+        tokens,
+    }
+}
+
+fn hanging_layout_follows(
+    source: &LexedSource<'_>,
+    member_start: usize,
+    invocation: usize,
+) -> bool {
+    if source.tokens()[invocation].leading() == LeadingTrivia::Joint {
+        return false;
+    }
+    source.tokens()[member_start..invocation]
+        .iter()
+        .rev()
+        .find(|token| !matches!(token.kind(), TokenKind::LineStart { .. }))
+        .is_some_and(
+            |token| matches!(token.kind(), TokenKind::Name(name) if g0_layout_introducer(name)),
         )
 }
 

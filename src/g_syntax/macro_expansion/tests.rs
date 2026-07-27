@@ -565,9 +565,12 @@ list_second = list.at 1 @meta.list
 object values with
   @meta.delete
   @meta.members
+object hanging_values with @meta.members
 do_effect = do
   @meta.steps
 do_value = list.head (list.pure do_effect)
+hanging_do_effect = do @meta.steps
+hanging_do_value = list.head (list.pure hanging_do_effect)
 "#,
         )
         .build()
@@ -578,6 +581,7 @@ do_value = list.head (list.pure do_effect)
         ("first", 40),
         ("second", 42),
         ("do_value", 42),
+        ("hanging_do_value", 42),
     ] {
         let value = assembler
             .get(module.value(), name)
@@ -590,19 +594,23 @@ do_value = list.head (list.pure do_effect)
             "unexpected value for `{name}`",
         );
     }
-    let values = assembler
-        .get(module.value(), "values")
-        .expect("generated object members should remain in their object");
-    for (name, expected) in [("first", 40), ("second", 42)] {
-        let value = assembler
-            .get(&values, name)
-            .unwrap_or_else(|error| panic!("object member `{name}` should exist: {error}"));
-        assert_eq!(
-            assembler
-                .evaluate(&value)
-                .unwrap_or_else(|error| panic!("object member `{name}` should evaluate: {error}")),
-            PublicValue::integer(expected),
-        );
+    for object_name in ["values", "hanging_values"] {
+        let values = assembler
+            .get(module.value(), object_name)
+            .unwrap_or_else(|error| {
+                panic!("generated object `{object_name}` should exist: {error}")
+            });
+        for (name, expected) in [("first", 40), ("second", 42)] {
+            let value = assembler.get(&values, name).unwrap_or_else(|error| {
+                panic!("object member `{object_name}.{name}` should exist: {error}")
+            });
+            assert_eq!(
+                assembler.evaluate(&value).unwrap_or_else(|error| {
+                    panic!("object member `{object_name}.{name}` should evaluate: {error}")
+                }),
+                PublicValue::integer(expected),
+            );
+        }
     }
 }
 
@@ -612,6 +620,11 @@ fn source_macro_anchor_contract_rejects_ambiguous_or_empty_items() {
         (
             ".write.anchor =>> .write.text \"generated = 42\"",
             "answer = @meta.bad",
+            "start of its logical item",
+        ),
+        (
+            ".write.anchor =>> .write.text \"generated = 42\"",
+            "answer = consume @meta.bad",
             "start of its logical item",
         ),
         (

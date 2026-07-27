@@ -11,6 +11,7 @@ pub(super) enum KeywordRole {
     Statement,
     Operator,
     Modifier,
+    LayoutIntroducer,
     ObjectAlias,
     SpecialReference,
 }
@@ -26,14 +27,14 @@ impl Keyword {
         self.spelling
     }
 
-    #[cfg(test)]
     pub(super) const fn roles(self) -> &'static [KeywordRole] {
         self.roles
     }
 }
 
 use KeywordRole::{
-    Declaration, Expression, Modifier, ObjectAlias, Operator, SpecialReference, Statement,
+    Declaration, Expression, LayoutIntroducer, Modifier, ObjectAlias, Operator, SpecialReference,
+    Statement,
 };
 
 pub(super) const G0_KEYWORDS: &[Keyword] = &[
@@ -59,7 +60,7 @@ pub(super) const G0_KEYWORDS: &[Keyword] = &[
     },
     Keyword {
         spelling: "do",
-        roles: &[Expression],
+        roles: &[Expression, LayoutIntroducer],
     },
     Keyword {
         spelling: "else",
@@ -91,7 +92,7 @@ pub(super) const G0_KEYWORDS: &[Keyword] = &[
     },
     Keyword {
         spelling: "let",
-        roles: &[Expression],
+        roles: &[Expression, LayoutIntroducer],
     },
     Keyword {
         spelling: "match",
@@ -135,15 +136,15 @@ pub(super) const G0_KEYWORDS: &[Keyword] = &[
     },
     Keyword {
         spelling: "when",
-        roles: &[Modifier],
+        roles: &[Modifier, LayoutIntroducer],
     },
     Keyword {
         spelling: "where",
-        roles: &[Expression],
+        roles: &[Expression, LayoutIntroducer],
     },
     Keyword {
         spelling: "with",
-        roles: &[Modifier],
+        roles: &[Modifier, LayoutIntroducer],
     },
 ];
 
@@ -160,6 +161,10 @@ pub(super) fn canonical_keyword(name: &str) -> Option<Keyword> {
         .filter(|name| !name.is_empty())
         .unwrap_or(name);
     g0_keyword(canonical)
+}
+
+pub(super) fn g0_layout_introducer(name: &str) -> bool {
+    g0_keyword(name).is_some_and(|keyword| keyword.roles().contains(&LayoutIntroducer))
 }
 
 pub(super) fn reserved_keyword_message(keyword: Keyword) -> String {
@@ -194,11 +199,11 @@ mod tests {
         );
         assert_eq!(
             g0_keyword("where").map(Keyword::roles),
-            Some(&[Expression][..])
+            Some(&[Expression, LayoutIntroducer][..])
         );
         assert_eq!(
             g0_keyword("with").map(Keyword::roles),
-            Some(&[Modifier][..])
+            Some(&[Modifier, LayoutIntroducer][..])
         );
         assert_eq!(
             g0_keyword("if").map(Keyword::roles),
@@ -210,7 +215,7 @@ mod tests {
         );
         assert_eq!(
             g0_keyword("when").map(Keyword::roles),
-            Some(&[Modifier][..])
+            Some(&[Modifier, LayoutIntroducer][..])
         );
         assert_eq!(
             g0_keyword("try").map(Keyword::roles),
@@ -223,6 +228,16 @@ mod tests {
         assert_eq!(
             g0_keyword("self").map(Keyword::roles),
             Some(&[SpecialReference, ObjectAlias][..])
+        );
+        assert!(
+            ["do", "let", "when", "where", "with"]
+                .into_iter()
+                .all(g0_layout_introducer)
+        );
+        assert!(
+            !["if", "match", "object"]
+                .into_iter()
+                .any(g0_layout_introducer)
         );
     }
 

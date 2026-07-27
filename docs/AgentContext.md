@@ -40,8 +40,10 @@ notes instead of appending history; put subsystem details in
   evolving owned logical declaration before the ordinary parser sees it.
   `LayoutView` infers both parser bodies and macro child-layout scopes; do not
   add a second indentation algorithm for macros. It returns rather than
-  consumes its first dedent. `ExpressionContext` decides whether a
-  postfix/infix owner may resume there.
+  consumes its first dedent. A leading macro anchor after a layout-introducing
+  keyword uses the first hanging member's column, not its physical line
+  indentation. `ExpressionContext` decides whether a postfix/infix owner may
+  resume at a dedent.
 - Keep current implementation claims out of target-state design documents, and
   keep chronological spike notes out of this file.
 
