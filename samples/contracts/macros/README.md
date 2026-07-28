@@ -15,6 +15,11 @@ and extendable. These fixtures exercise hierarchical macro-head lookup and
 sharing object-backed helpers from macro evaluation into later assembly
 evaluation.
 
+An object may expose its primary macro operation directly as `eff`, for
+example `eff = logic_object.expand.eff`. Macro execution reads that member and
+ignores the object's other helper members, so callers can write `@logic`
+instead of `@logic.expand`.
+
 ## Accepted macro heads
 
 ```g

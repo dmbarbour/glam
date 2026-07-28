@@ -221,10 +221,12 @@ Prefer a named top-level object declaration for a reusable macro grammar:
 
 - place the macro entry points and related helpers in the object;
 - refer to recursive members through its object-local alias; and
-- invoke the public entries through static paths such as `@words.expand`.
+- expose the primary operation's effect function as `eff` when callers should
+  use `@words`; named alternatives remain available through paths such as
+  `@words.expand`.
 
 This gives the grammar one namespace that other modules can reuse, extend, or
-override through ordinary object composition. When inheriting from a top-level 
+override through ordinary object composition. When inheriting from a top-level
 macro object, always spell that parent `_name`, never `name`:
 
 ```g
@@ -254,20 +256,26 @@ object words with
     read_all >>= \items ->
     .write.data items
 
-  eff = expand
+  eff = expand.eff  # primary effect function for this object
 
 result = @words hello
 ```
 
 The top-level object owns its recursive knot independently of the module-level
-fixpoint while remaining a named, composable grammar. 
+fixpoint while remaining a named, composable grammar.
 
-Use a local `let` or `where` group when a small helper group is intentionally 
-private to one macro value. Use `.fix` or `do { abstract ... }` only if when
+Use a local `let` or `where` group when a small helper group is intentionally
+private to one macro value. Use `.fix` or `do { abstract ... }` only when
 a fixpoint value genuinely depends on the result of some effectful observation.
 
 An explicit prior-definition reference can also avoid the final module, but
 top-level object declarations are the preferred reusable form.
+
+The macro runner accepts any dictionary or object with a defined `eff` member;
+other members do not prevent effect execution. As with other effect handlers,
+that member is the operation's effect function, not another effect wrapper.
+Selecting `expand.eff` above exposes the existing operation without adding an
+extra monadic layer.
 
 ## Non-hygienic macros
 

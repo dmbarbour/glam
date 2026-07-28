@@ -121,7 +121,10 @@ object logic as logic_object with
       .write.data logic_items
     )
 
-family = @logic.expand
+  # An effect handler accepts the object despite its helper members.
+  eff = logic_object.expand.eff
+
+family = @logic
   fact parent "alice" "bob"
   fact parent "bob" "carol"
 

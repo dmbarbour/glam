@@ -95,6 +95,10 @@ notes instead of appending history; put subsystem details in
   must name the parent `_name`, not final `name`, even when the child has a
   different name. Do not repair either dependency by forcing the module
   fixpoint during expansion.
+- Macro execution follows the ordinary handler convention `{eff:_, _}`:
+  helper members do not disqualify an object. To expose an existing primary
+  operation, assign its function (`eff = entry.eff`), not the wrapped effect
+  (`eff = entry`).
 - One top-level module build creates one `CompilationExecution` and propagates
   it through every input and recursive import. Macro effects use its private
   evaluation/reflection session, not assembler reasoning: heaps, tasks, and

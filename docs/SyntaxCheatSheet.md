@@ -524,6 +524,7 @@ using Dict do Body          # sugar for: using Dict in do Body
 ```
 @macro_name input           # selects prior _module.macro_name
 @table.create input         # joint static paths only
+@grammar input              # object/dict may expose its primary effect as `eff`
 @outer @inner input         # inner expands first; each original call runs once
 
 meta.macro.env = {          # immutable parameters available through macro .env
