@@ -553,7 +553,7 @@ impl FileNameAnalysis {
         scope: ResolutionScopeId,
         locals: &[String],
     ) {
-        if matches!(name, "module" | "self")
+        if matches!(name, "module" | "module_origin" | "self")
             || locals.iter().rev().any(|local| local == name)
             || self.scopes[scope.0].object_alias.as_deref() == Some(name)
         {

@@ -221,6 +221,15 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .try_map(|name, span| {
                 if let Some(prior) = name.strip_prefix('_') {
                     if prior.starts_with(|character: char| character.is_ascii_alphabetic()) {
+                        if prior == "module_origin" {
+                            return Err(Rich::custom(
+                                span,
+                                reserved_keyword_message(
+                                    g0_keyword(prior)
+                                        .expect("module_origin must remain a g0 keyword"),
+                                ),
+                            ));
+                        }
                         return validate_expr_name(prior)
                             .map(|_| SyntaxExpr::PriorName(prior.to_owned()))
                             .map_err(|message| Rich::custom(span, message));
@@ -938,7 +947,7 @@ fn validate_expr_name(name: &str) -> Result<String, String> {
         return Err("expected name".to_owned());
     }
     match g0_keyword(name) {
-        Some(keyword) if !matches!(keyword.spelling(), "module" | "self") => {
+        Some(keyword) if !matches!(keyword.spelling(), "module" | "module_origin" | "self") => {
             Err(reserved_keyword_message(keyword))
         }
         _ => Ok(name.to_owned()),

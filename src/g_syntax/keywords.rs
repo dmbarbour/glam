@@ -103,6 +103,10 @@ pub(super) const G0_KEYWORDS: &[Keyword] = &[
         roles: &[SpecialReference],
     },
     Keyword {
+        spelling: "module_origin",
+        roles: &[SpecialReference],
+    },
+    Keyword {
         spelling: "object",
         roles: &[Declaration, Expression],
     },
@@ -228,6 +232,10 @@ mod tests {
         assert_eq!(
             g0_keyword("self").map(Keyword::roles),
             Some(&[SpecialReference, ObjectAlias][..])
+        );
+        assert_eq!(
+            g0_keyword("module_origin").map(Keyword::roles),
+            Some(&[SpecialReference][..])
         );
         assert!(
             ["do", "let", "when", "where", "with"]

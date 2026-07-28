@@ -129,7 +129,9 @@ notes instead of appending history; put subsystem details in
   shallow static frame
   `{g:{origin:OpaqueOrigin, line:Number, definition:Text}}`. It deliberately
   does not capture function arguments or propagate that frame into later
-  calls. Other front ends may use different static span data.
+  calls. The `module_origin` special reference exposes the same opaque token
+  for manual static frames; it is not a namespace and has no prior form. Other
+  front ends may use different static span data.
 - Opaque origins are never found or projected by recursively searching a
   diagnostic. Reflection observers may iterate `msg.context` by ordinary
   privileged dictionary access and explicitly call the capability at

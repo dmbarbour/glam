@@ -36,6 +36,7 @@ fn ordinary_expressions_parse() {
         "()",
         "name",
         "module",
+        "module_origin",
         "self",
         "_prior",
         "^outer",
@@ -131,7 +132,14 @@ fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
     for keyword in crate::g_syntax::keywords::G0_KEYWORDS {
         if matches!(
             keyword.spelling(),
-            "do" | "if" | "match" | "module" | "self" | "try" | "try_match" | "using"
+            "do" | "if"
+                | "match"
+                | "module"
+                | "module_origin"
+                | "self"
+                | "try"
+                | "try_match"
+                | "using"
         ) {
             continue;
         }
@@ -198,6 +206,15 @@ fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
             .message
             .contains("using expression requires a namespace")
     }));
+}
+
+#[test]
+fn module_origin_is_a_special_reference_without_a_prior_form() {
+    assert_eq!(
+        parse_expression_fragment(b"module_origin").unwrap(),
+        SyntaxExpr::Name("module_origin".to_owned())
+    );
+    assert_rejects("_module_origin");
 }
 
 #[test]

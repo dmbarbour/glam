@@ -189,7 +189,7 @@ The active `g0` table is:
 | expression forms | `let`, `where`, `using`, `do`, `if`, `match`, `try`, `try_match`, `object`, `abstract object` |
 | do statements | `abstract` |
 | expression operators | `and`, `or` |
-| special expression references | `module`, `self` |
+| special expression references | `module`, `module_origin`, `self` |
 | special object/`with` alias | `self` |
 | contextual modifiers | `abstract`, `as`, `at`, `binary`, `else`, `extends`, `in`, `then`, `when`, `with` |
 
@@ -225,6 +225,17 @@ Namespaces are modeled as hierarchical dictionaries, accessed via dotted path, e
 In the general case, we also support expression-indexed paths using `.(ListExpr)` or `.[...]` for a literal list. These indices are interpreted such that `.([1, 'two] ++ [3])` is equivalent to `.[1].two.[3]`. The empty list is permitted, e.g. `foo.[]` is equivalent to `foo`, and `foo.[ ].bar` admits spaces, newlines, and comments in names if needed.
 
 Best practice is to avoid expression-indexed paths in module or object namespaces, but it's available as an escape hatch for integration. Users may define `.[Idx] = Def` at the module toplevel. Later access to this name requires `module.[Idx]`. Users may understand `module` as a keyword that aliases the module toplevel namespace, and `self` as the current object namespace (`self` aliases `module` at toplevel to simplify macros).
+
+`module_origin` is the opaque assembler provenance token for the current
+source compilation. It is stable and shared throughout that source input, so
+users may place it in their own static context frames without exposing paths:
+
+        guarded = anno context:{origin:module_origin} Expr
+
+When several source inputs contribute to one final module, each input receives
+its own origin. The token is not a namespace and has no `_module_origin` prior
+form. Reflection may inspect it explicitly through the capability described
+under [Errors](#errors).
 
 ### Introductions and Overrides
 
@@ -1013,6 +1024,9 @@ frame covers definition initialization only. In particular, initializing a
 function does not capture its arguments or make the frame follow later calls
 to that function. A compiler may add finer static frames where they do not
 capture runtime values.
+
+Source code may use the `module_origin` special reference to place the same
+opaque value in manual frames.
 
 Opaque origins are not implicitly rendered or searched for inside
 `msg.context`. A reflection observer that recognizes this convention may

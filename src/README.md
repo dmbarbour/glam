@@ -190,11 +190,12 @@ promises remain scheduler control states rather than errors.
 `CompileContext` constructs one opaque provenance handle for each traced source
 input. The `.g` front end places it in shallow, static definition-initialization
 frames alongside its own line and definition fields. It does not capture
-runtime arguments or make the frame follow later function calls. Evaluation
-never searches contexts for these handles. A reflection observer explicitly
-selects a handle and calls the `glam.origin.inspect` capability supplied in its
-immutable `.env`; only then is assembler-owned source and import provenance
-projected into ordinary data.
+runtime arguments or make the frame follow later function calls. The
+`module_origin` special reference embeds that same token in user-authored
+static frames. Evaluation never searches contexts for these handles. A
+reflection observer explicitly selects a handle and calls the
+`glam.origin.inspect` capability supplied in its immutable `.env`; only then is
+assembler-owned source and import provenance projected into ordinary data.
 
 Source-level net construction follows a separate lazy path:
 

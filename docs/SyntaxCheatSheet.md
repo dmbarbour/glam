@@ -14,7 +14,8 @@ language g0 with utf8  # BaseVer with Extensions
 # Names: [a-zA-Z][a-zA-Z0-9]* parts, joined by single underscores.
 # Active g0 keywords are reserved as bare names and local binders:
 # abstract and as at binary do else extend extends if import in language let
-# match module object or self then try try_match unique using when where with
+# match module module_origin object or self then try try_match unique using
+# when where with
 # Explicit keys may use them: module.where, where:Value, or .['where] = Value.
 foo = 42                    # introduce (ERROR if foo already defined)
 foo := 43                   # override (ERROR if foo NOT already defined)
@@ -552,6 +553,8 @@ anno refl:(.log Msg) Term   # reflection effect before returning Term
 
 # g0 definition initialization adds a shallow source frame:
 # {g:{origin:OpaqueOrigin, line:LineNumber, definition:Name}}
+# Manual source context may use the same opaque token:
+anno context:{origin:module_origin} Expr
 # Reflection may explicitly inspect that token with:
 .env '.glam.origin.inspect
 
@@ -562,6 +565,7 @@ refl.check_invariants = ... # refl.* run automatically as reflection tasks
 meta.abstract_names         # compiler metadata lives under meta.*
 env                         # implicitly abstract; provided on import by host 
 module                      # alias for module toplevel namespace
+module_origin               # opaque provenance for this source compilation
 self                        # current object namespace (= module at toplevel)
 ```
 

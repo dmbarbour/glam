@@ -2362,7 +2362,15 @@ mod tests {
             .module(["definition_context"])
             .script(
                 "g",
-                "language g0\nbroken = 1 / 0\nlater x = x / 0\nobject container with\n  broken = 1 / 0\n",
+                concat!(
+                    "language g0\n",
+                    "import 'std\n",
+                    "broken = 1 / 0\n",
+                    "later x = x / 0\n",
+                    "object container with\n",
+                    "  broken = 1 / 0\n",
+                    "manual = anno context:{manual:module_origin} (1 / 0)\n",
+                ),
             )
             .build()
             .expect("definition context fixture should compile");
@@ -2384,10 +2392,14 @@ mod tests {
         );
         assert_eq!(
             context.get(&*keys::LINE),
-            Some(&CoreValue::Number(Number::from_usize(2)))
+            Some(&CoreValue::Number(Number::from_usize(3)))
         );
+        let automatic_origin = context
+            .get(&*keys::ORIGIN)
+            .expect("source context should contain an origin")
+            .clone();
         assert!(
-            matches!(context.get(&*keys::ORIGIN), Some(CoreValue::Opaque(_))),
+            matches!(&automatic_origin, CoreValue::Opaque(_)),
             "source origins should remain opaque until a reflection capability inspects them"
         );
 
@@ -2425,7 +2437,27 @@ mod tests {
         );
         assert_eq!(
             context.get(&*keys::LINE),
-            Some(&CoreValue::Number(Number::from_usize(5)))
+            Some(&CoreValue::Number(Number::from_usize(6)))
+        );
+
+        let manual = assembler
+            .get(module.value(), "manual")
+            .expect("fixture should define a manual context");
+        let error = eval::eval_value(&assembler.eval_context(), manual.as_core())
+            .expect_err("the manually contextualized expression should fail");
+        let failure = error.into_permanent_failure();
+        let manual_origin = failure.contexts().iter().find_map(|frame| {
+            let CoreValue::Dict(frame) = eval::eval_value(&assembler.eval_context(), frame).ok()?
+            else {
+                return None;
+            };
+            frame.get(&Key::atom_from_text("manual")).cloned()
+        });
+        assert_eq!(
+            manual_origin.as_ref(),
+            Some(&automatic_origin),
+            "module_origin should expose the same opaque token used by automatic frames; contexts: {:?}",
+            failure.contexts()
         );
     }
 

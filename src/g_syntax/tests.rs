@@ -303,6 +303,7 @@ foo = \\foo -> foo
 fn g0_keywords_are_reserved_across_source_name_positions() {
     for (keyword, source) in [
         ("where", "language g0\nwhere = 1\n"),
+        ("module_origin", "language g0\nmodule_origin = 1\n"),
         ("where", "language g0\n.where = 1\n"),
         ("let", "language g0\nvalue let = let\n"),
         ("where", "language g0\nvalue = \\where -> 1\n"),

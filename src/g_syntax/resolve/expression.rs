@@ -36,7 +36,7 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::DictUnion(items) => {
             lower_dict_union_resolved(items, line, context, scope, locals)?
         }
-        SyntaxExpr::Name(name) => lower_name_expr_resolved(name, scope, locals),
+        SyntaxExpr::Name(name) => lower_name_expr_resolved(name, context, scope, locals),
         SyntaxExpr::PriorName(name) => lower_prior_name_expr_resolved(name, line, scope)?,
         SyntaxExpr::Escape(depth, expr) => {
             let escaped_scope = escaped_name_scope(scope, *depth, line)?;
@@ -832,11 +832,17 @@ pub(in crate::g_syntax) fn lower_let_expr_resolved(
 
 pub(in crate::g_syntax) fn lower_name_expr_resolved(
     name: &str,
+    context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &ResolverContext,
 ) -> ResolvedExpr<Value> {
     match name {
         "module" => return scope.module_final_defs.expr(),
+        "module_origin" => {
+            return ResolvedExpr::Embedded(context.opaque_origin().unwrap_or_else(|| {
+                Value::error("module origin is unavailable outside a source compilation context")
+            }));
+        }
         "self" => {
             return scope
                 .object_final_defs
