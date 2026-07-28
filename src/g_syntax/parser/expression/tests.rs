@@ -35,6 +35,9 @@ fn ordinary_expressions_parse() {
     const EXPRESSIONS: &[&str] = &[
         "()",
         "name",
+        "abstract_global_path foo",
+        "abstract_global_path foo.path",
+        "abstract_global_path module.foo.path",
         "module",
         "module_origin",
         "self",
@@ -132,7 +135,9 @@ fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
     for keyword in crate::g_syntax::keywords::G0_KEYWORDS {
         if matches!(
             keyword.spelling(),
-            "do" | "if"
+            "abstract_global_path"
+                | "do"
+                | "if"
                 | "match"
                 | "module"
                 | "module_origin"
@@ -215,6 +220,34 @@ fn module_origin_is_a_special_reference_without_a_prior_form() {
         SyntaxExpr::Name("module_origin".to_owned())
     );
     assert_rejects("_module_origin");
+}
+
+#[test]
+fn abstract_global_path_parses_only_static_relative_name_paths() {
+    assert_eq!(
+        parse_expression_fragment(b"abstract_global_path foo.bar").unwrap(),
+        SyntaxExpr::AbstractGlobalPath {
+            explicit_module: false,
+            path: vec!["foo".to_owned(), "bar".to_owned()],
+        }
+    );
+    assert_eq!(
+        parse_expression_fragment(b"abstract_global_path module.foo.bar").unwrap(),
+        SyntaxExpr::AbstractGlobalPath {
+            explicit_module: true,
+            path: vec!["foo".to_owned(), "bar".to_owned()],
+        }
+    );
+
+    for source in [
+        "abstract_global_path",
+        "abstract_global_path module",
+        "abstract_global_path self.foo",
+        "abstract_global_path foo.[42]",
+        "_abstract_global_path",
+    ] {
+        assert_rejects(source);
+    }
 }
 
 #[test]

@@ -197,6 +197,11 @@ reflection observer explicitly selects a handle and calls the
 `glam.origin.inspect` capability supplied in its immutable `.env`; only then is
 assembler-owned source and import provenance projected into ordinary data.
 
+The same front-end boundary owns the `abstract_global_path StaticName` keyword.
+Parsing retains a static name path; resolution verifies that an implicit root
+actually selects the module namespace, and lowering asks `CompileContext` to
+qualify it. No runtime expression is carried into core for this operation.
+
 Source-level net construction follows a separate lazy path:
 
 ```text

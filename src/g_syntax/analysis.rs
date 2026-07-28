@@ -15,7 +15,8 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
         | SyntaxExpr::Number(_)
         | SyntaxExpr::Text(_)
         | SyntaxExpr::Atom(_)
-        | SyntaxExpr::Effect(_) => {}
+        | SyntaxExpr::Effect(_)
+        | SyntaxExpr::AbstractGlobalPath { .. } => {}
         SyntaxExpr::Name(_) | SyntaxExpr::PriorName(_) => {}
         SyntaxExpr::Escape(_, expr) => analyze_expr_locals(expr, line, diagnostics),
         SyntaxExpr::Access(base, parts) => {
@@ -221,6 +222,7 @@ fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool
         | SyntaxExpr::Text(_)
         | SyntaxExpr::Atom(_)
         | SyntaxExpr::Effect(_)
+        | SyntaxExpr::AbstractGlobalPath { .. }
         | SyntaxExpr::Name(_)
         | SyntaxExpr::PriorName(_) => {}
         SyntaxExpr::Escape(_, expr) => mark_used_prior_alias(expr, alias, used),
@@ -391,7 +393,8 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
         | SyntaxExpr::Number(_)
         | SyntaxExpr::Text(_)
         | SyntaxExpr::Atom(_)
-        | SyntaxExpr::Effect(_) => {}
+        | SyntaxExpr::Effect(_)
+        | SyntaxExpr::AbstractGlobalPath { .. } => {}
         SyntaxExpr::Name(name) => {
             if let Some(index) = locals
                 .iter()

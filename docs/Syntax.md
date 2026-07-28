@@ -186,7 +186,7 @@ The active `g0` table is:
 | Role | Keywords |
 | --- | --- |
 | declaration heads | `language`, `import`, `abstract`, `unique`, `object`, `extend` |
-| expression forms | `let`, `where`, `using`, `do`, `if`, `match`, `try`, `try_match`, `object`, `abstract object` |
+| expression forms | `abstract_global_path`, `let`, `where`, `using`, `do`, `if`, `match`, `try`, `try_match`, `object`, `abstract object` |
 | do statements | `abstract` |
 | expression operators | `and`, `or` |
 | special expression references | `module`, `module_origin`, `self` |
@@ -236,6 +236,21 @@ When several source inputs contribute to one final module, each input receives
 its own origin. The token is not a namespace and has no `_module_origin` prior
 form. Reflection may inspect it explicitly through the capability described
 under [Errors](#errors).
+
+`abstract_global_path StaticName` constructs an abstract path qualified to the
+current module:
+
+        abstract_global_path foo
+        abstract_global_path foo.path
+        abstract_global_path module.foo.path
+
+The operand is static syntax, not an evaluated expression. An unqualified root
+is accepted only where ordinary resolution would bind that name through the
+module namespace. A lexical local, object member, object alias, or `using`
+namespace therefore cannot accidentally determine a global identity; use the
+explicit `module.` form when escaping such a scope. The current representation
+restricts the path to name components. A later representation may admit static
+non-name keys such as `abstract_global_path module.[42]`.
 
 ### Introductions and Overrides
 

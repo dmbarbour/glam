@@ -13,9 +13,9 @@ language g0 with utf8  # BaseVer with Extensions
 ```
 # Names: [a-zA-Z][a-zA-Z0-9]* parts, joined by single underscores.
 # Active g0 keywords are reserved as bare names and local binders:
-# abstract and as at binary do else extend extends if import in language let
-# match module module_origin object or self then try try_match unique using
-# when where with
+# abstract abstract_global_path and as at binary do else extend extends if
+# import in language let match module module_origin object or self then try
+# try_match unique using when where with
 # Explicit keys may use them: module.where, where:Value, or .['where] = Value.
 foo = 42                    # introduce (ERROR if foo already defined)
 foo := 43                   # override (ERROR if foo NOT already defined)
@@ -567,6 +567,8 @@ env                         # implicitly abstract; provided on import by host
 module                      # alias for module toplevel namespace
 module_origin               # opaque provenance for this source compilation
 self                        # current object namespace (= module at toplevel)
+abstract_global_path foo.bar
+abstract_global_path module.foo.bar  # explicit module scope
 ```
 
 ## Idiomatic Loops (no loop keywords)

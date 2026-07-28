@@ -217,6 +217,49 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .boxed();
         let path_suffix = path_suffix_item.clone().repeated().collect::<Vec<_>>();
 
+        let static_global_path = glam_name
+            .clone()
+            .then(
+                joint(symbol("."))
+                    .ignore_then(joint(glam_name.clone()))
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .try_map(|(root, mut suffix), span| {
+                let explicit_module = root == "module";
+                if explicit_module {
+                    if suffix.is_empty() {
+                        return Err(Rich::custom(
+                            span,
+                            "`abstract_global_path module` requires a relative path after `module.`",
+                        ));
+                    }
+                    return Ok(SyntaxExpr::AbstractGlobalPath {
+                        explicit_module,
+                        path: suffix,
+                    });
+                }
+                if let Some(keyword) = g0_keyword(&root) {
+                    return Err(Rich::custom(span, reserved_keyword_message(keyword)));
+                }
+                suffix.insert(0, root.to_owned());
+                Ok(SyntaxExpr::AbstractGlobalPath {
+                    explicit_module,
+                    path: suffix,
+                })
+            })
+            .boxed();
+        let abstract_global_path = keyword("abstract_global_path")
+            .ignore_then(choice((
+                space_before(static_global_path.clone()),
+                line_start()
+                    .repeated()
+                    .at_least(1)
+                    .ignored()
+                    .ignore_then(static_global_path),
+            )))
+            .boxed();
+
         let rooted_name = name()
             .try_map(|name, span| {
                 if let Some(prior) = name.strip_prefix('_') {
@@ -502,6 +545,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .map(|(base, suffixes)| access_if_path(base, suffixes))
             .boxed();
         let base_atom = choice((
+            abstract_global_path,
             try_match_expr,
             try_expr,
             match_expr,

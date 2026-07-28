@@ -27,6 +27,17 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::Effect(path) => ResolvedExpr::Embedded(compiler_values::effect_path_value(
             &path.iter().map(String::as_str).collect::<Vec<_>>(),
         )),
+        SyntaxExpr::AbstractGlobalPath {
+            explicit_module,
+            path,
+        } => lower_abstract_global_path_resolved(
+            *explicit_module,
+            path,
+            line,
+            context,
+            scope,
+            locals,
+        )?,
         SyntaxExpr::PathDict(path, value) => {
             lower_path_dict_resolved(path, value, line, context, scope, locals)?
         }
@@ -797,6 +808,58 @@ pub(in crate::g_syntax) fn lower_application_expr_resolved(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ResolvedExpr::apply(function, arguments))
+}
+
+fn lower_abstract_global_path_resolved(
+    explicit_module: bool,
+    path: &[String],
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &ResolverContext,
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let target = path.join(".");
+    if explicit_module {
+        return Ok(ResolvedExpr::Embedded(
+            context.abstract_global_path(&target),
+        ));
+    }
+
+    let root = path
+        .first()
+        .expect("abstract global paths must contain at least one name");
+    if locals
+        .iter()
+        .rev()
+        .any(|candidate| candidate.canonical.as_deref() == Some(root))
+    {
+        return Err(Diagnostic::error(
+            line,
+            format!(
+                "`abstract_global_path {target}` resolves `{root}` as a local; abstract global paths must bind to the module namespace"
+            ),
+        ));
+    }
+    if scope.object_alias.as_deref() == Some(root) {
+        return Err(Diagnostic::error(
+            line,
+            format!(
+                "`abstract_global_path {target}` resolves `{root}` as an object alias; write `abstract_global_path module.{target}` for the module namespace"
+            ),
+        ));
+    }
+    if scope.final_defs != scope.module_final_defs {
+        return Err(Diagnostic::error(
+            line,
+            format!(
+                "`abstract_global_path {target}` resolves through an object or `using` namespace; write `abstract_global_path module.{target}` for the module namespace"
+            ),
+        ));
+    }
+
+    Ok(ResolvedExpr::Embedded(
+        context.abstract_global_path(&target),
+    ))
 }
 
 pub(in crate::g_syntax) fn lower_let_expr_resolved(

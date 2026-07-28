@@ -260,6 +260,7 @@ impl FileNameAnalysis {
             | SyntaxExpr::Text(_)
             | SyntaxExpr::Atom(_)
             | SyntaxExpr::Effect(_)
+            | SyntaxExpr::AbstractGlobalPath { .. }
             | SyntaxExpr::PriorName(_) => {}
             SyntaxExpr::Name(name) => self.record_name_use(name, line, scope, locals),
             SyntaxExpr::Escape(depth, expr) => {

@@ -582,6 +582,11 @@ pub enum SyntaxExpr {
     Text(String),
     Atom(String),
     Effect(Vec<String>),
+    /// A compiler-qualified, statically named path in the module namespace.
+    AbstractGlobalPath {
+        explicit_module: bool,
+        path: Vec<String>,
+    },
     Name(String),
     PriorName(String),
     Escape(usize, Box<SyntaxExpr>),

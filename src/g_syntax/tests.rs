@@ -303,6 +303,10 @@ foo = \\foo -> foo
 fn g0_keywords_are_reserved_across_source_name_positions() {
     for (keyword, source) in [
         ("where", "language g0\nwhere = 1\n"),
+        (
+            "abstract_global_path",
+            "language g0\nabstract_global_path = 1\n",
+        ),
         ("module_origin", "language g0\nmodule_origin = 1\n"),
         ("where", "language g0\n.where = 1\n"),
         ("let", "language g0\nvalue let = let\n"),
@@ -5972,6 +5976,91 @@ fn lowers_unique_declarations_via_abstract_global_paths() {
     assert_eq!(
         value_at_atom_path(&value, &["palette", "Blue"]).as_ref(),
         Some(&abstract_path_atom(&["pkg", "module", "palette", "Blue"]))
+    );
+}
+
+#[test]
+fn abstract_global_path_keyword_qualifies_static_module_names() {
+    let context = CompileContext::default();
+    let lowered = lower_with_module_path(
+        concat!(
+            "language g0\n",
+            "direct = abstract_global_path foo\n",
+            "nested = abstract_global_path foo.bar\n",
+            "explicit = abstract_global_path module.foo.bar\n",
+        ),
+        &["pkg", "module"],
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        resolved_value_at_path(&value, &["direct"]),
+        abstract_path_atom(&["pkg", "module", "foo"])
+    );
+    let nested = abstract_path_atom(&["pkg", "module", "foo", "bar"]);
+    assert_eq!(resolved_value_at_path(&value, &["nested"]), nested);
+    assert_eq!(
+        resolved_value_at_path(&value, &["explicit"]),
+        abstract_path_atom(&["pkg", "module", "foo", "bar"])
+    );
+}
+
+#[test]
+fn abstract_global_path_keyword_rejects_local_and_object_roots() {
+    for (source, expected) in [
+        (
+            "language g0\nbad = \\foo -> abstract_global_path foo\n",
+            "resolves `foo` as a local",
+        ),
+        (
+            "language g0\nobject holder with\n  bad = abstract_global_path child\n",
+            "resolves through an object or `using` namespace",
+        ),
+        (
+            "language g0\nobject holder as h with\n  bad = abstract_global_path h\n",
+            "resolves `h` as an object alias",
+        ),
+        (
+            "language g0\nnamespace = {}\nbad = using namespace in abstract_global_path child\n",
+            "resolves through an object or `using` namespace",
+        ),
+    ] {
+        let lowered = lower_with_module_path(source, &["pkg", "module"]);
+        assert!(
+            lowered
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "missing `{expected}` diagnostic for `{source}`: {:?}",
+            lowered.diagnostics
+        );
+    }
+}
+
+#[test]
+fn explicit_module_abstract_global_paths_escape_object_scope() {
+    let context = CompileContext::default();
+    let lowered = lower_with_module_path(
+        concat!(
+            "language g0\n",
+            "object holder with\n",
+            "  path = abstract_global_path module.target\n",
+            "object aliased as _a with\n",
+            "  path = abstract_global_path target\n",
+        ),
+        &["pkg", "module"],
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        resolved_value_at_path(&value, &["holder", "path"]),
+        abstract_path_atom(&["pkg", "module", "target"])
+    );
+    assert_eq!(
+        resolved_value_at_path(&value, &["aliased", "path"]),
+        abstract_path_atom(&["pkg", "module", "target"])
     );
 }
 

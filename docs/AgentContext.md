@@ -85,6 +85,11 @@ notes instead of appending history; put subsystem details in
   Reject absolute paths, backslashes, empty components, dot components, parent
   traversal, and other dot-prefixed components. Top-level paths supplied by
   the host CLI are a separate trust boundary.
+- In `g0`, `abstract_global_path` takes a static name path. A bare root is
+  valid only when ordinary lexical resolution selects the module namespace;
+  locals, object scope, aliases, and `using` scope require or reject in favor
+  of an explicit `module.` root. Do not lower its operand as a runtime
+  expression. The current core key remains string-component-only.
 - The built-in compiler's closed helpers and built-in modules are lowered once
   in `g_syntax/compiler_values.rs`. Per-module paths, environments, promises,
   and reflection tasks remain local.
