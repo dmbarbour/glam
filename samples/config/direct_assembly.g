@@ -4,38 +4,87 @@ import "minimal.g"
 
 # A small, shared direct-assembly environment. Programs remain effect values
 # until `linux_x86_64.executable` interprets their instruction stream.
-object direct_x86_64 as x86 with
-  run operation = operation.eff x86
+object direct_standard_effects as effects with
+  # `{}` is undefined and therefore cannot establish an overridable member.
+  initial_state = {initialized:()}
 
-  r value = {result:value, instructions:[]}
+  run operation = effects.run_from effects.initial_state operation
+  run_from state operation = (operation.eff effects) state
 
   seq operation continuation =
-    x86.continue_after (x86.run operation) continuation
+    \state ->
+      effects.continue_after
+        (effects.run_from state operation)
+        continuation
 
   continue_after first_outcome continuation =
-    x86.finish_sequence
-      first_outcome
-      (x86.run (continuation first_outcome.result))
+    effects.run_from
+      first_outcome.state
+      (continuation first_outcome.result)
 
-  finish_sequence first_outcome second_outcome =
-    {
-      result:second_outcome.result,
-      instructions:
-        first_outcome.instructions ++ second_outcome.instructions
+  r result =
+    \state -> {result:result, state:state}
+
+  get path =
+    \state -> {result:state.(path), state:state}
+
+  set path value =
+    \state ->
+      {
+        result:(),
+        state:effects.updated_state path value state
+      }
+
+  updated_state path value state =
+    match path with
+      [] => value
+      _ => (state with { .(path) ::= \_prior -> value })
+
+unique direct_text_cursor, direct_rodata_cursor
+
+object direct_x86_64 as x86 extends direct_standard_effects with
+  cursor = {
+    text:^direct_text_cursor,
+    rodata:^direct_rodata_cursor
+  }
+
+  initial_state := {
+    current_cursor:^direct_text_cursor,
+    cursor_order:[^direct_text_cursor, ^direct_rodata_cursor],
+    streams:{
+      [^direct_text_cursor]:[],
+      [^direct_rodata_cursor]:[]
     }
+  }
 
-  emit instruction = {result:(), instructions:[instruction]}
+  emit instruction =
+    (
+      .get '.current_cursor >>= \cursor_handle ->
+      .get ['streams, cursor_handle] >>= \written ->
+      .set ['streams, cursor_handle] (written ++ [instruction])
+    ).eff x86
+
+  on cursor_handle operation =
+    (
+      .get '.current_cursor >>= \previous_cursor ->
+      .set '.current_cursor cursor_handle =>>
+      operation >>= \operation_result ->
+      .set '.current_cursor previous_cursor =>>
+      .r operation_result
+    ).eff x86
 
   mov_u32 register immediate =
     x86.emit (mov_u32:{register:register, immediate:immediate})
 
-  mov_label_u32 register label_name =
-    x86.emit (mov_label_u32:{register:register, label:label_name})
+  mov_label_u32 register label_handle =
+    x86.emit (
+      mov_label_u32:{register:register, label:label_handle}
+    )
 
   xor_u32 destination source =
     x86.emit (xor_u32:{destination:destination, source:source})
 
-  label label_name = x86.emit (label:{name:label_name})
+  label label_handle = x86.emit (label:{handle:label_handle})
   bytes payload = x86.emit (bytes:payload)
   syscall = x86.emit (syscall:())
 
@@ -63,17 +112,17 @@ object direct_x86_64 as x86 with
       mov_label_u32:{register:_, label:_} => 5
       xor_u32:{destination:_, source:_} => 2
       syscall:() => 2
-      label:{name:_} => 0
+      label:{handle:_} => 0
       bytes:payload => list.len payload
 
-  label_offset wanted instructions offset =
+  label_offset wanted_label instructions offset =
     match instructions with
       [instruction] ++ remaining =>
         match instruction with
-          label:{name:actual} when actual == wanted => offset
+          label:{handle:actual_label} when actual_label == wanted_label => offset
           _ =>
             x86.label_offset
-              wanted
+              wanted_label
               remaining
               (offset + x86.instruction_size instruction)
 
@@ -89,11 +138,14 @@ object direct_x86_64 as x86 with
       mov_u32:{register:register, immediate:immediate} =>
         [0xb8 + x86.register_index register] ++
           x86.little_endian 4 immediate
-      mov_label_u32:{register:register, label:label_name} =>
+      mov_label_u32:{register:register, label:label_handle} =>
         [0xb8 + x86.register_index register] ++
           x86.little_endian
             4
-            (code_address + x86.label_offset label_name all_instructions 0)
+            (
+              code_address +
+              x86.label_offset label_handle all_instructions 0
+            )
       xor_u32:{destination:destination, source:source} =>
         [
           0x31,
@@ -102,12 +154,30 @@ object direct_x86_64 as x86 with
             x86.register_index destination
         ]
       syscall:() => [0x0f, 0x05]
-      label:{name:_} => []
+      label:{handle:_} => []
       bytes:payload => payload
 
   compile code_address program =
+    x86.compile_state code_address (x86.run program).state
+
+  compile_state code_address completed_state =
+    x86.compile_instructions
+      code_address
+      (
+        x86.flatten_cursors
+          completed_state.cursor_order
+          completed_state.streams
+      )
+
+  compile_instructions code_address instructions =
     x86.encode instructions instructions code_address
-    where instructions = (x86.run program).instructions
+
+  flatten_cursors cursor_handles streams =
+    match cursor_handles with
+      [] => []
+      [cursor_handle] ++ remaining =>
+        streams.[cursor_handle] ++
+          x86.flatten_cursors remaining streams
 
 object direct_linux_x86_64 as linux with
   little_endian width value =

@@ -5,6 +5,12 @@ builds a symbolic instruction stream through the effect API supplied by
 `samples/config/direct_assembly.g`; the configuration resolves labels, encodes
 the instructions, and wraps the code in an ELF header.
 
+The runner inherits a reusable deterministic state-effect handler. Labels and
+write cursors are scope-unique opaque values: the program writes instructions
+to the default text cursor, then runs its message subprogram with the rodata
+cursor selected. The current ELF layout concatenates those cursors in
+text-then-rodata order within one load segment.
+
 From the repository root:
 
 ```sh
