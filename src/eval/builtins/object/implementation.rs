@@ -129,19 +129,26 @@ pub(super) fn eval_object_override_defs_builtin(
             "object override definitions require dictionary values",
         ));
     };
-    Ok(Value::Dict(override_dict(&base, &updates)))
+    Ok(Value::Dict(override_dict(context, &base, &updates)?))
 }
 
-fn override_dict(base: &crate::core::Dict, updates: &crate::core::Dict) -> crate::core::Dict {
-    updates.iter().fold(base.clone(), |base, (key, update)| {
-        let update = match (base.get(key), update) {
-            (Some(Value::Dict(prior)), Value::Dict(update)) => {
-                Value::Dict(override_dict(prior, update))
-            }
+fn override_dict(
+    context: &EvalContext,
+    base: &crate::core::Dict,
+    updates: &crate::core::Dict,
+) -> Result<crate::core::Dict, EvalError> {
+    let mut result = base.clone();
+    for (key, update) in updates.iter() {
+        let update = match (result.get(key), update) {
+            (Some(prior), Value::Dict(update)) => match eval_value(context, prior)? {
+                Value::Dict(prior) => Value::Dict(override_dict(context, &prior, update)?),
+                _ => Value::Dict(update.clone()),
+            },
             _ => update.clone(),
         };
-        base.insert(key.clone(), update)
-    })
+        result = result.insert(key.clone(), update);
+    }
+    Ok(result)
 }
 
 pub(super) fn eval_object_spec_builtin(

@@ -183,6 +183,9 @@ effects remain external freer-monad tasks. Generic interaction-net reduction
 knows topology; `core_net` and `eval` supply core semantics. See the
 [evaluation](../docs/architecture/evaluation.md) and
 [reflection](../docs/architecture/reflection.md) notes for the handoffs.
+Permanent failures carry Glam diagnostic values and ordered context frames
+through lazy memoization and task status queries; blocking and unassigned
+promises remain scheduler control states rather than errors.
 
 Source-level net construction follows a separate lazy path:
 

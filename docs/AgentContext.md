@@ -115,6 +115,11 @@ notes instead of appending history; put subsystem details in
 - Severity is an argument to diagnostic emission, not something inferred by
   evaluating the message. A session bus publishes the original value plus
   hidden assembler provenance only after its transaction commits.
+- Permanent evaluation failures retain a Glam diagnostic emission and an
+  ordered context stack through lazy caches and reflection-task results.
+  `anno 'error Message` evaluates `Message` to WHNF before raising it;
+  `anno context:Frame Expr` decorates only a permanent failure reached while
+  demanding `Expr`. Do not stringify failures at scheduler boundaries.
 - The bus owns sequence numbers and coherent severity counts, never retention.
   External buffers, callbacks, `conf.log` input, and terminal rendering are
   independent subscriptions. `Assembler` drops events by default. Assembler

@@ -977,17 +977,25 @@ direct expression of nets.
 
 ## Errors
 
-We can use annotations to indicate known errors or issues.
+Annotations can raise pure evaluation errors and add structured context:
 
-        anno 'error         produces an error value
-        anno 'TBD           incomplete definitions
-        anno 'deprecated    transitional code, no-op
+        anno 'error ErrorMessage
+        anno context:Context Expr
 
-We could also decorate errors within a context, something like:
+Demanding the first form evaluates `ErrorMessage` to weak-head normal form,
+then raises it as a permanent error. A text message is accepted as shorthand
+for a conventional `msg.text` diagnostic; diagnostic objects retain their
+other fields.
 
-        anno context:Context Expr       decorates error values from Expr
+The second form is transparent when `Expr` succeeds. If demand on `Expr`
+instead reaches a permanent error, it prepends `Context` to the ordered
+`msg.context` list. Nested contexts therefore run from outermost to innermost.
+Successful evaluation does not demand `Context`. Effect failure, scheduler
+blocking, and unresolved promises are not converted into errors.
 
-In these cases, `Expr` may indicate the nature of the error or future intentions for a TBD. For deprecated code, it should be valid, but we'll report a warning.
+Other conventional annotations include `anno 'TBD Expr` for incomplete
+definitions and `anno 'deprecated Expr` for valid transitional code that
+should produce a warning.
 
 ## Pipes
 

@@ -1747,7 +1747,7 @@ impl Assembler {
                 .into_iter()
                 .map(|failure| ReasoningFailure {
                     task_id: failure.task.get(),
-                    message: failure.error,
+                    message: failure.error.legacy_message(),
                 })
                 .collect(),
             unfinished: report

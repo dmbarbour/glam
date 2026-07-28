@@ -279,7 +279,7 @@ fn revoked_volume_get_exposes_a_lazy_error_through_reflection_eval() {
         .module(["missing_volume_get"])
         .script(
             "g",
-            "language g0\nimport 'std\ninspect = \\operation -> operation >>= (\\value -> .eval value >>= (\\result -> .log 'info { msg:{ text:result.err } }))\n",
+            "language g0\nimport 'std\ninspect = \\operation -> operation >>= (\\value -> .eval value >>= (\\result -> .log 'info result.err))\n",
         )
         .build()
         .expect("missing-volume inspector should compile");

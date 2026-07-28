@@ -35,7 +35,8 @@ use search::SearchPolicy;
 
 use crate::api::{EvaluationRuntime, Value as PublicValue};
 use crate::core::{
-    Atom, Builtin, Dict, FunctionValue, Key, LazyValue, List, NetValue, PromisedValue, Value, keys,
+    Atom, Builtin, Dict, EvaluationFailure, FunctionValue, Key, LazyValue, List, NetValue,
+    PromisedValue, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::eval;
@@ -333,13 +334,28 @@ pub struct TaskError(TaskErrorKind);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TaskErrorKind {
-    Message(Arc<str>),
+    Failure(Arc<EvaluationFailure>),
     Blocked(EvaluationWaitToken),
 }
 
 impl TaskError {
     pub fn new(message: impl Into<Arc<str>>) -> Self {
-        Self(TaskErrorKind::Message(message.into()))
+        let message = message.into();
+        Self::failure(Arc::new(EvaluationFailure::message(message.as_ref())))
+    }
+
+    fn failure(failure: Arc<EvaluationFailure>) -> Self {
+        Self(TaskErrorKind::Failure(failure))
+    }
+
+    fn into_failure(self) -> Arc<EvaluationFailure> {
+        match self.0 {
+            TaskErrorKind::Failure(failure) => failure,
+            TaskErrorKind::Blocked(wait) => Arc::new(EvaluationFailure::message(format!(
+                "reflection task blocked on wait token {}",
+                wait.get()
+            ))),
+        }
     }
 
     fn blocked(wait: EvaluationWaitToken) -> Self {
@@ -349,7 +365,7 @@ impl TaskError {
     fn blocked_on(&self) -> Option<&EvaluationWaitToken> {
         match &self.0 {
             TaskErrorKind::Blocked(wait) => Some(wait),
-            TaskErrorKind::Message(_) => None,
+            TaskErrorKind::Failure(_) => None,
         }
     }
 }
@@ -357,7 +373,7 @@ impl TaskError {
 impl fmt::Display for TaskError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
-            TaskErrorKind::Message(message) => formatter.write_str(message),
+            TaskErrorKind::Failure(failure) => failure.fmt(formatter),
             TaskErrorKind::Blocked(wait) => {
                 write!(
                     formatter,
@@ -2224,9 +2240,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for JoinableEffectTask<S> {
                 })
             }
             EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value.into_core()),
-            EffectTaskPoll::Failed(error) => {
-                EvaluationMachinePoll::Failed(Arc::from(error.to_string()))
-            }
+            EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error.into_failure()),
             EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
         }
     }
@@ -2250,13 +2264,13 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for AnnotationEffectTask<S> {
             EffectTaskPoll::Complete(value) if value.as_core() == &*keys::UNIT_VALUE => {
                 EvaluationMachinePoll::Complete((*keys::UNIT_VALUE).clone())
             }
-            EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Failed(Arc::from(format!(
-                "effect task returned {}; expected unit",
-                value.as_core().diagnostic_kind_name()
-            ))),
-            EffectTaskPoll::Failed(error) => {
-                EvaluationMachinePoll::Failed(Arc::from(error.to_string()))
+            EffectTaskPoll::Complete(value) => {
+                EvaluationMachinePoll::Failed(Arc::new(EvaluationFailure::message(format!(
+                    "effect task returned {}; expected unit",
+                    value.as_core().diagnostic_kind_name()
+                ))))
             }
+            EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error.into_failure()),
             EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
         }
     }
@@ -3245,7 +3259,7 @@ fn evaluate(context: &EvalContext, value: Value) -> Result<Value, TaskError> {
 pub(crate) fn task_eval_error(error: eval::EvalError) -> TaskError {
     match error.blocked_on() {
         Some(wait) => TaskError::blocked(wait.0),
-        None => TaskError::new(error.to_string()),
+        None => TaskError::failure(error.into_permanent_failure()),
     }
 }
 
@@ -4521,9 +4535,14 @@ mod tests {
         let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
             panic!("eval should contain an evaluator error instead of failing its task");
         };
+        let error = PublicValue::from_core(error);
         let error = assembler
-            .to_binary(&PublicValue::from_core(error))
-            .expect("the provisional eval error value should be text");
+            .to_binary(
+                &assembler
+                    .get(&error, "msg.text")
+                    .expect("eval error should have a diagnostic text view"),
+            )
+            .expect("eval error diagnostic text should be binary");
         assert!(String::from_utf8_lossy(&error).contains("zero"));
     }
 
@@ -4549,15 +4568,20 @@ mod tests {
         let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
             panic!("eval should convert a failed lazy dependency to err");
         };
+        let error = PublicValue::from_core(error);
         let error = assembler
-            .to_binary(&PublicValue::from_core(error))
+            .to_binary(
+                &assembler
+                    .get(&error, "msg.text")
+                    .expect("eval error should have a diagnostic text view"),
+            )
             .expect("the eval error should remain observable after its producer fails");
         assert!(String::from_utf8_lossy(&error).contains("failed permanently"));
     }
 
     #[test]
     fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
-        let (_, function) = compile_effect("\\value -> .eval value");
+        let (assembler, function) = compile_effect("\\value -> .eval value");
         let session = EvalContext::standalone();
         let owner = session.with_new_task().unwrap();
         let observer = session.with_new_task().unwrap();
@@ -4591,10 +4615,16 @@ mod tests {
         let Value::Dict(result) = value.into_core() else {
             panic!("eval should return a tagged result");
         };
-        let Some(Value::Binary(error)) = result.get(&*keys::ERR) else {
+        let Some(error) = result.get(&*keys::ERR) else {
             panic!("eval should return the dependency failure under err");
         };
-        assert_eq!(error.as_ref(), b"dependency failed");
+        let error = PublicValue::from_core(error.clone());
+        assert_eq!(
+            assembler
+                .to_binary(&assembler.get(&error, "msg.text").unwrap())
+                .unwrap(),
+            b"dependency failed".as_slice()
+        );
     }
 
     #[test]
@@ -4749,7 +4779,7 @@ mod tests {
         assert!(matches!(
             pump_composed_test_task(&second_context, &second_task),
             EvaluationTaskPoll::Failed(error)
-                if error.as_ref() == "task handle does not belong to this evaluation session"
+                if error.to_string() == "task handle does not belong to this evaluation session"
         ));
     }
 
@@ -4862,7 +4892,7 @@ mod tests {
         let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
             panic!("join should propagate its child task error")
         };
-        assert!(error.contains("failed permanently"));
+        assert!(error.to_string().contains("failed permanently"));
 
         let (assembler, extract) =
             compile_effect(".task.new (.fail) >>= (\\task -> .task.error task)");
@@ -4871,10 +4901,45 @@ mod tests {
         let EvaluationTaskPoll::Complete(value) = poll else {
             panic!("task_error should return the child task error, got {poll:?}")
         };
+        let value = PublicValue::from_core(value);
         let text = assembler
-            .to_binary(&PublicValue::from_core(value))
-            .expect("task error should be text");
+            .to_binary(
+                &assembler
+                    .get(&value, "msg.text")
+                    .expect("task error should have a diagnostic text view"),
+            )
+            .expect("task error diagnostic text should be binary");
         assert!(String::from_utf8_lossy(&text).contains("failed permanently"));
+    }
+
+    #[test]
+    fn task_errors_preserve_structured_emissions_and_contexts() {
+        let (assembler, effect) = compile_effect(
+            ".task.new (anno context:\"child dispatch\" (anno 'error { msg:{ text:\"handler failed\" }, operation:'emit })) >>= (\\task -> .task.error task)",
+        );
+        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
+            panic!("task.error should return the child's structured failure");
+        };
+        let error = PublicValue::from_core(error);
+        assert_eq!(
+            assembler
+                .to_binary(&assembler.get(&error, "msg.text").unwrap())
+                .unwrap(),
+            b"handler failed".as_slice()
+        );
+        assert_eq!(
+            assembler.get(&error, "operation").unwrap(),
+            PublicValue::atom_from_text("emit")
+        );
+        let contexts = assembler.get(&error, "msg.context").unwrap();
+        let Value::List(contexts) = contexts.as_core() else {
+            panic!("task error contexts should be a list")
+        };
+        assert_eq!(
+            eval::list_to_value_items(&assembler.eval_context(), contexts).unwrap(),
+            [Value::binary_from_text("child dispatch")]
+        );
     }
 
     #[test]
@@ -4989,7 +5054,7 @@ mod tests {
         let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
             panic!("task_error should fail for a successful task")
         };
-        assert!(error.contains("failed permanently"));
+        assert!(error.to_string().contains("failed permanently"));
     }
 
     #[test]
@@ -5018,9 +5083,14 @@ mod tests {
         let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
             panic!("child capability error should be observable through task_error")
         };
+        let error = PublicValue::from_core(error);
         let error = assembler
-            .to_binary(&PublicValue::from_core(error))
-            .expect("task error should be text");
+            .to_binary(
+                &assembler
+                    .get(&error, "msg.text")
+                    .expect("task error should have a diagnostic text view"),
+            )
+            .expect("task error diagnostic text should be binary");
         assert!(
             String::from_utf8_lossy(&error).contains("could not be applied"),
             "unexpected capability error: {}",
@@ -5638,8 +5708,9 @@ mod tests {
         else {
             panic!("reflection eval should catch a latent heap access error")
         };
+        let error_text = assembler.get(&error, "msg.text").unwrap();
         assert!(
-            String::from_utf8_lossy(&assembler.to_binary(&error).unwrap())
+            String::from_utf8_lossy(&assembler.to_binary(&error_text).unwrap())
                 .contains("not a dictionary")
         );
     }
@@ -5667,8 +5738,9 @@ mod tests {
         let TaskOutcome::Complete(error) = run_reflection_test(&bad, host).unwrap() else {
             panic!("reflection eval should catch the nested update error")
         };
+        let error_text = assembler.get(&error, "msg.text").unwrap();
         assert!(
-            String::from_utf8_lossy(&assembler.to_binary(&error).unwrap())
+            String::from_utf8_lossy(&assembler.to_binary(&error_text).unwrap())
                 .contains("non-dictionary")
         );
     }

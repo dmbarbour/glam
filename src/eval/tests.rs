@@ -451,9 +451,9 @@ fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
     let failure = context
         .lazy_failure(fixpoint_lazy)
         .expect("the fixpoint task should retain its structured failure");
-    let crate::core::LazyFailure::DependencyCycle(cycle) = failure.as_ref() else {
-        panic!("strict recursion should retain a dependency cycle")
-    };
+    let cycle = failure
+        .dependency_cycle_value()
+        .expect("strict recursion should retain a dependency cycle");
     assert!(
         cycle
             .members
@@ -2656,6 +2656,101 @@ fn assert_unit_annotation_has_optional_diagnostic_context() {
         contextual_error.to_string(),
         "annotated operation result: unit expected, received Number"
     );
+}
+
+#[test]
+fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
+    let atom = |name| Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(name)));
+    let context_annotation = |context| {
+        TestExpr::Value(Value::Dict(
+            Dict::new_sync().insert((*keys::CONTEXT).clone(), context),
+        ))
+    };
+    let message = Value::Dict(
+        Dict::new_sync()
+            .insert(
+                (*keys::MSG).clone(),
+                Value::Dict(Dict::new_sync().insert(
+                    (*keys::TEXT).clone(),
+                    Value::binary_from_text("handler failed"),
+                )),
+            )
+            .insert(Key::atom_from_text("operation"), atom("emit")),
+    );
+    let failure = builtin2_expr(
+        Builtin::Anno,
+        TestExpr::Value(atom("error")),
+        TestExpr::Value(message),
+    );
+    let inner = builtin2_expr(
+        Builtin::Anno,
+        context_annotation(Value::binary_from_text("inner")),
+        failure,
+    );
+    let outer = builtin2_expr(
+        Builtin::Anno,
+        context_annotation(Value::binary_from_text("outer")),
+        inner,
+    );
+
+    let error = eval_closed_expr(&outer).expect_err("error annotation must fail when demanded");
+    assert_eq!(error.to_string(), "handler failed");
+    let diagnostic = error
+        .failure_value()
+        .expect("permanent errors must project to diagnostics");
+    let Value::Dict(diagnostic) = eval_value(&test_context(), &diagnostic).unwrap() else {
+        panic!("failure diagnostic must be a dictionary");
+    };
+    let operation = eval_value(
+        &test_context(),
+        diagnostic
+            .get(&Key::atom_from_text("operation"))
+            .expect("diagnostic should retain ad hoc fields"),
+    )
+    .unwrap();
+    assert_eq!(operation, atom("emit"));
+    let message = eval_value(
+        &test_context(),
+        diagnostic
+            .get(&*keys::MSG)
+            .expect("diagnostic should define msg"),
+    )
+    .unwrap();
+    let Value::Dict(message) = message else {
+        panic!("diagnostic msg must be a dictionary");
+    };
+    let contexts = eval_value(
+        &test_context(),
+        message
+            .get(&*keys::CONTEXT)
+            .expect("context annotation should define msg.context"),
+    )
+    .unwrap();
+    let Value::List(contexts) = contexts else {
+        panic!("msg.context must be a list");
+    };
+    assert_eq!(
+        list_to_value_items(&test_context(), &contexts).unwrap(),
+        [
+            Value::binary_from_text("outer"),
+            Value::binary_from_text("inner")
+        ]
+    );
+}
+
+#[test]
+fn context_annotations_are_transparent_and_do_not_demand_context_on_success() {
+    let annotation = TestExpr::Value(Value::Dict(Dict::new_sync().insert(
+        (*keys::CONTEXT).clone(),
+        Value::error("unused context must remain lazy"),
+    )));
+    let value = eval_closed_expr(&builtin2_expr(
+        Builtin::Anno,
+        annotation,
+        TestExpr::Value(n(42)),
+    ))
+    .expect("successful context annotation should return its target");
+    assert_eq!(value, n(42));
 }
 
 #[test]

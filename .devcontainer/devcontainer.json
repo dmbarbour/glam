@@ -7,13 +7,6 @@
 	"features": {
 		"ghcr.io/devcontainers/features/rust:1": {},
 		"ghcr.io/sliekens/devcontainer-features/codex:1": {},
-		"ghcr.io/devcontainers/features/desktop-lite:1": {
-			"version": "latest",
-			"noVncVersion": "1.6.0",
-			"password": "vscode",
-			"webPort": "6080",
-			"vncPort": "5901"
-		}
 	},
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.

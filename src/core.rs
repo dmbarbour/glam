@@ -90,7 +90,7 @@ impl EvaluatedValue {
     }
 }
 
-pub(crate) type LazyResult = Result<EvaluatedValue, Arc<LazyFailure>>;
+pub(crate) type LazyResult = Result<EvaluatedValue, Arc<EvaluationFailure>>;
 
 impl TryFrom<Value> for EvaluatedValue {
     type Error = Value;
@@ -105,29 +105,90 @@ impl TryFrom<Value> for EvaluatedValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LazyFailure {
-    Evaluation(Arc<str>),
+pub(crate) struct EvaluationFailure {
+    kind: EvaluationFailureKind,
+    contexts: Arc<[Value]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EvaluationFailureKind {
+    Emission(Value),
     DependencyCycle(Arc<LazyCycle>),
 }
 
-impl LazyFailure {
-    pub(crate) fn evaluation(message: impl Into<Arc<str>>) -> Self {
-        Self::Evaluation(message.into())
+impl EvaluationFailure {
+    pub(crate) fn message(message: impl AsRef<str>) -> Self {
+        Self::emission(Value::binary_from_text(message.as_ref()))
+    }
+
+    pub(crate) fn emission(emission: Value) -> Self {
+        Self {
+            kind: EvaluationFailureKind::Emission(emission),
+            contexts: Arc::from([]),
+        }
+    }
+
+    pub(crate) fn dependency_cycle(cycle: Arc<LazyCycle>) -> Self {
+        Self {
+            kind: EvaluationFailureKind::DependencyCycle(cycle),
+            contexts: Arc::from([]),
+        }
+    }
+
+    pub(crate) fn with_context(&self, context: Value) -> Self {
+        let mut contexts = Vec::with_capacity(self.contexts.len() + 1);
+        contexts.push(context);
+        contexts.extend(self.contexts.iter().cloned());
+        Self {
+            kind: self.kind.clone(),
+            contexts: contexts.into(),
+        }
+    }
+
+    pub(crate) fn emission_value(&self) -> Option<&Value> {
+        match &self.kind {
+            EvaluationFailureKind::Emission(emission) => Some(emission),
+            EvaluationFailureKind::DependencyCycle(_) => None,
+        }
+    }
+
+    pub(crate) fn contexts(&self) -> &[Value] {
+        &self.contexts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dependency_cycle_value(&self) -> Option<&Arc<LazyCycle>> {
+        match &self.kind {
+            EvaluationFailureKind::DependencyCycle(cycle) => Some(cycle),
+            EvaluationFailureKind::Emission(_) => None,
+        }
     }
 
     pub(crate) fn legacy_message(&self) -> Arc<str> {
-        match self {
-            Self::Evaluation(message) => message.clone(),
-            Self::DependencyCycle(_) => Arc::from(self.to_string()),
+        match &self.kind {
+            EvaluationFailureKind::Emission(emission) => {
+                immediate_failure_text(emission).unwrap_or_else(|| Arc::from(self.to_string()))
+            }
+            EvaluationFailureKind::DependencyCycle(_) => Arc::from(self.to_string()),
         }
     }
 }
 
-impl fmt::Display for LazyFailure {
+impl fmt::Display for EvaluationFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Evaluation(message) => formatter.write_str(message),
-            Self::DependencyCycle(cycle) => {
+        match &self.kind {
+            EvaluationFailureKind::Emission(emission) => {
+                if let Some(message) = immediate_failure_text(emission) {
+                    formatter.write_str(&message)
+                } else {
+                    write!(
+                        formatter,
+                        "evaluation failed with {}",
+                        emission.diagnostic_kind_name()
+                    )
+                }
+            }
+            EvaluationFailureKind::DependencyCycle(cycle) => {
                 formatter.write_str("lazy dependency cycle")?;
                 for member in cycle.members.iter() {
                     write!(formatter, " -> {} ({})", member.id.get(), member.label)?;
@@ -141,7 +202,26 @@ impl fmt::Display for LazyFailure {
     }
 }
 
-impl std::error::Error for LazyFailure {}
+impl std::error::Error for EvaluationFailure {}
+
+fn immediate_failure_text(emission: &Value) -> Option<Arc<str>> {
+    match emission {
+        Value::Binary(text) => Some(Arc::from(String::from_utf8_lossy(text).as_ref())),
+        Value::Dict(emission) => {
+            let text = emission
+                .get(&*keys::MSG)
+                .and_then(|message| match message {
+                    Value::Dict(message) => message.get(&*keys::TEXT),
+                    _ => None,
+                })?;
+            match text {
+                Value::Binary(text) => Some(Arc::from(String::from_utf8_lossy(text).as_ref())),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LazyCycle {
@@ -205,7 +285,7 @@ impl LazyValue {
         let value = Self::with_source("error", LazySource::Error);
         value
             .result
-            .set(Err(Arc::new(LazyFailure::evaluation(message))))
+            .set(Err(Arc::new(EvaluationFailure::message(message.into()))))
             .expect("new lazy error must be uninitialized");
         value
     }
@@ -1161,7 +1241,7 @@ mod tests {
     fn lazy_cycle_failures_retain_member_identity_and_labels() {
         let first = LazyValue::error("first failure");
         let second = LazyValue::error("second failure");
-        let cycle = LazyFailure::DependencyCycle(Arc::new(LazyCycle {
+        let cycle = EvaluationFailure::dependency_cycle(Arc::new(LazyCycle {
             members: vec![
                 LazyCycleMember {
                     id: first.id(),

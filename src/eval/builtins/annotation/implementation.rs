@@ -43,6 +43,13 @@ pub(super) fn eval_anno_builtin(
         RecognizedAnnotation::Spark { value } => {
             Ok(super::super::strategy::spark(context, value, target))
         }
+        RecognizedAnnotation::Error => {
+            let message = eval_value(context, target)?;
+            Err(EvalError::from_value(message))
+        }
+        RecognizedAnnotation::Context {
+            context: diagnostic_context,
+        } => eval_value(context, target).map_err(|error| error.with_context(diagnostic_context)),
         RecognizedAnnotation::Invalid(message) => Ok(annotation_error_value(message)),
         RecognizedAnnotation::Unknown(rendered) => {
             eprintln!("warning: unrecognized annotation encountered: {rendered}");
@@ -75,6 +82,10 @@ enum RecognizedAnnotation {
     },
     Spark {
         value: Value,
+    },
+    Error,
+    Context {
+        context: Value,
     },
     Invalid(String),
     Unknown(String),
@@ -113,6 +124,11 @@ fn recognize_annotation(
         Key::Atom(atom) if atom_name(atom) == Some("spark") => Ok(RecognizedAnnotation::Spark {
             value: payload.clone(),
         }),
+        Key::Atom(atom) if atom_name(atom) == Some("context") => {
+            Ok(RecognizedAnnotation::Context {
+                context: payload.clone(),
+            })
+        }
         Key::Atom(atom) if atom_name(atom) == Some("assert_defined") => Ok(
             match parse_assertion_annotation(context, payload, "assert_defined")? {
                 ParsedAssertion::Valid { name, defined } => {
@@ -152,6 +168,7 @@ fn recognize_simple_annotation(atom: &crate::core::Atom) -> Option<RecognizedAnn
         "deque" => Some(RecognizedAnnotation::Deque),
         "binary" => Some(RecognizedAnnotation::Binary),
         "array" => Some(RecognizedAnnotation::Array),
+        "error" => Some(RecognizedAnnotation::Error),
         _ => None,
     }
 }

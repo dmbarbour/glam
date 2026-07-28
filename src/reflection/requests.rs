@@ -13,6 +13,7 @@ use super::{
     CommitResult, EffectRequestSpec, EvaluationQueryHandle, EvaluationQueryPoll,
     EvaluationQueryState, RequestContext, RequestResult, StoreJournal, TaskCommit, TaskEnvironment,
     TaskError, TaskHost, TaskSpecialization, decode_query_state, evaluate, get_value_path,
+    task_eval_error,
 };
 
 /// Requests shared by every full reflection task.
@@ -203,7 +204,7 @@ where
                 .try_into()
                 .map_err(|_| TaskError::new("`.env` received the wrong number of arguments"))?;
             let path = eval::eval_key_path_list(context.eval_context(), path.as_core())
-                .map_err(|error| TaskError::new(error.to_string()))?;
+                .map_err(task_eval_error)?;
             let environment = context.host().reflection_environment().into_core();
             let value = get_value_path(context.eval_context(), &environment, &path)?;
             Ok(RequestResult::Return(Value::from_core(value)))
@@ -340,7 +341,7 @@ where
                 EvaluationTaskPoll::Complete(value) => {
                     Ok(RequestResult::Return(Value::from_core(value)))
                 }
-                EvaluationTaskPoll::Failed(error) => Err(TaskError::new(error)),
+                EvaluationTaskPoll::Failed(error) => Err(TaskError::failure(error)),
                 EvaluationTaskPoll::Cancelled => {
                     Err(TaskError::new("joined reflection task was cancelled"))
                 }
@@ -429,7 +430,11 @@ fn evaluate_request(
                 }
                 return Ok(RequestResult::Return(tagged_result(
                     &keys::ERR,
-                    Value::text(error.to_string()),
+                    Value::from_core(
+                        error
+                            .failure_value()
+                            .expect("non-blocked evaluator error must have a failure value"),
+                    ),
                 )));
             }
         };
@@ -462,10 +467,9 @@ fn task_status_query_value(status: EvaluationTaskStatus) -> CoreValue {
         EvaluationTaskStatus::Complete(value) => {
             CoreValue::Dict(Dict::new_sync().insert((*keys::OK).clone(), value))
         }
-        EvaluationTaskStatus::Failed(error) => CoreValue::Dict(Dict::new_sync().insert(
-            (*keys::ERR).clone(),
-            CoreValue::binary_from_text(error.as_ref()),
-        )),
+        EvaluationTaskStatus::Failed(error) => CoreValue::Dict(
+            Dict::new_sync().insert((*keys::ERR).clone(), eval::failure_diagnostic_value(&error)),
+        ),
         EvaluationTaskStatus::Cancelled => key_value(&keys::CANCELED),
     }
 }

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use crate::core::{
-    DeferredValueId, LazyCycle, LazyCycleMember, LazyFailure, LazyValue, PromisedValue, Value,
+    DeferredValueId, EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue, PromisedValue, Value,
 };
 
 mod executor;
@@ -72,6 +72,10 @@ fn allocate_id(source: &AtomicU64, exhausted: &'static str) -> Result<NonZeroU64
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
         .map(|id| NonZeroU64::new(id).expect("evaluation IDs start at one"))
         .map_err(|_| Arc::from(exhausted))
+}
+
+fn evaluation_failure(message: impl AsRef<str>) -> Arc<EvaluationFailure> {
+    Arc::new(EvaluationFailure::message(message))
 }
 
 #[derive(Clone)]
@@ -156,7 +160,7 @@ impl fmt::Debug for EvaluationTaskHandle {
 pub(crate) enum EvaluationTaskPoll {
     Pending(EvaluationWaitToken),
     Complete(Value),
-    Failed(Arc<str>),
+    Failed(Arc<EvaluationFailure>),
     Cancelled,
     ForeignSession,
 }
@@ -179,8 +183,7 @@ pub(crate) enum EvaluationMachinePoll {
     Yielded,
     Blocked(EvaluationTaskBlock),
     Complete(Value),
-    Failed(Arc<str>),
-    LazyFailed(Arc<LazyFailure>),
+    Failed(Arc<EvaluationFailure>),
     Cancelled,
 }
 
@@ -204,7 +207,7 @@ pub(crate) enum EvaluationTaskStatus {
     Launched,
     Blocked,
     Complete(Value),
-    Failed(Arc<str>),
+    Failed(Arc<EvaluationFailure>),
     Cancelled,
 }
 
@@ -243,7 +246,7 @@ pub(crate) struct EvaluationSessionReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EvaluationTaskFailure {
     pub(crate) task: EvaluationTaskId,
-    pub(crate) error: Arc<str>,
+    pub(crate) error: Arc<EvaluationFailure>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,7 +278,7 @@ enum EvaluationTaskState {
     Running,
     Blocked(EvaluationTaskBlock),
     Complete(Value),
-    Failed(Arc<str>),
+    Failed(Arc<EvaluationFailure>),
     Cancelled,
 }
 
@@ -293,7 +296,7 @@ enum DeferredTaskState {
     Running,
     Blocked(EvaluationTaskBlock),
     Complete(Value),
-    Failed(Arc<LazyFailure>),
+    Failed(Arc<EvaluationFailure>),
 }
 
 #[derive(Clone)]
@@ -895,7 +898,9 @@ impl EvalContext {
                 record.state = EvaluationTaskState::Queued;
                 tasks.ready.push_back(handle.id);
             }
-            Err(error) => record.state = EvaluationTaskState::Failed(error),
+            Err(error) => {
+                record.state = EvaluationTaskState::Failed(evaluation_failure(error.as_ref()))
+            }
         }
         self.session.task_changed.notify_all();
         let queued = matches!(
@@ -1055,7 +1060,7 @@ impl EvalContext {
 
     pub(crate) fn poll_wait(&self, wait: &EvaluationWaitToken) -> EvaluationTaskPoll {
         let Some(owner) = wait.owner.upgrade() else {
-            return EvaluationTaskPoll::Failed(Arc::from(
+            return EvaluationTaskPoll::Failed(evaluation_failure(
                 "reflection task's evaluation session no longer exists",
             ));
         };
@@ -1073,25 +1078,25 @@ impl EvalContext {
                     DeferredTaskState::Complete(value) => {
                         EvaluationTaskPoll::Complete(value.clone())
                     }
-                    DeferredTaskState::Failed(error) => {
-                        EvaluationTaskPoll::Failed(error.legacy_message())
-                    }
+                    DeferredTaskState::Failed(error) => EvaluationTaskPoll::Failed(error.clone()),
                     DeferredTaskState::Dormant
                     | DeferredTaskState::Running
                     | DeferredTaskState::Blocked(_) => EvaluationTaskPoll::Pending(wait.clone()),
                 };
             }
             let Some(promise) = tasks.promises.get(wait) else {
-                return EvaluationTaskPoll::Failed(Arc::from(
+                return EvaluationTaskPoll::Failed(evaluation_failure(
                     "evaluation wait token is no longer registered",
                 ));
             };
             let Some(result) = promise.result.upgrade() else {
-                return EvaluationTaskPoll::Failed(Arc::from("promised value no longer exists"));
+                return EvaluationTaskPoll::Failed(evaluation_failure(
+                    "promised value no longer exists",
+                ));
             };
             return match result.get() {
                 Some(Ok(value)) => EvaluationTaskPoll::Complete(value.clone()),
-                Some(Err(error)) => EvaluationTaskPoll::Failed(error.clone()),
+                Some(Err(error)) => EvaluationTaskPoll::Failed(evaluation_failure(error.as_ref())),
                 None => EvaluationTaskPoll::Pending(wait.clone()),
             };
         };
@@ -1145,6 +1150,7 @@ impl EvalContext {
 
     #[cfg(test)]
     pub(crate) fn fail_wait(&self, wait: &EvaluationWaitToken, error: impl Into<Arc<str>>) {
+        let error = error.into();
         let target = wait.clone();
         let mut tasks = self
             .session
@@ -1156,7 +1162,7 @@ impl EvalContext {
             .reflection
             .get_mut(&wait)
             .expect("test task must belong to this session")
-            .state = EvaluationTaskState::Failed(error.into());
+            .state = EvaluationTaskState::Failed(evaluation_failure(error.as_ref()));
         self.session.task_changed.notify_all();
         drop(tasks);
         while matches!(
@@ -1186,19 +1192,22 @@ impl EvalContext {
     }
 
     #[cfg(test)]
-    pub(crate) fn lazy_failure(&self, lazy: &LazyValue) -> Option<Arc<LazyFailure>> {
+    pub(crate) fn lazy_failure(&self, lazy: &LazyValue) -> Option<Arc<EvaluationFailure>> {
         self.deferred_failure(lazy.id().into())
     }
 
     #[cfg(test)]
-    pub(crate) fn promise_failure(&self, promise: &PromisedValue) -> Option<Arc<LazyFailure>> {
+    pub(crate) fn promise_failure(
+        &self,
+        promise: &PromisedValue,
+    ) -> Option<Arc<EvaluationFailure>> {
         self.deferred_failure(promise.id().into())
     }
 
     pub(crate) fn lazy_failure_for_wait(
         &self,
         wait: &EvaluationWaitToken,
-    ) -> Option<Arc<LazyFailure>> {
+    ) -> Option<Arc<EvaluationFailure>> {
         let tasks = self
             .session
             .tasks
@@ -1215,7 +1224,7 @@ impl EvalContext {
     }
 
     #[cfg(test)]
-    fn deferred_failure(&self, deferred: DeferredValueId) -> Option<Arc<LazyFailure>> {
+    fn deferred_failure(&self, deferred: DeferredValueId) -> Option<Arc<EvaluationFailure>> {
         let tasks = self
             .session
             .tasks
@@ -1581,11 +1590,6 @@ impl EvaluationSession {
             EvaluationMachinePoll::Failed(error) => {
                 (EvaluationTaskState::Failed(error), true, false)
             }
-            EvaluationMachinePoll::LazyFailed(error) => (
-                EvaluationTaskState::Failed(error.legacy_message()),
-                true,
-                false,
-            ),
             EvaluationMachinePoll::Cancelled => (EvaluationTaskState::Cancelled, true, false),
         };
         record.state = state;
@@ -1638,13 +1642,9 @@ impl EvaluationSession {
                 (DeferredTaskState::Blocked(block), !unchanged)
             }
             EvaluationMachinePoll::Complete(value) => (DeferredTaskState::Complete(value), true),
-            EvaluationMachinePoll::Failed(error) => (
-                DeferredTaskState::Failed(Arc::new(LazyFailure::evaluation(error))),
-                true,
-            ),
-            EvaluationMachinePoll::LazyFailed(error) => (DeferredTaskState::Failed(error), true),
+            EvaluationMachinePoll::Failed(error) => (DeferredTaskState::Failed(error), true),
             EvaluationMachinePoll::Cancelled => (
-                DeferredTaskState::Failed(Arc::new(LazyFailure::evaluation(
+                DeferredTaskState::Failed(Arc::new(EvaluationFailure::message(
                     "deferred evaluation task was cancelled",
                 ))),
                 true,
@@ -1896,7 +1896,7 @@ fn poison_lazy_cycle(tasks: &mut EvaluationTasks, members: &[crate::core::LazyId
             })
             .collect(),
     });
-    let failure = Arc::new(LazyFailure::DependencyCycle(cycle));
+    let failure = Arc::new(EvaluationFailure::dependency_cycle(cycle));
 
     for id in members {
         let record = tasks
@@ -2090,12 +2090,12 @@ mod tests {
                 EvaluationTaskPoll::Failed(error) => self
                     .context
                     .lazy_failure_for_wait(&self.dependency)
-                    .map(EvaluationMachinePoll::LazyFailed)
+                    .map(EvaluationMachinePoll::Failed)
                     .unwrap_or(EvaluationMachinePoll::Failed(error)),
                 EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
-                EvaluationTaskPoll::ForeignSession => EvaluationMachinePoll::Failed(Arc::from(
-                    "test dependency unexpectedly belongs to another session",
-                )),
+                EvaluationTaskPoll::ForeignSession => EvaluationMachinePoll::Failed(
+                    evaluation_failure("test dependency unexpectedly belongs to another session"),
+                ),
             }
         }
     }
@@ -2123,12 +2123,12 @@ mod tests {
                 EvaluationTaskPoll::Failed(error) => self
                     .context
                     .lazy_failure_for_wait(dependency)
-                    .map(EvaluationMachinePoll::LazyFailed)
+                    .map(EvaluationMachinePoll::Failed)
                     .unwrap_or(EvaluationMachinePoll::Failed(error)),
                 EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
-                EvaluationTaskPoll::ForeignSession => EvaluationMachinePoll::Failed(Arc::from(
-                    "test dependency unexpectedly belongs to another session",
-                )),
+                EvaluationTaskPoll::ForeignSession => EvaluationMachinePoll::Failed(
+                    evaluation_failure("test dependency unexpectedly belongs to another session"),
+                ),
             }
         }
     }
@@ -2155,16 +2155,12 @@ mod tests {
     }
 
     fn dependency_cycle(context: &EvalContext, lazy: &LazyValue) -> Arc<LazyCycle> {
-        match context
+        context
             .lazy_failure(lazy)
             .expect("test lazy should have a structured failure")
-            .as_ref()
-        {
-            LazyFailure::DependencyCycle(cycle) => cycle.clone(),
-            LazyFailure::Evaluation(error) => {
-                panic!("expected dependency cycle, got evaluation failure: {error}")
-            }
-        }
+            .dependency_cycle_value()
+            .cloned()
+            .expect("test lazy failure should be a dependency cycle")
     }
 
     struct AlwaysBlocked;
@@ -2191,7 +2187,7 @@ mod tests {
 
     impl EvaluationTaskMachine for Fail {
         fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
-            EvaluationMachinePoll::Failed(Arc::from("reasoning failed"))
+            EvaluationMachinePoll::Failed(evaluation_failure("reasoning failed"))
         }
     }
 
@@ -2288,7 +2284,7 @@ mod tests {
         assert!(matches!(
             context.poll_wait(&wait),
             EvaluationTaskPoll::Failed(error)
-                if error.contains("lazy dependency cycle")
+                if error.to_string().contains("lazy dependency cycle")
         ));
     }
 
@@ -2542,7 +2538,7 @@ mod tests {
             panic!("terminal failures do not leave unfinished work");
         };
         assert_eq!(report.failures.len(), 1);
-        assert_eq!(report.failures[0].error.as_ref(), "reasoning failed");
+        assert_eq!(report.failures[0].error.to_string(), "reasoning failed");
         assert!(report.unfinished.is_empty());
     }
 
@@ -2638,7 +2634,7 @@ mod tests {
             .find(|failure| failure.task == follower.id())
             .expect("the foreign follower should fail");
         assert_eq!(
-            failure.error.as_ref(),
+            failure.error.to_string(),
             "reflection task's evaluation session no longer exists"
         );
         assert!(report.unfinished.is_empty());
