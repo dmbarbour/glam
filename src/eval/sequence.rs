@@ -91,7 +91,9 @@ pub(super) fn list_to_binary_bytes(
         },
         &mut |values| {
             for value in values.iter() {
-                match eval_value(context, value)? {
+                match eval_value(context, value).map_err(|error| {
+                    error.with_context(evaluation_context_frame("binary extraction"))
+                })? {
                     Value::Number(number) => {
                         let byte = number.to_u8_if_integer().ok_or_else(|| {
                             EvalError::new(format!(
@@ -109,27 +111,41 @@ pub(super) fn list_to_binary_bytes(
             }
             Ok(())
         },
-        &mut |thunk| force_list_thunk(context, thunk),
+        &mut |thunk| {
+            force_list_thunk(context, thunk)
+                .map_err(|error| error.with_context(evaluation_context_frame("binary extraction")))
+        },
     )?;
     Ok(bytes.into_inner())
 }
 
-pub fn list_output_bytes(context: &EvalContext, list: &List) -> Result<Vec<u8>, EvalError> {
-    list_to_binary_bytes(context, list, "`value`")
+#[cfg(test)]
+pub(crate) fn list_output_bytes(context: &EvalContext, list: &List) -> Result<Vec<u8>, EvalError> {
+    list_output_bytes_for(context, list, "`value`")
+}
+
+pub(crate) fn list_output_bytes_for(
+    context: &EvalContext,
+    list: &List,
+    subject: &str,
+) -> Result<Vec<u8>, EvalError> {
+    list_to_binary_bytes(context, list, subject)
 }
 
 pub(crate) fn list_output_bytes_range(
     context: &EvalContext,
     list: &List,
     range: std::ops::Range<usize>,
+    subject: &str,
 ) -> Result<Option<Vec<u8>>, EvalError> {
     let Some(slice) = list.try_slice(range.start, range.end, &mut |thunk| {
         force_list_thunk(context, thunk)
+            .map_err(|error| error.with_context(evaluation_context_frame("binary extraction")))
     })?
     else {
         return Ok(None);
     };
-    list_output_bytes(context, &slice).map(Some)
+    list_output_bytes_for(context, &slice, subject).map(Some)
 }
 
 pub(super) fn append_values(left: Value, right: Value) -> Result<Value, EvalError> {

@@ -1247,18 +1247,6 @@ impl Error {
         Self::from_eval_parts(error.failure_value(), message)
     }
 
-    fn from_eval_with_prefix(error: eval::EvalError, prefix: impl AsRef<str>) -> Self {
-        let message: Arc<str> = Arc::from(format!("{}{error}", prefix.as_ref()));
-        let emission = error.failure_value().map(|emission| {
-            crate::diagnostic::apply_emission_updates(
-                emission.clone(),
-                crate::diagnostic::text_message(None, &message),
-            )
-            .unwrap_or(emission)
-        });
-        Self::from_eval_parts(emission, message)
-    }
-
     fn from_eval_parts(emission: Option<CoreValue>, message: Arc<str>) -> Self {
         let (message, diagnostic) = match emission {
             Some(emission) => {
@@ -1281,6 +1269,21 @@ impl Error {
 
     fn with_diagnostics(mut self, diagnostics: Vec<Diagnostic>) -> Self {
         self.diagnostics = diagnostics;
+        self
+    }
+
+    /// Prepends one structured frame describing why this failed value was
+    /// demanded. The primary diagnostic text and ad hoc fields remain intact.
+    pub fn with_context(mut self, context: Value) -> Self {
+        let emission = crate::diagnostic::prepend_context(
+            self.diagnostic.emission.as_core().clone(),
+            context.into_core(),
+        )
+        .unwrap_or_else(|_| self.diagnostic.emission.as_core().clone());
+        self.diagnostic = Arc::new(Diagnostic::from_emission(
+            self.diagnostic.severity,
+            Value::from_core(emission),
+        ));
         self
     }
 
@@ -2217,12 +2220,17 @@ impl Assembler {
     fn core_value_bytes(&self, value: &CoreValue, label: &str) -> Result<Bytes, Error> {
         match value {
             CoreValue::Binary(bytes) => Ok(bytes.clone()),
-            CoreValue::List(list) => eval::list_output_bytes(&self.eval_context(), list)
-                .map(Bytes::from)
-                .map_err(|error| Error::from_eval_with_prefix(error, format!("`{label}` "))),
+            CoreValue::List(list) => {
+                { eval::list_output_bytes_for(&self.eval_context(), list, &format!("`{label}`")) }
+                    .map(Bytes::from)
+                    .map_err(Error::from_eval)
+            }
             CoreValue::Lazy(_) | CoreValue::Promised(_) => {
-                let value =
-                    eval::eval_value(&self.eval_context(), value).map_err(Error::from_eval)?;
+                let value = eval::eval_value(&self.eval_context(), value).map_err(|error| {
+                    Error::from_eval(
+                        error.with_context(eval::evaluation_context_frame("binary extraction")),
+                    )
+                })?;
                 self.core_value_bytes(&value, label)
             }
             CoreValue::Atom(_)
@@ -2253,14 +2261,20 @@ impl Assembler {
             CoreValue::Binary(bytes) => {
                 (range.end <= bytes.len()).then(|| bytes.slice(range.clone()))
             }
-            CoreValue::List(list) => {
-                { eval::list_output_bytes_range(&self.eval_context(), list, range.clone()) }
-                    .map(|bytes| bytes.map(Bytes::from))
-                    .map_err(|error| Error::from_eval_with_prefix(error, format!("`{label}` ")))?
-            }
+            CoreValue::List(list) => eval::list_output_bytes_range(
+                &self.eval_context(),
+                list,
+                range.clone(),
+                &format!("`{label}`"),
+            )
+            .map(|bytes| bytes.map(Bytes::from))
+            .map_err(Error::from_eval)?,
             CoreValue::Lazy(_) | CoreValue::Promised(_) | CoreValue::Net(_) => {
-                let value =
-                    eval::eval_value(&self.eval_context(), value).map_err(Error::from_eval)?;
+                let value = eval::eval_value(&self.eval_context(), value).map_err(|error| {
+                    Error::from_eval(
+                        error.with_context(eval::evaluation_context_frame("binary extraction")),
+                    )
+                })?;
                 return self.core_value_binary_slice(&value, range, label);
             }
             CoreValue::Atom(_)
@@ -2362,6 +2376,89 @@ mod tests {
             return None;
         };
         Some(context)
+    }
+
+    fn diagnostic_contexts(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<CoreValue> {
+        let emission = eval::eval_value(&assembler.eval_context(), diagnostic.emission().as_core())
+            .expect("diagnostic emission should evaluate");
+        let CoreValue::Dict(emission) = emission else {
+            panic!("diagnostic emission should be a dictionary");
+        };
+        let message = eval::eval_value(
+            &assembler.eval_context(),
+            emission
+                .get(&*keys::MSG)
+                .expect("diagnostic should define msg"),
+        )
+        .expect("diagnostic msg should evaluate");
+        let CoreValue::Dict(message) = message else {
+            panic!("diagnostic msg should be a dictionary");
+        };
+        let contexts = eval::eval_value(
+            &assembler.eval_context(),
+            message
+                .get(&*keys::CONTEXT)
+                .expect("diagnostic msg should define context"),
+        )
+        .expect("diagnostic context should evaluate");
+        let CoreValue::List(contexts) = contexts else {
+            panic!("diagnostic context should be a list");
+        };
+        eval::list_to_value_items(&assembler.eval_context(), &contexts)
+            .expect("diagnostic contexts should be concrete values")
+    }
+
+    #[test]
+    fn public_error_contexts_prepend_without_rewriting_the_message() {
+        let assembler = Assembler::new();
+        let inner = Value::record([("inner", Value::text("first"))]);
+        let outer = Value::record([("outer", Value::text("second"))]);
+
+        let error = Error::new("original")
+            .with_context(inner.clone())
+            .with_context(outer.clone());
+
+        assert_eq!(error.to_string(), "original");
+        assert_eq!(
+            diagnostic_contexts(&assembler, error.diagnostic()),
+            [outer.into_core(), inner.into_core()]
+        );
+    }
+
+    #[test]
+    fn binary_observation_contextualizes_a_nested_failure() {
+        let assembler = Assembler::new();
+        let module = assembler
+            .module(["binary_context"])
+            .script(
+                "g",
+                concat!(
+                    "language g0\n",
+                    "import 'std\n",
+                    "result = anno 'error {msg:{text:\"original\"}, detail:\"kept\"}\n",
+                ),
+            )
+            .build()
+            .expect("binary context fixture should compile");
+
+        let error = assembler
+            .binary_at(module.value(), "result")
+            .expect_err("binary observation should demand the failed definition");
+
+        assert_eq!(error.to_string(), "original");
+        assert_eq!(
+            diagnostic_contexts(&assembler, error.diagnostic())
+                .first()
+                .expect("binary observation should add an outer context"),
+            &eval::evaluation_context_frame("binary extraction")
+        );
+        assert_eq!(
+            assembler
+                .get(error.diagnostic().emission(), "detail")
+                .expect("ad hoc diagnostic fields should survive contextualization")
+                .as_binary(),
+            Some(b"kept".as_slice())
+        );
     }
 
     #[test]

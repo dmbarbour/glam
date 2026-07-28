@@ -231,6 +231,32 @@ pub(crate) fn apply_emission_updates(message: Value, updates: Value) -> Result<V
     apply_updates(message, updates)
 }
 
+/// Prepends one semantic demand frame to the conventional diagnostic context.
+///
+/// Evaluation failures already use outermost-to-innermost ordering. Keeping
+/// host-owned observation frames in that same list lets clients add context
+/// without rewriting the diagnostic's source text.
+pub(crate) fn prepend_context(message: Value, context: Value) -> Result<Value, String> {
+    let message = diagnostic_object(message)?;
+    let existing = match &message {
+        Value::Dict(message) => match message.get(&*keys::MSG) {
+            Some(Value::Dict(interface)) => match interface.get(&*keys::CONTEXT) {
+                Some(Value::List(contexts)) => contexts.clone(),
+                Some(context) => List::from_values(vec![context.clone()]),
+                None => List::empty(),
+            },
+            _ => List::empty(),
+        },
+        _ => unreachable!("diagnostic_object always returns a dictionary"),
+    };
+    let contexts = List::concat(List::from_values(vec![context]), existing);
+    let updates = Value::Dict(Dict::new_sync().insert(
+        (*keys::MSG).clone(),
+        Value::Dict(Dict::new_sync().insert((*keys::CONTEXT).clone(), Value::List(contexts))),
+    ));
+    apply_updates(message, updates)
+}
+
 /// Applies assembler-owned metadata as a real object definitions mixin so the
 /// resulting `spec` also records the extension for subsequent observers.
 pub(crate) fn enrich(

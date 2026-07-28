@@ -1,2 +1,2 @@
 # Required stderr substrings for runtime evaluation failure.
-error: `asm.result` mod builtin cannot divide by zero
+error: mod builtin cannot divide by zero

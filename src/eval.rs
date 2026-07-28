@@ -33,8 +33,11 @@ pub(crate) use operator::{
     access_operator, apply_arity_operator, computation_capture_operator, constant_effect,
     function_capture_operator, list_operator, request_operator,
 };
-pub use sequence::list_output_bytes;
-pub(crate) use sequence::{eval_key_path_list, list_output_bytes_range, list_to_value_items};
+#[cfg(test)]
+pub(crate) use sequence::list_output_bytes;
+pub(crate) use sequence::{
+    eval_key_path_list, list_output_bytes_for, list_output_bytes_range, list_to_value_items,
+};
 pub use value::{EvalError, eval_value};
 pub(crate) use value::{evaluation_context_frame, failure_diagnostic_value};
 

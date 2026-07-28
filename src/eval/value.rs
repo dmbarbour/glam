@@ -53,7 +53,7 @@ impl EvalError {
         }
     }
 
-    pub(in crate::eval) fn with_context(self, context: Value) -> Self {
+    pub(crate) fn with_context(self, context: Value) -> Self {
         match self.kind {
             EvalErrorKind::Failure(failure) => {
                 Self::failure(Arc::new(failure.with_context(context)))

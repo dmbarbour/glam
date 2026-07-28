@@ -646,7 +646,16 @@ fn assemble(
         .initial_definitions(initial_definitions)
         .inputs(inputs)
         .build()?;
-    assembler.binary_at(module.value(), "asm.result")
+    assembler
+        .binary_at(module.value(), "asm.result")
+        .map_err(|error| error.with_context(assembly_result_context()))
+}
+
+fn assembly_result_context() -> Value {
+    Value::record([(
+        "asm",
+        Value::record([("result", Value::text("asm.result"))]),
+    )])
 }
 
 struct LoadedConfiguration {
@@ -1607,6 +1616,18 @@ mod tests {
                 .evaluator
                 .get(diagnostic.emission(), "viewer")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn assembly_result_context_names_the_executable_output_boundary() {
+        let assembler = Assembler::default();
+        assert_eq!(
+            assembler
+                .get(&assembly_result_context(), "asm.result")
+                .expect("assembly result context should identify its output")
+                .as_binary(),
+            Some(b"asm.result".as_slice())
         );
     }
 

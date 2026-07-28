@@ -1079,6 +1079,20 @@ fn binary_output_does_not_flatten_nested_binary_values() {
     let error = list_output_bytes(&test_context(), &list)
         .expect_err("nested binary values must not be flattened during extraction");
     assert!(error.to_string().contains("byte integers"));
+    assert_eq!(failure_context_items(&error), []);
+}
+
+#[test]
+fn binary_output_contextualizes_only_nested_evaluation_failures() {
+    let list = List::from_values(vec![Value::error("byte computation failed")]);
+
+    let error = list_output_bytes(&test_context(), &list)
+        .expect_err("a failed byte computation must propagate");
+
+    assert_eq!(
+        failure_context_items(&error),
+        [evaluation_context_frame("binary extraction")]
+    );
 }
 
 #[test]

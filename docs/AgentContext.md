@@ -134,6 +134,13 @@ notes instead of appending history; put subsystem details in
   additional diagnostics emitted while attempting the operation. Its
   `Display` text is only a Rust-facing summary. CLI clients publish the primary
   diagnostic and leave all enrichment and rendering to diagnostic observers.
+  Clients may prepend semantic demand frames with `Error::with_context`;
+  executable assembly extraction uses `{asm:{result:"asm.result"}}` rather
+  than rewriting `msg.text`.
+- Binary extraction adds `eval:"binary extraction"` only when a deferred byte,
+  list segment, or target fails while being demanded. Immediate validation
+  errors already identify the invalid byte or value and do not gain that
+  nested-demand frame.
 - The built-in `.g` compiler wraps source definition initialization in a
   shallow static frame
   `{g:{origin:OpaqueOrigin, line:Number, definition:Text}}`. It deliberately
