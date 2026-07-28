@@ -19,6 +19,11 @@ fn assembly_samples_parse_without_errors() {
 }
 
 #[test]
+fn executable_samples_parse_without_errors() {
+    assert_samples_parse_without_errors("samples/executable");
+}
+
+#[test]
 fn hello_samples_parse_without_errors() {
     assert_samples_parse_without_errors("samples/hello");
 }

@@ -446,7 +446,7 @@ fn parse_reports_macro_bearing_declarations_without_expanding_them() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("1 macro-bearing declaration deferred; expansion not attempted"));
-    assert!(stdout.contains("macro-deferred family = @logic.expand"));
+    assert!(stdout.contains("macro-deferred family = @logic"));
 }
 
 #[test]

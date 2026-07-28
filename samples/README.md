@@ -18,6 +18,8 @@ Use cases:
   - `hello/libs/` contains their relative-import fixtures.
 - `assembly/` other assembly and multi-input fixtures.
   - early samples may produce raw binary text.
+- `executable/` end-to-end projects that generate runnable files.
+  - `hello_x86_64_linux/` compiles a direct-assembly effect program into ELF.
 - `contracts/` pre-implementation executable contracts that are intentionally
   excluded from ordinary `.g` sample parsing.
 - `invalid/` for testing of diagnostics and runtime failures.
