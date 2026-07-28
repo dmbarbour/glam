@@ -131,6 +131,9 @@ not revoke it.
 ## Reusable Reflection Requests
 
 - `.env Path` reads the active task host's immutable reasoning environment.
+  The authoritative `glam.origin.inspect` capability projects assembler-created
+  opaque compilation-origin values into ordinary provenance. It rejects other
+  opaque values; callers choose which context value to inspect.
 - `.log Severity Message` stages a diagnostic in the current transaction and
   publishes it through the session's diagnostic bus only after commit.
 - `.dict_items Dict` returns ordered `{key,value}` records.

@@ -230,6 +230,7 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::Spark) => "spark",
         SyntaxOperator::Builtin(crate::core::Builtin::InteractionNet) => "interaction_net",
         SyntaxOperator::Builtin(crate::core::Builtin::NetArity) => "net_arity",
+        SyntaxOperator::Builtin(crate::core::Builtin::InspectOrigin) => "inspect_origin",
         SyntaxOperator::Builtin(crate::core::Builtin::MergeDuplicate) => "merge_duplicate",
         SyntaxOperator::Builtin(crate::core::Builtin::Floor) => "floor",
         SyntaxOperator::Builtin(crate::core::Builtin::Mod) => "mod",

@@ -69,7 +69,7 @@ main or embedding client
   -> one CompilationExecution for the complete top-level build
   -> SourceSystem supplies immutable SourceArtifact
   -> artifact supplies bytes + identity + digest + relative resolver
-  -> CompileContext supplies source-scoped capabilities
+  -> CompileContext supplies source-scoped capabilities + opaque origin
   -> selected front end parses, resolves, and lowers
   -> closed module Value
   -> explicit evaluation/extraction
@@ -186,6 +186,15 @@ knows topology; `core_net` and `eval` supply core semantics. See the
 Permanent failures carry Glam diagnostic values and ordered context frames
 through lazy memoization and task status queries; blocking and unassigned
 promises remain scheduler control states rather than errors.
+
+`CompileContext` constructs one opaque provenance handle for each traced source
+input. The `.g` front end places it in shallow, static definition-initialization
+frames alongside its own line and definition fields. It does not capture
+runtime arguments or make the frame follow later function calls. Evaluation
+never searches contexts for these handles. A reflection observer explicitly
+selects a handle and calls the `glam.origin.inspect` capability supplied in its
+immutable `.env`; only then is assembler-owned source and import provenance
+projected into ordinary data.
 
 Source-level net construction follows a separate lazy path:
 

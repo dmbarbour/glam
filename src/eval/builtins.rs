@@ -12,6 +12,7 @@ mod net;
 mod numeric;
 mod object;
 mod pattern;
+mod provenance;
 mod strategy;
 
 use super::*;
@@ -96,6 +97,7 @@ pub(super) fn apply_builtin(
         | Builtin::EffectMapContinue => effect::apply(context, builtin, arguments),
         Builtin::Seq | Builtin::Spark => strategy::apply(context, builtin, arguments),
         Builtin::InteractionNet | Builtin::NetArity => net::apply(context, builtin, arguments),
+        Builtin::InspectOrigin => provenance::apply(context, arguments),
         Builtin::AssertUnit => assertion::apply(context, arguments),
         Builtin::Anno => annotation::apply(context, arguments),
     }

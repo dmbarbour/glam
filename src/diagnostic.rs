@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::core::{Builtin, Dict, List, Value, keys};
+use crate::core::{Builtin, Dict, List, OpaqueValue, Value, keys};
 use crate::eval;
 use crate::number::Number;
 use crate::source::{ContentDigest, SourceArtifact, SourceIdentity};
@@ -44,6 +44,22 @@ pub(crate) struct CompilationTrace {
     digest: ContentDigest,
     namespace: Arc<[String]>,
     imported_from: Option<ImportOrigin>,
+}
+
+struct CompilationOrigin {
+    value: Value,
+}
+
+pub(crate) fn opaque_compilation_origin(trace: &CompilationTrace) -> Value {
+    Value::Opaque(OpaqueValue::new(Arc::new(CompilationOrigin {
+        value: trace.origin_value(),
+    })))
+}
+
+pub(crate) fn inspect_compilation_origin(origin: &OpaqueValue) -> Option<Value> {
+    origin
+        .downcast::<CompilationOrigin>()
+        .map(|origin| origin.value.clone())
 }
 
 impl CompilationTrace {

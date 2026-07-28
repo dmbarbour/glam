@@ -28,6 +28,7 @@ pub(in crate::g_syntax) fn lower_object(
         object_value,
         &mut locals,
     )?;
+    let object_value = annotate_definition_context(object_value, &object.target, line, context);
     *definitions = lower_resolved_expr(update_module_resolved(
         definitions_root.expr(),
         &object.target,
@@ -252,6 +253,7 @@ pub(in crate::g_syntax) fn lower_nested_object_resolved(
         object_value,
         locals,
     )?;
+    let object_value = annotate_definition_context(object_value, &object.target, line, context);
     Ok(update_module_resolved(
         definitions.expr(),
         &object.target,
@@ -434,6 +436,7 @@ fn extend_object_resolved_in_scope(
         object_value,
         locals,
     )?;
+    let object_value = annotate_definition_context(object_value, &extend.target, line, context);
     Ok(update_module_resolved(
         definitions.expr(),
         &extend.target,

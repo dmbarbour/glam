@@ -53,6 +53,8 @@ protocol_key!(EXTENDS, "extends");
 protocol_key!(VALUE, "value");
 protocol_key!(CONTEXT, "context");
 protocol_key!(EVAL, "eval");
+protocol_key!(G, "g");
+protocol_key!(DEFINITION, "definition");
 protocol_key!(KEY, "key");
 protocol_key!(OK, "ok");
 protocol_key!(ERR, "err");

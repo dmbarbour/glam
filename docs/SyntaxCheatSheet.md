@@ -550,6 +550,11 @@ anno 'deprecated Expr       # valid but warns
 anno 'scope_unique Atom     # unique atom (ephemeron pattern)
 anno refl:(.log Msg) Term   # reflection effect before returning Term
 
+# g0 definition initialization adds a shallow source frame:
+# {g:{origin:OpaqueOrigin, line:LineNumber, definition:Name}}
+# Reflection may explicitly inspect that token with:
+.env '.glam.origin.inspect
+
 # Conventions:
 type_of.foo = ...           # associated names: '_of' dicts
 final_of.foo = _foo         # guard against accidental override

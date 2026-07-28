@@ -187,6 +187,12 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
         Some(assertion) => target_context.annotate(assertion, &definition.target, value, locals)?,
         None => value,
     };
+    let value = annotate_definition_context(
+        value,
+        &definition_target_name(&definition.target),
+        line,
+        context,
+    );
     update_definition_target_resolved(
         definitions,
         &definition.target,
@@ -315,6 +321,32 @@ fn definition_target_name(target: &[SyntaxKeyExpr]) -> String {
         }
     }
     name
+}
+
+pub(in crate::g_syntax) fn annotate_definition_context(
+    value: ResolvedExpr<Value>,
+    definition: &str,
+    line: usize,
+    context: &CompileContext,
+) -> ResolvedExpr<Value> {
+    let Some(origin) = context.opaque_origin() else {
+        return value;
+    };
+    let compiler_context = Value::Dict(
+        Dict::new_sync()
+            .insert((*keys::ORIGIN).clone(), origin)
+            .insert(
+                (*keys::LINE).clone(),
+                Value::Number(crate::number::Number::from_usize(line)),
+            )
+            .insert(
+                (*keys::DEFINITION).clone(),
+                Value::binary_from_text(definition),
+            ),
+    );
+    let frame = Value::Dict(Dict::new_sync().insert((*keys::G).clone(), compiler_context));
+    let annotation = Value::Dict(Dict::new_sync().insert((*keys::CONTEXT).clone(), frame));
+    apply_builtin_resolved(Builtin::Anno, [ResolvedExpr::Embedded(annotation), value])
 }
 
 pub(in crate::g_syntax) fn static_path_resolved(target: &str) -> ResolvedExpr<Value> {

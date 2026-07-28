@@ -1002,6 +1002,24 @@ net-arity, and interaction-net copy-count demand. These frames decorate a
 nested failure that the operation forced; the operation's own validation
 errors remain self-describing.
 
+The built-in `g0` compiler also places a shallow context around each source
+definition while its value is first demanded:
+
+        {g:{origin:OpaqueOrigin, line:LineNumber, definition:Name}}
+
+The origin is one assembler-created opaque value for the source-input context;
+the line and definition fields belong to this front end's location model. The
+frame covers definition initialization only. In particular, initializing a
+function does not capture its arguments or make the frame follow later calls
+to that function. A compiler may add finer static frames where they do not
+capture runtime values.
+
+Opaque origins are not implicitly rendered or searched for inside
+`msg.context`. A reflection observer that recognizes this convention may
+select the value while iterating the context dictionaries and explicitly
+apply the capability returned by `.env '.glam.origin.inspect`. That projection
+produces ordinary assembler provenance for the observer's own view.
+
 Other conventional annotations include `anno 'TBD Expr` for incomplete
 definitions and `anno 'deprecated Expr` for valid transitional code that
 should produce a warning.

@@ -1404,6 +1404,13 @@ fn authoritative_glam_environment(role: &str) -> CoreValue {
                 Key::atom_from_text("role"),
                 Value::atom_from_text(role).into_core(),
             )),
+        )
+        .insert(
+            Key::atom_from_text("origin"),
+            CoreValue::Dict(Dict::new_sync().insert(
+                Key::atom_from_text("inspect"),
+                CoreValue::Builtin(Builtin::InspectOrigin),
+            )),
         );
     CoreValue::Dict(glam)
 }
@@ -2288,6 +2295,7 @@ impl ModuleBuilder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{OpaqueValue, keys};
 
     fn test_compilation_trace(source: &str) -> CompilationTrace {
         let source =
@@ -2297,6 +2305,128 @@ mod tests {
             &source,
             Arc::from(["test".to_owned()]),
         )
+    }
+
+    fn definition_context(value: &CoreValue) -> Option<&Dict> {
+        let CoreValue::Dict(frame) = value else {
+            return None;
+        };
+        let CoreValue::Dict(context) = frame.get(&*keys::G)? else {
+            return None;
+        };
+        Some(context)
+    }
+
+    #[test]
+    fn reflection_environment_explicitly_projects_compilation_origins() {
+        let assembler = Assembler::new();
+        let trace = test_compilation_trace("/workspace/source.g");
+        let origin = crate::diagnostic::opaque_compilation_origin(&trace);
+        assert_eq!(Value::from_core(origin.clone()).kind(), ValueKind::Opaque);
+
+        let inspect = assembler
+            .get(&assembler.reflection_environment(), "glam.origin.inspect")
+            .expect("the reflection environment should expose origin inspection");
+        let projected = assembler
+            .apply(&inspect, [Value::from_core(origin)])
+            .and_then(|value| assembler.evaluate(&value))
+            .expect("the origin capability should inspect compilation origins");
+
+        assert_eq!(projected.as_core(), &trace.origin_value());
+    }
+
+    #[test]
+    fn origin_inspection_rejects_unrelated_opaque_values() {
+        let assembler = Assembler::new();
+        let inspect = assembler
+            .get(&assembler.reflection_environment(), "glam.origin.inspect")
+            .expect("the reflection environment should expose origin inspection");
+        let unrelated = Value::from_core(CoreValue::Opaque(OpaqueValue::new(Arc::new(42_u64))));
+
+        let error = assembler
+            .apply(&inspect, [unrelated])
+            .and_then(|value| assembler.evaluate(&value))
+            .expect_err("unrelated opaque values must not be disclosed");
+        assert!(
+            error
+                .to_string()
+                .contains("origin inspection requires an opaque compilation origin"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn source_definitions_add_shallow_opaque_origin_context() {
+        let assembler = Assembler::new();
+        let module = assembler
+            .module(["definition_context"])
+            .script(
+                "g",
+                "language g0\nbroken = 1 / 0\nlater x = x / 0\nobject container with\n  broken = 1 / 0\n",
+            )
+            .build()
+            .expect("definition context fixture should compile");
+
+        let broken = assembler
+            .get(module.value(), "broken")
+            .expect("fixture should define broken");
+        let error = eval::eval_value(&assembler.eval_context(), broken.as_core())
+            .expect_err("the broken definition should fail");
+        let failure = error.into_permanent_failure();
+        let context = failure
+            .contexts()
+            .iter()
+            .find_map(definition_context)
+            .expect("definition initialization should carry source context");
+        assert_eq!(
+            context.get(&*keys::DEFINITION),
+            Some(&CoreValue::binary_from_text("broken"))
+        );
+        assert_eq!(
+            context.get(&*keys::LINE),
+            Some(&CoreValue::Number(Number::from_usize(2)))
+        );
+        assert!(
+            matches!(context.get(&*keys::ORIGIN), Some(CoreValue::Opaque(_))),
+            "source origins should remain opaque until a reflection capability inspects them"
+        );
+
+        let later = assembler
+            .get(module.value(), "later")
+            .expect("fixture should define later");
+        let call = assembler
+            .apply(&later, [Value::integer(1)])
+            .expect("calling a source function should remain lazy");
+        let error = eval::eval_value(&assembler.eval_context(), call.as_core())
+            .expect_err("the function body should fail when called");
+        let failure = error.into_permanent_failure();
+        assert!(
+            failure
+                .contexts()
+                .iter()
+                .all(|context| definition_context(context).is_none()),
+            "shallow definition context must not capture arguments or follow later calls"
+        );
+
+        let object_member = assembler
+            .get(module.value(), "container.broken")
+            .expect("fixture should define the nested object member");
+        let error = eval::eval_value(&assembler.eval_context(), object_member.as_core())
+            .expect_err("the nested object member should fail");
+        let failure = error.into_permanent_failure();
+        let context = failure
+            .contexts()
+            .iter()
+            .find_map(definition_context)
+            .expect("object member initialization should carry source context");
+        assert_eq!(
+            context.get(&*keys::DEFINITION),
+            Some(&CoreValue::binary_from_text("broken"))
+        );
+        assert_eq!(
+            context.get(&*keys::LINE),
+            Some(&CoreValue::Number(Number::from_usize(5)))
+        );
     }
 
     #[test]

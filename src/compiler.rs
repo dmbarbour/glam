@@ -42,6 +42,7 @@ pub(crate) struct CompileContext {
     // values belong to the front end and are not constructed through here.
     importer_source: Option<Arc<SourceArtifact>>,
     compilation_trace: Option<Arc<CompilationTrace>>,
+    opaque_origin: Option<Value>,
     module_path: Arc<[String]>,
     prior_defs: Value, // definitions visible before compiling this source
     final_defs: Value, // promised final definitions for recursive access
@@ -56,6 +57,7 @@ impl Default for CompileContext {
         Self {
             importer_source: None,
             compilation_trace: None,
+            opaque_origin: None,
             module_path: Arc::from([]),
             prior_defs: Value::Dict(Dict::new_sync()), // empty prior dictionary
             final_defs: Value::Promised(PromisedValue::new("final definitions")),
@@ -82,6 +84,7 @@ impl CompileContext {
     }
 
     pub(crate) fn with_compilation_trace(mut self, trace: Arc<CompilationTrace>) -> Self {
+        self.opaque_origin = Some(crate::diagnostic::opaque_compilation_origin(&trace));
         self.compilation_trace = Some(trace);
         self
     }
@@ -144,6 +147,14 @@ impl CompileContext {
 
     pub(crate) fn compilation_execution(&self) -> Option<&Arc<CompilationExecution>> {
         self.compilation_execution.as_ref()
+    }
+
+    /// Returns the assembler-owned source origin without exposing its fields.
+    ///
+    /// The same opaque value is cloned for every annotation emitted from this
+    /// source context. The front end owns any surrounding span representation.
+    pub(crate) fn opaque_origin(&self) -> Option<Value> {
+        self.opaque_origin.clone()
     }
 
     /// Returns the abstract global-path value for a path relative to the

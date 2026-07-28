@@ -75,9 +75,12 @@ notes instead of appending history; put subsystem details in
   identity, digest, relative resolver, and importer provenance remain
   assembler-owned.
 - `CompileContext` supplies source-scoped authority: relative loads,
-  `abstract_global_path`, prior/final definitions, canonical unit, and
-  diagnostic emission. Ordinary values and builtins are constructed directly
-  by the front end; the context must not become an expression DSL.
+  `abstract_global_path`, prior/final definitions, canonical unit, diagnostic
+  emission, and one opaque source-origin token. A front end owns its location
+  model and may place that token inside static context frames; the assembler
+  does not expose paths or provenance fields through `CompileContext`.
+  Ordinary values and builtins are constructed directly by the front end; the
+  context must not become an expression DSL.
 - Front-end import requests and `abstract_global_path` components are relative.
   Reject absolute paths, backslashes, empty components, dot components, parent
   traversal, and other dot-prefixed components. Top-level paths supplied by
@@ -122,6 +125,15 @@ notes instead of appending history; put subsystem details in
   `anno context:Frame Expr` decorates only a permanent failure reached while
   demanding `Expr`. Automatic evaluator frames use `eval:Label` tagged values,
   not renderer-owned prose. Do not stringify failures at scheduler boundaries.
+- The built-in `.g` compiler wraps source definition initialization in a
+  shallow static frame
+  `{g:{origin:OpaqueOrigin, line:Number, definition:Text}}`. It deliberately
+  does not capture function arguments or propagate that frame into later
+  calls. Other front ends may use different static span data.
+- Opaque origins are never found or projected by recursively searching a
+  diagnostic. Reflection observers may iterate `msg.context` by ordinary
+  privileged dictionary access and explicitly call the capability at
+  `.env '.glam.origin.inspect`. Foreign opaque values are rejected.
 - The bus owns sequence numbers and coherent severity counts, never retention.
   External buffers, callbacks, `conf.log` input, and terminal rendering are
   independent subscriptions. `Assembler` drops events by default. Assembler
@@ -129,8 +141,9 @@ notes instead of appending history; put subsystem details in
 - An observer explicitly enriches that envelope with authoritative
   `msg.severity` and `msg.origin`; enrichment returns an independent object
   view. The assembler library neither renders nor prints diagnostics.
-- Source origins are tagged values. Import provenance must not retain module
-  values or compilation environments.
+- Assembler diagnostic-envelope origins are tagged values. Front-end context
+  origins are opaque capability handles. Neither representation may retain
+  module values or compilation environments.
 - The executable's default logger adds `viewer` context and applies the cached
   closed Glam `Diagnostic -> Bytes` formatter. Rust formatting is only an
   emergency fallback. See

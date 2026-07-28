@@ -825,6 +825,9 @@ pub enum Builtin {
     Spark,
     InteractionNet,
     NetArity,
+    /// Host-provided capability for inspecting opaque compilation origins.
+    /// The constructor is exposed only through the reflection environment.
+    InspectOrigin,
     MergeDuplicate,
     Floor,
     Mod,
@@ -903,6 +906,7 @@ impl Builtin {
             Self::Spark => 2,
             Self::InteractionNet => 1,
             Self::NetArity => 2,
+            Self::InspectOrigin => 1,
             Self::MergeDuplicate => 3,
             Self::Floor => 1,
             Self::Mod => 2,
