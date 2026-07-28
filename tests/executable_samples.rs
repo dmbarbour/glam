@@ -28,6 +28,20 @@ fn direct_assembly_sample_generates_a_runnable_hello_world_elf() {
     );
     assert_eq!(&generated.stdout[..4], b"\x7fELF");
 
+    let entry_address = u64::from_le_bytes(
+        generated.stdout[24..32]
+            .try_into()
+            .expect("ELF entry field should contain eight bytes"),
+    );
+    assert_eq!(
+        entry_address, 0x400079,
+        "the published `_start` label should follow the leading trap byte"
+    );
+    assert_eq!(
+        generated.stdout[120], 0xcc,
+        "the byte preceding the published entry should remain in the image"
+    );
+
     let path = generated_executable_path();
     fs::write(&path, &generated.stdout).expect("generated ELF should be writable");
     let mut permissions = fs::metadata(&path)
@@ -73,6 +87,57 @@ fn direct_assembly_exposes_only_the_public_effect_api() {
     );
     assert_eq!(inspected.stdout, b"ok");
     assert!(inspected.stderr.is_empty());
+}
+
+#[test]
+fn direct_assembly_rejects_conflicting_layout_and_symbol_publication() {
+    let cases = [
+        (
+            "language g0\n\
+             import 'std\n\
+             program = do\n\
+             \x20\x20.section.root 'text -> root\n\
+             \x20\x20.cursor.on root do\n\
+             \x20\x20\x20\x20.global \"_start\" -> _\n\
+             \x20\x20\x20\x20.section.following 'text -> _\n\
+             \x20\x20\x20\x20.section.following 'text -> _\n\
+             \x20\x20\x20\x20.r ()\n\
+             asm.result = env.linux_x86_64.executable program",
+            "direct-assembly cursor already has a linear successor",
+        ),
+        (
+            "language g0\n\
+             import 'std\n\
+             program = do\n\
+             \x20\x20.section.root 'text -> root\n\
+             \x20\x20.cursor.on root do\n\
+             \x20\x20\x20\x20.global \"_start\" -> _\n\
+             \x20\x20\x20\x20.global \"_start\" -> _\n\
+             \x20\x20\x20\x20.r ()\n\
+             asm.result = env.linux_x86_64.executable program",
+            "direct-assembly symbol is already published",
+        ),
+    ];
+
+    for (script, expected_error) in cases {
+        let rejected = Command::new(env!("CARGO_BIN_EXE_glam"))
+            .env("GLAM_CONF", "samples/config/direct_assembly.g")
+            .env_remove("GLAM_WORKERS")
+            .arg("--script.g")
+            .arg(script)
+            .output()
+            .expect("invalid direct-assembly program should run through glam");
+
+        assert!(
+            !rejected.status.success(),
+            "invalid direct assembly unexpectedly succeeded"
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains(expected_error),
+            "missing `{expected_error}` diagnostic: {}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+    }
 }
 
 fn generated_executable_path() -> std::path::PathBuf {
