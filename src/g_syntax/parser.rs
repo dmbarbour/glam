@@ -18,4 +18,6 @@ mod source;
 mod structural;
 
 pub(in crate::g_syntax) use source::StagedSourceParser;
+pub(crate) use source::inspect_source;
+#[cfg(test)]
 pub use source::parse_source;

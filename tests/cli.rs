@@ -433,6 +433,23 @@ fn parse_success_writes_summary_to_stdout() {
 }
 
 #[test]
+fn parse_reports_macro_bearing_declarations_without_expanding_them() {
+    let output = glam_command()
+        .arg("--parse")
+        .arg("samples/contracts/macros/logic.g")
+        .arg("--verbose")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(output.status.success());
+    assert_eq!(output.stderr, b"");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1 macro-bearing declaration deferred; expansion not attempted"));
+    assert!(stdout.contains("macro-deferred family = @logic.expand"));
+}
+
+#[test]
 fn parse_is_a_standalone_single_path_operation() {
     let output = glam_command()
         .args(["--parse", "samples/syntax/minimal.g", "--workers", "1"])

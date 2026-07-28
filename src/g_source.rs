@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::diagnostic::Severity;
-use crate::g_syntax::DeclarationKind;
+use crate::g_syntax::{DeclarationKind, InspectedDeclarationKind};
 
 /// A read-only summary produced by the built-in `.g` parser.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +28,13 @@ impl GSourceInspection {
         self.diagnostics
             .iter()
             .any(|diagnostic| diagnostic.severity == Severity::Error)
+    }
+
+    pub fn deferred_macro_declarations(&self) -> usize {
+        self.declarations
+            .iter()
+            .filter(|declaration| declaration.kind == GDeclarationKind::MacroDeferred)
+            .count()
     }
 }
 
@@ -86,6 +93,7 @@ pub enum GDeclarationKind {
     Object,
     Extend,
     Definition,
+    MacroDeferred,
     Unknown,
 }
 
@@ -99,6 +107,7 @@ impl GDeclarationKind {
             Self::Object => "object",
             Self::Extend => "extend",
             Self::Definition => "definition",
+            Self::MacroDeferred => "macro-deferred",
             Self::Unknown => "unknown",
         }
     }
@@ -107,7 +116,7 @@ impl GDeclarationKind {
 /// Inspects bytes using the built-in `.g` parser without compiling, loading
 /// imports, creating an assembler, or exposing the parser's syntax tree.
 pub fn inspect_g_source(source: &[u8]) -> GSourceInspection {
-    let parsed = crate::g_syntax::parse_source(source);
+    let parsed = crate::g_syntax::inspect_source(source);
     let diagnostics = parsed
         .diagnostics
         .into_iter()
@@ -132,16 +141,19 @@ pub fn inspect_g_source(source: &[u8]) -> GSourceInspection {
     }
 }
 
-fn declaration_kind(kind: &DeclarationKind) -> GDeclarationKind {
+fn declaration_kind(kind: &InspectedDeclarationKind) -> GDeclarationKind {
     match kind {
-        DeclarationKind::Language(_) => GDeclarationKind::Language,
-        DeclarationKind::Import(_) => GDeclarationKind::Import,
-        DeclarationKind::Abstract(_) => GDeclarationKind::Abstract,
-        DeclarationKind::Unique(_) => GDeclarationKind::Unique,
-        DeclarationKind::Object(_) => GDeclarationKind::Object,
-        DeclarationKind::Extend(_) => GDeclarationKind::Extend,
-        DeclarationKind::Definition(_) => GDeclarationKind::Definition,
-        DeclarationKind::Unknown => GDeclarationKind::Unknown,
+        InspectedDeclarationKind::Parsed(kind) => match kind {
+            DeclarationKind::Language(_) => GDeclarationKind::Language,
+            DeclarationKind::Import(_) => GDeclarationKind::Import,
+            DeclarationKind::Abstract(_) => GDeclarationKind::Abstract,
+            DeclarationKind::Unique(_) => GDeclarationKind::Unique,
+            DeclarationKind::Object(_) => GDeclarationKind::Object,
+            DeclarationKind::Extend(_) => GDeclarationKind::Extend,
+            DeclarationKind::Definition(_) => GDeclarationKind::Definition,
+            DeclarationKind::Unknown => GDeclarationKind::Unknown,
+        },
+        InspectedDeclarationKind::MacroDeferred => GDeclarationKind::MacroDeferred,
     }
 }
 
@@ -157,5 +169,23 @@ mod tests {
         assert_eq!(report.declarations().len(), 2);
         assert_eq!(report.declarations()[0].kind(), GDeclarationKind::Language);
         assert_eq!(report.declarations()[1].preview(), "asm.result = \"hello\"");
+    }
+
+    #[test]
+    fn inspection_defers_macro_declarations_without_evaluating_them() {
+        let report =
+            inspect_g_source(b"language g0\nmacro = .fail\nanswer = @macro arbitrary DSL input\n");
+
+        assert!(!report.has_errors(), "{:#?}", report.diagnostics());
+        assert_eq!(report.declarations().len(), 3);
+        assert_eq!(report.deferred_macro_declarations(), 1);
+        assert_eq!(
+            report.declarations()[2].kind(),
+            GDeclarationKind::MacroDeferred
+        );
+        assert_eq!(
+            report.declarations()[2].preview(),
+            "answer = @macro arbitrary DSL input"
+        );
     }
 }

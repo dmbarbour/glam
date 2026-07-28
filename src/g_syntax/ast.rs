@@ -3,10 +3,27 @@ use crate::number::Number;
 
 use super::Diagnostic;
 
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct ParsedSource {
     pub declarations: Vec<Declaration>,
     pub diagnostics: Vec<Diagnostic>,
+}
+
+pub(crate) struct InspectedSource {
+    pub(crate) declarations: Vec<InspectedDeclaration>,
+    pub(crate) diagnostics: Vec<Diagnostic>,
+}
+
+pub(crate) struct InspectedDeclaration {
+    pub(crate) line: usize,
+    pub(crate) kind: InspectedDeclarationKind,
+    pub(crate) preview: String,
+}
+
+pub(crate) enum InspectedDeclarationKind {
+    Parsed(DeclarationKind),
+    MacroDeferred,
 }
 
 #[derive(Debug, PartialEq, Eq)]

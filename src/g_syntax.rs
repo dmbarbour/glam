@@ -26,6 +26,8 @@ use resolve::*;
 #[cfg(test)]
 use net_lowering::ResolvedNetLowerer;
 use net_lowering::lower_resolved_expr;
+pub(crate) use parser::inspect_source;
+#[cfg(test)]
 pub use parser::parse_source;
 use resolved::{BindingId, ResolvedExpr, ResolvedPathPart};
 

@@ -1,4 +1,8 @@
-use super::super::{Declaration, Diagnostic, ParsedSource};
+#[cfg(test)]
+use super::super::ParsedSource;
+use super::super::{
+    Declaration, Diagnostic, InspectedDeclaration, InspectedDeclarationKind, InspectedSource,
+};
 use super::declaration::{
     SimpleDeclaration, is_abstract_object_declaration, parse_declaration, parse_simple_declaration,
     validate_language_position,
@@ -18,6 +22,20 @@ use crate::{api::CompilationExecution, eval};
 
 const MACRO_LOOKUP_STEP_BUDGET: usize = 256;
 
+pub(crate) fn inspect_source(source: &[u8]) -> InspectedSource {
+    let mut parser = StagedSourceParser::new(source);
+    let mut declarations = Vec::new();
+    while let Some(declaration) = parser.next_inspected_declaration() {
+        declarations.push(declaration);
+    }
+    let diagnostics = parser.finish_inspection(&declarations);
+    InspectedSource {
+        declarations,
+        diagnostics,
+    }
+}
+
+#[cfg(test)]
 pub fn parse_source(source: &[u8]) -> ParsedSource {
     let mut parser = StagedSourceParser::new(source);
     let mut declarations = Vec::new();
@@ -108,6 +126,7 @@ impl<'source> StagedSourceParser<'source> {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::g_syntax) fn next_declaration(&mut self) -> Option<Declaration> {
         let lexical = self.lexical.as_ref()?;
         if lexical.has_errors() {
@@ -120,6 +139,43 @@ impl<'source> StagedSourceParser<'source> {
             declaration,
             &mut self.diagnostics,
         ))
+    }
+
+    fn next_inspected_declaration(&mut self) -> Option<InspectedDeclaration> {
+        let lexical = self.lexical.as_ref()?;
+        if lexical.has_errors() {
+            return None;
+        }
+        let declaration = lexical.declarations().get(self.next_declaration)?.clone();
+        self.next_declaration += 1;
+        match DeclarationMacroWork::from_original(lexical, &declaration) {
+            Ok(Some(_)) => {
+                let view = TokenView::declaration(lexical, &declaration);
+                Some(InspectedDeclaration {
+                    line: declaration.line(),
+                    kind: InspectedDeclarationKind::MacroDeferred,
+                    preview: declaration_preview(view),
+                })
+            }
+            Err(diagnostic) => {
+                let view = TokenView::declaration(lexical, &declaration);
+                self.diagnostics.push(diagnostic);
+                Some(InspectedDeclaration {
+                    line: declaration.line(),
+                    kind: InspectedDeclarationKind::MacroDeferred,
+                    preview: declaration_preview(view),
+                })
+            }
+            Ok(None) => {
+                let declaration =
+                    parse_lexical_declaration(lexical, &declaration, &mut self.diagnostics);
+                Some(InspectedDeclaration {
+                    line: declaration.line,
+                    kind: InspectedDeclarationKind::Parsed(declaration.kind),
+                    preview: declaration.preview,
+                })
+            }
+        }
     }
 
     pub(in crate::g_syntax) fn next_expanded_declarations(
@@ -342,6 +398,48 @@ impl<'source> StagedSourceParser<'source> {
             validate_language_position(declarations, &mut self.diagnostics);
         }
         self.diagnostics
+    }
+
+    fn finish_inspection(mut self, declarations: &[InspectedDeclaration]) -> Vec<Diagnostic> {
+        if self.validate_language {
+            validate_inspected_language_position(declarations, &mut self.diagnostics);
+        }
+        self.diagnostics
+    }
+}
+
+fn validate_inspected_language_position(
+    declarations: &[InspectedDeclaration],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(first) = declarations.first() else {
+        diagnostics.push(Diagnostic::error(
+            1,
+            "empty source has no language declaration",
+        ));
+        return;
+    };
+
+    if !matches!(
+        &first.kind,
+        InspectedDeclarationKind::Parsed(super::super::DeclarationKind::Language(_))
+    ) {
+        diagnostics.push(Diagnostic::error(
+            first.line,
+            "first declaration should be a language version declaration",
+        ));
+    }
+
+    for declaration in declarations.iter().skip(1) {
+        if matches!(
+            &declaration.kind,
+            InspectedDeclarationKind::Parsed(super::super::DeclarationKind::Language(_))
+        ) {
+            diagnostics.push(Diagnostic::error(
+                declaration.line,
+                "language declaration must appear before all other declarations",
+            ));
+        }
     }
 }
 

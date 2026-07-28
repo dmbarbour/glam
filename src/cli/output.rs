@@ -58,6 +58,19 @@ pub fn format_parse_summary(
         }
         writeln!(output, "{} declarations", parsed.declarations().len())
             .expect("writing to a String cannot fail");
+        let deferred = parsed.deferred_macro_declarations();
+        if deferred != 0 {
+            let declaration = if deferred == 1 {
+                "declaration"
+            } else {
+                "declarations"
+            };
+            writeln!(
+                output,
+                "{deferred} macro-bearing {declaration} deferred; expansion not attempted"
+            )
+            .expect("writing to a String cannot fail");
+        }
     }
     if verbosity == ParseVerbosity::Verbose {
         for declaration in parsed.declarations() {
