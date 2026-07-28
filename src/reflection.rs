@@ -3952,7 +3952,7 @@ mod tests {
             Value::Binary(bytes) => Ok(bytes),
             Value::List(list) => eval::list_output_bytes(&context, &list)
                 .map(Bytes::from)
-                .map_err(TaskError::new),
+                .map_err(|error| TaskError::new(error.to_string())),
             _ => Err(TaskError::new("test stderr request requires binary data")),
         }
     }

@@ -1228,13 +1228,53 @@ impl BuiltModule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     message: Arc<str>,
+    diagnostic: Arc<Diagnostic>,
     diagnostics: Vec<Diagnostic>,
 }
 
 impl Error {
     fn new(message: impl Into<Arc<str>>) -> Self {
+        let message = message.into();
         Self {
-            message: message.into(),
+            diagnostic: Arc::new(Diagnostic::new(Severity::Error, message.clone())),
+            message,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn from_eval(error: eval::EvalError) -> Self {
+        let message: Arc<str> = Arc::from(error.to_string());
+        Self::from_eval_parts(error.failure_value(), message)
+    }
+
+    fn from_eval_with_prefix(error: eval::EvalError, prefix: impl AsRef<str>) -> Self {
+        let message: Arc<str> = Arc::from(format!("{}{error}", prefix.as_ref()));
+        let emission = error.failure_value().map(|emission| {
+            crate::diagnostic::apply_emission_updates(
+                emission.clone(),
+                crate::diagnostic::text_message(None, &message),
+            )
+            .unwrap_or(emission)
+        });
+        Self::from_eval_parts(emission, message)
+    }
+
+    fn from_eval_parts(emission: Option<CoreValue>, message: Arc<str>) -> Self {
+        let (message, diagnostic) = match emission {
+            Some(emission) => {
+                let message = crate::diagnostic::conventional_summary(&emission)
+                    .1
+                    .unwrap_or(message);
+                (
+                    message,
+                    Diagnostic::from_emission(Severity::Error, Value::from_core(emission)),
+                )
+            }
+            None => (message.clone(), Diagnostic::new(Severity::Error, message)),
+        };
+        Self {
+            message,
+            diagnostic: Arc::new(diagnostic),
             diagnostics: Vec::new(),
         }
     }
@@ -1244,6 +1284,15 @@ impl Error {
         self
     }
 
+    /// Returns the primary failure as a structured diagnostic.
+    ///
+    /// Permanent evaluator failures retain their original Glam emission and
+    /// `msg.context`; ordinary host failures use a conventional text message.
+    pub fn diagnostic(&self) -> &Diagnostic {
+        &self.diagnostic
+    }
+
+    /// Returns additional diagnostics emitted while attempting the operation.
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
@@ -1838,7 +1887,7 @@ impl Assembler {
     pub fn evaluate(&self, value: &Value) -> Result<Value, Error> {
         eval::eval_value(&self.eval_context(), value.as_core())
             .map(Value::from_core)
-            .map_err(|error| Error::new(error.to_string()))
+            .map_err(Error::from_eval)
     }
 
     /// Applies all supplied arguments while preserving evaluator laziness.
@@ -1854,7 +1903,7 @@ impl Assembler {
             arguments.into_iter().map(Value::into_core).collect(),
         )
         .map(Value::from_core)
-        .map_err(|error| Error::new(error.to_string()))
+        .map_err(Error::from_eval)
     }
 
     /// Builds one closed interaction-net value through a checked, effect-style
@@ -1968,8 +2017,7 @@ impl Assembler {
         }
 
         let module_value = self.seal_module(&module_context, &definitions);
-        eval::eval_value(&self.eval_context(), &module_value)
-            .map_err(|error| Error::new(error.to_string()))
+        eval::eval_value(&self.eval_context(), &module_value).map_err(Error::from_eval)
     }
 
     fn prepare_input(
@@ -2153,8 +2201,7 @@ impl Assembler {
         let context = self.eval_context();
 
         for part in path.split('.') {
-            let current_value = eval::eval_value(&context, &current)
-                .map_err(|error| Error::new(error.to_string()))?;
+            let current_value = eval::eval_value(&context, &current).map_err(Error::from_eval)?;
             let CoreValue::Dict(dict) = current_value else {
                 return Err(Error::new(format!("module did not define `{path}`")));
             };
@@ -2172,10 +2219,10 @@ impl Assembler {
             CoreValue::Binary(bytes) => Ok(bytes.clone()),
             CoreValue::List(list) => eval::list_output_bytes(&self.eval_context(), list)
                 .map(Bytes::from)
-                .map_err(|error| Error::new(format!("`{label}` {error}"))),
+                .map_err(|error| Error::from_eval_with_prefix(error, format!("`{label}` "))),
             CoreValue::Lazy(_) | CoreValue::Promised(_) => {
-                let value = eval::eval_value(&self.eval_context(), value)
-                    .map_err(|error| Error::new(error.to_string()))?;
+                let value =
+                    eval::eval_value(&self.eval_context(), value).map_err(Error::from_eval)?;
                 self.core_value_bytes(&value, label)
             }
             CoreValue::Atom(_)
@@ -2209,11 +2256,11 @@ impl Assembler {
             CoreValue::List(list) => {
                 { eval::list_output_bytes_range(&self.eval_context(), list, range.clone()) }
                     .map(|bytes| bytes.map(Bytes::from))
-                    .map_err(|error| Error::new(format!("`{label}` {error}")))?
+                    .map_err(|error| Error::from_eval_with_prefix(error, format!("`{label}` ")))?
             }
             CoreValue::Lazy(_) | CoreValue::Promised(_) | CoreValue::Net(_) => {
-                let value = eval::eval_value(&self.eval_context(), value)
-                    .map_err(|error| Error::new(error.to_string()))?;
+                let value =
+                    eval::eval_value(&self.eval_context(), value).map_err(Error::from_eval)?;
                 return self.core_value_binary_slice(&value, range, label);
             }
             CoreValue::Atom(_)

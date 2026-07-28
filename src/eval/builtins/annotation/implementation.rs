@@ -287,10 +287,11 @@ fn eval_deque_annotation(context: &EvalContext, target: &Value) -> Result<Value,
 fn eval_binary_annotation(context: &EvalContext, target: &Value) -> Result<Value, EvalError> {
     match eval_value(context, target)? {
         Value::Binary(bytes) => Ok(Value::Binary(bytes)),
-        Value::List(list) => match list_to_binary_bytes(context, &list, "`binary` annotation") {
-            Ok(bytes) => Ok(Value::Binary(Bytes::from(bytes))),
-            Err(message) => Ok(annotation_error_value(message)),
-        },
+        Value::List(list) => Ok(Value::Binary(Bytes::from(list_to_binary_bytes(
+            context,
+            &list,
+            "`binary` annotation",
+        )?))),
         other => Ok(annotation_error_value(format!(
             "`binary` annotation requires a list or binary target, got {other:?}"
         ))),

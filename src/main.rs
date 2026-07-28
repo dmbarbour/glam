@@ -282,6 +282,10 @@ fn finish_local_files(
     failed
 }
 
+fn publish_error(diagnostics: &DiagnosticBus, error: &Error) {
+    diagnostics.publish(error.diagnostic().clone());
+}
+
 struct PreparedAssembly {
     local_files: FileSourceSystem,
     runtime: EvaluationRuntime,
@@ -361,7 +365,7 @@ fn prepare_assembly(
         Ok(configuration) => configuration,
         Err(error) => {
             let diagnostics = assembler.diagnostic_bus();
-            diagnostics.publish(Diagnostic::new(Severity::Error, error.to_string()));
+            publish_error(&diagnostics, &error);
             finish_local_files(&local_files, failure_manifest, &diagnostics);
             log_host.close_input();
             log_host.drain_default(&DefaultLogger::new(assembler));
@@ -413,10 +417,7 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
         cli_arguments,
     };
     if let Err(error) = prepared.resolve_environment(&command_parts) {
-        prepared
-            .assembler
-            .diagnostic_bus()
-            .publish(Diagnostic::new(Severity::Error, error.to_string()));
+        publish_error(&prepared.assembler.diagnostic_bus(), &error);
         return finish_without_logger(prepared, command_parts.manifest.as_deref(), true);
     }
     let worker_threads = match configured_worker_count(worker_count) {
@@ -427,10 +428,7 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
         }
     };
     if let Err(error) = prepared.runtime.activate_workers(worker_threads) {
-        prepared
-            .assembler
-            .diagnostic_bus()
-            .publish(Diagnostic::new(Severity::Error, error.to_string()));
+        publish_error(&prepared.assembler.diagnostic_bus(), &error);
         return finish_without_logger(prepared, command_parts.manifest.as_deref(), true);
     }
     let CommandPlanParts {
@@ -462,7 +460,7 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
         }
         Err(error) => {
             operation_failed = true;
-            assembler_diagnostics.publish(Diagnostic::new(Severity::Error, error.to_string()));
+            publish_error(&assembler_diagnostics, &error);
         }
     }
 
@@ -539,10 +537,7 @@ fn configured_cli(arguments: CliArguments, inspection: Option<bool>) -> ExitCode
     if let Some(nul_terminated) = inspection {
         let parts = command.into_parts();
         if let Err(error) = prepared.resolve_environment(&parts) {
-            prepared
-                .assembler
-                .diagnostic_bus()
-                .publish(Diagnostic::new(Severity::Error, error.to_string()));
+            publish_error(&prepared.assembler.diagnostic_bus(), &error);
             return finish_without_logger(prepared, None, true);
         }
         let output = format_configured_arguments(&parts.process_args, nul_terminated);

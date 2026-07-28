@@ -130,6 +130,10 @@ notes instead of appending history; put subsystem details in
   `anno context:Frame Expr` decorates only a permanent failure reached while
   demanding `Expr`. Automatic evaluator frames use `eval:Label` tagged values,
   not renderer-owned prose. Do not stringify failures at scheduler boundaries.
+- Public `Error` retains one primary structured diagnostic separately from
+  additional diagnostics emitted while attempting the operation. Its
+  `Display` text is only a Rust-facing summary. CLI clients publish the primary
+  diagnostic and leave all enrichment and rendering to diagnostic observers.
 - The built-in `.g` compiler wraps source definition initialization in a
   shallow static frame
   `{g:{origin:OpaqueOrigin, line:Number, definition:Text}}`. It deliberately

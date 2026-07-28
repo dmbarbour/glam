@@ -249,10 +249,9 @@ pub(super) fn eval_text_lines_builtin(
 ) -> Result<Value, EvalError> {
     let bytes = match eval_value(context, value)? {
         Value::Binary(bytes) => bytes,
-        Value::List(list) => Bytes::from(
-            list_to_binary_bytes(context, &list, "text lines builtin")
-                .map_err(|error| EvalError::new(format!("text lines builtin {error}")))?,
-        ),
+        Value::List(list) => {
+            Bytes::from(list_to_binary_bytes(context, &list, "text lines builtin")?)
+        }
         _ => {
             return Err(EvalError::new(
                 "text lines builtin requires a binary-compatible list or binary value",

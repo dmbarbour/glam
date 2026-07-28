@@ -82,37 +82,39 @@ pub(super) fn list_to_binary_bytes(
     context: &EvalContext,
     list: &List,
     subject: &str,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, EvalError> {
     let bytes = std::cell::RefCell::new(Vec::new());
     list.try_for_each_segment(
         &mut |segment| {
             bytes.borrow_mut().extend_from_slice(segment);
-            Ok::<_, String>(())
+            Ok::<_, EvalError>(())
         },
         &mut |values| {
             for value in values.iter() {
-                match eval_value(context, value).map_err(|err| err.to_string())? {
+                match eval_value(context, value)? {
                     Value::Number(number) => {
                         let byte = number.to_u8_if_integer().ok_or_else(|| {
-                            format!("{subject} cannot encode number `{number}` as a byte")
+                            EvalError::new(format!(
+                                "{subject} cannot encode number `{number}` as a byte"
+                            ))
                         })?;
                         bytes.borrow_mut().push(byte);
                     }
                     other => {
-                        return Err(format!(
+                        return Err(EvalError::new(format!(
                             "{subject} requires list items to be byte integers, got {other:?}"
-                        ));
+                        )));
                     }
                 }
             }
             Ok(())
         },
-        &mut |thunk| force_list_thunk(context, thunk).map_err(|err| err.to_string()),
+        &mut |thunk| force_list_thunk(context, thunk),
     )?;
     Ok(bytes.into_inner())
 }
 
-pub fn list_output_bytes(context: &EvalContext, list: &List) -> Result<Vec<u8>, String> {
+pub fn list_output_bytes(context: &EvalContext, list: &List) -> Result<Vec<u8>, EvalError> {
     list_to_binary_bytes(context, list, "`value`")
 }
 
@@ -120,12 +122,10 @@ pub(crate) fn list_output_bytes_range(
     context: &EvalContext,
     list: &List,
     range: std::ops::Range<usize>,
-) -> Result<Option<Vec<u8>>, String> {
-    let Some(slice) = list
-        .try_slice(range.start, range.end, &mut |thunk| {
-            force_list_thunk(context, thunk)
-        })
-        .map_err(|error| error.to_string())?
+) -> Result<Option<Vec<u8>>, EvalError> {
+    let Some(slice) = list.try_slice(range.start, range.end, &mut |thunk| {
+        force_list_thunk(context, thunk)
+    })?
     else {
         return Ok(None);
     };

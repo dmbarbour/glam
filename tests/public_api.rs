@@ -65,6 +65,50 @@ fn public_api_builds_a_script_module_and_extracts_binary_data() {
 }
 
 #[test]
+fn public_evaluation_errors_preserve_their_structured_diagnostic() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["structured_failure"])
+        .script(
+            "g",
+            concat!(
+                "language g0\n",
+                "import 'std as std\n",
+                "asm.result = std.anno 'error ",
+                "{msg:{text:\"structured failure\"}, detail:\"preserved\"}\n",
+            ),
+        )
+        .build()
+        .expect("structured failure fixture should build lazily");
+
+    let error = assembler
+        .binary_at(module.value(), "asm.result")
+        .expect_err("observing asm.result should raise its structured failure");
+
+    assert_eq!(error.to_string(), "structured failure");
+    assert!(error.diagnostics().is_empty());
+    assert_eq!(error.diagnostic().message(), "structured failure");
+    let enriched = error
+        .diagnostic()
+        .enrich()
+        .expect("the primary failure diagnostic should remain enrichable");
+    assert_eq!(
+        assembler
+            .get(&enriched, "detail")
+            .expect("ad hoc failure fields should survive the public error boundary")
+            .as_binary(),
+        Some(b"preserved".as_slice())
+    );
+    assert_eq!(
+        assembler
+            .get(&enriched, "msg.context")
+            .expect("evaluation contexts should survive the public error boundary")
+            .kind(),
+        glam::ValueKind::List
+    );
+}
+
+#[test]
 fn public_api_reports_an_empty_reasoning_session_as_complete() {
     let report = Assembler::default().drain_reasoning();
 

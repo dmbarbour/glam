@@ -1078,7 +1078,7 @@ fn binary_output_does_not_flatten_nested_binary_values() {
 
     let error = list_output_bytes(&test_context(), &list)
         .expect_err("nested binary values must not be flattened during extraction");
-    assert!(error.contains("byte integers"));
+    assert!(error.to_string().contains("byte integers"));
 }
 
 #[test]
@@ -1114,7 +1114,10 @@ fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
 
     let err = list_output_bytes(&test_context(), &list)
         .expect_err("bad lazy chunk should fail when observed");
-    assert!(err.contains("lazy list chunk must evaluate to a list or binary value"));
+    assert!(
+        err.to_string()
+            .contains("lazy list chunk must evaluate to a list or binary value")
+    );
 }
 
 #[test]
@@ -1126,6 +1129,7 @@ fn promised_list_chunks_remain_assignable_after_early_observation() {
     assert!(
         list_output_bytes(&test_context(), &list)
             .expect_err("an empty list promise should fail fast")
+            .to_string()
             .contains("promised value was observed before initialization")
     );
     promise
