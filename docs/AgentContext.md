@@ -163,8 +163,13 @@ notes instead of appending history; put subsystem details in
   origins are opaque capability handles. Neither representation may retain
   module values or compilation environments.
 - The executable's default logger adds `viewer` context and applies the cached
-  closed Glam `Diagnostic -> Bytes` formatter. Rust formatting is only an
-  emergency fallback. See
+  closed Glam `Diagnostic -> Bytes` formatter. Text continuation lines use a
+  four-space child indent; a present `msg.context` renders under a two-space
+  `context:` sibling anchor in outermost-to-innermost order. The conservative
+  terminal view recognizes `eval`, `g`, and `asm` frames, names an otherwise
+  singleton tag, and falls back to the value kind. Local-file origin is already
+  represented by the leading location and is not repeated as an origin block.
+  Rust formatting is only an emergency fallback. See
   [`architecture/assembly.md`](architecture/assembly.md) for the logger
   lifecycle.
 

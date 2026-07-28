@@ -266,6 +266,9 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
             "pattern_dict_is_empty"
         }
         SyntaxOperator::Builtin(crate::core::Builtin::TextLines) => "text.lines",
+        SyntaxOperator::Builtin(crate::core::Builtin::DiagnosticContextBlock) => {
+            "diagnostic_context_block"
+        }
         SyntaxOperator::Builtin(crate::core::Builtin::ListEffect) => "list.pure",
         SyntaxOperator::Builtin(crate::core::Builtin::ListEffectReturn) => "list.pure.r",
         SyntaxOperator::Builtin(crate::core::Builtin::ListEffectSeq) => "list.pure.seq",

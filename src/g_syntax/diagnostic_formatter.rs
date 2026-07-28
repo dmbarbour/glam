@@ -105,6 +105,23 @@ fn build() -> Value {
             ],
         )],
     );
+    let context_block = apply_builtin(
+        Builtin::DiagnosticContextBlock,
+        [
+            append([
+                ResolvedExpr::Embedded(Value::binary_from_text("\n")),
+                field(diagnostic, &["viewer", "anchor_indent"]),
+                ResolvedExpr::Embedded(Value::binary_from_text("context:")),
+            ]),
+            append([
+                ResolvedExpr::Embedded(Value::binary_from_text("\n")),
+                field(diagnostic, &["viewer", "indent"]),
+            ]),
+            field(diagnostic, &["msg", "context"]),
+        ],
+    );
+    // Local source origin is already summarized by viewer.location. A future
+    // remote-origin summary can become another viewer-anchored sibling block.
     let formatted = append([
         field(diagnostic, &["viewer", "location"]),
         indexed(color_prefixes, [color(), severity()]),
@@ -113,6 +130,7 @@ fn build() -> Value {
         ResolvedExpr::Embedded(Value::binary_from_text(": ")),
         apply_builtin(Builtin::ListHead, [ResolvedExpr::Local(lines)]),
         indented_continuations,
+        context_block,
         ResolvedExpr::Embedded(Value::binary_from_text("\n")),
     ]);
     let binary = apply_builtin(

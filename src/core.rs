@@ -854,6 +854,9 @@ pub enum Builtin {
     /// Splits binary-compatible text into shared line segments without their
     /// newline delimiters. Internal support for closed formatting functions.
     TextLines,
+    /// Renders the conventional context portion of a default diagnostic.
+    /// Internal support for the cached closed Glam formatter.
+    DiagnosticContextBlock,
     ListEffect,
     ListEffectReturn,
     ListEffectSeq,
@@ -930,6 +933,7 @@ impl Builtin {
             Self::PatternDictTryTakeOptional => 2,
             Self::PatternDictIsEmpty => 1,
             Self::TextLines => 1,
+            Self::DiagnosticContextBlock => 3,
             Self::ListEffect => 1,
             Self::ListEffectReturn => 1,
             Self::ListEffectSeq => 2,

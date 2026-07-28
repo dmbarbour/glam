@@ -54,6 +54,8 @@ protocol_key!(VALUE, "value");
 protocol_key!(CONTEXT, "context");
 protocol_key!(EVAL, "eval");
 protocol_key!(G, "g");
+protocol_key!(ASM, "asm");
+protocol_key!(RESULT, "result");
 protocol_key!(DEFINITION, "definition");
 protocol_key!(KEY, "key");
 protocol_key!(OK, "ok");

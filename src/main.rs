@@ -1295,7 +1295,8 @@ struct DefaultLogger {
 }
 
 impl DefaultLogger {
-    const AUTO_INDENT: usize = 2;
+    const AUTO_INDENT: usize = 4;
+    const ANCHOR_INDENT: usize = 2;
 
     fn new(evaluator: Assembler) -> Self {
         let formatter = evaluator.default_diagnostic_formatter();
@@ -1330,6 +1331,10 @@ impl DefaultLogger {
             ("color", Value::text(terminal.color.name())),
             ("auto_indent", Value::integer(Self::AUTO_INDENT as i64)),
             ("indent", Value::text(" ".repeat(Self::AUTO_INDENT))),
+            (
+                "anchor_indent",
+                Value::text(" ".repeat(Self::ANCHOR_INDENT)),
+            ),
             ("location", Value::text(self.location(diagnostic))),
         ];
         if let Some(term) = &terminal.term {
@@ -1547,7 +1552,113 @@ mod tests {
 
         assert_eq!(
             rendered,
-            Bytes::from_static(b"src/test.g:4: warning: first\n  second\n  \n  fourth\n")
+            Bytes::from_static(b"src/test.g:4: warning: first\n    second\n    \n    fourth\n")
+        );
+    }
+
+    #[test]
+    fn glam_default_formatter_renders_recognized_context_frames() {
+        let evaluator = Assembler::default();
+        let logger = DefaultLogger {
+            formatter: evaluator.default_diagnostic_formatter(),
+            evaluator,
+            working_directory: PathBuf::from("/work"),
+        };
+        let diagnostic = Diagnostic::from_emission(
+            Severity::Error,
+            Value::record([(
+                "msg",
+                Value::record([
+                    ("text", Value::text("broken\nmore detail")),
+                    (
+                        "context",
+                        Value::list([
+                            Value::record([("eval", Value::text("binary extraction"))]),
+                            Value::record([(
+                                "g",
+                                Value::record([
+                                    ("definition", Value::text("result")),
+                                    ("line", Value::integer(7)),
+                                ]),
+                            )]),
+                            Value::record([(
+                                "asm",
+                                Value::record([("result", Value::text("asm.result"))]),
+                            )]),
+                        ]),
+                    ),
+                ]),
+            )]),
+        );
+        let terminal = TerminalContext {
+            columns: 80,
+            color: TerminalColor::None,
+            term: None,
+            language: None,
+        };
+        let enriched = diagnostic
+            .enrich_with(logger.viewer_updates(&diagnostic, &terminal))
+            .expect("terminal viewer metadata should mix into a diagnostic");
+        let rendered = logger
+            .evaluator
+            .apply(&logger.formatter, [enriched])
+            .and_then(|value| logger.evaluator.to_binary(&value))
+            .expect("the closed Glam formatter should render contexts");
+
+        assert_eq!(
+            rendered,
+            Bytes::from_static(
+                b"error: broken\n    more detail\n  context:\n    eval: binary extraction\n    g: definition `result` on line 7\n    asm: result `asm.result`\n"
+            )
+        );
+    }
+
+    #[test]
+    fn glam_default_formatter_summarizes_unrecognized_context_frames() {
+        let evaluator = Assembler::default();
+        let logger = DefaultLogger {
+            formatter: evaluator.default_diagnostic_formatter(),
+            evaluator,
+            working_directory: PathBuf::from("/work"),
+        };
+        let diagnostic = Diagnostic::from_emission(
+            Severity::Warning,
+            Value::record([(
+                "msg",
+                Value::record([
+                    ("text", Value::text("careful")),
+                    (
+                        "context",
+                        Value::list([
+                            Value::record([("custom", Value::integer(42))]),
+                            Value::record([
+                                ("left", Value::integer(1)),
+                                ("right", Value::integer(2)),
+                            ]),
+                            Value::integer(7),
+                        ]),
+                    ),
+                ]),
+            )]),
+        );
+        let terminal = TerminalContext {
+            columns: 80,
+            color: TerminalColor::None,
+            term: None,
+            language: None,
+        };
+        let enriched = diagnostic
+            .enrich_with(logger.viewer_updates(&diagnostic, &terminal))
+            .expect("terminal viewer metadata should mix into a diagnostic");
+        let rendered = logger
+            .evaluator
+            .apply(&logger.formatter, [enriched])
+            .and_then(|value| logger.evaluator.to_binary(&value))
+            .expect("the closed Glam formatter should summarize unknown contexts");
+
+        assert_eq!(
+            rendered,
+            Bytes::from_static(b"warning: careful\n  context:\n    custom\n    Dict\n    Number\n")
         );
     }
 
@@ -1601,7 +1712,15 @@ mod tests {
                 .get(&enriched, "viewer.auto_indent")
                 .expect("viewer should declare automatic indentation")
                 .as_i64(),
-            Some(2)
+            Some(4)
+        );
+        assert_eq!(
+            logger
+                .evaluator
+                .get(&enriched, "viewer.anchor_indent")
+                .expect("viewer should expose its section anchor indentation")
+                .as_binary(),
+            Some(b"  ".as_slice())
         );
         assert_eq!(
             logger
