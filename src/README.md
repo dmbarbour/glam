@@ -24,7 +24,7 @@ not define future language semantics or collect subsystem invariants.
 | `cli/path.rs`, `cli/adapters.rs` | Shared filesystem completion plus replaceable minimal Bash/Zsh bindings over the shell-neutral protocol |
 | `cli/token.rs`, `cli/token/` | Restricted nested token-effect search plus literal, remaining-span, Unicode-scalar, end, and capture-free Glam text-pattern readers |
 | `source.rs` | Immutable source artifacts, identities and digests, relative resolvers, host compatibility, and tracked local files |
-| `lib.rs`, `api.rs` | Embedding facade: staged assembler construction, opaque values, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
+| `lib.rs`, `api.rs` | Embedding facade: staged assembler construction, opaque values, privileged reflection inspection, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
 | `g_source.rs` | Narrow non-evaluating `.g` inspection report, including deferred macro-bearing declarations; no syntax tree or lowering context escapes |
 | `compiler.rs` | Per-source capabilities, hidden artifact/import provenance, loaders, namespace qualification, and diagnostic emission |
 | `g_syntax.rs` | Private built-in `.g` front-end facade |

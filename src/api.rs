@@ -1502,6 +1502,86 @@ impl ReasoningVolume {
     }
 }
 
+/// Privileged structural observation of values in one assembler session.
+///
+/// Ordinary [`Value`] accessors never drive evaluation. This facade is the
+/// embedding equivalent of reflection capabilities: every operation may
+/// demand the observed value through this assembler's evaluation session.
+/// Container members themselves remain lazy unless an operation explicitly
+/// observes them.
+#[derive(Clone, Copy)]
+pub struct ReflectionInspector<'a> {
+    assembler: &'a Assembler,
+}
+
+impl ReflectionInspector<'_> {
+    /// Evaluates a value to weak-head normal form.
+    pub fn evaluate(&self, value: &Value) -> Result<Value, Error> {
+        self.assembler.evaluate(value)
+    }
+
+    /// Returns the elements of a list without evaluating the elements.
+    ///
+    /// The list spine and any deferred concatenation segments are evaluated
+    /// far enough to enumerate the elements.
+    pub fn list_items(&self, value: &Value) -> Result<Vec<Value>, Error> {
+        let value = eval::eval_value(&self.assembler.eval_context(), value.as_core())
+            .map_err(Error::from_eval)?;
+        let CoreValue::List(list) = value else {
+            return Err(Error::new(format!(
+                "reflection list inspection requires a list, received {}",
+                value.diagnostic_kind_name()
+            )));
+        };
+        eval::list_to_value_items(&self.assembler.eval_context(), &list)
+            .map(|items| items.into_iter().map(Value::from_core).collect())
+            .map_err(Error::from_eval)
+    }
+
+    /// Returns dictionary entries in canonical key order without evaluating
+    /// their values. Keys are reified as ordinary keyable [`Value`]s.
+    pub fn dictionary_items(&self, value: &Value) -> Result<Vec<(Value, Value)>, Error> {
+        let value = eval::eval_value(&self.assembler.eval_context(), value.as_core())
+            .map_err(Error::from_eval)?;
+        let CoreValue::Dict(dict) = value else {
+            return Err(Error::new(format!(
+                "reflection dictionary inspection requires a dictionary, received {}",
+                value.diagnostic_kind_name()
+            )));
+        };
+        Ok(dict
+            .iter()
+            .map(|(key, value)| {
+                (
+                    Value::from_core(key.to_value()),
+                    Value::from_core(value.clone()),
+                )
+            })
+            .collect())
+    }
+
+    /// Returns the key value that gives an atom its identity.
+    pub fn atom_key(&self, value: &Value) -> Result<Value, Error> {
+        let value = eval::eval_value(&self.assembler.eval_context(), value.as_core())
+            .map_err(Error::from_eval)?;
+        let CoreValue::Atom(atom) = value else {
+            return Err(Error::new(format!(
+                "reflection atom inspection requires an atom, received {}",
+                value.diagnostic_kind_name()
+            )));
+        };
+        Ok(Value::from_core(atom.key().to_value()))
+    }
+}
+
+impl fmt::Debug for ReflectionInspector<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReflectionInspector")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone)]
 pub struct Assembler {
     source_system: Arc<dyn SourceSystem>,
@@ -1705,6 +1785,16 @@ impl Assembler {
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns this assembler's privileged reflection-inspection facade.
+    ///
+    /// Executable and IDE clients are reflection observers, not ordinary Glam
+    /// programs. Client policy that needs to inspect opaque value structure
+    /// belongs behind this explicit boundary rather than in evaluator
+    /// builtins.
+    pub fn reflection(&self) -> ReflectionInspector<'_> {
+        ReflectionInspector { assembler: self }
     }
 
     #[cfg(test)]

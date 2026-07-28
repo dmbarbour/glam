@@ -14,6 +14,13 @@ attachment to the shared evaluation runtime. Clients
 choose module paths and inputs; the library does not assign special meaning to
 `configuration` or `assembly`.
 
+Executable and IDE clients are privileged reflection observers. Ordinary
+`Value` accessors remain non-demanding, while `Assembler::reflection` exposes
+session-bound operations that deliberately evaluate and inspect value
+structure. Host policy should extend that facade when it needs another
+reflection capability; it should not add client-specific interpretation or
+rendering builtins to core evaluation.
+
 `main` is one client. `cli::dispatch_bootstrap` first turns raw `OsString`
 arguments into a typed `TopLevelCommand`; `main` performs the requested I/O but
 does not interpret individual assembly flags. A hyphen-leading command uses
@@ -84,6 +91,11 @@ default subscriber enriches them with terminal `viewer` context, applies the
 cached closed Glam formatter, and writes stderr. Logger output therefore cannot
 feed back into assembler input. Formatter failure falls back to a minimal Rust
 renderer.
+
+The default subscriber projects conventional context frames through the
+public reflection inspector and stores the selected wording and indentation in
+`viewer.context_lines`. The cached Glam formatter joins those viewer lines; it
+does not inspect `msg.context` or choose presentation terminology.
 
 The logger is wrapped with the native equivalent of `(=>> .r ())`; returning a
 non-unit result is an error. A logger failure produces a synthetic diagnostic,

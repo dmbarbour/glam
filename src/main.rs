@@ -1336,6 +1336,10 @@ impl DefaultLogger {
                 Value::text(" ".repeat(Self::ANCHOR_INDENT)),
             ),
             ("location", Value::text(self.location(diagnostic))),
+            (
+                "context_lines",
+                Value::list(self.context_lines(diagnostic).into_iter().map(Value::text)),
+            ),
         ];
         if let Some(term) = &terminal.term {
             viewer.push(("term", Value::text(term)));
@@ -1352,6 +1356,97 @@ impl DefaultLogger {
         Value::record([("viewer", Value::record(viewer))])
     }
 
+    fn context_lines(&self, diagnostic: &Diagnostic) -> Vec<String> {
+        let Ok(contexts) = self.evaluator.get(diagnostic.emission(), "msg.context") else {
+            return Vec::new();
+        };
+        let reflection = self.evaluator.reflection();
+        let contexts = reflection.evaluate(&contexts).unwrap_or(contexts);
+        let frames = if contexts.is_undefined() {
+            Vec::new()
+        } else if contexts.kind() == glam::ValueKind::List {
+            reflection
+                .list_items(&contexts)
+                .unwrap_or_else(|_| vec![contexts])
+        } else {
+            vec![contexts]
+        };
+        if frames.is_empty() {
+            return Vec::new();
+        }
+
+        let mut lines = Vec::with_capacity(frames.len() + 1);
+        lines.push(format!("{}context:", " ".repeat(Self::ANCHOR_INDENT)));
+        lines.extend(frames.into_iter().map(|frame| {
+            format!(
+                "{}{}",
+                " ".repeat(Self::AUTO_INDENT),
+                self.summarize_context_frame(&frame)
+            )
+        }));
+        lines
+    }
+
+    fn summarize_context_frame(&self, frame: &Value) -> String {
+        let reflection = self.evaluator.reflection();
+        let frame = reflection.evaluate(frame).unwrap_or_else(|_| frame.clone());
+        let Ok(entries) = reflection.dictionary_items(&frame) else {
+            return diagnostic_value_kind(&frame).to_owned();
+        };
+        let [(tag, payload)] = entries.as_slice() else {
+            return diagnostic_value_kind(&frame).to_owned();
+        };
+
+        if tag == &Value::atom_from_text("eval") {
+            return tagged_context_summary("eval", payload);
+        }
+        if tag == &Value::atom_from_text("g") {
+            return self.g_context_summary(payload);
+        }
+        if tag == &Value::atom_from_text("asm") {
+            return self.asm_context_summary(payload);
+        }
+        self.context_tag_text(tag)
+            .unwrap_or_else(|| diagnostic_value_kind(&frame).to_owned())
+    }
+
+    fn g_context_summary(&self, payload: &Value) -> String {
+        let definition = self.context_field_text(payload, "definition");
+        let line = self.context_field_text(payload, "line");
+        match (definition, line) {
+            (Some(definition), Some(line)) => {
+                format!("g: definition `{definition}` on line {line}")
+            }
+            (Some(definition), None) => format!("g: definition `{definition}`"),
+            (None, Some(line)) => format!("g: line {line}"),
+            (None, None) => "g".to_owned(),
+        }
+    }
+
+    fn asm_context_summary(&self, payload: &Value) -> String {
+        self.context_field_text(payload, "result").map_or_else(
+            || "asm".to_owned(),
+            |result| format!("asm: result `{result}`"),
+        )
+    }
+
+    fn context_field_text(&self, value: &Value, path: &str) -> Option<String> {
+        self.evaluator
+            .get(value, path)
+            .ok()
+            .and_then(|value| immediate_diagnostic_text(&value))
+    }
+
+    fn context_tag_text(&self, tag: &Value) -> Option<String> {
+        immediate_diagnostic_text(tag).or_else(|| {
+            self.evaluator
+                .reflection()
+                .atom_key(tag)
+                .ok()
+                .and_then(|key| immediate_diagnostic_text(&key))
+        })
+    }
+
     fn render(&self, diagnostic: &Diagnostic, text: &str, color: TerminalColor) -> String {
         let severity = diagnostic.severity().to_string();
         let severity = color.paint(diagnostic.severity(), &severity);
@@ -1364,6 +1459,10 @@ impl DefaultLogger {
                 rendered.push_str(&" ".repeat(Self::AUTO_INDENT));
                 rendered.push_str(line);
             }
+        }
+        for line in self.context_lines(diagnostic) {
+            rendered.push('\n');
+            rendered.push_str(&line);
         }
         rendered.push('\n');
         rendered
@@ -1386,6 +1485,39 @@ impl DefaultLogger {
             .unwrap_or(source)
             .display()
             .to_string()
+    }
+}
+
+fn tagged_context_summary(tag: &str, payload: &Value) -> String {
+    immediate_diagnostic_text(payload)
+        .map_or_else(|| tag.to_owned(), |text| format!("{tag}: {text}"))
+}
+
+fn immediate_diagnostic_text(value: &Value) -> Option<String> {
+    value
+        .as_binary()
+        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .or_else(|| value.as_number_text())
+}
+
+fn diagnostic_value_kind(value: &Value) -> &'static str {
+    if value.is_undefined() {
+        return "Undefined";
+    }
+    if value == &Value::abstract_global_path(["builtin", "unit"]) {
+        return "Unit";
+    }
+    match value.kind() {
+        glam::ValueKind::Atom => "Atom",
+        glam::ValueKind::Number => "Number",
+        glam::ValueKind::Binary => "Binary",
+        glam::ValueKind::List => "List",
+        glam::ValueKind::Dict => "Dict",
+        glam::ValueKind::Function => "Function",
+        glam::ValueKind::Net => "Net",
+        glam::ValueKind::Lazy => "Lazy",
+        glam::ValueKind::Opaque => "Opaque",
+        _ => "Value",
     }
 }
 

@@ -149,9 +149,10 @@ notes instead of appending history; put subsystem details in
   for manual static frames; it is not a namespace and has no prior form. Other
   front ends may use different static span data.
 - Opaque origins are never found or projected by recursively searching a
-  diagnostic. Reflection observers may iterate `msg.context` by ordinary
-  privileged dictionary access and explicitly call the capability at
-  `.env '.glam.origin.inspect`. Foreign opaque values are rejected.
+  diagnostic. Glam reflection tasks may iterate `msg.context` and explicitly
+  call the capability at `.env '.glam.origin.inspect`. Rust clients use
+  `Assembler::reflection` for equally explicit privileged structural
+  observation. Foreign opaque values are rejected.
 - The bus owns sequence numbers and coherent severity counts, never retention.
   External buffers, callbacks, `conf.log` input, and terminal rendering are
   independent subscriptions. `Assembler` drops events by default. Assembler
@@ -162,14 +163,17 @@ notes instead of appending history; put subsystem details in
 - Assembler diagnostic-envelope origins are tagged values. Front-end context
   origins are opaque capability handles. Neither representation may retain
   module values or compilation environments.
-- The executable's default logger adds `viewer` context and applies the cached
-  closed Glam `Diagnostic -> Bytes` formatter. Text continuation lines use a
-  four-space child indent; a present `msg.context` renders under a two-space
-  `context:` sibling anchor in outermost-to-innermost order. The conservative
-  terminal view recognizes `eval`, `g`, and `asm` frames, names an otherwise
-  singleton tag, and falls back to the value kind. Local-file origin is already
-  represented by the leading location and is not repeated as an origin block.
-  Rust formatting is only an emergency fallback. See
+- The executable's default logger uses `Assembler::reflection` to interpret
+  context frames and adds the resulting terminal policy as `viewer` data.
+  The cached closed Glam `Diagnostic -> Bytes` formatter only arranges that
+  client-provided view; presentation-specific structural analysis must not
+  become an evaluator builtin. Text continuation lines use a four-space child
+  indent; a present `msg.context` renders under a two-space `context:` sibling
+  anchor in outermost-to-innermost order. The conservative terminal view
+  recognizes `eval`, `g`, and `asm` frames, names an otherwise singleton tag,
+  and falls back to the value kind. Local-file origin is already represented
+  by the leading location and is not repeated as an origin block. Rust
+  formatting is only an emergency fallback. See
   [`architecture/assembly.md`](architecture/assembly.md) for the logger
   lifecycle.
 
@@ -196,6 +200,11 @@ their detailed scheduling and representation contracts.
 
 - The embedding API keeps `Value` opaque. Clients explicitly evaluate or apply;
   accessors do not silently drive arbitrary computation.
+- Executable and IDE clients are privileged reflection observers.
+  `Assembler::reflection` is the public, session-bound home for demanding
+  structural inspection; its container operations expose members without
+  forcing them. Extend that facade when host policy needs another reflection
+  capability instead of adding renderer/client policy to core evaluation.
 - Public number conversion exposes canonical text, finite `f64`, `i64`, and
   small ratios rather than the backing big-number crates.
 - Binary extraction accepts compact binaries and byte-valued list elements. It

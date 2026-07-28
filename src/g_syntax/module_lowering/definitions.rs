@@ -429,22 +429,7 @@ pub(in crate::g_syntax) fn path_value(target: &str) -> Value {
 }
 
 pub(in crate::g_syntax) fn key_to_value(key: &Key) -> Value {
-    match key {
-        Key::Atom(atom) => Value::Atom(*atom),
-        Key::Number(number) => Value::Number(number.clone()),
-        Key::Binary(bytes) => Value::Binary(bytes.clone()),
-        Key::AbstractGlobalPath(parts) => {
-            Value::Atom(Atom::from_key(&Key::AbstractGlobalPath(parts.clone())))
-        }
-        Key::List(items) => Value::List(crate::core::List::from_values(
-            items.iter().map(key_to_value).collect(),
-        )),
-        Key::Dict(entries) => {
-            Value::Dict(entries.iter().fold(Dict::new_sync(), |dict, (key, value)| {
-                dict.insert(key.clone(), key_to_value(value))
-            }))
-        }
-    }
+    key.to_value()
 }
 
 pub(in crate::g_syntax) fn path_value_in_definitions(

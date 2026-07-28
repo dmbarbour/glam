@@ -508,6 +508,25 @@ impl Key {
             | Value::Opaque(_) => None,
         }
     }
+
+    pub(crate) fn to_value(&self) -> Value {
+        match self {
+            Self::Atom(atom) => Value::Atom(*atom),
+            Self::Number(number) => Value::Number(number.clone()),
+            Self::Binary(bytes) => Value::Binary(bytes.clone()),
+            Self::AbstractGlobalPath(parts) => {
+                Value::Atom(Atom::from_key(&Self::AbstractGlobalPath(parts.clone())))
+            }
+            Self::List(items) => Value::List(List::from_values(
+                items.iter().map(Self::to_value).collect(),
+            )),
+            Self::Dict(entries) => {
+                Value::Dict(entries.iter().fold(Dict::new_sync(), |dict, (key, value)| {
+                    dict.insert(key.clone(), value.to_value())
+                }))
+            }
+        }
+    }
 }
 
 impl fmt::Debug for Key {
@@ -854,9 +873,6 @@ pub enum Builtin {
     /// Splits binary-compatible text into shared line segments without their
     /// newline delimiters. Internal support for closed formatting functions.
     TextLines,
-    /// Renders the conventional context portion of a default diagnostic.
-    /// Internal support for the cached closed Glam formatter.
-    DiagnosticContextBlock,
     ListEffect,
     ListEffectReturn,
     ListEffectSeq,
@@ -933,7 +949,6 @@ impl Builtin {
             Self::PatternDictTryTakeOptional => 2,
             Self::PatternDictIsEmpty => 1,
             Self::TextLines => 1,
-            Self::DiagnosticContextBlock => 3,
             Self::ListEffect => 1,
             Self::ListEffectReturn => 1,
             Self::ListEffectSeq => 2,

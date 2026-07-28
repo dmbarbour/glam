@@ -20,7 +20,7 @@ pub use api::{
     DiagnosticEvent, DiagnosticSubscriber, DiagnosticSubscription, Error, EvaluationRuntime,
     ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort, PromiseResolver,
     ReasoningFailure, ReasoningReport, ReasoningStatus, ReasoningTask, ReasoningTaskState,
-    ReasoningVolume, ReflectionEnvironmentBuilder, Value, ValueKind,
+    ReasoningVolume, ReflectionEnvironmentBuilder, ReflectionInspector, Value, ValueKind,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

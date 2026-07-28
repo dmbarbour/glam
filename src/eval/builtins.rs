@@ -4,7 +4,6 @@ mod annotation;
 mod assertion;
 mod comparison;
 mod conditional;
-mod diagnostic;
 mod dict;
 mod effect;
 mod list;
@@ -76,7 +75,6 @@ pub(super) fn apply_builtin(
         | Builtin::ListEffectCut
         | Builtin::ListEffectFix => list_effect::apply(context, builtin, arguments),
         Builtin::IfResult | Builtin::MatchResult => conditional::apply(context, builtin, arguments),
-        Builtin::DiagnosticContextBlock => diagnostic::apply(context, arguments),
         Builtin::DictSingleton
         | Builtin::DictUnion
         | Builtin::DictUpdate

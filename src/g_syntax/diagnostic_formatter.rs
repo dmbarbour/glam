@@ -85,6 +85,7 @@ fn build() -> Value {
     let diagnostic = locals.push_internal_binding("<diagnostic>");
     let lines = locals.push_internal_binding("<diagnostic-lines>");
     let continuation_line = locals.push_internal_binding("<diagnostic-continuation-line>");
+    let context_line = locals.push_internal_binding("<diagnostic-context-line>");
 
     let severity = || field(diagnostic, &["msg", "severity"]);
     let color = || field(diagnostic, &["viewer", "color"]);
@@ -105,20 +106,21 @@ fn build() -> Value {
             ],
         )],
     );
-    let context_block = apply_builtin(
-        Builtin::DiagnosticContextBlock,
-        [
-            append([
-                ResolvedExpr::Embedded(Value::binary_from_text("\n")),
-                field(diagnostic, &["viewer", "anchor_indent"]),
-                ResolvedExpr::Embedded(Value::binary_from_text("context:")),
-            ]),
-            append([
-                ResolvedExpr::Embedded(Value::binary_from_text("\n")),
-                field(diagnostic, &["viewer", "indent"]),
-            ]),
-            field(diagnostic, &["msg", "context"]),
-        ],
+    let context_lines = apply_builtin(
+        Builtin::ListConcat,
+        [apply_builtin(
+            Builtin::Map,
+            [
+                ResolvedExpr::lambda(
+                    vec![context_line],
+                    append([
+                        ResolvedExpr::Embedded(Value::binary_from_text("\n")),
+                        ResolvedExpr::Local(context_line),
+                    ]),
+                ),
+                field(diagnostic, &["viewer", "context_lines"]),
+            ],
+        )],
     );
     // Local source origin is already summarized by viewer.location. A future
     // remote-origin summary can become another viewer-anchored sibling block.
@@ -130,7 +132,7 @@ fn build() -> Value {
         ResolvedExpr::Embedded(Value::binary_from_text(": ")),
         apply_builtin(Builtin::ListHead, [ResolvedExpr::Local(lines)]),
         indented_continuations,
-        context_block,
+        context_lines,
         ResolvedExpr::Embedded(Value::binary_from_text("\n")),
     ]);
     let binary = apply_builtin(

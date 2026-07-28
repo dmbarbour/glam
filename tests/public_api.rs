@@ -421,6 +421,33 @@ fn public_api_exposes_the_default_diagnostic_formatter_as_a_function() {
 }
 
 #[test]
+fn public_reflection_inspects_container_structure_and_atom_identity() {
+    let assembler = Assembler::default();
+    let reflection = assembler.reflection();
+
+    let items = reflection
+        .list_items(&Value::list([Value::integer(1), Value::text("two")]))
+        .expect("reflection should enumerate list values");
+    assert_eq!(items[0].as_i64(), Some(1));
+    assert_eq!(items[1].as_binary(), Some(b"two".as_slice()));
+
+    let entries = reflection
+        .dictionary_items(&Value::record([("field", Value::integer(7))]))
+        .expect("reflection should enumerate dictionary entries");
+    let [(key, value)] = entries.as_slice() else {
+        panic!("the singleton record should have one reflected entry");
+    };
+    assert_eq!(value.as_i64(), Some(7));
+    assert_eq!(
+        reflection
+            .atom_key(key)
+            .expect("record keys should remain atoms")
+            .as_binary(),
+        Some(b"field".as_slice())
+    );
+}
+
+#[test]
 fn assembler_owns_an_authoritative_reflection_environment() {
     let (builder, diagnostics) = collecting_builder();
     let assembler = builder

@@ -222,7 +222,7 @@ where
                         .map(|(key, value)| {
                             CoreValue::Dict(
                                 Dict::new_sync()
-                                    .insert((*keys::KEY).clone(), key_value(key))
+                                    .insert((*keys::KEY).clone(), key.to_value())
                                     .insert((*keys::VALUE).clone(), value.clone()),
                             )
                         })
@@ -462,15 +462,15 @@ fn task_handle_value(handle: Arc<ReflectionTaskHandle>) -> Value {
 
 fn task_status_query_value(status: EvaluationTaskStatus) -> CoreValue {
     match status {
-        EvaluationTaskStatus::Launched => key_value(&keys::LAUNCHED),
-        EvaluationTaskStatus::Blocked => key_value(&keys::BLOCKED),
+        EvaluationTaskStatus::Launched => keys::LAUNCHED.to_value(),
+        EvaluationTaskStatus::Blocked => keys::BLOCKED.to_value(),
         EvaluationTaskStatus::Complete(value) => {
             CoreValue::Dict(Dict::new_sync().insert((*keys::OK).clone(), value))
         }
         EvaluationTaskStatus::Failed(error) => CoreValue::Dict(
             Dict::new_sync().insert((*keys::ERR).clone(), eval::failure_diagnostic_value(&error)),
         ),
-        EvaluationTaskStatus::Cancelled => key_value(&keys::CANCELED),
+        EvaluationTaskStatus::Cancelled => keys::CANCELED.to_value(),
     }
 }
 
@@ -483,13 +483,13 @@ enum TaggedTaskState {
 }
 
 fn tagged_task_state(value: &Value) -> Result<TaggedTaskState, TaskError> {
-    if value.as_core() == &key_value(&keys::LAUNCHED) {
+    if value.as_core() == &keys::LAUNCHED.to_value() {
         return Ok(TaggedTaskState::Launched);
     }
-    if value.as_core() == &key_value(&keys::BLOCKED) {
+    if value.as_core() == &keys::BLOCKED.to_value() {
         return Ok(TaggedTaskState::Blocked);
     }
-    if value.as_core() == &key_value(&keys::CANCELED) {
+    if value.as_core() == &keys::CANCELED.to_value() {
         return Ok(TaggedTaskState::Cancelled);
     }
     let CoreValue::Dict(state) = value.as_core() else {
@@ -505,25 +505,6 @@ fn tagged_task_state(value: &Value) -> Result<TaggedTaskState, TaskError> {
         return Ok(TaggedTaskState::Failed(Value::from_core(error.clone())));
     }
     Err(TaskError::new("reflection task status is malformed"))
-}
-
-fn key_value(key: &Key) -> CoreValue {
-    match key {
-        Key::Atom(atom) => CoreValue::Atom(*atom),
-        Key::Number(number) => CoreValue::Number(number.clone()),
-        Key::Binary(bytes) => CoreValue::Binary(bytes.clone()),
-        Key::AbstractGlobalPath(parts) => {
-            CoreValue::Atom(Atom::from_key(&Key::AbstractGlobalPath(parts.clone())))
-        }
-        Key::List(items) => CoreValue::List(crate::core::List::from_values(
-            items.iter().map(key_value).collect(),
-        )),
-        Key::Dict(entries) => {
-            CoreValue::Dict(entries.iter().fold(Dict::new_sync(), |dict, (key, value)| {
-                dict.insert(key.clone(), key_value(value))
-            }))
-        }
-    }
 }
 
 fn task_handle_argument(
