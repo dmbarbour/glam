@@ -67,8 +67,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
   extend api with
     section = {
       root:^x86.root_section,
-      after:^x86.following_section,
-      following:^x86.next_section
+      split:^x86.split_section
     }
 
     cursor = {
@@ -100,8 +99,8 @@ object direct_x86_64 as x86 extends direct_standard_effects with
   handler_error context =
     anno assert_unit:{context:context, value:"invalid handler operation"} {}
 
-  cursor_record kind =
-    {kind:kind, content:[], following:{}}
+  cursor_record kind following =
+    {kind:kind, content:[], following:following}
 
   root_section kind =
     \state ->
@@ -124,65 +123,47 @@ object direct_x86_64 as x86 extends direct_standard_effects with
               (
                 x86.updated_state
                   ['handler, 'cursors, cursor_id]
-                  (x86.cursor_record kind)
+                  (x86.cursor_record kind {})
                   state
               )
           )
     }
 
-  following_section kind prior_cursor =
+  split_section kind =
     \state ->
-      x86.allocate_following_section
-        kind
-        prior_cursor
-        state.handler.next_cursor_id
-        state
-
-  next_section kind =
-    \state ->
-      x86.allocate_following_section
+      x86.allocate_split_section
         kind
         state.handler.current_cursor
         state.handler.next_cursor_id
         state
 
-  allocate_following_section kind prior_cursor cursor_id state =
-    x86.allocate_following_section_ids
+  allocate_split_section kind prior_cursor cursor_id state =
+    x86.allocate_split_section_id
       kind
       (x86.cursor_id prior_cursor)
       cursor_id
       state
 
-  allocate_following_section_ids kind prior_cursor_id cursor_id state =
-    x86.allocate_after_known_cursor
+  allocate_split_section_id kind prior_cursor_id cursor_id state =
+    x86.split_known_cursor
       kind
       prior_cursor_id
       cursor_id
       state.handler.cursors.[prior_cursor_id]
       state
 
-  allocate_after_known_cursor kind prior_cursor_id cursor_id prior_cursor state =
+  split_known_cursor kind prior_cursor_id cursor_id prior_cursor state =
     if prior_cursor == {} then
-      x86.handler_error "cannot follow an unknown direct-assembly cursor"
+      x86.handler_error "cannot split an unknown direct-assembly cursor"
     else
-      x86.allocate_after_open_cursor
+      x86.insert_cursor_split
         kind
         prior_cursor_id
         cursor_id
         prior_cursor.following
         state
 
-  allocate_after_open_cursor kind prior_cursor_id cursor_id following state =
-    if following == {} then
-      x86.allocate_unlinked_following_section
-        kind
-        prior_cursor_id
-        cursor_id
-        state
-    else
-      x86.handler_error "direct-assembly cursor already has a linear successor"
-
-  allocate_unlinked_following_section kind prior_cursor_id cursor_id state =
+  insert_cursor_split kind prior_cursor_id cursor_id following state =
     {
       result:x86.cursor_handle cursor_id,
       state:
@@ -196,7 +177,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
               (
                 x86.updated_state
                   ['handler, 'cursors, cursor_id]
-                  (x86.cursor_record kind)
+                  (x86.cursor_record kind following)
                   state
               )
           )

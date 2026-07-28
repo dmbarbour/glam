@@ -21,13 +21,14 @@ remain absent. Adding choice will require the runner outcome to represent zero
 or more transactional state results rather than pretending the current
 single-outcome state transformer already has those semantics.
 
-The program dynamically allocates entry, exit, and message cursors, then links
-their completed fragments in that layout order. It populates the message
-fragment before finishing the entry and exit fragments, demonstrating that
-construction order does not determine byte order. Labels are captured directly
-from cursor boundaries. The `_start` publication determines the ELF entry
-address; a trap byte immediately before that label makes the distinction
-observable.
+The program dynamically allocates an entry cursor, then splits it twice.
+Splitting off the message region first and the exit region second establishes
+entry-then-exit-then-message layout: each new split is inserted immediately
+after the selected region. It populates the message fragment before finishing
+the entry and exit fragments, demonstrating that construction order does not
+determine byte order. Labels are captured directly from cursor boundaries. The
+`_start` publication determines the ELF entry address; a trap byte immediately
+before that label makes the distinction observable.
 
 Cursor and label identities are opaque to the program. The bootstrap handler
 currently implements them with private monotonic tagged integers.
@@ -46,9 +47,9 @@ The executable prints `Hello, World!` followed by a newline.
 
 ## Tooling backlog exposed by this sample
 
-- Add a structured handler-failure operation. Cursor-link and symbol conflicts
-  currently use `assert_unit` to retain useful context, but consequently end
-  with an irrelevant “unit expected” explanation.
+- Add a structured handler-failure operation. Invalid cursors and symbol
+  conflicts currently use `assert_unit` to retain useful context, but
+  consequently end with an irrelevant “unit expected” explanation.
 - Improve object-parent diagnostics to identify the parent expression, its
   evaluated value kind, and whether it resolved to undefined. This would have
   made an accidental `_api` reference inside an `as x86` scope immediately

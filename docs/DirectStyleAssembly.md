@@ -20,6 +20,120 @@ The current configuration implements only deterministic return, sequencing,
 and task-local user state from the standard effects. Choice, fixpoints, and
 delimited control remain future exercises.
 
+## Preliminary API
+
+The current API is supplied by `samples/config/direct_assembly.g`. A program
+constructs ordinary freer-effect values using the operations below, then
+`env.linux_x86_64.executable Program` interprets the program and returns the
+ELF bytes. `env.x86_64` exposes the same public effect API for explicit
+composition; handler implementation details are not exported.
+
+The signatures in this section are descriptive Glam pseudotypes. `Cursor` and
+`Label` are opaque values.
+
+### Standard effects
+
+```g
+.r Value                         # -> Value
+.seq Operation Continuation     # -> continuation result
+.get Path                        # -> task-local user value
+.set Path Value                  # -> ()
+```
+
+Layout `do` notation lowers through `.r` and `.seq`. Public `.get` and `.set`
+are confined beneath the task's `user_state`; they cannot access cursor,
+symbol, or encoder state.
+
+### Regions and cursor selection
+
+```g
+.section.root Kind               # -> Cursor
+.section.split Kind              # -> Cursor
+.cursor.on Cursor Operation      # -> operation result
+```
+
+`.section.root Kind` allocates an independent root region and appends it to the
+root layout order. It returns the new cursor without selecting it.
+
+`.section.split Kind` requires a selected cursor. It inserts a new region
+immediately after the selected region, gives the new region the selected
+region's former continuation, and returns its cursor. The selected cursor
+continues to receive subsequent writes. Repeated splits of one selected cursor
+are valid.
+
+`.cursor.on Cursor Operation` selects `Cursor` while interpreting `Operation`,
+then restores the previously selected cursor. Its result is the result of
+`Operation`. To split a retained cursor that is not currently selected, select
+it with `.cursor.on` and perform `.section.split` inside that scope.
+
+`Kind` is currently retained as metadata. The sample convention uses `'text`
+and `'rodata`, but the bootstrap does not yet validate kinds or map them to
+separate physical ELF sections.
+
+### Labels and publication
+
+```g
+.cursor.label Cursor             # -> Label
+.label                           # -> Label
+.publish Name Label              # -> ()
+.global Name                     # -> Label
+```
+
+`.cursor.label Cursor` captures a label at the explicit cursor's current
+logical offset without selecting that cursor. `.label` does the same at the
+selected cursor. Both immediately append an immutable zero-width label marker;
+they never return an unbound label.
+
+`.publish Name Label` associates a text name with an existing label. The same
+label may be published under several names, but publishing one name twice is
+an error. `.global Name` is the convenience form: it captures a label at the
+selected cursor, publishes it, and returns it. The Linux wrapper currently
+requires a published `"_start"` label and uses it for the ELF entry address.
+
+### Current x86-64 writer operations
+
+```g
+.mov_u32 Register Immediate      # -> ()
+.mov_label_u32 Register Label    # -> ()
+.xor_u32 Destination Source      # -> ()
+.bytes Binary                    # -> ()
+.syscall                         # -> ()
+```
+
+These operations append to the selected cursor. The provisional register set
+is `'eax`, `'ecx`, `'edx`, `'ebx`, `'esp`, `'ebp`, `'esi`, and `'edi`.
+`mov_label_u32` resolves the label to an absolute address after logical layout.
+The sample still emits one executable load segment, so `.bytes` can currently
+place either code or data in any logical region.
+
+### Example
+
+```g
+program = do
+  .section.root 'text -> entry
+  .cursor.on entry do
+    .global "_start" -> _
+
+    # The second split is placed before the first split.
+    .section.split 'rodata -> message
+    .section.split 'text -> exit
+    .cursor.label message -> message_label
+
+    # Construction order is independent of layout order.
+    .cursor.on message (.bytes ("Hello!" ++ [10]))
+
+    .mov_label_u32 'esi message_label
+    .cursor.on exit do
+      .mov_u32 'eax 60
+      .xor_u32 'edi 'edi
+      .syscall
+
+asm.result = env.linux_x86_64.executable program
+```
+
+The resulting logical order is `entry`, `exit`, then `message`, even though
+`message` is populated first.
+
 ## Logical Sections and Cursors
 
 A physical executable section is not represented by one global write cursor.
@@ -28,31 +142,39 @@ fragment has:
 
 - an opaque cursor handle;
 - a section class such as `text` or `rodata`;
-- an append-only stream of instructions or data;
-- one layout relation selected when the cursor is created.
+- an append-only stream of instructions or data; and
+- a continuation to the next logical region.
 
 A cursor is therefore a retained write continuation. Selecting a cursor makes
 subsequent writer effects append to that fragment. Leaving the selection
 restores the prior cursor.
 
-The common layout relation is `after`: the new fragment linearly follows the
-completed contents of another cursor. This relates whole logical fragments,
-not their lengths at the moment the relation is declared. A program can
-therefore retain several cursors, populate them in any convenient evaluation
-order, and still establish a different final layout order.
+New continuations are created by splitting the selected region. The selected
+cursor continues writing the first half; the operation returns a cursor for a
+new second half. The new region inherits the selected region's previous
+continuation, so it is inserted immediately after the selected region rather
+than appended to the end of an existing chain.
+
+Splitting one cursor repeatedly is therefore well-defined. If `message` is
+split off first and `exit` second, the final order is:
+
+```text
+selected region -> exit -> message -> previous continuation
+```
+
+This relation covers completed logical fragments, not their lengths at the
+time of the split. A program can retain several cursors, populate them in any
+convenient evaluation order, and still establish a different final byte order.
 
 For example, a conditional branch can retain one cursor for its fallthrough
 path and another for its taken path. Either path may be constructed first.
 Their immutable layout links determine the eventual byte order.
 
-The bootstrap handler currently supports:
-
-- a root cursor, appended to the root layout order; and
-- a cursor that linearly follows another cursor.
-
-The intended model rejects contradictory links and layout cycles. Richer
-constraints, alignment, physical-section grouping, and a general layout solver
-remain future work.
+The bootstrap handler supports root regions, appended to the root layout order,
+and repeated splits of the selected region. Because each split allocates a
+fresh region and only inserts it into an existing continuation, this operation
+cannot introduce a layout cycle. Richer constraints, alignment,
+physical-section grouping, and a general layout solver remain future work.
 
 ## Labels
 
@@ -107,9 +229,9 @@ over performance.
 Writing the executable sample has exposed several useful tooling targets:
 
 - A handler-level structured failure operation for invalid cursor handles,
-  contradictory layout links, duplicate symbol publication, and unresolved
-  references. The sample currently piggybacks on `assert_unit`, which preserves
-  its context but adds an irrelevant “unit expected” suffix.
+  duplicate symbol publication, and unresolved references. The sample
+  currently piggybacks on `assert_unit`, which preserves its context but adds
+  an irrelevant “unit expected” suffix.
 - An opt-in effect trace showing public operation dispatch and summarized
   protected-state changes without exposing the state to the program.
 - A cursor-layout view showing fragment classes, links, stream lengths, label

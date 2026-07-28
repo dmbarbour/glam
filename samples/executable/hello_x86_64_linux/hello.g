@@ -17,9 +17,10 @@ program = do
     .bytes [0xcc]
     .global "_start" -> _
 
-    # Layout is entry -> exit -> message, independent of write order.
-    .section.following 'text -> exit_cursor
-    .section.after 'rodata exit_cursor -> message_cursor
+    # Each split is inserted immediately after entry. Splitting message first,
+    # then exit, establishes entry -> exit -> message.
+    .section.split 'rodata -> message_cursor
+    .section.split 'text -> exit_cursor
     .cursor.label message_cursor -> message_label
 
     # Force the reused length before the lazy payload enters handler state.

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 #[test]
-fn direct_assembly_sample_generates_a_runnable_hello_world_elf() {
+fn direct_assembly_repeated_splits_generate_a_runnable_hello_world_elf() {
     let generated = Command::new(env!("CARGO_BIN_EXE_glam"))
         .env("GLAM_CONF", "samples/config/direct_assembly.g")
         .env_remove("GLAM_WORKERS")
@@ -90,22 +90,12 @@ fn direct_assembly_exposes_only_the_public_effect_api() {
 }
 
 #[test]
-fn direct_assembly_rejects_conflicting_layout_and_symbol_publication() {
-    let cases = [
-        (
-            "language g0\n\
-             import 'std\n\
-             program = do\n\
-             \x20\x20.section.root 'text -> root\n\
-             \x20\x20.cursor.on root do\n\
-             \x20\x20\x20\x20.global \"_start\" -> _\n\
-             \x20\x20\x20\x20.section.following 'text -> _\n\
-             \x20\x20\x20\x20.section.following 'text -> _\n\
-             \x20\x20\x20\x20.r ()\n\
-             asm.result = env.linux_x86_64.executable program",
-            "direct-assembly cursor already has a linear successor",
-        ),
-        (
+fn direct_assembly_rejects_duplicate_symbol_publication() {
+    let rejected = Command::new(env!("CARGO_BIN_EXE_glam"))
+        .env("GLAM_CONF", "samples/config/direct_assembly.g")
+        .env_remove("GLAM_WORKERS")
+        .arg("--script.g")
+        .arg(
             "language g0\n\
              import 'std\n\
              program = do\n\
@@ -115,29 +105,20 @@ fn direct_assembly_rejects_conflicting_layout_and_symbol_publication() {
              \x20\x20\x20\x20.global \"_start\" -> _\n\
              \x20\x20\x20\x20.r ()\n\
              asm.result = env.linux_x86_64.executable program",
-            "direct-assembly symbol is already published",
-        ),
-    ];
+        )
+        .output()
+        .expect("invalid direct-assembly program should run through glam");
 
-    for (script, expected_error) in cases {
-        let rejected = Command::new(env!("CARGO_BIN_EXE_glam"))
-            .env("GLAM_CONF", "samples/config/direct_assembly.g")
-            .env_remove("GLAM_WORKERS")
-            .arg("--script.g")
-            .arg(script)
-            .output()
-            .expect("invalid direct-assembly program should run through glam");
-
-        assert!(
-            !rejected.status.success(),
-            "invalid direct assembly unexpectedly succeeded"
-        );
-        assert!(
-            String::from_utf8_lossy(&rejected.stderr).contains(expected_error),
-            "missing `{expected_error}` diagnostic: {}",
-            String::from_utf8_lossy(&rejected.stderr)
-        );
-    }
+    assert!(
+        !rejected.status.success(),
+        "duplicate symbol publication unexpectedly succeeded"
+    );
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("direct-assembly symbol is already published"),
+        "missing duplicate-publication diagnostic: {}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
 }
 
 fn generated_executable_path() -> std::path::PathBuf {
