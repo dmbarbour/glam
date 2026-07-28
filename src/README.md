@@ -25,10 +25,10 @@ not define future language semantics or collect subsystem invariants.
 | `cli/token.rs`, `cli/token/` | Restricted nested token-effect search plus literal, Unicode-scalar, end, and capture-free Glam text-pattern readers |
 | `source.rs` | Immutable source artifacts, identities and digests, relative resolvers, host compatibility, and tracked local files |
 | `lib.rs`, `api.rs` | Embedding facade: staged assembler construction, opaque values, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
-| `g_source.rs` | Narrow public inspection report for the built-in `.g` parser; no syntax tree or lowering context escapes |
+| `g_source.rs` | Narrow non-evaluating `.g` inspection report, including deferred macro-bearing declarations; no syntax tree or lowering context escapes |
 | `compiler.rs` | Per-source capabilities, hidden artifact/import provenance, loaders, namespace qualification, and diagnostic emission |
 | `g_syntax.rs` | Private built-in `.g` front-end facade |
-| `g_syntax/parser/source.rs` | UTF-8 entry point, one lexical pass, source-wide validation, declaration orchestration, and recovery |
+| `g_syntax/parser/source.rs` | UTF-8 entry point, one lexical pass, staged expansion/non-evaluating inspection streams, source-wide validation, declaration orchestration, and recovery |
 | `g_syntax/parser/lexical.rs` | Authoritative spanned tokens, eagerly parsed numeric/text data, delimiter groups, indentation facts, and declaration ranges |
 | `g_syntax/parser/logical.rs` | Logical token/payload arenas, local generated-text classification, structural reindexing, and parser-token materialization |
 | `g_syntax/parser/input.rs` | Checked token-range views, group-aware iteration, mapped Chumsky input, token predicates, and parser diagnostics |
@@ -142,7 +142,15 @@ values; successful direct logs publish in source order after the expanded
 declaration parses and carry compiler-owned invocation frames. Invalid
 expanded syntax retains those frames plus a normalized declaration excerpt.
 Macro syntax never enters the syntax AST. Net lowering emits complete bind and
-application spines.
+application spines. Non-evaluating source inspection reports an original
+macro-bearing declaration as `MacroDeferred` rather than parsing its
+macro-owned text or inventing a macro namespace.
+
+Macro helpers required during staged expansion must not reach back through an
+ordinary reference to the unsealed final module. Capture them in a local
+mutually recursive group or an object-local recursive namespace. Textual
+declaration order alone does not turn a final-module reference into a prior
+reference.
 
 `LayoutView` selects one next-line or hanging sibling anchor and returns the
 first dedented line without consuming it. `ExpressionContext` carries the

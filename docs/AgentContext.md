@@ -23,6 +23,8 @@ notes instead of appending history; put subsystem details in
   not necessarily implemented behavior.
 - [`SyntaxCheatSheet.md`](SyntaxCheatSheet.md) is a target syntax reference;
   verify current acceptance against parser tests and samples.
+- [`Macros.md`](Macros.md) is the implemented `language g0` source-macro
+  protocol and staging guide.
 
 ## Working Rules
 
@@ -83,12 +85,22 @@ notes instead of appending history; put subsystem details in
 - The built-in compiler's closed helpers and built-in modules are lowered once
   in `g_syntax/compiler_values.rs`. Per-module paths, environments, promises,
   and reflection tasks remain local.
+- A macro helper named through an ordinary module-global reference observes
+  the unsealed future module even when its definition appears textually
+  earlier. Helpers needed during expansion must be captured in a mutually
+  recursive `let`/`where` group, grouped in an object and selected through its
+  object-local alias, or deliberately selected as a prior definition. Do not
+  repair this by forcing the module fixpoint during expansion.
 - One top-level module build creates one `CompilationExecution` and propagates
   it through every input and recursive import. Macro effects use its private
   evaluation/reflection session, not assembler reasoning: heaps, tasks, and
   diagnostic counts remain distinct even though both sessions share an
   executor. Direct macro journals backtrack; committed `anno refl:` work does
   not.
+- Source inspection is intentionally non-evaluating. Macro-bearing
+  declarations are `MacroDeferred` summaries; they are not parsed as partial
+  `.g` expressions and macro values are never looked up. The whole-file
+  `ParsedSource` path is test-only.
 
 ### Diagnostics
 

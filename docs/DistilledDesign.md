@@ -36,7 +36,11 @@
 - **Texts**: raw, no escape characters; multi-line via `"""` blocks with `"`-prefixed lines, LF-separated, no trailing LF; postprocess explicitly (e.g. `|> hex2bin`). Prefer `import "file" binary as x` for large data.
 - **Patterns**: dicts `{x:P, rem}` with explicit optional entries `{x?:P}`, `{:x,:y}` sugar; lists with one variable segment (`[x]++xs`, `xs++[x]`); view patterns `(View -> P)` (run before match; parentheses required where `->` would conflict, but optional for a complete `View -> P => Result` match arm); predicate patterns `(Pred P)` (pass/fail, captures original input); `as`, local `when` guards. Guard clauses compose with `and`; may be effects, pattern-binds, or booleans.
 - **Match arms** use `Pattern => Result`; **tentative choice** uses `then?`/`=>?`, whose branch body explicitly returns `.r Result` or `.fail`, enabling refactoring of conditional structure.
-- **Macros**: `@name` / `@(Expr)`; effectful, read/write source at text or AST level; cannot escape their bracket/indent scope, can't see comments, whitespace, or other macro invocations; may write lazy thunks as embedded-data AST nodes (compile-time → assembly-time transfer).
+- **Macros**: compiler-defined, effectful syntax rewrites. In `language g0`,
+  `@name.path` runs a bounded reader/writer over normalized source structure;
+  it cannot see comments or other macro invocations, cannot emit either, and
+  may transport arbitrary Glam values as embedded data. This bootstrap
+  protocol deliberately exposes neither ASTs nor hygienic binder identities.
 - `with` updates on dicts/objects use the same `=`/`:=`/`::=` discipline; `Dict as d with ...` captures; on objects, `with` bodies are anonymous mixins and `extend Name with ...` updates the spec and re-instantiates.
 
 ## Assembler Executable

@@ -30,6 +30,8 @@ This project is tentatively called 'glam' - general language assembly.
 - [Syntax Design](./Syntax.md) - design of initial syntax
   - borrows a lot from Haskell, but untyped by default
   - innovations on pattern matching, event continuations
+- [Source Macros](./Macros.md) - current `language g0` macro protocol,
+  environment, staging constraints, and examples
 
 ## Assembler Executable
 
@@ -43,4 +45,3 @@ The design document details the executable. Relevant logic:
 A minimum viable API for user interaction is very small, e.g. listen for TCP connections to service HTTP requests. Interaction logic can be moved into the user configuration. 
 
 Performance features are the main area where the assembler executable may potentially grow without bounds. We can always introduce another accelerator, improve caching, further optimize JIT. Of course, assembly-time performance does not affect assembly results, only how swiftly we obtain them. We can pick some low-hanging fruit and leave the rest for later.
-

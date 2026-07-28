@@ -512,24 +512,34 @@ parentheses.
 
 Because `.r` is concise, users can directly write `.r f <! op1 <! op2`. No need for a `<$>` equivalent.
 
-## Macros (Tentative)
+## Source Macros
 
-Proposed syntactic form:
+`language g0` accepts a joint static macro path:
 
+        @macro
         @macro.path
 
-The compiler looks for a macro definition at `_module.macro.path`, which should express an effect to rewrite the source. 
+This selects `_module.macro` or `_module.macro.path` from the module
+definitions visible before the declaration containing the invocation. The
+selected value is an effectful, bounded source rewrite. It reads normalized
+source elements to its right, writes replacement elements, and disappears
+before ordinary expression parsing. Macro syntax never enters the syntax tree.
 
-The effects API respects some structural conventions: balanced brackets, braces, parentheses, and structured indentation. Brackets, braces, and parentheses are enforced by a simple counting protocol. Indentation requires some careful attention: stretchy whitespace, anchored newlines. 
+Original invocations within one declaration expand once from right to left.
+Generated source cannot contain another macro invocation or comment. Macros
+preserve balanced `()`, `[]`, `{}`, and anchored layout structure, but do not
+receive an AST, raw whitespace, comments, source paths, or local binding
+access.
 
-- A macro may behave as if anchored even if expressed within a line. 
-  - This is achieved by 'reading' a newline first thing, then reading the remainder of the logical line.
-- To keep it simple, macros cannot see or emit more macro calls. Thus, the number of macro evaluations is visible at a glance.
-  - users compose macro definitions instead of assuming macros are in scope with specific names at point of invocation.
+The macro environment is supplied through `meta.macro.env`; the compiler adds
+the declared `language` value before execution. Macro output is deliberately
+non-hygienic: generated names resolve normally where placed. File-wide
+no-shadowing checks and explicit definition operators mitigate common
+accidents, while macro authors retain responsibility for generated names.
 
-To simplify, quoted texts and numbers are captured before macros apply, and macros may generally write embedded data as if it were a source element. 
-
-A consequence of this design is that macros are not hygienic. This is mitigated by rules against name shadowing and for explicit overrides.
+See [Source Macros](Macros.md) for the reader/writer effect API, staging rules,
+environment shape, helper-definition conventions, diagnostics, and executable
+examples.
 
 ## Annotations
 

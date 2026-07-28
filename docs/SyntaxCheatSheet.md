@@ -519,11 +519,25 @@ using Dict in Expr          # treat any dict as temporary object scope
 using Dict do Body          # sugar for: using Dict in do Body
 ```
 
-## Macros, Annotations, Conventions
+## Source Macros
 
 ```
-@macro_name arg1 arg2       # ≡ @(_module.macro_name); effectfully read args
-@(Expr) ...                 # general form; Expr must be an effect
+@macro_name input           # selects prior _module.macro_name
+@table.create input         # joint static paths only
+@outer @inner input         # inner expands first; each original call runs once
+
+meta.macro.env = {          # immutable parameters available through macro .env
+    style:"compact"
+}
+```
+
+The compiler adds the declared `language` value to `meta.macro.env`.
+Macro-bearing declarations are expanded before ordinary parsing. See
+[Source Macros](Macros.md) for definition, effects, layout, and staging.
+
+## Annotations and Conventions
+
+```
 
 anno 'TBD Expr              # incomplete
 anno 'error Expr            # known error
