@@ -15,6 +15,7 @@ pub(super) struct TokenEffects;
 pub(in crate::cli) enum TokenRequest {
     Text,
     Regex,
+    TextSpan,
     Any,
     End,
 }
@@ -42,6 +43,7 @@ impl TaskSpecialization for TokenEffects {
         match request {
             TokenRequest::Text => text(arguments, context),
             TokenRequest::Regex => regex_span(arguments, context),
+            TokenRequest::TextSpan => text_span(arguments, context),
             TokenRequest::Any => any(arguments, context),
             TokenRequest::End => end(arguments, context),
         }
@@ -52,6 +54,7 @@ pub(in crate::cli) fn request_specs() -> Vec<EffectRequestSpec<TokenRequest>> {
     vec![
         request("text", 1, TokenRequest::Text),
         request("regex", 1, TokenRequest::Regex),
+        request("text_span", 0, TokenRequest::TextSpan),
         request("any", 0, TokenRequest::Any),
         request("end", 0, TokenRequest::End),
     ]
@@ -146,6 +149,40 @@ fn regex_span(
     Ok(RequestResult::Return(Value::record([(
         "span",
         Value::text(matched),
+    )])))
+}
+
+fn text_span(
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, TokenEffects>,
+) -> Result<RequestResult, TaskError> {
+    let []: [Value; 0] = arguments
+        .try_into()
+        .map_err(|_| TaskError::new("`.token.text_span` received arguments"))?;
+    let mut transaction = context
+        .transaction()
+        .ok_or_else(|| TaskError::new("token reader escaped its isolated transaction"))?;
+    let (snapshot, journal) = transaction.parts();
+    let cursor = journal.cursor;
+    let remaining = &snapshot.input[cursor..];
+    if remaining.is_empty() {
+        record_expectation(journal, cursor, "remaining text");
+        return Ok(RequestResult::Fail);
+    }
+    if snapshot
+        .completion_offset
+        .is_some_and(|split| cursor <= split && cursor + remaining.len() > split)
+    {
+        let split = snapshot
+            .completion_offset
+            .expect("checked completion offset");
+        record_expectation(journal, split, "remaining text");
+        return Ok(RequestResult::Fail);
+    }
+    journal.cursor = snapshot.input.len();
+    Ok(RequestResult::Return(Value::record([(
+        "span",
+        Value::text(remaining),
     )])))
 }
 

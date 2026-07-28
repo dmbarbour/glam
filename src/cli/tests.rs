@@ -388,6 +388,44 @@ fn configured_cli_parses_structured_utf8_tokens() {
 }
 
 #[test]
+fn configured_cli_token_text_span_consumes_the_nonempty_remainder() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.token \"assignment\" (.token.text \"name=\" =>> .token.text_span) >>= (\\value -> .read.end =>> .write.script \"g\" value.span)\n",
+    );
+    let expansion = expand_configured(
+        &assembler,
+        &configuration,
+        configured_arguments(&["name=λ value"]),
+    )
+    .expect("text span should return the complete remaining UTF-8 token text");
+    assert_eq!(expansion.plan().process_args(), ["--script.g", "λ value"]);
+
+    let error = expand_configured(&assembler, &configuration, configured_arguments(&["name="]))
+        .expect_err("text span should require a nonempty remainder");
+    assert!(error.to_string().contains("remaining text"), "{error}");
+}
+
+#[test]
+fn configured_cli_token_text_span_reports_its_completion_frontier() {
+    let (assembler, configuration) = configuration(
+        "language g0\nimport 'std\nconf.cli = .read.token \"assignment\" (.token.text \"name=\" =>> .token.text_span) >>= (\\_ -> .read.end =>> .write.script \"g\" \"ok\")\n",
+    );
+    let completion = complete_configured(
+        &assembler,
+        &configuration,
+        CompletionRequest::with_active([], "name=", "", []),
+    )
+    .expect("text-span completion should report an expectation");
+    let expectation = completion
+        .expectations()
+        .iter()
+        .find(|expectation| expectation.label() == "remaining text")
+        .expect("text span should identify the empty remainder");
+    assert_eq!(expectation.token_offset(), 5);
+    assert!(completion.candidates().is_empty());
+}
+
+#[test]
 fn configured_cli_token_alternatives_reenter_outer_search() {
     let (assembler, configuration) = configuration(
         "language g0\nimport 'std\nconf.cli = .read.token \"choice\" (.alt (.token.text \"x\" =>> .r \"one\") (.token.text \"x\" =>> .r \"two\")) >>= (\\choice -> .read.end =>> .write.script \"g\" choice)\n",

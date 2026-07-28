@@ -218,18 +218,22 @@ the parser to consume that argument completely.
 | --- | --- | --- |
 | `.token.text Text` | `()` | Consume exact literal text. |
 | `.token.regex Regex` | `{span:Text}` | Consume a nonempty or empty span matched at the current cursor. |
+| `.token.text_span` | `{span:Text}` | Consume the nonempty remainder of the argument. |
 | `.token.any` | `Text` | Consume one Unicode scalar value. |
 | `.token.end` | `()` | Succeed only at the end of the argument. |
 
-`.token.regex` uses Glam's versioned, capture-free text-pattern language.
-Its `span` field is the whole matched text; the record leaves room for future
-capture metadata without changing the reader's outer result shape. Matching is
-anchored at the current cursor. Alternatives are ordered and leftmost-first,
-and repetition is greedy. Plain parentheses group without capturing. The
-supported atoms are literals, `.`, classes, and groups; `?`, `*`, and `+` are
-the only quantifiers. Backend-specific regex constructs are rejected. Literal
-token readers can enumerate completion candidates, while a general pattern
-contributes an expectation but does not enumerate its language.
+`.token.regex` uses Glam's versioned, capture-free text-pattern language, same
+as in [docs/Macros.md](Macros.md#text-patterns).
+
+The `span` field returned by `.token.regex` or `.token.text_span` is the whole
+consumed text; the record leaves room for future capture metadata without
+changing either reader's outer result shape. Regex matching is anchored at the
+current cursor. Alternatives are ordered and leftmost-first, and repetition is
+greedy. Plain parentheses group without capturing. The supported atoms are
+literals, `.`, classes, and groups; `?`, `*`, and `+` are the only
+quantifiers. Backend-specific regex constructs are rejected. Literal token
+readers can enumerate completion candidates, while general spans and patterns
+contribute expectations but do not enumerate their languages.
 
 Token parsing is its own restricted effect context. It has fresh task-local
 state for each `.read.token`, isolated from `conf.cli` and from other token

@@ -22,7 +22,7 @@ not define future language semantics or collect subsystem invariants.
 | `cli/effects.rs`, `cli/host.rs` | Serial CLI reader/writer effect specialization and immutable invocation host |
 | `cli/completion.rs`, `cli/basic.rs` | Optional-cursor completion requests, candidates/frontiers, lexical routing, and bootstrap-option completion |
 | `cli/path.rs`, `cli/adapters.rs` | Shared filesystem completion plus replaceable minimal Bash/Zsh bindings over the shell-neutral protocol |
-| `cli/token.rs`, `cli/token/` | Restricted nested token-effect search plus literal, Unicode-scalar, end, and capture-free Glam text-pattern readers |
+| `cli/token.rs`, `cli/token/` | Restricted nested token-effect search plus literal, remaining-span, Unicode-scalar, end, and capture-free Glam text-pattern readers |
 | `source.rs` | Immutable source artifacts, identities and digests, relative resolvers, host compatibility, and tracked local files |
 | `lib.rs`, `api.rs` | Embedding facade: staged assembler construction, opaque values, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
 | `g_source.rs` | Narrow non-evaluating `.g` inspection report, including deferred macro-bearing declarations; no syntax tree or lowering context escapes |

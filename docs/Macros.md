@@ -117,14 +117,14 @@ Readers advance one transactional, forward-only cursor:
 | `.read.anchor` | Read the next sibling anchor inside `.read.layout` |
 | `.read.end` | Succeed only at the end of the current root item or layout |
 
-`.read.text` can read delimiters explicitly. A committed read must leave
-parentheses, brackets, and braces balanced. `.read.regex` and
+`.read.text` can read delimiters `()[]{}` explicitly. A committed macro must
+leave these parentheses, brackets, and braces balanced. `.read.regex` and
 `.read.text_span` are restricted to a nonstructural text run and cannot cross
 embedded data, logical separation, delimiters, or layout anchors.
 
 The root cursor begins immediately after the static macro head and cannot
 consume a peer logical item. Root `.read.anchor` simply invokes `.fail`.
-Inside `.read.layout`, the parser must read each sibling with `.read.anchor`
+Inside `.read.layout`, the parser must precede each sibling with `.read.anchor`
 and finish the layout; it never observes physical columns, newline spelling,
 blank lines, or comments.
 
@@ -207,9 +207,7 @@ lazy or counted repetition, class negation, anchors, lookaround,
 backreferences, shorthand classes, Unicode-property classes, and the borrowed
 `(?:...)` spelling are invalid.
 
-A pattern is limited to 16,384 UTF-8 bytes and 64 nested grouping
-parentheses. A valid nonmatch invokes `.fail`; invalid pattern syntax is an
-effect error.
+A valid nonmatch invokes `.fail`; invalid pattern syntax is an effect error.
 
 ## Helper definitions and staging
 
