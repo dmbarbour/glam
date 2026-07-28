@@ -66,7 +66,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
     }
   }
 
-  api := object _ extends _x86.api with
+  extend api with
     cursor = {
       text:^direct_text_cursor,
       rodata:^direct_rodata_cursor
