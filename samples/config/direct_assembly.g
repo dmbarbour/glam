@@ -153,15 +153,16 @@ object direct_x86_64 as x86 extends direct_standard_effects with
       state
 
   split_known_cursor kind prior_cursor_id cursor_id prior_cursor state =
-    if prior_cursor == {} then
-      x86.handler_error "cannot split an unknown direct-assembly cursor"
-    else
-      x86.insert_cursor_split
-        kind
-        prior_cursor_id
-        cursor_id
-        prior_cursor.following
-        state
+    match prior_cursor with
+      {} =>
+        x86.handler_error "cannot split an unknown direct-assembly cursor"
+      _ =>
+        x86.insert_cursor_split
+          kind
+          prior_cursor_id
+          cursor_id
+          prior_cursor.following
+          state
 
   insert_cursor_split kind prior_cursor_id cursor_id following state =
     {

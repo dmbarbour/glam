@@ -861,54 +861,27 @@ fn find_structural_body(view: TokenView<'_, '_>) -> Option<StructuralBody> {
         .into_iter()
         .next()
         .unwrap_or(view.range().end());
-    for indexed in view.top_level() {
-        if indexed.index() >= where_boundary {
-            break;
-        }
-        let TokenKind::Open {
-            group,
-            delimiter: Delimiter::Brace,
-        } = indexed.token().kind()
-        else {
-            continue;
-        };
-        let header = trim_layout(view_between(view, view.range().start(), indexed.index()));
-        if !last_significant_is_contextual_name(header, "with") {
-            continue;
-        }
-        let close = view.group(*group).and_then(|group| group.close_token())?;
-        return Some(StructuralBody::Braced { end: close + 1 });
-    }
-
     for with_index in contextual_keywords(view, "with") {
         if with_index >= where_boundary {
             break;
         }
-        let with_token = view.token_at(with_index)?;
         let Some(next) = next_significant_after(view, with_index) else {
             continue;
         };
         if next.index() >= where_boundary {
             continue;
         }
-        if view.line_at_span(with_token.span()) == view.line_at_span(next.token().span()) {
-            return Some(StructuralBody::Layout {
-                start: next.index(),
-            });
+        if let TokenKind::Open {
+            group,
+            delimiter: Delimiter::Brace,
+        } = next.token().kind()
+        {
+            let close = view.group(*group).and_then(|group| group.close_token())?;
+            return Some(StructuralBody::Braced { end: close + 1 });
         }
-    }
-
-    let lines = LayoutView::new(view).lines();
-    for pair in lines.windows(2) {
-        if pair[0].tokens().start() >= where_boundary {
-            break;
-        }
-        let header_line = view.subview(pair[0].tokens())?;
-        if last_significant_is_contextual_name(header_line, "with") {
-            return Some(StructuralBody::Layout {
-                start: pair[1].start(),
-            });
-        }
+        return Some(StructuralBody::Layout {
+            start: next.index(),
+        });
     }
 
     None

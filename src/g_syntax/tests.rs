@@ -1177,6 +1177,93 @@ fn braced_with_bodies_share_the_recursive_object_declaration_grammar() {
 }
 
 #[test]
+fn layout_with_bodies_preserve_nested_dictionary_match_arms() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "object matcher with\n",
+        "  classify = match {} with\n",
+        "    {} => \"empty\"\n",
+        "    {x:item} as _whole => item\n",
+        "    _ => \"other\"\n",
+        "  braced = match {} with { {} => \"empty\"; _ => \"other\"; }\n",
+        "  neighbor = 1\n",
+        "updated = base with\n",
+        "  classify = match {} with\n",
+        "    {x:item} => item\n",
+        "    _ => \"other\"\n",
+        "  neighbor = 2\n",
+    ));
+    assert_eq!(parsed.diagnostics, []);
+
+    let DeclarationKind::Object(ObjectDecl { body, .. }) = &parsed.declarations[1].kind else {
+        panic!("the layout object declaration should remain an object");
+    };
+    assert_eq!(body.len(), 3);
+    let ObjectBodyDefinitionKind::Definition(classify) = &body[0].kind else {
+        panic!("the first object member should remain a definition");
+    };
+    assert!(matches!(
+        classify.expr.as_ref(),
+        Some(SyntaxExpr::Match(subject))
+            if subject.arms.len() == 3
+                && matches!(subject.arms[1].pattern.kind, SyntaxPatternKind::As(_, _))
+    ));
+    let ObjectBodyDefinitionKind::Definition(braced) = &body[1].kind else {
+        panic!("the second object member should remain a definition");
+    };
+    assert!(matches!(
+        braced.expr.as_ref(),
+        Some(SyntaxExpr::Match(subject)) if subject.arms.len() == 2
+    ));
+
+    let DeclarationKind::Definition(DefinitionDecl {
+        expr: Some(SyntaxExpr::With { body, .. }),
+        ..
+    }) = &parsed.declarations[2].kind
+    else {
+        panic!("the layout dictionary update should remain a `with` expression");
+    };
+    assert_eq!(body.len(), 2);
+    let ObjectBodyDefinitionKind::Definition(classify) = &body[0].kind else {
+        panic!("the first dictionary update member should remain a definition");
+    };
+    assert!(matches!(
+        classify.expr.as_ref(),
+        Some(SyntaxExpr::Match(subject)) if subject.arms.len() == 2
+    ));
+}
+
+#[test]
+fn malformed_nested_dictionary_match_reports_the_arm_not_the_object_header() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "object matcher with\n",
+        "  classify = match {} with\n",
+        "    {x:item} as => item\n",
+        "    _ => \"other\"\n",
+        "  neighbor = 1\n",
+    ));
+
+    assert!(!parsed.diagnostics.is_empty());
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.message.contains("object declaration header")),
+        "nested match recovery escaped to the object header: {:#?}",
+        parsed.diagnostics
+    );
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.line == 4),
+        "nested match diagnostic should remain on its malformed arm: {:#?}",
+        parsed.diagnostics
+    );
+}
+
+#[test]
 fn where_binding_can_own_a_deeper_layout_with_expression() {
     let source = concat!(
         "language g0\n",

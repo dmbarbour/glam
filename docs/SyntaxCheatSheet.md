@@ -391,6 +391,9 @@ match Expr with {}                 # error: match exhausted on its source line
 match* Expr with ...                # lazy list of every successful result
 match* Expr with {}                 # []
 
+# The first ungrouped `with` belongs to `match`; group an updated subject.
+match (Dict with { x := 1 }) with { {x:value} => value; _ => {}; }
+
 match when                          # no scrutinee: guard-only dispatch
     C1 => R1
     C2 when                         # choices may nest to arbitrary depth

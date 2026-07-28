@@ -302,17 +302,14 @@ fn parse_match_like_expression(
         && is_contextual_keyword(after_head, when_index)
     {
         let body = view_between(after_head, when_index + 1, after_head.range().end());
-        let (members, end) = choice_member_views(
+        let (arms, end) = choice_members(
             body,
             context,
             &format!("{display_head}-when body"),
             &format!("layout `{display_head} when` requires at least one arm"),
             true,
+            parse_when_arm,
         )?;
-        let arms = members
-            .into_iter()
-            .map(|arm| parse_when_arm(arm, context))
-            .collect::<ParseResult<Vec<_>>>()?;
         return Ok(ParsedExpression::new(
             SyntaxExpr::MatchWhen(MatchWhenExpr {
                 line,
@@ -352,17 +349,14 @@ fn parse_match_like_expression(
     let subject = parse_expression_in_context(subject, context.child_owner(subject))?;
 
     let after_with = view_between(view, with_index + 1, view.range().end());
-    let (members, end) = choice_member_views(
+    let (arms, end) = choice_members(
         after_with,
         context,
         &format!("{display_head} body"),
         &format!("layout {display_head} expression requires at least one arm"),
         true,
+        parse_match_arm,
     )?;
-    let arms = members
-        .into_iter()
-        .map(|arm| parse_match_arm(arm, context))
-        .collect::<ParseResult<Vec<_>>>()?;
     Ok(ParsedExpression::new(
         SyntaxExpr::Match(MatchExpr {
             line,
@@ -509,31 +503,32 @@ fn split_choice_arm<'lex, 'source>(
     }
     let nested_body = view_between(view, nested_when + 1, view.range().end());
     let nested_context = context.with_continuation_floor(first_line.indentation());
-    let (members, _) = choice_member_views(
+    let (arms, _) = choice_members(
         nested_body,
         nested_context,
         "nested match-when body",
         "nested `when` requires at least one child arm",
         false,
+        parse_when_arm,
     )?;
-    let arms = members
-        .into_iter()
-        .map(|arm| parse_when_arm(arm, nested_context))
-        .collect::<ParseResult<Vec<_>>>()?;
     Ok((head, MatchOutcome::Nested(arms)))
 }
 
-fn choice_member_views<'lex, 'source>(
+fn choice_members<'lex, 'source, T, F>(
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
     body_label: &str,
     missing_layout_message: &str,
     brace_can_start_member: bool,
-) -> ParseResult<(Vec<TokenView<'lex, 'source>>, usize)> {
+    parse_member: F,
+) -> ParseResult<(Vec<T>, usize)>
+where
+    F: Fn(TokenView<'lex, 'source>, ExpressionContext) -> ParseResult<T>,
+{
     let Some((body_start, body_token)) = view.first_significant() else {
         return Err(error_at_view(view, missing_layout_message));
     };
-    if let TokenKind::Open {
+    let braced = if let TokenKind::Open {
         group,
         delimiter: Delimiter::Brace,
     } = body_token.kind()
@@ -548,33 +543,30 @@ fn choice_member_views<'lex, 'source>(
                 format!("{body_label} has an unmatched or mismatched `}}`"),
             ));
         };
-        let after_group = trim_layout(view_between(view, close + 1, view.range().end()));
-        let group_is_member_head = brace_can_start_member
-            && after_group.first_significant().is_some_and(|(_, token)| {
-                matches!(token.kind(), TokenKind::Symbol("=>" | "=>?"))
-                    || token_is_name(token, "when")
-            });
-        if !group_is_member_head {
-            let body = view_between(view, body_start, close + 1);
-            let members = split_braced_members(body, body_label)
-                .expect("choice body begins with a complete brace group")?;
-            return Ok((members, close + 1));
-        }
-    }
+        Some((close, view_between(view, body_start, close + 1)))
+    } else {
+        None
+    };
 
     let block = LayoutView::new(view).block();
     if block.statements().is_empty() {
         return Err(error_at_view(view, missing_layout_message));
     }
     if !context.accepts_layout_anchor(block.anchor()) {
-        return Err(vec![Diagnostic::error(
+        let diagnostics = vec![Diagnostic::error(
             block.statements()[0].line(),
             format!(
                 "{body_label} begins at indentation {}; expected more than continuation floor {}",
                 block.anchor(),
                 context.continuation_floor()
             ),
-        )]);
+        )];
+        return match braced {
+            Some((close, body)) => {
+                parse_braced_choice_members(body, close, context, body_label, &parse_member)
+            }
+            None => Err(diagnostics),
+        };
     }
     let end = block.end();
     let members = block
@@ -584,8 +576,53 @@ fn choice_member_views<'lex, 'source>(
             view.subview(statement.tokens())
                 .expect("layout choice arm remains within its body")
         })
-        .collect();
-    Ok((members, end))
+        .collect::<Vec<_>>();
+
+    if !brace_can_start_member && let Some((close, body)) = braced {
+        return parse_braced_choice_members(body, close, context, body_label, &parse_member);
+    }
+
+    let mut members = members.into_iter();
+    let first = members
+        .next()
+        .expect("a nonempty layout block contains its first member");
+    let first = match parse_member(first, context) {
+        Ok(first) => first,
+        Err(diagnostics) => {
+            return match braced {
+                Some((close, body)) => {
+                    parse_braced_choice_members(body, close, context, body_label, &parse_member)
+                }
+                None => Err(diagnostics),
+            };
+        }
+    };
+
+    let mut parsed = Vec::with_capacity(members.len() + 1);
+    parsed.push(first);
+    for member in members {
+        parsed.push(parse_member(member, context)?);
+    }
+    Ok((parsed, end))
+}
+
+fn parse_braced_choice_members<'lex, 'source, T, F>(
+    body: TokenView<'lex, 'source>,
+    close: usize,
+    context: ExpressionContext,
+    body_label: &str,
+    parse_member: &F,
+) -> ParseResult<(Vec<T>, usize)>
+where
+    F: Fn(TokenView<'lex, 'source>, ExpressionContext) -> ParseResult<T>,
+{
+    let members = split_braced_members(body, body_label)
+        .expect("choice body begins with a complete brace group")?;
+    let parsed = members
+        .into_iter()
+        .map(|member| parse_member(member, context))
+        .collect::<ParseResult<Vec<_>>>()?;
+    Ok((parsed, close + 1))
 }
 
 fn top_level_contextual_names(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
@@ -1028,6 +1065,17 @@ mod tests {
             SyntaxPatternKind::Dict { .. }
         ));
 
+        let SyntaxExpr::Match(dict_as_pattern) =
+            parse("match subject with\n  {x:item} as whole => whole\n  _ => {}")
+        else {
+            panic!("a complete dictionary `as` pattern should establish layout");
+        };
+        assert_eq!(dict_as_pattern.arms.len(), 2);
+        assert!(matches!(
+            dict_as_pattern.arms[0].pattern.kind,
+            SyntaxPatternKind::As(_, _)
+        ));
+
         let SyntaxExpr::Match(braced) =
             parse("match subject with {; [head] ++ tail => head; _ => 0;}")
         else {
@@ -1039,6 +1087,33 @@ mod tests {
             panic!("an explicit empty match should remain a match expression");
         };
         assert!(empty.arms.is_empty());
+    }
+
+    #[test]
+    fn match_subject_with_expression_requires_explicit_grouping() {
+        let SyntaxExpr::Match(grouped) =
+            parse("match (base with { x := 1 }) with { {x:item} => item; _ => 0; }")
+        else {
+            panic!("a grouped `with` expression should remain the match subject");
+        };
+        assert!(matches!(grouped.subject.as_ref(), SyntaxExpr::With { .. }));
+
+        let diagnostics = super::super::input::parse_expression_fragment(
+            b"match base with { x := 1 } with { {x:item} => item; _ => 0; }",
+            |view| {
+                super::super::structural::parse_expression_in_context(
+                    view,
+                    ExpressionContext::for_fragment(view),
+                )
+            },
+        )
+        .expect_err("an ungrouped first `with` must belong to the match");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("match arm")),
+            "ungrouped subject update reported {diagnostics:#?}"
+        );
     }
 
     #[test]

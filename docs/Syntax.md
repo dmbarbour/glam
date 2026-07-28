@@ -1408,6 +1408,24 @@ I borrow a lot of inspiration from Haskell's syntax for `match`. Common use case
             Pattern2 => Result2
             _ => Result3
 
+The first ungrouped `with` after `match` ends the subject expression and begins
+the arms. Parenthesize a dictionary or object update used as the subject:
+
+        match (Dict with { value := 42 }) with
+            {value:x} => x
+            _ => {}
+
+A leading brace group belongs to an anchored arm when it participates in one
+complete arm; otherwise it delimits the semicolon-separated arm body.
+Consequently, dictionary patterns remain ordinary layout-arm heads while the
+compact braced form stays available:
+
+        match Value with
+            {value:x} as whole => whole
+            _ => {}
+
+        match Value with { {value:x} => x; _ => {}; }
+
 We also support branching guard clauses. We use `when` to separate the pattern from the a branching clause. base case, we have only one branch. But we'll need another `when` for hierarchical branching.
 
         match Expr with
