@@ -2739,6 +2739,50 @@ fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
 }
 
 #[test]
+fn error_annotations_contextualize_failure_while_evaluating_their_message() {
+    let error = eval_closed_expr(&builtin2_expr(
+        Builtin::Anno,
+        TestExpr::Value(Value::Atom(crate::core::Atom::from_key(
+            &Key::binary_from_text("error"),
+        ))),
+        TestExpr::Value(Value::error("message construction failed")),
+    ))
+    .expect_err("failure while constructing an error message must propagate");
+    assert_eq!(error.to_string(), "message construction failed");
+
+    let diagnostic = error
+        .failure_value()
+        .expect("message-construction failure must remain permanent");
+    let Value::Dict(diagnostic) = eval_value(&test_context(), &diagnostic).unwrap() else {
+        panic!("message-construction failure must project to a diagnostic");
+    };
+    let message = eval_value(
+        &test_context(),
+        diagnostic
+            .get(&*keys::MSG)
+            .expect("diagnostic should define msg"),
+    )
+    .unwrap();
+    let Value::Dict(message) = message else {
+        panic!("diagnostic msg must be a dictionary");
+    };
+    let contexts = eval_value(
+        &test_context(),
+        message
+            .get(&*keys::CONTEXT)
+            .expect("message-construction failure should define msg.context"),
+    )
+    .unwrap();
+    let Value::List(contexts) = contexts else {
+        panic!("msg.context must be a list");
+    };
+    assert_eq!(
+        list_to_value_items(&test_context(), &contexts).unwrap(),
+        [Value::binary_from_text("while evaluating error message")]
+    );
+}
+
+#[test]
 fn context_annotations_are_transparent_and_do_not_demand_context_on_success() {
     let annotation = TestExpr::Value(Value::Dict(Dict::new_sync().insert(
         (*keys::CONTEXT).clone(),

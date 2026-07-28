@@ -44,7 +44,9 @@ pub(super) fn eval_anno_builtin(
             Ok(super::super::strategy::spark(context, value, target))
         }
         RecognizedAnnotation::Error => {
-            let message = eval_value(context, target)?;
+            let message = eval_value(context, target).map_err(|error| {
+                error.with_context(Value::binary_from_text("while evaluating error message"))
+            })?;
             Err(EvalError::from_value(message))
         }
         RecognizedAnnotation::Context {

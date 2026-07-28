@@ -118,6 +118,7 @@ notes instead of appending history; put subsystem details in
 - Permanent evaluation failures retain a Glam diagnostic emission and an
   ordered context stack through lazy caches and reflection-task results.
   `anno 'error Message` evaluates `Message` to WHNF before raising it;
+  a failure while doing so gains `"while evaluating error message"` context.
   `anno context:Frame Expr` decorates only a permanent failure reached while
   demanding `Expr`. Do not stringify failures at scheduler boundaries.
 - The bus owns sequence numbers and coherent severity counts, never retention.

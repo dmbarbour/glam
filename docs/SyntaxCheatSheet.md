@@ -544,7 +544,7 @@ Macro-bearing declarations are expanded before ordinary parsing. See
 ```
 
 anno 'TBD Expr              # incomplete
-anno 'error Message         # permanent pure error; text or diagnostic value
+anno 'error Message         # errors while building Message gain context
 anno context:Frame Expr     # add Frame to msg.context if Expr errors
 anno 'deprecated Expr       # valid but warns
 anno 'scope_unique Atom     # unique atom (ephemeron pattern)

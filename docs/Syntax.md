@@ -985,7 +985,9 @@ Annotations can raise pure evaluation errors and add structured context:
 Demanding the first form evaluates `ErrorMessage` to weak-head normal form,
 then raises it as a permanent error. A text message is accepted as shorthand
 for a conventional `msg.text` diagnostic; diagnostic objects retain their
-other fields.
+other fields. If evaluating `ErrorMessage` itself fails, that prior failure
+receives the context `"while evaluating error message"`; the successfully
+constructed error does not.
 
 The second form is transparent when `Expr` succeeds. If demand on `Expr`
 instead reaches a permanent error, it prepends `Context` to the ordered
