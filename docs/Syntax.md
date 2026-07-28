@@ -986,7 +986,7 @@ Demanding the first form evaluates `ErrorMessage` to weak-head normal form,
 then raises it as a permanent error. A text message is accepted as shorthand
 for a conventional `msg.text` diagnostic; diagnostic objects retain their
 other fields. If evaluating `ErrorMessage` itself fails, that prior failure
-receives the context `"while evaluating error message"`; the successfully
+receives the context `eval:"error message"`; the successfully
 constructed error does not.
 
 The second form is transparent when `Expr` succeeds. If demand on `Expr`
@@ -994,6 +994,13 @@ instead reaches a permanent error, it prepends `Context` to the ordered
 `msg.context` list. Nested contexts therefore run from outermost to innermost.
 Successful evaluation does not demand `Context`. Effect failure, scheduler
 blocking, and unresolved promises are not converted into errors.
+
+Automatic evaluator context uses the tagged form `eval:Label`, leaving prose
+and presentation to diagnostic viewers. Current labels identify annotation,
+reflection-annotation, log-message, log-severity, list-index/count,
+net-arity, and interaction-net copy-count demand. These frames decorate a
+nested failure that the operation forced; the operation's own validation
+errors remain self-describing.
 
 Other conventional annotations include `anno 'TBD Expr` for incomplete
 definitions and `anno 'deprecated Expr` for valid transitional code that

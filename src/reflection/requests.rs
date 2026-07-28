@@ -621,17 +621,25 @@ fn observe_query_change<S: TaskSpecialization>(
 }
 
 pub(crate) fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskError> {
-    let CoreValue::Dict(mut message) = evaluate(context, message.into_core())? else {
+    let log_message_context = || eval::evaluation_context_frame("log message");
+    let CoreValue::Dict(mut message) = evaluate(context, message.into_core())
+        .map_err(|error| error.with_context(log_message_context()))?
+    else {
         return Err(TaskError::new("`.log` message must evaluate to an object"));
     };
     if let Some(interface) = message.get(&*keys::MSG) {
-        message = message.insert((*keys::MSG).clone(), evaluate(context, interface.clone())?);
+        message = message.insert(
+            (*keys::MSG).clone(),
+            evaluate(context, interface.clone())
+                .map_err(|error| error.with_context(log_message_context()))?,
+        );
     }
     Ok(Value::from_core(CoreValue::Dict(message)))
 }
 
 pub(crate) fn parse_severity(context: &EvalContext, value: Value) -> Result<Severity, TaskError> {
-    let value = evaluate(context, value.into_core())?;
+    let value = evaluate(context, value.into_core())
+        .map_err(|error| error.with_context(eval::evaluation_context_frame("log severity")))?;
     if severity_matches(&value, "info", &keys::INFO_VALUE) {
         Ok(Severity::Info)
     } else if severity_matches(&value, "warn", &keys::WARN_VALUE) {

@@ -35,8 +35,8 @@ pub(crate) use operator::{
 };
 pub use sequence::list_output_bytes;
 pub(crate) use sequence::{eval_key_path_list, list_output_bytes_range, list_to_value_items};
-pub(crate) use value::failure_diagnostic_value;
 pub use value::{EvalError, eval_value};
+pub(crate) use value::{evaluation_context_frame, failure_diagnostic_value};
 
 use application::*;
 use builtins::apply_builtin;

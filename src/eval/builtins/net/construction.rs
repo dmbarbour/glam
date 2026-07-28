@@ -312,8 +312,13 @@ fn construct_copy(
     brand: &Arc<ConstructionBrand>,
 ) -> Result<RequestResult, TaskError> {
     let [outputs] = exact(arguments, "`.copy`")?;
-    let outputs = eval_index_number(context.eval_context(), outputs.as_core(), "`.copy`")
-        .map_err(task_eval_error)?;
+    let outputs = eval_index_number(
+        context.eval_context(),
+        outputs.as_core(),
+        "`.copy`",
+        "copy count",
+    )
+    .map_err(task_eval_error)?;
     let port_count = outputs
         .checked_add(1)
         .ok_or_else(|| TaskError::new("`.copy` output count is too large"))?;

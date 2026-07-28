@@ -44,9 +44,8 @@ pub(super) fn eval_anno_builtin(
             Ok(super::super::strategy::spark(context, value, target))
         }
         RecognizedAnnotation::Error => {
-            let message = eval_value(context, target).map_err(|error| {
-                error.with_context(Value::binary_from_text("while evaluating error message"))
-            })?;
+            let message = eval_value(context, target)
+                .map_err(|error| error.with_context(evaluation_context_frame("error message")))?;
             Err(EvalError::from_value(message))
         }
         RecognizedAnnotation::Context {
@@ -97,7 +96,8 @@ fn recognize_annotation(
     context: &EvalContext,
     annotation: &Value,
 ) -> Result<RecognizedAnnotation, EvalError> {
-    let annotation = eval_value(context, annotation)?;
+    let annotation = eval_value(context, annotation)
+        .map_err(|error| error.with_context(evaluation_context_frame("annotation")))?;
     if let Value::Atom(atom) = &annotation {
         return Ok(recognize_simple_annotation(atom)
             .unwrap_or_else(|| RecognizedAnnotation::Unknown(format!("{annotation:?}"))));

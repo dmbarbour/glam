@@ -60,6 +60,21 @@ fn net_arity_functions_attach_to_applications_through_cursors() {
 }
 
 #[test]
+fn net_arity_contextualizes_failure_while_demanding_its_arity() {
+    let net = closed_net(|builder| builder.data(n(42)));
+    let error = apply_values(
+        &test_context(),
+        Value::Builtin(Builtin::NetArity),
+        vec![Value::error("arity computation failed"), Value::Net(net)],
+    )
+    .expect_err("failure while evaluating net arity must propagate");
+    assert_eq!(
+        failure_context_items(&error),
+        [evaluation_context_frame("net arity")]
+    );
+}
+
+#[test]
 fn observing_a_function_net_preserves_the_net_value() {
     let identity = closed_net(|builder| {
         let [application, argument, result] = builder.bind();
@@ -2778,8 +2793,75 @@ fn error_annotations_contextualize_failure_while_evaluating_their_message() {
     };
     assert_eq!(
         list_to_value_items(&test_context(), &contexts).unwrap(),
-        [Value::binary_from_text("while evaluating error message")]
+        [evaluation_context_frame("error message")]
     );
+}
+
+#[test]
+fn annotation_selection_contextualizes_only_nested_evaluation_failures() {
+    let error = eval_closed_expr(&builtin2_expr(
+        Builtin::Anno,
+        TestExpr::Value(Value::error("annotation selection failed")),
+        TestExpr::Value(n(42)),
+    ))
+    .expect_err("failure while selecting an annotation must propagate");
+    assert_eq!(
+        failure_context_items(&error),
+        [evaluation_context_frame("annotation")]
+    );
+}
+
+#[test]
+fn index_builtins_contextualize_demand_without_decorating_validation_errors() {
+    let values = Value::List(List::from_values(vec![n(42)]));
+    let nested = eval_closed_expr(&builtin2_expr(
+        Builtin::ListAt,
+        TestExpr::Value(Value::error("index computation failed")),
+        TestExpr::Value(values.clone()),
+    ))
+    .expect_err("failure while evaluating the index must propagate");
+    assert_eq!(
+        failure_context_items(&nested),
+        [evaluation_context_frame("list index")]
+    );
+
+    let validation = eval_closed_expr(&builtin2_expr(
+        Builtin::ListAt,
+        TestExpr::Value(Value::binary_from_text("not an index")),
+        TestExpr::Value(values),
+    ))
+    .expect_err("a nonnumeric index must fail validation");
+    assert_eq!(failure_context_items(&validation), []);
+}
+
+fn failure_context_items(error: &EvalError) -> Vec<Value> {
+    let diagnostic = error
+        .failure_value()
+        .expect("test error should be permanent");
+    let Value::Dict(diagnostic) = eval_value(&test_context(), &diagnostic).unwrap() else {
+        panic!("failure diagnostic must be a dictionary");
+    };
+    let message = eval_value(
+        &test_context(),
+        diagnostic
+            .get(&*keys::MSG)
+            .expect("diagnostic should define msg"),
+    )
+    .unwrap();
+    let Value::Dict(message) = message else {
+        panic!("diagnostic msg must be a dictionary");
+    };
+    let contexts = eval_value(
+        &test_context(),
+        message
+            .get(&*keys::CONTEXT)
+            .expect("diagnostic should define msg.context"),
+    )
+    .unwrap();
+    let Value::List(contexts) = contexts else {
+        panic!("msg.context must be a list");
+    };
+    list_to_value_items(&test_context(), &contexts).unwrap()
 }
 
 #[test]
@@ -2969,13 +3051,17 @@ fn reflection_gate_memoizes_task_failure() {
 
     context.fail_wait(&wait.0, "reflection task failed deliberately");
 
+    let first = eval_value(&context, &gate).unwrap_err();
+    assert_eq!(first.to_string(), "reflection task failed deliberately");
     assert_eq!(
-        eval_value(&context, &gate).unwrap_err().to_string(),
-        "reflection task failed deliberately"
+        failure_context_items(&first),
+        [evaluation_context_frame("reflection annotation")]
     );
+    let second = eval_value(&context, &gate).unwrap_err();
+    assert_eq!(second.to_string(), "reflection task failed deliberately");
     assert_eq!(
-        eval_value(&context, &gate).unwrap_err().to_string(),
-        "reflection task failed deliberately"
+        failure_context_items(&second),
+        [evaluation_context_frame("reflection annotation")]
     );
 }
 

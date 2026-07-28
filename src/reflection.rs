@@ -348,6 +348,15 @@ impl TaskError {
         Self(TaskErrorKind::Failure(failure))
     }
 
+    fn with_context(self, context: Value) -> Self {
+        match self.0 {
+            TaskErrorKind::Failure(failure) => {
+                Self::failure(Arc::new(failure.with_context(context)))
+            }
+            TaskErrorKind::Blocked(wait) => Self::blocked(wait),
+        }
+    }
+
     fn into_failure(self) -> Arc<EvaluationFailure> {
         match self.0 {
             TaskErrorKind::Failure(failure) => failure,
@@ -3987,6 +3996,35 @@ mod tests {
         (assembler, effect)
     }
 
+    fn task_error_contexts(error: &TaskError) -> Vec<Value> {
+        let diagnostic = eval::failure_diagnostic_value(error.clone().into_failure().as_ref());
+        let context = EvalContext::standalone();
+        let Value::Dict(diagnostic) = eval::eval_value(&context, &diagnostic).unwrap() else {
+            panic!("task error diagnostic must be a dictionary")
+        };
+        let message = eval::eval_value(
+            &context,
+            diagnostic
+                .get(&*keys::MSG)
+                .expect("task error diagnostic should define msg"),
+        )
+        .unwrap();
+        let Value::Dict(message) = message else {
+            panic!("task error msg must be a dictionary")
+        };
+        let contexts = eval::eval_value(
+            &context,
+            message
+                .get(&*keys::CONTEXT)
+                .expect("task error diagnostic should define msg.context"),
+        )
+        .unwrap();
+        let Value::List(contexts) = contexts else {
+            panic!("task error msg.context must be a list")
+        };
+        eval::list_to_value_items(&context, &contexts).unwrap()
+    }
+
     fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &PublicValue) {
         let actual = assembler.evaluate(actual).unwrap();
         let Value::List(actual) = actual.as_core() else {
@@ -5323,6 +5361,28 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("severity must be")
+        );
+    }
+
+    #[test]
+    fn reflection_log_contextualizes_nested_message_and_severity_failures() {
+        let (_, message_effect) =
+            compile_effect(".log 'info (anno 'error \"message construction failed\")");
+        let message_error =
+            run_reflection_test(&message_effect, Arc::new(TestHost::default())).unwrap_err();
+        assert_eq!(
+            task_error_contexts(&message_error),
+            [eval::evaluation_context_frame("log message")]
+        );
+
+        let (_, severity_effect) = compile_effect(
+            ".log (anno 'error \"severity construction failed\") { msg:{ text:\"unused\" } }",
+        );
+        let severity_error =
+            run_reflection_test(&severity_effect, Arc::new(TestHost::default())).unwrap_err();
+        assert_eq!(
+            task_error_contexts(&severity_error),
+            [eval::evaluation_context_frame("log severity")]
         );
     }
 

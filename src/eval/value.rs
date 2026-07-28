@@ -137,6 +137,10 @@ pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
         .unwrap_or_else(|_| fallback_failure_diagnostic(failure, Some(emission), contexts))
 }
 
+pub(crate) fn evaluation_context_frame(label: &str) -> Value {
+    Value::Dict(Dict::new_sync().insert((*keys::EVAL).clone(), Value::binary_from_text(label)))
+}
+
 fn fallback_failure_diagnostic(
     failure: &EvaluationFailure,
     emission: Option<Value>,
@@ -547,13 +551,15 @@ fn eval_reflection_gate_source(
     context: &EvalContext,
     gate: &crate::core::ReflectionGate,
 ) -> Result<Value, EvalError> {
-    let task = gate
-        .task(context)
-        .map_err(|error| EvalError::new(error.as_ref()))?;
+    let task = gate.task(context).map_err(|error| {
+        EvalError::new(error.as_ref())
+            .with_context(evaluation_context_frame("reflection annotation"))
+    })?;
     match context.poll_reflection_task(task) {
         EvaluationTaskPoll::Pending(wait) => Err(EvalError::blocked(CoreWaitToken(wait))),
         EvaluationTaskPoll::Complete(_) => Ok(gate.target().clone()),
-        EvaluationTaskPoll::Failed(error) => Err(EvalError::failure(error)),
+        EvaluationTaskPoll::Failed(error) => Err(EvalError::failure(error)
+            .with_context(evaluation_context_frame("reflection annotation"))),
         EvaluationTaskPoll::Cancelled => {
             Err(EvalError::new("reflection annotation task was cancelled"))
         }
@@ -682,8 +688,15 @@ pub(super) fn eval_index_number(
     context: &EvalContext,
     value: &Value,
     builtin_name: &str,
+    evaluation_label: &str,
 ) -> Result<usize, EvalError> {
-    let number = eval_number(context, value, builtin_name)?;
+    let value = eval_value(context, value)
+        .map_err(|error| error.with_context(evaluation_context_frame(evaluation_label)))?;
+    let Value::Number(number) = value else {
+        return Err(EvalError::new(format!(
+            "{builtin_name} builtin requires number values"
+        )));
+    };
     number.to_usize_if_integer().ok_or_else(|| {
         EvalError::new(format!(
             "{builtin_name} builtin requires non-negative integer indices"
