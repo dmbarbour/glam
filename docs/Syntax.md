@@ -204,10 +204,10 @@ request paths such as `'.where` and `.where` likewise remain valid. Bare
 spellings such as `where = ...`, `\where -> ...`, and an ordinary reference to
 `where` are errors.
 
-Words proposed for later syntax, including `without`, are not active `g0` keywords
-until their language-version feature is introduced. The recognized table may
-therefore vary by base language version and extension without retroactively
-changing an older version.
+Words proposed for later syntax do not become reserved until their
+language-version feature is introduced. The recognized table may therefore
+vary by base language version and extension without retroactively changing an
+older version.
 
 *Note:* Pre-release, a language version may freely adjust keywords, as reproducibility
 is not an issue yet.

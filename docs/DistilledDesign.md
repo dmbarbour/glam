@@ -28,7 +28,7 @@
 
 - First declaration: `language g0 with utf8` (fail-fast versioning). ASCII default; `#` line comments only; declarations start at column 0, continuing lines indented.
 - Names: `[a-zA-Z][a-zA-Z0-9]*` parts joined by `_`; paths dotted; expression-indexed paths `.[Expr]` / `.(ListExpr)`. 
-- Keywords: `import as module abstract using unique with without do let in where object extend self if then else match try when and or` etc. 
+- Keywords: `import as module abstract using unique with do let in where object extend self if then else match try when and or` etc.
 - `abstract Name, ...` declares externally-provided names (also enables recursive-do forward references). `unique Foo, Bar` declares scope-unique atoms from namespace paths.
 - **Object scoping**: inside objects, names bind to `self` by default; `^name` escapes one lexical level (composes: `^^name`); `as Name` gives the object a local alias instead. Local-to-local shadowing is forbidden; namespace shadowing may warn. `using Dict in Expr` treats any dict as a temporary object scope. Prior definitions via `_name` (or `_self.name`).
 - **Do notation**: supports both `Pattern <- op` and `op -> Pattern` (the latter suits vertical assembly columns); `Pattern = Expr` without `let`; applicatives `!>` / `<!`; pure pipes `|>` `<|`, function composition `>>` `<<`; no mixing opposing directions without parens.
