@@ -46,6 +46,35 @@ fn direct_assembly_sample_generates_a_runnable_hello_world_elf() {
     assert!(executed.stderr.is_empty());
 }
 
+#[test]
+fn direct_assembly_exposes_only_the_public_effect_api() {
+    let inspected = Command::new(env!("CARGO_BIN_EXE_glam"))
+        .env("GLAM_CONF", "samples/config/direct_assembly.g")
+        .env_remove("GLAM_WORKERS")
+        .arg("--script.g")
+        .arg(
+            "language g0\n\
+             import 'std\n\
+             asm.result = anno 'binary (\n\
+             \x20\x20if env.x86_64.run == {} and\n\
+             \x20\x20\x20\x20env.x86_64.continue_after == {}\n\
+             \x20\x20then \"ok\"\n\
+             \x20\x20else \"handler internals leaked\"\n\
+             )",
+        )
+        .output()
+        .expect("direct-assembly API inspection should run through glam");
+
+    assert!(
+        inspected.status.success(),
+        "inspection failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&inspected.stdout),
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    assert_eq!(inspected.stdout, b"ok");
+    assert!(inspected.stderr.is_empty());
+}
+
 fn generated_executable_path() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target")

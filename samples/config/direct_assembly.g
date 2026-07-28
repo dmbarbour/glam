@@ -6,12 +6,16 @@ import "minimal.g"
 # until `linux_x86_64.executable` interprets their instruction stream.
 object direct_standard_effects as effects with
   # `{}` is undefined and therefore cannot establish an overridable member.
-  initial_state = {initialized:()}
+  initial_state = {handler:{initialized:()}}
 
   run operation = effects.run_from effects.initial_state operation
-  run_from state operation = (operation.eff effects) state
+  run_from state operation = effects.run_with effects.api state operation
+  run_with effect_api state operation = (operation.eff effect_api) state
 
-  seq operation continuation =
+  return_effect result =
+    \state -> {result:result, state:state}
+
+  sequence_effect operation continuation =
     \state ->
       effects.continue_after
         (effects.run_from state operation)
@@ -22,17 +26,18 @@ object direct_standard_effects as effects with
       first_outcome.state
       (continuation first_outcome.result)
 
-  r result =
-    \state -> {result:result, state:state}
+  user_get path =
+    \state -> {result:state.user_state.(path), state:state}
 
-  get path =
-    \state -> {result:state.(path), state:state}
-
-  set path value =
+  user_set path value =
     \state ->
       {
         result:(),
-        state:effects.updated_state path value state
+        state:
+          effects.updated_state
+            (['user_state] ++ path)
+            value
+            state
       }
 
   updated_state path value state =
@@ -40,53 +45,94 @@ object direct_standard_effects as effects with
       [] => value
       _ => (state with { .(path) ::= \_prior -> value })
 
+  object api with
+    r result = ^effects.return_effect result
+    seq operation continuation =
+      ^effects.sequence_effect operation continuation
+    get path = ^effects.user_get path
+    set path value = ^effects.user_set path value
+
 unique direct_text_cursor, direct_rodata_cursor
 
 object direct_x86_64 as x86 extends direct_standard_effects with
-  cursor = {
-    text:^direct_text_cursor,
-    rodata:^direct_rodata_cursor
-  }
-
   initial_state := {
-    current_cursor:^direct_text_cursor,
-    cursor_order:[^direct_text_cursor, ^direct_rodata_cursor],
-    streams:{
-      [^direct_text_cursor]:[],
-      [^direct_rodata_cursor]:[]
+    handler:{
+      current_cursor:^direct_text_cursor,
+      cursor_order:[^direct_text_cursor, ^direct_rodata_cursor],
+      streams:{
+        [^direct_text_cursor]:[],
+        [^direct_rodata_cursor]:[]
+      }
     }
   }
 
+  api := object _ extends _x86.api with
+    cursor = {
+      text:^direct_text_cursor,
+      rodata:^direct_rodata_cursor
+    }
+
+    mov_u32 register immediate =
+      ^x86.emit (mov_u32:{register:register, immediate:immediate})
+
+    mov_label_u32 register label_handle =
+      ^x86.emit (
+        mov_label_u32:{register:register, label:label_handle}
+      )
+
+    xor_u32 destination source =
+      ^x86.emit (xor_u32:{destination:destination, source:source})
+
+    label label_handle = ^x86.emit (label:{handle:label_handle})
+    bytes payload = ^x86.emit (bytes:payload)
+    syscall = ^x86.emit (syscall:())
+    on cursor_handle operation =
+      ^x86.on_cursor cursor_handle operation
+
   emit instruction =
-    (
-      .get '.current_cursor >>= \cursor_handle ->
-      .get ['streams, cursor_handle] >>= \written ->
-      .set ['streams, cursor_handle] (written ++ [instruction])
-    ).eff x86
+    \state ->
+      x86.emit_at
+        state.handler.current_cursor
+        instruction
+        state
 
-  on cursor_handle operation =
-    (
-      .get '.current_cursor >>= \previous_cursor ->
-      .set '.current_cursor cursor_handle =>>
-      operation >>= \operation_result ->
-      .set '.current_cursor previous_cursor =>>
-      .r operation_result
-    ).eff x86
+  emit_at cursor_handle instruction state =
+    {
+      result:(),
+      state:
+        x86.updated_state
+          ['handler, 'streams, cursor_handle]
+          (
+            state.handler.streams.[cursor_handle] ++
+              [instruction]
+          )
+          state
+    }
 
-  mov_u32 register immediate =
-    x86.emit (mov_u32:{register:register, immediate:immediate})
+  on_cursor cursor_handle operation =
+    \state ->
+      x86.restore_cursor
+        state.handler.current_cursor
+        (
+          x86.run_from
+            (
+              x86.updated_state
+                '.handler.current_cursor
+                cursor_handle
+                state
+            )
+            operation
+        )
 
-  mov_label_u32 register label_handle =
-    x86.emit (
-      mov_label_u32:{register:register, label:label_handle}
-    )
-
-  xor_u32 destination source =
-    x86.emit (xor_u32:{destination:destination, source:source})
-
-  label label_handle = x86.emit (label:{handle:label_handle})
-  bytes payload = x86.emit (bytes:payload)
-  syscall = x86.emit (syscall:())
+  restore_cursor cursor_handle outcome =
+    {
+      result:outcome.result,
+      state:
+        x86.updated_state
+          '.handler.current_cursor
+          cursor_handle
+          outcome.state
+    }
 
   register_index register =
     match register with
@@ -165,8 +211,8 @@ object direct_x86_64 as x86 extends direct_standard_effects with
       code_address
       (
         x86.flatten_cursors
-          completed_state.cursor_order
-          completed_state.streams
+          completed_state.handler.cursor_order
+          completed_state.handler.streams
       )
 
   compile_instructions code_address instructions =
@@ -220,5 +266,5 @@ object direct_linux_x86_64 as linux with
     )
 
 extend conf.env with
-  x86_64 = ^direct_x86_64
+  x86_64 = ^direct_x86_64.api
   linux_x86_64 = ^direct_linux_x86_64

@@ -9,11 +9,16 @@ message_section = do
   .label message_label
   .bytes message
 
+prepare_message = do
+  .set '.message_length (list.len message)
+  .get '.message_length
+
 program = do
+  prepare_message -> message_length
   .mov_u32 'eax 1
   .mov_u32 'edi 1
   .mov_label_u32 'esi message_label
-  .mov_u32 'edx (list.len message)
+  .mov_u32 'edx message_length
   .syscall
   .on env.x86_64.cursor.rodata message_section
   .mov_u32 'eax 60
