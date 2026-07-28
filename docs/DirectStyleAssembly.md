@@ -224,37 +224,5 @@ flattened, encoding scans those markers to resolve label references and
 published entry points. This is intentionally simple and favors inspectability
 over performance.
 
-## Missing Authoring Tools
-
-Writing the executable sample has exposed several useful tooling targets:
-
-- A handler-level structured failure operation for invalid cursor handles,
-  duplicate symbol publication, and unresolved references. The sample
-  currently piggybacks on `assert_unit`, which preserves its context but adds
-  an irrelevant “unit expected” suffix.
-- An opt-in effect trace showing public operation dispatch and summarized
-  protected-state changes without exposing the state to the program.
-- A cursor-layout view showing fragment classes, links, stream lengths, label
-  boundaries, and published symbols before encoding.
-- A reflection view for object specifications and linearization that does not
-  force unrelated definitions.
-- `anno context:Context Expr` or an equivalent pure-evaluation diagnostic
-  context.
-- Lazy-dependency diagnostics that identify the effect and protected state
-  path involved. Storing a shared lazy payload in handler state and observing
-  another property of it later initially surfaced only as a host stack
-  overflow; the sample currently makes the intended demand explicit with
-  `seq`.
-- Better object-parent diagnostics that report the selected expression, value
-  kind, and undefined values.
-- Parser recovery for an empty-dictionary `match` pattern inside a layout
-  object body. The attempted handler validation was initially misreported as
-  “`with` must end an object declaration header”; an equivalent `if` works.
-- A referential-equality assertion before implementing shared singleton
-  sections and content-addressed constants.
-- A reusable assembly contract harness that can inspect logical fragments and
-  resolved labels without first wrapping them in an ELF file.
-- An encoder/disassembler comparison view for generated machine code.
-
-These are deliberately tracked alongside the sample: exercising the language
-as an assembly author is expected to guide the diagnostic and reflection APIs.
+The active tooling investigations exposed by this model are consolidated in
+[`docs/.tmp/AuthoringTools.md`](.tmp/AuthoringTools.md).
