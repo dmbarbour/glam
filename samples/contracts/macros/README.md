@@ -7,11 +7,13 @@ a binary packet layout; `tests/macro_protocols.rs` compiles and runs them. The
 rewrite fixture also passes replayed layout through a second macro, including
 a negative test proving that the second reader observes anchor structure.
 
-The fixtures group related macro and runtime helpers in ordinary objects.
-Macro heads select object members such as `@logic.expand`; recursive helpers
-refer through object-local aliases rather than depending on the module-level
-fixpoint. This also exercises hierarchical macro-head lookup and sharing
-object-backed helpers from macro evaluation into later assembly evaluation.
+The fixtures group related macro and runtime helpers in named top-level object
+declarations. Macro heads select object members such as `@logic.expand`;
+recursive helpers refer through object-local aliases rather than depending on
+the module-level fixpoint. The named objects also make each grammar reusable
+and extendable. These fixtures exercise hierarchical macro-head lookup and
+sharing object-backed helpers from macro evaluation into later assembly
+evaluation.
 
 ## Accepted macro heads
 

@@ -3,7 +3,7 @@ import 'std
 
 meta.macro.env = {}
 
-logic = object _ as logic_object with
+object logic as logic_object with
   facts logic_items =
     match logic_items with
       [] => []

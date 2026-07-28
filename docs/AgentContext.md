@@ -87,10 +87,14 @@ notes instead of appending history; put subsystem details in
   and reflection tasks remain local.
 - A macro helper named through an ordinary module-global reference observes
   the unsealed future module even when its definition appears textually
-  earlier. Helpers needed during expansion must be captured in a mutually
-  recursive `let`/`where` group, grouped in an object and selected through its
-  object-local alias, or deliberately selected as a prior definition. Do not
-  repair this by forcing the module fixpoint during expansion.
+  earlier. Prefer a named top-level object declaration for macro grammars and
+  select recursive helpers through its object-local alias; this also keeps the
+  grammar reusable and extendable. A mutually recursive `let`/`where` group is
+  suitable for deliberately private helpers. An explicit prior definition is
+  the remaining escape hatch. Any inheritance from a top-level macro object
+  must name the parent `_name`, not final `name`, even when the child has a
+  different name. Do not repair either dependency by forcing the module
+  fixpoint during expansion.
 - One top-level module build creates one `CompilationExecution` and propagates
   it through every input and recursive import. Macro effects use its private
   evaluation/reflection session, not assembler reasoning: heaps, tasks, and

@@ -147,10 +147,14 @@ macro-bearing declaration as `MacroDeferred` rather than parsing its
 macro-owned text or inventing a macro namespace.
 
 Macro helpers required during staged expansion must not reach back through an
-ordinary reference to the unsealed final module. Capture them in a local
-mutually recursive group or an object-local recursive namespace. Textual
-declaration order alone does not turn a final-module reference into a prior
-reference.
+ordinary reference to the unsealed final module. Prefer a named top-level
+object declaration and its object-local recursive alias, giving the helper
+grammar a reusable and extendable namespace. Use a local mutually recursive
+group only for deliberately private helpers. Textual declaration order alone
+does not turn a final-module reference into a prior reference. A replacement
+or derived macro object likewise inherits from `_name`, even when the child
+has a different name; inheriting from final `name` reintroduces the
+module-fixpoint dependency.
 
 `LayoutView` selects one next-line or hanging sibling anchor and returns the
 first dedented line without consuming it. `ExpressionContext` carries the

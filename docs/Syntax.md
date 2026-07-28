@@ -521,9 +521,9 @@ Because `.r` is concise, users can directly write `.r f <! op1 <! op2`. No need 
 
 This selects `_module.macro` or `_module.macro.path` from the module
 definitions visible before the declaration containing the invocation. The
-selected value is an effectful, bounded source rewrite. It reads normalized
+macro definition should express an effectful, local source rewrite. It reads
 source elements to its right, writes replacement elements, and disappears
-before ordinary expression parsing. Macro syntax never enters the syntax tree.
+before ordinary expression parsing.
 
 Original invocations within one declaration expand once from right to left.
 Generated source cannot contain another macro invocation or comment. Macros
@@ -531,15 +531,10 @@ preserve balanced `()`, `[]`, `{}`, and anchored layout structure, but do not
 receive an AST, raw whitespace, comments, source paths, or local binding
 access.
 
-The macro environment is supplied through `meta.macro.env`; the compiler adds
-the declared `language` value before execution. Macro output is deliberately
-non-hygienic: generated names resolve normally where placed. File-wide
-no-shadowing checks and explicit definition operators mitigate common
-accidents, while macro authors retain responsibility for generated names.
+Primary macro parameters are via effectfully reading source tokens. But macros
+also support implicit parameters via `_module.meta.macro.env`.
 
-See [Source Macros](Macros.md) for the reader/writer effect API, staging rules,
-environment shape, helper-definition conventions, diagnostics, and executable
-examples.
+See [Source Macros](Macros.md) for details.
 
 ## Annotations
 

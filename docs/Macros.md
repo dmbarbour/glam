@@ -209,7 +209,7 @@ backreferences, shorthand classes, Unicode-property classes, and the borrowed
 
 A valid nonmatch invokes `.fail`; invalid pattern syntax is an effect error.
 
-## Helper definitions and staging
+## Helper definitions and staging advice
 
 Macro expansion occurs before the current module fixpoint is sealed. An
 ordinary global reference normally denotes that future final module, even
@@ -217,63 +217,78 @@ when the referenced definition appears earlier in the file. A helper selected
 that way may therefore wait on the very module compilation that is waiting
 for the macro.
 
-Keep helpers local to the macro value instead:
+Prefer a named top-level object declaration for a reusable macro grammar:
 
-- use one `let` or `where` group for mutually recursive local helpers; or
-- place related helpers in an object and refer to members through its
-  object-local alias.
+- place the macro entry points and related helpers in the object;
+- refer to recursive members through its object-local alias; and
+- invoke the public entries through static paths such as `@words.expand`.
+
+This gives the grammar one namespace that other modules can reuse, extend, or
+override through ordinary object composition. When inheriting from a top-level 
+macro object, always spell that parent `_name`, never `name`:
+
+```g
+object specialized_words extends _words with
+  # additions and overrides
+```
+
+`_words` selects the prior definition. Unescaped `words` denotes the final
+module binding and can recreate the module-fixpoint dependency that the object
+boundary is meant to avoid.
 
 For example:
 
 ```g
-words = object _ as words_object with
-  read_all _ =
+object words with
+  read_all =
     .alt
       (.read.end =>> .r [])
       (
         .read.sep =>>
         .read.regex "[A-Za-z]+" >>= \word ->
-        words_object.read_all () >>= \rest ->
+        read_all >>= \rest ->
         .r ([word.span] ++ rest)
       )
 
   expand =
-    words_object.read_all () >>= \items ->
+    read_all >>= \items ->
     .write.data items
 
-result = @words.expand hello
+  eff = expand
+
+result = @words hello
 ```
 
-This object owns its recursive knot independently of the module-level
-fixpoint. Similarly, a local `where` group is captured directly by the macro
-effect. Use `.fix` when the fixpoint value genuinely depends on the result of
-some monadic operation other than `.r`; do not wrap ordinary recursive
-functions or effect descriptions in `.fix`.
+The top-level object owns its recursive knot independently of the module-level
+fixpoint while remaining a named, composable grammar. 
+
+Use a local `let` or `where` group when a small helper group is intentionally 
+private to one macro value. Use `.fix` or `do { abstract ... }` only if when
+a fixpoint value genuinely depends on the result of some effectful observation.
 
 An explicit prior-definition reference can also avoid the final module, but
-local groups and objects usually make the staging boundary clearer.
+top-level object declarations are the preferred reusable form.
 
-## Deliberately non-hygienic output
+## Non-hygienic macros
 
-`g0` macros are deliberately non-hygienic. Text emitted as a name is an
-ordinary `.g` name resolved where the expansion is placed. Macros receive no
-binder identities, captured references, syntax trees, fresh-name allocator,
-or placement-aware expression handles.
+`g0` macros are deliberately non-hygienic. The normal `".g"` parser interprets
+emitted texts as names, 'let', symbols such as '=', etc.. This keeps the protocol
+small.
 
-This keeps the protocol small enough for user-defined `.g` compilers to
-reimplement. The language mitigates common accidents through:
+The language mitigates common hygienic accidents through:
 
 - prohibition of local name shadowing;
 - file-wide checks against introduced and actually used global roots;
 - explicit introduction, override, and update definition operators;
 - static macro lookup independent of local bindings;
-- structural balance checks around macro input and output; and
+- structural balance checks around macro input and output;
+- macro composition at definition instead of application;
+- `using` to deliberately shadow names in scope; and
 - atomic `.write.data` for passing values and helper functions without naming
-  them in generated source.
+  or serializing them in generated source.
 
 Macro authors remain responsible for names they intentionally generate. Favor
-distinctive generated-name conventions, keep helper functions embedded as
-values where practical, and use `using` to make temporary namespaces explicit.
+distinct naming conventions or rely on `using` to scope locals.
 
 ## Inspection and examples
 

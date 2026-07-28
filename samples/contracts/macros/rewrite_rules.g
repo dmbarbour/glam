@@ -5,7 +5,7 @@ meta.macro.env = {}
 
 # This rule compiler exercises balanced inline fragments and generates a later
 # macro as embedded data.
-rules = object _ as rules_object with
+object rules as rules_object with
   fragment_group fragment_open fragment_close =
     .read.text fragment_open =>>
     rules_object.fragment_until fragment_close >>= \fragment_body_writer ->
@@ -80,7 +80,7 @@ rules = object _ as rules_object with
 
 # Try layout first, then rewind and accept an inline option. The bounded helper
 # keeps this protocol sample focused on speculative layout and anchor replay.
-layout = object _ as layout_object with
+object layout as layout_object with
   read_option _ =
     .cut (
       .alt
