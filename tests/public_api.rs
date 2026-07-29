@@ -7,7 +7,7 @@ use glam::{
     Assembler, AssemblerBuilder, CONTENT_DIGEST_ALGORITHM, ContentDigest, Diagnostic,
     DiagnosticEvent, EvaluationRuntime, Host, HostError, ImportResolver, ModuleInput,
     ReasoningStatus, RelativeSourcePath, Severity, SourceArtifact, SourceError, SourceIdentity,
-    SourceSystem, Value,
+    SourceSystem, Value, ValueKind,
 };
 
 type DiagnosticEvents = Arc<Mutex<Vec<DiagnosticEvent>>>;
@@ -45,6 +45,30 @@ fn absolute_path_text(path: impl AsRef<Path>) -> String {
         .expect("test path should become absolute")
         .display()
         .to_string()
+}
+
+fn diagnostic_contexts(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<Value> {
+    let contexts = assembler
+        .get(diagnostic.emission(), "msg.context")
+        .expect("structured evaluation failure should define msg.context");
+    assembler
+        .reflection()
+        .list_items(&contexts)
+        .expect("diagnostic contexts should form a list")
+}
+
+fn import_context<'a>(assembler: &Assembler, contexts: &'a [Value], request: &str) -> &'a Value {
+    contexts
+        .iter()
+        .find(|context| {
+            assembler
+                .get(context, "g.request.file")
+                .ok()
+                .and_then(|request| request.as_binary().map(ToOwned::to_owned))
+                .as_deref()
+                == Some(request.as_bytes())
+        })
+        .expect("diagnostic should retain its import request context")
 }
 
 #[test]
@@ -979,11 +1003,44 @@ fn imported_source_diagnostics_include_the_import_chain() {
         .build()
         .expect("the lazy imported source is not observed during module construction");
 
-    assembler
+    let error = assembler
         .binary_at(module.value(), "asm.result")
         .expect_err("observing the imported definition should compile and reject child.g");
+    let primary_contexts = diagnostic_contexts(&assembler, error.diagnostic());
+    let primary_import = import_context(&assembler, &primary_contexts, "child.g");
+    let child_origin = assembler
+        .get(primary_import, "g.origin")
+        .expect("failed child compilation should retain its opaque origin");
+    assert_eq!(child_origin.kind(), ValueKind::Opaque);
+    let inspect_origin = assembler
+        .get(&assembler.reflection_environment(), "glam.origin.inspect")
+        .expect("reflection should expose compilation-origin inspection");
+    let child_origin = assembler
+        .apply(&inspect_origin, [child_origin])
+        .and_then(|value| assembler.evaluate(&value))
+        .expect("reflection should inspect the child origin");
+    let child_source = assembler
+        .to_binary(
+            &assembler
+                .get(&child_origin, "source.file")
+                .expect("child origin should retain its source identity"),
+        )
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&child_source).ends_with("child.g"),
+        "unexpected child source: {}",
+        String::from_utf8_lossy(&child_source)
+    );
+
+    assembler
+        .binary_at(module.value(), "asm.result")
+        .expect_err("the cached imported failure should remain observable");
     let diagnostics = take_diagnostics(&diagnostics);
-    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "forcing a cached import failure must not duplicate compile diagnostics"
+    );
     let diagnostic = &diagnostics[0];
     let source_path = absolute_path_text("child.g");
     assert_eq!(diagnostic.source(), Some(source_path.as_str()));
@@ -997,6 +1054,45 @@ fn imported_source_diagnostics_include_the_import_chain() {
             .kind(),
         glam::ValueKind::List
     );
+}
+
+#[test]
+fn missing_module_and_binary_imports_retain_requesting_origin() {
+    for (declaration, request) in [
+        (
+            "import \"missing.g\" as missing\nasm.result = missing.value\n",
+            "missing.g",
+        ),
+        (
+            "import \"missing.bin\" binary as missing\nasm.result = missing\n",
+            "missing.bin",
+        ),
+    ] {
+        let sources =
+            MemorySourceSystem::new([("main.g", format!("language g0\n{declaration}").as_bytes())]);
+        let assembler = Assembler::builder()
+            .source_system(sources)
+            .build()
+            .expect("test assembler should build");
+        let module = assembler
+            .module(["missing_import"])
+            .file("main.g")
+            .build()
+            .expect("missing imports should remain lazy until observed");
+
+        let error = assembler
+            .binary_at(module.value(), "asm.result")
+            .expect_err("observing the missing import should fail");
+        let contexts = diagnostic_contexts(&assembler, error.diagnostic());
+        let context = import_context(&assembler, &contexts, request);
+        assert_eq!(
+            assembler
+                .get(context, "g.origin")
+                .expect("missing import should retain the requesting origin")
+                .kind(),
+            ValueKind::Opaque
+        );
+    }
 }
 
 #[test]

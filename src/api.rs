@@ -16,7 +16,7 @@ use bytes::Bytes;
 
 use crate::compiler::{
     BinaryFileLoader, BinaryLoadArgs, CompileContext, CompileDiagnosticEmitter, ModuleLoadArgs,
-    ModuleLoader,
+    ModuleLoader, import_failure,
 };
 use crate::core::Value as CoreValue;
 use crate::core::{
@@ -2308,18 +2308,29 @@ impl Assembler {
         args: ModuleLoadArgs,
         session: Arc<Mutex<Vec<Diagnostic>>>,
         execution: Arc<CompilationExecution>,
-    ) -> Result<CoreValue, String> {
+    ) -> Result<CoreValue, Arc<EvaluationFailure>> {
         let importer = args.importer_source.as_ref().ok_or_else(|| {
-            format!(
-                "local import `{}` cannot be loaded from a source without an import resolver",
-                args.request.as_str()
+            import_failure(
+                format!(
+                    "local import `{}` cannot be loaded from a source without an import resolver",
+                    args.request.as_str()
+                ),
+                args.request.as_str(),
+                args.importer_trace.as_deref(),
+                None,
             )
         })?;
-        let source = Arc::new(
-            importer
-                .load_relative(&args.request)
-                .map_err(|error| error.to_string())?,
-        );
+        let source = Arc::new(importer.load_relative(&args.request).map_err(|error| {
+            import_failure(
+                format!(
+                    "local import `{}` could not be loaded: {error}",
+                    args.request.as_str()
+                ),
+                args.request.as_str(),
+                args.importer_trace.as_deref(),
+                Some(importer),
+            )
+        })?);
         let module_loader = self.module_loader(session.clone(), execution.clone());
         let binary_loader = self.binary_loader();
         let had_errors = Arc::new(AtomicBool::new(false));
@@ -2347,33 +2358,53 @@ impl Assembler {
             .with_local_binary_loader(binary_loader)
             .with_compilation_execution(execution)
             .with_diagnostic_emitter(self.compile_diagnostic_emitter(
-                trace,
+                trace.clone(),
                 session,
                 had_errors.clone(),
             ));
         let definitions = compile_source(source.bytes(), &context);
 
         if had_errors.load(Ordering::Relaxed) {
-            Err(format!(
-                "local import `{}` failed to compile",
-                source.identity().label()
+            Err(import_failure(
+                format!(
+                    "local import `{}` failed to compile",
+                    source.identity().label()
+                ),
+                args.request.as_str(),
+                Some(&trace),
+                Some(&source),
             ))
         } else {
             Ok(definitions)
         }
     }
 
-    fn load_local_binary(&self, args: BinaryLoadArgs) -> Result<CoreValue, String> {
+    fn load_local_binary(&self, args: BinaryLoadArgs) -> Result<CoreValue, Arc<EvaluationFailure>> {
         let importer = args.importer_source.as_ref().ok_or_else(|| {
-            format!(
-                "binary import `{}` cannot be loaded from a source without an import resolver",
-                args.request.as_str()
+            import_failure(
+                format!(
+                    "binary import `{}` cannot be loaded from a source without an import resolver",
+                    args.request.as_str()
+                ),
+                args.request.as_str(),
+                args.importer_trace.as_deref(),
+                None,
             )
         })?;
         importer
             .load_relative(&args.request)
             .map(|artifact| CoreValue::Binary(artifact.bytes().clone()))
-            .map_err(|error| error.to_string())
+            .map_err(|error| {
+                import_failure(
+                    format!(
+                        "binary import `{}` could not be loaded: {error}",
+                        args.request.as_str()
+                    ),
+                    args.request.as_str(),
+                    args.importer_trace.as_deref(),
+                    Some(importer),
+                )
+            })
     }
 
     fn seal_module(&self, context: &CompileContext, definitions: &CoreValue) -> CoreValue {
