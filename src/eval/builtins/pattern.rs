@@ -221,6 +221,7 @@ fn pattern_value_key(context: &EvalContext, value: &Value) -> Result<Option<Key>
         | Value::PartialBuiltin(_)
         | Value::Function(_)
         | Value::Net(_)
+        | Value::Metadata(_)
         | Value::Opaque(_) => None,
         Value::Lazy(_) | Value::Promised(_) => {
             unreachable!("eval_value removes suspended values")

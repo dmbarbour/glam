@@ -184,6 +184,7 @@ impl Value {
             }
             CoreValue::Net(_) => ValueKind::Net,
             CoreValue::Lazy(_) | CoreValue::Promised(_) => ValueKind::Lazy,
+            CoreValue::Metadata(_) => ValueKind::Sealed,
             CoreValue::Opaque(_) => ValueKind::Opaque,
         }
     }
@@ -357,6 +358,7 @@ pub enum ValueKind {
     Function,
     Net,
     Lazy,
+    Sealed,
     Opaque,
 }
 
@@ -2478,6 +2480,7 @@ impl Assembler {
             | CoreValue::Net(_)
             | CoreValue::Builtin(_)
             | CoreValue::PartialBuiltin(_)
+            | CoreValue::Metadata(_)
             | CoreValue::Opaque(_) => Err(Error::new(format!("`{label}` is not binary text data"))),
         }
     }
@@ -2521,6 +2524,7 @@ impl Assembler {
             | CoreValue::Function(_)
             | CoreValue::Builtin(_)
             | CoreValue::PartialBuiltin(_)
+            | CoreValue::Metadata(_)
             | CoreValue::Opaque(_) => {
                 return Err(Error::new(format!("`{label}` is not binary list data")));
             }
@@ -2758,6 +2762,16 @@ mod tests {
             .expect("the origin capability should inspect compilation origins");
 
         assert_eq!(projected.as_core(), &trace.origin_value());
+    }
+
+    #[test]
+    fn public_values_describe_metadata_carriers_only_as_sealed() {
+        let value = Value::from_core(CoreValue::metadata_carrier(CoreValue::binary_from_text(
+            "private trace",
+        )));
+
+        assert_eq!(value.kind(), ValueKind::Sealed);
+        assert_eq!(format!("{value:?}"), "Value { kind: Sealed, .. }");
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::any::Any;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use bytes::Bytes;
 use internment::Intern;
@@ -559,6 +559,7 @@ impl Key {
             | Value::Net(_)
             | Value::Lazy(_)
             | Value::Promised(_)
+            | Value::Metadata(_)
             | Value::Opaque(_) => None,
         }
     }
@@ -598,7 +599,7 @@ impl fmt::Debug for Key {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Value {
     Atom(Atom),
     Number(Number),
@@ -616,10 +617,74 @@ pub enum Value {
     Lazy(LazyValue),
     /// A named one-write hole whose assignment may itself be deferred.
     Promised(PromisedValue),
+    /// A sealed unit carrier whose associated Glam metadata is available only
+    /// to privileged reflection operations.
+    Metadata(MetadataCarrier),
     /// Host-owned identity whose representation is deliberately unavailable to
     /// Glam programs. Clones retain the payload and compare by identity.
     Opaque(OpaqueValue),
 }
+
+impl fmt::Debug for Value {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Atom(value) => formatter.debug_tuple("Atom").field(value).finish(),
+            Self::Number(value) => formatter.debug_tuple("Number").field(value).finish(),
+            Self::Binary(value) => formatter.debug_tuple("Binary").field(value).finish(),
+            Self::List(value) => formatter.debug_tuple("List").field(value).finish(),
+            Self::Dict(value) => formatter.debug_tuple("Dict").field(value).finish(),
+            Self::Builtin(value) => formatter.debug_tuple("Builtin").field(value).finish(),
+            Self::PartialBuiltin(value) => formatter
+                .debug_tuple("PartialBuiltin")
+                .field(value)
+                .finish(),
+            Self::Function(value) => formatter.debug_tuple("Function").field(value).finish(),
+            Self::Net(value) => formatter.debug_tuple("Net").field(value).finish(),
+            Self::Lazy(value) => formatter.debug_tuple("Lazy").field(value).finish(),
+            Self::Promised(value) => formatter.debug_tuple("Promised").field(value).finish(),
+            Self::Metadata(_) => formatter.write_str("Sealed(..)"),
+            Self::Opaque(value) => formatter.debug_tuple("Opaque").field(value).finish(),
+        }
+    }
+}
+
+/// A sealed unit carrier with reflection-only associated Glam metadata.
+///
+/// Pointer equality exists only to support Rust's internal value containers.
+/// Ordinary Glam comparison rejects the carrier rather than exposing identity.
+#[derive(Clone)]
+pub struct MetadataCarrier {
+    metadata: Arc<Value>,
+}
+
+impl MetadataCarrier {
+    fn new(metadata: Value) -> Self {
+        Self {
+            metadata: Arc::new(metadata),
+        }
+    }
+
+    fn associated_metadata(&self) -> Value {
+        self.metadata.as_ref().clone()
+    }
+}
+
+impl fmt::Debug for MetadataCarrier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MetadataCarrier(..)")
+    }
+}
+
+impl PartialEq for MetadataCarrier {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.metadata, &other.metadata)
+    }
+}
+
+impl Eq for MetadataCarrier {}
+
+static INITIAL_METADATA_CARRIER: LazyLock<Value> =
+    LazyLock::new(|| Value::Metadata(MetadataCarrier::new(Value::Dict(Dict::new_sync()))));
 
 /// Type-erased storage for internal handles that must participate in ordinary
 /// [`Value`] ownership without exposing forgeable identifiers to Glam code.
@@ -1103,6 +1168,7 @@ impl Value {
             Self::Builtin(_) | Self::PartialBuiltin(_) | Self::Function(_) => "Function",
             Self::Net(_) => "Net",
             Self::Lazy(_) | Self::Promised(_) => "Lazy",
+            Self::Metadata(_) => "Sealed",
             Self::Opaque(_) => "Opaque",
         }
     }
@@ -1124,6 +1190,27 @@ impl Value {
 
     pub(crate) fn reflection_gate(effect: Value, target: Value) -> Self {
         Self::Lazy(LazyValue::from_reflection_gate(effect, target))
+    }
+
+    /// Constructs a sealed unit carrier with reflection-only metadata.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn metadata_carrier(metadata: Value) -> Self {
+        Self::Metadata(MetadataCarrier::new(metadata))
+    }
+
+    /// Returns the canonical carrier whose associated metadata is `{}`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn initial_metadata_carrier() -> Self {
+        INITIAL_METADATA_CARRIER.clone()
+    }
+
+    /// Returns a sealed carrier's associated metadata for privileged clients.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn associated_metadata(&self) -> Option<Value> {
+        match self {
+            Self::Metadata(carrier) => Some(carrier.associated_metadata()),
+            _ => None,
+        }
     }
 
     /// Constructs a builtin value at a specific curried stage without
@@ -1168,6 +1255,7 @@ impl Value {
                 | Value::PartialBuiltin(_)
                 | Value::Lazy(_)
                 | Value::Promised(_)
+                | Value::Metadata(_)
                 | Value::Opaque(_) => None,
             },
         }
@@ -1315,6 +1403,48 @@ mod tests {
     }
 
     #[test]
+    fn metadata_carriers_hide_unit_and_associated_metadata() {
+        let first = Value::initial_metadata_carrier();
+        let second = Value::initial_metadata_carrier();
+        let Value::Metadata(first_carrier) = &first else {
+            panic!("initial metadata value should be a sealed carrier");
+        };
+        let Value::Metadata(second_carrier) = &second else {
+            panic!("initial metadata value should be a sealed carrier");
+        };
+
+        assert!(
+            Arc::ptr_eq(&first_carrier.metadata, &second_carrier.metadata),
+            "initial metadata carriers should share one allocation"
+        );
+        assert_ne!(first, *keys::UNIT_VALUE);
+        assert_eq!(
+            first.associated_metadata(),
+            Some(Value::Dict(Dict::new_sync()))
+        );
+        assert_eq!(Key::from_value(&first), None);
+        assert_eq!(first.diagnostic_kind_name(), "Sealed");
+
+        let private = Value::metadata_carrier(Value::binary_from_text("hidden metadata"));
+        assert_eq!(format!("{private:?}"), "Sealed(..)");
+        assert!(!format!("{private:?}").contains("hidden metadata"));
+    }
+
+    #[test]
+    fn metadata_carriers_transport_through_ordinary_containers() {
+        let carrier = Value::initial_metadata_carrier();
+        let list = Value::List(List::from_values(vec![carrier.clone()]));
+        let dict =
+            Value::Dict(Dict::new_sync().insert(Key::atom_from_text("trace"), carrier.clone()));
+
+        assert_eq!(list, Value::List(List::from_values(vec![carrier.clone()])));
+        assert_eq!(
+            dict.get_key_path(&[Key::atom_from_text("trace")]),
+            Some(&carrier)
+        );
+    }
+
+    #[test]
     fn semantic_values_can_hold_lazy_errors() {
         let value = Value::error("ambiguous key");
 
@@ -1329,10 +1459,17 @@ mod tests {
         let promise = PromisedValue::new("promised field");
         let container =
             Value::Dict(Dict::new_sync().insert(Key::atom_from_text("field"), field.clone()));
+        let sealed = Value::initial_metadata_carrier();
 
         let evaluated = EvaluatedValue::try_from(container.clone())
             .expect("a container with a lazy field is in outer WHNF");
         assert_eq!(evaluated.into_value(), container);
+        assert_eq!(
+            EvaluatedValue::try_from(sealed.clone())
+                .expect("a sealed carrier is already in outer WHNF")
+                .into_value(),
+            sealed
+        );
         assert!(matches!(
             EvaluatedValue::try_from(field),
             Err(Value::Lazy(_))

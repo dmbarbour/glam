@@ -295,6 +295,7 @@ pub(super) fn lower_core_callable(
         | Value::Binary(_)
         | Value::List(_)
         | Value::Function(_)
+        | Value::Metadata(_)
         | Value::Opaque(_)) => Err(non_callable_error(&value)),
         Value::Lazy(_) | Value::Promised(_) => {
             unreachable!("callable value shell must be fully forced")

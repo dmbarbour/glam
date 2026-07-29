@@ -1743,6 +1743,7 @@ fn diagnostic_value_kind(value: &Value) -> &'static str {
         glam::ValueKind::Function => "Function",
         glam::ValueKind::Net => "Net",
         glam::ValueKind::Lazy => "Lazy",
+        glam::ValueKind::Sealed => "Sealed",
         glam::ValueKind::Opaque => "Opaque",
         _ => "Value",
     }

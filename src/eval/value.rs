@@ -551,6 +551,7 @@ pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, 
         | Value::Net(_)
         | Value::Lazy(_)
         | Value::Promised(_)
+        | Value::Metadata(_)
         | Value::Opaque(_) => Err(EvaluationHalt::new(
             "dictionary keys must evaluate to keyable values",
         )),

@@ -97,6 +97,9 @@ fn compare_ordered_values(
         (Value::Opaque(_), _) | (_, Value::Opaque(_)) => Err(EvaluationHalt::new(format!(
             "{name} builtin cannot compare opaque values"
         ))),
+        (Value::Metadata(_), _) | (_, Value::Metadata(_)) => Err(EvaluationHalt::new(format!(
+            "{name} builtin cannot compare sealed values"
+        ))),
         (left, right) => Err(EvaluationHalt::new(format!(
             "{name} builtin cannot order values {left:?} and {right:?}"
         ))),
@@ -168,6 +171,9 @@ fn equal_values(
         ))),
         (Value::Opaque(left), Value::Opaque(right)) => Ok(left == right),
         (Value::Opaque(_), _) | (_, Value::Opaque(_)) => Ok(false),
+        (Value::Metadata(_), _) | (_, Value::Metadata(_)) => Err(EvaluationHalt::new(format!(
+            "{name} builtin cannot compare sealed values"
+        ))),
         (Value::Atom(_), _)
         | (Value::Number(_), _)
         | (Value::Binary(_), _)

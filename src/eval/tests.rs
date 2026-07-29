@@ -1759,6 +1759,81 @@ fn equality_errors_when_dictionary_comparison_reaches_functions() {
 }
 
 #[test]
+fn ordinary_observers_do_not_unseal_metadata_carriers() {
+    let carrier = Value::initial_metadata_carrier();
+
+    for builtin in [Builtin::Equal, Builtin::NotEqual, Builtin::Greater] {
+        let error = eval_closed_expr(&builtin2_expr(
+            builtin,
+            TestExpr::Value(carrier.clone()),
+            TestExpr::Value(carrier.clone()),
+        ))
+        .expect_err("comparison must not expose sealed carrier identity");
+        assert!(
+            error.to_string().contains("cannot compare sealed values"),
+            "{error}"
+        );
+    }
+
+    assert!(
+        run_pattern_equal((*keys::UNIT_VALUE).clone(), carrier.clone())
+            .expect("a sealed carrier should be an ordinary pattern mismatch")
+            .is_empty()
+    );
+    for builtin in [Builtin::PatternIsList, Builtin::PatternIsDict] {
+        assert!(
+            run_pattern_builtin(builtin, carrier.clone())
+                .expect("sealed carriers should mismatch ordinary shape patterns")
+                .is_empty()
+        );
+    }
+
+    let unit_error = eval_closed_expr(&builtin3_expr(
+        Builtin::AssertUnit,
+        TestExpr::Value(Value::binary_from_text("sealed result")),
+        TestExpr::Value(carrier.clone()),
+        TestExpr::Value(n(42)),
+    ))
+    .expect_err("a sealed unit carrier must not satisfy a unit assertion");
+    assert_eq!(
+        unit_error.to_string(),
+        "sealed result: unit expected, received Sealed"
+    );
+
+    let application_error = apply_value(&test_context(), carrier.clone(), n(0))
+        .expect_err("a sealed unit carrier must not be callable");
+    assert_eq!(
+        application_error.to_string(),
+        "application requires a function value, received Sealed"
+    );
+    let Err(net_call_error) = lower_core_callable(&test_context(), carrier.clone()) else {
+        panic!("an interaction-net call must not unseal metadata");
+    };
+    assert_eq!(
+        net_call_error.to_string(),
+        "application requires a function value, received Sealed"
+    );
+
+    let key_error = value_to_key(&test_context(), &carrier)
+        .expect_err("a sealed unit carrier must not become a dictionary key");
+    assert_eq!(
+        key_error.to_string(),
+        "dictionary keys must evaluate to keyable values"
+    );
+}
+
+#[test]
+fn binary_validation_does_not_disclose_sealed_metadata() {
+    let hidden = Value::metadata_carrier(Value::binary_from_text("private trace"));
+    let list = List::from_values(vec![hidden]);
+
+    let error =
+        list_output_bytes(&test_context(), &list).expect_err("sealed values are not binary bytes");
+    assert!(error.to_string().contains("got Sealed(..)"), "{error}");
+    assert!(!error.to_string().contains("private trace"), "{error}");
+}
+
+#[test]
 fn evaluates_extended_math_builtins() {
     let floor = eval_closed_expr(&builtin1_expr(
         Builtin::Floor,
