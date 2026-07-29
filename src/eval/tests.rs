@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bytes::Bytes;
 
@@ -63,7 +63,7 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
     let failure_signal = DropSignal(failure_dropped.clone());
     let failure = LazyValue::deferred("failed source release", move |_| {
         let _keep_signal_captured = &failure_signal;
-        Err("expected lazy failure".to_owned())
+        Err(EvalError::new("expected lazy failure"))
     });
 
     let error = eval_lazy(&context, &failure).expect_err("lazy source should fail");
@@ -414,6 +414,104 @@ fn promised_values_fail_fast_without_poisoning_later_assignment() {
     assert_eq!(promised.assignment(), None);
     promised.set(n(42)).unwrap();
     assert_eq!(eval_value(&test_context(), &value).unwrap(), n(42));
+}
+
+#[test]
+fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
+    let session = test_context();
+    let owner = session.with_new_task().unwrap();
+    let observer = session.with_new_task().unwrap();
+    let promise = PromisedValue::fixpoint(&owner, "deferred computation input").unwrap();
+    let promised_value = Value::Promised(promise.clone());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted_attempts = attempts.clone();
+    let lazy = LazyValue::deferred("promise-demanding deferred computation", move |context| {
+        counted_attempts.fetch_add(1, Ordering::SeqCst);
+        eval_value(context, &promised_value)
+    });
+    let value = Value::Lazy(lazy.clone());
+
+    let blocked =
+        eval_value(&observer, &value).expect_err("the unresolved input promise should block");
+    assert!(blocked.blocked_on().is_some());
+    assert!(
+        lazy.cached().is_none(),
+        "a retryable deferred error must not poison the terminal lazy cache"
+    );
+    assert!(
+        session.lazy_failure(&lazy).is_none(),
+        "the scheduler must not record a permanent lazy failure while its input may change"
+    );
+
+    promise.set(n(42)).unwrap();
+    assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
+    assert!(
+        attempts.load(Ordering::SeqCst) >= 2,
+        "resuming the producer should retry the deferred computation"
+    );
+
+    let completed_attempts = attempts.load(Ordering::SeqCst);
+    assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        completed_attempts,
+        "the successful terminal cache should prevent another thunk invocation"
+    );
+}
+
+#[test]
+fn deferred_computation_caches_one_structured_failure() {
+    let context = test_context();
+    let detail = Key::atom_from_text("detail");
+    let emission = Value::Dict(
+        Dict::new_sync()
+            .insert(
+                (*keys::MSG).clone(),
+                Value::Dict(Dict::new_sync().insert(
+                    (*keys::TEXT).clone(),
+                    Value::binary_from_text("structured deferred failure"),
+                )),
+            )
+            .insert(detail.clone(), n(7)),
+    );
+    let frame = evaluation_context_frame("deferred_test");
+    let thunk_emission = emission.clone();
+    let thunk_frame = frame.clone();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted_attempts = attempts.clone();
+    let lazy = LazyValue::deferred("structured deferred failure", move |_| {
+        counted_attempts.fetch_add(1, Ordering::SeqCst);
+        Err(EvalError::from_value(thunk_emission.clone()).with_context(thunk_frame.clone()))
+    });
+    let value = Value::Lazy(lazy.clone());
+
+    let error =
+        eval_value(&context, &value).expect_err("the deferred computation should fail permanently");
+    let observed_failure = error.into_permanent_failure();
+    let cached_failure = lazy
+        .cached()
+        .expect("a permanent deferred failure should be cached")
+        .expect_err("the cached result should be the failure");
+
+    assert!(Arc::ptr_eq(&observed_failure, &cached_failure));
+    assert_eq!(cached_failure.emission_value(), Some(&emission));
+    assert_eq!(cached_failure.contexts(), [frame]);
+    let Value::Dict(diagnostic) = failure_diagnostic_value(&cached_failure) else {
+        panic!("a structured failure should project to a diagnostic dictionary")
+    };
+    assert_eq!(diagnostic.get(&detail), Some(&n(7)));
+
+    assert_eq!(
+        eval_value(&context, &value)
+            .expect_err("the cached value should remain failed")
+            .into_permanent_failure(),
+        cached_failure
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "a cached permanent failure must not invoke its thunk again"
+    );
 }
 
 #[test]

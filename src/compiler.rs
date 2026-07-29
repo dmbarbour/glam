@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::api::CompilationExecution;
 use crate::core::{Atom, Dict, Key, PromisedValue, Value, keys};
 use crate::diagnostic::{CompilationTrace, Severity};
+use crate::eval::EvalError;
 use crate::source::{RelativeSourcePath, SourceArtifact};
 
 pub(crate) type ModuleLoader = Arc<dyn Fn(ModuleLoadArgs) -> Result<Value, String> + Send + Sync>;
@@ -206,12 +207,12 @@ impl CompileContext {
 
         Value::deferred(label, move |_| {
             let Some(loader) = &loader else {
-                return Err(format!(
+                return Err(EvalError::new(format!(
                     "local import `{}` cannot be loaded without a module loader",
                     args.request.as_str()
-                ));
+                )));
             };
-            loader(args.clone())
+            loader(args.clone()).map_err(EvalError::new)
         })
     }
 
@@ -229,12 +230,12 @@ impl CompileContext {
 
         Value::deferred(label, move |_| {
             let Some(loader) = &loader else {
-                return Err(format!(
+                return Err(EvalError::new(format!(
                     "binary import `{}` cannot be loaded without a binary loader",
                     args.request.as_str()
-                ));
+                )));
             };
-            loader(args.clone())
+            loader(args.clone()).map_err(EvalError::new)
         })
     }
 

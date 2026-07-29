@@ -65,7 +65,7 @@ mod tests {
         let forced_by_thunk = forced.clone();
         let selected = Value::deferred("selected conditional result", move |_| {
             forced_by_thunk.store(true, Ordering::Relaxed);
-            Err("selected result was forced".to_owned())
+            Err(EvalError::new("selected result was forced"))
         });
 
         let result = select(Builtin::IfResult, vec![selected])

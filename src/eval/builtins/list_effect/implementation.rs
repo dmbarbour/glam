@@ -125,12 +125,7 @@ fn deferred_list(
     thunk: impl Fn(&EvalContext) -> Result<List, EvalError> + Send + Sync + 'static,
 ) -> List {
     List::from_thunk(
-        LazyValue::deferred(label, move |context| {
-            thunk(context)
-                .map(Value::List)
-                .map_err(|err| err.to_string())
-        })
-        .into(),
+        LazyValue::deferred(label, move |context| thunk(context).map(Value::List)).into(),
     )
 }
 

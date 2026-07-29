@@ -3144,7 +3144,7 @@ mod tests {
             );
 
             let lazy = LazyValue::deferred(format!("failed lazy {index}"), |_| {
-                Err("long-lived lazy failure".to_owned())
+                Err(crate::eval::EvalError::new("long-lived lazy failure"))
             });
             assert!(
                 crate::eval::eval_value(&context, &Value::Lazy(lazy)).is_err(),

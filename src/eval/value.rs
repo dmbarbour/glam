@@ -33,7 +33,7 @@ enum EvalErrorKind {
 }
 
 impl EvalError {
-    pub(super) fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self::failure(Arc::new(EvaluationFailure::message(message.into())))
     }
 
@@ -504,7 +504,7 @@ fn produce_lazy_source(
             "initialized lazy errors must be returned from their result cache",
         )),
         LazySource::ComputedFixpoint(fixpoint) => eval_computed_fixpoint(context, lazy, fixpoint),
-        LazySource::Deferred(thunk) => thunk(context).map_err(EvalError::new),
+        LazySource::Deferred(thunk) => thunk(context),
         LazySource::ReflectionGate(gate) => eval_reflection_gate_source(context, gate),
         LazySource::Access { path, arguments } => resolve_core_access(context, arguments, path),
         LazySource::Application(application) => apply_values(
