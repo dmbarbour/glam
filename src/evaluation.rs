@@ -1028,6 +1028,10 @@ impl EvalContext {
         self.task.get_or_init(allocate_task_id).clone()
     }
 
+    pub(crate) fn session_id(&self) -> EvaluationSessionId {
+        self.session.id
+    }
+
     pub(crate) fn register_promise(
         &self,
         result: &Arc<OnceLock<Result<Value, Arc<str>>>>,
@@ -1416,6 +1420,15 @@ impl EvalContext {
             tasks.unacknowledged_failures.remove_mut(&task.id);
         }
         true
+    }
+
+    pub(crate) fn acknowledge_task_failure(&self, task: EvaluationTaskId) {
+        self.session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned")
+            .unacknowledged_failures
+            .remove_mut(&task);
     }
 
     pub(crate) fn poll_wait(&self, wait: &EvaluationWaitToken) -> EvaluationTaskPoll {

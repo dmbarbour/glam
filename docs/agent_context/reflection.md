@@ -147,7 +147,11 @@ and control flow.
 - Reasoning drain has no timeout or step limit. It includes newly launched
   tasks and ends only when all tasks are terminal or one stable pass proves
   deadlock. Failures, known wait dependencies, and retryably blocked errors
-  remain in its report.
+  remain in its report. A reported `ReasoningFailure` is an opaque capability
+  bound to its originating assembler session:
+  `Assembler::acknowledge_reasoning_failure` is idempotent, accepts assembler
+  clones, rejects foreign sessions, and removes only the reporting-ledger
+  entry. It does not alter the task's terminal result.
 
 ## Front-End and Logger Integration
 

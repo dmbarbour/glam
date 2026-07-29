@@ -41,7 +41,11 @@ retain only unresolved deferred producers and nonterminal reflection tasks.
 Reflection task handles own their shared terminal wait cells, so completion,
 failure, and cancellation remain observable after the active record and
 task-ID index are retired. An unacknowledged failure also leaves one minimal
-session-ledger entry until `.task.ack_error` removes it.
+session-ledger entry until `.task.ack_error` removes it. Rust clients receive
+the corresponding opaque, session-bound `ReasoningFailure` from
+`Assembler::drain_reasoning` and may remove the same entry with
+`Assembler::acknowledge_reasoning_failure`. Acknowledgement through either
+surface leaves the terminal result unchanged.
 
 ### Scheduler State Ownership
 

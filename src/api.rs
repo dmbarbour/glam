@@ -24,8 +24,8 @@ use crate::core_net::CoreSpecialization;
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
 use crate::evaluation::{
-    EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionRun,
-    EvaluationUnfinishedState,
+    EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionId, EvaluationSessionRun,
+    EvaluationTaskId, EvaluationUnfinishedState,
 };
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -1376,15 +1376,26 @@ pub enum ReasoningStatus {
     Deadlocked,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReasoningFailure {
-    task_id: u64,
+    task: EvaluationTaskId,
     message: Arc<str>,
+    session: EvaluationSessionId,
+}
+
+impl fmt::Debug for ReasoningFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReasoningFailure")
+            .field("task_id", &self.task_id())
+            .field("message", &self.message)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ReasoningFailure {
     pub fn task_id(&self) -> u64 {
-        self.task_id
+        self.task.get()
     }
 
     pub fn message(&self) -> &str {
@@ -1915,7 +1926,9 @@ impl Assembler {
     /// Runs scheduled reflection reasoning without imposing a step or time
     /// limit. A runnable infinite task therefore keeps this call running.
     pub fn drain_reasoning(&self) -> ReasoningReport {
-        let run = self.eval_context().run_until_quiescent();
+        let context = self.eval_context();
+        let session = context.session_id();
+        let run = context.run_until_quiescent();
         let (status, report) = match run {
             EvaluationSessionRun::Complete(report) => (ReasoningStatus::Complete, report),
             EvaluationSessionRun::Quiescent(report) => (ReasoningStatus::Quiescent, report),
@@ -1927,8 +1940,9 @@ impl Assembler {
                 .failures
                 .iter()
                 .map(|(task, error)| ReasoningFailure {
-                    task_id: task.get(),
+                    task: *task,
                     message: error.legacy_message(),
+                    session,
                 })
                 .collect(),
             unfinished: report
@@ -1951,6 +1965,24 @@ impl Assembler {
                 })
                 .collect(),
         }
+    }
+
+    /// Acknowledges a failed task previously returned by
+    /// [`Self::drain_reasoning`].
+    ///
+    /// Acknowledgement removes the failure from later reasoning reports but
+    /// does not change the task's terminal result. Repeated acknowledgement is
+    /// harmless. A report from another assembler reasoning session is rejected
+    /// even when both assemblers share the same execution runtime.
+    pub fn acknowledge_reasoning_failure(&self, failure: &ReasoningFailure) -> Result<(), Error> {
+        let context = self.eval_context();
+        if context.session_id() != failure.session {
+            return Err(Error::new(
+                "reasoning failure belongs to a different assembler session",
+            ));
+        }
+        context.acknowledge_task_failure(failure.task);
+        Ok(())
     }
 
     /// Installs another retained diagnostic subscription
@@ -2496,6 +2528,17 @@ impl ModuleBuilder<'_> {
 mod tests {
     use super::*;
     use crate::core::{OpaqueValue, keys};
+    use crate::evaluation::{EvaluationMachinePoll, EvaluationTaskMachine, EvaluationTaskPoll};
+
+    struct FailedReasoningTask;
+
+    impl EvaluationTaskMachine for FailedReasoningTask {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            EvaluationMachinePoll::Failed(Arc::new(crate::core::EvaluationFailure::message(
+                "public reasoning failure",
+            )))
+        }
+    }
 
     fn test_compilation_trace(source: &str) -> CompilationTrace {
         let source =
@@ -2898,6 +2941,56 @@ mod tests {
             .expect("dormant runtime should activate");
         assert_eq!(runtime.worker_threads(), 1);
         assert!(runtime.activate_workers(1).is_err());
+    }
+
+    #[test]
+    fn reasoning_failure_acknowledgement_is_idempotent_and_session_bound() {
+        let runtime = EvaluationRuntime::new(0).expect("dormant runtime should build");
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("assembler should build");
+        let foreign = Assembler::builder()
+            .evaluation_runtime(runtime)
+            .build()
+            .expect("foreign assembler should build");
+        let task = assembler
+            .eval_context()
+            .schedule_task(|_| Ok(Box::new(FailedReasoningTask)))
+            .expect("failing task should schedule");
+
+        let report = assembler.drain_reasoning();
+        assert_eq!(report.status(), ReasoningStatus::Complete);
+        let [failure] = report.failures() else {
+            panic!("drain should report exactly one task failure")
+        };
+        assert_eq!(failure.task_id(), task.id().get());
+        assert_eq!(failure.message(), "public reasoning failure");
+        let failure = failure.clone();
+
+        let error = foreign
+            .acknowledge_reasoning_failure(&failure)
+            .expect_err("a foreign assembler must reject the acknowledgement capability");
+        assert!(error.to_string().contains("different assembler session"));
+        assert_eq!(
+            assembler.drain_reasoning().failures(),
+            std::slice::from_ref(&failure),
+            "foreign acknowledgement must not alter the originating ledger"
+        );
+
+        assembler
+            .clone()
+            .acknowledge_reasoning_failure(&failure)
+            .expect("an assembler clone should share the originating session");
+        assembler
+            .acknowledge_reasoning_failure(&failure)
+            .expect("repeated acknowledgement should be harmless");
+        assert!(assembler.drain_reasoning().failures().is_empty());
+        assert!(matches!(
+            assembler.eval_context().poll_reflection_task(&task),
+            EvaluationTaskPoll::Failed(error)
+                if error.to_string() == "public reasoning failure"
+        ));
     }
 
     #[test]
