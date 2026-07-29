@@ -248,6 +248,16 @@ impl Value {
 /// Completion wakes only the evaluation session belonging to the
 /// [`Assembler`] that created the promise. If the value is shared with other
 /// assemblers, the client is responsible for pumping those sessions.
+///
+/// The resolver is consumed by every terminal operation, so attempting to
+/// complete the same public promise twice is a compile-time error:
+///
+/// ```compile_fail
+/// let assembler = glam::Assembler::default();
+/// let (_, resolver) = assembler.promise("host input");
+/// resolver.resolve(glam::Value::integer(1)).unwrap();
+/// resolver.fail_message("too late").unwrap();
+/// ```
 #[must_use = "dropping an unresolved promise resolver fails its value"]
 pub struct PromiseResolver {
     promise: Option<PromisedValue>,

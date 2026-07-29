@@ -193,10 +193,17 @@ fn public_promise_resolver_can_fail_or_be_abandoned() {
 fn public_promise_resolver_preserves_structured_failures() {
     let assembler = Assembler::default();
     let (failed, resolver) = assembler.promise("structured failure");
+    let context = Value::record([(
+        "host",
+        Value::record([("operation", Value::atom_from_text("read"))]),
+    )]);
     let failure = Value::record([
         (
             "msg",
-            Value::record([("text", Value::text("host operation failed structurally"))]),
+            Value::record([
+                ("text", Value::text("host operation failed structurally")),
+                ("context", Value::list([context.clone()])),
+            ]),
         ),
         ("detail", Value::integer(7)),
     ]);
@@ -216,6 +223,63 @@ fn public_promise_resolver_preserves_structured_failures() {
             .as_i64(),
         Some(7)
     );
+    assert_eq!(
+        diagnostic_contexts(&assembler, error.diagnostic()),
+        [context],
+        "the resolver must preserve existing structured diagnostic context"
+    );
+}
+
+#[test]
+fn public_promise_completion_resumes_blocked_reasoning_in_its_session() {
+    let mut resolver = None;
+    let (builder, diagnostics) = collecting_builder();
+    let assembler = builder
+        .reflection_environment(|environment| {
+            let (late, promise_resolver) = environment.promise("late reflection input");
+            resolver = Some(promise_resolver);
+            Ok(Value::record([("client", Value::record([("late", late)]))]))
+        })
+        .expect("promised reflection environment should build")
+        .build()
+        .expect("assembler should build");
+    let module = assembler
+        .module(["promise_wakeup"])
+        .script(
+            "g",
+            "language g0\nimport 'std\nrefl.wait = .env ['client,'late] >>= (\\input -> (input == \"ready\") =>> .log 'info {msg:{text:\"promise resumed\"}})\nvalue = ()\n",
+        )
+        .build()
+        .expect("reflection fixture should compile");
+    assembler
+        .evaluate(
+            &assembler
+                .get(module.value(), "value")
+                .expect("fixture should define its ordinary value"),
+        )
+        .expect("ordinary demand should schedule automatic reflection");
+
+    let blocked = assembler.drain_reasoning();
+    assert_ne!(
+        blocked.status(),
+        ReasoningStatus::Complete,
+        "the unresolved host promise should block its reflection task"
+    );
+    assert_eq!(blocked.unfinished().len(), 1);
+
+    resolver
+        .take()
+        .expect("resolver should escape environment construction")
+        .resolve(Value::text("ready"))
+        .expect("host completion should succeed");
+    let resumed = assembler.drain_reasoning();
+    assert_eq!(resumed.status(), ReasoningStatus::Complete);
+    assert!(resumed.failures().is_empty());
+    assert!(resumed.unfinished().is_empty());
+
+    let diagnostics = take_diagnostics(&diagnostics);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].message(), "promise resumed");
 }
 
 #[test]

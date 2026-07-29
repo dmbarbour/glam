@@ -125,6 +125,8 @@ notes instead of appending history; put subsystem details in
   hidden assembler provenance only after its transaction commits.
 - Permanent evaluation failures retain a Glam diagnostic emission and an
   ordered context stack through lazy caches and reflection-task results.
+  Projection prepends evaluator-owned frames to any `msg.context` already
+  supplied by that emission; it never replaces author-provided context.
   `anno 'error Message` evaluates `Message` to WHNF before raising it;
   a failure while doing so gains `eval:{op:'error_message}` context.
   `anno context:Frame Expr` decorates only a permanent failure reached while

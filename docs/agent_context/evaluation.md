@@ -124,6 +124,9 @@ control-flow overview.
   `PromiseResolver`. Resolving, failing, or dropping it wakes only the creating
   assembler's evaluation session. A client that shares the consumer value with
   another session is responsible for pumping that session.
+- `PromiseResolver::fail` accepts a complete diagnostic-style Glam value.
+  Projection preserves its ad hoc fields and existing `msg.context`, prepending
+  later evaluator-owned demand frames rather than replacing client context.
 - Reflection annotations are lazy gates. Construction demands neither effect
   nor target. Demand on a gate waits for its session-owned task, requires
   canonical unit, and then transfers the same demand to the target. Waits are

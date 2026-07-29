@@ -237,6 +237,13 @@ pub(crate) fn apply_emission_updates(message: Value, updates: Value) -> Result<V
 /// host-owned observation frames in that same list lets clients add context
 /// without rewriting the diagnostic's source text.
 pub(crate) fn prepend_context(message: Value, context: Value) -> Result<Value, String> {
+    prepend_contexts(message, &[context])
+}
+
+/// Prepends semantic demand frames while preserving context supplied by the
+/// original diagnostic emission. An empty prefix still normalizes
+/// `msg.context` to a list.
+pub(crate) fn prepend_contexts(message: Value, contexts: &[Value]) -> Result<Value, String> {
     let message = diagnostic_object(message)?;
     let existing = match &message {
         Value::Dict(message) => match message.get(&*keys::MSG) {
@@ -249,7 +256,7 @@ pub(crate) fn prepend_context(message: Value, context: Value) -> Result<Value, S
         },
         _ => unreachable!("diagnostic_object always returns a dictionary"),
     };
-    let contexts = List::concat(List::from_values(vec![context]), existing);
+    let contexts = List::concat(List::from_values(contexts.to_vec()), existing);
     let updates = Value::Dict(Dict::new_sync().insert(
         (*keys::MSG).clone(),
         Value::Dict(Dict::new_sync().insert((*keys::CONTEXT).clone(), Value::List(contexts))),

@@ -3218,10 +3218,19 @@ fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
         Dict::new_sync()
             .insert(
                 (*keys::MSG).clone(),
-                Value::Dict(Dict::new_sync().insert(
-                    (*keys::TEXT).clone(),
-                    Value::binary_from_text("handler failed"),
-                )),
+                Value::Dict(
+                    Dict::new_sync()
+                        .insert(
+                            (*keys::TEXT).clone(),
+                            Value::binary_from_text("handler failed"),
+                        )
+                        .insert(
+                            (*keys::CONTEXT).clone(),
+                            Value::List(List::from_values(vec![Value::binary_from_text(
+                                "emitted",
+                            )])),
+                        ),
+                ),
             )
             .insert(Key::atom_from_text("operation"), atom("emit")),
     );
@@ -3280,7 +3289,8 @@ fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
         list_to_value_items(&test_context(), &contexts).unwrap(),
         [
             Value::binary_from_text("outer"),
-            Value::binary_from_text("inner")
+            Value::binary_from_text("inner"),
+            Value::binary_from_text("emitted")
         ]
     );
 }

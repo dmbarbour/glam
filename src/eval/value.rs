@@ -20,12 +20,6 @@ use super::net::*;
 use super::sequence::list_to_key_items;
 
 pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
-    let contexts = Value::List(List::from_values(failure.contexts().to_vec()));
-    let updates = Value::Dict(Dict::new_sync().insert(
-        (*keys::MSG).clone(),
-        Value::Dict(Dict::new_sync().insert((*keys::CONTEXT).clone(), contexts.clone())),
-    ));
-
     let emission = match failure.emission_value() {
         Some(Value::Binary(text)) => {
             crate::diagnostic::text_message(None, String::from_utf8_lossy(text))
@@ -35,13 +29,22 @@ pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
             .expect("matched failure emission")
             .clone(),
         Some(other) => {
-            return fallback_failure_diagnostic(failure, Some(other.clone()), contexts);
+            return fallback_failure_diagnostic(
+                failure,
+                Some(other.clone()),
+                Value::List(List::from_values(failure.contexts().to_vec())),
+            );
         }
         None => crate::diagnostic::text_message(None, failure.to_string()),
     };
 
-    crate::diagnostic::apply_emission_updates(emission.clone(), updates)
-        .unwrap_or_else(|_| fallback_failure_diagnostic(failure, Some(emission), contexts))
+    crate::diagnostic::prepend_contexts(emission.clone(), failure.contexts()).unwrap_or_else(|_| {
+        fallback_failure_diagnostic(
+            failure,
+            Some(emission),
+            Value::List(List::from_values(failure.contexts().to_vec())),
+        )
+    })
 }
 
 pub(crate) fn halt_diagnostic_value(halt: &EvaluationHalt) -> Option<Value> {
