@@ -114,6 +114,16 @@ control-flow overview.
   Wait tokens retain the owner weakly plus stable session and producer IDs, so
   a dropped owner is a terminal failure and live foreign work remains visible
   in quiescence reports without becoming a cached `LazyFailure`.
+- Opaque reflection task values retain `EvaluationTaskHandle`, not a bare task
+  ID. Public join and cancellation validate the handle's session provenance;
+  internal foreign followers deliberately operate on wait tokens instead.
+- A transaction folds modifiers for its newly reserved tasks before launch.
+  In particular, same-transaction cancellation must publish `'canceled`
+  without constructing a task machine or exposing runnable work to the shared
+  executor. Older-task modifiers remain ordinary committed updates.
+- Never invoke task status sinks, task cancellation hooks, or machine
+  destructors while holding the scheduler registry mutex. Terminal reflection
+  records retain results for now but release their machines after unlocking.
 
 ## Sessions and Workers
 

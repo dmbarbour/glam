@@ -2140,8 +2140,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             EvaluationTaskPoll::Complete(_)
             | EvaluationTaskPoll::Failed(_)
-            | EvaluationTaskPoll::Cancelled
-            | EvaluationTaskPoll::ForeignSession => {
+            | EvaluationTaskPoll::Cancelled => {
                 self.blocked = None;
                 None
             }
@@ -3526,15 +3525,33 @@ fn unit_value() -> Value {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use bytes::Bytes;
 
     use super::*;
     use crate::api::{Assembler, Diagnostic};
-    use crate::evaluation::EvaluationTaskHandle;
+    use crate::evaluation::{EvaluationExecutor, EvaluationTaskHandle};
 
     #[derive(Clone)]
     struct TestEffects;
+
+    struct CountingLauncher {
+        inner: Arc<dyn ReflectionTaskLauncher>,
+        builds: Arc<AtomicUsize>,
+    }
+
+    impl ReflectionTaskLauncher for CountingLauncher {
+        fn build(
+            &self,
+            context: EvalContext,
+            effect: Value,
+            kind: ReflectionTaskKind,
+        ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>> {
+            self.builds.fetch_add(1, Ordering::AcqRel);
+            self.inner.build(context, effect, kind)
+        }
+    }
 
     #[derive(Clone)]
     enum TestRequest {
@@ -4933,6 +4950,48 @@ mod tests {
             pump_composed_test_task(&context, &task),
             EvaluationTaskPoll::Complete(_)
         ));
+    }
+
+    #[test]
+    fn same_transaction_cancellation_prevents_worker_launch_and_machine_construction() {
+        let (_, effect) = compile_effect(
+            ".cut (.task.new (.log 'error { msg:{ text:\"cancelled task ran\" } }) >>= (\\task -> (.task.cancel task) =>> .r task)) >>= (\\task -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
+        );
+        let host = Arc::new(TestHost::default());
+        let executor = EvaluationExecutor::new(2).expect("test executor should start");
+        let context = EvalContext::new(EvaluationSession::shared(&executor));
+        let builds = Arc::new(AtomicUsize::new(0));
+        let launcher: Arc<dyn ReflectionTaskLauncher> = Arc::new(CountingLauncher {
+            inner: task_launcher(TestEffects, host.clone()),
+            builds: builds.clone(),
+        });
+        context
+            .install_reflection_launcher(launcher)
+            .expect("fresh test session should accept its launcher");
+        let effect = effect.as_core().clone();
+        let task = context
+            .schedule_task(move |task_context| {
+                EffectTask::new_in_context(effect, TestEffects, host.clone(), task_context)
+                    .map(|task| {
+                        Box::new(JoinableEffectTask(task)) as Box<dyn EvaluationTaskMachine>
+                    })
+                    .map_err(|error| Arc::from(error.to_string()))
+            })
+            .expect("parent task should schedule");
+
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("atomically cancelled child should leave no unfinished work")
+        };
+        assert!(report.failures.is_empty());
+        assert!(matches!(
+            context.poll_reflection_task(&task),
+            EvaluationTaskPoll::Complete(_)
+        ));
+        assert_eq!(
+            builds.load(Ordering::Acquire),
+            0,
+            "same-transaction cancellation must bypass child machine construction"
+        );
     }
 
     #[test]

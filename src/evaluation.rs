@@ -212,7 +212,6 @@ pub(crate) enum EvaluationTaskPoll {
     Complete(Value),
     Failed(Arc<EvaluationFailure>),
     Cancelled,
-    ForeignSession,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +219,24 @@ pub(crate) enum EvaluationTaskCancellation {
     Requested,
     Late,
     ForeignSession,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum InitialTaskDisposition {
+    #[default]
+    Launch,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PendingTaskPolicy {
+    disposition: InitialTaskDisposition,
+}
+
+impl PendingTaskPolicy {
+    pub(crate) fn cancel(&mut self) {
+        self.disposition = InitialTaskDisposition::Cancel;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -502,16 +519,28 @@ impl PendingReflectionTask {
         &self.inner.handle
     }
 
-    pub(crate) fn activate(&self, status: Arc<dyn EvaluationTaskStatusSink>) {
+    pub(crate) fn commit(
+        &self,
+        status: Arc<dyn EvaluationTaskStatusSink>,
+        policy: PendingTaskPolicy,
+    ) {
         if self.inner.activated.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.inner.context.activate_reflection_task(
-            &self.inner.handle,
-            self.inner.effect.clone(),
-            ReflectionTaskKind::Joinable,
-            Some(status),
-        );
+        match policy.disposition {
+            InitialTaskDisposition::Launch => {
+                self.inner.context.activate_reflection_task(
+                    &self.inner.handle,
+                    self.inner.effect.clone(),
+                    ReflectionTaskKind::Joinable,
+                    Some(status),
+                );
+            }
+            InitialTaskDisposition::Cancel => self
+                .inner
+                .context
+                .cancel_pending_reflection_task(&self.inner.handle, status),
+        }
     }
 }
 
@@ -1062,6 +1091,34 @@ impl EvalContext {
         }
     }
 
+    fn cancel_pending_reflection_task(
+        &self,
+        handle: &EvaluationTaskHandle,
+        status_sink: Arc<dyn EvaluationTaskStatusSink>,
+    ) {
+        let status = {
+            let mut tasks = self
+                .session
+                .tasks
+                .lock()
+                .expect("evaluation task registry was poisoned");
+            let record = tasks
+                .reflection
+                .get_mut(&handle.wait)
+                .expect("a committed pending task must remain reserved");
+            assert!(
+                matches!(record.state, EvaluationTaskState::Reserved),
+                "only a reserved task may apply its pre-launch policy"
+            );
+            let prior = record.state.clone();
+            record.status_sinks.push(status_sink);
+            record.state = publish_reflection_state(&handle.wait, EvaluationTaskState::Cancelled);
+            self.session.task_changed.notify_all();
+            task_status_update(record, Some(&prior))
+        };
+        publish_task_status(status);
+    }
+
     pub(crate) fn reserve_reflection_task(
         &self,
         effect: Value,
@@ -1123,37 +1180,32 @@ impl EvalContext {
         self.poll_wait(&task.wait)
     }
 
-    pub(crate) fn poll_reflection_task_id(&self, id: EvaluationTaskId) -> EvaluationTaskPoll {
-        let wait = {
-            let tasks = self
-                .session
-                .tasks
-                .lock()
-                .expect("evaluation task registry was poisoned");
-            tasks.reflection_by_id.get(&id).cloned()
-        };
-        wait.map_or(EvaluationTaskPoll::ForeignSession, |wait| {
-            self.poll_wait(&wait)
-        })
+    pub(crate) fn owns_task(&self, task: &EvaluationTaskHandle) -> bool {
+        task.session_id() == self.session.id
     }
 
-    pub(crate) fn cancel_reflection_task_id(
+    pub(crate) fn cancel_reflection_task(
         &self,
-        id: EvaluationTaskId,
+        task: &EvaluationTaskHandle,
     ) -> EvaluationTaskCancellation {
+        if !self.owns_task(task) {
+            return EvaluationTaskCancellation::ForeignSession;
+        }
+        if task.wait.terminal_poll().is_some() {
+            return EvaluationTaskCancellation::Late;
+        }
         let (machine, status) = {
             let mut tasks = self
                 .session
                 .tasks
                 .lock()
                 .expect("evaluation task registry was poisoned");
-            let Some(wait) = tasks.reflection_by_id.get(&id).cloned() else {
-                return EvaluationTaskCancellation::ForeignSession;
+            if task.wait.terminal_poll().is_some() {
+                return EvaluationTaskCancellation::Late;
+            }
+            let Some(record) = tasks.reflection.get_mut(&task.wait) else {
+                return EvaluationTaskCancellation::Late;
             };
-            let record = tasks
-                .reflection
-                .get_mut(&wait)
-                .expect("task ID index must refer to a task record");
             match record.state {
                 EvaluationTaskState::Complete(_)
                 | EvaluationTaskState::Failed(_)
@@ -1167,7 +1219,8 @@ impl EvalContext {
                 | EvaluationTaskState::Queued
                 | EvaluationTaskState::Blocked(_) => {
                     let prior = record.state.clone();
-                    record.state = publish_reflection_state(&wait, EvaluationTaskState::Cancelled);
+                    record.state =
+                        publish_reflection_state(&task.wait, EvaluationTaskState::Cancelled);
                     self.session.task_changed.notify_all();
                     let machine = record.machine.take();
                     let status = task_status_update(record, Some(&prior));
@@ -1464,6 +1517,20 @@ struct ClaimedDeferredTask {
     machine: Box<dyn EvaluationTaskMachine>,
 }
 
+enum ReleasedTaskMachine {
+    Drop(Box<dyn EvaluationTaskMachine>),
+    Cancel(Box<dyn EvaluationTaskMachine>),
+}
+
+impl ReleasedTaskMachine {
+    fn finish(self) {
+        match self {
+            Self::Drop(machine) => drop(machine),
+            Self::Cancel(mut machine) => machine.cancel(),
+        }
+    }
+}
+
 struct ReportedDependency {
     task: EvaluationTaskId,
     session: EvaluationSessionId,
@@ -1523,12 +1590,12 @@ impl EvaluationSession {
 
             let poll = claimed.poll(TASK_POLL_QUANTUM);
             let claimed_id = claimed.id();
-            let (made_progress, remains_blocked, cancelled, status) =
+            let (made_progress, remains_blocked, released, status) =
                 self.release_task(claimed, poll);
             publish_task_status(status);
             self.notify_executor_if_ready();
-            if let Some(mut machine) = cancelled {
-                machine.cancel();
+            if let Some(machine) = released {
+                machine.finish();
             }
             if remains_blocked {
                 attempted_blocked.insert(claimed_id);
@@ -1687,12 +1754,12 @@ impl EvaluationSession {
             step_budget -= quantum;
             let poll = claimed.poll(quantum);
             let claimed_id = claimed.id();
-            let (made_progress, remains_blocked, cancelled, status) =
+            let (made_progress, remains_blocked, released, status) =
                 self.release_task(claimed, poll);
             publish_task_status(status);
             self.notify_executor_if_ready();
-            if let Some(mut machine) = cancelled {
-                machine.cancel();
+            if let Some(machine) = released {
+                machine.finish();
             }
             if remains_blocked {
                 attempted_blocked.insert(claimed_id);
@@ -1712,7 +1779,7 @@ impl EvaluationSession {
     ) -> (
         bool,
         bool,
-        Option<Box<dyn EvaluationTaskMachine>>,
+        Option<ReleasedTaskMachine>,
         Option<TaskStatusUpdate>,
     ) {
         match claimed {
@@ -1728,7 +1795,7 @@ impl EvaluationSession {
     ) -> (
         bool,
         bool,
-        Option<Box<dyn EvaluationTaskMachine>>,
+        Option<ReleasedTaskMachine>,
         Option<TaskStatusUpdate>,
     ) {
         let mut tasks = self
@@ -1749,7 +1816,12 @@ impl EvaluationSession {
             record.state = publish_reflection_state(&claimed.wait, EvaluationTaskState::Cancelled);
             self.task_changed.notify_all();
             let status = task_status_update(record, Some(&claimed.prior_state));
-            return (true, false, Some(claimed.machine), status);
+            return (
+                true,
+                false,
+                Some(ReleasedTaskMachine::Cancel(claimed.machine)),
+                status,
+            );
         }
         record.machine = Some(claimed.machine);
 
@@ -1771,6 +1843,16 @@ impl EvaluationSession {
             EvaluationMachinePoll::Cancelled => (EvaluationTaskState::Cancelled, true, false),
         };
         record.state = publish_reflection_state(&claimed.wait, state);
+        let released = if matches!(
+            record.state,
+            EvaluationTaskState::Complete(_)
+                | EvaluationTaskState::Failed(_)
+                | EvaluationTaskState::Cancelled
+        ) {
+            record.machine.take().map(ReleasedTaskMachine::Drop)
+        } else {
+            None
+        };
         if matches!(record.state, EvaluationTaskState::Queued) {
             tasks.ready.push_back(claimed.id);
         }
@@ -1779,7 +1861,7 @@ impl EvaluationSession {
             .get_mut(&claimed.wait)
             .and_then(|record| task_status_update(record, Some(&claimed.prior_state)));
         self.task_changed.notify_all();
-        (made_progress, remains_blocked, None, status)
+        (made_progress, remains_blocked, released, status)
     }
 
     fn release_deferred_task(
@@ -1789,7 +1871,7 @@ impl EvaluationSession {
     ) -> (
         bool,
         bool,
-        Option<Box<dyn EvaluationTaskMachine>>,
+        Option<ReleasedTaskMachine>,
         Option<TaskStatusUpdate>,
     ) {
         let (state, mut made_progress) = match poll {
@@ -1908,10 +1990,10 @@ impl EvaluationSession {
         // may claim independent tasks from this same session concurrently.
         self.notify_executor_if_ready();
         let poll = claimed.poll(TASK_POLL_QUANTUM);
-        let (_, _, cancelled, status) = self.release_task(claimed, poll);
+        let (_, _, released, status) = self.release_task(claimed, poll);
         publish_task_status(status);
-        if let Some(mut machine) = cancelled {
-            machine.cancel();
+        if let Some(machine) = released {
+            machine.finish();
         }
         self.notify_executor_if_ready();
     }
@@ -2299,9 +2381,6 @@ mod tests {
                     .map(EvaluationMachinePoll::Failed)
                     .unwrap_or(EvaluationMachinePoll::Failed(error)),
                 EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
-                EvaluationTaskPoll::ForeignSession => EvaluationMachinePoll::Failed(
-                    evaluation_failure("test dependency unexpectedly belongs to another session"),
-                ),
             }
         }
     }
@@ -2332,9 +2411,6 @@ mod tests {
                     .map(EvaluationMachinePoll::Failed)
                     .unwrap_or(EvaluationMachinePoll::Failed(error)),
                 EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
-                EvaluationTaskPoll::ForeignSession => EvaluationMachinePoll::Failed(
-                    evaluation_failure("test dependency unexpectedly belongs to another session"),
-                ),
             }
         }
     }
@@ -2468,6 +2544,26 @@ mod tests {
     impl Drop for CompleteAndSignalDrop {
         fn drop(&mut self) {
             self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    struct CompleteAndCheckReflectionDrop {
+        context: EvalContext,
+        dropped_without_registry_lock: Arc<AtomicBool>,
+    }
+
+    impl EvaluationTaskMachine for CompleteAndCheckReflectionDrop {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            EvaluationMachinePoll::Complete((*crate::core::keys::UNIT_VALUE).clone())
+        }
+    }
+
+    impl Drop for CompleteAndCheckReflectionDrop {
+        fn drop(&mut self) {
+            self.dropped_without_registry_lock.store(
+                self.context.session.tasks.try_lock().is_ok(),
+                Ordering::Release,
+            );
         }
     }
 
@@ -2678,7 +2774,7 @@ mod tests {
             .schedule_task(|_| Ok(Box::new(Complete)))
             .expect("cancelled task should schedule");
         assert_eq!(
-            context.cancel_reflection_task_id(cancelled.id()),
+            context.cancel_reflection_task(&cancelled),
             EvaluationTaskCancellation::Requested
         );
 
@@ -2723,6 +2819,42 @@ mod tests {
     }
 
     #[test]
+    fn terminal_reflection_machines_drop_after_releasing_the_registry_lock() {
+        let context = EvalContext::standalone();
+        let dropped_without_registry_lock = Arc::new(AtomicBool::new(false));
+        let task = context
+            .schedule_task({
+                let dropped_without_registry_lock = dropped_without_registry_lock.clone();
+                move |task_context| {
+                    Ok(Box::new(CompleteAndCheckReflectionDrop {
+                        context: task_context,
+                        dropped_without_registry_lock,
+                    }))
+                }
+            })
+            .expect("reflection task should schedule");
+
+        assert_eq!(
+            context.pump_wait(task.wait(), 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert!(
+            dropped_without_registry_lock.load(Ordering::Acquire),
+            "terminal reflection machine must be destroyed without the registry lock"
+        );
+        let tasks = context
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        let record = tasks
+            .reflection
+            .get(task.wait())
+            .expect("Phase 5, not Phase 3, retires terminal reflection records");
+        assert!(record.machine.is_none());
+    }
+
+    #[test]
     fn terminal_wait_tokens_outlive_their_owner_session() {
         let (completed_wait, failed_wait, cancelled_wait) = {
             let owner = EvalContext::standalone();
@@ -2736,7 +2868,7 @@ mod tests {
                 .schedule_task(|_| Ok(Box::new(Complete)))
                 .expect("cancelled task should schedule");
             assert_eq!(
-                owner.cancel_reflection_task_id(cancelled.id()),
+                owner.cancel_reflection_task(&cancelled),
                 EvaluationTaskCancellation::Requested
             );
             assert!(matches!(
@@ -3093,7 +3225,7 @@ mod tests {
             })
             .expect("cancellable task should schedule");
         assert_eq!(
-            context.cancel_reflection_task_id(task.id()),
+            context.cancel_reflection_task(&task),
             EvaluationTaskCancellation::Requested
         );
         assert!(cancelled.load(Ordering::Acquire));
@@ -3102,13 +3234,13 @@ mod tests {
             EvaluationTaskPoll::Cancelled
         );
         assert_eq!(
-            context.cancel_reflection_task_id(task.id()),
+            context.cancel_reflection_task(&task),
             EvaluationTaskCancellation::Late
         );
 
         let foreign = EvalContext::standalone();
         assert_eq!(
-            foreign.cancel_reflection_task_id(task.id()),
+            foreign.cancel_reflection_task(&task),
             EvaluationTaskCancellation::ForeignSession
         );
     }

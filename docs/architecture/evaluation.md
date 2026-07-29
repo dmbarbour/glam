@@ -121,6 +121,30 @@ owner. Reports retain the producing session and task IDs; clients decide when
 to poll again. Terminal foreign results remain observable, while a dropped
 owner is a permanent producer failure.
 
+## Reflection Task Handles
+
+An opaque reflection task value retains its `EvaluationTaskHandle`: the task
+ID, session provenance, and wait token are one lifetime-bearing capability.
+Join polls that wait directly. Cancellation first validates that the handle
+belongs to the caller's evaluation session, then updates the record addressed
+by the same wait token. Transactional status, value, and error observations
+remain query-backed and therefore keep their existing snapshot semantics.
+
+Task creation reserves a non-runnable record. At transaction commit, all
+modifiers for tasks created by that same journal are folded into one
+pre-launch policy before any launcher is called. A same-transaction
+cancellation publishes terminal cancellation and updates the status query
+without constructing a machine, entering the ready queue, or notifying a
+worker. Modifiers for older tasks are applied after pending launches have
+committed. Status-query callbacks run after both the reasoning-store lock and
+scheduler lock have been released.
+
+Active reflection records retain machines; terminal records do not. Completion
+and failure take the claimed machine out of the record under the scheduler
+lock, then destroy it after unlocking. Cancellation similarly invokes the
+machine's cancellation hook only after unlocking. Terminal reflection records
+and their ID indexes remain until the later record-retirement phase.
+
 ## Interaction-Net Handoff
 
 `NetBuilder` validates an immutable template. Instantiation creates a shared

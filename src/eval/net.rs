@@ -249,9 +249,6 @@ pub(super) fn progress_exact_core_pair(
     if let Some(blocked) = runtime.with(|net| net.blocked_call(pair)) {
         return match context.poll_wait(&blocked.wait.0) {
             crate::evaluation::EvaluationTaskPoll::Pending(_) => Ok(false),
-            crate::evaluation::EvaluationTaskPoll::ForeignSession => Err(EvalError::new(
-                "blocked interaction-net call belongs to another evaluation session",
-            )),
             crate::evaluation::EvaluationTaskPoll::Complete(_)
             | crate::evaluation::EvaluationTaskPoll::Failed(_)
             | crate::evaluation::EvaluationTaskPoll::Cancelled => {

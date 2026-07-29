@@ -349,11 +349,6 @@ impl EvaluationTaskMachine for PromiseFollower {
                         EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Failed(Arc::new(
                             EvaluationFailure::message("promised value's producer was cancelled"),
                         )),
-                        EvaluationTaskPoll::ForeignSession => {
-                            EvaluationMachinePoll::Failed(Arc::new(EvaluationFailure::message(
-                                "promised value belongs to another evaluation session",
-                            )))
-                        }
                     };
                 }
             },
@@ -442,11 +437,6 @@ fn await_deferred_task(
         EvaluationTaskPoll::Cancelled => {
             return Err(EvalError::new(format!("{kind} evaluation was cancelled")));
         }
-        EvaluationTaskPoll::ForeignSession => {
-            return Err(EvalError::new(format!(
-                "{kind} belongs to another evaluation session"
-            )));
-        }
         EvaluationTaskPoll::Pending(_) => {}
     }
     if context.runs_scheduled_task() {
@@ -460,9 +450,6 @@ fn await_deferred_task(
                 EvaluationTaskPoll::Cancelled => {
                     Err(EvalError::new(format!("{kind} evaluation was cancelled")))
                 }
-                EvaluationTaskPoll::ForeignSession => Err(EvalError::new(format!(
-                    "{kind} belongs to another evaluation session"
-                ))),
             },
             EvaluationPumpOutcome::Busy
             | EvaluationPumpOutcome::NoProgress
@@ -493,9 +480,6 @@ fn await_deferred_task(
         EvaluationTaskPoll::Cancelled => {
             Err(EvalError::new(format!("{kind} evaluation was cancelled")))
         }
-        EvaluationTaskPoll::ForeignSession => Err(EvalError::new(format!(
-            "{kind} belongs to another evaluation session"
-        ))),
     }
 }
 
@@ -594,9 +578,6 @@ fn eval_reflection_gate_source(
         EvaluationTaskPoll::Cancelled => {
             Err(EvalError::new("reflection annotation task was cancelled"))
         }
-        EvaluationTaskPoll::ForeignSession => Err(EvalError::new(
-            "reflection annotation task belongs to another evaluation session",
-        )),
     }
 }
 

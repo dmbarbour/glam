@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::api::{Diagnostic, Value};
@@ -5,8 +6,9 @@ use crate::core::{Atom, Dict, Key, OpaqueValue, Value as CoreValue, keys};
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{
-    EvalContext, EvaluationTaskCancellation, EvaluationTaskId, EvaluationTaskPoll,
-    EvaluationTaskStatus, EvaluationTaskStatusSink, PendingReflectionTask,
+    EvalContext, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId,
+    EvaluationTaskPoll, EvaluationTaskStatus, EvaluationTaskStatusSink, PendingReflectionTask,
+    PendingTaskPolicy,
 };
 use crate::number::Number;
 
@@ -38,7 +40,7 @@ enum ReflectionUpdate {
         task: PendingReflectionTask,
         status: Arc<dyn EvaluationTaskStatusSink>,
     },
-    Cancel(EvalContext, EvaluationTaskId),
+    Cancel(EvalContext, EvaluationTaskHandle),
 }
 
 struct TaskStatusQuery<H: ?Sized> {
@@ -72,11 +74,36 @@ impl ReflectionJournal {
 
     #[doc(hidden)]
     pub fn commit_updates(&self) {
+        let mut pending_policies = BTreeMap::new();
+        for update in &self.updates {
+            if let ReflectionUpdate::Launch { task, .. } = update {
+                assert!(
+                    pending_policies
+                        .insert(task.handle().id(), PendingTaskPolicy::default())
+                        .is_none(),
+                    "a pending reflection task must be launched exactly once"
+                );
+            }
+        }
+        for update in &self.updates {
+            if let ReflectionUpdate::Cancel(_, task) = update
+                && let Some(policy) = pending_policies.get_mut(&task.id())
+            {
+                policy.cancel();
+            }
+        }
         for update in &self.updates {
             match update {
-                ReflectionUpdate::Launch { task, status } => task.activate(status.clone()),
+                ReflectionUpdate::Launch { task, status } => task.commit(
+                    status.clone(),
+                    *pending_policies
+                        .get(&task.handle().id())
+                        .expect("every pending launch must have a policy"),
+                ),
                 ReflectionUpdate::Cancel(context, task) => {
-                    context.cancel_reflection_task_id(*task);
+                    if !pending_policies.contains_key(&task.id()) {
+                        context.cancel_reflection_task(task);
+                    }
                 }
             }
         }
@@ -273,7 +300,7 @@ where
                         .reserve_reflection_task(effect)
                         .map_err(|error| TaskError::new(error.as_ref()))?;
                     let handle = Arc::new(ReflectionTaskHandle {
-                        task: pending.handle().id(),
+                        task: pending.handle().clone(),
                         status: result.clone(),
                     });
                     let status = Arc::new(TaskStatusQuery {
@@ -299,7 +326,7 @@ where
                         .reserve_reflection_task(effect)
                         .map_err(|error| TaskError::new(error.as_ref()))?;
                     let handle = Arc::new(ReflectionTaskHandle {
-                        task: pending.handle().id(),
+                        task: pending.handle().clone(),
                         status: result.clone(),
                     });
                     let status = Arc::new(TaskStatusQuery {
@@ -337,20 +364,21 @@ where
         }
         ReflectionRequest::TaskJoin => {
             let handle = task_handle_argument(context.eval_context(), arguments, "task.join")?;
-            match context.eval_context().poll_reflection_task_id(handle.task) {
+            if !context.eval_context().owns_task(&handle.task) {
+                return Err(TaskError::new(
+                    "task handle does not belong to this evaluation session",
+                ));
+            }
+            match context.eval_context().poll_reflection_task(&handle.task) {
                 EvaluationTaskPoll::Pending(wait) => Err(TaskError::blocked(wait)),
                 EvaluationTaskPoll::Complete(value) => {
                     Ok(RequestResult::Return(Value::from_core(value)))
                 }
-                EvaluationTaskPoll::Failed(error) => {
-                    Err(TaskError::failure(error).with_core_context(task_join_context(handle.task)))
-                }
+                EvaluationTaskPoll::Failed(error) => Err(TaskError::failure(error)
+                    .with_core_context(task_join_context(handle.task.id()))),
                 EvaluationTaskPoll::Cancelled => {
                     Err(TaskError::new("joined reflection task was cancelled"))
                 }
-                EvaluationTaskPoll::ForeignSession => Err(TaskError::new(
-                    "task handle does not belong to this evaluation session",
-                )),
             }
         }
         ReflectionRequest::TaskStatus => {
@@ -403,9 +431,9 @@ where
                     .1
                     .reflection_journal()
                     .updates
-                    .push(ReflectionUpdate::Cancel(eval_context, handle.task));
+                    .push(ReflectionUpdate::Cancel(eval_context, handle.task.clone()));
             } else {
-                match eval_context.cancel_reflection_task_id(handle.task) {
+                match eval_context.cancel_reflection_task(&handle.task) {
                     EvaluationTaskCancellation::Requested => context.committed(),
                     EvaluationTaskCancellation::Late
                     | EvaluationTaskCancellation::ForeignSession => {}
@@ -455,7 +483,7 @@ fn tagged_result(tag: &Key, value: Value) -> Value {
 }
 
 struct ReflectionTaskHandle {
-    task: EvaluationTaskId,
+    task: EvaluationTaskHandle,
     status: Arc<EvaluationQueryHandle>,
 }
 
@@ -545,10 +573,7 @@ fn ensure_local_task(
     context: &EvalContext,
     handle: &ReflectionTaskHandle,
 ) -> Result<(), TaskError> {
-    if matches!(
-        context.poll_reflection_task_id(handle.task),
-        EvaluationTaskPoll::ForeignSession
-    ) {
+    if !context.owns_task(&handle.task) {
         Err(TaskError::new(
             "task handle does not belong to this evaluation session",
         ))
