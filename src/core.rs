@@ -1199,7 +1199,6 @@ impl Value {
     }
 
     /// Returns the canonical carrier whose associated metadata is `{}`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn initial_metadata_carrier() -> Self {
         INITIAL_METADATA_CARRIER.clone()
     }

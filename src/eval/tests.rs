@@ -3494,6 +3494,75 @@ fn context_annotations_are_transparent_and_do_not_demand_context_on_success() {
 }
 
 #[test]
+fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
+    let context = test_context();
+    let annotation = || Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text("meta")));
+    let target_forces = Arc::new(AtomicUsize::new(0));
+    let counted_target_forces = target_forces.clone();
+    let unit = Value::deferred("metadata annotation unit", move |_| {
+        counted_target_forces.fetch_add(1, Ordering::SeqCst);
+        Ok((*keys::UNIT_VALUE).clone())
+    });
+
+    let first = apply_values(
+        &context,
+        Value::Builtin(Builtin::Anno),
+        vec![annotation(), unit],
+    )
+    .expect("metadata annotation should accept demanded canonical unit");
+    let second = apply_values(
+        &context,
+        Value::Builtin(Builtin::Anno),
+        vec![annotation(), (*keys::UNIT_VALUE).clone()],
+    )
+    .expect("metadata annotation should reuse its canonical carrier");
+
+    assert_eq!(target_forces.load(Ordering::SeqCst), 1);
+    assert_eq!(first, Value::initial_metadata_carrier());
+    assert_eq!(second, Value::initial_metadata_carrier());
+    assert_eq!(first, second);
+    assert_eq!(
+        first.associated_metadata(),
+        Some(Value::Dict(Dict::new_sync()))
+    );
+
+    let seq_result = apply_values(
+        &context,
+        Value::Builtin(Builtin::Seq),
+        vec![first.clone(), n(42)],
+    )
+    .expect("initial metadata should already satisfy shallow sequencing");
+    assert_eq!(eval_value(&context, &seq_result).unwrap(), n(42));
+
+    let spark_result = apply_values(&context, Value::Builtin(Builtin::Spark), vec![first, n(43)])
+        .expect("initial metadata should be safe to spark");
+    assert_eq!(eval_value(&context, &spark_result).unwrap(), n(43));
+}
+
+#[test]
+fn metadata_annotation_rejects_non_unit_and_existing_carriers() {
+    let context = test_context();
+    let annotation = || Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text("meta")));
+
+    for (target, expected_kind) in [
+        (n(42), "Number"),
+        (Value::Dict(Dict::new_sync()), "Undefined"),
+        (Value::initial_metadata_carrier(), "Sealed"),
+    ] {
+        let error = apply_values(
+            &context,
+            Value::Builtin(Builtin::Anno),
+            vec![annotation(), target],
+        )
+        .expect_err("metadata initialization must require canonical unit");
+        assert_eq!(
+            error.to_string(),
+            format!("unit expected, received {expected_kind}")
+        );
+    }
+}
+
+#[test]
 fn list_annotations_rebalance_and_flatten_lists() {
     let deque = eval_closed_expr(&builtin2_expr(
         Builtin::Anno,

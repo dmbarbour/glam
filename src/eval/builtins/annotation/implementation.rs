@@ -33,6 +33,10 @@ pub(super) fn eval_anno_builtin(
             &value,
             target,
         ),
+        RecognizedAnnotation::Metadata => {
+            let carrier = Value::initial_metadata_carrier();
+            super::super::assertion::assert_unit(context, None, target, &carrier)
+        }
         RecognizedAnnotation::Deque => eval_deque_annotation(context, target),
         RecognizedAnnotation::Binary => eval_binary_annotation(context, target),
         RecognizedAnnotation::Array => eval_array_annotation(context, target),
@@ -72,6 +76,7 @@ enum RecognizedAnnotation {
         value: Value,
         diagnostic_context: Option<Value>,
     },
+    Metadata,
     Deque,
     Binary,
     Array,
@@ -171,6 +176,7 @@ fn recognize_simple_annotation(atom: &crate::core::Atom) -> Option<RecognizedAnn
         "binary" => Some(RecognizedAnnotation::Binary),
         "array" => Some(RecognizedAnnotation::Array),
         "error" => Some(RecognizedAnnotation::Error),
+        "meta" => Some(RecognizedAnnotation::Metadata),
         _ => None,
     }
 }
