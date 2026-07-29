@@ -24,7 +24,18 @@ snapshot without holding its mutex during evaluation. Terminal cache
 publication precedes removal of the shared source, so concurrent snapshots may
 finish while later observers take the cached path. Terminal deferred-task
 records also discard their task machines; blocked tasks retain both source and
-machine. Terminal record pruning remains separate scheduler work.
+machine.
+
+Every scheduler wait token is one shared cell containing identity, a weak
+session owner, and an optional terminal result. Completion, permanent failure,
+and cancellation publish that result while holding the active task-registry
+mutex. Polling checks the cell before and after taking the mutex, so a waiter
+racing publication sees either active state or the terminal result. A terminal
+token remains observable after its owner session is dropped; a pending token
+does not keep the session alive and reports a dead producer. Active registries
+still retain terminal records and their lookup indexes for now. Moving
+observation entirely to wait handles and pruning those records remains separate
+scheduler work.
 
 When a lazy or assigned-promise task blocks on another deferred producer, the
 session records one strict dependency edge. The graph has at most one outgoing

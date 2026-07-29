@@ -52,12 +52,13 @@ fn allocate_wait_token(
     session: &Arc<EvaluationSession>,
     producer: EvaluationTaskId,
 ) -> Result<EvaluationWaitToken, Arc<str>> {
-    Ok(EvaluationWaitToken {
+    Ok(EvaluationWaitToken(Arc::new(EvaluationWaitState {
         id: allocate_id(&NEXT_WAIT_ID, "evaluation wait-token IDs exhausted")?,
         owner_id: session.id,
         owner: Arc::downgrade(session),
         producer,
-    })
+        terminal: OnceLock::new(),
+    })))
 }
 
 fn allocate_session_id() -> EvaluationSessionId {
@@ -78,25 +79,73 @@ fn evaluation_failure(message: impl AsRef<str>) -> Arc<EvaluationFailure> {
     Arc::new(EvaluationFailure::message(message))
 }
 
-#[derive(Clone)]
-pub(crate) struct EvaluationWaitToken {
+struct EvaluationWaitState {
     id: NonZeroU64,
     owner_id: EvaluationSessionId,
     owner: Weak<EvaluationSession>,
     producer: EvaluationTaskId,
+    terminal: OnceLock<EvaluationTaskTerminal>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EvaluationTaskTerminal {
+    Complete(Value),
+    Failed(Arc<EvaluationFailure>),
+    Cancelled,
+}
+
+#[derive(Clone)]
+pub(crate) struct EvaluationWaitToken(Arc<EvaluationWaitState>);
 
 impl EvaluationWaitToken {
     pub(crate) fn get(&self) -> u64 {
-        self.id.get()
+        self.0.id.get()
     }
 
     pub(crate) fn owner_id(&self) -> EvaluationSessionId {
-        self.owner_id
+        self.0.owner_id
     }
 
     pub(crate) fn producer(&self) -> EvaluationTaskId {
-        self.producer
+        self.0.producer
+    }
+
+    fn owner(&self) -> Option<Arc<EvaluationSession>> {
+        self.0.owner.upgrade()
+    }
+
+    fn belongs_to(&self, session: &Arc<EvaluationSession>) -> bool {
+        self.owner()
+            .is_some_and(|owner| Arc::ptr_eq(session, &owner))
+    }
+
+    fn terminal_poll(&self) -> Option<EvaluationTaskPoll> {
+        self.0.terminal.get().map(EvaluationTaskTerminal::to_poll)
+    }
+
+    fn publish_terminal(&self, terminal: EvaluationTaskTerminal) -> EvaluationTaskTerminal {
+        if let Err(candidate) = self.0.terminal.set(terminal) {
+            debug_assert_eq!(
+                self.0.terminal.get(),
+                Some(&candidate),
+                "a wait token received conflicting terminal results"
+            );
+        }
+        self.0
+            .terminal
+            .get()
+            .expect("terminal publication must initialize the wait cell")
+            .clone()
+    }
+}
+
+impl EvaluationTaskTerminal {
+    fn to_poll(&self) -> EvaluationTaskPoll {
+        match self {
+            Self::Complete(value) => EvaluationTaskPoll::Complete(value.clone()),
+            Self::Failed(error) => EvaluationTaskPoll::Failed(error.clone()),
+            Self::Cancelled => EvaluationTaskPoll::Cancelled,
+        }
     }
 }
 
@@ -104,16 +153,17 @@ impl fmt::Debug for EvaluationWaitToken {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("EvaluationWaitToken")
-            .field("wait", &self.id)
-            .field("session", &self.owner_id)
-            .field("producer", &self.producer)
+            .field("wait", &self.0.id)
+            .field("session", &self.0.owner_id)
+            .field("producer", &self.0.producer)
+            .field("terminal", &self.0.terminal.get().is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl PartialEq for EvaluationWaitToken {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.0.id == other.0.id
     }
 }
 
@@ -121,7 +171,7 @@ impl Eq for EvaluationWaitToken {}
 
 impl Hash for EvaluationWaitToken {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
+        self.0.id.hash(state);
     }
 }
 
@@ -312,6 +362,41 @@ enum DeferredTaskState {
     Blocked(EvaluationTaskBlock),
     Complete(Value),
     Failed(Arc<EvaluationFailure>),
+}
+
+fn publish_reflection_state(
+    wait: &EvaluationWaitToken,
+    state: EvaluationTaskState,
+) -> EvaluationTaskState {
+    let terminal = match state {
+        EvaluationTaskState::Complete(value) => EvaluationTaskTerminal::Complete(value),
+        EvaluationTaskState::Failed(error) => EvaluationTaskTerminal::Failed(error),
+        EvaluationTaskState::Cancelled => EvaluationTaskTerminal::Cancelled,
+        state => return state,
+    };
+    match wait.publish_terminal(terminal) {
+        EvaluationTaskTerminal::Complete(value) => EvaluationTaskState::Complete(value),
+        EvaluationTaskTerminal::Failed(error) => EvaluationTaskState::Failed(error),
+        EvaluationTaskTerminal::Cancelled => EvaluationTaskState::Cancelled,
+    }
+}
+
+fn publish_deferred_state(
+    wait: &EvaluationWaitToken,
+    state: DeferredTaskState,
+) -> DeferredTaskState {
+    let terminal = match state {
+        DeferredTaskState::Complete(value) => EvaluationTaskTerminal::Complete(value),
+        DeferredTaskState::Failed(error) => EvaluationTaskTerminal::Failed(error),
+        state => return state,
+    };
+    match wait.publish_terminal(terminal) {
+        EvaluationTaskTerminal::Complete(value) => DeferredTaskState::Complete(value),
+        EvaluationTaskTerminal::Failed(error) => DeferredTaskState::Failed(error),
+        EvaluationTaskTerminal::Cancelled => {
+            unreachable!("a deferred wait cannot publish cancellation")
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -914,7 +999,10 @@ impl EvalContext {
                 tasks.ready.push_back(handle.id);
             }
             Err(error) => {
-                record.state = EvaluationTaskState::Failed(evaluation_failure(error.as_ref()))
+                record.state = publish_reflection_state(
+                    &handle.wait,
+                    EvaluationTaskState::Failed(evaluation_failure(error.as_ref())),
+                )
             }
         }
         self.session.task_changed.notify_all();
@@ -1058,7 +1146,7 @@ impl EvalContext {
                 | EvaluationTaskState::Queued
                 | EvaluationTaskState::Blocked(_) => {
                     let prior = record.state.clone();
-                    record.state = EvaluationTaskState::Cancelled;
+                    record.state = publish_reflection_state(&wait, EvaluationTaskState::Cancelled);
                     self.session.task_changed.notify_all();
                     let machine = record.machine.take();
                     let status = task_status_update(record, Some(&prior));
@@ -1074,15 +1162,26 @@ impl EvalContext {
     }
 
     pub(crate) fn poll_wait(&self, wait: &EvaluationWaitToken) -> EvaluationTaskPoll {
-        let Some(owner) = wait.owner.upgrade() else {
-            return EvaluationTaskPoll::Failed(evaluation_failure(
-                "reflection task's evaluation session no longer exists",
-            ));
+        if let Some(terminal) = wait.terminal_poll() {
+            return terminal;
+        }
+        let owner = match wait.owner() {
+            Some(owner) => owner,
+            None => {
+                return wait.terminal_poll().unwrap_or_else(|| {
+                    EvaluationTaskPoll::Failed(evaluation_failure(
+                        "reflection task's evaluation session no longer exists",
+                    ))
+                });
+            }
         };
         let tasks = owner
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
+        if let Some(terminal) = wait.terminal_poll() {
+            return terminal;
+        }
         let Some(record) = tasks.reflection.get(wait) else {
             if let Some(deferred) = tasks.deferred_by_wait.get(wait) {
                 let record = tasks
@@ -1150,11 +1249,15 @@ impl EvalContext {
             .lock()
             .expect("evaluation task registry was poisoned");
         let wait = test_reflection_dependency(&tasks, wait);
+        let state = publish_reflection_state(
+            &wait,
+            EvaluationTaskState::Complete((*crate::core::keys::UNIT_VALUE).clone()),
+        );
         tasks
             .reflection
             .get_mut(&wait)
             .expect("test task must belong to this session")
-            .state = EvaluationTaskState::Complete((*crate::core::keys::UNIT_VALUE).clone());
+            .state = state;
         self.session.task_changed.notify_all();
         drop(tasks);
         while matches!(
@@ -1173,11 +1276,15 @@ impl EvalContext {
             .lock()
             .expect("evaluation task registry was poisoned");
         let wait = test_reflection_dependency(&tasks, wait);
+        let state = publish_reflection_state(
+            &wait,
+            EvaluationTaskState::Failed(evaluation_failure(error.as_ref())),
+        );
         tasks
             .reflection
             .get_mut(&wait)
             .expect("test task must belong to this session")
-            .state = EvaluationTaskState::Failed(evaluation_failure(error.as_ref()));
+            .state = state;
         self.session.task_changed.notify_all();
         drop(tasks);
         while matches!(
@@ -1310,7 +1417,7 @@ fn test_reflection_dependency(
 ) -> EvaluationWaitToken {
     let mut wait = wait.clone();
     let mut seen = HashSet::new();
-    while seen.insert(wait.clone()) {
+    while seen.insert(wait.get()) {
         let Some(deferred) = tasks.deferred_by_wait.get(&wait) else {
             break;
         };
@@ -1498,7 +1605,7 @@ impl EvaluationSession {
                     task: wait.producer(),
                     session: wait.owner_id(),
                     wait: wait.get(),
-                    live_foreign: wait.owner_id() != self.id && wait.owner.upgrade().is_some(),
+                    live_foreign: wait.owner_id() != self.id && wait.owner().is_some(),
                 };
             }
             let Some(next) = task_dependency(tasks, &wait.producer()).cloned() else {
@@ -1519,11 +1626,10 @@ impl EvaluationSession {
         target: &EvaluationWaitToken,
         mut step_budget: usize,
     ) -> EvaluationPumpOutcome {
-        if !target
-            .owner
-            .upgrade()
-            .is_some_and(|owner| Arc::ptr_eq(&context.session, &owner))
-        {
+        if target.terminal_poll().is_some() {
+            return EvaluationPumpOutcome::TargetReady;
+        }
+        if !target.belongs_to(&context.session) {
             return EvaluationPumpOutcome::NoProgress;
         }
 
@@ -1628,7 +1734,7 @@ impl EvaluationSession {
         assert!(record.machine.is_none(), "claimed machine must be absent");
         if record.cancel_requested {
             record.cancel_requested = false;
-            record.state = EvaluationTaskState::Cancelled;
+            record.state = publish_reflection_state(&claimed.wait, EvaluationTaskState::Cancelled);
             self.task_changed.notify_all();
             let status = task_status_update(record, Some(&claimed.prior_state));
             return (true, false, Some(claimed.machine), status);
@@ -1652,7 +1758,7 @@ impl EvaluationSession {
             }
             EvaluationMachinePoll::Cancelled => (EvaluationTaskState::Cancelled, true, false),
         };
-        record.state = state;
+        record.state = publish_reflection_state(&claimed.wait, state);
         if matches!(record.state, EvaluationTaskState::Queued) {
             tasks.ready.push_back(claimed.id);
         }
@@ -1736,7 +1842,7 @@ impl EvaluationSession {
             .get_mut(&claimed.deferred)
             .expect("claimed deferred task must remain registered");
         made_progress |= claimed.prior_dependency != dependency;
-        record.state = state;
+        record.state = publish_deferred_state(&record.wait, state);
         record.dependency = dependency;
 
         if dependency.is_some()
@@ -1871,6 +1977,9 @@ fn task_is_claimable(
 }
 
 fn wait_is_terminal(tasks: &EvaluationTasks, wait: &EvaluationWaitToken) -> bool {
+    if wait.terminal_poll().is_some() {
+        return true;
+    }
     if let Some(record) = tasks.reflection.get(wait) {
         return matches!(
             record.state,
@@ -1990,7 +2099,7 @@ fn poison_lazy_cycle(
         let DeferredValue::Lazy(lazy) = &record.value else {
             unreachable!("a pure lazy cycle cannot contain a promise")
         };
-        record.state = match lazy.cache(Err(failure.clone())) {
+        let state = match lazy.cache(Err(failure.clone())) {
             Err(error) => DeferredTaskState::Failed(error),
             Ok(value) => {
                 debug_assert!(
@@ -2000,6 +2109,7 @@ fn poison_lazy_cycle(
                 DeferredTaskState::Complete(value.into_value())
             }
         };
+        record.state = publish_deferred_state(&record.wait, state);
     }
     retired_machines
 }
@@ -2145,7 +2255,7 @@ fn claim_blocked_task(
 mod tests {
     use super::*;
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     struct Complete;
 
@@ -2298,6 +2408,25 @@ mod tests {
             if let Some(signal) = self.0.take() {
                 signal.send(()).expect("test receiver should remain open");
             }
+            EvaluationMachinePoll::Complete((*crate::core::keys::UNIT_VALUE).clone())
+        }
+    }
+
+    struct CompleteAfterRelease {
+        started: Option<mpsc::Sender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl EvaluationTaskMachine for CompleteAfterRelease {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            if let Some(started) = self.started.take() {
+                started
+                    .send(())
+                    .expect("test start receiver should remain open");
+            }
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test should release the task");
             EvaluationMachinePoll::Complete((*crate::core::keys::UNIT_VALUE).clone())
         }
     }
@@ -2476,17 +2605,43 @@ mod tests {
     }
 
     #[test]
-    fn wait_tokens_currently_require_a_live_owner_even_after_completion() {
-        let completed_wait = {
+    fn terminal_wait_tokens_outlive_their_owner_session() {
+        let (completed_wait, failed_wait, cancelled_wait) = {
             let owner = EvalContext::standalone();
-            let task = owner
+            let completed = owner
                 .schedule_task(|_| Ok(Box::new(Complete)))
                 .expect("completed task should schedule");
+            let failed = owner
+                .schedule_task(|_| Ok(Box::new(Fail)))
+                .expect("failed task should schedule");
+            let cancelled = owner
+                .schedule_task(|_| Ok(Box::new(Complete)))
+                .expect("cancelled task should schedule");
             assert_eq!(
-                owner.pump_wait(task.wait(), 256),
+                owner.cancel_reflection_task_id(cancelled.id()),
+                EvaluationTaskCancellation::Requested
+            );
+            assert!(matches!(
+                owner.run_until_quiescent(),
+                EvaluationSessionRun::Complete(_)
+            ));
+            (
+                completed.wait().clone(),
+                failed.wait().clone(),
+                cancelled.wait().clone(),
+            )
+        };
+        let deferred_wait = {
+            let owner = EvalContext::standalone();
+            let lazy = inert_lazy("owner lifetime");
+            let wait = owner
+                .lazy_task(&lazy, |_| Box::new(Complete))
+                .expect("deferred task should schedule");
+            assert_eq!(
+                owner.pump_wait(&wait, 256),
                 EvaluationPumpOutcome::TargetReady
             );
-            task.wait().clone()
+            wait
         };
         let pending_wait = {
             let owner = EvalContext::standalone();
@@ -2498,17 +2653,88 @@ mod tests {
         };
         let observer = EvalContext::standalone();
 
-        // Phase 1 deliberately changes only the completed case: a terminal
-        // wait cell will outlive its session, while a pending wait still
-        // reports that its producer session is gone.
-        for wait in [&completed_wait, &pending_wait] {
-            assert!(matches!(
-                observer.poll_wait(wait),
-                EvaluationTaskPoll::Failed(error)
-                    if error.to_string()
-                        == "reflection task's evaluation session no longer exists"
-            ));
+        assert!(matches!(
+            observer.poll_wait(&completed_wait),
+            EvaluationTaskPoll::Complete(_)
+        ));
+        assert!(matches!(
+            observer.poll_wait(&deferred_wait),
+            EvaluationTaskPoll::Complete(_)
+        ));
+        assert!(matches!(
+            observer.poll_wait(&failed_wait),
+            EvaluationTaskPoll::Failed(error) if error.to_string() == "reasoning failed"
+        ));
+        assert_eq!(
+            observer.poll_wait(&cancelled_wait),
+            EvaluationTaskPoll::Cancelled
+        );
+        assert_eq!(
+            observer.pump_wait(&completed_wait, 1),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert!(matches!(
+            observer.poll_wait(&pending_wait),
+            EvaluationTaskPoll::Failed(error)
+                if error.to_string()
+                    == "reflection task's evaluation session no longer exists"
+        ));
+    }
+
+    #[test]
+    fn concurrent_waiters_observe_terminal_publication() {
+        let executor = EvaluationExecutor::new(1).expect("test executor should start");
+        let session = EvaluationSession::shared(&executor);
+        let context = EvalContext::new(session);
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let task = context
+            .schedule_task(move |_| {
+                Ok(Box::new(CompleteAfterRelease {
+                    started: Some(started_sender),
+                    release: release_receiver,
+                }))
+            })
+            .expect("test task should schedule");
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should claim the task");
+
+        let barrier = Arc::new(std::sync::Barrier::new(9));
+        let waiters = (0..8)
+            .map(|_| {
+                let context = context.clone();
+                let wait = task.wait().clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    loop {
+                        match context.poll_wait(&wait) {
+                            EvaluationTaskPoll::Pending(_) if Instant::now() < deadline => {
+                                std::thread::yield_now();
+                            }
+                            EvaluationTaskPoll::Pending(_) => {
+                                panic!("waiter timed out before terminal publication")
+                            }
+                            EvaluationTaskPoll::Complete(_) => break,
+                            poll => panic!("waiter observed unexpected task state: {poll:?}"),
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        release_sender
+            .send(())
+            .expect("worker release receiver should remain open");
+        for waiter in waiters {
+            waiter.join().expect("concurrent waiter should not panic");
         }
+        assert!(matches!(
+            context.poll_reflection_task(&task),
+            EvaluationTaskPoll::Complete(_)
+        ));
     }
 
     #[test]

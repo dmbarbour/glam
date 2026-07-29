@@ -61,9 +61,13 @@ control-flow overview.
   only their source snapshots and may finish harmlessly against the canonical
   cache. Blocking and retryable promise conditions retain the source.
   Terminal deferred-task records drop their machines, including followed
-  values and net-construction state. The lightweight terminal records and
-  their results still live until the evaluation session is dropped; wait-token
-  terminal cells and registry pruning remain future work.
+  values and net-construction state. Every scheduler wait token shares a
+  lock-free terminal cell. Terminal state is published while the session
+  registry is locked, and polling checks it around registry lookup; a terminal
+  result therefore outlives the weakly held owner session while a pending wait
+  does not keep that session alive. The lightweight terminal records, indexes,
+  and duplicate results still live until the evaluation session is dropped;
+  registry pruning remains future work.
 - `Value::Function` is an independently observable curried stage. Partial
   application shares its staged runtime; saturation returns memoized work.
 - Lazy lists contain opaque `ListThunk` holes for either computed lazies or
