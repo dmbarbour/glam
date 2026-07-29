@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bytes::Bytes;
 
-use crate::core::{Dict, EvaluatedValue, FixpointComputation, Key, LazyValue, Value, keys};
+use crate::core::{
+    Dict, EvaluatedValue, EvaluationFailure, FixpointComputation, Key, LazyValue, Value, keys,
+};
 use crate::evaluation::EvaluationTaskPoll;
 use crate::number::Number;
 
@@ -643,6 +645,55 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
 }
 
 #[test]
+fn promised_failure_preserves_structured_diagnostic_and_identity() {
+    let session = test_context();
+    let owner = session.with_new_task().unwrap();
+    let observer = session.with_new_task().unwrap();
+    let promise = PromisedValue::fixpoint(&owner, "structured promise failure").unwrap();
+    let wait = promise
+        .task()
+        .expect("task-owned promise should expose its wait")
+        .wait()
+        .clone();
+    let detail = Key::atom_from_text("detail");
+    let emission = Value::Dict(
+        Dict::new_sync()
+            .insert(
+                (*keys::MSG).clone(),
+                Value::Dict(Dict::new_sync().insert(
+                    (*keys::TEXT).clone(),
+                    Value::binary_from_text("structured promise failure"),
+                )),
+            )
+            .insert(detail.clone(), n(7)),
+    );
+    let frame = evaluation_context_frame("promise_test");
+    let failure =
+        Arc::new(EvaluationFailure::emission(emission.clone()).with_context(frame.clone()));
+
+    promise
+        .fail(failure.clone())
+        .expect("new promise should accept one permanent failure");
+
+    let observed = eval_value(&observer, &Value::Promised(promise))
+        .expect_err("failed promise should expose its permanent failure")
+        .into_permanent_failure();
+    assert!(Arc::ptr_eq(&failure, &observed));
+    assert_eq!(observed.emission_value(), Some(&emission));
+    assert_eq!(observed.contexts(), [frame]);
+
+    let EvaluationTaskPoll::Failed(wait_failure) = session.poll_wait(&wait) else {
+        panic!("the promise wait should publish the same permanent failure")
+    };
+    assert!(Arc::ptr_eq(&failure, &wait_failure));
+
+    let Value::Dict(diagnostic) = failure_diagnostic_value(&observed) else {
+        panic!("a structured promise failure should project to a diagnostic dictionary")
+    };
+    assert_eq!(diagnostic.get(&detail), Some(&n(7)));
+}
+
+#[test]
 fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
     let context = test_context();
     let promise = PromisedValue::new("promise cycle");
@@ -765,7 +816,9 @@ fn explicitly_failed_task_promise_retires_its_wait_record() {
         .wait()
         .clone();
 
-    fixpoint.fail("fixpoint failed deliberately").unwrap();
+    fixpoint
+        .fail_message("fixpoint failed deliberately")
+        .unwrap();
 
     assert!(matches!(
         session.poll_wait(&wait),

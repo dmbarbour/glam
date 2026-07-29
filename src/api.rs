@@ -292,7 +292,7 @@ impl PromiseResolver {
             .expect("a live promise resolver must retain its promise");
         let label = promise.label().clone();
         promise
-            .fail(message)
+            .fail_message(message)
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
         self.wake.notify();
         Ok(())
@@ -308,7 +308,7 @@ impl Drop for PromiseResolver {
             "promise resolver for `{}` was dropped before completion",
             promise.label()
         );
-        if promise.fail(message).is_ok() {
+        if promise.fail_message(message).is_ok() {
             self.wake.notify();
         }
     }

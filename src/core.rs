@@ -246,11 +246,18 @@ struct LazyCell {
     result: OnceLock<LazyResult>,
 }
 
+/// The one terminal assignment retained by a named promise.
+///
+/// Successful assignments may still name deferred values, which observers
+/// follow normally. The failure arm is permanent: retryable demand halts never
+/// enter this cell.
+pub(crate) type PromiseAssignment = Result<Value, Arc<EvaluationFailure>>;
+
 #[derive(Clone)]
 pub(crate) struct PromisedValue {
     id: PromiseId,
     label: Arc<str>,
-    assignment: Arc<OnceLock<Result<Value, Arc<str>>>>,
+    assignment: Arc<OnceLock<PromiseAssignment>>,
     task: Option<Arc<TaskPromise>>,
 }
 
@@ -393,15 +400,25 @@ impl PromisedValue {
         Ok(())
     }
 
-    pub(crate) fn fail(&self, error: impl Into<Arc<str>>) -> Result<(), Arc<str>> {
-        if let Err(assignment) = self.assignment.set(Err(error.into())) {
+    pub(crate) fn fail(
+        &self,
+        failure: Arc<EvaluationFailure>,
+    ) -> Result<(), Arc<EvaluationFailure>> {
+        if let Err(assignment) = self.assignment.set(Err(failure)) {
             return Err(assignment.expect_err("failing a promised value always supplies an error"));
         }
         self.publish_task_assignment();
         Ok(())
     }
 
-    pub(crate) fn assignment(&self) -> Option<Result<Value, Arc<str>>> {
+    pub(crate) fn fail_message(
+        &self,
+        message: impl Into<Arc<str>>,
+    ) -> Result<(), Arc<EvaluationFailure>> {
+        self.fail(Arc::new(EvaluationFailure::message(message.into())))
+    }
+
+    pub(crate) fn assignment(&self) -> Option<PromiseAssignment> {
         self.assignment.get().cloned()
     }
 

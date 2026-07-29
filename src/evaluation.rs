@@ -14,7 +14,8 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use crate::core::{
-    DeferredValueId, EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue, PromisedValue, Value,
+    DeferredValueId, EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue, PromiseAssignment,
+    PromisedValue, Value,
 };
 
 mod executor;
@@ -140,7 +141,7 @@ impl EvaluationWaitToken {
             .clone()
     }
 
-    pub(crate) fn publish_promise_assignment(&self, assignment: &Result<Value, Arc<str>>) {
+    pub(crate) fn publish_promise_assignment(&self, assignment: &PromiseAssignment) {
         let terminal = promise_assignment_terminal(assignment);
         if let Some(owner) = self.owner() {
             owner.complete_promise_wait(self, terminal);
@@ -568,7 +569,7 @@ impl Drop for PendingReflectionTaskInner {
 #[derive(Debug)]
 struct PromiseRecord {
     producer: EvaluationTaskId,
-    result: Weak<OnceLock<Result<Value, Arc<str>>>>,
+    result: Weak<OnceLock<PromiseAssignment>>,
 }
 
 #[derive(Default)]
@@ -639,10 +640,10 @@ fn retire_reflection_task(
     record
 }
 
-fn promise_assignment_terminal(assignment: &Result<Value, Arc<str>>) -> EvaluationTaskTerminal {
+fn promise_assignment_terminal(assignment: &PromiseAssignment) -> EvaluationTaskTerminal {
     match assignment {
         Ok(value) => EvaluationTaskTerminal::Complete(value.clone()),
-        Err(error) => EvaluationTaskTerminal::Failed(evaluation_failure(error.as_ref())),
+        Err(error) => EvaluationTaskTerminal::Failed(error.clone()),
     }
 }
 
@@ -1034,7 +1035,7 @@ impl EvalContext {
 
     pub(crate) fn register_promise(
         &self,
-        result: &Arc<OnceLock<Result<Value, Arc<str>>>>,
+        result: &Arc<OnceLock<PromiseAssignment>>,
     ) -> Result<(EvaluationTaskId, EvaluationWaitToken), Arc<str>> {
         let owner = self.task_id()?;
         let wait = allocate_wait_token(&self.session, owner)?;
@@ -1065,6 +1066,7 @@ impl EvalContext {
         };
         let owner = *owner;
         let reason = reason.into();
+        let failure = Arc::new(EvaluationFailure::message(reason));
         let mut tasks = self
             .session
             .tasks
@@ -1076,7 +1078,7 @@ impl EvalContext {
                 continue;
             };
             let terminal = if let Some(result) = promise.result.upgrade() {
-                let _ = result.set(Err(reason.clone()));
+                let _ = result.set(Err(failure.clone()));
                 promise_assignment_terminal(
                     result
                         .get()
@@ -3167,7 +3169,7 @@ mod tests {
                     .expect("successful promise should complete once");
             } else {
                 promise
-                    .fail("long-lived promise failure")
+                    .fail_message("long-lived promise failure")
                     .expect("failed promise should complete once");
             }
             promises.push(wait);

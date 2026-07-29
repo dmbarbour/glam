@@ -4675,7 +4675,7 @@ mod tests {
         assert!(blocked.lazy.is_some());
 
         promised
-            .fail("dependency failed")
+            .fail_message("dependency failed")
             .expect("test promise should fail once");
         let poll = task.poll(256);
         let EffectTaskPoll::Complete(value) = poll else {

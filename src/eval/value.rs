@@ -224,7 +224,7 @@ impl EvaluationTaskMachine for PromiseFollower {
     fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
         let result = match &self.state {
             PromiseFollowerState::AwaitAssignment => match self.promise.assignment() {
-                Some(result) => result.map_err(|error| EvaluationHalt::new(error.as_ref())),
+                Some(result) => result.map_err(EvaluationHalt::failure),
                 None => {
                     let Some(task) = self.promise.task() else {
                         return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -247,9 +247,7 @@ impl EvaluationTaskMachine for PromiseFollower {
                                     self.state = PromiseFollowerState::FollowAssignment(value);
                                     EvaluationMachinePoll::Yielded
                                 }
-                                Err(error) => EvaluationMachinePoll::Failed(Arc::new(
-                                    EvaluationFailure::message(error.as_ref()),
-                                )),
+                                Err(error) => EvaluationMachinePoll::Failed(error),
                             },
                             None => {
                                 EvaluationMachinePoll::Failed(Arc::new(EvaluationFailure::message(
@@ -453,7 +451,7 @@ fn produce_lazy_source(
 
 fn eval_promised(context: &EvalContext, promise: &PromisedValue) -> Result<Value, EvaluationHalt> {
     if let Some(assignment) = promise.assignment() {
-        let value = assignment.map_err(|message| EvaluationHalt::new(message.as_ref()))?;
+        let value = assignment.map_err(EvaluationHalt::failure)?;
         if !is_deferred(&value) {
             return Ok(value);
         }
