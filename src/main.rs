@@ -309,10 +309,10 @@ impl PreparedAssembly {
 
     fn fail_environment(&mut self, message: &str) {
         if let Some(resolver) = self.process_args.take() {
-            let _ = resolver.fail(message);
+            let _ = resolver.fail_message(message);
         }
         if let Some(resolver) = self.reflection_args.take() {
-            let _ = resolver.fail(message);
+            let _ = resolver.fail_message(message);
         }
     }
 }

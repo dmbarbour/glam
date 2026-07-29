@@ -19,7 +19,9 @@ use crate::compiler::{
     ModuleLoader,
 };
 use crate::core::Value as CoreValue;
-use crate::core::{Builtin, Dict, EvaluationHalt, Key, List, NetValue, PromisedValue, keys};
+use crate::core::{
+    Builtin, Dict, EvaluationFailure, EvaluationHalt, Key, List, NetValue, PromisedValue, keys,
+};
 use crate::core_net::CoreSpecialization;
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
@@ -239,8 +241,9 @@ impl Value {
 /// The unique host capability for completing one promised [`Value`].
 ///
 /// This handle is affine: it cannot be cloned and is consumed by
-/// [`resolve`](Self::resolve) or [`fail`](Self::fail). Dropping it unresolved
-/// permanently fails the promised value.
+/// [`resolve`](Self::resolve), [`fail`](Self::fail), or
+/// [`fail_message`](Self::fail_message). Dropping it unresolved permanently
+/// fails the promised value.
 ///
 /// Completion wakes only the evaluation session belonging to the
 /// [`Assembler`] that created the promise. If the value is shared with other
@@ -284,15 +287,25 @@ impl PromiseResolver {
         Ok(())
     }
 
-    /// Completes the promise with a permanent producer error.
-    pub fn fail(mut self, message: impl Into<Arc<str>>) -> Result<(), Error> {
+    /// Completes the promise with an arbitrary Glam value as its permanent
+    /// producer error.
+    pub fn fail(self, failure: Value) -> Result<(), Error> {
+        self.fail_with(Arc::new(EvaluationFailure::emission(failure.into_core())))
+    }
+
+    /// Completes the promise with a conventional textual producer error.
+    pub fn fail_message(self, message: impl Into<Arc<str>>) -> Result<(), Error> {
+        self.fail_with(Arc::new(EvaluationFailure::message(message.into())))
+    }
+
+    fn fail_with(mut self, failure: Arc<EvaluationFailure>) -> Result<(), Error> {
         let promise = self
             .promise
             .take()
             .expect("a live promise resolver must retain its promise");
         let label = promise.label().clone();
         promise
-            .fail_message(message)
+            .fail(failure)
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
         self.wake.notify();
         Ok(())

@@ -146,7 +146,7 @@ fn public_promise_resolver_can_fail_or_be_abandoned() {
     let assembler = Assembler::default();
     let (failed, resolver) = assembler.promise("explicit failure");
     resolver
-        .fail("host operation failed")
+        .fail_message("host operation failed")
         .expect("the unique resolver should fail its promise");
     assert!(
         assembler
@@ -163,6 +163,35 @@ fn public_promise_resolver_can_fail_or_be_abandoned() {
         .expect_err("dropping a resolver should permanently fail its promise");
     assert!(error.to_string().contains("abandoned input"));
     assert!(error.to_string().contains("dropped before completion"));
+}
+
+#[test]
+fn public_promise_resolver_preserves_structured_failures() {
+    let assembler = Assembler::default();
+    let (failed, resolver) = assembler.promise("structured failure");
+    let failure = Value::record([
+        (
+            "msg",
+            Value::record([("text", Value::text("host operation failed structurally"))]),
+        ),
+        ("detail", Value::integer(7)),
+    ]);
+
+    resolver
+        .fail(failure)
+        .expect("the unique resolver should accept a structured failure");
+    let error = assembler
+        .evaluate(&failed)
+        .expect_err("a failed promise should expose its structured producer error");
+
+    assert_eq!(error.to_string(), "host operation failed structurally");
+    assert_eq!(
+        assembler
+            .get(error.diagnostic().emission(), "detail")
+            .expect("the structured diagnostic should retain its ad hoc field")
+            .as_i64(),
+        Some(7)
+    );
 }
 
 #[test]
