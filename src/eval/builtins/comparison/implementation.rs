@@ -9,7 +9,7 @@ pub(super) fn eval_compare_ordering_builtin(
     left: &Value,
     right: &Value,
     predicate: impl FnOnce(Ordering) -> bool,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let ordering = compare_ordered_values(context, left, right, name)?;
     Ok(condition_effect_value(predicate(ordering)))
 }
@@ -20,7 +20,7 @@ pub(super) fn eval_compare_equality_builtin(
     left: &Value,
     right: &Value,
     predicate: impl FnOnce(bool) -> bool,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let equal = equal_values(context, left, right, name)?;
     Ok(condition_effect_value(predicate(equal)))
 }
@@ -54,7 +54,7 @@ fn compare_ordered_values(
     left: &Value,
     right: &Value,
     name: &str,
-) -> Result<Ordering, EvalError> {
+) -> Result<Ordering, EvaluationHalt> {
     let left = eval_value(context, left)?;
     let right = eval_value(context, right)?;
     match (left, right) {
@@ -71,12 +71,12 @@ fn compare_ordered_values(
         }
         (Value::Dict(left), Value::Dict(right)) => {
             let Some(left) = left.tagged_payload(context, &keys::TUPLE)? else {
-                return Err(EvalError::new(format!(
+                return Err(EvaluationHalt::new(format!(
                     "{name} builtin can only order dictionaries tagged as `tuple`"
                 )));
             };
             let Some(right) = right.tagged_payload(context, &keys::TUPLE)? else {
-                return Err(EvalError::new(format!(
+                return Err(EvaluationHalt::new(format!(
                     "{name} builtin can only order dictionaries tagged as `tuple`"
                 )));
             };
@@ -91,13 +91,13 @@ fn compare_ordered_values(
         | (Value::Function(_), _)
         | (_, Value::Function(_))
         | (Value::Net(_), _)
-        | (_, Value::Net(_)) => Err(EvalError::new(format!(
+        | (_, Value::Net(_)) => Err(EvaluationHalt::new(format!(
             "{name} builtin cannot compare function values"
         ))),
-        (Value::Opaque(_), _) | (_, Value::Opaque(_)) => Err(EvalError::new(format!(
+        (Value::Opaque(_), _) | (_, Value::Opaque(_)) => Err(EvaluationHalt::new(format!(
             "{name} builtin cannot compare opaque values"
         ))),
-        (left, right) => Err(EvalError::new(format!(
+        (left, right) => Err(EvaluationHalt::new(format!(
             "{name} builtin cannot order values {left:?} and {right:?}"
         ))),
     }
@@ -108,7 +108,7 @@ fn compare_lists_ordered(
     mut left: List,
     mut right: List,
     name: &str,
-) -> Result<Ordering, EvalError> {
+) -> Result<Ordering, EvaluationHalt> {
     loop {
         match (
             pop_list_front(context, &left)?,
@@ -135,7 +135,7 @@ fn equal_values(
     left: &Value,
     right: &Value,
     name: &str,
-) -> Result<bool, EvalError> {
+) -> Result<bool, EvaluationHalt> {
     let left = eval_value(context, left)?;
     let right = eval_value(context, right)?;
     match (left, right) {
@@ -163,7 +163,7 @@ fn equal_values(
         | (Value::Function(_), _)
         | (_, Value::Function(_))
         | (Value::Net(_), _)
-        | (_, Value::Net(_)) => Err(EvalError::new(format!(
+        | (_, Value::Net(_)) => Err(EvaluationHalt::new(format!(
             "{name} builtin cannot compare function values"
         ))),
         (Value::Opaque(left), Value::Opaque(right)) => Ok(left == right),
@@ -181,7 +181,7 @@ fn equal_lists(
     mut left: List,
     mut right: List,
     name: &str,
-) -> Result<bool, EvalError> {
+) -> Result<bool, EvaluationHalt> {
     loop {
         match (
             pop_list_front(context, &left)?,
@@ -205,7 +205,7 @@ fn equal_dicts(
     left: &crate::core::Dict,
     right: &crate::core::Dict,
     name: &str,
-) -> Result<bool, EvalError> {
+) -> Result<bool, EvaluationHalt> {
     let empty = Value::Dict(crate::core::Dict::new_sync());
     for (key, left_value) in left.iter() {
         let right_value = right.get(key).unwrap_or(&empty);

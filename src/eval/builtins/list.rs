@@ -9,7 +9,7 @@ pub(super) fn apply(
     context: &EvalContext,
     builtin: Builtin,
     arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     match builtin {
         Builtin::Append => {
             let [left, right] = super::exact(arguments, "append")?;

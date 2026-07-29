@@ -6,7 +6,7 @@ pub(super) fn apply(
     context: &EvalContext,
     builtin: Builtin,
     arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let [first, target] = super::exact(arguments, builtin_name(builtin))?;
     match builtin {
         Builtin::Seq => seq(context, &first, &target),
@@ -19,7 +19,7 @@ pub(in crate::eval) fn seq(
     context: &EvalContext,
     first: &Value,
     target: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     eval_value(context, first)?;
     Ok(target.clone())
 }

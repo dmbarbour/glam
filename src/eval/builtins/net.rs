@@ -10,7 +10,7 @@ pub(super) fn apply(
     context: &EvalContext,
     builtin: Builtin,
     arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     match builtin {
         Builtin::InteractionNet => {
             let [effect] = super::exact(arguments, "interaction_net")?;
@@ -21,12 +21,12 @@ pub(super) fn apply(
     }
 }
 
-fn apply_net_arity(context: &EvalContext, arguments: Vec<Value>) -> Result<Value, EvalError> {
+fn apply_net_arity(context: &EvalContext, arguments: Vec<Value>) -> Result<Value, EvaluationHalt> {
     let [arity, net] = super::exact(arguments, "net_arity")?;
     let arity = eval_index_number(context, &arity, "net_arity", "net_arity")?;
     let net = eval_value(context, &net)?;
     let Value::Net(net) = net else {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "net_arity builtin requires an interaction-net value",
         ));
     };

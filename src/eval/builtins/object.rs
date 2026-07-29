@@ -10,7 +10,7 @@ pub(super) fn apply(
     context: &EvalContext,
     builtin: Builtin,
     arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     match builtin {
         Builtin::ObjectSpec => {
             let [value] = super::exact(arguments, "object spec")?;

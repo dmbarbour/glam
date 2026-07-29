@@ -3,7 +3,7 @@ use super::super::super::*;
 pub(super) fn eval_list_effect_builtin(
     _context: &EvalContext,
     effect: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(lazy_run_list_effect(effect.clone())))
 }
 
@@ -11,7 +11,7 @@ pub(super) fn eval_list_effect_seq_builtin(
     _context: &EvalContext,
     operation: &Value,
     continuation: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(flat_map_list_effect_results(
         lazy_run_list_effect(operation.clone()),
         continuation.clone(),
@@ -22,7 +22,7 @@ pub(super) fn eval_list_effect_alt_builtin(
     _context: &EvalContext,
     left: &Value,
     right: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(List::concat(
         lazy_run_list_effect(left.clone()),
         lazy_run_list_effect(right.clone()),
@@ -32,14 +32,14 @@ pub(super) fn eval_list_effect_alt_builtin(
 pub(super) fn eval_list_effect_cut_builtin(
     _context: &EvalContext,
     operation: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(cut_list_effect_results(operation.clone())))
 }
 
 pub(super) fn eval_list_effect_fix_builtin(
     context: &EvalContext,
     function: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let function = eval_value(context, function)?;
     let handle = PromisedValue::new("list effect fixpoint");
     let marker = Value::Promised(handle.clone());
@@ -53,10 +53,10 @@ fn lazy_run_list_effect(effect: Value) -> List {
     })
 }
 
-fn run_list_effect_to_list(context: &EvalContext, effect: Value) -> Result<List, EvalError> {
+fn run_list_effect_to_list(context: &EvalContext, effect: Value) -> Result<List, EvaluationHalt> {
     let effect = eval_value(context, &effect)?;
     let Value::Dict(dict) = effect else {
-        return Err(EvalError::new(format!(
+        return Err(EvaluationHalt::new(format!(
             "list effect handler requires an effect dictionary, got {effect:?}"
         )));
     };
@@ -65,7 +65,7 @@ fn run_list_effect_to_list(context: &EvalContext, effect: Value) -> Result<List,
         .filter(|function| !is_undefined_dict_value(function))
         .cloned()
     else {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "list effect handler requires an `eff` member",
         ));
     };
@@ -73,7 +73,7 @@ fn run_list_effect_to_list(context: &EvalContext, effect: Value) -> Result<List,
     let handled = apply_value(context, eval_value(context, &function)?, list_effect_api())?;
     let handled = eval_value(context, &handled)?;
     let Value::List(results) = handled else {
-        return Err(EvalError::new(format!(
+        return Err(EvaluationHalt::new(format!(
             "list effect handler expected a standard effect result list, got {handled:?}"
         )));
     };
@@ -110,19 +110,19 @@ fn fix_list_effect_results(operation: Value, handle: PromisedValue) -> List {
         let Some((head, tail)) = pop_list_front(context, &results)? else {
             handle
                 .set(Value::List(List::empty()))
-                .map_err(|_| EvalError::new("list effect fix initialized twice"))?;
+                .map_err(|_| EvaluationHalt::new("list effect fix initialized twice"))?;
             return Ok(List::empty());
         };
         handle
             .set(head.clone())
-            .map_err(|_| EvalError::new("list effect fix initialized twice"))?;
+            .map_err(|_| EvaluationHalt::new("list effect fix initialized twice"))?;
         Ok(List::concat(List::from_values(vec![head]), tail))
     })
 }
 
 fn deferred_list(
     label: &'static str,
-    thunk: impl Fn(&EvalContext) -> Result<List, EvalError> + Send + Sync + 'static,
+    thunk: impl Fn(&EvalContext) -> Result<List, EvaluationHalt> + Send + Sync + 'static,
 ) -> List {
     List::from_thunk(
         LazyValue::deferred(label, move |context| thunk(context).map(Value::List)).into(),

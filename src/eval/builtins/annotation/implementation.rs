@@ -4,7 +4,7 @@ pub(super) fn eval_anno_builtin(
     context: &EvalContext,
     annotation: &Value,
     target: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     match recognize_annotation(context, annotation)? {
         RecognizedAnnotation::AssertDefined { name, defined } => {
             if defined {
@@ -46,7 +46,7 @@ pub(super) fn eval_anno_builtin(
         RecognizedAnnotation::Error => {
             let message = eval_value(context, target)
                 .map_err(|error| error.with_context(evaluation_context_frame("error_message")))?;
-            Err(EvalError::from_value(message))
+            Err(EvaluationHalt::from_value(message))
         }
         RecognizedAnnotation::Context {
             context: diagnostic_context,
@@ -95,7 +95,7 @@ enum RecognizedAnnotation {
 fn recognize_annotation(
     context: &EvalContext,
     annotation: &Value,
-) -> Result<RecognizedAnnotation, EvalError> {
+) -> Result<RecognizedAnnotation, EvaluationHalt> {
     let annotation = eval_value(context, annotation)
         .map_err(|error| error.with_context(evaluation_context_frame("annotation")))?;
     if let Value::Atom(atom) = &annotation {
@@ -196,7 +196,7 @@ fn parse_assertion_annotation(
     context: &EvalContext,
     payload: &Value,
     tag_name: &str,
-) -> Result<ParsedAssertion, EvalError> {
+) -> Result<ParsedAssertion, EvaluationHalt> {
     let payload = eval_value(context, payload)?;
     let Value::Dict(payload) = payload else {
         return Ok(ParsedAssertion::Invalid(format!(
@@ -224,7 +224,7 @@ fn parse_value_annotation(
     context: &EvalContext,
     payload: &Value,
     tag_name: &str,
-) -> Result<ParsedValueAnnotation, EvalError> {
+) -> Result<ParsedValueAnnotation, EvaluationHalt> {
     let payload = eval_value(context, payload)?;
     let Value::Dict(payload) = payload else {
         return Ok(ParsedValueAnnotation::Invalid(format!(
@@ -244,7 +244,7 @@ fn parse_value_annotation(
     })
 }
 
-fn annotation_name(context: &EvalContext, value: &Value) -> Result<String, EvalError> {
+fn annotation_name(context: &EvalContext, value: &Value) -> Result<String, EvaluationHalt> {
     let value = eval_value(context, value)?;
     Ok(match value {
         Value::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -271,7 +271,7 @@ pub(in crate::eval) fn annotation_error_value(message: impl Into<String>) -> Val
     Value::error(message.into())
 }
 
-fn eval_deque_annotation(context: &EvalContext, target: &Value) -> Result<Value, EvalError> {
+fn eval_deque_annotation(context: &EvalContext, target: &Value) -> Result<Value, EvaluationHalt> {
     match eval_value(context, target)? {
         Value::List(list) => {
             Ok(Value::List(list.try_balanced(&mut |thunk| {
@@ -284,7 +284,7 @@ fn eval_deque_annotation(context: &EvalContext, target: &Value) -> Result<Value,
     }
 }
 
-fn eval_binary_annotation(context: &EvalContext, target: &Value) -> Result<Value, EvalError> {
+fn eval_binary_annotation(context: &EvalContext, target: &Value) -> Result<Value, EvaluationHalt> {
     match eval_value(context, target)? {
         Value::Binary(bytes) => Ok(Value::Binary(bytes)),
         Value::List(list) => Ok(Value::Binary(Bytes::from(list_to_binary_bytes(
@@ -298,7 +298,7 @@ fn eval_binary_annotation(context: &EvalContext, target: &Value) -> Result<Value
     }
 }
 
-fn eval_array_annotation(context: &EvalContext, target: &Value) -> Result<Value, EvalError> {
+fn eval_array_annotation(context: &EvalContext, target: &Value) -> Result<Value, EvaluationHalt> {
     match eval_value(context, target)? {
         Value::Binary(bytes) => Ok(Value::List(List::from_values(
             bytes

@@ -21,6 +21,12 @@ control-flow overview.
   top-level lazy or promised result while leaving lazy dictionary fields and
   list elements untouched. `EvaluatedValue` records only that non-deferred
   structural boundary; it does not authorize inspecting an opaque net.
+- A failed demand returns `core::EvaluationHalt`: either a permanent
+  `Arc<EvaluationFailure>`, a scheduler wait, or an unassigned promise.
+  Pollable computations may propagate all three cases. Only the permanent
+  variant may enter a lazy cache, promise failure, terminal wait cell, or
+  failure ledger. Diagnostic projection belongs to `eval`, not the core halt
+  representation.
 - Computed lazy work is owned by demand-driven `EvaluationSession` task
   records. Contending observers receive the task's stable wait token; they do
   not wait on a lazy-specific condition variable. A pump distinguishes a
@@ -51,7 +57,8 @@ control-flow overview.
 - Lazy identities are process-global nonzero IDs because a value and its result
   cell may cross evaluation sessions; each session uses them only as local
   scheduling keys.
-- A computed `LazyValue` caches `Result<EvaluatedValue, Arc<LazyFailure>>`.
+- A computed `LazyValue` caches
+  `Result<EvaluatedValue, Arc<EvaluationFailure>>`.
   Successful cache installation therefore rejects deferred outer shells at the
   type boundary, while a forwarded failure keeps one structured `Arc` through
   cycle members and upstream dependents. Raw `PromisedValue` assignments are a

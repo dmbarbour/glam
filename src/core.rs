@@ -9,11 +9,12 @@ use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
-use crate::eval::EvalError;
 use crate::evaluation::{EvalContext, EvaluationTaskHandle, EvaluationTaskId, EvaluationWaitToken};
 use crate::number::Number;
 
+mod evaluation_halt;
 pub(crate) mod keys;
+pub(crate) use evaluation_halt::EvaluationHalt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct LazyId(NonZeroU64);
@@ -279,7 +280,7 @@ impl LazyValue {
 
     pub(crate) fn deferred(
         label: impl Into<Arc<str>>,
-        thunk: impl Fn(&EvalContext) -> Result<Value, EvalError> + Send + Sync + 'static,
+        thunk: impl Fn(&EvalContext) -> Result<Value, EvaluationHalt> + Send + Sync + 'static,
     ) -> Self {
         Self::with_source(label, LazySource::Deferred(Arc::new(thunk)))
     }
@@ -787,7 +788,7 @@ impl TaskPromise {
 }
 
 pub(crate) type DeferredComputation =
-    dyn Fn(&EvalContext) -> Result<Value, EvalError> + Send + Sync;
+    dyn Fn(&EvalContext) -> Result<Value, EvaluationHalt> + Send + Sync;
 
 /// A lazy sequencing boundary for `anno refl:Effect Target`.
 ///
@@ -1097,7 +1098,7 @@ impl Value {
 
     pub(crate) fn deferred(
         label: impl Into<Arc<str>>,
-        thunk: impl Fn(&EvalContext) -> Result<Value, EvalError> + Send + Sync + 'static,
+        thunk: impl Fn(&EvalContext) -> Result<Value, EvaluationHalt> + Send + Sync + 'static,
     ) -> Self {
         Self::Lazy(LazyValue::deferred(label, thunk))
     }

@@ -6,7 +6,7 @@ pub(super) fn apply(
     context: &EvalContext,
     builtin: Builtin,
     arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let name = match builtin {
         Builtin::IfResult => "if",
         Builtin::MatchResult => "match",
@@ -14,17 +14,17 @@ pub(super) fn apply(
     };
     let [results] = super::exact(arguments, name)?;
     let Value::List(results) = eval_value(context, &results)? else {
-        return Err(EvalError::new(format!(
+        return Err(EvaluationHalt::new(format!(
             "{name} search did not produce a result list"
         )));
     };
 
     match pop_list_front(context, &results)? {
         Some((result, _)) => Ok(result),
-        None if builtin == Builtin::IfResult => Err(EvalError::new(
+        None if builtin == Builtin::IfResult => Err(EvaluationHalt::new(
             "if search exhausted despite its required `else` branch",
         )),
-        None => Err(EvalError::new(
+        None => Err(EvaluationHalt::new(
             "match search exhausted despite its compiler-provided fallback",
         )),
     }
@@ -37,7 +37,7 @@ mod tests {
 
     use super::*;
 
-    fn select(builtin: Builtin, values: Vec<Value>) -> Result<Value, EvalError> {
+    fn select(builtin: Builtin, values: Vec<Value>) -> Result<Value, EvaluationHalt> {
         apply(
             &EvalContext::standalone(),
             builtin,
@@ -65,7 +65,7 @@ mod tests {
         let forced_by_thunk = forced.clone();
         let selected = Value::deferred("selected conditional result", move |_| {
             forced_by_thunk.store(true, Ordering::Relaxed);
-            Err(EvalError::new("selected result was forced"))
+            Err(EvaluationHalt::new("selected result was forced"))
         });
 
         let result = select(Builtin::IfResult, vec![selected])

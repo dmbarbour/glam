@@ -4,7 +4,7 @@ use crate::core::FixpointComputation;
 pub(super) fn eval_object_instance_builtin(
     _context: &EvalContext,
     spec: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     Ok(Value::Lazy(LazyValue::computed_fixpoint(
         "object self",
         FixpointComputation::ObjectInstance(spec.clone()),
@@ -15,7 +15,7 @@ pub(in crate::eval) fn construct_object_instance(
     context: &EvalContext,
     spec: &Value,
     self_marker: Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let spec_dict = object_spec_dict(context, spec)?;
     let specs = object_application_order(context, &spec_dict)?;
 
@@ -28,7 +28,7 @@ pub(in crate::eval) fn construct_object_instance(
         let mixed = apply_value(context, eval_value(context, &defs)?, base)?;
         let mixed = apply_value(context, eval_value(context, &mixed)?, self_marker.clone())?;
         let Value::Dict(mixed_dict) = eval_value(context, &mixed)? else {
-            return Err(EvalError::new(
+            return Err(EvaluationHalt::new(
                 "object definition mixin must produce a dictionary",
             ));
         };
@@ -36,7 +36,7 @@ pub(in crate::eval) fn construct_object_instance(
     }
 
     let Value::Dict(base_dict) = base else {
-        return Err(EvalError::new("object base is not a dictionary"));
+        return Err(EvaluationHalt::new("object base is not a dictionary"));
     };
     let object = Value::Dict(base_dict.insert((*keys::SPEC).clone(), Value::Dict(spec_dict)));
     Ok(object)
@@ -47,7 +47,7 @@ pub(super) fn eval_object_instance_from_parts_builtin(
     name: Value,
     deps: Value,
     defs: Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let spec = object_spec_from_parts(name, deps, defs);
     eval_object_instance_builtin(context, &Value::Dict(spec))
 }
@@ -68,10 +68,10 @@ pub(super) fn eval_object_with_defs_builtin(
     context: &EvalContext,
     object: &Value,
     extension_defs: Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let object = eval_value(context, object)?;
     let Value::Dict(object_dict) = &object else {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "ordinary `with` requires a dictionary or object value",
         ));
     };
@@ -107,7 +107,7 @@ pub(super) fn eval_object_composed_defs_builtin(
     extension_defs: Value,
     base: Value,
     self_value: Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let prior = apply_value(context, prior_defs, base)?;
     let prior = apply_value(context, prior, self_value.clone())?;
     let extended = apply_value(context, extension_defs, prior)?;
@@ -121,11 +121,11 @@ pub(super) fn eval_object_override_defs_builtin(
     context: &EvalContext,
     updates: &Value,
     base: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let updates = eval_value(context, updates)?;
     let base = eval_value(context, base)?;
     let (Value::Dict(updates), Value::Dict(base)) = (updates, base) else {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "object override definitions require dictionary values",
         ));
     };
@@ -136,7 +136,7 @@ fn override_dict(
     context: &EvalContext,
     base: &crate::core::Dict,
     updates: &crate::core::Dict,
-) -> Result<crate::core::Dict, EvalError> {
+) -> Result<crate::core::Dict, EvaluationHalt> {
     let mut result = base.clone();
     for (key, update) in updates.iter() {
         let update = match (result.get(key), update) {
@@ -154,27 +154,27 @@ fn override_dict(
 pub(super) fn eval_object_spec_builtin(
     context: &EvalContext,
     value: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let value = eval_value(context, value)?;
     let Value::Dict(dict) = value else {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "object spec builtin requires an object value",
         ));
     };
 
     let Some(spec) = dict.get(&*keys::SPEC) else {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
         ));
     };
     let spec = eval_value(context, spec)?;
     if is_undefined_dict_value(&spec) {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
         ));
     }
     if !matches!(spec, Value::Dict(_)) {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "object value requires a dictionary-valued `spec`",
         ));
     }
@@ -184,10 +184,10 @@ pub(super) fn eval_object_spec_builtin(
 pub(super) fn eval_object_from_dict_builtin(
     context: &EvalContext,
     value: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let value = eval_value(context, value)?;
     let Value::Dict(dict) = value else {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "object_from_dict requires a dictionary value",
         ));
     };
@@ -195,7 +195,7 @@ pub(super) fn eval_object_from_dict_builtin(
     if let Some(spec) = dict.get(&*keys::SPEC)
         && !is_undefined_dict_value(&eval_value(context, spec)?)
     {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "object_from_dict requires a plain dictionary, not an object",
         ));
     }
@@ -207,7 +207,7 @@ pub(super) fn eval_object_local_name_builtin(
     context: &EvalContext,
     host: &Value,
     parts: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let host_spec = eval_object_spec_builtin(context, host)?;
     let host_spec = object_spec_dict(context, &host_spec)?;
     let host_name = object_spec_name_value(&host_spec);
@@ -217,7 +217,7 @@ pub(super) fn eval_object_local_name_builtin(
         Value::List(parts) => list_to_value_items(context, &parts)?,
         Value::Dict(dict) if dict.is_empty() => Vec::new(),
         _ => {
-            return Err(EvalError::new(
+            return Err(EvaluationHalt::new(
                 "object local name builtin requires a list of name parts",
             ));
         }
@@ -225,10 +225,13 @@ pub(super) fn eval_object_local_name_builtin(
     Ok(Value::List(List::from_values(name_parts)))
 }
 
-fn object_spec_dict(context: &EvalContext, spec: &Value) -> Result<crate::core::Dict, EvalError> {
+fn object_spec_dict(
+    context: &EvalContext,
+    spec: &Value,
+) -> Result<crate::core::Dict, EvaluationHalt> {
     let spec = eval_value(context, spec)?;
     let Value::Dict(spec_dict) = spec else {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "object instance builtin requires a specification dictionary",
         ));
     };
@@ -253,7 +256,7 @@ fn dict_object_spec(dict: crate::core::Dict) -> Value {
 fn object_application_order(
     context: &EvalContext,
     spec: &crate::core::Dict,
-) -> Result<Vec<crate::core::Dict>, EvalError> {
+) -> Result<Vec<crate::core::Dict>, EvaluationHalt> {
     let mut seen = BTreeMap::new();
     let mut next_anonymous_id = 0;
     let mut linearized = object_c3_linearization(context, spec, &mut seen, &mut next_anonymous_id)?;
@@ -276,7 +279,7 @@ impl LinearizedObjectSpec {
         context: &EvalContext,
         spec: crate::core::Dict,
         next_anonymous_id: &mut u64,
-    ) -> Result<Self, EvalError> {
+    ) -> Result<Self, EvaluationHalt> {
         let name = object_spec_name(context, &spec)?;
         let anonymous_id = if is_anonymous_object_name(&name) {
             let id = *next_anonymous_id;
@@ -298,7 +301,7 @@ fn object_c3_linearization(
     spec: &crate::core::Dict,
     seen: &mut BTreeMap<Key, crate::core::Dict>,
     next_anonymous_id: &mut u64,
-) -> Result<Vec<LinearizedObjectSpec>, EvalError> {
+) -> Result<Vec<LinearizedObjectSpec>, EvaluationHalt> {
     let entry = LinearizedObjectSpec::new(context, spec.clone(), next_anonymous_id)?;
     if entry.anonymous_id.is_none() {
         remember_object_spec(&entry.name, spec, seen)?;
@@ -318,10 +321,10 @@ fn object_c3_linearization(
         let dep_entry = dep_linearization
             .first()
             .cloned()
-            .ok_or_else(|| EvalError::new("object dependency linearization was empty"))?;
+            .ok_or_else(|| EvaluationHalt::new("object dependency linearization was empty"))?;
         if dep_entry.anonymous_id.is_some() {
             if saw_named_dep {
-                return Err(EvalError::new(
+                return Err(EvaluationHalt::new(
                     "anonymous object dependencies must appear before named object dependencies",
                 ));
             }
@@ -340,7 +343,7 @@ fn object_c3_linearization(
 
 fn c3_merge(
     mut sequences: Vec<Vec<LinearizedObjectSpec>>,
-) -> Result<Vec<LinearizedObjectSpec>, EvalError> {
+) -> Result<Vec<LinearizedObjectSpec>, EvaluationHalt> {
     let mut result = Vec::new();
 
     loop {
@@ -366,7 +369,7 @@ fn c3_merge(
         }
 
         let Some(selected_spec) = selected else {
-            return Err(EvalError::new(
+            return Err(EvaluationHalt::new(
                 "object dependencies have inconsistent C3 linearization",
             ));
         };
@@ -391,7 +394,10 @@ fn same_linearized_object_spec(left: &LinearizedObjectSpec, right: &LinearizedOb
     }
 }
 
-fn object_spec_name(context: &EvalContext, spec: &crate::core::Dict) -> Result<Key, EvalError> {
+fn object_spec_name(
+    context: &EvalContext,
+    spec: &crate::core::Dict,
+) -> Result<Key, EvaluationHalt> {
     let name = eval_value(context, &object_spec_name_value(spec))?;
     value_to_key(context, &name)
 }
@@ -410,9 +416,9 @@ fn remember_object_spec(
     name: &Key,
     spec: &crate::core::Dict,
     seen: &mut BTreeMap<Key, crate::core::Dict>,
-) -> Result<(), EvalError> {
+) -> Result<(), EvaluationHalt> {
     match seen.get(name) {
-        Some(prior) if !prior.ptr_eq(spec) => Err(EvalError::new(format!(
+        Some(prior) if !prior.ptr_eq(spec) => Err(EvaluationHalt::new(format!(
             "object specification name {name:?} identifies multiple specifications"
         ))),
         Some(_) => Ok(()),
@@ -423,11 +429,11 @@ fn remember_object_spec(
     }
 }
 
-fn object_dep_specs(context: &EvalContext, deps: &Value) -> Result<Vec<Value>, EvalError> {
+fn object_dep_specs(context: &EvalContext, deps: &Value) -> Result<Vec<Value>, EvaluationHalt> {
     match eval_value(context, deps)? {
         Value::List(list) => list_to_value_items(context, &list),
         Value::Dict(dict) if dict.is_empty() => Ok(Vec::new()),
-        _ => Err(EvalError::new(
+        _ => Err(EvaluationHalt::new(
             "object specification deps must evaluate to a list",
         )),
     }

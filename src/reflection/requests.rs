@@ -498,8 +498,7 @@ fn evaluate_request(
                 return Ok(RequestResult::Return(tagged_result(
                     &keys::ERR,
                     Value::from_core(
-                        error
-                            .failure_value()
+                        eval::halt_diagnostic_value(&error)
                             .expect("non-blocked evaluator error must have a failure value"),
                     ),
                 )));

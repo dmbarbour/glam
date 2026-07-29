@@ -6,8 +6,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::core::{
-    Builtin, BuiltinCall, FunctionCode, FunctionValue, Key, LazyValue, List, NetValue,
-    PromisedValue, Value, keys,
+    Builtin, BuiltinCall, EvaluationHalt, FunctionCode, FunctionValue, Key, LazyValue, List,
+    NetValue, PromisedValue, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::evaluation::EvalContext;
@@ -38,9 +38,10 @@ pub(crate) use sequence::list_output_bytes;
 pub(crate) use sequence::{
     eval_key_path_list, list_output_bytes_for, list_output_bytes_range, list_to_value_items,
 };
-pub use value::{EvalError, eval_value};
+pub use value::eval_value;
 pub(crate) use value::{
     evaluation_context_frame, evaluation_context_frame_with_args, failure_diagnostic_value,
+    halt_diagnostic_value,
 };
 
 use application::*;

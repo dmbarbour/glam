@@ -5,7 +5,7 @@ pub(super) fn eval_singleton_builtin(
     context: &EvalContext,
     key: &Value,
     value: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let key = eval_value(context, key)?;
     let key = value_to_key(context, &key)?;
     if matches!(value, Value::Dict(dict) if dict.is_empty()) {
@@ -21,16 +21,16 @@ pub(in crate::eval::builtins) fn eval_dict_union_builtin(
     context: &EvalContext,
     left: &Value,
     right: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let left = eval_value(context, left)?;
     let right = eval_value(context, right)?;
     let Value::Dict(left_dict) = left else {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "dictionary union requires dictionary values",
         ));
     };
     let Value::Dict(right_dict) = right else {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "dictionary union requires dictionary values",
         ));
     };
@@ -43,16 +43,18 @@ pub(super) fn eval_dict_update_builtin(
     path: &Value,
     new_value: &Value,
     dict: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let path = eval_key_path_list(context, path)?;
     if path.is_empty() {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "dict update builtin requires a non-empty path",
         ));
     }
     let dict = eval_value(context, dict)?;
     let Value::Dict(dict) = dict else {
-        return Err(EvalError::new("dict update builtin requires a dictionary"));
+        return Err(EvaluationHalt::new(
+            "dict update builtin requires a dictionary",
+        ));
     };
     Ok(Value::Dict(update_dict_path(
         &dict,

@@ -97,7 +97,7 @@ fn fully_evaluated_value(mut value: Value) -> Value {
     value
 }
 
-fn fully_evaluated_error(mut value: Value) -> crate::eval::EvalError {
+fn fully_evaluated_error(mut value: Value) -> crate::core::EvaluationHalt {
     let context = test_eval_context();
     loop {
         match crate::eval::eval_value(&context, &value) {

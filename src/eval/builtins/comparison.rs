@@ -10,7 +10,7 @@ pub(super) fn apply(
     context: &EvalContext,
     builtin: Builtin,
     arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let [left, right] = super::exact(arguments, comparison_name(builtin))?;
     match builtin {
         Builtin::Greater => {

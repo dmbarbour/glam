@@ -11,7 +11,7 @@ pub(super) fn apply(
     context: &EvalContext,
     builtin: Builtin,
     arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     match builtin {
         Builtin::DictSingleton => {
             let [key, value] = super::exact(arguments, "singleton")?;

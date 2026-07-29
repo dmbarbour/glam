@@ -27,7 +27,7 @@ pub(crate) fn test_context() -> EvalContext {
     EvalContext::standalone()
 }
 
-pub(super) fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvalError> {
+pub(super) fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvaluationHalt> {
     let context = test_context();
     let mut value = eval_value(&context, &lower_test_computation_value(expr.clone()))?;
     while matches!(&value, Value::Lazy(lazy)
@@ -47,7 +47,7 @@ pub(super) fn lower_test_computation_value(expr: TestExpr) -> Value {
     )))
 }
 
-pub(super) fn eval_key(value: &Value) -> Result<Key, EvalError> {
+pub(super) fn eval_key(value: &Value) -> Result<Key, EvaluationHalt> {
     let context = test_context();
     let value = eval_value(&context, value)?;
     value_to_key(&context, &value)

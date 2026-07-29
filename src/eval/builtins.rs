@@ -25,7 +25,7 @@ pub(super) fn apply_builtin(
     builtin: Builtin,
     mut arguments: Vec<Value>,
     argument: Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     arguments.push(argument);
     if arguments.len() < builtin.arity() {
         return Ok(Value::PartialBuiltin(BuiltinCall {
@@ -103,9 +103,9 @@ pub(super) fn apply_builtin(
     }
 }
 
-fn exact<const N: usize>(arguments: Vec<Value>, name: &str) -> Result<[Value; N], EvalError> {
+fn exact<const N: usize>(arguments: Vec<Value>, name: &str) -> Result<[Value; N], EvaluationHalt> {
     arguments.try_into().map_err(|_| {
-        EvalError::new(format!(
+        EvaluationHalt::new(format!(
             "{name} builtin received the wrong number of arguments"
         ))
     })

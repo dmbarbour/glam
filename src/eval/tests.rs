@@ -63,7 +63,7 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
     let failure_signal = DropSignal(failure_dropped.clone());
     let failure = LazyValue::deferred("failed source release", move |_| {
         let _keep_signal_captured = &failure_signal;
-        Err(EvalError::new("expected lazy failure"))
+        Err(EvaluationHalt::new("expected lazy failure"))
     });
 
     let error = eval_lazy(&context, &failure).expect_err("lazy source should fail");
@@ -481,7 +481,7 @@ fn deferred_computation_caches_one_structured_failure() {
     let counted_attempts = attempts.clone();
     let lazy = LazyValue::deferred("structured deferred failure", move |_| {
         counted_attempts.fetch_add(1, Ordering::SeqCst);
-        Err(EvalError::from_value(thunk_emission.clone()).with_context(thunk_frame.clone()))
+        Err(EvaluationHalt::from_value(thunk_emission.clone()).with_context(thunk_frame.clone()))
     });
     let value = Value::Lazy(lazy.clone());
 
@@ -1115,7 +1115,7 @@ fn builtin1_expr(builtin: Builtin, value: TestExpr) -> TestExpr {
     )
 }
 
-fn run_pattern_builtin(builtin: Builtin, value: Value) -> Result<Vec<Value>, EvalError> {
+fn run_pattern_builtin(builtin: Builtin, value: Value) -> Result<Vec<Value>, EvaluationHalt> {
     let handled = eval_closed_expr(&builtin1_expr(
         Builtin::ListEffect,
         builtin1_expr(builtin, TestExpr::Value(value)),
@@ -1130,7 +1130,7 @@ fn run_pattern_builtin2(
     builtin: Builtin,
     first: Value,
     second: Value,
-) -> Result<Vec<Value>, EvalError> {
+) -> Result<Vec<Value>, EvaluationHalt> {
     let handled = eval_closed_expr(&builtin1_expr(
         Builtin::ListEffect,
         builtin2_expr(builtin, TestExpr::Value(first), TestExpr::Value(second)),
@@ -1141,7 +1141,7 @@ fn run_pattern_builtin2(
     list_to_value_items(&test_context(), &results)
 }
 
-fn run_pattern_equal(expected: Value, value: Value) -> Result<Vec<Value>, EvalError> {
+fn run_pattern_equal(expected: Value, value: Value) -> Result<Vec<Value>, EvaluationHalt> {
     run_pattern_builtin2(Builtin::PatternEqual, expected, value)
 }
 
@@ -2241,7 +2241,7 @@ fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
         panic!("net-backed list literal should produce a list");
     };
     let Some((item, tail)) = list
-        .try_pop_front(&mut |_| -> Result<_, EvalError> {
+        .try_pop_front(&mut |_| -> Result<_, EvaluationHalt> {
             panic!("embedded lazy value must not become a list hole")
         })
         .unwrap()
@@ -3040,9 +3040,8 @@ fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
 
     let error = eval_closed_expr(&outer).expect_err("error annotation must fail when demanded");
     assert_eq!(error.to_string(), "handler failed");
-    let diagnostic = error
-        .failure_value()
-        .expect("permanent errors must project to diagnostics");
+    let diagnostic =
+        halt_diagnostic_value(&error).expect("permanent errors must project to diagnostics");
     let Value::Dict(diagnostic) = eval_value(&test_context(), &diagnostic).unwrap() else {
         panic!("failure diagnostic must be a dictionary");
     };
@@ -3095,9 +3094,8 @@ fn error_annotations_contextualize_failure_while_evaluating_their_message() {
     .expect_err("failure while constructing an error message must propagate");
     assert_eq!(error.to_string(), "message construction failed");
 
-    let diagnostic = error
-        .failure_value()
-        .expect("message-construction failure must remain permanent");
+    let diagnostic =
+        halt_diagnostic_value(&error).expect("message-construction failure must remain permanent");
     let Value::Dict(diagnostic) = eval_value(&test_context(), &diagnostic).unwrap() else {
         panic!("message-construction failure must project to a diagnostic");
     };
@@ -3164,10 +3162,8 @@ fn index_builtins_contextualize_demand_without_decorating_validation_errors() {
     assert_eq!(failure_context_items(&validation), []);
 }
 
-fn failure_context_items(error: &EvalError) -> Vec<Value> {
-    let diagnostic = error
-        .failure_value()
-        .expect("test error should be permanent");
+fn failure_context_items(error: &EvaluationHalt) -> Vec<Value> {
+    let diagnostic = halt_diagnostic_value(error).expect("test error should be permanent");
     let Value::Dict(diagnostic) = eval_value(&test_context(), &diagnostic).unwrap() else {
         panic!("failure diagnostic must be a dictionary");
     };

@@ -4,7 +4,7 @@ pub(super) fn apply_value(
     context: &EvalContext,
     function: Value,
     argument: Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     match function {
         Value::Builtin(builtin) => apply_builtin(context, builtin, Vec::new(), argument),
         Value::PartialBuiltin(call) => apply_builtin(
@@ -29,7 +29,7 @@ pub(crate) fn apply_values(
     context: &EvalContext,
     function: Value,
     arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     if arguments.is_empty() {
         return Ok(function);
     }
@@ -61,7 +61,7 @@ pub(super) fn apply_function_values(
     context: &EvalContext,
     function: FunctionValue,
     arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     assert!(
         !arguments.is_empty(),
         "function application requires an argument"
@@ -93,7 +93,7 @@ pub(super) fn apply_dict_value(
     context: &EvalContext,
     dict: crate::core::Dict,
     argument: Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     if let Some(function) = dict.tagged_payload(context, &keys::EFF)? {
         return Ok(effect_value(apply_effect_function_value(
             function, argument,
@@ -109,8 +109,8 @@ pub(super) fn apply_dict_value(
     Err(non_callable_error(&Value::Dict(dict)))
 }
 
-pub(super) fn non_callable_error(value: &Value) -> EvalError {
-    EvalError::new(format!(
+pub(super) fn non_callable_error(value: &Value) -> EvaluationHalt {
+    EvaluationHalt::new(format!(
         "application requires a function value, received {}",
         value.diagnostic_kind_name()
     ))
@@ -130,9 +130,9 @@ pub(super) fn effect_value(function: Value) -> Value {
 pub(super) fn instantiate_function(
     code: &FunctionCode,
     captures: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     if captures.len() != code.capture_count() {
-        return Err(EvalError::new("function capture arity mismatch"));
+        return Err(EvaluationHalt::new("function capture arity mismatch"));
     }
     let stage = if captures.is_empty() {
         NetValue::new(code.runtime().clone())

@@ -6,7 +6,7 @@ pub(super) fn eval_merge_duplicate_builtin(
     name: &Value,
     left: &Value,
     right: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let name = eval_value(context, name)?;
     let name = match name {
         Value::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),

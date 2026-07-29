@@ -20,6 +20,13 @@ Lazy values retain computation and a stable identity, not a captured evaluator
 session. The observing `EvalContext` supplies host and scheduling behavior when
 the value is forced.
 
+`core::EvaluationHalt` is the typed result of a demand that cannot currently
+produce WHNF. Its permanent-failure case carries an arbitrary diagnostic value
+and context frames; its wait and unassigned-promise cases remain retryable
+scheduler control state. Core owns this distinction, while `eval` projects
+permanent failures into diagnostic values. Terminal caches and wait cells never
+store the retryable cases.
+
 All clones of a lazy value share one source/result cell. Workers clone a source
 snapshot without holding its mutex during evaluation. Terminal cache
 publication precedes removal of the shared source, so concurrent snapshots may

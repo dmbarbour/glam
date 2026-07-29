@@ -1,9 +1,8 @@
-use std::fmt;
 use std::sync::Arc;
 
 use crate::core::{
-    Dict, EvaluatedValue, EvaluationFailure, FixpointComputation, Key, LazySource, LazyValue, List,
-    ListThunk, PromisedValue, Value, keys,
+    Dict, EvaluatedValue, EvaluationFailure, EvaluationHalt, FixpointComputation, Key, LazySource,
+    LazyValue, List, ListThunk, PromisedValue, Value, keys,
 };
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
@@ -19,98 +18,6 @@ use super::builtins::{
 };
 use super::net::*;
 use super::sequence::list_to_key_items;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvalError {
-    kind: EvalErrorKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum EvalErrorKind {
-    Failure(Arc<EvaluationFailure>),
-    Blocked(CoreWaitToken),
-    UnassignedPromise(PromisedValue),
-}
-
-impl EvalError {
-    pub(crate) fn new(message: impl Into<String>) -> Self {
-        Self::failure(Arc::new(EvaluationFailure::message(message.into())))
-    }
-
-    pub(in crate::eval) fn from_value(value: Value) -> Self {
-        Self::failure(Arc::new(EvaluationFailure::emission(value)))
-    }
-
-    fn failure(failure: Arc<EvaluationFailure>) -> Self {
-        Self {
-            kind: EvalErrorKind::Failure(failure),
-        }
-    }
-
-    pub(super) fn blocked(wait: CoreWaitToken) -> Self {
-        Self {
-            kind: EvalErrorKind::Blocked(wait),
-        }
-    }
-
-    pub(crate) fn with_context(self, context: Value) -> Self {
-        match self.kind {
-            EvalErrorKind::Failure(failure) => {
-                Self::failure(Arc::new(failure.with_context(context)))
-            }
-            EvalErrorKind::Blocked(wait) => Self {
-                kind: EvalErrorKind::Blocked(wait),
-            },
-            EvalErrorKind::UnassignedPromise(promise) => Self {
-                kind: EvalErrorKind::UnassignedPromise(promise),
-            },
-        }
-    }
-
-    pub(crate) fn into_permanent_failure(self) -> Arc<EvaluationFailure> {
-        match self.kind {
-            EvalErrorKind::Failure(failure) => failure,
-            other => Arc::new(EvaluationFailure::message(Self { kind: other }.to_string())),
-        }
-    }
-
-    pub(crate) fn failure_value(&self) -> Option<Value> {
-        match &self.kind {
-            EvalErrorKind::Failure(failure) => Some(failure_diagnostic_value(failure)),
-            EvalErrorKind::Blocked(_) | EvalErrorKind::UnassignedPromise(_) => None,
-        }
-    }
-
-    pub(crate) fn blocked_on(&self) -> Option<CoreWaitToken> {
-        match &self.kind {
-            EvalErrorKind::Blocked(wait) => Some(wait.clone()),
-            EvalErrorKind::Failure(_) | EvalErrorKind::UnassignedPromise(_) => None,
-        }
-    }
-
-    fn unassigned_promise(&self) -> Option<&PromisedValue> {
-        match &self.kind {
-            EvalErrorKind::UnassignedPromise(promise) => Some(promise),
-            EvalErrorKind::Failure(_) | EvalErrorKind::Blocked(_) => None,
-        }
-    }
-}
-
-impl fmt::Display for EvalError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.kind {
-            EvalErrorKind::Failure(failure) => failure.fmt(f),
-            EvalErrorKind::Blocked(wait) => {
-                write!(f, "evaluation is blocked on wait token {}", wait.wait_id())
-            }
-            EvalErrorKind::UnassignedPromise(_) => {
-                f.write_str("promised value was observed before initialization")
-            }
-        }
-    }
-}
-
-impl std::error::Error for EvalError {}
 
 pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
     let contexts = Value::List(List::from_values(failure.contexts().to_vec()));
@@ -135,6 +42,11 @@ pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
 
     crate::diagnostic::apply_emission_updates(emission.clone(), updates)
         .unwrap_or_else(|_| fallback_failure_diagnostic(failure, Some(emission), contexts))
+}
+
+pub(crate) fn halt_diagnostic_value(halt: &EvaluationHalt) -> Option<Value> {
+    halt.permanent_failure()
+        .map(|failure| failure_diagnostic_value(failure))
 }
 
 pub(crate) fn evaluation_context_frame(operation: &str) -> Value {
@@ -169,7 +81,7 @@ fn fallback_failure_diagnostic(
     Value::Dict(Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message)))
 }
 
-pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvalError> {
+pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
     match value {
         Value::Lazy(lazy) => eval_lazy(context, lazy),
         Value::Promised(promise) => eval_promised(context, promise),
@@ -210,7 +122,7 @@ impl LazyTaskMachine {
         }
     }
 
-    fn finish_poll(&mut self, result: Result<Value, EvalError>) -> EvaluationMachinePoll {
+    fn finish_poll(&mut self, result: Result<Value, EvaluationHalt>) -> EvaluationMachinePoll {
         match result {
             Ok(value) if is_deferred(&value) => {
                 self.work = LazyTaskWork::Follow(value);
@@ -266,7 +178,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
 }
 
 impl LazyTaskMachine {
-    fn fail(&self, error: EvalError) -> EvaluationMachinePoll {
+    fn fail(&self, error: EvaluationHalt) -> EvaluationMachinePoll {
         if let Some(wait) = error.blocked_on() {
             return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 lazy: Some(wait.0),
@@ -312,7 +224,7 @@ impl EvaluationTaskMachine for PromiseFollower {
     fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
         let result = match &self.state {
             PromiseFollowerState::AwaitAssignment => match self.promise.assignment() {
-                Some(result) => result.map_err(|error| EvalError::new(error.as_ref())),
+                Some(result) => result.map_err(|error| EvaluationHalt::new(error.as_ref())),
                 None => {
                     let Some(task) = self.promise.task() else {
                         return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -383,7 +295,7 @@ fn promise_wait(
     })
 }
 
-fn block_or_fail(context: &EvalContext, error: EvalError) -> EvaluationMachinePoll {
+fn block_or_fail(context: &EvalContext, error: EvaluationHalt) -> EvaluationMachinePoll {
     if let Some(wait) = error.blocked_on() {
         return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             lazy: Some(wait.0),
@@ -406,11 +318,11 @@ fn block_or_fail(context: &EvalContext, error: EvalError) -> EvaluationMachinePo
     EvaluationMachinePoll::Failed(error.into_permanent_failure())
 }
 
-pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvalError> {
+pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvaluationHalt> {
     if let Some(result) = lazy.cached() {
         return result
             .map(EvaluatedValue::into_value)
-            .map_err(EvalError::failure);
+            .map_err(EvaluationHalt::failure);
     }
     let wait = context
         .lazy_task(lazy, |task_context| {
@@ -420,7 +332,7 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
                 work: LazyTaskWork::Produce,
             })
         })
-        .map_err(|error| EvalError::new(error.as_ref()))?;
+        .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
     await_deferred_task(context, wait, "lazy value")
 }
 
@@ -428,14 +340,16 @@ fn await_deferred_task(
     context: &EvalContext,
     wait: crate::evaluation::EvaluationWaitToken,
     kind: &str,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     match context.poll_wait(&wait) {
         EvaluationTaskPoll::Complete(value) => return Ok(value),
         EvaluationTaskPoll::Failed(error) => {
             return Err(deferred_task_failure(context, &wait, error));
         }
         EvaluationTaskPoll::Cancelled => {
-            return Err(EvalError::new(format!("{kind} evaluation was cancelled")));
+            return Err(EvaluationHalt::new(format!(
+                "{kind} evaluation was cancelled"
+            )));
         }
         EvaluationTaskPoll::Pending(_) => {}
     }
@@ -446,15 +360,17 @@ fn await_deferred_task(
                 EvaluationTaskPoll::Failed(error) => {
                     Err(deferred_task_failure(context, &wait, error))
                 }
-                EvaluationTaskPoll::Pending(wait) => Err(EvalError::blocked(CoreWaitToken(wait))),
-                EvaluationTaskPoll::Cancelled => {
-                    Err(EvalError::new(format!("{kind} evaluation was cancelled")))
+                EvaluationTaskPoll::Pending(wait) => {
+                    Err(EvaluationHalt::blocked(CoreWaitToken(wait)))
                 }
+                EvaluationTaskPoll::Cancelled => Err(EvaluationHalt::new(format!(
+                    "{kind} evaluation was cancelled"
+                ))),
             },
             EvaluationPumpOutcome::Busy
             | EvaluationPumpOutcome::NoProgress
             | EvaluationPumpOutcome::BudgetExhausted => {
-                Err(EvalError::blocked(CoreWaitToken(wait)))
+                Err(EvaluationHalt::blocked(CoreWaitToken(wait)))
             }
         };
     }
@@ -465,10 +381,10 @@ fn await_deferred_task(
                 context.wait_for_claimed_task(&wait);
             }
             EvaluationPumpOutcome::Busy => {
-                return Err(EvalError::blocked(CoreWaitToken(wait)));
+                return Err(EvaluationHalt::blocked(CoreWaitToken(wait)));
             }
             EvaluationPumpOutcome::NoProgress => {
-                return Err(EvalError::blocked(CoreWaitToken(wait)));
+                return Err(EvaluationHalt::blocked(CoreWaitToken(wait)));
             }
             EvaluationPumpOutcome::BudgetExhausted => {}
         }
@@ -476,10 +392,10 @@ fn await_deferred_task(
     match context.poll_wait(&wait) {
         EvaluationTaskPoll::Complete(value) => Ok(value),
         EvaluationTaskPoll::Failed(error) => Err(deferred_task_failure(context, &wait, error)),
-        EvaluationTaskPoll::Pending(wait) => Err(EvalError::blocked(CoreWaitToken(wait))),
-        EvaluationTaskPoll::Cancelled => {
-            Err(EvalError::new(format!("{kind} evaluation was cancelled")))
-        }
+        EvaluationTaskPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
+        EvaluationTaskPoll::Cancelled => Err(EvaluationHalt::new(format!(
+            "{kind} evaluation was cancelled"
+        ))),
     }
 }
 
@@ -487,20 +403,20 @@ fn deferred_task_failure(
     context: &EvalContext,
     wait: &crate::evaluation::EvaluationWaitToken,
     failure: Arc<EvaluationFailure>,
-) -> EvalError {
+) -> EvaluationHalt {
     context
         .lazy_failure_for_wait(wait)
-        .map(EvalError::failure)
-        .unwrap_or_else(|| EvalError::failure(failure))
+        .map(EvaluationHalt::failure)
+        .unwrap_or_else(|| EvaluationHalt::failure(failure))
 }
 
 fn produce_lazy_source(
     context: &EvalContext,
     lazy: &LazyValue,
     source: &LazySource,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     match source {
-        LazySource::Error => Err(EvalError::new(
+        LazySource::Error => Err(EvaluationHalt::new(
             "initialized lazy errors must be returned from their result cache",
         )),
         LazySource::ComputedFixpoint(fixpoint) => eval_computed_fixpoint(context, lazy, fixpoint),
@@ -535,49 +451,47 @@ fn produce_lazy_source(
     }
 }
 
-fn eval_promised(context: &EvalContext, promise: &PromisedValue) -> Result<Value, EvalError> {
+fn eval_promised(context: &EvalContext, promise: &PromisedValue) -> Result<Value, EvaluationHalt> {
     if let Some(assignment) = promise.assignment() {
-        let value = assignment.map_err(|message| EvalError::new(message.as_ref()))?;
+        let value = assignment.map_err(|message| EvaluationHalt::new(message.as_ref()))?;
         if !is_deferred(&value) {
             return Ok(value);
         }
         let wait =
-            promise_wait(context, promise).map_err(|error| EvalError::new(error.as_ref()))?;
+            promise_wait(context, promise).map_err(|error| EvaluationHalt::new(error.as_ref()))?;
         return await_deferred_task(context, wait, "promised value");
     }
     if let Some(task) = promise.task() {
         if context.observes_as_task(task.owner()) {
-            return Err(EvalError::new(format!(
+            return Err(EvaluationHalt::new(format!(
                 "reflection promise {} recursively observed itself in task {}",
                 promise.id().get(),
                 task.owner().get()
             )));
         }
         let wait =
-            promise_wait(context, promise).map_err(|error| EvalError::new(error.as_ref()))?;
+            promise_wait(context, promise).map_err(|error| EvaluationHalt::new(error.as_ref()))?;
         return await_deferred_task(context, wait, "promised value");
     }
-    Err(EvalError {
-        kind: EvalErrorKind::UnassignedPromise(promise.clone()),
-    })
+    Err(EvaluationHalt::unassigned(promise.clone()))
 }
 
 fn eval_reflection_gate_source(
     context: &EvalContext,
     gate: &crate::core::ReflectionGate,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let task = gate.task(context).map_err(|error| {
-        EvalError::new(error.as_ref())
+        EvaluationHalt::new(error.as_ref())
             .with_context(evaluation_context_frame("reflection_annotation"))
     })?;
     match context.poll_reflection_task(task) {
-        EvaluationTaskPoll::Pending(wait) => Err(EvalError::blocked(CoreWaitToken(wait))),
+        EvaluationTaskPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
         EvaluationTaskPoll::Complete(_) => Ok(gate.target().clone()),
-        EvaluationTaskPoll::Failed(error) => Err(EvalError::failure(error)
+        EvaluationTaskPoll::Failed(error) => Err(EvaluationHalt::failure(error)
             .with_context(evaluation_context_frame("reflection_annotation"))),
-        EvaluationTaskPoll::Cancelled => {
-            Err(EvalError::new("reflection annotation task was cancelled"))
-        }
+        EvaluationTaskPoll::Cancelled => Err(EvaluationHalt::new(
+            "reflection annotation task was cancelled",
+        )),
     }
 }
 
@@ -585,7 +499,7 @@ fn eval_computed_fixpoint(
     context: &EvalContext,
     lazy: &LazyValue,
     computation: &FixpointComputation,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let marker = Value::Lazy(lazy.clone());
     match computation {
         FixpointComputation::Function(function) => apply_value(context, function.clone(), marker)
@@ -609,7 +523,7 @@ pub(super) fn format_name_part(key: &Key) -> String {
     }
 }
 
-pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, EvalError> {
+pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, EvaluationHalt> {
     let value = eval_value(context, value)?;
     match &value {
         Value::Atom(atom) => Ok(Key::Atom(*atom)),
@@ -625,7 +539,7 @@ pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, 
                     }
                     Ok(Some((key.clone(), value)))
                 })
-                .collect::<Result<Vec<_>, EvalError>>()?
+                .collect::<Result<Vec<_>, EvaluationHalt>>()?
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>(),
@@ -636,7 +550,7 @@ pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, 
         | Value::Net(_)
         | Value::Lazy(_)
         | Value::Promised(_)
-        | Value::Opaque(_) => Err(EvalError::new(
+        | Value::Opaque(_) => Err(EvaluationHalt::new(
             "dictionary keys must evaluate to keyable values",
         )),
     }
@@ -645,7 +559,7 @@ pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, 
 pub(super) fn force_list_thunk(
     context: &EvalContext,
     thunk: &ListThunk,
-) -> Result<List, EvalError> {
+) -> Result<List, EvaluationHalt> {
     let thunk = match thunk {
         ListThunk::Lazy(lazy) => Value::Lazy(lazy.clone()),
         ListThunk::Promised(promise) => Value::Promised(promise.clone()),
@@ -653,7 +567,7 @@ pub(super) fn force_list_thunk(
     match eval_value(context, &thunk)? {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
-        other => Err(EvalError::new(format!(
+        other => Err(EvaluationHalt::new(format!(
             "lazy list chunk must evaluate to a list or binary value, got {other:?}"
         ))),
     }
@@ -662,7 +576,7 @@ pub(super) fn force_list_thunk(
 pub(super) fn pop_list_front(
     context: &EvalContext,
     list: &List,
-) -> Result<Option<(Value, List)>, EvalError> {
+) -> Result<Option<(Value, List)>, EvaluationHalt> {
     Ok(list
         .try_pop_front(&mut |thunk| force_list_thunk(context, thunk))?
         .map(|(item, tail)| {
@@ -686,10 +600,10 @@ pub(super) fn eval_number(
     context: &EvalContext,
     value: &Value,
     builtin_name: &str,
-) -> Result<Number, EvalError> {
+) -> Result<Number, EvaluationHalt> {
     let value = eval_value(context, value)?;
     let Value::Number(number) = value else {
-        return Err(EvalError::new(format!(
+        return Err(EvaluationHalt::new(format!(
             "{builtin_name} builtin requires number values"
         )));
     };
@@ -701,16 +615,16 @@ pub(super) fn eval_index_number(
     value: &Value,
     builtin_name: &str,
     evaluation_label: &str,
-) -> Result<usize, EvalError> {
+) -> Result<usize, EvaluationHalt> {
     let value = eval_value(context, value)
         .map_err(|error| error.with_context(evaluation_context_frame(evaluation_label)))?;
     let Value::Number(number) = value else {
-        return Err(EvalError::new(format!(
+        return Err(EvaluationHalt::new(format!(
             "{builtin_name} builtin requires number values"
         )));
     };
     number.to_usize_if_integer().ok_or_else(|| {
-        EvalError::new(format!(
+        EvaluationHalt::new(format!(
             "{builtin_name} builtin requires non-negative integer indices"
         ))
     })
@@ -734,11 +648,19 @@ pub(super) fn is_undefined_dict_value(value: &Value) -> bool {
 /// evaluate to undefined dictionaries. The tagged payload must itself be
 /// semantically defined.
 pub(super) trait TaggedDictExt {
-    fn tagged_payload(&self, context: &EvalContext, tag: &Key) -> Result<Option<Value>, EvalError>;
+    fn tagged_payload(
+        &self,
+        context: &EvalContext,
+        tag: &Key,
+    ) -> Result<Option<Value>, EvaluationHalt>;
 }
 
 impl TaggedDictExt for crate::core::Dict {
-    fn tagged_payload(&self, context: &EvalContext, tag: &Key) -> Result<Option<Value>, EvalError> {
+    fn tagged_payload(
+        &self,
+        context: &EvalContext,
+        tag: &Key,
+    ) -> Result<Option<Value>, EvaluationHalt> {
         let Some(payload) = self.get(tag) else {
             return Ok(None);
         };
@@ -755,7 +677,7 @@ impl TaggedDictExt for crate::core::Dict {
     }
 }
 
-fn is_semantically_undefined(context: &EvalContext, value: &Value) -> Result<bool, EvalError> {
+fn is_semantically_undefined(context: &EvalContext, value: &Value) -> Result<bool, EvaluationHalt> {
     let value = eval_value(context, value)?;
     let Value::Dict(dict) = value else {
         return Ok(false);

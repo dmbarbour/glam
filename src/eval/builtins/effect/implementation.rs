@@ -5,10 +5,12 @@ use crate::list::ListItem;
 pub(super) fn eval_fixpoint_builtin(
     context: &EvalContext,
     function: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let function = eval_value(context, function)?;
     if !matches!(function, Value::Function(_) | Value::Net(_)) {
-        return Err(EvalError::new("fixpoint builtin requires a function value"));
+        return Err(EvaluationHalt::new(
+            "fixpoint builtin requires a function value",
+        ));
     }
 
     Ok(Value::Lazy(LazyValue::computed_fixpoint(
@@ -17,7 +19,10 @@ pub(super) fn eval_fixpoint_builtin(
     )))
 }
 
-pub(super) fn eval_effect_map_builtin(function: &Value, items: &Value) -> Result<Value, EvalError> {
+pub(super) fn eval_effect_map_builtin(
+    function: &Value,
+    items: &Value,
+) -> Result<Value, EvaluationHalt> {
     Ok(effect_value(Value::PartialBuiltin(BuiltinCall {
         builtin: Builtin::EffectMapRun,
         arguments: Arc::from([function.clone(), items.clone(), Value::List(List::empty())]),
@@ -30,12 +35,14 @@ pub(super) fn eval_effect_map_run_builtin(
     items: &Value,
     results: &Value,
     api: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let Value::List(items) = eval_value(context, items)? else {
-        return Err(EvalError::new("effect map requires a list"));
+        return Err(EvaluationHalt::new("effect map requires a list"));
     };
     let Value::List(results) = eval_value(context, results)? else {
-        return Err(EvalError::new("effect map internal results must be a list"));
+        return Err(EvaluationHalt::new(
+            "effect map internal results must be a list",
+        ));
     };
     let Some((item, remaining)) =
         items.try_pop_front(&mut |thunk| force_list_thunk(context, thunk))?
@@ -64,9 +71,11 @@ pub(super) fn eval_effect_map_continue_builtin(
     items: &Value,
     results: &Value,
     result: &Value,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let Value::List(results) = results else {
-        return Err(EvalError::new("effect map internal results must be a list"));
+        return Err(EvaluationHalt::new(
+            "effect map internal results must be a list",
+        ));
     };
     let results = List::concat(results.clone(), List::from_values(vec![result.clone()]));
     Ok(effect_value(Value::PartialBuiltin(BuiltinCall {
@@ -80,7 +89,7 @@ fn apply_effect_api(
     api: &Value,
     name: &Key,
     arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let function = resolve_core_access(
         context,
         std::slice::from_ref(api),

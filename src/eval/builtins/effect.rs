@@ -8,7 +8,7 @@ pub(super) fn apply(
     context: &EvalContext,
     builtin: Builtin,
     arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     match builtin {
         Builtin::Fixpoint => {
             let [function] = super::exact(arguments, "fixpoint")?;
@@ -29,7 +29,7 @@ pub(super) fn apply(
             let arguments = match eval_value(context, &arguments)? {
                 Value::List(arguments) => list_to_value_items(context, &arguments)?,
                 _ => {
-                    return Err(EvalError::new(
+                    return Err(EvaluationHalt::new(
                         "effect call builtin requires a list of arguments",
                     ));
                 }

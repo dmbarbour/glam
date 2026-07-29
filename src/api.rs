@@ -19,7 +19,7 @@ use crate::compiler::{
     ModuleLoader,
 };
 use crate::core::Value as CoreValue;
-use crate::core::{Builtin, Dict, Key, List, NetValue, PromisedValue, keys};
+use crate::core::{Builtin, Dict, EvaluationHalt, Key, List, NetValue, PromisedValue, keys};
 use crate::core_net::CoreSpecialization;
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
@@ -1266,9 +1266,9 @@ impl Error {
         }
     }
 
-    fn from_eval(error: eval::EvalError) -> Self {
+    fn from_eval(error: EvaluationHalt) -> Self {
         let message: Arc<str> = Arc::from(error.to_string());
-        Self::from_eval_parts(error.failure_value(), message)
+        Self::from_eval_parts(eval::halt_diagnostic_value(&error), message)
     }
 
     fn from_eval_parts(emission: Option<CoreValue>, message: Arc<str>) -> Self {

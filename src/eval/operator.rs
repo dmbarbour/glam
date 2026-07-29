@@ -13,7 +13,7 @@ pub(super) fn apply_builtin_values_lazily(
     builtin: Builtin,
     mut supplied: Vec<Value>,
     arguments: Vec<Value>,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let remaining = builtin
         .arity()
         .checked_sub(supplied.len())
@@ -107,7 +107,7 @@ pub(super) fn apply_core_operator(
     context: &EvalContext,
     operator: &CoreOperator,
     data: &Value,
-) -> Result<OperatorYield<CoreSpecialization>, EvalError> {
+) -> Result<OperatorYield<CoreSpecialization>, EvaluationHalt> {
     let operand = data.clone();
     match operator {
         CoreOperator::ApplyArity { arity, supplied } => {
@@ -191,7 +191,7 @@ pub(super) fn apply_core_operator(
                 })));
             }
             if arguments.len() > call.builtin.arity() {
-                return Err(EvalError::new(
+                return Err(EvaluationHalt::new(
                     "builtin operator received too many arguments",
                 ));
             }

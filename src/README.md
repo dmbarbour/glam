@@ -44,6 +44,7 @@ not define future language semantics or collect subsystem invariants.
 | `g_syntax/diagnostic_formatter.rs` | Cached closed Glam default `Diagnostic -> Bytes` formatter |
 | `text_pattern.rs` | Versioned capture-free text-pattern grammar and replaceable matching backend shared by source-facing effects |
 | `core.rs`, `core/` | Syntax-independent values, functions, computed lazies, named promises, dictionaries, keys, and builtin IDs |
+| `core/evaluation_halt.rs` | Typed demand halts: permanent structured failure versus retryable wait or unassigned promise |
 | `core_net.rs` | Core data/operator specialization of generic interaction nets |
 | `interaction_net/model.rs`, `builder.rs` | Generic identities, agents, specialization protocol, and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair rewrites, cursors, and runtime tests |

@@ -18,7 +18,7 @@ pub(super) fn extract_net_data(
     runtime: crate::core_net::CoreRuntimeNet,
     interface: Port,
     operation: &str,
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     match drive_net_interface(context, &runtime, interface)? {
         NetInterfaceOutcome::Data => {
             let data = runtime
@@ -29,10 +29,10 @@ pub(super) fn extract_net_data(
             // forcing here can re-enter a productive fixpoint runtime.
             Ok(data)
         }
-        NetInterfaceOutcome::Bind => Err(EvalError::new(format!(
+        NetInterfaceOutcome::Bind => Err(EvaluationHalt::new(format!(
             "{operation} exposed a bind instead of data"
         ))),
-        NetInterfaceOutcome::NormalForm => Err(EvalError::new(format!(
+        NetInterfaceOutcome::NormalForm => Err(EvaluationHalt::new(format!(
             "{operation} reached a non-data normal form"
         ))),
     }
@@ -42,7 +42,7 @@ pub(super) fn evaluate_function_call(
     context: &EvalContext,
     function: &FunctionValue,
     arguments: &[Value],
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let net = attach_net_many(Value::Net(function.stage().clone()), arguments.to_vec());
     let runtime = net.into_runtime();
     let exposed = runtime.with(|runtime| runtime.exposed());
@@ -64,7 +64,7 @@ fn drive_net_interface(
     context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
     interface: Port,
-) -> Result<NetInterfaceOutcome, EvalError> {
+) -> Result<NetInterfaceOutcome, EvaluationHalt> {
     loop {
         if runtime.with(|net| net.interface_data(interface).is_some()) {
             return Ok(NetInterfaceOutcome::Data);
@@ -105,7 +105,7 @@ fn drive_net_interface(
                 continue;
             }
             if let Some(blocked) = runtime.with(|net| net.blocked_call(pair)) {
-                return Err(EvalError::blocked(blocked.wait));
+                return Err(EvaluationHalt::blocked(blocked.wait));
             }
         }
 
@@ -152,7 +152,7 @@ fn drive_net_interface(
                 net.stuck_pairs().count()
             )
         });
-        return Err(EvalError::new(format!(
+        return Err(EvaluationHalt::new(format!(
             "interaction net became quiescent before producing a value ({detail})"
         )));
     }
@@ -161,7 +161,7 @@ fn drive_net_interface(
 pub(super) fn progress_core_net(
     context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
-) -> Result<bool, EvalError> {
+) -> Result<bool, EvaluationHalt> {
     if let Some(reduction) = runtime.with_mut(|net| net.reduce_next()) {
         handle_core_reduction(context, runtime, reduction)?;
         return Ok(true);
@@ -174,9 +174,9 @@ pub(super) fn progress_cursor_dependency(
     runtime: &crate::core_net::CoreRuntimeNet,
     cursor: crate::interaction_net::NodeId,
     depth: usize,
-) -> Result<bool, EvalError> {
+) -> Result<bool, EvaluationHalt> {
     if depth >= 1024 {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "interaction-net cursor dependency chain is too deep",
         ));
     }
@@ -202,7 +202,7 @@ pub(super) fn progress_dependent_cursor(
     runtime: &crate::core_net::CoreRuntimeNet,
     cursor: crate::interaction_net::NodeId,
     depth: usize,
-) -> Result<bool, EvalError> {
+) -> Result<bool, EvaluationHalt> {
     let progress = runtime.with_mut(|source| source.claim_dependent_cursor(cursor));
     let progress = progress.map(|progress| finish_core_cursor_claim(runtime, cursor, progress));
     match progress {
@@ -223,7 +223,7 @@ pub(super) fn progress_exact_core_pair(
     runtime: &crate::core_net::CoreRuntimeNet,
     pair: ActivePairKey,
     depth: usize,
-) -> Result<bool, EvalError> {
+) -> Result<bool, EvaluationHalt> {
     if let Some(reduction) = runtime.with_mut(|net| net.reduce_pair(pair)) {
         handle_core_reduction(context, runtime, reduction)?;
         return Ok(true);
@@ -271,13 +271,13 @@ impl NetSpecialization for CoreSpecialization {
     type Data = Value;
     type Operator = CoreOperator;
     type WaitToken = crate::core_net::CoreWaitToken;
-    type StuckReason = EvalError;
+    type StuckReason = EvaluationHalt;
 }
 
 pub(super) fn lower_core_callable(
     context: &EvalContext,
     value: Value,
-) -> Result<Callable<CoreSpecialization>, EvalError> {
+) -> Result<Callable<CoreSpecialization>, EvaluationHalt> {
     let value = if matches!(value, Value::Lazy(_) | Value::Promised(_)) {
         eval_value(context, &value)?
     } else {
@@ -306,7 +306,7 @@ pub(super) fn progress_exact_core_call(
     context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
     call: Call,
-) -> Result<bool, EvalError> {
+) -> Result<bool, EvaluationHalt> {
     let Some(data) = runtime.with_mut(|runtime| runtime.claim_call(call)) else {
         return Ok(false);
     };
@@ -336,7 +336,7 @@ pub(super) fn handle_core_reduction(
     context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
     reduction: Reduction,
-) -> Result<(), EvalError> {
+) -> Result<(), EvaluationHalt> {
     match reduction.kind {
         ReductionKind::Stuck => Err(stuck_pair_error(runtime, reduction.pair)),
         ReductionKind::Call { bind, data } => {
@@ -346,7 +346,7 @@ pub(super) fn handle_core_reduction(
                 data,
             };
             if !progress_exact_core_call(context, runtime, call)? {
-                return Err(EvalError::new("interaction-net call lost its claim"));
+                return Err(EvaluationHalt::new("interaction-net call lost its claim"));
             }
             Ok(())
         }
@@ -357,7 +357,7 @@ pub(super) fn handle_core_reduction(
                 data,
             };
             if !progress_core_operator_call(context, runtime, call)? {
-                return Err(EvalError::new(
+                return Err(EvaluationHalt::new(
                     "interaction-net operator call lost its claim",
                 ));
             }
@@ -394,18 +394,18 @@ pub(super) fn finish_core_cursor_claim(
 pub(super) fn stuck_pair_error(
     runtime: &crate::core_net::CoreRuntimeNet,
     pair: ActivePairKey,
-) -> EvalError {
+) -> EvaluationHalt {
     runtime.with(|net| {
         let reason = net.stuck_reason(pair);
         match reason {
             Some(StuckReason::Specialization(error)) => error.clone(),
             Some(StuckReason::NoRule) | None => match net.active_pair_nodes(pair) {
-                Some((left, right)) => EvalError::new(format!(
+                Some((left, right)) => EvaluationHalt::new(format!(
                     "interaction net reached a stuck active pair: {:?} >< {:?}",
                     net.node(left),
                     net.node(right)
                 )),
-                None => EvalError::new("interaction net reached a stale stuck active pair"),
+                None => EvaluationHalt::new("interaction net reached a stale stuck active pair"),
             },
         }
     })
@@ -415,7 +415,7 @@ pub(super) fn progress_core_operator_call(
     context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
     call: OperatorCall,
-) -> Result<bool, EvalError> {
+) -> Result<bool, EvaluationHalt> {
     let (operator, data) = runtime.with(|net| net.operator_call_parts(call));
     match apply_core_operator(context, &operator, &data) {
         Ok(result) => runtime.with_mut(|net| {
@@ -438,11 +438,11 @@ pub(super) fn resolve_core_access(
     context: &EvalContext,
     arguments: &[Value],
     path: &[CoreDataKey],
-) -> Result<Value, EvalError> {
+) -> Result<Value, EvaluationHalt> {
     let mut current = arguments
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("value access is missing its base value"))?;
+        .ok_or_else(|| EvaluationHalt::new("value access is missing its base value"))?;
     let mut dynamic = arguments[1..].iter();
     for part in path {
         let keys = match part {
@@ -462,7 +462,7 @@ pub(super) fn resolve_core_access(
         for key in keys {
             let value = eval_value(context, &current)?;
             let Value::Dict(dict) = value else {
-                return Err(EvalError::new("value access base is not a dictionary"));
+                return Err(EvaluationHalt::new("value access base is not a dictionary"));
             };
             current = dict
                 .get(&key)

@@ -35,8 +35,8 @@ use search::SearchPolicy;
 
 use crate::api::{Diagnostic, EvaluationRuntime, Value as PublicValue};
 use crate::core::{
-    Atom, Builtin, Dict, EvaluationFailure, FunctionValue, Key, LazyValue, List, NetValue,
-    PromisedValue, Value, keys,
+    Atom, Builtin, Dict, EvaluationFailure, EvaluationHalt, FunctionValue, Key, LazyValue, List,
+    NetValue, PromisedValue, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::diagnostic::Severity;
@@ -3278,7 +3278,7 @@ fn evaluate(context: &EvalContext, value: Value) -> Result<Value, TaskError> {
     Ok(value)
 }
 
-pub(crate) fn task_eval_error(error: eval::EvalError) -> TaskError {
+pub(crate) fn task_eval_error(error: EvaluationHalt) -> TaskError {
     match error.blocked_on() {
         Some(wait) => TaskError::blocked(wait.0),
         None => TaskError::failure(error.into_permanent_failure()),

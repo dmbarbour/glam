@@ -14,15 +14,15 @@ use crate::reflection::{
     TaskEnvironment, TaskError, TaskHost, TaskSpecialization, task_eval_error,
 };
 
-use super::super::super::{EvalError, eval_index_number, eval_value};
+use super::super::super::{EvaluationHalt, eval_index_number, eval_value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ConstructionPortId(NonZeroU64);
 
 impl ConstructionPortId {
-    fn index(self) -> Result<usize, EvalError> {
+    fn index(self) -> Result<usize, EvaluationHalt> {
         usize::try_from(self.0.get() - 1)
-            .map_err(|_| EvalError::new("interaction-net port index exceeds this target"))
+            .map_err(|_| EvaluationHalt::new("interaction-net port index exceeds this target"))
     }
 }
 
@@ -216,7 +216,10 @@ pub(in crate::eval) struct NetConstructionMachine {
 }
 
 impl NetConstructionMachine {
-    pub(in crate::eval) fn new(context: EvalContext, effect: Value) -> Result<Self, EvalError> {
+    pub(in crate::eval) fn new(
+        context: EvalContext,
+        effect: Value,
+    ) -> Result<Self, EvaluationHalt> {
         let brand = Arc::new(ConstructionBrand);
         let specialization = InteractionNetEffects {
             brand: brand.clone(),
@@ -229,7 +232,7 @@ impl NetConstructionMachine {
             context,
         )
         .map_err(|error| {
-            EvalError::new(format!(
+            EvaluationHalt::new(format!(
                 "interaction-net construction could not start: {error}"
             ))
         })?;
@@ -238,35 +241,35 @@ impl NetConstructionMachine {
 
     /// Advances construction without losing the freer machine or its journal.
     /// `Ok(None)` is a cooperative yield; dependencies are returned through
-    /// `EvalError::Blocked` and recorded by the owning lazy task.
+    /// `EvaluationHalt::Blocked` and recorded by the owning lazy task.
     pub(in crate::eval) fn poll(
         &mut self,
         context: &EvalContext,
         step_budget: usize,
-    ) -> Result<Option<Value>, EvalError> {
+    ) -> Result<Option<Value>, EvaluationHalt> {
         match self.search.poll(step_budget.max(1)) {
             IsolatedSearchPoll::Yielded => Ok(None),
             IsolatedSearchPoll::Blocked(blocked) => {
                 if let Some(dependency) = blocked.dependency().cloned() {
-                    return Err(EvalError::blocked(CoreWaitToken(dependency)));
+                    return Err(EvaluationHalt::blocked(CoreWaitToken(dependency)));
                 }
                 let detail = blocked.error().map_or_else(
                     || "without a dependency or mutable host observation".to_owned(),
                     |error| format!("after evaluation failed: {error}"),
                 );
-                Err(EvalError::new(format!(
+                Err(EvaluationHalt::new(format!(
                     "interaction-net construction became blocked {detail}"
                 )))
             }
             IsolatedSearchPoll::Complete(branches) => {
                 let mut successes = branches.iter().filter(|branch| branch.value().is_some());
                 let Some(branch) = successes.next() else {
-                    return Err(EvalError::new(
+                    return Err(EvaluationHalt::new(
                         "interaction-net construction produced no successful result",
                     ));
                 };
                 if successes.next().is_some() {
-                    return Err(EvalError::new(
+                    return Err(EvaluationHalt::new(
                         "interaction-net construction produced multiple results; use `.cut` to select one",
                     ));
                 }
@@ -280,12 +283,12 @@ impl NetConstructionMachine {
                 )?;
                 replay(branch.journal(), exposed).map(Some)
             }
-            IsolatedSearchPoll::Failed(error) => Err(EvalError::new(format!(
+            IsolatedSearchPoll::Failed(error) => Err(EvaluationHalt::new(format!(
                 "interaction-net construction failed: {error}"
             ))),
-            IsolatedSearchPoll::Cancelled => {
-                Err(EvalError::new("interaction-net construction was cancelled"))
-            }
+            IsolatedSearchPoll::Cancelled => Err(EvaluationHalt::new(
+                "interaction-net construction was cancelled",
+            )),
         }
     }
 }
@@ -406,31 +409,34 @@ fn construction_port(
     context: &EvalContext,
     value: &Value,
     brand: &Arc<ConstructionBrand>,
-) -> Result<ConstructionPortId, EvalError> {
+) -> Result<ConstructionPortId, EvaluationHalt> {
     let value = eval_value(context, value)?;
     let Value::Opaque(port) = value else {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "interaction-net operation requires a construction port",
         ));
     };
-    let port = port
-        .downcast::<ConstructionPort>()
-        .ok_or_else(|| EvalError::new("interaction-net operation requires a construction port"))?;
+    let port = port.downcast::<ConstructionPort>().ok_or_else(|| {
+        EvaluationHalt::new("interaction-net operation requires a construction port")
+    })?;
     if !Arc::ptr_eq(&port.brand, brand) {
-        return Err(EvalError::new(
+        return Err(EvaluationHalt::new(
             "interaction-net construction port belongs to another invocation",
         ));
     }
     Ok(port.id)
 }
 
-fn replay(journal: &ConstructionJournal, exposed: ConstructionPortId) -> Result<Value, EvalError> {
+fn replay(
+    journal: &ConstructionJournal,
+    exposed: ConstructionPortId,
+) -> Result<Value, EvaluationHalt> {
     let capacity = usize::try_from(journal.next_port - 1)
-        .map_err(|_| EvalError::new("interaction-net port count exceeds this target"))?;
+        .map_err(|_| EvaluationHalt::new("interaction-net port count exceeds this target"))?;
     let mut mapped = Vec::new();
     mapped
         .try_reserve_exact(capacity)
-        .map_err(|_| EvalError::new("interaction-net replay allocation is too large"))?;
+        .map_err(|_| EvaluationHalt::new("interaction-net replay allocation is too large"))?;
     let mut builder = NetBuilder::<CoreSpecialization>::new();
 
     for operation in journal.operations() {
@@ -452,7 +458,7 @@ fn replay(journal: &ConstructionJournal, exposed: ConstructionPortId) -> Result<
             ConstructionOp::Wire { left, right } => {
                 builder
                     .try_wire(mapped_port(&mapped, *left)?, mapped_port(&mapped, *right)?)
-                    .map_err(|error| EvalError::new(error.to_string()))?;
+                    .map_err(|error| EvaluationHalt::new(error.to_string()))?;
             }
         }
     }
@@ -460,7 +466,7 @@ fn replay(journal: &ConstructionJournal, exposed: ConstructionPortId) -> Result<
     let exposed = mapped_port(&mapped, exposed)?;
     let template = builder
         .try_finish(exposed)
-        .map_err(|error| EvalError::new(error.to_string()))?;
+        .map_err(|error| EvaluationHalt::new(error.to_string()))?;
     Ok(Value::Net(NetValue::new(template.instantiate_shared())))
 }
 
@@ -468,14 +474,14 @@ fn append_ports(
     mapped: &mut Vec<Port>,
     logical: impl IntoIterator<Item = ConstructionPortId>,
     actual: impl IntoIterator<Item = Port>,
-) -> Result<(), EvalError> {
+) -> Result<(), EvaluationHalt> {
     let mut logical = logical.into_iter();
     let mut actual = actual.into_iter();
     loop {
         match (logical.next(), actual.next()) {
             (Some(logical), Some(actual)) => {
                 if logical.index()? != mapped.len() {
-                    return Err(EvalError::new(
+                    return Err(EvaluationHalt::new(
                         "interaction-net construction journal has nonsequential ports",
                     ));
                 }
@@ -483,7 +489,7 @@ fn append_ports(
             }
             (None, None) => return Ok(()),
             _ => {
-                return Err(EvalError::new(
+                return Err(EvaluationHalt::new(
                     "interaction-net construction journal port arity mismatch",
                 ));
             }
@@ -491,11 +497,10 @@ fn append_ports(
     }
 }
 
-fn mapped_port(mapped: &[Port], port: ConstructionPortId) -> Result<Port, EvalError> {
-    mapped
-        .get(port.index()?)
-        .copied()
-        .ok_or_else(|| EvalError::new("interaction-net construction refers to an unknown port"))
+fn mapped_port(mapped: &[Port], port: ConstructionPortId) -> Result<Port, EvaluationHalt> {
+    mapped.get(port.index()?).copied().ok_or_else(|| {
+        EvaluationHalt::new("interaction-net construction refers to an unknown port")
+    })
 }
 
 #[cfg(test)]
