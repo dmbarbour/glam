@@ -25,6 +25,7 @@ pub enum ReflectionRequest {
     Environment,
     DictItems,
     Eval,
+    MetadataInspect,
     Log,
     TaskNew,
     TaskJoin,
@@ -174,6 +175,12 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
                 ReflectionRequest::Eval,
             ),
             EffectRequestSpec::at_path(
+                ["meta", "inspect"],
+                ["reflection_runtime", "v0", "request", "meta", "inspect"],
+                1,
+                ReflectionRequest::MetadataInspect,
+            ),
+            EffectRequestSpec::at_path(
                 ["task", "new"],
                 ["reflection_runtime", "v0", "request", "task", "new"],
                 1,
@@ -280,6 +287,16 @@ where
             ))))
         }
         ReflectionRequest::Eval => evaluate_request(arguments, context.eval_context()),
+        ReflectionRequest::MetadataInspect => {
+            let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
+                TaskHalt::new("`.meta.inspect` received the wrong number of arguments")
+            })?;
+            let value = evaluate(context.eval_context(), value.into_core())?;
+            let Some(metadata) = value.associated_metadata() else {
+                return Ok(RequestResult::Fail);
+            };
+            Ok(RequestResult::Return(Value::from_core(metadata)))
+        }
         ReflectionRequest::Log => {
             let [severity, message]: [Value; 2] = arguments
                 .try_into()

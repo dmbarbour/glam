@@ -4592,6 +4592,62 @@ mod tests {
     }
 
     #[test]
+    fn metadata_inspection_returns_hidden_values_without_forcing_them() {
+        let (_, initial) = compile_effect(".meta.inspect (anno 'meta ())");
+        let (context, task) = schedule_composed_test_task(&initial, Arc::new(TestHost::default()));
+        let EvaluationTaskPoll::Complete(Value::Dict(metadata)) =
+            pump_composed_test_task(&context, &task)
+        else {
+            panic!("metadata inspection should return the initial hidden dictionary");
+        };
+        assert!(metadata.is_empty());
+
+        let (assembler, inspect) = compile_effect("\\value -> .meta.inspect value");
+        let carrier = PublicValue::from_core(Value::metadata_carrier(Value::error(
+            "latent metadata failure",
+        )));
+        let effect = assembler
+            .apply(&inspect, [carrier])
+            .expect("metadata inspection function should accept its carrier");
+        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let EvaluationTaskPoll::Complete(metadata @ Value::Lazy(_)) =
+            pump_composed_test_task(&context, &task)
+        else {
+            panic!("metadata inspection must not demand its hidden value");
+        };
+        let error = assembler
+            .evaluate(&PublicValue::from_core(metadata))
+            .expect_err("the returned hidden failure should remain demandable");
+        assert_eq!(error.to_string(), "latent metadata failure");
+    }
+
+    #[test]
+    fn metadata_inspection_mismatches_are_unobserved_effect_failures() {
+        for ordinary in ["()", "42"] {
+            let (assembler, effect) = compile_effect(&format!(
+                ".cut (.alt (.meta.inspect {ordinary}) (.r \"fallback\"))"
+            ));
+            let (context, task) =
+                schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+            let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task)
+            else {
+                panic!("metadata mismatch should permit an ordinary fallback");
+            };
+            assert_eq!(
+                assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+                b"fallback".as_slice()
+            );
+        }
+
+        let (_, effect) = compile_effect(".cut (.alt (.meta.inspect 42) (1 2))");
+        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
+            panic!("metadata mismatch must not make a later evaluator error retryable");
+        };
+        assert!(error.to_string().contains("requires a function value"));
+    }
+
+    #[test]
     fn reflection_eval_returns_a_tagged_whnf_result() {
         let (_, effect) = compile_effect(".eval (1 + 2)");
         let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));

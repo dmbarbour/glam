@@ -667,6 +667,73 @@ fn public_reflection_inspects_container_structure_and_atom_identity() {
 }
 
 #[test]
+fn public_reflection_recognizes_sealed_metadata_without_forcing_it() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["metadata_reflection"])
+        .script(
+            "g",
+            concat!(
+                "language g0\n",
+                "import 'std\n",
+                "carrier = anno 'meta ()\n",
+                "failed = list.at 0 (anno meta_upd:(\\_ -> [1 / 0]) [carrier])\n",
+                "ordinary = 42\n",
+            ),
+        )
+        .build()
+        .expect("metadata reflection fixture should compile");
+    let reflection = assembler.reflection();
+
+    let carrier = assembler
+        .get(module.value(), "carrier")
+        .expect("fixture should define its initial carrier");
+    assert_eq!(
+        reflection
+            .evaluate(&carrier)
+            .expect("the carrier definition should evaluate")
+            .kind(),
+        ValueKind::Sealed
+    );
+    let initial = reflection
+        .associated_metadata(&carrier)
+        .expect("metadata recognition should evaluate the carrier shell")
+        .expect("the carrier should expose metadata to reflection");
+    assert!(initial.is_undefined());
+
+    let failed = assembler
+        .get(module.value(), "failed")
+        .expect("fixture should define its derived carrier");
+    let hidden_failure = reflection
+        .associated_metadata(&failed)
+        .expect("metadata recognition should evaluate the derived carrier shell")
+        .expect("the derived carrier should expose metadata to reflection");
+    assert_eq!(hidden_failure.kind(), ValueKind::Lazy);
+    assert!(
+        assembler.evaluate(&hidden_failure).is_err(),
+        "metadata recognition must not demand the hidden failure"
+    );
+    assert!(
+        reflection
+            .associated_metadata(&carrier)
+            .expect("the original carrier should remain inspectable")
+            .expect("the original carrier should retain its metadata")
+            .is_undefined(),
+        "deriving another carrier must not alter the original snapshot"
+    );
+
+    let ordinary = assembler
+        .get(module.value(), "ordinary")
+        .expect("fixture should define an ordinary value");
+    assert!(
+        reflection
+            .associated_metadata(&ordinary)
+            .expect("ordinary mismatch should not be an error")
+            .is_none()
+    );
+}
+
+#[test]
 fn optional_path_lookup_distinguishes_absence_from_failure() {
     let assembler = Assembler::default();
     let value = Value::record([("present", Value::integer(1))]);

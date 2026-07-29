@@ -1600,6 +1600,17 @@ impl ReflectionInspector<'_> {
         self.assembler.evaluate(value)
     }
 
+    /// Returns a sealed carrier's associated metadata without evaluating it.
+    ///
+    /// The supplied value is evaluated only far enough to recognize its outer
+    /// kind. Ordinary values return `None`; a failure while reaching that kind
+    /// remains an evaluation error rather than a metadata mismatch.
+    pub fn associated_metadata(&self, value: &Value) -> Result<Option<Value>, Error> {
+        let value = eval::eval_value(&self.assembler.eval_context(), value.as_core())
+            .map_err(Error::from_eval)?;
+        Ok(value.associated_metadata().map(Value::from_core))
+    }
+
     /// Returns the elements of a list without evaluating the elements.
     ///
     /// The list spine and any deferred concatenation segments are evaluated
