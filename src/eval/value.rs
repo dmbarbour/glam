@@ -479,7 +479,7 @@ fn eval_reflection_gate_source(
     gate: &crate::core::ReflectionGate,
 ) -> Result<Value, EvaluationHalt> {
     let task = gate.task(context).map_err(|error| {
-        EvaluationHalt::new(error.as_ref())
+        EvaluationHalt::failure(Arc::clone(error))
             .with_context(evaluation_context_frame("reflection_annotation"))
     })?;
     match context.poll_reflection_task(task) {

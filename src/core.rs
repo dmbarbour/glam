@@ -815,13 +815,20 @@ pub(crate) type DeferredComputation =
 pub(crate) struct ReflectionGate {
     effect: Value,
     target: Value,
-    task: OnceLock<Result<EvaluationTaskHandle, Arc<str>>>,
+    task: OnceLock<Result<EvaluationTaskHandle, Arc<EvaluationFailure>>>,
 }
 
 impl ReflectionGate {
-    pub(crate) fn task(&self, context: &EvalContext) -> Result<&EvaluationTaskHandle, &Arc<str>> {
+    pub(crate) fn task(
+        &self,
+        context: &EvalContext,
+    ) -> Result<&EvaluationTaskHandle, &Arc<EvaluationFailure>> {
         self.task
-            .get_or_init(|| context.start_reflection_task(self.effect.clone()))
+            .get_or_init(|| {
+                context
+                    .start_reflection_task(self.effect.clone())
+                    .map_err(|error| Arc::new(EvaluationFailure::message(error)))
+            })
             .as_ref()
     }
 

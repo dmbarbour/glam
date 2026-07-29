@@ -283,7 +283,7 @@ pub(crate) trait ReflectionTaskLauncher: Send + Sync {
         context: EvalContext,
         effect: Value,
         kind: ReflectionTaskKind,
-    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>;
+    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1173,7 +1173,11 @@ impl EvalContext {
             .session
             .reflection_launcher
             .get()
-            .ok_or_else(|| Arc::from("evaluation session has no reflection task launcher"))
+            .ok_or_else(|| {
+                Arc::new(EvaluationFailure::message(
+                    "evaluation session has no reflection task launcher",
+                ))
+            })
             .and_then(|launcher| {
                 launcher.build(
                     Self::for_task(self.session.clone(), handle.id),
@@ -1202,7 +1206,7 @@ impl EvalContext {
                 record.machine = Some(machine);
                 EvaluationTaskState::Queued
             }
-            Err(error) => EvaluationTaskState::Failed(evaluation_failure(error.as_ref())),
+            Err(error) => EvaluationTaskState::Failed(error),
         };
         let queued = matches!(state, EvaluationTaskState::Queued);
         let transition = transition_reflection_task(&mut tasks, &handle.wait, state, &prior);

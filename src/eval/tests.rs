@@ -6,7 +6,10 @@ use bytes::Bytes;
 use crate::core::{
     Dict, EvaluatedValue, EvaluationFailure, FixpointComputation, Key, LazyValue, Value, keys,
 };
-use crate::evaluation::EvaluationTaskPoll;
+use crate::evaluation::{
+    EvaluationMachinePoll, EvaluationTaskMachine, EvaluationTaskPoll, ReflectionTaskKind,
+    ReflectionTaskLauncher,
+};
 use crate::number::Number;
 
 use super::*;
@@ -38,6 +41,41 @@ struct DropSignal(Arc<AtomicBool>);
 impl Drop for DropSignal {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GateFailureStage {
+    LauncherConstruction,
+    TaskPoll,
+}
+
+struct GateFailureLauncher {
+    failure: Arc<EvaluationFailure>,
+    stage: GateFailureStage,
+    builds: Arc<AtomicUsize>,
+}
+
+impl ReflectionTaskLauncher for GateFailureLauncher {
+    fn build(
+        &self,
+        _context: EvalContext,
+        _effect: Value,
+        _kind: ReflectionTaskKind,
+    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
+        self.builds.fetch_add(1, Ordering::SeqCst);
+        match self.stage {
+            GateFailureStage::LauncherConstruction => Err(self.failure.clone()),
+            GateFailureStage::TaskPoll => Ok(Box::new(GateFailureMachine(self.failure.clone()))),
+        }
+    }
+}
+
+struct GateFailureMachine(Arc<EvaluationFailure>);
+
+impl EvaluationTaskMachine for GateFailureMachine {
+    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+        EvaluationMachinePoll::Failed(self.0.clone())
     }
 }
 
@@ -3536,6 +3574,75 @@ fn reflection_gate_memoizes_task_failure() {
         failure_context_items(&second),
         [evaluation_context_frame("reflection_annotation")]
     );
+}
+
+fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
+    let context = test_context();
+    let detail = Key::atom_from_text("detail");
+    let emission = Value::Dict(
+        Dict::new_sync()
+            .insert(
+                (*keys::MSG).clone(),
+                Value::Dict(Dict::new_sync().insert(
+                    (*keys::TEXT).clone(),
+                    Value::binary_from_text("structured gate failure"),
+                )),
+            )
+            .insert(detail.clone(), n(7)),
+    );
+    let producer_frame = evaluation_context_frame("gate_producer");
+    let failure = Arc::new(
+        EvaluationFailure::emission(emission.clone()).with_context(producer_frame.clone()),
+    );
+    let builds = Arc::new(AtomicUsize::new(0));
+    context
+        .install_reflection_launcher(Arc::new(GateFailureLauncher {
+            failure,
+            stage,
+            builds: builds.clone(),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let gate = reflection_annotation(&context, n(0), n(42));
+    let Value::Lazy(gate_lazy) = &gate else {
+        panic!("reflection annotation should produce a lazy gate")
+    };
+
+    let first = eval_value(&context, &gate)
+        .expect_err("the reflection gate should retain its structured task failure")
+        .into_permanent_failure();
+    assert_eq!(first.emission_value(), Some(&emission));
+    assert_eq!(
+        first.contexts(),
+        [
+            evaluation_context_frame("reflection_annotation"),
+            producer_frame,
+        ]
+    );
+    let cached = gate_lazy
+        .cached()
+        .expect("the failed gate should have a terminal lazy cache")
+        .expect_err("the terminal gate cache should contain its failure");
+    assert!(Arc::ptr_eq(&first, &cached));
+
+    let second = eval_value(&context, &gate)
+        .expect_err("the reflection gate should reuse its cached failure")
+        .into_permanent_failure();
+    assert!(Arc::ptr_eq(&cached, &second));
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+    let Value::Dict(diagnostic) = failure_diagnostic_value(&second) else {
+        panic!("structured gate failure should project to a diagnostic dictionary")
+    };
+    assert_eq!(diagnostic.get(&detail), Some(&n(7)));
+}
+
+#[test]
+fn reflection_gate_preserves_structured_launcher_construction_failure() {
+    assert_structured_reflection_gate_failure(GateFailureStage::LauncherConstruction);
+}
+
+#[test]
+fn reflection_gate_preserves_structured_post_launch_failure() {
+    assert_structured_reflection_gate_failure(GateFailureStage::TaskPoll);
 }
 
 #[test]

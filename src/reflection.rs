@@ -595,14 +595,14 @@ impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
         context: EvalContext,
         effect: Value,
         kind: ReflectionTaskKind,
-    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>> {
+    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
         let task = EffectTask::new_in_context(
             effect,
             self.specialization.clone(),
             self.host.clone(),
             context,
         )
-        .map_err(|error| Arc::from(error.to_string()))?;
+        .map_err(TaskError::into_failure)?;
         Ok(match kind {
             ReflectionTaskKind::Annotation => Box::new(AnnotationEffectTask(
                 task.asserting_unit_result(Arc::from("reflection annotation result")),
@@ -3543,7 +3543,7 @@ mod tests {
             context: EvalContext,
             effect: Value,
             kind: ReflectionTaskKind,
-        ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>> {
+        ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
             self.builds.fetch_add(1, Ordering::AcqRel);
             self.inner.build(context, effect, kind)
         }
@@ -4416,11 +4416,13 @@ mod tests {
         let launcher = task_launcher(TestEffects, host.clone());
         let task = context
             .schedule_task(|task_context| {
-                launcher.build(
-                    task_context,
-                    effect.as_core().clone(),
-                    ReflectionTaskKind::Annotation,
-                )
+                launcher
+                    .build(
+                        task_context,
+                        effect.as_core().clone(),
+                        ReflectionTaskKind::Annotation,
+                    )
+                    .map_err(|error| Arc::from(error.to_string()))
             })
             .expect("effect task should schedule");
 
