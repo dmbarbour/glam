@@ -1193,7 +1193,6 @@ impl Value {
     }
 
     /// Constructs a sealed unit carrier with reflection-only metadata.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn metadata_carrier(metadata: Value) -> Self {
         Self::Metadata(MetadataCarrier::new(metadata))
     }
@@ -1204,7 +1203,6 @@ impl Value {
     }
 
     /// Returns a sealed carrier's associated metadata for privileged clients.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn associated_metadata(&self) -> Option<Value> {
         match self {
             Self::Metadata(carrier) => Some(carrier.associated_metadata()),

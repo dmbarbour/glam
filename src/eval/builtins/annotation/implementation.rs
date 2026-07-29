@@ -37,6 +37,9 @@ pub(super) fn eval_anno_builtin(
             let carrier = Value::initial_metadata_carrier();
             super::super::assertion::assert_unit(context, None, target, &carrier)
         }
+        RecognizedAnnotation::MetadataUpdate { function } => {
+            eval_metadata_update_annotation(context, function, target)
+        }
         RecognizedAnnotation::Deque => eval_deque_annotation(context, target),
         RecognizedAnnotation::Binary => eval_binary_annotation(context, target),
         RecognizedAnnotation::Array => eval_array_annotation(context, target),
@@ -77,6 +80,9 @@ enum RecognizedAnnotation {
         diagnostic_context: Option<Value>,
     },
     Metadata,
+    MetadataUpdate {
+        function: Value,
+    },
     Deque,
     Binary,
     Array,
@@ -134,6 +140,11 @@ fn recognize_annotation(
         Key::Atom(atom) if atom_name(atom) == Some("context") => {
             Ok(RecognizedAnnotation::Context {
                 context: payload.clone(),
+            })
+        }
+        Key::Atom(atom) if atom_name(atom) == Some("meta_upd") => {
+            Ok(RecognizedAnnotation::MetadataUpdate {
+                function: payload.clone(),
             })
         }
         Key::Atom(atom) if atom_name(atom) == Some("assert_defined") => Ok(
@@ -275,6 +286,53 @@ pub(in crate::eval) fn is_undefined_value(value: &Value) -> bool {
 
 pub(in crate::eval) fn annotation_error_value(message: impl Into<String>) -> Value {
     Value::error(message.into())
+}
+
+fn eval_metadata_update_annotation(
+    context: &EvalContext,
+    function: Value,
+    target: &Value,
+) -> Result<Value, EvaluationHalt> {
+    let Value::List(carriers) = eval_value(context, target)? else {
+        return Err(EvaluationHalt::new(
+            "`meta_upd` annotation requires a list of sealed metadata carriers",
+        ));
+    };
+    let carriers = list_to_value_items(context, &carriers)?;
+    let mut metadata = Vec::with_capacity(carriers.len());
+    for (index, carrier) in carriers.into_iter().enumerate() {
+        let carrier = eval_value(context, &carrier)?;
+        let Some(value) = carrier.associated_metadata() else {
+            return Err(EvaluationHalt::new(format!(
+                "`meta_upd` annotation item {index} must be a sealed metadata carrier, received {}",
+                carrier.diagnostic_kind_name()
+            )));
+        };
+        metadata.push(value);
+    }
+
+    let output_count = metadata.len();
+    let updates = Value::Lazy(LazyValue::from_application(
+        function,
+        Arc::from([Value::List(List::from_values(metadata))]),
+    ));
+    let projection_context = Value::Dict(crate::core::Dict::new_sync().insert(
+        (*keys::CONTEXT).clone(),
+        evaluation_context_frame("wrap_metadata"),
+    ));
+    let carriers = (0..output_count)
+        .map(|index| {
+            let projection = Value::Lazy(LazyValue::from_builtin(BuiltinCall {
+                builtin: Builtin::ListAt,
+                arguments: Arc::from([Value::Number(Number::from_usize(index)), updates.clone()]),
+            }));
+            Value::metadata_carrier(Value::builtin_call(
+                Builtin::Anno,
+                vec![projection_context.clone(), projection],
+            ))
+        })
+        .collect();
+    Ok(Value::List(List::from_values(carriers)))
 }
 
 fn eval_deque_annotation(context: &EvalContext, target: &Value) -> Result<Value, EvaluationHalt> {

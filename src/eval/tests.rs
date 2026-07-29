@@ -3562,6 +3562,286 @@ fn metadata_annotation_rejects_non_unit_and_existing_carriers() {
     }
 }
 
+fn run_metadata_update(
+    context: &EvalContext,
+    function: Value,
+    carriers: Vec<Value>,
+) -> Result<Vec<Value>, EvaluationHalt> {
+    let annotation =
+        Value::Dict(Dict::new_sync().insert(Key::atom_from_text("meta_upd"), function));
+    let result = apply_values(
+        context,
+        Value::Builtin(Builtin::Anno),
+        vec![annotation, Value::List(List::from_values(carriers))],
+    )?;
+    let Value::List(result) = result else {
+        panic!("metadata update should return a list");
+    };
+    list_to_value_items(context, &result)
+}
+
+fn metadata_reorder_function(indices: &[usize]) -> Value {
+    let projections = indices
+        .iter()
+        .map(|index| {
+            Arc::new(builtin2_expr(
+                Builtin::ListAt,
+                TestExpr::Value(Value::Number(Number::from_usize(*index))),
+                TestExpr::Local(0),
+            ))
+        })
+        .collect::<Vec<_>>();
+    closed_function_value(1, TestExpr::List(Arc::from(projections)))
+}
+
+fn evaluated_metadata(context: &EvalContext, carrier: &Value) -> Result<Value, EvaluationHalt> {
+    let metadata = carrier
+        .associated_metadata()
+        .expect("metadata update output must remain sealed");
+    eval_value(context, &metadata)
+}
+
+#[test]
+fn metadata_update_reorders_copies_and_clears_hidden_values() {
+    let context = test_context();
+    let left = Value::metadata_carrier(n(1));
+    let right = Value::metadata_carrier(n(2));
+
+    let swapped = run_metadata_update(
+        &context,
+        metadata_reorder_function(&[1, 0]),
+        vec![left.clone(), right.clone()],
+    )
+    .expect("metadata update should support permutation");
+    assert_eq!(
+        swapped
+            .iter()
+            .map(|carrier| evaluated_metadata(&context, carrier))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        vec![n(2), n(1)]
+    );
+
+    let copied = run_metadata_update(
+        &context,
+        metadata_reorder_function(&[0, 0]),
+        vec![left, right],
+    )
+    .expect("metadata update should support copying");
+    assert_eq!(
+        copied
+            .iter()
+            .map(|carrier| evaluated_metadata(&context, carrier))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        vec![n(1), n(1)]
+    );
+
+    let cleared = run_metadata_update(
+        &context,
+        closed_function_value(
+            1,
+            TestExpr::List(Arc::from([
+                Arc::new(builtin2_expr(
+                    Builtin::Add,
+                    builtin2_expr(Builtin::ListAt, TestExpr::Value(n(0)), TestExpr::Local(0)),
+                    builtin2_expr(Builtin::ListAt, TestExpr::Value(n(1)), TestExpr::Local(0)),
+                )),
+                Arc::new(TestExpr::Value(Value::Dict(Dict::new_sync()))),
+            ])),
+        ),
+        vec![Value::metadata_carrier(n(1)), Value::metadata_carrier(n(2))],
+    )
+    .expect("metadata update should permit merging and clearing");
+    assert_eq!(
+        cleared
+            .iter()
+            .map(|carrier| evaluated_metadata(&context, carrier))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        vec![n(3), Value::Dict(Dict::new_sync())]
+    );
+}
+
+#[test]
+fn metadata_update_preserves_input_arity_without_validating_output_length() {
+    let context = test_context();
+    let empty = run_metadata_update(&context, Value::error("unused update"), Vec::new())
+        .expect("an empty carrier list should not demand its update function");
+    assert!(empty.is_empty());
+
+    let too_short = run_metadata_update(
+        &context,
+        closed_function_value(
+            1,
+            TestExpr::Value(Value::List(List::from_values(vec![n(7)]))),
+        ),
+        vec![
+            Value::initial_metadata_carrier(),
+            Value::initial_metadata_carrier(),
+        ],
+    )
+    .expect("a short update list should remain latent inside output carriers");
+    assert_eq!(too_short.len(), 2);
+    let missing_error = evaluated_metadata(&context, &too_short[1])
+        .expect_err("only the missing projection should fail");
+    assert_eq!(
+        missing_error.to_string(),
+        "list at builtin index is out of bounds"
+    );
+    assert_eq!(
+        evaluated_metadata(&context, &too_short[0]).unwrap(),
+        n(7),
+        "a failed later projection must not poison an earlier valid one"
+    );
+
+    let extra_forces = Arc::new(AtomicUsize::new(0));
+    let counted_extra_forces = extra_forces.clone();
+    let extra = Value::deferred("unused metadata update result", move |_| {
+        counted_extra_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(9))
+    });
+    let too_long = run_metadata_update(
+        &context,
+        closed_function_value(
+            1,
+            TestExpr::Value(Value::List(List::from_values(vec![n(8), extra]))),
+        ),
+        vec![Value::initial_metadata_carrier()],
+    )
+    .expect("extra update values should be ignored");
+    assert_eq!(too_long.len(), 1);
+    assert_eq!(evaluated_metadata(&context, &too_long[0]).unwrap(), n(8));
+    assert_eq!(
+        extra_forces.load(Ordering::SeqCst),
+        0,
+        "an unused extra update value must remain lazy"
+    );
+}
+
+#[test]
+fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
+    let context = test_context();
+    let carrier_forces = Arc::new(AtomicUsize::new(0));
+    let counted_carrier_forces = carrier_forces.clone();
+    let hidden_forces = Arc::new(AtomicUsize::new(0));
+    let counted_hidden_forces = hidden_forces.clone();
+    let hidden = Value::deferred("hidden metadata", move |_| {
+        counted_hidden_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(11))
+    });
+    let carrier = Value::metadata_carrier(hidden);
+    let lazy_carrier = Value::deferred("lazy metadata carrier", move |_| {
+        counted_carrier_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(carrier.clone())
+    });
+
+    let result = run_metadata_update(
+        &context,
+        metadata_reorder_function(&[0]),
+        vec![lazy_carrier],
+    )
+    .expect("lazy carrier shells should be demanded during input validation");
+    assert_eq!(carrier_forces.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        hidden_forces.load(Ordering::SeqCst),
+        0,
+        "input validation must not demand associated metadata"
+    );
+    assert_eq!(evaluated_metadata(&context, &result[0]).unwrap(), n(11));
+    assert_eq!(hidden_forces.load(Ordering::SeqCst), 1);
+
+    let error = run_metadata_update(
+        &context,
+        Value::error("update function must remain unused"),
+        vec![n(1)],
+    )
+    .expect_err("ordinary input values must be rejected before update evaluation");
+    assert_eq!(
+        error.to_string(),
+        "`meta_upd` annotation item 0 must be a sealed metadata carrier, received Number"
+    );
+
+    let annotation = Value::Dict(Dict::new_sync().insert(
+        Key::atom_from_text("meta_upd"),
+        Value::error("update function must remain unused"),
+    ));
+    let error = apply_values(
+        &context,
+        Value::Builtin(Builtin::Anno),
+        vec![annotation, n(1)],
+    )
+    .expect_err("metadata update target must be a list");
+    assert_eq!(
+        error.to_string(),
+        "`meta_upd` annotation requires a list of sealed metadata carriers"
+    );
+}
+
+#[test]
+fn metadata_update_shares_update_failures_between_projections() {
+    let context = test_context();
+    let update_forces = Arc::new(AtomicUsize::new(0));
+    let counted_update_forces = update_forces.clone();
+    let function = Value::deferred("failing metadata update", move |_| {
+        counted_update_forces.fetch_add(1, Ordering::SeqCst);
+        Err(EvaluationHalt::new("shared metadata update failed"))
+    });
+    let result = run_metadata_update(
+        &context,
+        function,
+        vec![
+            Value::initial_metadata_carrier(),
+            Value::initial_metadata_carrier(),
+        ],
+    )
+    .expect("update failure should remain latent inside output carriers");
+    assert_eq!(update_forces.load(Ordering::SeqCst), 0);
+
+    for carrier in &result {
+        let error =
+            evaluated_metadata(&context, carrier).expect_err("every shared projection must fail");
+        assert_eq!(error.to_string(), "shared metadata update failed");
+    }
+    assert_eq!(
+        update_forces.load(Ordering::SeqCst),
+        1,
+        "all projections must share one update application"
+    );
+}
+
+#[test]
+fn metadata_update_delegates_output_interpretation_to_list_at() {
+    let context = test_context();
+    let binary = run_metadata_update(
+        &context,
+        closed_function_value(1, TestExpr::Value(Value::binary_from_text("x"))),
+        vec![Value::initial_metadata_carrier()],
+    )
+    .expect("binary update output should remain indexable");
+    assert_eq!(
+        evaluated_metadata(&context, &binary[0]).unwrap(),
+        n(i64::from(b'x'))
+    );
+
+    let number = run_metadata_update(
+        &context,
+        closed_function_value(1, TestExpr::Value(n(42))),
+        vec![Value::initial_metadata_carrier()],
+    )
+    .expect("an unindexable update result should remain latent");
+    let error =
+        evaluated_metadata(&context, &number[0]).expect_err("the indexed projection must fail");
+    assert_eq!(
+        error.to_string(),
+        "list at builtin requires a list or binary value"
+    );
+    assert_eq!(
+        error.into_permanent_failure().contexts(),
+        [evaluation_context_frame("wrap_metadata")]
+    );
+}
+
 #[test]
 fn list_annotations_rebalance_and_flatten_lists() {
     let deque = eval_closed_expr(&builtin2_expr(
