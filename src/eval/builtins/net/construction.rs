@@ -11,7 +11,7 @@ use crate::interaction_net::{NetBuilder, Port};
 use crate::reflection::{
     CommitResult, EffectRequestSpec, ExactConflictAnalysis, HostSnapshot, IsolatedEffectSearch,
     IsolatedSearchPoll, ReflectionStore, RequestContext, RequestResult, StoreSnapshot, TaskCommit,
-    TaskEnvironment, TaskError, TaskHost, TaskSpecialization, task_eval_error,
+    TaskEnvironment, TaskHalt, TaskHost, TaskSpecialization, task_eval_error,
 };
 
 use super::super::super::{EvaluationHalt, eval_index_number, eval_value};
@@ -80,19 +80,19 @@ impl ConstructionJournal {
         }));
     }
 
-    fn allocate_ports(&mut self, count: usize) -> Result<Vec<ConstructionPortId>, TaskError> {
+    fn allocate_ports(&mut self, count: usize) -> Result<Vec<ConstructionPortId>, TaskHalt> {
         let count = u64::try_from(count)
-            .map_err(|_| TaskError::new("interaction-net port count exceeds u64"))?;
+            .map_err(|_| TaskHalt::new("interaction-net port count exceeds u64"))?;
         let end = self
             .next_port
             .checked_add(count)
-            .ok_or_else(|| TaskError::new("interaction-net port IDs exhausted"))?;
+            .ok_or_else(|| TaskHalt::new("interaction-net port IDs exhausted"))?;
         let capacity = usize::try_from(count)
-            .map_err(|_| TaskError::new("interaction-net port count exceeds this target"))?;
+            .map_err(|_| TaskHalt::new("interaction-net port count exceeds this target"))?;
         let mut ports = Vec::new();
         ports
             .try_reserve_exact(capacity)
-            .map_err(|_| TaskError::new("interaction-net port allocation is too large"))?;
+            .map_err(|_| TaskHalt::new("interaction-net port allocation is too large"))?;
         for id in self.next_port..end {
             ports.push(ConstructionPortId(
                 NonZeroU64::new(id).expect("construction port IDs start at one"),
@@ -172,7 +172,7 @@ impl TaskSpecialization for InteractionNetEffects {
         request: Self::Request,
         arguments: Vec<PublicValue>,
         context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskError> {
+    ) -> Result<RequestResult, TaskHalt> {
         match request {
             InteractionNetRequest::Bind => construct_bind(arguments, context, &self.brand),
             InteractionNetRequest::Copy => construct_copy(arguments, context, &self.brand),
@@ -297,7 +297,7 @@ fn construct_bind(
     arguments: Vec<PublicValue>,
     context: &mut RequestContext<'_, InteractionNetEffects>,
     brand: &Arc<ConstructionBrand>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [PublicValue; 0] = exact(arguments, "`.bind`")?;
     let mut transaction = construction_transaction(context)?;
     let (_, journal) = transaction.parts();
@@ -313,7 +313,7 @@ fn construct_copy(
     arguments: Vec<PublicValue>,
     context: &mut RequestContext<'_, InteractionNetEffects>,
     brand: &Arc<ConstructionBrand>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [outputs] = exact(arguments, "`.copy`")?;
     let outputs = eval_index_number(
         context.eval_context(),
@@ -324,7 +324,7 @@ fn construct_copy(
     .map_err(task_eval_error)?;
     let port_count = outputs
         .checked_add(1)
-        .ok_or_else(|| TaskError::new("`.copy` output count is too large"))?;
+        .ok_or_else(|| TaskHalt::new("`.copy` output count is too large"))?;
     let mut transaction = construction_transaction(context)?;
     let (_, journal) = transaction.parts();
     let ports = journal.allocate_ports(port_count)?;
@@ -338,7 +338,7 @@ fn construct_data(
     arguments: Vec<PublicValue>,
     context: &mut RequestContext<'_, InteractionNetEffects>,
     brand: &Arc<ConstructionBrand>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [value] = exact(arguments, "`.data`")?;
     let mut transaction = construction_transaction(context)?;
     let (_, journal) = transaction.parts();
@@ -357,7 +357,7 @@ fn construct_wire(
     arguments: Vec<PublicValue>,
     context: &mut RequestContext<'_, InteractionNetEffects>,
     brand: &Arc<ConstructionBrand>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [left, right] = exact(arguments, "`.wire`")?;
     let left = construction_port(context.eval_context(), left.as_core(), brand)
         .map_err(task_eval_error)?;
@@ -371,18 +371,18 @@ fn construct_wire(
 
 fn construction_transaction<'a>(
     context: &'a mut RequestContext<'_, InteractionNetEffects>,
-) -> Result<crate::reflection::TransactionContext<'a, InteractionNetEffects>, TaskError> {
+) -> Result<crate::reflection::TransactionContext<'a, InteractionNetEffects>, TaskHalt> {
     context.transaction().ok_or_else(|| {
-        TaskError::new("interaction-net operation escaped its isolated construction transaction")
+        TaskHalt::new("interaction-net operation escaped its isolated construction transaction")
     })
 }
 
 fn exact<const N: usize>(
     arguments: Vec<PublicValue>,
     operation: &str,
-) -> Result<[PublicValue; N], TaskError> {
+) -> Result<[PublicValue; N], TaskHalt> {
     arguments.try_into().map_err(|_| {
-        TaskError::new(format!(
+        TaskHalt::new(format!(
             "{operation} received the wrong number of arguments"
         ))
     })

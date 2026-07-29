@@ -2,7 +2,7 @@ use crate::api::Value;
 use crate::core::Value as CoreValue;
 use crate::eval;
 use crate::reflection::{
-    EffectRequestSpec, RequestContext, RequestResult, TaskError, TaskSpecialization,
+    EffectRequestSpec, RequestContext, RequestResult, TaskHalt, TaskSpecialization,
 };
 use crate::text_pattern::TextPattern;
 
@@ -39,7 +39,7 @@ impl TaskSpecialization for TokenEffects {
         request: Self::Request,
         arguments: Vec<Value>,
         context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskError> {
+    ) -> Result<RequestResult, TaskHalt> {
         match request {
             TokenRequest::Text => text(arguments, context),
             TokenRequest::Regex => regex_span(arguments, context),
@@ -72,14 +72,14 @@ fn request(name: &str, arity: usize, request: TokenRequest) -> EffectRequestSpec
 fn text(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, TokenEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [literal]: [Value; 1] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.token.text` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("`.token.text` received the wrong number of arguments"))?;
     let literal = text_value(context, literal, "`.token.text`")?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("token reader escaped its isolated transaction"))?;
+        .ok_or_else(|| TaskHalt::new("token reader escaped its isolated transaction"))?;
     let (snapshot, journal) = transaction.parts();
     let input = snapshot.input.as_ref();
     let cursor = journal.cursor;
@@ -117,16 +117,16 @@ fn text(
 fn regex_span(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, TokenEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [pattern]: [Value; 1] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.token.regex` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("`.token.regex` received the wrong number of arguments"))?;
     let pattern = text_value(context, pattern, "`.token.regex`")?;
     let matcher = TextPattern::parse(&pattern)
-        .map_err(|error| TaskError::new(format!("invalid `.token.regex` pattern: {error}")))?;
+        .map_err(|error| TaskHalt::new(format!("invalid `.token.regex` pattern: {error}")))?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("token reader escaped its isolated transaction"))?;
+        .ok_or_else(|| TaskHalt::new("token reader escaped its isolated transaction"))?;
     let (snapshot, journal) = transaction.parts();
     let cursor = journal.cursor;
     let remaining = &snapshot.input[cursor..];
@@ -155,13 +155,13 @@ fn regex_span(
 fn text_span(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, TokenEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.token.text_span` received arguments"))?;
+        .map_err(|_| TaskHalt::new("`.token.text_span` received arguments"))?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("token reader escaped its isolated transaction"))?;
+        .ok_or_else(|| TaskHalt::new("token reader escaped its isolated transaction"))?;
     let (snapshot, journal) = transaction.parts();
     let cursor = journal.cursor;
     let remaining = &snapshot.input[cursor..];
@@ -189,13 +189,13 @@ fn text_span(
 fn any(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, TokenEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.token.any` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("`.token.any` received the wrong number of arguments"))?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("token reader escaped its isolated transaction"))?;
+        .ok_or_else(|| TaskHalt::new("token reader escaped its isolated transaction"))?;
     let (snapshot, journal) = transaction.parts();
     if snapshot
         .completion_offset
@@ -215,13 +215,13 @@ fn any(
 fn end(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, TokenEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.token.end` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("`.token.end` received the wrong number of arguments"))?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("token reader escaped its isolated transaction"))?;
+        .ok_or_else(|| TaskHalt::new("token reader escaped its isolated transaction"))?;
     let (snapshot, journal) = transaction.parts();
     if journal.cursor == snapshot.input.len() {
         Ok(RequestResult::ReturnUnit)
@@ -235,14 +235,14 @@ fn text_value(
     context: &RequestContext<'_, TokenEffects>,
     value: Value,
     request: &str,
-) -> Result<String, TaskError> {
+) -> Result<String, TaskHalt> {
     let CoreValue::Binary(bytes) = eval::eval_value(context.eval_context(), value.as_core())
-        .map_err(|error| TaskError::new(error.to_string()))?
+        .map_err(|error| TaskHalt::new(error.to_string()))?
     else {
-        return Err(TaskError::new(format!("{request} requires text")));
+        return Err(TaskHalt::new(format!("{request} requires text")));
     };
     String::from_utf8(bytes.to_vec())
-        .map_err(|_| TaskError::new(format!("{request} requires UTF-8 text")))
+        .map_err(|_| TaskHalt::new(format!("{request} requires UTF-8 text")))
 }
 
 fn common_prefix_bytes(left: &str, right: &str) -> usize {

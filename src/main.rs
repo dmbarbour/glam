@@ -837,7 +837,7 @@ impl TaskSpecialization for MainEffects {
         request: Self::Request,
         arguments: Vec<Value>,
         context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, glam::reflection::TaskError> {
+    ) -> Result<RequestResult, glam::reflection::TaskHalt> {
         match request {
             MainRequest::Reflection(request) => {
                 handle_reflection_request(request, arguments, context)
@@ -846,14 +846,14 @@ impl TaskSpecialization for MainEffects {
             MainRequest::ReadLog => read_log(context),
             MainRequest::WriteStderr => {
                 let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
-                    glam::reflection::TaskError::new(
+                    glam::reflection::TaskHalt::new(
                         "`.write_stderr` received the wrong number of arguments",
                     )
                 })?;
                 let bytes = self
                     .assembler
                     .to_binary(&value)
-                    .map_err(|error| glam::reflection::TaskError::new(error.to_string()))?;
+                    .map_err(|error| glam::reflection::TaskHalt::new(error.to_string()))?;
                 if let Some(mut transaction) = context.transaction() {
                     transaction.parts().1.stderr.push(bytes);
                 } else {
@@ -869,9 +869,9 @@ impl TaskSpecialization for MainEffects {
 fn log_status(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MainEffects>,
-) -> Result<RequestResult, glam::reflection::TaskError> {
+) -> Result<RequestResult, glam::reflection::TaskHalt> {
     if !arguments.is_empty() {
-        return Err(glam::reflection::TaskError::new(
+        return Err(glam::reflection::TaskHalt::new(
             "`.log_status` received the wrong number of arguments",
         ));
     }
@@ -894,7 +894,7 @@ fn log_status(
 
 fn read_log(
     context: &mut RequestContext<'_, MainEffects>,
-) -> Result<RequestResult, glam::reflection::TaskError> {
+) -> Result<RequestResult, glam::reflection::TaskHalt> {
     if let Some(generation) = context.transaction_generation() {
         context.observe_host_generation(generation);
         let mut transaction = context
@@ -907,7 +907,7 @@ fn read_log(
             return diagnostic
                 .enrich()
                 .map(RequestResult::Return)
-                .map_err(|error| glam::reflection::TaskError::new(error.to_string()));
+                .map_err(|error| glam::reflection::TaskHalt::new(error.to_string()));
         }
         // Queue reads observe only the host snapshot. Journaled writes remain
         // invisible until commit, just as writes from concurrent tasks do.
@@ -922,7 +922,7 @@ fn read_log(
         };
         let value = diagnostic
             .enrich()
-            .map_err(|error| glam::reflection::TaskError::new(error.to_string()))?;
+            .map_err(|error| glam::reflection::TaskHalt::new(error.to_string()))?;
         let commit = TaskCommit::new(
             glam::reflection::StoreJournal::new(snapshot.store().clone()),
             snapshot.extra().clone(),
@@ -940,7 +940,7 @@ fn read_log(
             }
             CommitResult::Conflict => {}
             CommitResult::MissingVolume(volume) => {
-                return Err(glam::reflection::TaskError::new(format!(
+                return Err(glam::reflection::TaskHalt::new(format!(
                     "reflection volume {} was revoked before its edits committed",
                     volume.get()
                 )));

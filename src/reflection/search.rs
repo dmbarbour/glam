@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::{
-    EffectTask, EffectTaskPoll, EvalContext, PublicValue, TaskCommit, TaskError, TaskSpecialization,
+    EffectTask, EffectTaskPoll, EvalContext, PublicValue, TaskCommit, TaskHalt, TaskSpecialization,
 };
 
 /// Selects how terminal branches at the outer effect boundary are handled.
@@ -147,7 +147,7 @@ pub enum IsolatedSearchPoll<S: TaskSpecialization> {
     Yielded,
     Blocked(IsolatedSearchBlock),
     Complete(Arc<[IsolatedSearchBranch<S>]>),
-    Failed(TaskError),
+    Failed(TaskHalt),
     Cancelled,
 }
 
@@ -164,7 +164,7 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
         effect: &PublicValue,
         specialization: S,
         host: Arc<S::Host>,
-    ) -> Result<Self, TaskError> {
+    ) -> Result<Self, TaskHalt> {
         Self::new_in_context(effect, specialization, host, EvalContext::standalone())
     }
 
@@ -173,7 +173,7 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
         specialization: S,
         host: Arc<S::Host>,
         context: EvalContext,
-    ) -> Result<Self, TaskError> {
+    ) -> Result<Self, TaskHalt> {
         Ok(Self {
             task: EffectTask::new_isolated_in_context(
                 effect.as_core().clone(),

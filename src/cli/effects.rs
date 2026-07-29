@@ -5,7 +5,7 @@ use crate::api::{ModuleInput, Value};
 use crate::core::{Atom, Dict, Key, List, OpaqueValue, Value as CoreValue};
 use crate::eval;
 use crate::reflection::{
-    EffectRequestSpec, ReflectionRequest, RequestContext, RequestResult, TaskError,
+    EffectRequestSpec, ReflectionRequest, RequestContext, RequestResult, TaskHalt,
     TaskSpecialization, environment_log_request_specs, handle_reflection_request,
 };
 
@@ -116,7 +116,7 @@ impl TaskSpecialization for CliEffects {
         request: Self::Request,
         arguments: Vec<Value>,
         context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskError> {
+    ) -> Result<RequestResult, TaskHalt> {
         match request {
             CliRequest::Reflection(request) => {
                 handle_reflection_request(request, arguments, context)
@@ -138,7 +138,7 @@ impl TaskSpecialization for CliEffects {
             CliRequest::WriteWorkerCount => write_worker_count(arguments, context),
             CliRequest::Case => enter_case(arguments, context),
             CliRequest::CaseExit => exit_case(arguments, context),
-            CliRequest::EscapedToken => Err(TaskError::new(
+            CliRequest::EscapedToken => Err(TaskHalt::new(
                 "token parser operation escaped `.read.token`",
             )),
         }
@@ -162,13 +162,13 @@ fn request(
 fn enter_case(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, CliEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [explanation, parse]: [Value; 2] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.case` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("`.case` received the wrong number of arguments"))?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("`.case` escaped its isolated search transaction"))?;
+        .ok_or_else(|| TaskHalt::new("`.case` escaped its isolated search transaction"))?;
     let (_, journal) = transaction.parts();
     journal.active_cases.push(explanation.clone());
     journal.visited_cases.push(explanation);
@@ -181,18 +181,18 @@ fn enter_case(
 fn exit_case(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, CliEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("internal CLI case close received arguments"))?;
+        .map_err(|_| TaskHalt::new("internal CLI case close received arguments"))?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("CLI case close escaped its isolated transaction"))?;
+        .ok_or_else(|| TaskHalt::new("CLI case close escaped its isolated transaction"))?;
     let (_, journal) = transaction.parts();
     journal
         .active_cases
         .pop()
-        .ok_or_else(|| TaskError::new("CLI case stack became unbalanced"))?;
+        .ok_or_else(|| TaskHalt::new("CLI case stack became unbalanced"))?;
     Ok(RequestResult::ReturnUnit)
 }
 
@@ -207,14 +207,14 @@ fn case_exit_effect() -> Value {
 fn read_keyword(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, CliEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [expected]: [Value; 1] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.read.keyword` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("`.read.keyword` received the wrong number of arguments"))?;
     let expected = text_value(context, expected, "`.read.keyword`")?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("CLI reader escaped its isolated search transaction"))?;
+        .ok_or_else(|| TaskHalt::new("CLI reader escaped its isolated search transaction"))?;
     let (snapshot, journal) = transaction.parts();
     if let Some(completion) = snapshot
         .invocation
@@ -265,14 +265,14 @@ fn read_keyword(
 fn read_text(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, CliEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [expectation]: [Value; 1] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.read.text` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("`.read.text` received the wrong number of arguments"))?;
     let expectation = text_value(context, expectation, "`.read.text` expectation")?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("CLI reader escaped its isolated search transaction"))?;
+        .ok_or_else(|| TaskHalt::new("CLI reader escaped its isolated search transaction"))?;
     let (snapshot, journal) = transaction.parts();
     if let Some(completion) = snapshot
         .invocation
@@ -303,16 +303,16 @@ fn read_text(
 fn read_token(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, CliEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [expectation, parser]: [Value; 2] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.read.token` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("`.read.token` received the wrong number of arguments"))?;
     let expectation = text_value(context, expectation, "`.read.token` expectation")?;
     let eval_context = context.eval_context().clone();
     let (argument_index, argument, completion_offset) = {
         let mut transaction = context
             .transaction()
-            .ok_or_else(|| TaskError::new("CLI reader escaped its isolated search transaction"))?;
+            .ok_or_else(|| TaskHalt::new("CLI reader escaped its isolated search transaction"))?;
         let (snapshot, journal) = transaction.parts();
         let argument_index = journal.cursor;
         let Some(argument) = snapshot.invocation.args.get(argument_index) else {
@@ -337,7 +337,7 @@ fn read_token(
     };
 
     let result = token::run(&parser, argument, completion_offset, eval_context.clone())
-        .map_err(TaskError::new)?;
+        .map_err(TaskHalt::new)?;
     let completion_candidates = if completion_offset.is_some() {
         result
             .candidates
@@ -360,7 +360,7 @@ fn read_token(
     };
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("CLI reader escaped its isolated search transaction"))?;
+        .ok_or_else(|| TaskHalt::new("CLI reader escaped its isolated search transaction"))?;
     let (_, journal) = transaction.parts();
     if completion_offset.is_some() {
         for (candidate, complete_reader) in completion_candidates {
@@ -406,13 +406,13 @@ fn read_token(
 fn read_end(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, CliEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.read.end` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("`.read.end` received the wrong number of arguments"))?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("CLI reader escaped its isolated search transaction"))?;
+        .ok_or_else(|| TaskHalt::new("CLI reader escaped its isolated search transaction"))?;
     let (snapshot, journal) = transaction.parts();
     if journal.cursor == snapshot.invocation.args.len() {
         Ok(RequestResult::ReturnUnit)
@@ -432,10 +432,10 @@ struct PathHandle {
 fn read_path(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, CliEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [kind, access]: [Value; 2] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.read.path` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("`.read.path` received the wrong number of arguments"))?;
     let kind = match atom_name(context, kind, &["file", "folder", "any"], "path kind")? {
         "file" => PathKind::File,
         "folder" => PathKind::Folder,
@@ -449,7 +449,7 @@ fn read_path(
     };
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("CLI reader escaped its isolated search transaction"))?;
+        .ok_or_else(|| TaskHalt::new("CLI reader escaped its isolated search transaction"))?;
     let (snapshot, journal) = transaction.parts();
     let argument_index = journal.cursor;
     let expectation = path::expectation(kind, access);
@@ -506,22 +506,22 @@ fn write_path(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, CliEffects>,
     writer: PathWriter,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [handle]: [Value; 1] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("CLI path writer received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("CLI path writer received the wrong number of arguments"))?;
     let CoreValue::Opaque(handle) = evaluated(context, handle)? else {
-        return Err(TaskError::new("CLI path writer requires a path handle"));
+        return Err(TaskHalt::new("CLI path writer requires a path handle"));
     };
     let handle = handle
         .downcast::<PathHandle>()
-        .ok_or_else(|| TaskError::new("CLI path writer requires a path handle"))?;
+        .ok_or_else(|| TaskHalt::new("CLI path writer requires a path handle"))?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("CLI writer escaped its isolated search transaction"))?;
+        .ok_or_else(|| TaskHalt::new("CLI writer escaped its isolated search transaction"))?;
     let (snapshot, journal) = transaction.parts();
     if handle.invocation != snapshot.invocation.id {
-        return Err(TaskError::new(
+        return Err(TaskHalt::new(
             "CLI path handle belongs to another invocation",
         ));
     }
@@ -530,7 +530,7 @@ fn write_path(
         .args
         .get(handle.argument)
         .map(PathBuf::from)
-        .ok_or_else(|| TaskError::new("CLI path handle refers to an invalid argument"))?;
+        .ok_or_else(|| TaskHalt::new("CLI path handle refers to an invalid argument"))?;
     let edit = match writer {
         PathWriter::File if handle.kind == PathKind::File && handle.access == PathAccess::Read => {
             CommandEdit::Input(ModuleInput::file(path))
@@ -541,12 +541,12 @@ fn write_path(
             CommandEdit::Manifest(path)
         }
         PathWriter::File => {
-            return Err(TaskError::new(
+            return Err(TaskHalt::new(
                 "`.write.file` requires a readable file path handle",
             ));
         }
         PathWriter::Manifest => {
-            return Err(TaskError::new(
+            return Err(TaskHalt::new(
                 "`.write.manifest` requires a writable file path handle",
             ));
         }
@@ -558,13 +558,13 @@ fn write_path(
 fn write_script(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, CliEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [extension, body]: [Value; 2] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.write.script` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("`.write.script` received the wrong number of arguments"))?;
     let extension = text_value(context, extension, "`.write.script` extension")?;
     if extension.is_empty() {
-        return Err(TaskError::new(
+        return Err(TaskHalt::new(
             "`.write.script` requires a nonempty extension",
         ));
     }
@@ -585,10 +585,10 @@ fn write_text_argument(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, CliEffects>,
     writer: TextWriter,
-) -> Result<RequestResult, TaskError> {
-    let [argument]: [Value; 1] = arguments.try_into().map_err(|_| {
-        TaskError::new("CLI argument writer received the wrong number of arguments")
-    })?;
+) -> Result<RequestResult, TaskHalt> {
+    let [argument]: [Value; 1] = arguments
+        .try_into()
+        .map_err(|_| TaskHalt::new("CLI argument writer received the wrong number of arguments"))?;
     let argument = text_value(context, argument, "CLI argument writer")?;
     let edit = match writer {
         TextWriter::Reflection => CommandEdit::ReflectionArgument(argument.into()),
@@ -601,12 +601,12 @@ fn write_text_argument(
 fn write_worker_count(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, CliEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [count]: [Value; 1] = arguments.try_into().map_err(|_| {
-        TaskError::new("`.write.worker_count` received the wrong number of arguments")
+        TaskHalt::new("`.write.worker_count` received the wrong number of arguments")
     })?;
     let CoreValue::Number(count) = evaluated(context, count)? else {
-        return Err(TaskError::new(
+        return Err(TaskHalt::new(
             "`.write.worker_count` requires a non-negative integer",
         ));
     };
@@ -614,7 +614,7 @@ fn write_worker_count(
         .to_u64_if_integer()
         .and_then(|count| usize::try_from(count).ok())
         .ok_or_else(|| {
-            TaskError::new("`.write.worker_count` requires a supported non-negative integer")
+            TaskHalt::new("`.write.worker_count` requires a supported non-negative integer")
         })?;
     push_edit(context, CommandEdit::WorkerCount(count))?;
     Ok(RequestResult::ReturnUnit)
@@ -623,10 +623,10 @@ fn write_worker_count(
 fn push_edit(
     context: &mut RequestContext<'_, CliEffects>,
     edit: CommandEdit,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskHalt> {
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("CLI writer escaped its isolated search transaction"))?;
+        .ok_or_else(|| TaskHalt::new("CLI writer escaped its isolated search transaction"))?;
     transaction.parts().1.edits.push(edit);
     Ok(())
 }
@@ -635,12 +635,12 @@ fn text_value(
     context: &RequestContext<'_, CliEffects>,
     value: Value,
     request: &str,
-) -> Result<String, TaskError> {
+) -> Result<String, TaskHalt> {
     let CoreValue::Binary(bytes) = evaluated(context, value)? else {
-        return Err(TaskError::new(format!("{request} requires text")));
+        return Err(TaskHalt::new(format!("{request} requires text")));
     };
     String::from_utf8(bytes.to_vec())
-        .map_err(|_| TaskError::new(format!("{request} requires UTF-8 text")))
+        .map_err(|_| TaskHalt::new(format!("{request} requires UTF-8 text")))
 }
 
 fn atom_name<'a>(
@@ -648,21 +648,21 @@ fn atom_name<'a>(
     value: Value,
     accepted: &'a [&str],
     kind: &str,
-) -> Result<&'a str, TaskError> {
+) -> Result<&'a str, TaskHalt> {
     let value = evaluated(context, value)?;
     accepted
         .iter()
         .copied()
         .find(|name| value == CoreValue::Atom(Atom::from_key(&Key::binary_from_text(name))))
-        .ok_or_else(|| TaskError::new(format!("invalid CLI {kind}")))
+        .ok_or_else(|| TaskHalt::new(format!("invalid CLI {kind}")))
 }
 
 fn evaluated(
     context: &RequestContext<'_, CliEffects>,
     value: Value,
-) -> Result<CoreValue, TaskError> {
+) -> Result<CoreValue, TaskHalt> {
     eval::eval_value(context.eval_context(), value.as_core())
-        .map_err(|error| TaskError::new(error.to_string()))
+        .map_err(|error| TaskHalt::new(error.to_string()))
 }
 
 fn record_expectation(

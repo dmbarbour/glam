@@ -172,7 +172,7 @@ pub trait TaskSpecialization: Clone + Sized + Send + Sync + 'static {
         request: Self::Request,
         arguments: Vec<PublicValue>,
         context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskError>;
+    ) -> Result<RequestResult, TaskHalt>;
 }
 
 /// A task exposing only the standard effect machine.
@@ -194,7 +194,7 @@ impl TaskSpecialization for StandardEffects {
         request: Self::Request,
         _arguments: Vec<PublicValue>,
         _context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskError> {
+    ) -> Result<RequestResult, TaskHalt> {
         match request {}
     }
 }
@@ -218,7 +218,7 @@ impl TaskSpecialization for ReflectionEffects {
         request: Self::Request,
         arguments: Vec<PublicValue>,
         context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskError> {
+    ) -> Result<RequestResult, TaskHalt> {
         handle_reflection_request(request, arguments, context)
     }
 }
@@ -331,30 +331,30 @@ pub enum TaskOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskError(TaskErrorKind);
+pub struct TaskHalt(TaskHaltKind);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TaskErrorKind {
+enum TaskHaltKind {
     Failure(Arc<EvaluationFailure>),
     Blocked(EvaluationWaitToken),
 }
 
-impl TaskError {
+impl TaskHalt {
     pub fn new(message: impl Into<Arc<str>>) -> Self {
         let message = message.into();
         Self::failure(Arc::new(EvaluationFailure::message(message.as_ref())))
     }
 
     fn failure(failure: Arc<EvaluationFailure>) -> Self {
-        Self(TaskErrorKind::Failure(failure))
+        Self(TaskHaltKind::Failure(failure))
     }
 
     fn with_core_context(self, context: Value) -> Self {
         match self.0 {
-            TaskErrorKind::Failure(failure) => {
+            TaskHaltKind::Failure(failure) => {
                 Self::failure(Arc::new(failure.with_context(context)))
             }
-            TaskErrorKind::Blocked(wait) => Self::blocked(wait),
+            TaskHaltKind::Blocked(wait) => Self::blocked(wait),
         }
     }
 
@@ -366,48 +366,48 @@ impl TaskError {
 
     /// Projects a permanent task failure into its structured diagnostic.
     pub fn diagnostic(&self) -> Diagnostic {
-        match &self.0 {
-            TaskErrorKind::Failure(failure) => Diagnostic::from_emission(
-                Severity::Error,
-                PublicValue::from_core(eval::failure_diagnostic_value(failure)),
-            ),
-            TaskErrorKind::Blocked(_) => Diagnostic::new(Severity::Error, self.to_string()),
-        }
+        let failure = self
+            .permanent_failure()
+            .expect("a blocked task halt has no failure diagnostic");
+        Diagnostic::from_emission(
+            Severity::Error,
+            PublicValue::from_core(eval::failure_diagnostic_value(failure)),
+        )
     }
 
     fn into_failure(self) -> Arc<EvaluationFailure> {
         match self.0 {
-            TaskErrorKind::Failure(failure) => failure,
-            TaskErrorKind::Blocked(_) => {
-                panic!("a blocked task error cannot become a permanent evaluation failure")
+            TaskHaltKind::Failure(failure) => failure,
+            TaskHaltKind::Blocked(_) => {
+                panic!("a blocked task halt cannot become a permanent evaluation failure")
             }
         }
     }
 
     fn permanent_failure(&self) -> Option<&Arc<EvaluationFailure>> {
         match &self.0 {
-            TaskErrorKind::Failure(failure) => Some(failure),
-            TaskErrorKind::Blocked(_) => None,
+            TaskHaltKind::Failure(failure) => Some(failure),
+            TaskHaltKind::Blocked(_) => None,
         }
     }
 
     fn blocked(wait: EvaluationWaitToken) -> Self {
-        Self(TaskErrorKind::Blocked(wait))
+        Self(TaskHaltKind::Blocked(wait))
     }
 
     fn blocked_on(&self) -> Option<&EvaluationWaitToken> {
         match &self.0 {
-            TaskErrorKind::Blocked(wait) => Some(wait),
-            TaskErrorKind::Failure(_) => None,
+            TaskHaltKind::Blocked(wait) => Some(wait),
+            TaskHaltKind::Failure(_) => None,
         }
     }
 }
 
-impl fmt::Display for TaskError {
+impl fmt::Display for TaskHalt {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
-            TaskErrorKind::Failure(failure) => failure.fmt(formatter),
-            TaskErrorKind::Blocked(wait) => {
+            TaskHaltKind::Failure(failure) => failure.fmt(formatter),
+            TaskHaltKind::Blocked(wait) => {
                 write!(
                     formatter,
                     "reflection task blocked on wait token {}",
@@ -418,7 +418,7 @@ impl fmt::Display for TaskError {
     }
 }
 
-impl std::error::Error for TaskError {}
+impl std::error::Error for TaskHalt {}
 
 /// Configures and synchronously runs one effect task.
 ///
@@ -486,7 +486,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
         self
     }
 
-    pub fn run(self) -> Result<TaskOutcome, TaskError> {
+    pub fn run(self) -> Result<TaskOutcome, TaskHalt> {
         let Self {
             effect,
             specialization,
@@ -504,7 +504,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
         if let Some(reflection_host) = reflection_children {
             session
                 .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
-                .map_err(|error| TaskError::new(error.as_ref()))?;
+                .map_err(|error| TaskHalt::new(error.as_ref()))?;
         }
         let mut task = EffectTask::new_in_context(
             effect.into_core(),
@@ -531,26 +531,26 @@ pub fn run<S: TaskSpecialization>(
     effect: &PublicValue,
     specialization: S,
     host: Arc<S::Host>,
-) -> Result<TaskOutcome, TaskError> {
+) -> Result<TaskOutcome, TaskHalt> {
     EffectRun::new(effect, specialization, host).run()
 }
 
 fn run_composed_effect_task<S: TaskSpecialization>(
     mut task: EffectTask<S>,
-) -> Result<TaskOutcome, TaskError> {
+) -> Result<TaskOutcome, TaskHalt> {
     let parent = task.run();
     let children = task.eval_context.run_until_quiescent();
     let child_error = composed_child_error(children);
     match (parent, child_error) {
         (Ok(outcome), None) => Ok(outcome),
         (Ok(_), Some(error)) | (Err(error), None) => Err(error),
-        (Err(parent), Some(children)) => Err(TaskError::new(format!(
+        (Err(parent), Some(children)) => Err(TaskHalt::new(format!(
             "{parent}; child task failure: {children}"
         ))),
     }
 }
 
-fn composed_child_error(run: EvaluationSessionRun) -> Option<TaskError> {
+fn composed_child_error(run: EvaluationSessionRun) -> Option<TaskHalt> {
     let (quiescent, report) = match run {
         EvaluationSessionRun::Complete(report) => (false, report),
         EvaluationSessionRun::Quiescent(report) | EvaluationSessionRun::Deadlocked(report) => {
@@ -576,7 +576,7 @@ fn composed_child_error(run: EvaluationSessionRun) -> Option<TaskError> {
             }
         ));
     }
-    Some(TaskError::new(details.join("; ")))
+    Some(TaskHalt::new(details.join("; ")))
 }
 
 /// Builds a type-erased launcher for annotation and joinable reflection tasks.
@@ -608,7 +608,7 @@ impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
             self.host.clone(),
             context,
         )
-        .map_err(TaskError::into_failure)?;
+        .map_err(TaskHalt::into_failure)?;
         Ok(match kind {
             ReflectionTaskKind::Annotation => Box::new(AnnotationEffectTask(
                 task.asserting_unit_result(Arc::from("reflection annotation result")),
@@ -622,7 +622,7 @@ impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
 pub fn run_standard(
     effect: &PublicValue,
     host: Arc<dyn TaskHost<StandardEffects>>,
-) -> Result<TaskOutcome, TaskError> {
+) -> Result<TaskOutcome, TaskHalt> {
     EffectRun::new(effect, StandardEffects, host).run()
 }
 
@@ -701,7 +701,7 @@ struct EffectTask<S: TaskSpecialization> {
 
 impl<S: TaskSpecialization> EffectTask<S> {
     #[cfg(test)]
-    fn new(effect: Value, specialization: S, host: Arc<S::Host>) -> Result<Self, TaskError> {
+    fn new(effect: Value, specialization: S, host: Arc<S::Host>) -> Result<Self, TaskHalt> {
         Self::new_in_context(effect, specialization, host, EvalContext::standalone())
     }
 
@@ -710,7 +710,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         specialization: S,
         host: Arc<S::Host>,
         eval_context: EvalContext,
-    ) -> Result<Self, TaskError> {
+    ) -> Result<Self, TaskHalt> {
         Self::new_in_context_with_policy(effect, specialization, host, eval_context, false)
     }
 
@@ -719,7 +719,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         specialization: S,
         host: Arc<S::Host>,
         eval_context: EvalContext,
-    ) -> Result<Self, TaskError> {
+    ) -> Result<Self, TaskHalt> {
         Self::new_in_context_with_policy(effect, specialization, host, eval_context, true)
     }
 
@@ -729,7 +729,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         host: Arc<S::Host>,
         eval_context: EvalContext,
         retain_all: bool,
-    ) -> Result<Self, TaskError> {
+    ) -> Result<Self, TaskHalt> {
         let tags = Tags::new();
         let (api, specialized_requests) = effect_api(
             &tags,
@@ -738,7 +738,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         )?;
         let id = eval_context
             .task_id()
-            .map_err(|error| TaskError::new(error.as_ref()))?;
+            .map_err(|error| TaskHalt::new(error.as_ref()))?;
         let initial_state = Value::Dict(Dict::new_sync());
         let root = Branch::new(effect, initial_state);
         let (search, branch) = if retain_all {
@@ -800,24 +800,24 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self
     }
 
-    fn allocate_control_order(&mut self) -> Result<usize, TaskError> {
+    fn allocate_control_order(&mut self) -> Result<usize, TaskHalt> {
         let order = self.next_control_order;
         self.next_control_order = self
             .next_control_order
             .checked_add(1)
-            .ok_or_else(|| TaskError::new("reflection control order exhausted"))?;
+            .ok_or_else(|| TaskHalt::new("reflection control order exhausted"))?;
         Ok(order)
     }
 
     fn capture_continuation(
         &mut self,
         continuation: CapturedContinuation,
-    ) -> Result<Value, TaskError> {
+    ) -> Result<Value, TaskHalt> {
         let id = self.next_continuation;
         self.next_continuation = self
             .next_continuation
             .checked_add(1)
-            .ok_or_else(|| TaskError::new("reflection continuation IDs exhausted"))?;
+            .ok_or_else(|| TaskHalt::new("reflection continuation IDs exhausted"))?;
         self.continuations.insert(id, continuation);
         Ok(request_function(
             self.tags.resume.clone(),
@@ -834,7 +834,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         root: Arc<FixRoot<S>>,
         choices: Vec<FixChoice>,
-    ) -> Result<MachineWork<S>, TaskError> {
+    ) -> Result<MachineWork<S>, TaskHalt> {
         let mut branch = root.entry.clone();
         let reset_stack = reset_stack_value(
             &self.eval_context,
@@ -849,7 +849,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         )?;
         let order = self.allocate_control_order()?;
         let handle = PromisedValue::fixpoint(&self.eval_context, "reflection effect fixpoint")
-            .map_err(|error| TaskError::new(error.as_ref()))?;
+            .map_err(|error| TaskHalt::new(error.as_ref()))?;
         let marker = Value::Promised(handle.clone());
         let outer_control = std::mem::take(&mut branch.control);
         branch.state = state;
@@ -878,7 +878,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         branch: &mut Branch<S>,
         scope_depth: usize,
-    ) -> Result<Option<MachineWork<S>>, TaskError> {
+    ) -> Result<Option<MachineWork<S>>, TaskHalt> {
         let Some(restart) = branch.fix_restarts.last() else {
             return Ok(None);
         };
@@ -886,7 +886,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             return Ok(None);
         }
         if restart.root.scope_depth > scope_depth {
-            return Err(TaskError::new(
+            return Err(TaskHalt::new(
                 "reflection fixpoint restart escaped its evaluation scope",
             ));
         }
@@ -908,7 +908,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         branch: &mut Branch<S>,
         captured: &CapturedContinuation,
         scope_depth: usize,
-    ) -> Result<(), TaskError> {
+    ) -> Result<(), TaskHalt> {
         let mut layers = captured
             .reset_frames
             .iter()
@@ -932,7 +932,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let next_order = self
             .next_control_order
             .checked_add(layers.len())
-            .ok_or_else(|| TaskError::new("reflection control order exhausted"))?;
+            .ok_or_else(|| TaskHalt::new("reflection control order exhausted"))?;
         let mut delimiters = Vec::new();
         for (order, layer) in (self.next_control_order..).zip(layers) {
             match layer {
@@ -959,7 +959,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         Ok(())
     }
 
-    fn run(&mut self) -> Result<TaskOutcome, TaskError> {
+    fn run(&mut self) -> Result<TaskOutcome, TaskHalt> {
         loop {
             match self.poll(256) {
                 EffectTaskPoll::Yielded => {}
@@ -975,7 +975,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             EvaluationPumpOutcome::NoProgress
                                 if blocked.observed_generation.is_none() =>
                             {
-                                let error = TaskError::new(
+                                let error = TaskHalt::new(
                                     "synchronous reflection task has no runnable producer for its dependency",
                                 );
                                 self.finish(TaskTerminal::Failed(error.clone()));
@@ -985,7 +985,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         }
                     }
                     let generation = blocked.observed_generation.ok_or_else(|| {
-                        TaskError::new("blocked reflection task has no wake condition")
+                        TaskHalt::new("blocked reflection task has no wake condition")
                     })?;
                     if !self.host.wait_for_change(generation) {
                         self.finish(TaskTerminal::Cancelled);
@@ -1035,7 +1035,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         EffectTaskPoll::Yielded
     }
 
-    fn step(&mut self, work: MachineWork<S>) -> Result<MachineStep<S>, TaskError> {
+    fn step(&mut self, work: MachineWork<S>) -> Result<MachineStep<S>, TaskHalt> {
         match work {
             MachineWork::Drive {
                 branch,
@@ -1069,7 +1069,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         mut branch: Branch<S>,
         scope_depth: usize,
-    ) -> Result<MachineStep<S>, TaskError> {
+    ) -> Result<MachineStep<S>, TaskHalt> {
         let request = self.effect_request(branch.effect.clone())?;
         let work = match request {
             Request::Return(value) => MachineWork::Deliver {
@@ -1406,7 +1406,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     &self.tags.continuation_state,
                 )?;
                 let Some(index) = frames.iter().rposition(|frame| frame.key == key) else {
-                    return Err(TaskError::new("`.shift` key is not in reset scope"));
+                    return Err(TaskHalt::new("`.shift` key is not in reset scope"));
                 };
                 let inner_reset_frames = frames.split_off(index + 1);
                 let target = frames.pop().expect("matching reset frame must exist");
@@ -1437,7 +1437,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Request::Resume(task_id, id, value) => {
                 if task_id != self.id {
-                    return Err(TaskError::new(
+                    return Err(TaskHalt::new(
                         "captured continuation belongs to another reflection task",
                     ));
                 }
@@ -1445,7 +1445,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .continuations
                     .get(&id)
                     .cloned()
-                    .ok_or_else(|| TaskError::new("unknown reflection continuation"))?;
+                    .ok_or_else(|| TaskHalt::new("unknown reflection continuation"))?;
                 let order = self.allocate_control_order()?;
                 let caller_sequence = std::mem::take(&mut branch.control.sequence);
                 branch.control.delimiters.push(Delimiter::Resume {
@@ -1549,7 +1549,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         value: Value,
         mut branch: Branch<S>,
         scope_depth: usize,
-    ) -> Result<MachineStep<S>, TaskError> {
+    ) -> Result<MachineStep<S>, TaskHalt> {
         if let Some(continuation) = branch.control.sequence.last().cloned() {
             return match continuation {
                 Continuation::Glam(function) => {
@@ -1565,7 +1565,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 Continuation::RequireUnit => {
                     let value = evaluate(&self.eval_context, value)?;
                     if value != unit_value() {
-                        return Err(TaskError::new(format!(
+                        return Err(TaskHalt::new(format!(
                             "effect task returned {}; expected unit",
                             value.diagnostic_kind_name()
                         )));
@@ -1592,19 +1592,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
                 Continuation::Fix(handle) => {
                     let active = branch.active_fixes.last().ok_or_else(|| {
-                        TaskError::new("reflection fixpoint lost its active branch")
+                        TaskHalt::new("reflection fixpoint lost its active branch")
                     })?;
                     if active.handle != handle {
-                        return Err(TaskError::new(
+                        return Err(TaskHalt::new(
                             "reflection fixpoint control became unbalanced",
                         ));
                     }
                     if active.next_choice != active.choices.len() {
-                        return Err(TaskError::new("reflection fixpoint choice replay diverged"));
+                        return Err(TaskHalt::new("reflection fixpoint choice replay diverged"));
                     }
                     handle
                         .set(value.clone())
-                        .map_err(|_| TaskError::new("reflection fixpoint initialized twice"))?;
+                        .map_err(|_| TaskHalt::new("reflection fixpoint initialized twice"))?;
                     branch.control.sequence.pop();
                     branch.active_fixes.pop();
                     Ok(MachineStep::Continue(MachineWork::Deliver {
@@ -1628,7 +1628,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 Continuation::RestoreScopedValue(scoped_value) => {
                     let value = evaluate(&self.eval_context, value)?;
                     if value != unit_value() {
-                        return Err(TaskError::new(format!(
+                        return Err(TaskHalt::new(format!(
                             "scoped effect close must return unit, got {value:?}"
                         )));
                     }
@@ -1748,7 +1748,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         outcome: BranchOutcome<S>,
         scope_depth: usize,
-    ) -> Result<MachineStep<S>, TaskError> {
+    ) -> Result<MachineStep<S>, TaskHalt> {
         if self.execution.cuts.is_empty() {
             return self.handle_top_level_outcome(outcome, scope_depth);
         }
@@ -1759,7 +1759,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .expect("checked nonempty cut stack")
             .scope_depth;
         if scope_depth != expected_scope {
-            return Err(TaskError::new(
+            return Err(TaskHalt::new(
                 "reflection cut stack became unbalanced during polling",
             ));
         }
@@ -1869,7 +1869,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
-    fn finish_cut_attempt(&mut self) -> Result<MachineStep<S>, TaskError> {
+    fn finish_cut_attempt(&mut self) -> Result<MachineStep<S>, TaskHalt> {
         let mut frame = self
             .execution
             .cuts
@@ -1925,7 +1925,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         outcome: BranchOutcome<S>,
         scope_depth: usize,
-    ) -> Result<MachineStep<S>, TaskError> {
+    ) -> Result<MachineStep<S>, TaskHalt> {
         if self.search.retains_all() {
             return self.handle_isolated_search_outcome(outcome, scope_depth);
         }
@@ -1934,20 +1934,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 PublicValue::from_core(value),
             ))),
             BranchOutcome::Fail(_) => Ok(MachineStep::Terminal(TaskTerminal::Failed(
-                TaskError::new("reflection task failed permanently"),
+                TaskHalt::new("reflection task failed permanently"),
             ))),
             BranchOutcome::Fork(_, _) => Ok(MachineStep::Terminal(TaskTerminal::Failed(
-                TaskError::new("`.alt` requires an enclosing `.cut`"),
+                TaskHalt::new("`.alt` requires an enclosing `.cut`"),
             ))),
             BranchOutcome::Retry(mut failed) => {
                 if let Some(restarted) = self.restart_fixpoint_at_scope(&mut failed, scope_depth)? {
                     return Ok(MachineStep::Continue(restarted));
                 }
                 let checkpoint = failed.retry.take().ok_or_else(|| {
-                    TaskError::new("retryable reflection failure lost its observation")
+                    TaskHalt::new("retryable reflection failure lost its observation")
                 })?;
                 let generation = checkpoint.generation.ok_or_else(|| {
-                    TaskError::new("retryable reflection failure lost its wake generation")
+                    TaskHalt::new("retryable reflection failure lost its wake generation")
                 })?;
                 Ok(MachineStep::Blocked(BlockedExecution::exhausted(
                     RetryWake {
@@ -1967,7 +1967,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         outcome: BranchOutcome<S>,
         scope_depth: usize,
-    ) -> Result<MachineStep<S>, TaskError> {
+    ) -> Result<MachineStep<S>, TaskHalt> {
         debug_assert_eq!(scope_depth, 0);
         match outcome {
             BranchOutcome::Complete(value, mut completed) => {
@@ -2016,7 +2016,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             .and_then(|checkpoint| checkpoint.generation)
                     })
                     .ok_or_else(|| {
-                        TaskError::new("retryable isolated branch lost its wake generation")
+                        TaskHalt::new("retryable isolated branch lost its wake generation")
                     })?;
                 Ok(MachineStep::Blocked(BlockedExecution::exhausted(
                     RetryWake {
@@ -2215,30 +2215,30 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.terminal = Some(terminal);
     }
 
-    fn effect_request(&self, effect: Value) -> Result<Request<S::Request>, TaskError> {
+    fn effect_request(&self, effect: Value) -> Result<Request<S::Request>, TaskHalt> {
         let effect = evaluate(&self.eval_context, effect)?;
         let Value::Dict(effect) = effect else {
-            return Err(TaskError::new(format!(
+            return Err(TaskHalt::new(format!(
                 "reflection task requires an effect object, got {effect:?}"
             )));
         };
         let function = effect
             .get(&*keys::EFF)
             .cloned()
-            .ok_or_else(|| TaskError::new("reflection effect has no `eff` member"))?;
+            .ok_or_else(|| TaskHalt::new("reflection effect has no `eff` member"))?;
         let function = evaluate(&self.eval_context, function).map_err(|error| {
-            TaskError::new(format!(
+            TaskHalt::new(format!(
                 "reflection effect function could not be evaluated: {error}"
             ))
         })?;
         let request =
             apply(&self.eval_context, function, vec![self.api.clone()]).map_err(|error| {
-                TaskError::new(format!(
+                TaskHalt::new(format!(
                     "reflection effect function could not be applied: {error}"
                 ))
             })?;
         let request = evaluate(&self.eval_context, request).map_err(|error| {
-            TaskError::new(format!(
+            TaskHalt::new(format!(
                 "reflection effect application could not be evaluated: {error}"
             ))
         })?;
@@ -2517,7 +2517,7 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
         }
     }
 
-    fn evaluation_error(error: TaskError, retry: RetryWake<S>) -> Self {
+    fn evaluation_error(error: TaskHalt, retry: RetryWake<S>) -> Self {
         assert!(
             error.blocked_on().is_none(),
             "a blocked task error belongs in the wait dependency field"
@@ -2555,7 +2555,7 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
 enum BlockReason {
     WaitingOn(EvaluationWaitToken),
     Exhausted,
-    EvaluationError(TaskError),
+    EvaluationError(TaskHalt),
 }
 
 struct RetryWake<S: TaskSpecialization> {
@@ -2579,14 +2579,14 @@ enum EffectTaskPoll {
     Yielded,
     Blocked(TaskBlock),
     Complete(PublicValue),
-    Failed(TaskError),
+    Failed(TaskHalt),
     Cancelled,
 }
 
 #[derive(Clone)]
 enum TaskTerminal {
     Complete(PublicValue),
-    Failed(TaskError),
+    Failed(TaskHalt),
     Cancelled,
 }
 
@@ -2885,15 +2885,15 @@ fn parse_request<R: Clone>(
     tags: &Tags,
     specialized: &[SpecializedRequest<R>],
     reasoning_session: Option<ReasoningSessionId>,
-) -> Result<Request<R>, TaskError> {
+) -> Result<Request<R>, TaskHalt> {
     let Value::Dict(dict) = value else {
-        return Err(TaskError::new("effect API returned a non-request value"));
+        return Err(TaskHalt::new("effect API returned a non-request value"));
     };
-    let parse = |tag: &Key| -> Result<Option<Vec<Value>>, TaskError> {
+    let parse = |tag: &Key| -> Result<Option<Vec<Value>>, TaskHalt> {
         dict.get(tag)
             .map(|payload| {
                 let Value::List(payload) = evaluate(context, payload.clone())? else {
-                    return Err(TaskError::new("effect request payload must be a list"));
+                    return Err(TaskHalt::new("effect request payload must be a list"));
                 };
                 eval::list_to_value_items(context, &payload).map_err(task_eval_error)
             })
@@ -2903,7 +2903,7 @@ fn parse_request<R: Clone>(
         ($tag:expr, $n:literal, $body:expr) => {
             if let Some(arguments) = parse($tag)? {
                 let arguments: [Value; $n] = arguments.try_into().map_err(|_| {
-                    TaskError::new("effect request contained the wrong number of arguments")
+                    TaskHalt::new("effect request contained the wrong number of arguments")
                 })?;
                 return Ok(($body)(arguments));
             }
@@ -2945,12 +2945,12 @@ fn parse_request<R: Clone>(
         |[key, function]: [Value; 2]| Request::Shift(key, function)
     );
     if let Some(arguments) = parse(&tags.resume)? {
-        let [task_id, continuation_id, value]: [Value; 3] = arguments.try_into().map_err(|_| {
-            TaskError::new("resume request contained the wrong number of arguments")
-        })?;
+        let [task_id, continuation_id, value]: [Value; 3] = arguments
+            .try_into()
+            .map_err(|_| TaskHalt::new("resume request contained the wrong number of arguments"))?;
         let task_id = request_id(context, task_id, "task")?;
         let task_id = EvaluationTaskId::from_u64(task_id)
-            .ok_or_else(|| TaskError::new("reflection task ID must be nonzero"))?;
+            .ok_or_else(|| TaskHalt::new("reflection task ID must be nonzero"))?;
         return Ok(Request::Resume(
             task_id,
             request_id(context, continuation_id, "continuation")?,
@@ -2960,7 +2960,7 @@ fn parse_request<R: Clone>(
     for specialized in specialized {
         if let Some(arguments) = parse(&specialized.tag)? {
             if arguments.len() != specialized.arity {
-                return Err(TaskError::new(
+                return Err(TaskHalt::new(
                     "effect request contained the wrong number of arguments",
                 ));
             }
@@ -2975,7 +2975,7 @@ fn parse_request<R: Clone>(
             continue;
         };
         if reasoning_session != Some(identity.reasoning_session) {
-            return Err(TaskError::new(
+            return Err(TaskHalt::new(
                 VolumeRequestError::ForeignVolume(identity.reasoning_session, identity.volume)
                     .to_string(),
             ));
@@ -2993,12 +2993,12 @@ fn parse_request<R: Clone>(
                 path.clone(),
                 updater.clone(),
             )),
-            _ => Err(TaskError::new(
+            _ => Err(TaskHalt::new(
                 "volume capability request contained the wrong number of arguments",
             )),
         };
     }
-    Err(TaskError::new("effect API returned an unknown request"))
+    Err(TaskHalt::new("effect API returned an unknown request"))
 }
 
 const VOLUME_REQUEST_PREFIX: [&str; 3] = ["reflection_runtime", "v0", "volume"];
@@ -3023,7 +3023,7 @@ fn volume_request_tag(
     ])
 }
 
-fn parse_volume_request_tag(tag: &Key) -> Result<Option<VolumeRequestIdentity>, TaskError> {
+fn parse_volume_request_tag(tag: &Key) -> Result<Option<VolumeRequestIdentity>, TaskHalt> {
     let Key::AbstractGlobalPath(parts) = tag else {
         return Ok(None);
     };
@@ -3036,25 +3036,23 @@ fn parse_volume_request_tag(tag: &Key) -> Result<Option<VolumeRequestIdentity>, 
         return Ok(None);
     }
     let [_, _, _, reasoning_session, volume, operation] = parts.as_ref() else {
-        return Err(TaskError::new(
-            "malformed private volume capability request",
-        ));
+        return Err(TaskHalt::new("malformed private volume capability request"));
     };
     let reasoning_session = reasoning_session
         .parse::<u64>()
         .ok()
         .and_then(ReasoningSessionId::from_u64)
-        .ok_or_else(|| TaskError::new("volume capability has an invalid reasoning session"))?;
+        .ok_or_else(|| TaskHalt::new("volume capability has an invalid reasoning session"))?;
     let volume = volume
         .parse::<u64>()
         .ok()
         .and_then(VolumeId::from_u64)
-        .ok_or_else(|| TaskError::new("volume capability has an invalid volume ID"))?;
+        .ok_or_else(|| TaskHalt::new("volume capability has an invalid volume ID"))?;
     let operation = match operation.as_str() {
         "get" => VolumeOperation::Get,
         "set" => VolumeOperation::Set,
         "rewrite" => VolumeOperation::Rewrite,
-        _ => return Err(TaskError::new("volume capability has an invalid operation")),
+        _ => return Err(TaskHalt::new("volume capability has an invalid operation")),
     };
     Ok(Some(VolumeRequestIdentity {
         reasoning_session,
@@ -3091,22 +3089,22 @@ pub(crate) fn volume_effects(
     ))
 }
 
-fn request_id(context: &EvalContext, value: Value, kind: &str) -> Result<u64, TaskError> {
+fn request_id(context: &EvalContext, value: Value, kind: &str) -> Result<u64, TaskHalt> {
     let Value::Number(value) = evaluate(context, value)? else {
-        return Err(TaskError::new(format!(
+        return Err(TaskHalt::new(format!(
             "resume request has an invalid {kind} ID"
         )));
     };
     value
         .to_u64_if_integer()
-        .ok_or_else(|| TaskError::new(format!("resume request has an invalid {kind} ID")))
+        .ok_or_else(|| TaskHalt::new(format!("resume request has an invalid {kind} ID")))
 }
 
 fn effect_api<R: Clone>(
     tags: &Tags,
     specs: Vec<EffectRequestSpec<R>>,
     expose_shared_heap: bool,
-) -> Result<(Value, Vec<SpecializedRequest<R>>), TaskError> {
+) -> Result<(Value, Vec<SpecializedRequest<R>>), TaskHalt> {
     let entry = |name: &str, value| (Key::atom_from_text(name), value);
     let heap_api = Value::Dict(
         [
@@ -3183,7 +3181,7 @@ fn effect_api<R: Clone>(
             .iter()
             .any(|request: &SpecializedRequest<R>| request.tag == tag)
         {
-            return Err(TaskError::new(format!(
+            return Err(TaskHalt::new(format!(
                 "duplicate private tag for effect API name `{}`",
                 api_name.as_deref().unwrap_or("<hidden>")
             )));
@@ -3217,14 +3215,14 @@ fn insert_effect_api_path(
     path: &[Arc<str>],
     value: Value,
     display_path: &str,
-) -> Result<Dict, TaskError> {
+) -> Result<Dict, TaskHalt> {
     let Some((name, rest)) = path.split_first() else {
-        return Err(TaskError::new("effect API path must not be empty"));
+        return Err(TaskHalt::new("effect API path must not be empty"));
     };
     let key = Key::atom_from_text(name);
     if rest.is_empty() {
         if api.get(&key).is_some() {
-            return Err(TaskError::new(format!(
+            return Err(TaskHalt::new(format!(
                 "duplicate effect API name `{display_path}`"
             )));
         }
@@ -3234,7 +3232,7 @@ fn insert_effect_api_path(
     let nested = match api.get(&key) {
         Some(Value::Dict(nested)) => nested.clone(),
         Some(_) => {
-            return Err(TaskError::new(format!(
+            return Err(TaskHalt::new(format!(
                 "effect API path `{display_path}` crosses non-dictionary `{name}`"
             )));
         }
@@ -3276,15 +3274,11 @@ fn alternative_returns(tags: &Tags, values: Vec<Value>) -> Value {
         .expect("alternative return construction requires at least two values")
 }
 
-fn apply(
-    context: &EvalContext,
-    function: Value,
-    arguments: Vec<Value>,
-) -> Result<Value, TaskError> {
+fn apply(context: &EvalContext, function: Value, arguments: Vec<Value>) -> Result<Value, TaskHalt> {
     eval::apply_values(context, function, arguments).map_err(task_eval_error)
 }
 
-fn evaluate(context: &EvalContext, value: Value) -> Result<Value, TaskError> {
+fn evaluate(context: &EvalContext, value: Value) -> Result<Value, TaskHalt> {
     let mut value = value;
     while matches!(value, Value::Lazy(_) | Value::Promised(_)) {
         value = eval::eval_value(context, &value).map_err(task_eval_error)?;
@@ -3292,15 +3286,15 @@ fn evaluate(context: &EvalContext, value: Value) -> Result<Value, TaskError> {
     Ok(value)
 }
 
-pub(crate) fn task_eval_error(error: EvaluationHalt) -> TaskError {
+pub(crate) fn task_eval_error(error: EvaluationHalt) -> TaskHalt {
     match error.blocked_on() {
-        Some(wait) => TaskError::blocked(wait.0),
-        None => TaskError::failure(error.into_permanent_failure()),
+        Some(wait) => TaskHalt::blocked(wait.0),
+        None => TaskHalt::failure(error.into_permanent_failure()),
     }
 }
 
-fn missing_volume_error(volume: VolumeId) -> TaskError {
-    TaskError::new(format!(
+fn missing_volume_error(volume: VolumeId) -> TaskHalt {
+    TaskHalt::new(format!(
         "reflection volume {} was revoked before its edits committed",
         volume.get()
     ))
@@ -3313,22 +3307,20 @@ fn missing_volume_value(volume: VolumeId) -> Value {
     ))
 }
 
-fn value_key(context: &EvalContext, value: Value) -> Result<Key, TaskError> {
+fn value_key(context: &EvalContext, value: Value) -> Result<Key, TaskHalt> {
     Key::from_value(&evaluate(context, value)?)
-        .ok_or_else(|| TaskError::new("effect index is not keyable"))
+        .ok_or_else(|| TaskHalt::new("effect index is not keyable"))
 }
 
 pub(crate) fn get_value_path(
     context: &EvalContext,
     value: &Value,
     path: &[Key],
-) -> Result<Value, TaskError> {
+) -> Result<Value, TaskHalt> {
     let mut current = value.clone();
     for key in path {
         let Value::Dict(dict) = evaluate(context, current)? else {
-            return Err(TaskError::new(
-                "state path traverses a non-dictionary value",
-            ));
+            return Err(TaskHalt::new("state path traverses a non-dictionary value"));
         };
         current = dict
             .get(key)
@@ -3358,7 +3350,7 @@ fn set_state_path(
     state: Value,
     path: &Value,
     value: Value,
-) -> Result<Value, TaskError> {
+) -> Result<Value, TaskHalt> {
     let path = eval::eval_key_path_list(context, path).map_err(task_eval_error)?;
     if path.is_empty() {
         return require_state_dict(context, value);
@@ -3373,10 +3365,10 @@ fn set_state_path(
     )
 }
 
-fn require_state_dict(context: &EvalContext, value: Value) -> Result<Value, TaskError> {
+fn require_state_dict(context: &EvalContext, value: Value) -> Result<Value, TaskHalt> {
     match evaluate(context, value)? {
         value @ Value::Dict(_) => Ok(value),
-        _ => Err(TaskError::new("reflection user state must be a dictionary")),
+        _ => Err(TaskHalt::new("reflection user state must be a dictionary")),
     }
 }
 
@@ -3384,9 +3376,9 @@ fn reset_stack_value(
     context: &EvalContext,
     state: &Value,
     continuation_state: &Key,
-) -> Result<Value, TaskError> {
+) -> Result<Value, TaskHalt> {
     let Value::Dict(state) = state else {
-        return Err(TaskError::new("reflection user state must be a dictionary"));
+        return Err(TaskHalt::new("reflection user state must be a dictionary"));
     };
     let stack = state
         .get(continuation_state)
@@ -3400,7 +3392,7 @@ fn reset_frames(
     context: &EvalContext,
     state: &Value,
     continuation_state: &Key,
-) -> Result<Vec<ResetFrame>, TaskError> {
+) -> Result<Vec<ResetFrame>, TaskHalt> {
     reset_frames_from_value(
         context,
         &reset_stack_value(context, state, continuation_state)?,
@@ -3410,9 +3402,9 @@ fn reset_frames(
 fn reset_frames_from_value(
     context: &EvalContext,
     stack: &Value,
-) -> Result<Vec<ResetFrame>, TaskError> {
+) -> Result<Vec<ResetFrame>, TaskHalt> {
     let Value::List(stack) = evaluate(context, stack.clone())? else {
-        return Err(TaskError::new(
+        return Err(TaskHalt::new(
             "reflection continuation state must be a list",
         ));
     };
@@ -3421,7 +3413,7 @@ fn reset_frames_from_value(
         .into_iter()
         .map(|frame| {
             let Value::List(frame) = evaluate(context, frame)? else {
-                return Err(TaskError::new(
+                return Err(TaskHalt::new(
                     "reflection continuation frame must be a list",
                 ));
             };
@@ -3430,15 +3422,15 @@ fn reset_frames_from_value(
                     .map_err(task_eval_error)?
                     .try_into()
                     .map_err(|_| {
-                        TaskError::new("reflection continuation frame has the wrong size")
+                        TaskHalt::new("reflection continuation frame has the wrong size")
                     })?;
             let Value::Number(scope_depth) = scope_depth else {
-                return Err(TaskError::new(
+                return Err(TaskHalt::new(
                     "reflection continuation frame has an invalid scope",
                 ));
             };
             let Value::Number(order) = order else {
-                return Err(TaskError::new(
+                return Err(TaskHalt::new(
                     "reflection continuation frame has an invalid order",
                 ));
             };
@@ -3446,10 +3438,10 @@ fn reset_frames_from_value(
                 key: value_key(context, key)?,
                 continuation,
                 scope_depth: scope_depth.to_usize_if_integer().ok_or_else(|| {
-                    TaskError::new("reflection continuation frame has an invalid scope")
+                    TaskHalt::new("reflection continuation frame has an invalid scope")
                 })?,
                 order: order.to_usize_if_integer().ok_or_else(|| {
-                    TaskError::new("reflection continuation frame has an invalid order")
+                    TaskHalt::new("reflection continuation frame has an invalid order")
                 })?,
             })
         })
@@ -3477,7 +3469,7 @@ fn with_reset_frames(
     state: Value,
     continuation_state: &Key,
     frames: &[ResetFrame],
-) -> Result<Value, TaskError> {
+) -> Result<Value, TaskHalt> {
     with_reset_stack_value(
         context,
         state,
@@ -3498,7 +3490,7 @@ fn with_reset_stack_value(
     state: Value,
     continuation_state: &Key,
     stack: Value,
-) -> Result<Value, TaskError> {
+) -> Result<Value, TaskHalt> {
     reset_frames_from_value(context, &stack)?;
     let Value::Dict(state) = require_state_dict(context, state)? else {
         unreachable!("require_state_dict returned a non-dictionary")
@@ -3628,7 +3620,7 @@ mod tests {
             request: Self::Request,
             arguments: Vec<PublicValue>,
             context: &mut RequestContext<'_, Self>,
-        ) -> Result<RequestResult, TaskError> {
+        ) -> Result<RequestResult, TaskHalt> {
             match request {
                 TestRequest::Reflection(request) => {
                     handle_reflection_request(request, arguments, context)
@@ -3636,7 +3628,7 @@ mod tests {
                 TestRequest::ReadLog => read_test_log(context),
                 TestRequest::WriteStderr => {
                     let [value]: [PublicValue; 1] = arguments.try_into().map_err(|_| {
-                        TaskError::new("test stderr request received the wrong arity")
+                        TaskHalt::new("test stderr request received the wrong arity")
                     })?;
                     let bytes = value_bytes(value.as_core())?;
                     if let Some(mut transaction) = context.transaction() {
@@ -3657,7 +3649,7 @@ mod tests {
 
     fn read_test_log(
         context: &mut RequestContext<'_, TestEffects>,
-    ) -> Result<RequestResult, TaskError> {
+    ) -> Result<RequestResult, TaskHalt> {
         if let Some(generation) = context.transaction_generation() {
             context.observe_host_generation(generation);
             let mut transaction = context
@@ -3671,7 +3663,7 @@ mod tests {
             return diagnostic
                 .enrich()
                 .map(RequestResult::Return)
-                .map_err(|error| TaskError::new(error.to_string()));
+                .map_err(|error| TaskHalt::new(error.to_string()));
         }
 
         loop {
@@ -3682,7 +3674,7 @@ mod tests {
             };
             let value = diagnostic
                 .enrich()
-                .map_err(|error| TaskError::new(error.to_string()))?;
+                .map_err(|error| TaskHalt::new(error.to_string()))?;
             let commit = TaskCommit::new(
                 StoreJournal::new(snapshot.store().clone()),
                 snapshot.extra().clone(),
@@ -3991,37 +3983,34 @@ mod tests {
         }
     }
 
-    fn value_bytes(value: &Value) -> Result<Bytes, TaskError> {
+    fn value_bytes(value: &Value) -> Result<Bytes, TaskHalt> {
         let context = EvalContext::standalone();
         match evaluate(&context, value.clone())? {
             Value::Binary(bytes) => Ok(bytes),
             Value::List(list) => eval::list_output_bytes(&context, &list)
                 .map(Bytes::from)
-                .map_err(|error| TaskError::new(error.to_string())),
-            _ => Err(TaskError::new("test stderr request requires binary data")),
+                .map_err(|error| TaskHalt::new(error.to_string())),
+            _ => Err(TaskHalt::new("test stderr request requires binary data")),
         }
     }
 
-    fn run_log_test(effect: &PublicValue, host: Arc<TestHost>) -> Result<TaskOutcome, TaskError> {
+    fn run_log_test(effect: &PublicValue, host: Arc<TestHost>) -> Result<TaskOutcome, TaskHalt> {
         run(effect, TestEffects, host)
     }
 
     fn run_reflection_test(
         effect: &PublicValue,
         host: Arc<TestHost>,
-    ) -> Result<TaskOutcome, TaskError> {
+    ) -> Result<TaskOutcome, TaskHalt> {
         let host: Arc<dyn ReflectionHost<ReflectionEffects>> = host;
         run(effect, ReflectionEffects, host)
     }
 
-    fn run_standard_test(effect: &PublicValue) -> Result<TaskOutcome, TaskError> {
+    fn run_standard_test(effect: &PublicValue) -> Result<TaskOutcome, TaskHalt> {
         run_standard(effect, Arc::new(TestHost::default()))
     }
 
-    fn run_standard_on(
-        effect: &PublicValue,
-        host: Arc<TestHost>,
-    ) -> Result<TaskOutcome, TaskError> {
+    fn run_standard_on(effect: &PublicValue, host: Arc<TestHost>) -> Result<TaskOutcome, TaskHalt> {
         run_standard(effect, host)
     }
 
@@ -4041,7 +4030,7 @@ mod tests {
         (assembler, effect)
     }
 
-    fn task_error_contexts(error: &TaskError) -> Vec<Value> {
+    fn task_error_contexts(error: &TaskHalt) -> Vec<Value> {
         let diagnostic = eval::failure_diagnostic_value(error.clone().into_failure().as_ref());
         let context = EvalContext::standalone();
         let Value::Dict(diagnostic) = eval::eval_value(&context, &diagnostic).unwrap() else {
@@ -5688,7 +5677,7 @@ mod tests {
         let frame = eval::evaluation_context_frame("producer_test");
         let failure =
             Arc::new(EvaluationFailure::emission(emission.clone()).with_context(frame.clone()));
-        task.finish(TaskTerminal::Failed(TaskError::failure(failure.clone())));
+        task.finish(TaskTerminal::Failed(TaskHalt::failure(failure.clone())));
 
         for (promise, wait) in promises.into_iter().zip(waits) {
             let observed = eval::eval_value(&task.eval_context, &Value::Promised(promise))

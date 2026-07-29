@@ -15,7 +15,7 @@ use crate::number::Number;
 use super::{
     CommitResult, EffectRequestSpec, EvaluationQueryHandle, EvaluationQueryPoll,
     EvaluationQueryState, RequestContext, RequestResult, StoreJournal, TaskCommit, TaskEnvironment,
-    TaskError, TaskHost, TaskSpecialization, decode_query_state, evaluate, get_value_path,
+    TaskHalt, TaskHost, TaskSpecialization, decode_query_state, evaluate, get_value_path,
     task_eval_error,
 };
 
@@ -30,7 +30,7 @@ pub enum ReflectionRequest {
     TaskJoin,
     TaskStatus,
     TaskValue,
-    TaskError,
+    TaskHalt,
     TaskAcknowledgeError,
     TaskCancel,
 }
@@ -201,7 +201,7 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
                 ["task", "error"],
                 ["reflection_runtime", "v0", "request", "task", "error"],
                 1,
-                ReflectionRequest::TaskError,
+                ReflectionRequest::TaskHalt,
             ),
             EffectRequestSpec::at_path(
                 ["task", "ack_error"],
@@ -241,7 +241,7 @@ pub fn handle_reflection_request<S>(
     request: ReflectionRequest,
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, S>,
-) -> Result<RequestResult, TaskError>
+) -> Result<RequestResult, TaskHalt>
 where
     S: TaskSpecialization,
     S::Host: ReflectionHost<S>,
@@ -251,7 +251,7 @@ where
         ReflectionRequest::Environment => {
             let [path]: [Value; 1] = arguments
                 .try_into()
-                .map_err(|_| TaskError::new("`.env` received the wrong number of arguments"))?;
+                .map_err(|_| TaskHalt::new("`.env` received the wrong number of arguments"))?;
             let path = eval::eval_key_path_list(context.eval_context(), path.as_core())
                 .map_err(task_eval_error)?;
             let environment = context.host().reflection_environment().into_core();
@@ -260,10 +260,10 @@ where
         }
         ReflectionRequest::DictItems => {
             let [dict]: [Value; 1] = arguments.try_into().map_err(|_| {
-                TaskError::new("`.dict_items` received the wrong number of arguments")
+                TaskHalt::new("`.dict_items` received the wrong number of arguments")
             })?;
             let CoreValue::Dict(dict) = evaluate(context.eval_context(), dict.into_core())? else {
-                return Err(TaskError::new("`.dict_items` requires a dictionary"));
+                return Err(TaskHalt::new("`.dict_items` requires a dictionary"));
             };
             Ok(RequestResult::Return(Value::from_core(CoreValue::List(
                 crate::core::List::from_values(
@@ -283,7 +283,7 @@ where
         ReflectionRequest::Log => {
             let [severity, message]: [Value; 2] = arguments
                 .try_into()
-                .map_err(|_| TaskError::new("`.log` received the wrong number of arguments"))?;
+                .map_err(|_| TaskHalt::new("`.log` received the wrong number of arguments"))?;
             let message = prepare_message(context.eval_context(), message)?;
             let diagnostic = Diagnostic::from_emission(
                 parse_severity(context.eval_context(), severity)?,
@@ -303,9 +303,9 @@ where
             Ok(RequestResult::ReturnUnit)
         }
         ReflectionRequest::TaskNew => {
-            let [effect]: [Value; 1] = arguments.try_into().map_err(|_| {
-                TaskError::new("`.task.new` received the wrong number of arguments")
-            })?;
+            let [effect]: [Value; 1] = arguments
+                .try_into()
+                .map_err(|_| TaskHalt::new("`.task.new` received the wrong number of arguments"))?;
             let eval_context = context.eval_context().clone();
             let host = context.host_arc();
             let effect = effect.into_core();
@@ -316,10 +316,10 @@ where
                         .reserve_query_with(Value::from_core(task_status_query_value(
                             EvaluationTaskStatus::Launched,
                         )))
-                        .map_err(|error| TaskError::new(error.as_ref()))?;
+                        .map_err(|error| TaskHalt::new(error.as_ref()))?;
                     let pending = eval_context
                         .reserve_reflection_task(effect)
-                        .map_err(|error| TaskError::new(error.as_ref()))?;
+                        .map_err(|error| TaskHalt::new(error.as_ref()))?;
                     let handle = Arc::new(ReflectionTaskHandle {
                         task: pending.handle().clone(),
                         status: result.clone(),
@@ -342,10 +342,10 @@ where
                         .reserve_query_with(Value::from_core(task_status_query_value(
                             EvaluationTaskStatus::Launched,
                         )))
-                        .map_err(|error| TaskError::new(error.as_ref()))?;
+                        .map_err(|error| TaskHalt::new(error.as_ref()))?;
                     let pending = eval_context
                         .reserve_reflection_task(effect)
-                        .map_err(|error| TaskError::new(error.as_ref()))?;
+                        .map_err(|error| TaskHalt::new(error.as_ref()))?;
                     let handle = Arc::new(ReflectionTaskHandle {
                         task: pending.handle().clone(),
                         status: result.clone(),
@@ -369,10 +369,10 @@ where
                     )) {
                         CommitResult::Committed => context.committed(),
                         CommitResult::Conflict => {
-                            return Err(TaskError::new("fresh task reservation conflicted"));
+                            return Err(TaskHalt::new("fresh task reservation conflicted"));
                         }
                         CommitResult::MissingVolume(volume) => {
-                            return Err(TaskError::new(format!(
+                            return Err(TaskHalt::new(format!(
                                 "private query volume {} is unavailable",
                                 volume.get()
                             )));
@@ -386,19 +386,21 @@ where
         ReflectionRequest::TaskJoin => {
             let handle = task_handle_argument(context.eval_context(), arguments, "task.join")?;
             if !context.eval_context().owns_task(&handle.task) {
-                return Err(TaskError::new(
+                return Err(TaskHalt::new(
                     "task handle does not belong to this evaluation session",
                 ));
             }
             match context.eval_context().poll_reflection_task(&handle.task) {
-                EvaluationTaskPoll::Pending(wait) => Err(TaskError::blocked(wait)),
+                EvaluationTaskPoll::Pending(wait) => Err(TaskHalt::blocked(wait)),
                 EvaluationTaskPoll::Complete(value) => {
                     Ok(RequestResult::Return(Value::from_core(value)))
                 }
-                EvaluationTaskPoll::Failed(error) => Err(TaskError::failure(error)
-                    .with_core_context(task_join_context(handle.task.id()))),
+                EvaluationTaskPoll::Failed(error) => {
+                    Err(TaskHalt::failure(error)
+                        .with_core_context(task_join_context(handle.task.id())))
+                }
                 EvaluationTaskPoll::Cancelled => {
-                    Err(TaskError::new("joined reflection task was cancelled"))
+                    Err(TaskHalt::new("joined reflection task was cancelled"))
                 }
             }
         }
@@ -425,7 +427,7 @@ where
                 TaggedTaskState::Failed(_) | TaggedTaskState::Cancelled => Ok(RequestResult::Fail),
             }
         }
-        ReflectionRequest::TaskError => {
+        ReflectionRequest::TaskHalt => {
             let (handle, query) = read_task_status(context, arguments, "task.error")?;
             let Some(state) = query.value else {
                 observe_query_change(context, &handle.status, query.generation);
@@ -483,17 +485,17 @@ where
 fn evaluate_request(
     arguments: Vec<Value>,
     context: &EvalContext,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [value]: [Value; 1] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("`.eval` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("`.eval` received the wrong number of arguments"))?;
     let mut value = value.into_core();
     while matches!(value, CoreValue::Lazy(_) | CoreValue::Promised(_)) {
         value = match eval::eval_value(context, &value) {
             Ok(value) => value,
             Err(error) => {
                 if let Some(wait) = error.blocked_on() {
-                    return Err(TaskError::blocked(wait.0));
+                    return Err(TaskHalt::blocked(wait.0));
                 }
                 return Ok(RequestResult::Return(tagged_result(
                     &keys::ERR,
@@ -559,7 +561,7 @@ enum TaggedTaskState {
     Cancelled,
 }
 
-fn tagged_task_state(value: &Value) -> Result<TaggedTaskState, TaskError> {
+fn tagged_task_state(value: &Value) -> Result<TaggedTaskState, TaskHalt> {
     if value.as_core() == &keys::LAUNCHED.to_value() {
         return Ok(TaggedTaskState::Launched);
     }
@@ -570,10 +572,10 @@ fn tagged_task_state(value: &Value) -> Result<TaggedTaskState, TaskError> {
         return Ok(TaggedTaskState::Cancelled);
     }
     let CoreValue::Dict(state) = value.as_core() else {
-        return Err(TaskError::new("reflection task status is malformed"));
+        return Err(TaskHalt::new("reflection task status is malformed"));
     };
     if state.iter().count() != 1 {
-        return Err(TaskError::new("reflection task status is malformed"));
+        return Err(TaskHalt::new("reflection task status is malformed"));
     }
     if let Some(value) = state.get(&*keys::OK) {
         return Ok(TaggedTaskState::Complete(Value::from_core(value.clone())));
@@ -581,35 +583,32 @@ fn tagged_task_state(value: &Value) -> Result<TaggedTaskState, TaskError> {
     if let Some(error) = state.get(&*keys::ERR) {
         return Ok(TaggedTaskState::Failed(Value::from_core(error.clone())));
     }
-    Err(TaskError::new("reflection task status is malformed"))
+    Err(TaskHalt::new("reflection task status is malformed"))
 }
 
 fn task_handle_argument(
     context: &EvalContext,
     arguments: Vec<Value>,
     request: &str,
-) -> Result<Arc<ReflectionTaskHandle>, TaskError> {
+) -> Result<Arc<ReflectionTaskHandle>, TaskHalt> {
     let [handle]: [Value; 1] = arguments.try_into().map_err(|_| {
-        TaskError::new(format!(
+        TaskHalt::new(format!(
             "`.{request}` received the wrong number of arguments"
         ))
     })?;
     let CoreValue::Opaque(handle) = evaluate(context, handle.into_core())? else {
-        return Err(TaskError::new(format!(
+        return Err(TaskHalt::new(format!(
             "`.{request}` requires a reflection task handle"
         )));
     };
     handle
         .downcast::<ReflectionTaskHandle>()
-        .ok_or_else(|| TaskError::new(format!("`.{request}` requires a reflection task handle")))
+        .ok_or_else(|| TaskHalt::new(format!("`.{request}` requires a reflection task handle")))
 }
 
-fn ensure_local_task(
-    context: &EvalContext,
-    handle: &ReflectionTaskHandle,
-) -> Result<(), TaskError> {
+fn ensure_local_task(context: &EvalContext, handle: &ReflectionTaskHandle) -> Result<(), TaskHalt> {
     if !context.owns_task(&handle.task) {
-        Err(TaskError::new(
+        Err(TaskHalt::new(
             "task handle does not belong to this evaluation session",
         ))
     } else {
@@ -626,7 +625,7 @@ fn read_task_status<S: TaskSpecialization>(
     context: &mut RequestContext<'_, S>,
     arguments: Vec<Value>,
     request: &str,
-) -> Result<(Arc<ReflectionTaskHandle>, QueryRead), TaskError> {
+) -> Result<(Arc<ReflectionTaskHandle>, QueryRead), TaskHalt> {
     let handle = task_handle_argument(context.eval_context(), arguments, request)?;
     ensure_local_task(context.eval_context(), &handle)?;
     let status = read_query(context, &handle.status)?;
@@ -636,7 +635,7 @@ fn read_task_status<S: TaskSpecialization>(
 fn read_query<S: TaskSpecialization>(
     context: &mut RequestContext<'_, S>,
     handle: &Arc<EvaluationQueryHandle>,
-) -> Result<QueryRead, TaskError> {
+) -> Result<QueryRead, TaskHalt> {
     let transaction_generation = context.transaction_generation();
     let (result, generation) = if let Some(mut transaction) = context.transaction() {
         let generation =
@@ -647,7 +646,7 @@ fn read_query<S: TaskSpecialization>(
         (snapshot.store().poll_query(handle), snapshot.generation())
     };
     let EvaluationQueryPoll::State { value, .. } = result else {
-        return Err(TaskError::new(
+        return Err(TaskHalt::new(
             "query handle does not belong to this reasoning session",
         ));
     };
@@ -655,7 +654,7 @@ fn read_query<S: TaskSpecialization>(
     let value = match decode_query_state(&state) {
         Some(EvaluationQueryState::Pending) => None,
         Some(EvaluationQueryState::Complete(result)) => Some(result),
-        None => return Err(TaskError::new("query handle has been retired")),
+        None => return Err(TaskHalt::new("query handle has been retired")),
     };
     Ok(QueryRead { value, generation })
 }
@@ -675,12 +674,12 @@ fn observe_query_change<S: TaskSpecialization>(
     }
 }
 
-pub(crate) fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskError> {
+pub(crate) fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskHalt> {
     let log_message_context = || eval::evaluation_context_frame("log_message");
     let CoreValue::Dict(mut message) = evaluate(context, message.into_core())
         .map_err(|error| error.with_core_context(log_message_context()))?
     else {
-        return Err(TaskError::new("`.log` message must evaluate to an object"));
+        return Err(TaskHalt::new("`.log` message must evaluate to an object"));
     };
     if let Some(interface) = message.get(&*keys::MSG) {
         message = message.insert(
@@ -692,7 +691,7 @@ pub(crate) fn prepare_message(context: &EvalContext, message: Value) -> Result<V
     Ok(Value::from_core(CoreValue::Dict(message)))
 }
 
-pub(crate) fn parse_severity(context: &EvalContext, value: Value) -> Result<Severity, TaskError> {
+pub(crate) fn parse_severity(context: &EvalContext, value: Value) -> Result<Severity, TaskHalt> {
     let value = evaluate(context, value.into_core())
         .map_err(|error| error.with_core_context(eval::evaluation_context_frame("log_severity")))?;
     if severity_matches(&value, "info", &keys::INFO_VALUE) {
@@ -702,7 +701,7 @@ pub(crate) fn parse_severity(context: &EvalContext, value: Value) -> Result<Seve
     } else if severity_matches(&value, "error", &keys::ERROR_VALUE) {
         Ok(Severity::Error)
     } else {
-        Err(TaskError::new(
+        Err(TaskHalt::new(
             "`.log` severity must be `'info`, `'warn`, or `'error`",
         ))
     }

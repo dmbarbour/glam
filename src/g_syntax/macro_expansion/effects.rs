@@ -2,8 +2,8 @@ use crate::api::{Diagnostic, Value};
 use crate::core::{Dict, Key, List, Value as CoreValue};
 use crate::eval;
 use crate::reflection::{
-    EffectRequestSpec, RequestContext, RequestResult, TaskError, TaskSpecialization,
-    get_value_path, parse_severity, prepare_message,
+    EffectRequestSpec, RequestContext, RequestResult, TaskHalt, TaskSpecialization, get_value_path,
+    parse_severity, prepare_message,
 };
 use crate::text_pattern::TextPattern;
 
@@ -123,7 +123,7 @@ impl TaskSpecialization for MacroEffects {
         request: Self::Request,
         arguments: Vec<Value>,
         context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskError> {
+    ) -> Result<RequestResult, TaskHalt> {
         match request {
             MacroRequest::Environment => environment(arguments, context),
             MacroRequest::Log => log(arguments, context),
@@ -165,15 +165,15 @@ fn request(
 fn environment(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [path]: [Value; 1] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("macro `.env` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("macro `.env` received the wrong number of arguments"))?;
     let path = eval::eval_key_path_list(context.eval_context(), path.as_core())
-        .map_err(|error| TaskError::new(error.to_string()))?;
+        .map_err(|error| TaskHalt::new(error.to_string()))?;
     let environment = context
         .transaction()
-        .ok_or_else(|| TaskError::new("macro `.env` escaped its isolated transaction"))?
+        .ok_or_else(|| TaskHalt::new("macro `.env` escaped its isolated transaction"))?
         .parts()
         .0
         .environment
@@ -186,15 +186,15 @@ fn environment(
 fn log(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [severity, message]: [Value; 2] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("macro `.log` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("macro `.log` received the wrong number of arguments"))?;
     let severity = parse_severity(context.eval_context(), severity)?;
     let message = prepare_message(context.eval_context(), message)?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("macro `.log` escaped its isolated transaction"))?;
+        .ok_or_else(|| TaskHalt::new("macro `.log` escaped its isolated transaction"))?;
     transaction
         .parts()
         .1
@@ -205,13 +205,13 @@ fn log(
 fn enter_case(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [explanation, parser]: [Value; 2] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("macro `.case` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("macro `.case` received the wrong number of arguments"))?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("macro `.case` escaped its isolated transaction"))?;
+        .ok_or_else(|| TaskHalt::new("macro `.case` escaped its isolated transaction"))?;
     let (_, journal) = transaction.parts();
     #[cfg(test)]
     journal.visited_cases.push(explanation.clone());
@@ -225,19 +225,19 @@ fn enter_case(
 fn exit_case(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("internal macro case close received arguments"))?;
+        .map_err(|_| TaskHalt::new("internal macro case close received arguments"))?;
     let mut transaction = context
         .transaction()
-        .ok_or_else(|| TaskError::new("macro case close escaped its isolated transaction"))?;
+        .ok_or_else(|| TaskHalt::new("macro case close escaped its isolated transaction"))?;
     transaction
         .parts()
         .1
         .active_cases
         .pop()
-        .ok_or_else(|| TaskError::new("macro case stack became unbalanced"))?;
+        .ok_or_else(|| TaskHalt::new("macro case stack became unbalanced"))?;
     Ok(RequestResult::ReturnUnit)
 }
 
@@ -248,10 +248,10 @@ fn case_exit_effect() -> Value {
 fn read_text(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [expected]: [Value; 1] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("macro `.read.text` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("macro `.read.text` received the wrong number of arguments"))?;
     let expected = text_value(context, expected, "macro `.read.text`")?;
     let mut transaction = macro_transaction(context, "macro `.read.text`")?;
     let (snapshot, journal) = transaction.parts();
@@ -265,13 +265,13 @@ fn read_text(
 fn read_regex(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
-    let [pattern]: [Value; 1] = arguments.try_into().map_err(|_| {
-        TaskError::new("macro `.read.regex` received the wrong number of arguments")
-    })?;
+) -> Result<RequestResult, TaskHalt> {
+    let [pattern]: [Value; 1] = arguments
+        .try_into()
+        .map_err(|_| TaskHalt::new("macro `.read.regex` received the wrong number of arguments"))?;
     let pattern = text_value(context, pattern, "macro `.read.regex`")?;
     let matcher = TextPattern::parse(&pattern)
-        .map_err(|error| TaskError::new(format!("invalid macro text pattern: {error}")))?;
+        .map_err(|error| TaskHalt::new(format!("invalid macro text pattern: {error}")))?;
     let mut transaction = macro_transaction(context, "macro `.read.regex`")?;
     let (snapshot, journal) = transaction.parts();
     let Some(run) = journal.cursor.textual_run(&snapshot.input) else {
@@ -282,7 +282,7 @@ fn read_regex(
     };
     let matched = matched.to_owned();
     if !journal.cursor.advance_run(&snapshot.input, matched.len()) {
-        return Err(TaskError::new(
+        return Err(TaskHalt::new(
             "macro regex reader produced an invalid textual boundary",
         ));
     }
@@ -295,9 +295,9 @@ fn read_regex(
 fn read_text_span(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments.try_into().map_err(|_| {
-        TaskError::new("macro `.read.text_span` received the wrong number of arguments")
+        TaskHalt::new("macro `.read.text_span` received the wrong number of arguments")
     })?;
     let mut transaction = macro_transaction(context, "macro `.read.text_span`")?;
     let (snapshot, journal) = transaction.parts();
@@ -309,7 +309,7 @@ fn read_text_span(
     }
     let span = run.to_owned();
     if !journal.cursor.advance_run(&snapshot.input, span.len()) {
-        return Err(TaskError::new(
+        return Err(TaskHalt::new(
             "macro text-span reader produced an invalid textual boundary",
         ));
     }
@@ -322,10 +322,10 @@ fn read_text_span(
 fn read_data(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("macro `.read.data` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("macro `.read.data` received the wrong number of arguments"))?;
     let mut transaction = macro_transaction(context, "macro `.read.data`")?;
     let (snapshot, journal) = transaction.parts();
     Ok(journal
@@ -337,10 +337,10 @@ fn read_data(
 fn read_separator(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("macro `.read.sep` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("macro `.read.sep` received the wrong number of arguments"))?;
     let mut transaction = macro_transaction(context, "macro `.read.sep`")?;
     let (snapshot, journal) = transaction.parts();
     if journal.cursor.read_separator(&snapshot.input) {
@@ -353,9 +353,9 @@ fn read_separator(
 fn read_layout(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [parser]: [Value; 1] = arguments.try_into().map_err(|_| {
-        TaskError::new("macro `.read.layout` received the wrong number of arguments")
+        TaskHalt::new("macro `.read.layout` received the wrong number of arguments")
     })?;
     let mut transaction = macro_transaction(context, "macro `.read.layout`")?;
     let (snapshot, journal) = transaction.parts();
@@ -371,10 +371,10 @@ fn read_layout(
 fn read_anchor(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("macro `.read.anchor` received arguments"))?;
+        .map_err(|_| TaskHalt::new("macro `.read.anchor` received arguments"))?;
     let mut transaction = macro_transaction(context, "macro `.read.anchor`")?;
     if transaction.parts().1.cursor.read_anchor() {
         Ok(RequestResult::ReturnUnit)
@@ -386,10 +386,10 @@ fn read_anchor(
 fn read_layout_exit(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("internal macro read-layout close received arguments"))?;
+        .map_err(|_| TaskHalt::new("internal macro read-layout close received arguments"))?;
     let mut transaction = macro_transaction(context, "internal macro read-layout close")?;
     if transaction.parts().1.cursor.exit_layout() {
         Ok(RequestResult::ReturnUnit)
@@ -401,10 +401,10 @@ fn read_layout_exit(
 fn read_end(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("macro `.read.end` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("macro `.read.end` received the wrong number of arguments"))?;
     let mut transaction = macro_transaction(context, "macro `.read.end`")?;
     let (snapshot, journal) = transaction.parts();
     if journal.cursor.at_end(&snapshot.input) {
@@ -417,12 +417,12 @@ fn read_end(
 fn write_text(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
-    let [text]: [Value; 1] = arguments.try_into().map_err(|_| {
-        TaskError::new("macro `.write.text` received the wrong number of arguments")
-    })?;
+) -> Result<RequestResult, TaskHalt> {
+    let [text]: [Value; 1] = arguments
+        .try_into()
+        .map_err(|_| TaskHalt::new("macro `.write.text` received the wrong number of arguments"))?;
     let text = text_value(context, text, "macro `.write.text`")?;
-    validate_written_text(&text).map_err(TaskError::new)?;
+    validate_written_text(&text).map_err(TaskHalt::new)?;
     macro_transaction(context, "macro `.write.text`")?
         .parts()
         .1
@@ -445,10 +445,10 @@ pub(super) fn validate_written_text(text: &str) -> Result<(), &'static str> {
 fn write_data(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
-    let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
-        TaskError::new("macro `.write.data` received the wrong number of arguments")
-    })?;
+) -> Result<RequestResult, TaskHalt> {
+    let [value]: [Value; 1] = arguments
+        .try_into()
+        .map_err(|_| TaskHalt::new("macro `.write.data` received the wrong number of arguments"))?;
     macro_transaction(context, "macro `.write.data`")?
         .parts()
         .1
@@ -459,10 +459,10 @@ fn write_data(
 fn write_separator(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("macro `.write.sep` received the wrong number of arguments"))?;
+        .map_err(|_| TaskHalt::new("macro `.write.sep` received the wrong number of arguments"))?;
     macro_transaction(context, "macro `.write.sep`")?
         .parts()
         .1
@@ -473,9 +473,9 @@ fn write_separator(
 fn write_layout(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let [writer]: [Value; 1] = arguments.try_into().map_err(|_| {
-        TaskError::new("macro `.write.layout` received the wrong number of arguments")
+        TaskHalt::new("macro `.write.layout` received the wrong number of arguments")
     })?;
     macro_transaction(context, "macro `.write.layout`")?
         .parts()
@@ -490,30 +490,30 @@ fn write_layout(
 fn write_anchor(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("macro `.write.anchor` received arguments"))?;
+        .map_err(|_| TaskHalt::new("macro `.write.anchor` received arguments"))?;
     macro_transaction(context, "macro `.write.anchor`")?
         .parts()
         .1
         .write_anchor()
-        .map_err(TaskError::new)?;
+        .map_err(TaskHalt::new)?;
     Ok(RequestResult::ReturnUnit)
 }
 
 fn write_layout_exit(
     arguments: Vec<Value>,
     context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskError> {
+) -> Result<RequestResult, TaskHalt> {
     let []: [Value; 0] = arguments
         .try_into()
-        .map_err(|_| TaskError::new("internal macro write-layout close received arguments"))?;
+        .map_err(|_| TaskHalt::new("internal macro write-layout close received arguments"))?;
     macro_transaction(context, "internal macro write-layout close")?
         .parts()
         .1
         .exit_output_layout()
-        .map_err(TaskError::new)?;
+        .map_err(TaskHalt::new)?;
     Ok(RequestResult::ReturnUnit)
 }
 
@@ -528,22 +528,22 @@ fn hidden_effect(tag: [&str; 5]) -> Value {
 fn macro_transaction<'context, 'request>(
     context: &'context mut RequestContext<'request, MacroEffects>,
     request: &str,
-) -> Result<crate::reflection::TransactionContext<'context, MacroEffects>, TaskError> {
+) -> Result<crate::reflection::TransactionContext<'context, MacroEffects>, TaskHalt> {
     context
         .transaction()
-        .ok_or_else(|| TaskError::new(format!("{request} escaped its isolated transaction")))
+        .ok_or_else(|| TaskHalt::new(format!("{request} escaped its isolated transaction")))
 }
 
 fn text_value(
     context: &RequestContext<'_, MacroEffects>,
     value: Value,
     request: &str,
-) -> Result<String, TaskError> {
+) -> Result<String, TaskHalt> {
     let CoreValue::Binary(bytes) = eval::eval_value(context.eval_context(), value.as_core())
-        .map_err(|error| TaskError::new(error.to_string()))?
+        .map_err(|error| TaskHalt::new(error.to_string()))?
     else {
-        return Err(TaskError::new(format!("{request} requires text")));
+        return Err(TaskHalt::new(format!("{request} requires text")));
     };
     String::from_utf8(bytes.to_vec())
-        .map_err(|_| TaskError::new(format!("{request} requires UTF-8 text")))
+        .map_err(|_| TaskHalt::new(format!("{request} requires UTF-8 text")))
 }
