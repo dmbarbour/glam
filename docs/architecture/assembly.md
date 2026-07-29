@@ -105,6 +105,11 @@ Main supplies presentation-only `viewer.header` as the complete textual prefix
 (location, severity wording, punctuation, trailing space, and any terminal
 escapes) separately from authoritative `msg.severity`.
 
+Loader failures use a dedicated
+`import:{request:{file:Text}, origin?:OpaqueOrigin, source?:Source}` context
+frame. The `g` tag remains reserved for locations and definitions supplied by
+the built-in `.g` front end.
+
 The logger is wrapped with the native equivalent of `(=>> .r ())`; returning a
 non-unit result is an error. A logger failure produces a synthetic diagnostic,
 then remaining messages use the default path.

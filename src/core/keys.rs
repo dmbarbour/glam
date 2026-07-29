@@ -57,6 +57,7 @@ protocol_key!(OP, "op");
 protocol_key!(ARGS, "args");
 protocol_key!(PATH, "path");
 protocol_key!(G, "g");
+protocol_key!(IMPORT, "import");
 protocol_key!(DEFINITION, "definition");
 protocol_key!(KEY, "key");
 protocol_key!(OK, "ok");

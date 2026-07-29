@@ -1575,6 +1575,9 @@ impl DefaultLogger {
         if tag == &Value::atom_from_text("g") {
             return self.g_context_summary(payload);
         }
+        if tag == &Value::atom_from_text("import") {
+            return self.import_context_summary(payload);
+        }
         if tag == &Value::atom_from_text("asm") {
             return self.asm_context_summary(payload);
         }
@@ -1612,6 +1615,14 @@ impl DefaultLogger {
             (None, Some(line)) => format!("g: line {line}"),
             (None, None) => "g".to_owned(),
         }
+    }
+
+    fn import_context_summary(&self, payload: &Value) -> String {
+        self.context_field_text(payload, "request.file")
+            .map_or_else(
+                || "import".to_owned(),
+                |request| format!("import: request `{request}`"),
+            )
     }
 
     fn asm_context_summary(&self, payload: &Value) -> String {
@@ -1921,6 +1932,13 @@ mod tests {
                                 ]),
                             )]),
                             Value::record([(
+                                "import",
+                                Value::record([(
+                                    "request",
+                                    Value::record([("file", Value::text("child.g"))]),
+                                )]),
+                            )]),
+                            Value::record([(
                                 "asm",
                                 Value::record([("result", Value::text("asm.result"))]),
                             )]),
@@ -1960,7 +1978,7 @@ mod tests {
         assert_eq!(
             rendered,
             Bytes::from_static(
-                b"error: broken\n    more detail\n  context:\n    eval: binary extraction\n    g: definition `result` on line 7\n    asm: result `asm.result`\n    eval: path lookup `conf.env`\n    conf: entry `log`\n    task: join task 12\n"
+                b"error: broken\n    more detail\n  context:\n    eval: binary extraction\n    g: definition `result` on line 7\n    import: request `child.g`\n    asm: result `asm.result`\n    eval: path lookup `conf.env`\n    conf: entry `log`\n    task: join task 12\n"
             )
         );
     }

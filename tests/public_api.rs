@@ -62,7 +62,7 @@ fn import_context<'a>(assembler: &Assembler, contexts: &'a [Value], request: &st
         .iter()
         .find(|context| {
             assembler
-                .get(context, "g.request.file")
+                .get(context, "import.request.file")
                 .ok()
                 .and_then(|request| request.as_binary().map(ToOwned::to_owned))
                 .as_deref()
@@ -1009,7 +1009,7 @@ fn imported_source_diagnostics_include_the_import_chain() {
     let primary_contexts = diagnostic_contexts(&assembler, error.diagnostic());
     let primary_import = import_context(&assembler, &primary_contexts, "child.g");
     let child_origin = assembler
-        .get(primary_import, "g.origin")
+        .get(primary_import, "import.origin")
         .expect("failed child compilation should retain its opaque origin");
     assert_eq!(child_origin.kind(), ValueKind::Opaque);
     let inspect_origin = assembler
@@ -1087,7 +1087,7 @@ fn missing_module_and_binary_imports_retain_requesting_origin() {
         let context = import_context(&assembler, &contexts, request);
         assert_eq!(
             assembler
-                .get(context, "g.origin")
+                .get(context, "import.origin")
                 .expect("missing import should retain the requesting origin")
                 .kind(),
             ValueKind::Opaque

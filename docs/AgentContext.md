@@ -162,6 +162,11 @@ notes instead of appending history; put subsystem details in
   calls. The `module_origin` special reference exposes the same opaque token
   for manual static frames; it is not a namespace and has no prior form. Other
   front ends may use different static span data.
+- Import discovery and loading failures use
+  `{import:{request:{file:Text}, origin?:OpaqueOrigin, source?:Source}}`.
+  Reserve `g` frames for `.g` front-end syntax and source-definition context;
+  importing is assembler infrastructure even when a `.g` declaration requests
+  it.
 - Opaque origins are never found or projected by recursively searching a
   diagnostic. Glam reflection tasks may iterate `msg.context` and explicitly
   call the capability at `.env '.glam.origin.inspect`. Rust clients use
@@ -192,11 +197,11 @@ notes instead of appending history; put subsystem details in
   formatter prepends that text without interpreting it. The nested message is a
   view, not another bus event. Nested indentation is absolute for that frame,
   while terminal, color, language, and width metadata retain the same snapshot.
-  The conservative terminal view otherwise recognizes `eval`, `g`, `asm`,
-  `conf`, and `task` frames, names an otherwise singleton tag, and falls back
-  to the value kind. Local-file origin is already represented by the leading
-  location and is not repeated as an origin block. Rust formatting is only an
-  emergency fallback. See
+  The conservative terminal view otherwise recognizes `eval`, `g`, `import`,
+  `asm`, `conf`, and `task` frames, names an otherwise singleton tag, and
+  falls back to the value kind. Local-file origin is already represented by
+  the leading location and is not repeated as an origin block. Rust formatting
+  is only an emergency fallback. See
   [`architecture/assembly.md`](architecture/assembly.md) for the logger
   lifecycle.
 

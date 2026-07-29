@@ -299,7 +299,8 @@ pub(crate) fn import_failure(
             source.identity().value().as_core().clone(),
         );
     }
-    let context = Value::Dict(Dict::new_sync().insert((*keys::G).clone(), Value::Dict(details)));
+    let context =
+        Value::Dict(Dict::new_sync().insert((*keys::IMPORT).clone(), Value::Dict(details)));
     Arc::new(EvaluationFailure::message(message).with_context(context))
 }
 
@@ -369,7 +370,7 @@ mod tests {
                 let Value::Dict(context) = context else {
                     return None;
                 };
-                let Value::Dict(context) = context.get(&*keys::G)? else {
+                let Value::Dict(context) = context.get(&*keys::IMPORT)? else {
                     return None;
                 };
                 let Value::Dict(request) = context.get(&*keys::REQUEST)? else {
