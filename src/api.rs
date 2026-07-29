@@ -1392,7 +1392,7 @@ pub enum ReasoningStatus {
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReasoningFailure {
     task: EvaluationTaskId,
-    message: Arc<str>,
+    diagnostic: Diagnostic,
     session: EvaluationSessionId,
 }
 
@@ -1401,7 +1401,7 @@ impl fmt::Debug for ReasoningFailure {
         formatter
             .debug_struct("ReasoningFailure")
             .field("task_id", &self.task_id())
-            .field("message", &self.message)
+            .field("diagnostic", &self.diagnostic)
             .finish_non_exhaustive()
     }
 }
@@ -1412,7 +1412,13 @@ impl ReasoningFailure {
     }
 
     pub fn message(&self) -> &str {
-        &self.message
+        self.diagnostic.message()
+    }
+
+    /// Returns the structured terminal failure retained by the reasoning
+    /// session.
+    pub fn diagnostic(&self) -> &Diagnostic {
+        &self.diagnostic
     }
 }
 
@@ -1424,7 +1430,7 @@ pub struct ReasoningTask {
     waiting_on_session: Option<u64>,
     wait_id: Option<u64>,
     observed_generation: Option<u64>,
-    blocked_error: Option<Arc<str>>,
+    blocked_diagnostic: Option<Diagnostic>,
 }
 
 impl ReasoningTask {
@@ -1456,7 +1462,14 @@ impl ReasoningTask {
     /// The evaluation error retained while this task waits for an observed
     /// state change that can retry its current reasoning checkpoint.
     pub fn blocked_error(&self) -> Option<&str> {
-        self.blocked_error.as_deref()
+        self.blocked_diagnostic.as_ref().map(Diagnostic::message)
+    }
+
+    /// The structured evaluation failure retained while this task waits for
+    /// an observed state change that can retry its current reasoning
+    /// checkpoint.
+    pub fn blocked_diagnostic(&self) -> Option<&Diagnostic> {
+        self.blocked_diagnostic.as_ref()
     }
 }
 
@@ -1954,7 +1967,7 @@ impl Assembler {
                 .iter()
                 .map(|(task, error)| ReasoningFailure {
                     task: *task,
-                    message: error.legacy_message(),
+                    diagnostic: reasoning_diagnostic(error),
                     session,
                 })
                 .collect(),
@@ -1974,7 +1987,7 @@ impl Assembler {
                     waiting_on_session: task.dependency_session.map(|session| session.get()),
                     wait_id: task.wait,
                     observed_generation: task.observed_generation,
-                    blocked_error: task.error,
+                    blocked_diagnostic: task.error.as_deref().map(reasoning_diagnostic),
                 })
                 .collect(),
         }
@@ -2498,6 +2511,13 @@ impl Assembler {
             assembler.record_diagnostic(diagnostic);
         })
     }
+}
+
+fn reasoning_diagnostic(failure: &EvaluationFailure) -> Diagnostic {
+    Diagnostic::from_emission(
+        Severity::Error,
+        Value::from_core(eval::failure_diagnostic_value(failure)),
+    )
 }
 
 pub struct ModuleBuilder<'a> {

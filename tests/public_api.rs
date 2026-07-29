@@ -201,7 +201,7 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
         .module(["blocked_error"])
         .script(
             "g",
-            "language g0\nrefl.error = .heap.get ['observed] >>= (\\_ -> 1 2)\nvalue = \"value\"\n",
+            "language g0\nimport 'std\nrefl.error = .heap.get ['observed] >>= (\\_ -> anno context:\"retry context\" (anno 'error {msg:{text:\"structured retryable failure\"}, detail:7}))\nvalue = \"value\"\n",
         )
         .build()
         .expect("reflection fixture should compile");
@@ -212,13 +212,36 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
         b"value".as_slice()
     );
 
-    let report = assembler.drain_reasoning();
-    assert_eq!(report.status(), ReasoningStatus::Deadlocked);
-    assert!(report.failures().is_empty());
-    assert!(report.unfinished().iter().any(|task| {
-        task.blocked_error()
-            .is_some_and(|error| error.contains("requires a function value"))
-    }));
+    let first = assembler.drain_reasoning();
+    assert_eq!(first.status(), ReasoningStatus::Deadlocked);
+    assert!(first.failures().is_empty());
+    let blocked = first
+        .unfinished()
+        .iter()
+        .find(|task| task.blocked_diagnostic().is_some())
+        .expect("retryable failure should remain structured in the report");
+    let diagnostic = blocked
+        .blocked_diagnostic()
+        .expect("blocked task should expose its diagnostic");
+    assert_eq!(
+        blocked.blocked_error(),
+        Some("structured retryable failure")
+    );
+    assert_eq!(
+        assembler
+            .get(diagnostic.emission(), "detail")
+            .expect("the retryable diagnostic should retain ad hoc fields")
+            .as_i64(),
+        Some(7)
+    );
+
+    let second = assembler.drain_reasoning();
+    let repeated = second
+        .unfinished()
+        .iter()
+        .find_map(|task| task.blocked_diagnostic())
+        .expect("repeated reporting should retain the failure");
+    assert_eq!(repeated, diagnostic);
 }
 
 fn volume_write_annotation(assembler: &Assembler, effects: Value, value: Value) -> Value {

@@ -260,7 +260,7 @@ impl PendingTaskPolicy {
 pub(crate) struct EvaluationTaskBlock {
     pub(crate) lazy: Option<EvaluationWaitToken>,
     pub(crate) observed_generation: Option<u64>,
-    pub(crate) error: Option<Arc<str>>,
+    pub(crate) error: Option<Arc<EvaluationFailure>>,
 }
 
 pub(crate) enum EvaluationMachinePoll {
@@ -360,7 +360,7 @@ pub(crate) struct EvaluationUnfinishedTask {
     pub(crate) dependency_session: Option<EvaluationSessionId>,
     pub(crate) wait: Option<u64>,
     pub(crate) observed_generation: Option<u64>,
-    pub(crate) error: Option<Arc<str>>,
+    pub(crate) error: Option<Arc<EvaluationFailure>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2621,7 +2621,9 @@ mod tests {
             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 lazy: None,
                 observed_generation: Some(7),
-                error: Some(Arc::from("retryable evaluation error")),
+                error: Some(Arc::new(EvaluationFailure::message(
+                    "retryable evaluation error",
+                ))),
             })
         }
     }
@@ -3747,8 +3749,11 @@ mod tests {
         );
         assert_eq!(report.unfinished[0].observed_generation, Some(7));
         assert_eq!(
-            report.unfinished[0].error.as_deref(),
-            Some("retryable evaluation error")
+            report.unfinished[0]
+                .error
+                .as_ref()
+                .map(|error| error.legacy_message()),
+            Some(Arc::from("retryable evaluation error"))
         );
     }
 

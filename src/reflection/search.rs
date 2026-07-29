@@ -190,7 +190,7 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
             EffectTaskPoll::Blocked(blocked) => IsolatedSearchPoll::Blocked(IsolatedSearchBlock {
                 dependency: blocked.lazy,
                 observed_generation: blocked.observed_generation,
-                error: blocked.error,
+                error: blocked.error.map(|error| error.legacy_message()),
             }),
             EffectTaskPoll::Complete(_) => {
                 let results = self

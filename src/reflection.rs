@@ -378,10 +378,16 @@ impl TaskError {
     fn into_failure(self) -> Arc<EvaluationFailure> {
         match self.0 {
             TaskErrorKind::Failure(failure) => failure,
-            TaskErrorKind::Blocked(wait) => Arc::new(EvaluationFailure::message(format!(
-                "reflection task blocked on wait token {}",
-                wait.get()
-            ))),
+            TaskErrorKind::Blocked(_) => {
+                panic!("a blocked task error cannot become a permanent evaluation failure")
+            }
+        }
+    }
+
+    fn permanent_failure(&self) -> Option<&Arc<EvaluationFailure>> {
+        match &self.0 {
+            TaskErrorKind::Failure(failure) => Some(failure),
+            TaskErrorKind::Blocked(_) => None,
         }
     }
 
@@ -2512,7 +2518,10 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
     }
 
     fn evaluation_error(error: TaskError, retry: RetryWake<S>) -> Self {
-        debug_assert!(error.blocked_on().is_none());
+        assert!(
+            error.blocked_on().is_none(),
+            "a blocked task error belongs in the wait dependency field"
+        );
         Self {
             reason: BlockReason::EvaluationError(error),
             retry: Some(retry),
@@ -2530,9 +2539,14 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
         self.retry.as_ref().map(|retry| retry.observed_generation)
     }
 
-    fn error(&self) -> Option<Arc<str>> {
+    fn error(&self) -> Option<Arc<EvaluationFailure>> {
         match &self.reason {
-            BlockReason::EvaluationError(error) => Some(Arc::from(error.to_string())),
+            BlockReason::EvaluationError(error) => Some(
+                error
+                    .permanent_failure()
+                    .expect("evaluation-error blocks retain permanent failures")
+                    .clone(),
+            ),
             BlockReason::WaitingOn(_) | BlockReason::Exhausted => None,
         }
     }
@@ -2558,7 +2572,7 @@ enum WakeAction<S: TaskSpecialization> {
 struct TaskBlock {
     lazy: Option<EvaluationWaitToken>,
     observed_generation: Option<u64>,
-    error: Option<Arc<str>>,
+    error: Option<Arc<EvaluationFailure>>,
 }
 
 enum EffectTaskPoll {
@@ -5211,8 +5225,8 @@ mod tests {
             assert!(
                 blocked
                     .error
-                    .as_deref()
-                    .is_some_and(|error| error.contains(expected)),
+                    .as_ref()
+                    .is_some_and(|error| error.to_string().contains(expected)),
                 "unexpected retained error for {source}: {:?}",
                 blocked.error
             );
@@ -5234,8 +5248,8 @@ mod tests {
         assert!(
             blocked
                 .error
-                .as_deref()
-                .is_some_and(|error| error.contains("requires a function value")),
+                .as_ref()
+                .is_some_and(|error| error.to_string().contains("requires a function value")),
             "unexpected retained error: {:?}",
             blocked.error
         );
