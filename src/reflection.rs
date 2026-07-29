@@ -38,7 +38,7 @@ use crate::core::{
     Atom, Builtin, Dict, EvaluationFailure, EvaluationHalt, FunctionValue, Key, LazyValue, List,
     NetValue, PromisedValue, Value, keys,
 };
-use crate::core_net::{CoreDataKey, CoreSpecialization};
+use crate::core_net::{CoreDataKey, CoreSpecialization, CoreWaitToken};
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{
@@ -384,6 +384,13 @@ impl TaskHalt {
         }
     }
 
+    pub(crate) fn into_evaluation_halt(self) -> EvaluationHalt {
+        match self.0 {
+            TaskHaltKind::Failure(failure) => EvaluationHalt::failure(failure),
+            TaskHaltKind::Blocked(wait) => EvaluationHalt::blocked(CoreWaitToken(wait)),
+        }
+    }
+
     fn permanent_failure(&self) -> Option<&Arc<EvaluationFailure>> {
         match &self.0 {
             TaskHaltKind::Failure(failure) => Some(failure),
@@ -544,9 +551,12 @@ fn run_composed_effect_task<S: TaskSpecialization>(
     match (parent, child_error) {
         (Ok(outcome), None) => Ok(outcome),
         (Ok(_), Some(error)) | (Err(error), None) => Err(error),
-        (Err(parent), Some(children)) => Err(TaskHalt::new(format!(
-            "{parent}; child task failure: {children}"
-        ))),
+        (Err(parent), Some(children)) => {
+            let child_failure = children
+                .permanent_failure()
+                .expect("composed child reporting produces a permanent failure");
+            Err(parent.with_core_context(eval::failure_diagnostic_value(child_failure)))
+        }
     }
 }
 
@@ -2226,22 +2236,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .get(&*keys::EFF)
             .cloned()
             .ok_or_else(|| TaskHalt::new("reflection effect has no `eff` member"))?;
-        let function = evaluate(&self.eval_context, function).map_err(|error| {
-            TaskHalt::new(format!(
-                "reflection effect function could not be evaluated: {error}"
-            ))
-        })?;
-        let request =
-            apply(&self.eval_context, function, vec![self.api.clone()]).map_err(|error| {
-                TaskHalt::new(format!(
-                    "reflection effect function could not be applied: {error}"
-                ))
-            })?;
-        let request = evaluate(&self.eval_context, request).map_err(|error| {
-            TaskHalt::new(format!(
-                "reflection effect application could not be evaluated: {error}"
-            ))
-        })?;
+        let function = evaluate(&self.eval_context, function)
+            .map_err(|halt| halt.with_core_context(effect_dispatch_context("function")))?;
+        let request = apply(&self.eval_context, function, vec![self.api.clone()])
+            .map_err(|halt| halt.with_core_context(effect_dispatch_context("application")))?;
+        let request = evaluate(&self.eval_context, request)
+            .map_err(|halt| halt.with_core_context(effect_dispatch_context("request")))?;
         parse_request(
             &self.eval_context,
             request,
@@ -2250,6 +2250,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
             self.host.reasoning_session_id(),
         )
     }
+}
+
+fn effect_dispatch_context(stage: &str) -> Value {
+    let stage_key = Key::binary_from_text("stage");
+    let stage = Value::Atom(Atom::from_key(&Key::binary_from_text(stage)));
+    eval::evaluation_context_frame_with_args(
+        "effect_dispatch",
+        Dict::new_sync().insert(stage_key, stage),
+    )
 }
 
 struct AnnotationEffectTask<S: TaskSpecialization>(EffectTask<S>);
@@ -4030,31 +4039,31 @@ mod tests {
         (assembler, effect)
     }
 
-    fn task_error_contexts(error: &TaskHalt) -> Vec<Value> {
-        let diagnostic = eval::failure_diagnostic_value(error.clone().into_failure().as_ref());
+    fn task_halt_contexts(halt: &TaskHalt) -> Vec<Value> {
+        let diagnostic = eval::failure_diagnostic_value(halt.clone().into_failure().as_ref());
         let context = EvalContext::standalone();
         let Value::Dict(diagnostic) = eval::eval_value(&context, &diagnostic).unwrap() else {
-            panic!("task error diagnostic must be a dictionary")
+            panic!("task halt diagnostic must be a dictionary")
         };
         let message = eval::eval_value(
             &context,
             diagnostic
                 .get(&*keys::MSG)
-                .expect("task error diagnostic should define msg"),
+                .expect("task halt diagnostic should define msg"),
         )
         .unwrap();
         let Value::Dict(message) = message else {
-            panic!("task error msg must be a dictionary")
+            panic!("task halt msg must be a dictionary")
         };
         let contexts = eval::eval_value(
             &context,
             message
                 .get(&*keys::CONTEXT)
-                .expect("task error diagnostic should define msg.context"),
+                .expect("task halt diagnostic should define msg.context"),
         )
         .unwrap();
         let Value::List(contexts) = contexts else {
-            panic!("task error msg.context must be a list")
+            panic!("task halt msg.context must be a list")
         };
         eval::list_to_value_items(&context, &contexts).unwrap()
     }
@@ -4278,11 +4287,9 @@ mod tests {
                 IsolatedSearchPoll::Yielded => {}
                 IsolatedSearchPoll::Blocked(blocked) => {
                     assert!(!blocked.waiting_on_dependency());
-                    assert!(
-                        blocked
-                            .error()
-                            .is_some_and(|error| error.contains("requires a function value"))
-                    );
+                    assert!(blocked.error().is_some_and(|error| {
+                        error.to_string().contains("requires a function value")
+                    }));
                     break blocked
                         .observed_generation()
                         .expect("observed error must retain its generation");
@@ -5187,6 +5194,34 @@ mod tests {
     }
 
     #[test]
+    fn effect_dispatch_preserves_structured_failure_and_adds_stage_context() {
+        let (assembler, effect) = compile_effect(
+            "{eff:anno context:\"effect function\" (anno 'error {msg:{text:\"dispatch failed\"}, detail:7})}",
+        );
+
+        let halt = run_standard_test(&effect).expect_err("the effect function should fail");
+        assert_eq!(halt.diagnostic().message(), "dispatch failed");
+        assert_eq!(
+            assembler
+                .get(halt.diagnostic().emission(), "detail")
+                .expect("dispatch should preserve ad hoc diagnostic fields")
+                .as_i64(),
+            Some(7)
+        );
+
+        let contexts = task_halt_contexts(&halt);
+        assert_eq!(
+            contexts.first(),
+            Some(&effect_dispatch_context("function")),
+            "the dispatch boundary should prepend its stage"
+        );
+        assert!(
+            contexts.contains(&Value::binary_from_text("effect function")),
+            "the original effect-function context should survive"
+        );
+    }
+
+    #[test]
     fn failed_and_cancelled_joins_retain_retryable_errors() {
         let host = Arc::new(TestHost::default());
         for (source, expected) in [
@@ -5328,7 +5363,7 @@ mod tests {
             panic!("child capability error should be observable through task_error")
         };
         let error = PublicValue::from_core(error);
-        let error = assembler
+        let message = assembler
             .to_binary(
                 &assembler
                     .get(&error, "msg.text")
@@ -5336,9 +5371,20 @@ mod tests {
             )
             .expect("task error diagnostic text should be binary");
         assert!(
-            String::from_utf8_lossy(&error).contains("could not be applied"),
+            String::from_utf8_lossy(&message).contains("requires a function value"),
             "unexpected capability error: {}",
-            String::from_utf8_lossy(&error)
+            String::from_utf8_lossy(&message)
+        );
+        let contexts = assembler
+            .get(&error, "msg.context")
+            .expect("task error should retain dispatch context");
+        let Value::List(contexts) = contexts.as_core() else {
+            panic!("task error contexts should be a list")
+        };
+        assert!(
+            eval::list_to_value_items(&assembler.eval_context(), contexts)
+                .unwrap()
+                .contains(&effect_dispatch_context("application"))
         );
         assert!(host.stderr().is_empty());
     }
@@ -5577,7 +5623,7 @@ mod tests {
         let message_error =
             run_reflection_test(&message_effect, Arc::new(TestHost::default())).unwrap_err();
         assert_eq!(
-            task_error_contexts(&message_error),
+            task_halt_contexts(&message_error),
             [
                 eval::evaluation_context_frame("log_message"),
                 eval::evaluation_context_frame("net_computation"),
@@ -5590,7 +5636,7 @@ mod tests {
         let severity_error =
             run_reflection_test(&severity_effect, Arc::new(TestHost::default())).unwrap_err();
         assert_eq!(
-            task_error_contexts(&severity_error),
+            task_halt_contexts(&severity_error),
             [
                 eval::evaluation_context_frame("log_severity"),
                 eval::evaluation_context_frame("net_computation"),

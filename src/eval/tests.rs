@@ -595,6 +595,24 @@ fn deferred_list_effect_work_blocks_and_resumes() {
 }
 
 #[test]
+fn interaction_net_construction_dependency_does_not_poison_its_lazy_value() {
+    let session = test_context();
+    let owner = session.with_new_task().unwrap();
+    let observer = session.with_new_task().unwrap();
+    let promise = PromisedValue::fixpoint(&owner, "pending net effect").unwrap();
+    let lazy = LazyValue::from_net_construction(Value::Promised(promise));
+    let value = Value::Lazy(lazy.clone());
+
+    let blocked = eval_value(&observer, &value)
+        .expect_err("net construction should block on its unresolved effect");
+    assert!(blocked.blocked_on().is_some());
+    assert!(
+        lazy.cached().is_none(),
+        "a retryable construction dependency must not become a cached failure"
+    );
+}
+
+#[test]
 fn deferred_computation_caches_one_text_failure() {
     let context = test_context();
     let attempts = Arc::new(AtomicUsize::new(0));

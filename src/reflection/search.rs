@@ -121,7 +121,7 @@ impl<S: TaskSpecialization> IsolatedSearchBranch<S> {
 pub struct IsolatedSearchBlock {
     dependency: Option<super::EvaluationWaitToken>,
     observed_generation: Option<u64>,
-    error: Option<Arc<str>>,
+    error: Option<TaskHalt>,
 }
 
 impl IsolatedSearchBlock {
@@ -137,7 +137,7 @@ impl IsolatedSearchBlock {
         self.observed_generation
     }
 
-    pub fn error(&self) -> Option<&Arc<str>> {
+    pub fn error(&self) -> Option<&TaskHalt> {
         self.error.as_ref()
     }
 }
@@ -190,7 +190,7 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
             EffectTaskPoll::Blocked(blocked) => IsolatedSearchPoll::Blocked(IsolatedSearchBlock {
                 dependency: blocked.lazy,
                 observed_generation: blocked.observed_generation,
-                error: blocked.error.map(|error| error.legacy_message()),
+                error: blocked.error.map(TaskHalt::failure),
             }),
             EffectTaskPoll::Complete(_) => {
                 let results = self

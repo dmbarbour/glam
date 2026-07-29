@@ -5848,6 +5848,59 @@ fn interaction_net_construction_backtracks_and_requires_one_result() {
 }
 
 #[test]
+fn interaction_net_construction_preserves_structured_effect_failures() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "failed = interaction_net {eff:anno context:\"net effect\" (anno 'error {msg:{text:\"construction failed\"}, detail:7})}\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    let halt = fully_evaluated_error(value_at_atom_path(&definitions, &["failed"]).unwrap());
+    let failure = halt.into_permanent_failure();
+    let Value::Dict(emission) = failure
+        .emission_value()
+        .expect("construction failure should retain its emission")
+    else {
+        panic!("construction failure emission should be a dictionary")
+    };
+    assert_eq!(
+        emission.get(&Key::atom_from_text("detail")),
+        Some(&Value::Number(n(7)))
+    );
+
+    let dispatch = crate::eval::evaluation_context_frame_with_args(
+        "effect_dispatch",
+        Dict::new_sync().insert(
+            Key::binary_from_text("stage"),
+            Value::Atom(Atom::from_key(&Key::binary_from_text("function"))),
+        ),
+    );
+    let net = crate::eval::evaluation_context_frame("net_construction");
+    let net_index = failure
+        .contexts()
+        .iter()
+        .position(|context| context == &net)
+        .expect("net construction should add an outer context");
+    let dispatch_index = failure
+        .contexts()
+        .iter()
+        .position(|context| context == &dispatch)
+        .expect("effect dispatch should retain its stage");
+    let source_index = failure
+        .contexts()
+        .iter()
+        .position(|context| context == &Value::binary_from_text("net effect"))
+        .expect("the original effect context should survive");
+    assert!(net_index < dispatch_index && dispatch_index < source_index);
+}
+
+#[test]
 fn interaction_net_data_does_not_force_its_payload_during_construction() {
     let context = CompileContext::default();
     let lowered = lower_parsed_source(

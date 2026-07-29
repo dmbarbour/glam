@@ -165,15 +165,6 @@ impl EvaluationFailure {
             EvaluationFailureKind::Emission(_) => None,
         }
     }
-
-    pub(crate) fn legacy_message(&self) -> Arc<str> {
-        match &self.kind {
-            EvaluationFailureKind::Emission(emission) => {
-                immediate_failure_text(emission).unwrap_or_else(|| Arc::from(self.to_string()))
-            }
-            EvaluationFailureKind::DependencyCycle(_) => Arc::from(self.to_string()),
-        }
-    }
 }
 
 impl fmt::Display for EvaluationFailure {

@@ -231,11 +231,7 @@ impl NetConstructionMachine {
             Arc::new(ConstructionHost::new()),
             context,
         )
-        .map_err(|error| {
-            EvaluationHalt::new(format!(
-                "interaction-net construction could not start: {error}"
-            ))
-        })?;
+        .map_err(TaskHalt::into_evaluation_halt)?;
         Ok(Self { brand, search })
     }
 
@@ -253,13 +249,15 @@ impl NetConstructionMachine {
                 if let Some(dependency) = blocked.dependency().cloned() {
                     return Err(EvaluationHalt::blocked(CoreWaitToken(dependency)));
                 }
-                let detail = blocked.error().map_or_else(
-                    || "without a dependency or mutable host observation".to_owned(),
-                    |error| format!("after evaluation failed: {error}"),
-                );
-                Err(EvaluationHalt::new(format!(
-                    "interaction-net construction became blocked {detail}"
-                )))
+                match blocked.error() {
+                    Some(halt) => Err(halt
+                        .clone()
+                        .with_context(PublicValue::from_core(net_construction_context()))
+                        .into_evaluation_halt()),
+                    None => Err(EvaluationHalt::new(
+                        "interaction-net construction became blocked without a dependency or mutable host observation",
+                    )),
+                }
             }
             IsolatedSearchPoll::Complete(branches) => {
                 let mut successes = branches.iter().filter(|branch| branch.value().is_some());
@@ -283,14 +281,18 @@ impl NetConstructionMachine {
                 )?;
                 replay(branch.journal(), exposed).map(Some)
             }
-            IsolatedSearchPoll::Failed(error) => Err(EvaluationHalt::new(format!(
-                "interaction-net construction failed: {error}"
-            ))),
+            IsolatedSearchPoll::Failed(halt) => Err(halt
+                .with_context(PublicValue::from_core(net_construction_context()))
+                .into_evaluation_halt()),
             IsolatedSearchPoll::Cancelled => Err(EvaluationHalt::new(
                 "interaction-net construction was cancelled",
             )),
         }
     }
+}
+
+fn net_construction_context() -> Value {
+    crate::eval::evaluation_context_frame("net_construction")
 }
 
 fn construct_bind(

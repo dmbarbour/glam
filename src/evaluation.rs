@@ -3752,8 +3752,9 @@ mod tests {
             report.unfinished[0]
                 .error
                 .as_ref()
-                .map(|error| error.legacy_message()),
-            Some(Arc::from("retryable evaluation error"))
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("retryable evaluation error")
         );
     }
 
