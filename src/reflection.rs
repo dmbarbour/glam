@@ -4798,6 +4798,22 @@ mod tests {
     }
 
     #[test]
+    fn task_join_remains_available_after_the_child_is_terminal() {
+        let (assembler, effect) = compile_effect(
+            ".task.new (.r \"result\") >>= (\\task -> .task.join task >>= (\\_ -> .task.join task))",
+        );
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host);
+        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+            panic!("a late join should retain the completed child result")
+        };
+        assert_eq!(
+            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            b"result".as_slice()
+        );
+    }
+
+    #[test]
     fn task_status_reports_launched_and_terminal_states() {
         let host = Arc::new(TestHost::default());
         for source in [
@@ -4817,7 +4833,7 @@ mod tests {
     }
 
     #[test]
-    fn task_status_rejects_a_handle_from_another_session() {
+    fn task_observers_reject_a_handle_from_another_session() {
         let (assembler, spawn) = compile_effect(".task.new (.r ())");
         let host = Arc::new(TestHost::default());
         let (first_context, first_task) = schedule_composed_test_task(&spawn, host.clone());
@@ -4827,16 +4843,22 @@ mod tests {
             panic!("first session should return a task handle")
         };
 
-        let (_, inspect) = compile_effect("\\task -> .task.status task");
-        let inspect = assembler
-            .apply(&inspect, [PublicValue::from_core(handle)])
-            .expect("foreign task inspection should apply");
-        let (second_context, second_task) = schedule_composed_test_task(&inspect, host);
-        assert!(matches!(
-            pump_composed_test_task(&second_context, &second_task),
-            EvaluationTaskPoll::Failed(error)
-                if error.to_string() == "task handle does not belong to this evaluation session"
-        ));
+        for operation in ["status", "value", "error", "join"] {
+            let (_, inspect) = compile_effect(&format!("\\task -> .task.{operation} task"));
+            let inspect = assembler
+                .apply(&inspect, [PublicValue::from_core(handle.clone())])
+                .expect("foreign task inspection should apply");
+            let (second_context, second_task) = schedule_composed_test_task(&inspect, host.clone());
+            assert!(
+                matches!(
+                    pump_composed_test_task(&second_context, &second_task),
+                    EvaluationTaskPoll::Failed(error)
+                        if error.to_string()
+                            == "task handle does not belong to this evaluation session"
+                ),
+                "task.{operation} should reject a foreign handle"
+            );
+        }
     }
 
     #[test]
@@ -4872,13 +4894,17 @@ mod tests {
         );
 
         let (_, committed) = compile_effect(
-            ".cut (.task.new (.r ()) >>= (\\task -> (.task.cancel task) =>> .r task)) >>= (\\task -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
+            ".cut (.task.new (.log 'error { msg:{ text:\"cancelled task ran\" } }) >>= (\\task -> (.task.cancel task) =>> .r task)) >>= (\\task -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
         );
         let (context, task) = schedule_composed_test_task(&committed, host.clone());
         assert!(matches!(
             pump_composed_test_task(&context, &task),
             EvaluationTaskPoll::Complete(_)
         ));
+        assert!(
+            host.diagnostics().is_empty(),
+            "serial commit should cancel a same-transaction task before polling it"
+        );
 
         let (_, spawn_foreign) = compile_effect(".task.new (.r ())");
         let (source_context, source_task) =
@@ -4925,9 +4951,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_transaction_discards_its_reflection_task_launch() {
+    fn failed_transaction_discards_its_reflection_task_launch_and_cancellation() {
         let (_, effect) = compile_effect(
-            ".cut (.alt (.task.new (.log 'error { msg:{ text:\"discarded\" } }) >>= (\\task -> .fail)) (.r \"kept\"))",
+            ".cut (.alt (.task.new (.log 'error { msg:{ text:\"discarded\" } }) >>= (\\task -> (.task.cancel task) =>> .fail)) (.r \"kept\"))",
         );
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&effect, host.clone());

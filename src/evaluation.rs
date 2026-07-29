@@ -249,6 +249,21 @@ pub(crate) struct EvaluationTaskFailure {
     pub(crate) error: Arc<EvaluationFailure>,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EvaluationTaskRegistryCounts {
+    pub(crate) reflection_active: usize,
+    pub(crate) reflection_terminal: usize,
+    pub(crate) reflection_by_id: usize,
+    pub(crate) deferred_active: usize,
+    pub(crate) deferred_terminal: usize,
+    pub(crate) deferred_by_wait: usize,
+    pub(crate) deferred_by_task: usize,
+    pub(crate) promises_active: usize,
+    pub(crate) promises_terminal: usize,
+    pub(crate) owned_promise_waits: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvaluationUnfinishedState {
     Dormant,
@@ -1173,22 +1188,67 @@ impl EvalContext {
 
     #[cfg(test)]
     pub(crate) fn reflection_task_count(&self) -> usize {
-        self.session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned")
-            .reflection
-            .len()
+        let counts = self.task_registry_counts();
+        counts.reflection_active + counts.reflection_terminal
     }
 
     #[cfg(test)]
     pub(crate) fn deferred_task_count(&self) -> usize {
-        self.session
+        let counts = self.task_registry_counts();
+        counts.deferred_active + counts.deferred_terminal
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task_registry_counts(&self) -> EvaluationTaskRegistryCounts {
+        let tasks = self
+            .session
             .tasks
             .lock()
-            .expect("evaluation task registry was poisoned")
+            .expect("evaluation task registry was poisoned");
+        let reflection_terminal = tasks
+            .reflection
+            .values()
+            .filter(|record| {
+                matches!(
+                    record.state,
+                    EvaluationTaskState::Complete(_)
+                        | EvaluationTaskState::Failed(_)
+                        | EvaluationTaskState::Cancelled
+                )
+            })
+            .count();
+        let deferred_terminal = tasks
             .deferred
-            .len()
+            .values()
+            .filter(|record| {
+                matches!(
+                    record.state,
+                    DeferredTaskState::Complete(_) | DeferredTaskState::Failed(_)
+                )
+            })
+            .count();
+        let promises_terminal = tasks
+            .promises
+            .values()
+            .filter(|promise| {
+                promise
+                    .result
+                    .upgrade()
+                    .is_none_or(|result| result.get().is_some())
+            })
+            .count();
+        EvaluationTaskRegistryCounts {
+            reflection_active: tasks.reflection.len() - reflection_terminal,
+            reflection_terminal,
+            reflection_by_id: tasks.reflection_by_id.len(),
+            deferred_active: tasks.deferred.len() - deferred_terminal,
+            deferred_terminal,
+            deferred_by_wait: tasks.deferred_by_wait.len(),
+            deferred_by_task: tasks.deferred_by_task.len(),
+            promises_active: tasks.promises.len() - promises_terminal,
+            promises_terminal,
+            owned_promise_waits: tasks.owned_promises.values().map(Vec::len).sum(),
+        }
     }
 
     #[cfg(test)]
@@ -2340,6 +2400,115 @@ mod tests {
             "a completed deferred task must drop its machine"
         );
         assert_deferred_machine_retired(&context, &lazy);
+        assert_eq!(
+            context.task_registry_counts(),
+            EvaluationTaskRegistryCounts {
+                reflection_active: 0,
+                reflection_terminal: 0,
+                reflection_by_id: 0,
+                deferred_active: 0,
+                deferred_terminal: 1,
+                deferred_by_wait: 1,
+                deferred_by_task: 1,
+                promises_active: 0,
+                promises_terminal: 0,
+                owned_promise_waits: 0,
+            },
+            "the terminal machine is gone, but Phase 2 has not yet retired its record and indexes"
+        );
+    }
+
+    #[test]
+    fn terminal_reflection_records_preserve_late_polling() {
+        let context = EvalContext::standalone();
+        let complete = context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("completed task should schedule");
+        let failed = context
+            .schedule_task(|_| Ok(Box::new(Fail)))
+            .expect("failed task should schedule");
+        let cancelled = context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("cancelled task should schedule");
+        assert_eq!(
+            context.cancel_reflection_task_id(cancelled.id()),
+            EvaluationTaskCancellation::Requested
+        );
+
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("terminal tasks should leave no unfinished work");
+        };
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].task, failed.id());
+
+        for _ in 0..2 {
+            assert!(matches!(
+                context.poll_reflection_task(&complete),
+                EvaluationTaskPoll::Complete(_)
+            ));
+            assert!(matches!(
+                context.poll_reflection_task(&failed),
+                EvaluationTaskPoll::Failed(error)
+                    if error.to_string() == "reasoning failed"
+            ));
+            assert_eq!(
+                context.poll_reflection_task(&cancelled),
+                EvaluationTaskPoll::Cancelled
+            );
+        }
+
+        assert_eq!(
+            context.task_registry_counts(),
+            EvaluationTaskRegistryCounts {
+                reflection_active: 0,
+                reflection_terminal: 3,
+                reflection_by_id: 3,
+                deferred_active: 0,
+                deferred_terminal: 0,
+                deferred_by_wait: 0,
+                deferred_by_task: 0,
+                promises_active: 0,
+                promises_terminal: 0,
+                owned_promise_waits: 0,
+            },
+            "Phase 5 will preserve late polling while retiring these records"
+        );
+    }
+
+    #[test]
+    fn wait_tokens_currently_require_a_live_owner_even_after_completion() {
+        let completed_wait = {
+            let owner = EvalContext::standalone();
+            let task = owner
+                .schedule_task(|_| Ok(Box::new(Complete)))
+                .expect("completed task should schedule");
+            assert_eq!(
+                owner.pump_wait(task.wait(), 256),
+                EvaluationPumpOutcome::TargetReady
+            );
+            task.wait().clone()
+        };
+        let pending_wait = {
+            let owner = EvalContext::standalone();
+            owner
+                .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+                .expect("pending task should schedule")
+                .wait()
+                .clone()
+        };
+        let observer = EvalContext::standalone();
+
+        // Phase 1 deliberately changes only the completed case: a terminal
+        // wait cell will outlive its session, while a pending wait still
+        // reports that its producer session is gone.
+        for wait in [&completed_wait, &pending_wait] {
+            assert!(matches!(
+                observer.poll_wait(wait),
+                EvaluationTaskPoll::Failed(error)
+                    if error.to_string()
+                        == "reflection task's evaluation session no longer exists"
+            ));
+        }
     }
 
     #[test]
@@ -2623,15 +2792,18 @@ mod tests {
     #[test]
     fn run_until_quiescent_collects_failures_without_short_circuiting() {
         let context = EvalContext::standalone();
-        context.schedule_task(|_| Ok(Box::new(Fail))).unwrap();
+        let failed = context.schedule_task(|_| Ok(Box::new(Fail))).unwrap();
         context.schedule_task(|_| Ok(Box::new(Complete))).unwrap();
 
-        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-            panic!("terminal failures do not leave unfinished work");
-        };
-        assert_eq!(report.failures.len(), 1);
-        assert_eq!(report.failures[0].error.to_string(), "reasoning failed");
-        assert!(report.unfinished.is_empty());
+        for _ in 0..2 {
+            let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+                panic!("terminal failures do not leave unfinished work");
+            };
+            assert_eq!(report.failures.len(), 1);
+            assert_eq!(report.failures[0].task, failed.id());
+            assert_eq!(report.failures[0].error.to_string(), "reasoning failed");
+            assert!(report.unfinished.is_empty());
+        }
     }
 
     #[test]

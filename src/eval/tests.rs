@@ -507,9 +507,20 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
 
     let blocked = eval_value(&observer, &value).unwrap_err();
     assert!(blocked.blocked_on().is_some());
+    let counts = session.task_registry_counts();
+    assert_eq!(counts.promises_active, 1);
+    assert_eq!(counts.promises_terminal, 0);
+    assert_eq!(counts.owned_promise_waits, 1);
 
     fixpoint.set(n(42)).unwrap();
     assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
+    let counts = session.task_registry_counts();
+    assert_eq!(counts.promises_active, 0);
+    assert_eq!(counts.promises_terminal, 1);
+    assert_eq!(
+        counts.owned_promise_waits, 1,
+        "Phase 6 will retire the completed promise and its owner index"
+    );
 }
 
 #[test]
