@@ -139,6 +139,15 @@ impl EvaluationWaitToken {
             .expect("terminal publication must initialize the wait cell")
             .clone()
     }
+
+    pub(crate) fn publish_promise_assignment(&self, assignment: &Result<Value, Arc<str>>) {
+        let terminal = promise_assignment_terminal(assignment);
+        if let Some(owner) = self.owner() {
+            owner.complete_promise_wait(self, terminal);
+        } else {
+            self.publish_terminal(terminal);
+        }
+    }
 }
 
 impl EvaluationTaskTerminal {
@@ -630,6 +639,60 @@ fn retire_reflection_task(
     record
 }
 
+fn promise_assignment_terminal(assignment: &Result<Value, Arc<str>>) -> EvaluationTaskTerminal {
+    match assignment {
+        Ok(value) => EvaluationTaskTerminal::Complete(value.clone()),
+        Err(error) => EvaluationTaskTerminal::Failed(evaluation_failure(error.as_ref())),
+    }
+}
+
+fn promise_record_terminal(record: &PromiseRecord) -> Option<EvaluationTaskTerminal> {
+    let Some(result) = record.result.upgrade() else {
+        return Some(EvaluationTaskTerminal::Failed(evaluation_failure(
+            "promised value no longer exists",
+        )));
+    };
+    result.get().map(promise_assignment_terminal)
+}
+
+fn retire_promise_wait(
+    tasks: &mut EvaluationTasks,
+    wait: &EvaluationWaitToken,
+) -> Option<PromiseRecord> {
+    let record = tasks.promises.remove(wait)?;
+    let remove_owner = {
+        let waits = tasks
+            .owned_promises
+            .get_mut(&record.producer)
+            .expect("a registered task promise must belong to its producer");
+        let index = waits
+            .iter()
+            .position(|candidate| candidate == wait)
+            .expect("the promise owner index must contain its registered wait");
+        waits.swap_remove(index);
+        waits.is_empty()
+    };
+    if remove_owner {
+        tasks.owned_promises.remove(&record.producer);
+    }
+    Some(record)
+}
+
+fn prune_terminal_promise_waits(tasks: &mut EvaluationTasks) {
+    let terminal = tasks
+        .promises
+        .iter()
+        .filter_map(|(wait, record)| {
+            promise_record_terminal(record).map(|terminal| (wait.clone(), terminal))
+        })
+        .collect::<Vec<_>>();
+    for (wait, terminal) in terminal {
+        wait.publish_terminal(terminal);
+        let retired = retire_promise_wait(tasks, &wait);
+        debug_assert!(retired.is_some());
+    }
+}
+
 fn retire_deferred_task(
     tasks: &mut EvaluationTasks,
     deferred: DeferredValueId,
@@ -707,6 +770,16 @@ impl EvaluationSession {
         if let Some(executor) = self.executor.upgrade() {
             executor.notify_session_ready(self.id.get());
         }
+    }
+
+    fn complete_promise_wait(&self, wait: &EvaluationWaitToken, terminal: EvaluationTaskTerminal) {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        wait.publish_terminal(terminal);
+        retire_promise_wait(&mut tasks, wait);
+        self.task_changed.notify_all();
     }
 
     pub(crate) fn submit_spark(self: &Arc<Self>, value: Value) {
@@ -795,12 +868,15 @@ impl EvalContext {
     pub(crate) fn notify_promise_changed(&self) {
         // Taking the scheduler lock pairs this notification with condvar waits
         // and prevents a completion between their final check and sleep from
-        // being lost. Public resolvers are never stored inside task records.
-        let tasks = self
+        // being lost. Public resolvers are never stored inside task records;
+        // pruning here only collects task-owned waits whose terminal state is
+        // already visible.
+        let mut tasks = self
             .session
             .tasks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prune_terminal_promise_waits(&mut tasks);
         self.session.task_changed.notify_all();
         drop(tasks);
     }
@@ -992,13 +1068,24 @@ impl EvalContext {
             .expect("evaluation task registry was poisoned");
         let waits = tasks.owned_promises.remove(&owner).unwrap_or_default();
         for wait in waits {
-            let Some(promise) = tasks.promises.get(&wait) else {
+            let Some(promise) = tasks.promises.remove(&wait) else {
                 continue;
             };
-            if let Some(result) = promise.result.upgrade() {
+            let terminal = if let Some(result) = promise.result.upgrade() {
                 let _ = result.set(Err(reason.clone()));
-            }
+                promise_assignment_terminal(
+                    result
+                        .get()
+                        .expect("promise assignment must be set after producer failure"),
+                )
+            } else {
+                EvaluationTaskTerminal::Failed(evaluation_failure(
+                    "promised value no longer exists",
+                ))
+            };
+            wait.publish_terminal(terminal);
         }
+        self.session.task_changed.notify_all();
     }
 
     /// Registers an executable task whose concrete specialization remains

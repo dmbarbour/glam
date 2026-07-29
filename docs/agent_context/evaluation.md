@@ -71,8 +71,9 @@ control-flow overview.
   reflection records and their task-ID indexes are retired immediately.
   Unacknowledged reflection failures remain only in the persistent reporting
   ledger; `.task.ack_error` removes that entry without changing the handle's
-  terminal observation. Promise records retain their separate later cleanup
-  phase.
+  terminal observation. Task-owned promise waits follow the same ownership
+  boundary: terminal assignment is copied into the shared wait cell before the
+  promise record and owner index are retired.
 - `Value::Function` is an independently observable curried stage. Partial
   application shares its staged runtime; saturation returns memoized work.
 - Lazy lists contain opaque `ListThunk` holes for either computed lazies or
@@ -89,7 +90,9 @@ control-flow overview.
   session may duplicate pure work against the shared result cell.
 - Task-owned reflection fixpoint promises retain their separate rule: direct
   observation by their owning reflection task is an error, while other tasks
-  wait for the owner's assignment.
+  wait for the owner's assignment. Assignment or explicit failure retires the
+  active promise wait immediately; owner termination fails and retires every
+  unresolved wait. Late observers use the wait cell rather than the registry.
 - Suspended fixpoint production is ordinary scheduler state, not a Rust stack
   guard; evaluation unwinds the stack before scheduling resumes it.
 - `PromisedValue` is a distinct raw one-write assignment cell, not a

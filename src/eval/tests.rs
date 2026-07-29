@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bytes::Bytes;
 
 use crate::core::{Dict, EvaluatedValue, FixpointComputation, Key, LazyValue, Value, keys};
+use crate::evaluation::EvaluationTaskPoll;
 use crate::number::Number;
 
 use super::*;
@@ -496,6 +497,11 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
     let owner = session.with_new_task().unwrap();
     let observer = session.with_new_task().unwrap();
     let fixpoint = PromisedValue::fixpoint(&owner, "test fixpoint").unwrap();
+    let wait = fixpoint
+        .task()
+        .expect("task-owned fixpoint should expose its wait")
+        .wait()
+        .clone();
     let value = Value::Promised(fixpoint.clone());
 
     let recursive = eval_value(&owner, &value).unwrap_err();
@@ -514,13 +520,15 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
 
     fixpoint.set(n(42)).unwrap();
     assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
+    assert_eq!(
+        session.poll_wait(&wait),
+        EvaluationTaskPoll::Complete(n(42)),
+        "the retired promise wait must preserve late terminal observation"
+    );
     let counts = session.task_registry_counts();
     assert_eq!(counts.promises_active, 0);
-    assert_eq!(counts.promises_terminal, 1);
-    assert_eq!(
-        counts.owned_promise_waits, 1,
-        "Phase 6 will retire the completed promise and its owner index"
-    );
+    assert_eq!(counts.promises_terminal, 0);
+    assert_eq!(counts.owned_promise_waits, 0);
 }
 
 #[test]
@@ -529,6 +537,11 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
     let owner = session.with_new_task().unwrap();
     let observer = session.with_new_task().unwrap();
     let fixpoint = PromisedValue::fixpoint(&owner, "test fixpoint").unwrap();
+    let wait = fixpoint
+        .task()
+        .expect("task-owned fixpoint should expose its wait")
+        .wait()
+        .clone();
     let value = Value::Promised(fixpoint);
 
     assert!(
@@ -542,6 +555,99 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
         eval_value(&observer, &value).unwrap_err().to_string(),
         "producer failed deliberately"
     );
+    assert!(matches!(
+        session.poll_wait(&wait),
+        EvaluationTaskPoll::Failed(error)
+            if error.to_string() == "producer failed deliberately"
+    ));
+    let counts = session.task_registry_counts();
+    assert_eq!(counts.promises_active, 0);
+    assert_eq!(counts.promises_terminal, 0);
+    assert_eq!(counts.owned_promise_waits, 0);
+}
+
+#[test]
+fn explicitly_failed_task_promise_retires_its_wait_record() {
+    let session = test_context();
+    let owner = session.with_new_task().unwrap();
+    let fixpoint = PromisedValue::fixpoint(&owner, "test fixpoint").unwrap();
+    let wait = fixpoint
+        .task()
+        .expect("task-owned fixpoint should expose its wait")
+        .wait()
+        .clone();
+
+    fixpoint.fail("fixpoint failed deliberately").unwrap();
+
+    assert!(matches!(
+        session.poll_wait(&wait),
+        EvaluationTaskPoll::Failed(error)
+            if error.to_string() == "fixpoint failed deliberately"
+    ));
+    let counts = session.task_registry_counts();
+    assert_eq!(counts.promises_active, 0);
+    assert_eq!(counts.promises_terminal, 0);
+    assert_eq!(counts.owned_promise_waits, 0);
+}
+
+#[test]
+fn producer_failure_retires_every_owned_promise_wait() {
+    let session = test_context();
+    let owner = session.with_new_task().unwrap();
+    let promises = [
+        PromisedValue::fixpoint(&owner, "first fixpoint").unwrap(),
+        PromisedValue::fixpoint(&owner, "second fixpoint").unwrap(),
+    ];
+    let waits = promises.each_ref().map(|promise| {
+        promise
+            .task()
+            .expect("task-owned fixpoint should expose its wait")
+            .wait()
+            .clone()
+    });
+
+    owner.fail_unresolved_promises("producer failed all fixpoints");
+
+    for wait in waits {
+        assert!(matches!(
+            session.poll_wait(&wait),
+            EvaluationTaskPoll::Failed(error)
+                if error.to_string() == "producer failed all fixpoints"
+        ));
+    }
+    let counts = session.task_registry_counts();
+    assert_eq!(counts.promises_active, 0);
+    assert_eq!(counts.promises_terminal, 0);
+    assert_eq!(counts.owned_promise_waits, 0);
+}
+
+#[test]
+fn promise_change_notification_retires_an_abandoned_task_promise() {
+    let session = test_context();
+    let owner = session.with_new_task().unwrap();
+    let wait = {
+        let promise = PromisedValue::fixpoint(&owner, "abandoned fixpoint").unwrap();
+        promise
+            .task()
+            .expect("task-owned fixpoint should expose its wait")
+            .wait()
+            .clone()
+    };
+    let counts = session.task_registry_counts();
+    assert_eq!(counts.promises_terminal, 1);
+    assert_eq!(counts.owned_promise_waits, 1);
+
+    session.notify_promise_changed();
+
+    assert!(matches!(
+        session.poll_wait(&wait),
+        EvaluationTaskPoll::Failed(error)
+            if error.to_string() == "promised value no longer exists"
+    ));
+    let counts = session.task_registry_counts();
+    assert_eq!(counts.promises_active, 0);
+    assert_eq!(counts.promises_terminal, 0);
+    assert_eq!(counts.owned_promise_waits, 0);
 }
 
 #[test]

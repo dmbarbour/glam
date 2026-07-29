@@ -114,6 +114,14 @@ follow lazy or promised payloads through the common deferred dependency graph.
 Promise-only and mixed promise/lazy cycles remain retryable scheduler waits;
 only pure lazy cycles permanently poison computed results.
 
+A task-owned promise has an active wait record only while its assignment is
+unresolved. Successful assignment, explicit failure, and producer termination
+publish the authoritative `OnceLock` result into the shared wait cell before
+removing both the promise record and its owner index. Outstanding wait handles
+therefore retain late terminal observation without keeping session scheduler
+state. Host-owned `PromiseResolver` values have no task-owned wait record and
+retain their existing session-local wake behavior.
+
 Reflection annotations are also lazy producers. Constructing a gate demands
 neither its effect nor its target. Demand on the gate registers or resumes the
 effect task; after checking that it returned unit, the same demand continues

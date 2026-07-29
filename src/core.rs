@@ -382,21 +382,36 @@ impl PromisedValue {
     }
 
     pub(crate) fn set(&self, value: Value) -> Result<(), Value> {
-        self.assignment.set(Ok(value)).map_err(|assignment| {
-            assignment.expect("setting a promised value always supplies a successful value")
-        })
+        if let Err(assignment) = self.assignment.set(Ok(value)) {
+            return Err(
+                assignment.expect("setting a promised value always supplies a successful value")
+            );
+        }
+        self.publish_task_assignment();
+        Ok(())
     }
 
     pub(crate) fn fail(&self, error: impl Into<Arc<str>>) -> Result<(), Arc<str>> {
-        self.assignment
-            .set(Err(error.into()))
-            .map_err(|assignment| {
-                assignment.expect_err("failing a promised value always supplies an error")
-            })
+        if let Err(assignment) = self.assignment.set(Err(error.into())) {
+            return Err(assignment.expect_err("failing a promised value always supplies an error"));
+        }
+        self.publish_task_assignment();
+        Ok(())
     }
 
     pub(crate) fn assignment(&self) -> Option<Result<Value, Arc<str>>> {
         self.assignment.get().cloned()
+    }
+
+    fn publish_task_assignment(&self) {
+        let Some(task) = &self.task else {
+            return;
+        };
+        task.wait().publish_promise_assignment(
+            self.assignment
+                .get()
+                .expect("a completed task promise must retain its assignment"),
+        );
     }
 }
 
