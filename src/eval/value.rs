@@ -190,22 +190,34 @@ struct LazyTaskMachine {
 }
 
 impl LazyTaskMachine {
-    fn poll_source(&mut self) -> Result<Value, EvalError> {
-        match &self.work {
-            LazyTaskWork::Produce => produce_lazy_source(&self.context, &self.lazy),
-            LazyTaskWork::Follow(target) => eval_value(&self.context, target),
-            LazyTaskWork::NetConstruction(_) => {
-                unreachable!("net construction has a dedicated poll path")
-            }
-        }
-    }
-
     fn complete(&self, value: Value) -> EvaluationMachinePoll {
         let value = EvaluatedValue::try_from(value)
             .expect("WHNF demand must eliminate the outer deferred variant");
         match self.lazy.cache(Ok(value)) {
             Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
             Err(error) => EvaluationMachinePoll::Failed(error),
+        }
+    }
+
+    fn cached_poll(&self) -> EvaluationMachinePoll {
+        match self
+            .lazy
+            .cached()
+            .expect("a released lazy source must have a terminal cache")
+        {
+            Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
+            Err(error) => EvaluationMachinePoll::Failed(error),
+        }
+    }
+
+    fn finish_poll(&mut self, result: Result<Value, EvalError>) -> EvaluationMachinePoll {
+        match result {
+            Ok(value) if is_deferred(&value) => {
+                self.work = LazyTaskWork::Follow(value);
+                EvaluationMachinePoll::Yielded
+            }
+            Ok(value) => self.complete(value),
+            Err(error) => self.fail(error),
         }
     }
 }
@@ -219,16 +231,23 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             };
         }
 
-        if matches!(self.work, LazyTaskWork::Produce)
-            && let LazySource::NetConstruction(effect) = self.lazy.source()
-        {
-            let machine =
-                match NetConstructionMachine::new(self.context.clone(), effect.as_ref().clone()) {
+        if matches!(self.work, LazyTaskWork::Produce) {
+            let Some(source) = self.lazy.source_snapshot() else {
+                return self.cached_poll();
+            };
+            if let LazySource::NetConstruction(effect) = source {
+                let machine = match NetConstructionMachine::new(
+                    self.context.clone(),
+                    effect.as_ref().clone(),
+                ) {
                     Ok(machine) => machine,
                     Err(error) => return self.fail(error),
                 };
-            self.work = LazyTaskWork::NetConstruction(Box::new(machine));
-            return EvaluationMachinePoll::Yielded;
+                self.work = LazyTaskWork::NetConstruction(Box::new(machine));
+                return EvaluationMachinePoll::Yielded;
+            }
+            let result = produce_lazy_source(&self.context, &self.lazy, &source);
+            return self.finish_poll(result);
         }
 
         if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
@@ -239,14 +258,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             };
         }
 
-        match self.poll_source() {
-            Ok(value) if is_deferred(&value) => {
-                self.work = LazyTaskWork::Follow(value);
-                EvaluationMachinePoll::Yielded
-            }
-            Ok(value) => self.complete(value),
-            Err(error) => self.fail(error),
-        }
+        let LazyTaskWork::Follow(target) = &self.work else {
+            unreachable!("non-producing lazy work must follow a value or construct a net")
+        };
+        self.finish_poll(eval_value(&self.context, target))
     }
 }
 
@@ -495,8 +510,12 @@ fn deferred_task_failure(
         .unwrap_or_else(|| EvalError::failure(failure))
 }
 
-fn produce_lazy_source(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvalError> {
-    match lazy.source() {
+fn produce_lazy_source(
+    context: &EvalContext,
+    lazy: &LazyValue,
+    source: &LazySource,
+) -> Result<Value, EvalError> {
+    match source {
         LazySource::Error => Err(EvalError::new(
             "initialized lazy errors must be returned from their result cache",
         )),

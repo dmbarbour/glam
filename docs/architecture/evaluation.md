@@ -19,6 +19,13 @@ Lazy values retain computation and a stable identity, not a captured evaluator
 session. The observing `EvalContext` supplies host and scheduling behavior when
 the value is forced.
 
+All clones of a lazy value share one source/result cell. Workers clone a source
+snapshot without holding its mutex during evaluation. Terminal cache
+publication precedes removal of the shared source, so concurrent snapshots may
+finish while later observers take the cached path. Terminal deferred-task
+records also discard their task machines; blocked tasks retain both source and
+machine. Terminal record pruning remains separate scheduler work.
+
 When a lazy or assigned-promise task blocks on another deferred producer, the
 session records one strict dependency edge. The graph has at most one outgoing
 edge per unresolved producer, so an edge insertion can find a cycle with a

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 
@@ -27,6 +28,50 @@ fn cached_value(lazy: &LazyValue) -> Value {
         .expect("lazy value should be cached")
         .expect("lazy value should succeed")
         .into_value()
+}
+
+struct DropSignal(Arc<AtomicBool>);
+
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[test]
+fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
+    let context = test_context();
+    let success_dropped = Arc::new(AtomicBool::new(false));
+    let success_signal = DropSignal(success_dropped.clone());
+    let success = LazyValue::deferred("successful source release", move |_| {
+        let _keep_signal_captured = &success_signal;
+        Ok((*keys::UNIT_VALUE).clone())
+    });
+
+    assert_eq!(
+        eval_lazy(&context, &success).expect("lazy source should succeed"),
+        (*keys::UNIT_VALUE).clone()
+    );
+    assert!(success.source_snapshot().is_none());
+    assert!(
+        success_dropped.load(Ordering::Acquire),
+        "successful production should release its source captures"
+    );
+
+    let failure_dropped = Arc::new(AtomicBool::new(false));
+    let failure_signal = DropSignal(failure_dropped.clone());
+    let failure = LazyValue::deferred("failed source release", move |_| {
+        let _keep_signal_captured = &failure_signal;
+        Err("expected lazy failure".to_owned())
+    });
+
+    let error = eval_lazy(&context, &failure).expect_err("lazy source should fail");
+    assert_eq!(error.to_string(), "expected lazy failure");
+    assert!(failure.source_snapshot().is_none());
+    assert!(
+        failure_dropped.load(Ordering::Acquire),
+        "failed production should release its source captures"
+    );
 }
 
 #[test]

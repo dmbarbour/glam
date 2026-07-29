@@ -2,7 +2,7 @@ use std::any::Any;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
 use internment::Intern;
@@ -235,11 +235,13 @@ pub(crate) struct LazyCycleMember {
 }
 
 #[derive(Clone)]
-pub struct LazyValue {
+pub struct LazyValue(Arc<LazyCell>);
+
+struct LazyCell {
     id: LazyId,
     label: Arc<str>,
-    source: LazySource,
-    result: Arc<OnceLock<LazyResult>>,
+    source: Mutex<Option<LazySource>>,
+    result: OnceLock<LazyResult>,
 }
 
 #[derive(Clone)]
@@ -259,12 +261,12 @@ static NEXT_DEFERRED_VALUE_ID: AtomicU64 = AtomicU64::new(1);
 
 impl LazyValue {
     fn with_source(label: impl Into<Arc<str>>, source: LazySource) -> Self {
-        Self {
+        Self(Arc::new(LazyCell {
             id: allocate_lazy_id(),
             label: label.into(),
-            source,
-            result: Arc::new(OnceLock::new()),
-        }
+            source: Mutex::new(Some(source)),
+            result: OnceLock::new(),
+        }))
     }
 
     pub(crate) fn computed_fixpoint(
@@ -283,35 +285,62 @@ impl LazyValue {
 
     pub fn error(message: impl Into<Arc<str>>) -> Self {
         let value = Self::with_source("error", LazySource::Error);
-        value
-            .result
-            .set(Err(Arc::new(EvaluationFailure::message(message.into()))))
-            .expect("new lazy error must be uninitialized");
+        let result = value.cache(Err(Arc::new(EvaluationFailure::message(message.into()))));
+        debug_assert!(result.is_err(), "new lazy errors must cache a failure");
         value
     }
 
     pub(crate) fn id(&self) -> LazyId {
-        self.id
+        self.0.id
     }
 
     pub(crate) fn label(&self) -> &Arc<str> {
-        &self.label
+        &self.0.label
     }
 
-    pub(crate) fn source(&self) -> &LazySource {
-        &self.source
+    /// Clones the producer while this lazy remains unresolved.
+    ///
+    /// Terminal results are published before the shared source is removed.
+    /// A worker which wins this snapshot may therefore finish concurrent work,
+    /// while later observers take the lock-free cached-result path.
+    pub(crate) fn source_snapshot(&self) -> Option<LazySource> {
+        if self.0.result.get().is_some() {
+            return None;
+        }
+        let source = self.0.source.lock().expect("lazy source cell was poisoned");
+        if self.0.result.get().is_some() {
+            return None;
+        }
+        Some(
+            source
+                .as_ref()
+                .expect("an unresolved lazy value must retain its source")
+                .clone(),
+        )
     }
 
     pub(crate) fn cached(&self) -> Option<LazyResult> {
-        self.result.get().cloned()
+        self.0.result.get().cloned()
     }
 
     pub(crate) fn cache(&self, result: LazyResult) -> LazyResult {
-        let _ = self.result.set(result);
-        self.result
+        let _ = self.0.result.set(result);
+        let result = self
+            .0
+            .result
             .get()
             .expect("lazy cache should contain a value after set")
-            .clone()
+            .clone();
+
+        // Publish the terminal result before removing its producer. Workers
+        // which already cloned the source may finish harmlessly; a subsequent
+        // cache attempt observes this same canonical result.
+        let source = {
+            let mut source = self.0.source.lock().expect("lazy source cell was poisoned");
+            source.take()
+        };
+        drop(source);
+        result
     }
 }
 
@@ -388,7 +417,7 @@ fn allocate_deferred_value_id() -> NonZeroU64 {
 
 impl PartialEq for LazyValue {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.id() == other.id()
     }
 }
 
@@ -397,8 +426,8 @@ impl Eq for LazyValue {}
 impl fmt::Debug for LazyValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LazyValue")
-            .field("id", &self.id)
-            .field("label", &self.label)
+            .field("id", &self.id())
+            .field("label", self.label())
             .finish_non_exhaustive()
     }
 }
@@ -1122,6 +1151,47 @@ impl Value {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use std::sync::atomic::AtomicBool;
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn terminal_lazy_cache_releases_its_shared_source_after_active_snapshots() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let signal = DropSignal(dropped.clone());
+        let lazy = LazyValue::deferred("source release", move |_| {
+            let _keep_signal_captured = &signal;
+            Ok((*keys::UNIT_VALUE).clone())
+        });
+        let observer = lazy.clone();
+        let active_snapshot = lazy
+            .source_snapshot()
+            .expect("an unresolved lazy should expose a source snapshot");
+
+        let result = EvaluatedValue::try_from((*keys::UNIT_VALUE).clone())
+            .expect("unit is already evaluated");
+        assert!(observer.cache(Ok(result)).is_ok());
+        assert!(
+            lazy.source_snapshot().is_none(),
+            "all clones should observe the released shared source"
+        );
+        assert!(
+            !dropped.load(Ordering::Acquire),
+            "an active worker snapshot should keep its producer alive"
+        );
+
+        drop(active_snapshot);
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "the producer should drop after its final active snapshot"
+        );
+    }
 
     #[test]
     fn boxed_reflection_gate_does_not_enlarge_lazy_source() {

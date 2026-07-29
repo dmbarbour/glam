@@ -56,6 +56,14 @@ control-flow overview.
   type boundary, while a forwarded failure keeps one structured `Arc` through
   cycle members and upstream dependents. Raw `PromisedValue` assignments are a
   separate representation and may still contain deferred values.
+- `LazyValue` clones share one cell. A terminal success or permanent failure is
+  published before that cell releases its `LazySource`; active workers retain
+  only their source snapshots and may finish harmlessly against the canonical
+  cache. Blocking and retryable promise conditions retain the source.
+  Terminal deferred-task records drop their machines, including followed
+  values and net-construction state. The lightweight terminal records and
+  their results still live until the evaluation session is dropped; wait-token
+  terminal cells and registry pruning remain future work.
 - `Value::Function` is an independently observable curried stage. Partial
   application shares its staged runtime; saturation returns memoized work.
 - Lazy lists contain opaque `ListThunk` holes for either computed lazies or
