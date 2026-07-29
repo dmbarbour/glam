@@ -43,6 +43,25 @@ failure, and cancellation remain observable after the active record and
 task-ID index are retired. An unacknowledged failure also leaves one minimal
 session-ledger entry until `.task.ack_error` removes it.
 
+### Scheduler State Ownership
+
+The session owns only live scheduling state:
+
+| State | Owner |
+| --- | --- |
+| runnable, running, blocked, or unresolved producer | active session registry |
+| completed, failed, or cancelled outcome | shared `EvaluationWaitToken` cell |
+| unacknowledged reflection failure | persistent session reporting ledger |
+| transactional `.task.status`, `.task.value`, or `.task.error` view | reasoning-store query |
+
+Terminal publication happens while the active registry mutex is held and
+precedes record removal. `poll_wait` checks the shared cell before and after
+taking that mutex; after the second check, finding an active record means only
+that the producer is pending. It does not reinterpret terminal state from a
+retained record. A promise assignment observed in the narrow interval before
+its publisher acquires the mutex is canonicalized into the same wait cell and
+retired by the polling path.
+
 When a lazy or assigned-promise task blocks on another deferred producer, the
 session records one strict dependency edge. The graph has at most one outgoing
 edge per unresolved producer, so an edge insertion can find a cycle with a

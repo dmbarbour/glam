@@ -74,6 +74,12 @@ control-flow overview.
   terminal observation. Task-owned promise waits follow the same ownership
   boundary: terminal assignment is copied into the shared wait cell before the
   promise record and owner index are retired.
+- Treat any terminal state found in an active reflection or deferred registry
+  as an internal scheduler bug. `poll_wait` obtains terminal outcomes only from
+  the shared wait cell; after checking that cell under the registry mutex, any
+  registered producer is pending. Promise polling may discover a completed or
+  abandoned assignment during the publication race, but must publish it into
+  the same cell and retire both promise indexes before returning it.
 - `Value::Function` is an independently observable curried stage. Partial
   application shares its staged runtime; saturation returns memoized work.
 - Lazy lists contain opaque `ListThunk` holes for either computed lazies or

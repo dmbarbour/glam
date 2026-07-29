@@ -1365,7 +1365,9 @@ impl EvalContext {
             match record.state {
                 EvaluationTaskState::Complete(_)
                 | EvaluationTaskState::Failed(_)
-                | EvaluationTaskState::Cancelled => return EvaluationTaskCancellation::Late,
+                | EvaluationTaskState::Cancelled => {
+                    unreachable!("terminal reflection records must be retired")
+                }
                 EvaluationTaskState::Running => {
                     record.cancel_requested = true;
                     return EvaluationTaskCancellation::Requested;
@@ -1430,55 +1432,28 @@ impl EvalContext {
                 });
             }
         };
-        let tasks = owner
+        let mut tasks = owner
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
         if let Some(terminal) = wait.terminal_poll() {
             return terminal;
         }
-        let Some(record) = tasks.reflection.get(wait) else {
-            if let Some(deferred) = tasks.deferred_by_wait.get(wait) {
-                let record = tasks
-                    .deferred
-                    .get(deferred)
-                    .expect("deferred wait index must refer to a task record");
-                return match &record.state {
-                    DeferredTaskState::Complete(value) => {
-                        EvaluationTaskPoll::Complete(value.clone())
-                    }
-                    DeferredTaskState::Failed(error) => EvaluationTaskPoll::Failed(error.clone()),
-                    DeferredTaskState::Dormant
-                    | DeferredTaskState::Running
-                    | DeferredTaskState::Blocked(_) => EvaluationTaskPoll::Pending(wait.clone()),
-                };
-            }
-            let Some(promise) = tasks.promises.get(wait) else {
-                return EvaluationTaskPoll::Failed(evaluation_failure(
-                    "evaluation wait token is no longer registered",
-                ));
-            };
-            let Some(result) = promise.result.upgrade() else {
-                return EvaluationTaskPoll::Failed(evaluation_failure(
-                    "promised value no longer exists",
-                ));
-            };
-            return match result.get() {
-                Some(Ok(value)) => EvaluationTaskPoll::Complete(value.clone()),
-                Some(Err(error)) => EvaluationTaskPoll::Failed(evaluation_failure(error.as_ref())),
-                None => EvaluationTaskPoll::Pending(wait.clone()),
-            };
-        };
-        match &record.state {
-            EvaluationTaskState::Complete(value) => EvaluationTaskPoll::Complete(value.clone()),
-            EvaluationTaskState::Failed(error) => EvaluationTaskPoll::Failed(error.clone()),
-            EvaluationTaskState::Cancelled => EvaluationTaskPoll::Cancelled,
-            EvaluationTaskState::Dormant
-            | EvaluationTaskState::Reserved
-            | EvaluationTaskState::Queued
-            | EvaluationTaskState::Running
-            | EvaluationTaskState::Blocked(_) => EvaluationTaskPoll::Pending(wait.clone()),
+        if let Some(terminal) = tasks.promises.get(wait).and_then(promise_record_terminal) {
+            let terminal = wait.publish_terminal(terminal);
+            retire_promise_wait(&mut tasks, wait);
+            owner.task_changed.notify_all();
+            return terminal.to_poll();
         }
+        if tasks.reflection.contains_key(wait)
+            || tasks.deferred_by_wait.contains_key(wait)
+            || tasks.promises.contains_key(wait)
+        {
+            return EvaluationTaskPoll::Pending(wait.clone());
+        }
+        EvaluationTaskPoll::Failed(evaluation_failure(
+            "evaluation wait token is no longer registered",
+        ))
     }
 
     pub(crate) fn pump_wait(
@@ -1560,14 +1535,12 @@ impl EvalContext {
 
     #[cfg(test)]
     pub(crate) fn reflection_task_count(&self) -> usize {
-        let counts = self.task_registry_counts();
-        counts.reflection_active + counts.reflection_terminal
+        self.task_registry_counts().reflection_active
     }
 
     #[cfg(test)]
     pub(crate) fn deferred_task_count(&self) -> usize {
-        let counts = self.task_registry_counts();
-        counts.deferred_active + counts.deferred_terminal
+        self.task_registry_counts().deferred_active
     }
 
     #[cfg(test)]
@@ -1577,28 +1550,16 @@ impl EvalContext {
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
-        let reflection_terminal = tasks
-            .reflection
-            .values()
-            .filter(|record| {
-                matches!(
-                    record.state,
-                    EvaluationTaskState::Complete(_)
-                        | EvaluationTaskState::Failed(_)
-                        | EvaluationTaskState::Cancelled
-                )
-            })
-            .count();
-        let deferred_terminal = tasks
-            .deferred
-            .values()
-            .filter(|record| {
-                matches!(
-                    record.state,
-                    DeferredTaskState::Complete(_) | DeferredTaskState::Failed(_)
-                )
-            })
-            .count();
+        debug_assert!(tasks.reflection.values().all(|record| !matches!(
+            record.state,
+            EvaluationTaskState::Complete(_)
+                | EvaluationTaskState::Failed(_)
+                | EvaluationTaskState::Cancelled
+        )));
+        debug_assert!(tasks.deferred.values().all(|record| !matches!(
+            record.state,
+            DeferredTaskState::Complete(_) | DeferredTaskState::Failed(_)
+        )));
         let promises_terminal = tasks
             .promises
             .values()
@@ -1610,12 +1571,12 @@ impl EvalContext {
             })
             .count();
         EvaluationTaskRegistryCounts {
-            reflection_active: tasks.reflection.len() - reflection_terminal,
-            reflection_terminal,
+            reflection_active: tasks.reflection.len(),
+            reflection_terminal: 0,
             reflection_by_id: tasks.reflection_by_id.len(),
             unacknowledged_failures: tasks.unacknowledged_failures.size(),
-            deferred_active: tasks.deferred.len() - deferred_terminal,
-            deferred_terminal,
+            deferred_active: tasks.deferred.len(),
+            deferred_terminal: 0,
             deferred_by_wait: tasks.deferred_by_wait.len(),
             deferred_by_task: tasks.deferred_by_task.len(),
             promises_active: tasks.promises.len() - promises_terminal,
@@ -2254,27 +2215,11 @@ fn wait_is_terminal(tasks: &EvaluationTasks, wait: &EvaluationWaitToken) -> bool
     if wait.terminal_poll().is_some() {
         return true;
     }
-    if let Some(record) = tasks.reflection.get(wait) {
-        return matches!(
-            record.state,
-            EvaluationTaskState::Complete(_)
-                | EvaluationTaskState::Failed(_)
-                | EvaluationTaskState::Cancelled
-        );
-    }
-    if let Some(deferred) = tasks.deferred_by_wait.get(wait) {
-        return tasks.deferred.get(deferred).is_some_and(|record| {
-            matches!(
-                record.state,
-                DeferredTaskState::Complete(_) | DeferredTaskState::Failed(_)
-            )
-        });
-    }
     if let Some(promise) = tasks.promises.get(wait) {
-        return promise
-            .result
-            .upgrade()
-            .is_none_or(|result| result.get().is_some());
+        return promise_record_terminal(promise).is_some();
+    }
+    if tasks.reflection.contains_key(wait) || tasks.deferred_by_wait.contains_key(wait) {
+        return false;
     }
 
     // A dependency owned by another session cannot be inspected while this
@@ -3136,6 +3081,133 @@ mod tests {
                 if error.to_string()
                     == "reflection task's evaluation session no longer exists"
         ));
+    }
+
+    #[test]
+    fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
+        const ITERATIONS: usize = 64;
+
+        let context = EvalContext::standalone();
+        let mut completed = Vec::with_capacity(ITERATIONS);
+        let mut failed = Vec::with_capacity(ITERATIONS);
+        let mut cancelled = Vec::with_capacity(ITERATIONS);
+        let mut promises = Vec::with_capacity(ITERATIONS);
+
+        for index in 0..ITERATIONS {
+            let complete = context
+                .schedule_task(|_| Ok(Box::new(Complete)))
+                .expect("successful reflection task should schedule");
+            assert_eq!(
+                context.pump_wait(complete.wait(), 256),
+                EvaluationPumpOutcome::TargetReady
+            );
+            completed.push(complete);
+
+            let failure = context
+                .schedule_task(|_| Ok(Box::new(Fail)))
+                .expect("failing reflection task should schedule");
+            assert_eq!(
+                context.pump_wait(failure.wait(), 256),
+                EvaluationPumpOutcome::TargetReady
+            );
+            failed.push(failure);
+
+            let cancellation = context
+                .schedule_task(|_| Ok(Box::new(Complete)))
+                .expect("cancelled reflection task should schedule");
+            assert_eq!(
+                context.cancel_reflection_task(&cancellation),
+                EvaluationTaskCancellation::Requested
+            );
+            cancelled.push(cancellation);
+
+            let lazy = LazyValue::deferred(format!("successful lazy {index}"), |_| {
+                Ok((*crate::core::keys::UNIT_VALUE).clone())
+            });
+            assert_eq!(
+                crate::eval::eval_value(&context, &Value::Lazy(lazy))
+                    .expect("successful lazy should evaluate"),
+                (*crate::core::keys::UNIT_VALUE).clone()
+            );
+
+            let lazy = LazyValue::deferred(format!("failed lazy {index}"), |_| {
+                Err("long-lived lazy failure".to_owned())
+            });
+            assert!(
+                crate::eval::eval_value(&context, &Value::Lazy(lazy)).is_err(),
+                "failed lazy should terminate without retaining its task record"
+            );
+
+            let owner = context
+                .with_new_task()
+                .expect("promise owner should receive a task ID");
+            let promise = PromisedValue::fixpoint(&owner, format!("promise {index}"))
+                .expect("task-owned promise should register");
+            let wait = promise
+                .task()
+                .expect("task-owned promise should expose its wait")
+                .wait()
+                .clone();
+            if index % 2 == 0 {
+                promise
+                    .set((*crate::core::keys::UNIT_VALUE).clone())
+                    .expect("successful promise should complete once");
+            } else {
+                promise
+                    .fail("long-lived promise failure")
+                    .expect("failed promise should complete once");
+            }
+            promises.push(wait);
+        }
+
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("terminal stress fixtures should leave no unfinished work")
+        };
+        assert_eq!(report.failures.size(), ITERATIONS);
+        assert!(report.unfinished.is_empty());
+
+        let counts = context.task_registry_counts();
+        assert_eq!(counts.reflection_active, 0);
+        assert_eq!(counts.reflection_terminal, 0);
+        assert_eq!(counts.reflection_by_id, 0);
+        assert_eq!(counts.unacknowledged_failures, ITERATIONS);
+        assert_eq!(counts.deferred_active, 0);
+        assert_eq!(counts.deferred_terminal, 0);
+        assert_eq!(counts.deferred_by_wait, 0);
+        assert_eq!(counts.deferred_by_task, 0);
+        assert_eq!(counts.promises_active, 0);
+        assert_eq!(counts.promises_terminal, 0);
+        assert_eq!(counts.owned_promise_waits, 0);
+
+        assert!(matches!(
+            context.poll_reflection_task(&completed[0]),
+            EvaluationTaskPoll::Complete(_)
+        ));
+        assert!(matches!(
+            context.poll_reflection_task(&failed[0]),
+            EvaluationTaskPoll::Failed(_)
+        ));
+        assert_eq!(
+            context.poll_reflection_task(&cancelled[0]),
+            EvaluationTaskPoll::Cancelled
+        );
+        assert!(matches!(
+            context.poll_wait(&promises[0]),
+            EvaluationTaskPoll::Complete(_)
+        ));
+        assert!(matches!(
+            context.poll_wait(&promises[1]),
+            EvaluationTaskPoll::Failed(_)
+        ));
+
+        for task in &failed {
+            assert!(context.acknowledge_reflection_task_error(task));
+        }
+        assert_eq!(
+            context.task_registry_counts().unacknowledged_failures,
+            0,
+            "acknowledgement should release the only retained terminal session state"
+        );
     }
 
     #[test]
