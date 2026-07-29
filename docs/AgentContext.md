@@ -183,11 +183,18 @@ notes instead of appending history; put subsystem details in
   client-provided view; presentation-specific structural analysis must not
   become an evaluator builtin. Text continuation lines use a four-space child
   indent; a present `msg.context` renders under a two-space `context:` sibling
-  anchor in outermost-to-innermost order. The conservative terminal view
-  recognizes `eval`, `g`, and `asm` frames, names an otherwise singleton tag,
-  and falls back to the value kind. Local-file origin is already represented
-  by the leading location and is not repeated as an origin block. Rust
-  formatting is only an emergency fallback. See
+  anchor in outermost-to-innermost order. A frame with a defined `msg`
+  interface is recursively enriched and formatted as a diagnostic-style
+  dictionary or object; its standard severity becomes the header, otherwise
+  the header is `msg:`. Main records that presentation choice in
+  `viewer.header`; it is not another semantic severity. The nested message is
+  a view, not another bus event. Nested indentation is absolute for that frame,
+  while terminal, color, language, and width metadata retain the same snapshot.
+  The conservative terminal view otherwise recognizes `eval`, `g`, `asm`,
+  `conf`, and `task` frames, names an otherwise singleton tag, and falls back
+  to the value kind. Local-file origin is already represented by the leading
+  location and is not repeated as an origin block. Rust formatting is only an
+  emergency fallback. See
   [`architecture/assembly.md`](architecture/assembly.md) for the logger
   lifecycle.
 

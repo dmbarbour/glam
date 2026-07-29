@@ -1331,19 +1331,54 @@ impl DefaultLogger {
 
     fn emit(&self, diagnostic: &Diagnostic) {
         let terminal = TerminalContext::snapshot();
-        let updates = self.viewer_updates(diagnostic, &terminal);
-        let rendered = diagnostic
-            .enrich_with(updates)
-            .and_then(|message| self.evaluator.apply(&self.formatter, [message]))
-            .and_then(|rendered| self.evaluator.to_binary(&rendered))
+        let rendered = self
+            .format_diagnostic(diagnostic, &terminal)
             .unwrap_or_else(|_| {
-                Bytes::from(self.render(diagnostic, diagnostic.message(), terminal.color))
+                Bytes::from(self.render(diagnostic, diagnostic.message(), &terminal))
             });
 
         let _ = io::stderr().lock().write_all(&rendered);
     }
 
+    fn format_diagnostic(
+        &self,
+        diagnostic: &Diagnostic,
+        terminal: &TerminalContext,
+    ) -> Result<Bytes, Error> {
+        let message = diagnostic.enrich_with(self.viewer_updates(diagnostic, terminal))?;
+        let context_lines = self.context_lines(&message, terminal, 0);
+        let message =
+            Diagnostic::apply_updates(&message, Self::context_lines_update(context_lines))?;
+        self.format_message(message)
+    }
+
+    fn format_message(&self, message: Value) -> Result<Bytes, Error> {
+        self.evaluator
+            .apply(&self.formatter, [message])
+            .and_then(|rendered| self.evaluator.to_binary(&rendered))
+    }
+
     fn viewer_updates(&self, diagnostic: &Diagnostic, terminal: &TerminalContext) -> Value {
+        let header = match diagnostic.severity() {
+            Severity::Info => Value::atom_from_text("info"),
+            Severity::Warning => Value::atom_from_text("warn"),
+            Severity::Error => Value::atom_from_text("error"),
+        };
+        let source = diagnostic.source().and_then(|source| {
+            let path = Path::new(source);
+            path.is_absolute().then(|| self.display_source(path))
+        });
+        self.terminal_viewer_updates(terminal, 0, header, self.location(diagnostic), source)
+    }
+
+    fn terminal_viewer_updates(
+        &self,
+        terminal: &TerminalContext,
+        base_indent: usize,
+        header: Value,
+        location: String,
+        source: Option<String>,
+    ) -> Value {
         let mut viewer = vec![
             ("kind", Value::text("terminal")),
             (
@@ -1351,17 +1386,18 @@ impl DefaultLogger {
                 Value::integer(i64::try_from(terminal.columns).unwrap_or(i64::MAX)),
             ),
             ("color", Value::text(terminal.color.name())),
+            ("header", header),
             ("auto_indent", Value::integer(Self::AUTO_INDENT as i64)),
-            ("indent", Value::text(" ".repeat(Self::AUTO_INDENT))),
+            (
+                "indent",
+                Value::text(" ".repeat(base_indent + Self::AUTO_INDENT)),
+            ),
             (
                 "anchor_indent",
-                Value::text(" ".repeat(Self::ANCHOR_INDENT)),
+                Value::text(" ".repeat(base_indent + Self::ANCHOR_INDENT)),
             ),
-            ("location", Value::text(self.location(diagnostic))),
-            (
-                "context_lines",
-                Value::list(self.context_lines(diagnostic).into_iter().map(Value::text)),
-            ),
+            ("location", Value::text(location)),
+            ("context_lines", Value::list(std::iter::empty())),
         ];
         if let Some(term) = &terminal.term {
             viewer.push(("term", Value::text(term)));
@@ -1369,18 +1405,30 @@ impl DefaultLogger {
         if let Some(language) = &terminal.language {
             viewer.push(("lang", Value::text(language)));
         }
-        if let Some(source) = diagnostic.source().and_then(|source| {
-            let path = Path::new(source);
-            path.is_absolute().then(|| self.display_source(path))
-        }) {
+        if let Some(source) = source {
             viewer.push(("source", Value::record([("file", Value::text(source))])));
         }
         Value::record([("viewer", Value::record(viewer))])
     }
 
-    fn context_lines(&self, diagnostic: &Diagnostic) -> Vec<String> {
-        let Ok(contexts) = self.evaluator.get(diagnostic.emission(), "msg.context") else {
-            return Vec::new();
+    fn context_lines(
+        &self,
+        message: &Value,
+        terminal: &TerminalContext,
+        base_indent: usize,
+    ) -> Vec<String> {
+        let contexts = match self.evaluator.get_optional(message, "msg.context") {
+            Ok(Some(contexts)) => contexts,
+            Ok(None) => return Vec::new(),
+            Err(error) => {
+                return vec![
+                    format!("{}context:", " ".repeat(base_indent + Self::ANCHOR_INDENT)),
+                    format!(
+                        "{}msg: <context rendering failed: {error}>",
+                        " ".repeat(base_indent + Self::AUTO_INDENT)
+                    ),
+                ];
+            }
         };
         let reflection = self.evaluator.reflection();
         let contexts = reflection.evaluate(&contexts).unwrap_or(contexts);
@@ -1398,25 +1446,125 @@ impl DefaultLogger {
         }
 
         let mut lines = Vec::with_capacity(frames.len() + 1);
-        lines.push(format!("{}context:", " ".repeat(Self::ANCHOR_INDENT)));
+        lines.push(format!(
+            "{}context:",
+            " ".repeat(base_indent + Self::ANCHOR_INDENT)
+        ));
         lines.extend(frames.into_iter().map(|frame| {
-            format!(
-                "{}{}",
-                " ".repeat(Self::AUTO_INDENT),
-                self.summarize_context_frame(&frame)
-            )
+            self.render_context_frame(&frame, terminal, base_indent + Self::AUTO_INDENT)
         }));
         lines
     }
 
+    fn render_context_frame(
+        &self,
+        frame: &Value,
+        terminal: &TerminalContext,
+        frame_indent: usize,
+    ) -> String {
+        let frame = match self.evaluator.reflection().evaluate(frame) {
+            Ok(frame) => frame,
+            Err(error) => {
+                return format!(
+                    "{}msg: <context rendering failed: {error}>",
+                    " ".repeat(frame_indent)
+                );
+            }
+        };
+        let message_tag = Value::atom_from_text("msg");
+        let is_message = self
+            .evaluator
+            .reflection()
+            .dictionary_items(&frame)
+            .is_ok_and(|items| items.into_iter().any(|(tag, _)| tag == message_tag));
+        if is_message {
+            return self
+                .render_context_message(&frame, terminal, frame_indent)
+                .unwrap_or_else(|error| {
+                    format!(
+                        "{}msg: <context rendering failed: {error}>",
+                        " ".repeat(frame_indent)
+                    )
+                });
+        }
+        format!(
+            "{}{}",
+            " ".repeat(frame_indent),
+            self.summarize_context_frame(&frame)
+        )
+    }
+
+    fn render_context_message(
+        &self,
+        message: &Value,
+        terminal: &TerminalContext,
+        frame_indent: usize,
+    ) -> Result<String, Error> {
+        let default_header = Value::atom_from_text("msg");
+        let message = Diagnostic::apply_updates(
+            message,
+            self.terminal_viewer_updates(
+                terminal,
+                frame_indent,
+                default_header.clone(),
+                String::new(),
+                None,
+            ),
+        )?;
+        let header = self.context_message_header(&message);
+        let message = if header == default_header {
+            message
+        } else {
+            Diagnostic::apply_updates(&message, Self::viewer_header_update(header))?
+        };
+        let context_lines = self.context_lines(&message, terminal, frame_indent);
+        let message =
+            Diagnostic::apply_updates(&message, Self::context_lines_update(context_lines))?;
+        let rendered = self.format_message(message)?;
+        let rendered = String::from_utf8_lossy(&rendered);
+        let rendered = rendered.strip_suffix('\n').unwrap_or(&rendered);
+        Ok(format!("{}{rendered}", " ".repeat(frame_indent)))
+    }
+
+    fn context_message_header(&self, message: &Value) -> Value {
+        let Some(severity) = self
+            .evaluator
+            .get_optional(message, "msg.severity")
+            .ok()
+            .flatten()
+        else {
+            return Value::atom_from_text("msg");
+        };
+        let Ok(key) = self.evaluator.reflection().atom_key(&severity) else {
+            return Value::atom_from_text("msg");
+        };
+        match immediate_diagnostic_text(&key).as_deref() {
+            Some("info" | "warn" | "error") => severity,
+            _ => Value::atom_from_text("msg"),
+        }
+    }
+
+    fn viewer_header_update(header: Value) -> Value {
+        Value::record([("viewer", Value::record([("header", header)]))])
+    }
+
+    fn context_lines_update(lines: Vec<String>) -> Value {
+        Value::record([(
+            "viewer",
+            Value::record([(
+                "context_lines",
+                Value::list(lines.into_iter().map(Value::text)),
+            )]),
+        )])
+    }
+
     fn summarize_context_frame(&self, frame: &Value) -> String {
         let reflection = self.evaluator.reflection();
-        let frame = reflection.evaluate(frame).unwrap_or_else(|_| frame.clone());
-        let Ok(entries) = reflection.dictionary_items(&frame) else {
-            return diagnostic_value_kind(&frame).to_owned();
+        let Ok(entries) = reflection.dictionary_items(frame) else {
+            return diagnostic_value_kind(frame).to_owned();
         };
         let [(tag, payload)] = entries.as_slice() else {
-            return diagnostic_value_kind(&frame).to_owned();
+            return diagnostic_value_kind(frame).to_owned();
         };
 
         if tag == &Value::atom_from_text("eval") {
@@ -1435,7 +1583,7 @@ impl DefaultLogger {
             return self.task_context_summary(payload);
         }
         self.context_tag_text(tag)
-            .unwrap_or_else(|| diagnostic_value_kind(&frame).to_owned())
+            .unwrap_or_else(|| diagnostic_value_kind(frame).to_owned())
     }
 
     fn eval_context_summary(&self, payload: &Value) -> String {
@@ -1513,9 +1661,9 @@ impl DefaultLogger {
         })
     }
 
-    fn render(&self, diagnostic: &Diagnostic, text: &str, color: TerminalColor) -> String {
+    fn render(&self, diagnostic: &Diagnostic, text: &str, terminal: &TerminalContext) -> String {
         let severity = diagnostic.severity().to_string();
-        let severity = color.paint(diagnostic.severity(), &severity);
+        let severity = terminal.color.paint(diagnostic.severity(), &severity);
         let mut rendered = format!("{}{severity}: ", self.location(diagnostic));
         let mut lines = text.split('\n');
         rendered.push_str(lines.next().unwrap_or_default());
@@ -1526,7 +1674,7 @@ impl DefaultLogger {
                 rendered.push_str(line);
             }
         }
-        for line in self.context_lines(diagnostic) {
+        for line in self.context_lines(diagnostic.emission(), terminal, 0) {
             rendered.push('\n');
             rendered.push_str(&line);
         }
@@ -1727,20 +1875,8 @@ mod tests {
             term: None,
             language: None,
         };
-        let enriched = diagnostic
-            .enrich_with(logger.viewer_updates(&diagnostic, &terminal))
-            .expect("terminal viewer metadata should mix into a diagnostic");
-        let rendered_value = logger
-            .evaluator
-            .apply(&logger.formatter, [enriched])
-            .expect("the closed Glam formatter should apply");
-        let rendered_value = logger
-            .evaluator
-            .evaluate(&rendered_value)
-            .expect("the formatter result should evaluate");
         let rendered = logger
-            .evaluator
-            .to_binary(&rendered_value)
+            .format_diagnostic(&diagnostic, &terminal)
             .expect("the closed Glam formatter should return bytes");
 
         assert_eq!(
@@ -1810,13 +1946,8 @@ mod tests {
             term: None,
             language: None,
         };
-        let enriched = diagnostic
-            .enrich_with(logger.viewer_updates(&diagnostic, &terminal))
-            .expect("terminal viewer metadata should mix into a diagnostic");
         let rendered = logger
-            .evaluator
-            .apply(&logger.formatter, [enriched])
-            .and_then(|value| logger.evaluator.to_binary(&value))
+            .format_diagnostic(&diagnostic, &terminal)
             .expect("the closed Glam formatter should render contexts");
 
         assert_eq!(
@@ -1825,6 +1956,164 @@ mod tests {
                 b"error: broken\n    more detail\n  context:\n    eval: binary extraction\n    g: definition `result` on line 7\n    asm: result `asm.result`\n    eval: path lookup `conf.env`\n    conf: entry `log`\n    task: join task 12\n"
             )
         );
+    }
+
+    #[test]
+    fn glam_default_formatter_recursively_renders_context_messages() {
+        let evaluator = Assembler::default();
+        let logger = DefaultLogger {
+            formatter: evaluator.default_diagnostic_formatter(),
+            evaluator,
+            working_directory: PathBuf::from("/work"),
+        };
+        let diagnostic = Diagnostic::from_emission(
+            Severity::Error,
+            Value::record([(
+                "msg",
+                Value::record([
+                    ("text", Value::text("outer failure")),
+                    (
+                        "context",
+                        Value::list([
+                            Value::record([(
+                                "msg",
+                                Value::record([("text", Value::text("unclassified context"))]),
+                            )]),
+                            Value::record([(
+                                "msg",
+                                Value::record([
+                                    ("text", Value::text("nested context\nmore detail")),
+                                    ("severity", Value::atom_from_text("info")),
+                                    (
+                                        "context",
+                                        Value::list([Value::record([(
+                                            "eval",
+                                            Value::record([(
+                                                "op",
+                                                Value::atom_from_text("list_index"),
+                                            )]),
+                                        )])]),
+                                    ),
+                                ]),
+                            )]),
+                        ]),
+                    ),
+                ]),
+            )]),
+        );
+        let terminal = TerminalContext {
+            columns: 80,
+            color: TerminalColor::None,
+            term: Some("xterm-256color".to_owned()),
+            language: Some("en_US.UTF-8".to_owned()),
+        };
+
+        let rendered = logger
+            .format_diagnostic(&diagnostic, &terminal)
+            .expect("context messages should use the recursive diagnostic view");
+
+        assert_eq!(
+            rendered,
+            Bytes::from_static(
+                b"error: outer failure\n  context:\n    msg: unclassified context\n    info: nested context\n        more detail\n      context:\n        eval: list index\n"
+            )
+        );
+    }
+
+    #[test]
+    fn glam_default_formatter_recognizes_full_objects_as_context_messages() {
+        let evaluator = Assembler::default();
+        let module = evaluator
+            .module(["context_fixture"])
+            .script(
+                "g",
+                concat!(
+                    "language g0\n",
+                    "object frame with\n",
+                    "  msg = {text:viewer.term, severity:'info}\n",
+                ),
+            )
+            .build()
+            .expect("context object fixture should compile");
+        let frame = evaluator
+            .get(module.value(), "frame")
+            .expect("context object should be available");
+        assert!(
+            evaluator.get(&frame, "spec").is_ok(),
+            "fixture must retain its object interface"
+        );
+        let logger = DefaultLogger {
+            formatter: evaluator.default_diagnostic_formatter(),
+            evaluator,
+            working_directory: PathBuf::from("/work"),
+        };
+        let diagnostic = Diagnostic::from_emission(
+            Severity::Error,
+            Value::record([(
+                "msg",
+                Value::record([
+                    ("text", Value::text("outer failure")),
+                    ("context", Value::list([frame])),
+                ]),
+            )]),
+        );
+        let terminal = TerminalContext {
+            columns: 80,
+            color: TerminalColor::None,
+            term: Some("object terminal context".to_owned()),
+            language: None,
+        };
+
+        let rendered = logger
+            .format_diagnostic(&diagnostic, &terminal)
+            .expect("a context object should retain its view behavior");
+
+        assert_eq!(
+            rendered,
+            Bytes::from_static(
+                b"error: outer failure\n  context:\n    info: object terminal context\n"
+            )
+        );
+    }
+
+    #[test]
+    fn failed_context_message_rendering_does_not_hide_the_primary_diagnostic() {
+        let evaluator = Assembler::default();
+        let logger = DefaultLogger {
+            formatter: evaluator.default_diagnostic_formatter(),
+            evaluator,
+            working_directory: PathBuf::from("/work"),
+        };
+        let diagnostic = Diagnostic::from_emission(
+            Severity::Error,
+            Value::record([(
+                "msg",
+                Value::record([
+                    ("text", Value::text("outer failure")),
+                    (
+                        "context",
+                        Value::list([Value::record([(
+                            "msg",
+                            Value::record([("text", Value::integer(42))]),
+                        )])]),
+                    ),
+                ]),
+            )]),
+        );
+        let terminal = TerminalContext {
+            columns: 80,
+            color: TerminalColor::None,
+            term: None,
+            language: None,
+        };
+
+        let rendered = logger
+            .format_diagnostic(&diagnostic, &terminal)
+            .expect("a malformed context message should have a local fallback");
+        let rendered = String::from_utf8_lossy(&rendered);
+
+        assert!(rendered.starts_with("error: outer failure\n  context:\n"));
+        assert!(rendered.contains("    msg: <context rendering failed:"));
     }
 
     #[test]
@@ -1861,13 +2150,8 @@ mod tests {
             term: None,
             language: None,
         };
-        let enriched = diagnostic
-            .enrich_with(logger.viewer_updates(&diagnostic, &terminal))
-            .expect("terminal viewer metadata should mix into a diagnostic");
         let rendered = logger
-            .evaluator
-            .apply(&logger.formatter, [enriched])
-            .and_then(|value| logger.evaluator.to_binary(&value))
+            .format_diagnostic(&diagnostic, &terminal)
             .expect("the closed Glam formatter should summarize unknown contexts");
 
         assert_eq!(
@@ -1891,13 +2175,8 @@ mod tests {
             term: None,
             language: None,
         };
-        let enriched = diagnostic
-            .enrich_with(logger.viewer_updates(&diagnostic, &terminal))
-            .expect("terminal viewer metadata should mix into a diagnostic");
         let rendered = logger
-            .evaluator
-            .apply(&logger.formatter, [enriched])
-            .and_then(|value| logger.evaluator.to_binary(&value))
+            .format_diagnostic(&diagnostic, &terminal)
             .expect("the closed Glam formatter should return colored bytes");
 
         assert_eq!(
@@ -1927,6 +2206,13 @@ mod tests {
                 .expect("viewer should declare automatic indentation")
                 .as_i64(),
             Some(4)
+        );
+        assert_eq!(
+            logger
+                .evaluator
+                .get(&enriched, "viewer.header")
+                .expect("viewer should choose the effective message header"),
+            Value::atom_from_text("info")
         );
         assert_eq!(
             logger

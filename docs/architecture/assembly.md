@@ -94,8 +94,15 @@ renderer.
 
 The default subscriber projects conventional context frames through the
 public reflection inspector and stores the selected wording and indentation in
-`viewer.context_lines`. The cached Glam formatter joins those viewer lines; it
-does not inspect `msg.context` or choose presentation terminology.
+`viewer.context_lines`. A frame with a defined `msg` interface instead enters
+the same pipeline recursively: main applies a depth-adjusted copy of its
+terminal viewer metadata to the complete dictionary or object, recursively
+builds that message's context lines, and invokes the same cached formatter.
+Nested messages are not republished and do not affect severity counts. The
+cached Glam formatter joins the viewer lines; it does not inspect
+`msg.context`, choose presentation terminology, or perform the recursion.
+Main supplies the presentation-only `viewer.header` atom (`msg`, `info`,
+`warn`, or `error`) separately from authoritative `msg.severity`.
 
 The logger is wrapped with the native equivalent of `(=>> .r ())`; returning a
 non-unit result is an error. A logger failure produces a synthetic diagnostic,

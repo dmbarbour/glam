@@ -15,9 +15,10 @@ pub(super) fn value() -> Value {
 }
 
 fn build() -> Value {
-    fn severity_values(info: &str, warning: &str, error: &str) -> Value {
+    fn severity_values(message: &str, info: &str, warning: &str, error: &str) -> Value {
         Value::Dict(
             Dict::new_sync()
+                .insert((*keys::MSG).clone(), Value::binary_from_text(message))
                 .insert((*keys::INFO).clone(), Value::binary_from_text(info))
                 .insert((*keys::WARN).clone(), Value::binary_from_text(warning))
                 .insert((*keys::ERROR).clone(), Value::binary_from_text(error)),
@@ -54,9 +55,9 @@ fn build() -> Value {
             .unwrap_or_else(|| ResolvedExpr::Embedded(Value::List(crate::core::List::empty())))
     }
 
-    let severity_labels = severity_values("info", "warning", "error");
-    let plain_colors = severity_values("", "", "");
-    let ansi_colors = severity_values("\x1b[36m", "\x1b[33m", "\x1b[31m");
+    let severity_labels = severity_values("msg", "info", "warning", "error");
+    let plain_colors = severity_values("", "", "", "");
+    let ansi_colors = severity_values("", "\x1b[36m", "\x1b[33m", "\x1b[31m");
     let color_prefixes = Value::Dict(
         Dict::new_sync()
             .insert(Key::binary_from_text("none"), plain_colors)
@@ -87,7 +88,7 @@ fn build() -> Value {
     let continuation_line = locals.push_internal_binding("<diagnostic-continuation-line>");
     let context_line = locals.push_internal_binding("<diagnostic-context-line>");
 
-    let severity = || field(diagnostic, &["msg", "severity"]);
+    let header = || field(diagnostic, &["viewer", "header"]);
     let color = || field(diagnostic, &["viewer", "color"]);
     let indented_continuations = apply_builtin(
         Builtin::ListConcat,
@@ -126,8 +127,8 @@ fn build() -> Value {
     // remote-origin summary can become another viewer-anchored sibling block.
     let formatted = append([
         field(diagnostic, &["viewer", "location"]),
-        indexed(color_prefixes, [color(), severity()]),
-        indexed(severity_labels, [severity()]),
+        indexed(color_prefixes, [color(), header()]),
+        indexed(severity_labels, [header()]),
         indexed(color_suffixes, [color()]),
         ResolvedExpr::Embedded(Value::binary_from_text(": ")),
         apply_builtin(Builtin::ListHead, [ResolvedExpr::Local(lines)]),

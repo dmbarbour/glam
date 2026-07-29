@@ -4,9 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use glam::{
-    Assembler, AssemblerBuilder, CONTENT_DIGEST_ALGORITHM, ContentDigest, DiagnosticEvent,
-    EvaluationRuntime, Host, HostError, ImportResolver, ModuleInput, ReasoningStatus,
-    RelativeSourcePath, Severity, SourceArtifact, SourceError, SourceIdentity, SourceSystem, Value,
+    Assembler, AssemblerBuilder, CONTENT_DIGEST_ALGORITHM, ContentDigest, Diagnostic,
+    DiagnosticEvent, EvaluationRuntime, Host, HostError, ImportResolver, ModuleInput,
+    ReasoningStatus, RelativeSourcePath, Severity, SourceArtifact, SourceError, SourceIdentity,
+    SourceSystem, Value,
 };
 
 type DiagnosticEvents = Arc<Mutex<Vec<DiagnosticEvent>>>;
@@ -417,6 +418,40 @@ fn public_api_exposes_the_default_diagnostic_formatter_as_a_function() {
     assert_eq!(
         Assembler::default().default_diagnostic_formatter().kind(),
         glam::ValueKind::Function
+    );
+}
+
+#[test]
+fn diagnostic_value_updates_preserve_the_source_and_add_no_authoritative_metadata() {
+    let assembler = Assembler::default();
+    let message = Value::record([("msg", Value::record([("text", Value::text("nested"))]))]);
+    let enriched = Diagnostic::apply_updates(
+        &message,
+        Value::record([("viewer", Value::record([("kind", Value::text("terminal"))]))]),
+    )
+    .expect("an observer should be able to enrich a context message");
+
+    assert_eq!(
+        assembler
+            .get(&enriched, "msg.text")
+            .expect("message text should remain available")
+            .as_binary(),
+        Some(b"nested".as_slice())
+    );
+    assert_eq!(
+        assembler
+            .get(&enriched, "viewer.kind")
+            .expect("viewer update should be applied")
+            .as_binary(),
+        Some(b"terminal".as_slice())
+    );
+    assert!(
+        assembler.get(&enriched, "msg.severity").is_err(),
+        "neutral observer updates must not invent diagnostic severity"
+    );
+    assert!(
+        assembler.get(&message, "viewer").is_err(),
+        "the original diagnostic-style value must stay unchanged"
     );
 }
 

@@ -504,6 +504,17 @@ impl Diagnostic {
             .map_err(Error::new)
     }
 
+    /// Applies observer-owned updates to an arbitrary diagnostic-style value.
+    ///
+    /// Unlike [`Self::enrich`] and [`Self::enrich_with`], this does not inject
+    /// assembler severity or origin metadata. This supports recursive context
+    /// messages whose enrichment policy belongs entirely to the observer.
+    pub fn apply_updates(message: &Value, updates: Value) -> Result<Value, Error> {
+        crate::diagnostic::apply_emission_updates(message.as_core().clone(), updates.into_core())
+            .map(Value::from_core)
+            .map_err(Error::new)
+    }
+
     /// Prepends one structured frame describing why this diagnostic was
     /// produced or propagated. The original emission remains otherwise
     /// unchanged.
@@ -1866,7 +1877,8 @@ impl Assembler {
 
     /// Returns the cached closed Glam function used by the executable's
     /// default terminal logger. It expects an enriched diagnostic containing
-    /// the conventional `msg` and `viewer` fields and returns bytes.
+    /// the conventional `msg` and `viewer` fields, including the observer's
+    /// effective `viewer.header` atom, and returns bytes.
     pub fn default_diagnostic_formatter(&self) -> Value {
         Value::from_core(crate::g_syntax::default_diagnostic_formatter())
     }

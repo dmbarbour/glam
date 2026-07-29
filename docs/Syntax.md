@@ -1021,6 +1021,28 @@ instead reaches a permanent error, it prepends `Context` to the ordered
 Successful evaluation does not demand `Context`. Effect failure, scheduler
 blocking, and unresolved promises are not converted into errors.
 
+An explicitly supplied context frame with a defined `msg` interface is itself
+a recursive diagnostic-style message. It may be either a dictionary or a full
+object with `spec`, arbitrary fields, and viewer-dependent definitions:
+
+        anno context:{
+          msg:{
+            text:"while encoding instruction",
+            severity:'info,
+            context:[eval:{op:'binary_extraction}]
+          }
+        } Expr
+
+The default terminal observer enriches this object with the same terminal
+viewer snapshot as the outer diagnostic, but with indentation anchored at the
+nested message. A defined standard `msg.severity` supplies its line header;
+without one, the neutral header is `msg:`. This presentation choice is exposed
+as `viewer.header` without inventing or replacing semantic `msg.severity`.
+Recursive context messages are views, not separately emitted diagnostics, and
+therefore do not affect diagnostic counts. Malformed or divergent custom views
+remain the author's responsibility, though failure to render one does not
+suppress the primary diagnostic.
+
 Automatic evaluator context uses the tagged form
 `eval:{op:Operation, args?:Arguments}`, where `Operation` is an atom and
 defined `Arguments` is a dictionary of named fields. Argument-free frames omit
