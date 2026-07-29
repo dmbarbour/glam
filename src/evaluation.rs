@@ -1060,13 +1060,11 @@ impl EvalContext {
         Ok((owner, wait))
     }
 
-    pub(crate) fn fail_unresolved_promises(&self, reason: impl Into<Arc<str>>) {
+    pub(crate) fn fail_unresolved_promises(&self, failure: Arc<EvaluationFailure>) {
         let Some(Ok(owner)) = self.task.get() else {
             return;
         };
         let owner = *owner;
-        let reason = reason.into();
-        let failure = Arc::new(EvaluationFailure::message(reason));
         let mut tasks = self
             .session
             .tasks

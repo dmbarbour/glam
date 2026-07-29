@@ -789,7 +789,9 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
             .blocked_on()
             .is_some()
     );
-    owner.fail_unresolved_promises("producer failed deliberately");
+    owner.fail_unresolved_promises(Arc::new(EvaluationFailure::message(
+        "producer failed deliberately",
+    )));
     assert_eq!(
         eval_value(&observer, &value).unwrap_err().to_string(),
         "producer failed deliberately"
@@ -847,7 +849,9 @@ fn producer_failure_retires_every_owned_promise_wait() {
             .clone()
     });
 
-    owner.fail_unresolved_promises("producer failed all fixpoints");
+    owner.fail_unresolved_promises(Arc::new(EvaluationFailure::message(
+        "producer failed all fixpoints",
+    )));
 
     for wait in waits {
         assert!(matches!(
