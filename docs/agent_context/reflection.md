@@ -114,6 +114,12 @@ and control flow.
 - `.task.cancel` is an unconditional best-effort, commit-ordered request; late
   and foreign cancellation are harmless no-ops. Losing branches discard
   cancellation requests.
+- `.task.ack_error` is a timing-independent, commit-ordered modifier for a
+  local handle. It suppresses the task's present or future failure from
+  reasoning reports but never mutates `.task.status`, `.task.error`, or
+  `.task.join`. Same-transaction acknowledgement is installed before launch;
+  losing branches discard it. Repeated acknowledgement and acknowledgement of
+  success or cancellation are harmless.
 - `.eval` demands WHNF and returns `ok:WHNF` or provisional `err:Text`. A raw
   opaque `Value::Net` is already WHNF and is returned unchanged; only an
   explicit net-arity bridge observes its interface. A pending evaluator

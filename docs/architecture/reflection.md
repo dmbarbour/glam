@@ -150,8 +150,14 @@ not revoke it.
   failure.
   `.task.status` returns that stored status value unchanged, while
   `.task.value` and `.task.error` project and transactionally wait for their
-  matching terminal payload. `.task.cancel` journals a best-effort
-  cancellation request. Task inspection creates no secondary scheduler work.
+  matching terminal payload. `.task.ack_error` transactionally acknowledges
+  present or future failure reporting without changing any of those
+  observations; it is valid before launch, while running, and after
+  termination. `.task.cancel` journals a best-effort cancellation request.
+  Same-transaction modifiers are folded into the reserved task before launch,
+  so cancellation can bypass machine construction and acknowledgement can
+  precede an arbitrarily fast failure. Task inspection creates no secondary
+  scheduler work.
 
 The immutable environment conventionally contains assembler-owned `glam`
 identity plus client context. `glam.reasoning.role` distinguishes assembler,

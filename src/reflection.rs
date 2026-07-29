@@ -4838,6 +4838,8 @@ mod tests {
             ".task.new (.r ()) >>= (\\task -> .task.join task >>= (\\_ -> .task.status task >>= (\\status -> .r status.ok)))",
             ".task.new (.fail) >>= (\\task -> .task.error task >>= (\\_ -> .task.status task >>= (\\status -> .r status.err)))",
             ".task.new (.r ()) >>= (\\task -> .task.cancel task =>> .task.error task >>= (\\_ -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ())))",
+            ".task.new (.r ()) >>= (\\task -> .task.join task >>= (\\_ -> .task.ack_error task =>> .task.status task >>= (\\status -> .r status.ok)))",
+            ".task.new (.r ()) >>= (\\task -> .task.cancel task =>> .task.ack_error task =>> .task.ack_error task =>> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
         ] {
             let (_, effect) = compile_effect(source);
             let (context, task) = schedule_composed_test_task(&effect, host.clone());
@@ -4860,7 +4862,7 @@ mod tests {
             panic!("first session should return a task handle")
         };
 
-        for operation in ["status", "value", "error", "join"] {
+        for operation in ["status", "value", "error", "join", "ack_error"] {
             let (_, inspect) = compile_effect(&format!("\\task -> .task.{operation} task"));
             let inspect = assembler
                 .apply(&inspect, [PublicValue::from_core(handle.clone())])
@@ -5071,6 +5073,82 @@ mod tests {
             )
             .expect("task error diagnostic text should be binary");
         assert!(String::from_utf8_lossy(&text).contains("failed permanently"));
+    }
+
+    #[test]
+    fn acknowledged_task_failure_remains_observable_but_is_not_reported() {
+        let (assembler, inspect) = compile_effect(
+            ".cut (.task.new (.fail) >>= (\\task -> .task.ack_error task =>> .r task)) >>= (\\task -> .task.error task >>= (\\error -> .task.status task >>= (\\status -> .r {error:error, status:status})))",
+        );
+        let host = Arc::new(TestHost::default());
+        let (context, parent) = schedule_composed_test_task(&inspect, host.clone());
+        let EvaluationTaskPoll::Complete(observation) = pump_composed_test_task(&context, &parent)
+        else {
+            panic!("acknowledged failure should remain observable as data")
+        };
+        let observation = PublicValue::from_core(observation);
+        let error = assembler
+            .evaluate(
+                &assembler
+                    .get(&observation, "error")
+                    .expect("task.error should retain the failure"),
+            )
+            .expect("task.error result should evaluate");
+        let status_error = assembler
+            .evaluate(
+                &assembler
+                    .get(&observation, "status.err")
+                    .expect("task.status should retain the failure"),
+            )
+            .expect("task.status error should evaluate");
+        assert_eq!(error, status_error);
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("acknowledged child should leave no unfinished work")
+        };
+        assert!(report.failures.is_empty());
+
+        let (_, join) = compile_effect(
+            ".cut (.task.new (.fail) >>= (\\task -> .task.ack_error task =>> .r task)) >>= (\\task -> .task.join task)",
+        );
+        let (context, parent) = schedule_composed_test_task(&join, host);
+        assert!(matches!(
+            pump_composed_test_task(&context, &parent),
+            EvaluationTaskPoll::Failed(_)
+        ));
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("failed join should be terminal")
+        };
+        assert_eq!(
+            report
+                .failures
+                .iter()
+                .map(|failure| failure.task)
+                .collect::<Vec<_>>(),
+            [parent.id()],
+            "join must propagate the error while the acknowledged child stays out of reports"
+        );
+    }
+
+    #[test]
+    fn abandoned_task_error_acknowledgement_does_not_suppress_reporting() {
+        let (_, effect) = compile_effect(
+            ".task.new (.fail) >>= (\\task -> (.cut (.alt ((.task.ack_error task) =>> .fail) (.r ()))) =>> .task.error task)",
+        );
+        let host = Arc::new(TestHost::default());
+        let (context, parent) = schedule_composed_test_task(&effect, host);
+        assert!(matches!(
+            pump_composed_test_task(&context, &parent),
+            EvaluationTaskPoll::Complete(_)
+        ));
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("child failure should be terminal")
+        };
+        assert_eq!(
+            report.failures.len(),
+            1,
+            "rolled-back acknowledgement must leave the child failure unacknowledged"
+        );
+        assert_ne!(report.failures[0].task, parent.id());
     }
 
     #[test]

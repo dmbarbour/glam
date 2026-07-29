@@ -135,9 +135,11 @@ modifiers for tasks created by that same journal are folded into one
 pre-launch policy before any launcher is called. A same-transaction
 cancellation publishes terminal cancellation and updates the status query
 without constructing a machine, entering the ready queue, or notifying a
-worker. Modifiers for older tasks are applied after pending launches have
-committed. Status-query callbacks run after both the reasoning-store lock and
-scheduler lock have been released.
+worker. Same-transaction error acknowledgement is installed before launch and
+therefore suppresses reporting even if the child fails immediately; it does
+not alter the wait result or status query. Modifiers for older tasks are
+applied after pending launches have committed. Status-query callbacks run
+after both the reasoning-store lock and scheduler lock have been released.
 
 Active reflection records retain machines; terminal records do not. Completion
 and failure take the claimed machine out of the record under the scheduler

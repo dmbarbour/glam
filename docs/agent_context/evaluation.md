@@ -120,7 +120,9 @@ control-flow overview.
 - A transaction folds modifiers for its newly reserved tasks before launch.
   In particular, same-transaction cancellation must publish `'canceled`
   without constructing a task machine or exposing runnable work to the shared
-  executor. Older-task modifiers remain ordinary committed updates.
+  executor, while same-transaction error acknowledgement must be installed
+  before an immediate failure can be reported. Older-task modifiers remain
+  ordinary committed updates.
 - Never invoke task status sinks, task cancellation hooks, or machine
   destructors while holding the scheduler registry mutex. Terminal reflection
   records retain results for now but release their machines after unlocking.

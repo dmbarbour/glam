@@ -31,6 +31,7 @@ pub enum ReflectionRequest {
     TaskStatus,
     TaskValue,
     TaskError,
+    TaskAcknowledgeError,
     TaskCancel,
 }
 
@@ -41,6 +42,7 @@ enum ReflectionUpdate {
         status: Arc<dyn EvaluationTaskStatusSink>,
     },
     Cancel(EvalContext, EvaluationTaskHandle),
+    AcknowledgeError(EvalContext, EvaluationTaskHandle),
 }
 
 struct TaskStatusQuery<H: ?Sized> {
@@ -86,10 +88,18 @@ impl ReflectionJournal {
             }
         }
         for update in &self.updates {
-            if let ReflectionUpdate::Cancel(_, task) = update
-                && let Some(policy) = pending_policies.get_mut(&task.id())
-            {
-                policy.cancel();
+            match update {
+                ReflectionUpdate::Cancel(_, task) => {
+                    if let Some(policy) = pending_policies.get_mut(&task.id()) {
+                        policy.cancel();
+                    }
+                }
+                ReflectionUpdate::AcknowledgeError(_, task) => {
+                    if let Some(policy) = pending_policies.get_mut(&task.id()) {
+                        policy.acknowledge_error();
+                    }
+                }
+                ReflectionUpdate::Launch { .. } => {}
             }
         }
         for update in &self.updates {
@@ -103,6 +113,11 @@ impl ReflectionJournal {
                 ReflectionUpdate::Cancel(context, task) => {
                     if !pending_policies.contains_key(&task.id()) {
                         context.cancel_reflection_task(task);
+                    }
+                }
+                ReflectionUpdate::AcknowledgeError(context, task) => {
+                    if !pending_policies.contains_key(&task.id()) {
+                        context.acknowledge_reflection_task_error(task);
                     }
                 }
             }
@@ -187,6 +202,12 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
                 ["reflection_runtime", "v0", "request", "task", "error"],
                 1,
                 ReflectionRequest::TaskError,
+            ),
+            EffectRequestSpec::at_path(
+                ["task", "ack_error"],
+                ["reflection_runtime", "v0", "request", "task", "ack_error"],
+                1,
+                ReflectionRequest::TaskAcknowledgeError,
             ),
             EffectRequestSpec::at_path(
                 ["task", "cancel"],
@@ -421,6 +442,21 @@ where
                 }
                 TaggedTaskState::Complete(_) => Ok(RequestResult::Fail),
             }
+        }
+        ReflectionRequest::TaskAcknowledgeError => {
+            let handle = task_handle_argument(context.eval_context(), arguments, "task.ack_error")?;
+            ensure_local_task(context.eval_context(), &handle)?;
+            let eval_context = context.eval_context().clone();
+            if let Some(mut transaction) = context.transaction() {
+                transaction.parts().1.reflection_journal().updates.push(
+                    ReflectionUpdate::AcknowledgeError(eval_context, handle.task.clone()),
+                );
+            } else {
+                let acknowledged = eval_context.acknowledge_reflection_task_error(&handle.task);
+                debug_assert!(acknowledged, "task locality was checked above");
+                context.committed();
+            }
+            Ok(RequestResult::ReturnUnit)
         }
         ReflectionRequest::TaskCancel => {
             let handle = task_handle_argument(context.eval_context(), arguments, "task.cancel")?;

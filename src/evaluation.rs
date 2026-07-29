@@ -231,11 +231,16 @@ pub(crate) enum InitialTaskDisposition {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PendingTaskPolicy {
     disposition: InitialTaskDisposition,
+    acknowledge_error: bool,
 }
 
 impl PendingTaskPolicy {
     pub(crate) fn cancel(&mut self) {
         self.disposition = InitialTaskDisposition::Cancel;
+    }
+
+    pub(crate) fn acknowledge_error(&mut self) {
+        self.acknowledge_error = true;
     }
 }
 
@@ -369,6 +374,7 @@ struct ReflectionTaskRecord {
     state: EvaluationTaskState,
     machine: Option<Box<dyn EvaluationTaskMachine>>,
     cancel_requested: bool,
+    error_acknowledged: bool,
     status_sinks: Vec<Arc<dyn EvaluationTaskStatusSink>>,
 }
 
@@ -534,6 +540,7 @@ impl PendingReflectionTask {
                     self.inner.effect.clone(),
                     ReflectionTaskKind::Joinable,
                     Some(status),
+                    policy.acknowledge_error,
                 );
             }
             InitialTaskDisposition::Cancel => self
@@ -966,6 +973,7 @@ impl EvalContext {
                 state: EvaluationTaskState::Queued,
                 machine: Some(machine),
                 cancel_requested: false,
+                error_acknowledged: false,
                 status_sinks: Vec::new(),
             },
         );
@@ -996,6 +1004,7 @@ impl EvalContext {
                 state: EvaluationTaskState::Reserved,
                 machine: None,
                 cancel_requested: false,
+                error_acknowledged: false,
                 status_sinks: Vec::new(),
             },
         );
@@ -1014,6 +1023,7 @@ impl EvalContext {
         effect: Value,
         kind: ReflectionTaskKind,
         status_sink: Option<Arc<dyn EvaluationTaskStatusSink>>,
+        error_acknowledged: bool,
     ) {
         let result = self
             .session
@@ -1039,6 +1049,7 @@ impl EvalContext {
             return;
         }
         let prior = record.state.clone();
+        record.error_acknowledged = error_acknowledged;
         if let Some(status_sink) = status_sink {
             record.status_sinks.push(status_sink);
         }
@@ -1144,7 +1155,13 @@ impl EvalContext {
     ) -> Result<EvaluationTaskHandle, Arc<str>> {
         if self.session.reflection_launcher.get().is_some() {
             let handle = self.reserve_task()?;
-            self.activate_reflection_task(&handle, effect, ReflectionTaskKind::Annotation, None);
+            self.activate_reflection_task(
+                &handle,
+                effect,
+                ReflectionTaskKind::Annotation,
+                None,
+                false,
+            );
             return Ok(handle);
         }
 
@@ -1165,6 +1182,7 @@ impl EvalContext {
                 state: EvaluationTaskState::Dormant,
                 machine: None,
                 cancel_requested: false,
+                error_acknowledged: false,
                 status_sinks: Vec::new(),
             },
         );
@@ -1233,6 +1251,25 @@ impl EvalContext {
             machine.cancel();
         }
         EvaluationTaskCancellation::Requested
+    }
+
+    /// Acknowledges any present or future failure of a local reflection task.
+    ///
+    /// Acknowledgement affects reasoning reports only. The task's terminal
+    /// result and transactional status query remain unchanged.
+    pub(crate) fn acknowledge_reflection_task_error(&self, task: &EvaluationTaskHandle) -> bool {
+        if !self.owns_task(task) {
+            return false;
+        }
+        let mut tasks = self
+            .session
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        if let Some(record) = tasks.reflection.get_mut(&task.wait) {
+            record.error_acknowledged = true;
+        }
+        true
     }
 
     pub(crate) fn poll_wait(&self, wait: &EvaluationWaitToken) -> EvaluationTaskPoll {
@@ -1617,10 +1654,13 @@ impl EvaluationSession {
                 .expect("task ID index must refer to a task record");
             match &record.state {
                 EvaluationTaskState::Complete(_) | EvaluationTaskState::Cancelled => {}
-                EvaluationTaskState::Failed(error) => failures.push(EvaluationTaskFailure {
-                    task: *task,
-                    error: error.clone(),
-                }),
+                EvaluationTaskState::Failed(error) if !record.error_acknowledged => {
+                    failures.push(EvaluationTaskFailure {
+                        task: *task,
+                        error: error.clone(),
+                    })
+                }
+                EvaluationTaskState::Failed(_) => {}
                 state => {
                     let (state, block) = match state {
                         EvaluationTaskState::Dormant => (EvaluationUnfinishedState::Dormant, None),
@@ -2531,6 +2571,25 @@ mod tests {
         }
     }
 
+    struct FailAfterRelease {
+        started: Option<mpsc::Sender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl EvaluationTaskMachine for FailAfterRelease {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            if let Some(started) = self.started.take() {
+                started
+                    .send(())
+                    .expect("test start receiver should remain open");
+            }
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test should release the task");
+            EvaluationMachinePoll::Failed(evaluation_failure("acknowledged task failure"))
+        }
+    }
+
     struct CompleteAndSignalDrop {
         dropped: Arc<AtomicBool>,
     }
@@ -3242,6 +3301,142 @@ mod tests {
         assert_eq!(
             foreign.cancel_reflection_task(&task),
             EvaluationTaskCancellation::ForeignSession
+        );
+    }
+
+    #[test]
+    fn error_acknowledgement_is_timing_independent_and_preserves_task_results() {
+        let context = EvalContext::standalone();
+
+        let reserved = context.reserve_task().expect("task should reserve");
+        assert!(context.acknowledge_reflection_task_error(&reserved));
+        {
+            let tasks = context
+                .session
+                .tasks
+                .lock()
+                .expect("evaluation task registry was poisoned");
+            assert!(
+                tasks
+                    .reflection
+                    .get(reserved.wait())
+                    .expect("reserved task should remain registered")
+                    .error_acknowledged
+            );
+        }
+        context.cancel_reserved_task(&reserved);
+
+        let blocked = context
+            .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+            .expect("blocked task should schedule");
+        assert_eq!(
+            context.pump_wait(blocked.wait(), 256),
+            EvaluationPumpOutcome::NoProgress
+        );
+        assert!(context.acknowledge_reflection_task_error(&blocked));
+        {
+            let tasks = context
+                .session
+                .tasks
+                .lock()
+                .expect("evaluation task registry was poisoned");
+            assert!(
+                tasks
+                    .reflection
+                    .get(blocked.wait())
+                    .expect("blocked task should remain registered")
+                    .error_acknowledged
+            );
+        }
+        assert_eq!(
+            context.cancel_reflection_task(&blocked),
+            EvaluationTaskCancellation::Requested
+        );
+
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let running = context
+            .schedule_task(move |_| {
+                Ok(Box::new(FailAfterRelease {
+                    started: Some(started_sender),
+                    release: release_receiver,
+                }))
+            })
+            .expect("running task should schedule");
+        let worker = {
+            let context = context.clone();
+            let wait = running.wait().clone();
+            std::thread::spawn(move || context.pump_wait(&wait, 256))
+        };
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should claim the running task");
+        assert!(context.acknowledge_reflection_task_error(&running));
+        release_sender
+            .send(())
+            .expect("running task should still be waiting");
+        assert_eq!(
+            worker.join().expect("worker should not panic"),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert!(matches!(
+            context.poll_reflection_task(&running),
+            EvaluationTaskPoll::Failed(error)
+                if error.to_string() == "acknowledged task failure"
+        ));
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("only terminal tasks should remain")
+        };
+        assert!(report.failures.is_empty());
+
+        let failed = context
+            .schedule_task(|_| Ok(Box::new(Fail)))
+            .expect("failing task should schedule");
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("failing task should terminate")
+        };
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].task, failed.id());
+        assert!(context.acknowledge_reflection_task_error(&failed));
+        assert!(context.acknowledge_reflection_task_error(&failed));
+        for _ in 0..2 {
+            let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+                panic!("acknowledged task should remain terminal")
+            };
+            assert!(
+                report.failures.is_empty(),
+                "acknowledged failure must stay absent from repeated reports"
+            );
+        }
+        assert!(matches!(
+            context.poll_reflection_task(&failed),
+            EvaluationTaskPoll::Failed(error) if error.to_string() == "reasoning failed"
+        ));
+
+        let successful = context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("successful task should schedule");
+        assert_eq!(
+            context.pump_wait(successful.wait(), 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert!(context.acknowledge_reflection_task_error(&successful));
+        assert!(matches!(
+            context.poll_reflection_task(&successful),
+            EvaluationTaskPoll::Complete(_)
+        ));
+
+        let cancelled = context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("cancelled task should schedule");
+        assert_eq!(
+            context.cancel_reflection_task(&cancelled),
+            EvaluationTaskCancellation::Requested
+        );
+        assert!(context.acknowledge_reflection_task_error(&cancelled));
+        assert_eq!(
+            context.poll_reflection_task(&cancelled),
+            EvaluationTaskPoll::Cancelled
         );
     }
 
