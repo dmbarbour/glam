@@ -21,8 +21,8 @@ pub(super) fn eval_slice_builtin(
     end: &Value,
     value: &Value,
 ) -> Result<Value, EvalError> {
-    let start = eval_index_number(context, start, "slice", "list index")?;
-    let end = eval_index_number(context, end, "slice", "list index")?;
+    let start = eval_index_number(context, start, "slice", "list_index")?;
+    let end = eval_index_number(context, end, "slice", "list_index")?;
     if start > end {
         return Err(EvalError::new(
             "slice builtin requires start to be less than or equal to end",
@@ -118,7 +118,7 @@ pub(super) fn eval_list_split_builtin(
     index: &Value,
     value: &Value,
 ) -> Result<Value, EvalError> {
-    let index = eval_index_number(context, index, "split", "list index")?;
+    let index = eval_index_number(context, index, "split", "list_index")?;
     match eval_value(context, value)? {
         Value::Binary(bytes) => {
             if index > bytes.len() {
@@ -179,7 +179,7 @@ pub(super) fn eval_list_at_builtin(
     index: &Value,
     value: &Value,
 ) -> Result<Value, EvalError> {
-    let index = eval_index_number(context, index, "list at", "list index")?;
+    let index = eval_index_number(context, index, "list at", "list_index")?;
     let item = match eval_value(context, value)? {
         Value::Binary(bytes) => bytes.get(index).copied().map(ListItem::Byte),
         Value::List(list) => list.try_at(index, &mut |thunk| force_list_thunk(context, thunk))?,

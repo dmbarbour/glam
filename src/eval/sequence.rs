@@ -92,7 +92,7 @@ pub(super) fn list_to_binary_bytes(
         &mut |values| {
             for value in values.iter() {
                 match eval_value(context, value).map_err(|error| {
-                    error.with_context(evaluation_context_frame("binary extraction"))
+                    error.with_context(evaluation_context_frame("binary_extraction"))
                 })? {
                     Value::Number(number) => {
                         let byte = number.to_u8_if_integer().ok_or_else(|| {
@@ -113,7 +113,7 @@ pub(super) fn list_to_binary_bytes(
         },
         &mut |thunk| {
             force_list_thunk(context, thunk)
-                .map_err(|error| error.with_context(evaluation_context_frame("binary extraction")))
+                .map_err(|error| error.with_context(evaluation_context_frame("binary_extraction")))
         },
     )?;
     Ok(bytes.into_inner())
@@ -140,7 +140,7 @@ pub(crate) fn list_output_bytes_range(
 ) -> Result<Option<Vec<u8>>, EvalError> {
     let Some(slice) = list.try_slice(range.start, range.end, &mut |thunk| {
         force_list_thunk(context, thunk)
-            .map_err(|error| error.with_context(evaluation_context_frame("binary extraction")))
+            .map_err(|error| error.with_context(evaluation_context_frame("binary_extraction")))
     })?
     else {
         return Ok(None);

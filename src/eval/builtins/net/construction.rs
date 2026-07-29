@@ -316,7 +316,7 @@ fn construct_copy(
         context.eval_context(),
         outputs.as_core(),
         "`.copy`",
-        "copy count",
+        "copy_count",
     )
     .map_err(task_eval_error)?;
     let port_count = outputs

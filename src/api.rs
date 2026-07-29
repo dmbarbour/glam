@@ -19,7 +19,7 @@ use crate::compiler::{
     ModuleLoader,
 };
 use crate::core::Value as CoreValue;
-use crate::core::{Builtin, Dict, Key, List, NetValue, PromisedValue};
+use crate::core::{Builtin, Dict, Key, List, NetValue, PromisedValue, keys};
 use crate::core_net::CoreSpecialization;
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
@@ -1331,16 +1331,10 @@ fn net_build_error(error: NetBuildError) -> Error {
 }
 
 fn path_lookup_context(path: &str) -> CoreValue {
-    let detail = Dict::new_sync()
-        .insert(
-            Key::atom_from_text("operation"),
-            CoreValue::binary_from_text("path lookup"),
-        )
-        .insert(
-            Key::atom_from_text("path"),
-            CoreValue::binary_from_text(path),
-        );
-    CoreValue::Dict(Dict::new_sync().insert(Key::atom_from_text("eval"), CoreValue::Dict(detail)))
+    eval::evaluation_context_frame_with_args(
+        "path_lookup",
+        Dict::new_sync().insert((*keys::PATH).clone(), CoreValue::binary_from_text(path)),
+    )
 }
 
 /// Result of running every currently scheduled reflection task to a terminal
@@ -2365,7 +2359,7 @@ impl Assembler {
             CoreValue::Lazy(_) | CoreValue::Promised(_) => {
                 let value = eval::eval_value(&self.eval_context(), value).map_err(|error| {
                     Error::from_eval(
-                        error.with_context(eval::evaluation_context_frame("binary extraction")),
+                        error.with_context(eval::evaluation_context_frame("binary_extraction")),
                     )
                 })?;
                 self.core_value_bytes(&value, label)
@@ -2409,7 +2403,7 @@ impl Assembler {
             CoreValue::Lazy(_) | CoreValue::Promised(_) | CoreValue::Net(_) => {
                 let value = eval::eval_value(&self.eval_context(), value).map_err(|error| {
                     Error::from_eval(
-                        error.with_context(eval::evaluation_context_frame("binary extraction")),
+                        error.with_context(eval::evaluation_context_frame("binary_extraction")),
                     )
                 })?;
                 return self.core_value_binary_slice(&value, range, label);
@@ -2587,7 +2581,7 @@ mod tests {
             diagnostic_contexts(&assembler, error.diagnostic())
                 .first()
                 .expect("binary observation should add an outer context"),
-            &eval::evaluation_context_frame("binary extraction")
+            &eval::evaluation_context_frame("binary_extraction")
         );
         assert_eq!(
             assembler

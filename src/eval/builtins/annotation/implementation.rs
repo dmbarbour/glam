@@ -45,7 +45,7 @@ pub(super) fn eval_anno_builtin(
         }
         RecognizedAnnotation::Error => {
             let message = eval_value(context, target)
-                .map_err(|error| error.with_context(evaluation_context_frame("error message")))?;
+                .map_err(|error| error.with_context(evaluation_context_frame("error_message")))?;
             Err(EvalError::from_value(message))
         }
         RecognizedAnnotation::Context {

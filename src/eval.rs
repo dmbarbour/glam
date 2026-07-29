@@ -39,7 +39,9 @@ pub(crate) use sequence::{
     eval_key_path_list, list_output_bytes_for, list_output_bytes_range, list_to_value_items,
 };
 pub use value::{EvalError, eval_value};
-pub(crate) use value::{evaluation_context_frame, failure_diagnostic_value};
+pub(crate) use value::{
+    evaluation_context_frame, evaluation_context_frame_with_args, failure_diagnostic_value,
+};
 
 use application::*;
 use builtins::apply_builtin;

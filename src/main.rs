@@ -1439,11 +1439,10 @@ impl DefaultLogger {
     }
 
     fn eval_context_summary(&self, payload: &Value) -> String {
-        if let Some(text) = immediate_diagnostic_text(payload) {
-            return format!("eval: {text}");
-        }
-        let operation = self.context_field_text(payload, "operation");
-        let path = self.context_field_text(payload, "path");
+        let operation = self
+            .context_field_tag_text(payload, "op")
+            .map(|operation| operation.replace('_', " "));
+        let path = self.context_field_text(payload, "args.path");
         match (operation, path) {
             (Some(operation), Some(path)) => format!("eval: {operation} `{path}`"),
             (Some(operation), None) => format!("eval: {operation}"),
@@ -1767,7 +1766,10 @@ mod tests {
                     (
                         "context",
                         Value::list([
-                            Value::record([("eval", Value::text("binary extraction"))]),
+                            Value::record([(
+                                "eval",
+                                Value::record([("op", Value::atom_from_text("binary_extraction"))]),
+                            )]),
                             Value::record([(
                                 "g",
                                 Value::record([
@@ -1782,8 +1784,8 @@ mod tests {
                             Value::record([(
                                 "eval",
                                 Value::record([
-                                    ("operation", Value::text("path lookup")),
-                                    ("path", Value::text("conf.env")),
+                                    ("op", Value::atom_from_text("path_lookup")),
+                                    ("args", Value::record([("path", Value::text("conf.env"))])),
                                 ]),
                             )]),
                             Value::record([(

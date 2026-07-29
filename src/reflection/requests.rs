@@ -616,7 +616,7 @@ fn observe_query_change<S: TaskSpecialization>(
 }
 
 pub(crate) fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskError> {
-    let log_message_context = || eval::evaluation_context_frame("log message");
+    let log_message_context = || eval::evaluation_context_frame("log_message");
     let CoreValue::Dict(mut message) = evaluate(context, message.into_core())
         .map_err(|error| error.with_core_context(log_message_context()))?
     else {
@@ -634,7 +634,7 @@ pub(crate) fn prepare_message(context: &EvalContext, message: Value) -> Result<V
 
 pub(crate) fn parse_severity(context: &EvalContext, value: Value) -> Result<Severity, TaskError> {
     let value = evaluate(context, value.into_core())
-        .map_err(|error| error.with_core_context(eval::evaluation_context_frame("log severity")))?;
+        .map_err(|error| error.with_core_context(eval::evaluation_context_frame("log_severity")))?;
     if severity_matches(&value, "info", &keys::INFO_VALUE) {
         Ok(Severity::Info)
     } else if severity_matches(&value, "warn", &keys::WARN_VALUE) {

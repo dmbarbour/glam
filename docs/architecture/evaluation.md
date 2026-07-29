@@ -53,7 +53,7 @@ produces memoized work. A raw `Value::Net` is an opaque value already in WHNF,
 not an ordinary callable. Only the interaction-net call reduction opens it by
 attaching a cursor. `LazySource::NetComputation` is the internal zero-arity
 bridge: forcing it must expose data, and an exposed bind or non-data normal
-form is an error carrying `eval:"net computation"` demand context.
+form is an error carrying `eval:{op:'net_computation}` demand context.
 `FunctionValue` provides the corresponding positive-arity bridge. Partial
 application only attaches arguments and returns another shared stage; it does
 not evaluate the net to verify an intermediate bind. Saturation demands data

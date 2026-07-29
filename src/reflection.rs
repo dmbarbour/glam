@@ -5015,9 +5015,9 @@ mod tests {
         assert_eq!(
             eval::list_to_value_items(&assembler.eval_context(), contexts).unwrap(),
             [
-                eval::evaluation_context_frame("net computation"),
+                eval::evaluation_context_frame("net_computation"),
                 Value::binary_from_text("child dispatch"),
-                eval::evaluation_context_frame("net computation"),
+                eval::evaluation_context_frame("net_computation"),
             ]
         );
     }
@@ -5415,8 +5415,8 @@ mod tests {
         assert_eq!(
             task_error_contexts(&message_error),
             [
-                eval::evaluation_context_frame("log message"),
-                eval::evaluation_context_frame("net computation"),
+                eval::evaluation_context_frame("log_message"),
+                eval::evaluation_context_frame("net_computation"),
             ]
         );
 
@@ -5428,8 +5428,8 @@ mod tests {
         assert_eq!(
             task_error_contexts(&severity_error),
             [
-                eval::evaluation_context_frame("log severity"),
-                eval::evaluation_context_frame("net computation"),
+                eval::evaluation_context_frame("log_severity"),
+                eval::evaluation_context_frame("net_computation"),
             ]
         );
     }

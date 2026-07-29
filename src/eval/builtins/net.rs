@@ -23,7 +23,7 @@ pub(super) fn apply(
 
 fn apply_net_arity(context: &EvalContext, arguments: Vec<Value>) -> Result<Value, EvalError> {
     let [arity, net] = super::exact(arguments, "net_arity")?;
-    let arity = eval_index_number(context, &arity, "net_arity", "net arity")?;
+    let arity = eval_index_number(context, &arity, "net_arity", "net_arity")?;
     let net = eval_value(context, &net)?;
     let Value::Net(net) = net else {
         return Err(EvalError::new(

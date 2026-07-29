@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::core::{Dict, EvaluatedValue, FixpointComputation, Key, LazyValue, Value};
+use crate::core::{Dict, EvaluatedValue, FixpointComputation, Key, LazyValue, Value, keys};
 use crate::number::Number;
 
 use super::*;
@@ -27,6 +27,38 @@ fn cached_value(lazy: &LazyValue) -> Value {
         .expect("lazy value should be cached")
         .expect("lazy value should succeed")
         .into_value()
+}
+
+#[test]
+fn evaluation_context_frames_use_an_atom_operation_and_optional_named_arguments() {
+    assert_eq!(
+        evaluation_context_frame("list_index"),
+        Value::Dict(Dict::new_sync().insert(
+            (*keys::EVAL).clone(),
+            Value::Dict(Dict::new_sync().insert(
+                (*keys::OP).clone(),
+                Key::atom_from_text("list_index").to_value(),
+            )),
+        ))
+    );
+
+    let args = Dict::new_sync().insert((*keys::PATH).clone(), Value::binary_from_text("conf.env"));
+    assert_eq!(
+        evaluation_context_frame_with_args("path_lookup", args.clone()),
+        Value::Dict(
+            Dict::new_sync().insert(
+                (*keys::EVAL).clone(),
+                Value::Dict(
+                    Dict::new_sync()
+                        .insert(
+                            (*keys::OP).clone(),
+                            Key::atom_from_text("path_lookup").to_value(),
+                        )
+                        .insert((*keys::ARGS).clone(), Value::Dict(args)),
+                ),
+            )
+        )
+    );
 }
 
 #[test]
@@ -70,7 +102,7 @@ fn net_arity_contextualizes_failure_while_demanding_its_arity() {
     .expect_err("failure while evaluating net arity must propagate");
     assert_eq!(
         failure_context_items(&error),
-        [evaluation_context_frame("net arity")]
+        [evaluation_context_frame("net_arity")]
     );
 }
 
@@ -106,7 +138,7 @@ fn net_backed_lazy_values_require_an_exposed_data_node() {
     );
     assert_eq!(
         failure_context_items(&error),
-        [evaluation_context_frame("net computation")]
+        [evaluation_context_frame("net_computation")]
     );
 }
 
@@ -123,7 +155,7 @@ fn net_backed_lazy_values_reject_non_data_normal_forms() {
     );
     assert_eq!(
         failure_context_items(&error),
-        [evaluation_context_frame("net computation")]
+        [evaluation_context_frame("net_computation")]
     );
 }
 
@@ -1103,7 +1135,7 @@ fn binary_output_contextualizes_only_nested_evaluation_failures() {
 
     assert_eq!(
         failure_context_items(&error),
-        [evaluation_context_frame("binary extraction")]
+        [evaluation_context_frame("binary_extraction")]
     );
 }
 
@@ -2823,7 +2855,7 @@ fn error_annotations_contextualize_failure_while_evaluating_their_message() {
     };
     assert_eq!(
         list_to_value_items(&test_context(), &contexts).unwrap(),
-        [evaluation_context_frame("error message")]
+        [evaluation_context_frame("error_message")]
     );
 }
 
@@ -2852,7 +2884,7 @@ fn index_builtins_contextualize_demand_without_decorating_validation_errors() {
     .expect_err("failure while evaluating the index must propagate");
     assert_eq!(
         failure_context_items(&nested),
-        [evaluation_context_frame("list index")]
+        [evaluation_context_frame("list_index")]
     );
 
     let validation = eval_closed_expr(&builtin2_expr(
@@ -3085,13 +3117,13 @@ fn reflection_gate_memoizes_task_failure() {
     assert_eq!(first.to_string(), "reflection task failed deliberately");
     assert_eq!(
         failure_context_items(&first),
-        [evaluation_context_frame("reflection annotation")]
+        [evaluation_context_frame("reflection_annotation")]
     );
     let second = eval_value(&context, &gate).unwrap_err();
     assert_eq!(second.to_string(), "reflection task failed deliberately");
     assert_eq!(
         failure_context_items(&second),
-        [evaluation_context_frame("reflection annotation")]
+        [evaluation_context_frame("reflection_annotation")]
     );
 }
 

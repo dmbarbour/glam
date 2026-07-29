@@ -137,8 +137,19 @@ pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
         .unwrap_or_else(|_| fallback_failure_diagnostic(failure, Some(emission), contexts))
 }
 
-pub(crate) fn evaluation_context_frame(label: &str) -> Value {
-    Value::Dict(Dict::new_sync().insert((*keys::EVAL).clone(), Value::binary_from_text(label)))
+pub(crate) fn evaluation_context_frame(operation: &str) -> Value {
+    evaluation_context_frame_with_args(operation, Dict::new_sync())
+}
+
+pub(crate) fn evaluation_context_frame_with_args(operation: &str, args: Dict) -> Value {
+    let operation = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
+        operation,
+    )));
+    let mut detail = Dict::new_sync().insert((*keys::OP).clone(), operation);
+    if !args.is_empty() {
+        detail = detail.insert((*keys::ARGS).clone(), Value::Dict(args));
+    }
+    Value::Dict(Dict::new_sync().insert((*keys::EVAL).clone(), Value::Dict(detail)))
 }
 
 fn fallback_failure_diagnostic(
@@ -512,7 +523,7 @@ fn produce_lazy_source(context: &EvalContext, lazy: &LazyValue) -> Result<Value,
             let runtime = net.runtime().clone();
             let exposed = runtime.with(|runtime| runtime.exposed());
             extract_net_data(context, runtime, exposed, "lazy net computation")
-                .map_err(|error| error.with_context(evaluation_context_frame("net computation")))
+                .map_err(|error| error.with_context(evaluation_context_frame("net_computation")))
         }
         LazySource::FunctionCall {
             function,
@@ -554,13 +565,13 @@ fn eval_reflection_gate_source(
 ) -> Result<Value, EvalError> {
     let task = gate.task(context).map_err(|error| {
         EvalError::new(error.as_ref())
-            .with_context(evaluation_context_frame("reflection annotation"))
+            .with_context(evaluation_context_frame("reflection_annotation"))
     })?;
     match context.poll_reflection_task(task) {
         EvaluationTaskPoll::Pending(wait) => Err(EvalError::blocked(CoreWaitToken(wait))),
         EvaluationTaskPoll::Complete(_) => Ok(gate.target().clone()),
         EvaluationTaskPoll::Failed(error) => Err(EvalError::failure(error)
-            .with_context(evaluation_context_frame("reflection annotation"))),
+            .with_context(evaluation_context_frame("reflection_annotation"))),
         EvaluationTaskPoll::Cancelled => {
             Err(EvalError::new("reflection annotation task was cancelled"))
         }
