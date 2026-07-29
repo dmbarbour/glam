@@ -672,9 +672,14 @@ fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Erro
         .inputs(configuration_paths().into_iter().map(ModuleInput::file))
         .build()?;
 
-    let environment = match assembler.get(module.value(), "conf.env") {
-        Ok(environment) if !environment.is_undefined() => assembler.evaluate(&environment)?,
-        Ok(_) | Err(_) => default_environment,
+    let environment = match assembler
+        .get_optional(module.value(), "conf.env")
+        .map_err(|error| error.with_context(configuration_entry_context("env")))?
+    {
+        Some(environment) if !environment.is_undefined() => assembler
+            .evaluate(&environment)
+            .map_err(|error| error.with_context(configuration_entry_context("env")))?,
+        Some(_) | None => default_environment,
     };
     Ok(LoadedConfiguration {
         value: module.into_value(),
@@ -693,10 +698,19 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
     ));
     let effect_assembler = assembler.clone();
     let evaluation_runtime = assembler.evaluation_runtime();
-    let custom = assembler
-        .get(configuration, "conf.log")
-        .ok()
-        .filter(|logger| !logger.is_undefined());
+    let custom = match assembler.get_optional(configuration, "conf.log") {
+        Ok(Some(logger)) if !logger.is_undefined() => Some(logger),
+        Ok(Some(_)) | Ok(None) => None,
+        Err(error) => {
+            diagnostics.publish(
+                error
+                    .with_context(configuration_entry_context("log"))
+                    .diagnostic()
+                    .clone(),
+            );
+            None
+        }
+    };
     let task_diagnostics = diagnostics.clone();
     let thread = thread::spawn(move || {
         let _subscription = subscription;
@@ -711,16 +725,20 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
             {
                 Ok(TaskOutcome::Complete(_)) => {}
                 Ok(TaskOutcome::Cancelled) => {
-                    task_diagnostics.publish(Diagnostic::new(
-                        Severity::Error,
-                        "configured logger remained blocked after the log stream closed",
-                    ));
+                    task_diagnostics.publish(
+                        Diagnostic::new(
+                            Severity::Error,
+                            "configured logger remained blocked after the log stream closed",
+                        )
+                        .with_context(configuration_entry_context("log")),
+                    );
                 }
                 Err(error) => {
-                    task_diagnostics.publish(Diagnostic::new(
-                        Severity::Error,
-                        format!("configured logger failed: {error}"),
-                    ));
+                    task_diagnostics.publish(
+                        error
+                            .with_context(configuration_entry_context("log"))
+                            .diagnostic(),
+                    );
                 }
             }
         }
@@ -730,6 +748,10 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
         thread,
         diagnostics,
     }
+}
+
+fn configuration_entry_context(entry: &str) -> Value {
+    Value::record([("conf", Value::record([("entry", Value::text(entry))]))])
 }
 
 struct LoggerRun {
@@ -1398,7 +1420,7 @@ impl DefaultLogger {
         };
 
         if tag == &Value::atom_from_text("eval") {
-            return tagged_context_summary("eval", payload);
+            return self.eval_context_summary(payload);
         }
         if tag == &Value::atom_from_text("g") {
             return self.g_context_summary(payload);
@@ -1406,8 +1428,28 @@ impl DefaultLogger {
         if tag == &Value::atom_from_text("asm") {
             return self.asm_context_summary(payload);
         }
+        if tag == &Value::atom_from_text("conf") {
+            return self.conf_context_summary(payload);
+        }
+        if tag == &Value::atom_from_text("task") {
+            return self.task_context_summary(payload);
+        }
         self.context_tag_text(tag)
             .unwrap_or_else(|| diagnostic_value_kind(&frame).to_owned())
+    }
+
+    fn eval_context_summary(&self, payload: &Value) -> String {
+        if let Some(text) = immediate_diagnostic_text(payload) {
+            return format!("eval: {text}");
+        }
+        let operation = self.context_field_text(payload, "operation");
+        let path = self.context_field_text(payload, "path");
+        match (operation, path) {
+            (Some(operation), Some(path)) => format!("eval: {operation} `{path}`"),
+            (Some(operation), None) => format!("eval: {operation}"),
+            (None, Some(path)) => format!("eval: path `{path}`"),
+            (None, None) => "eval".to_owned(),
+        }
     }
 
     fn g_context_summary(&self, payload: &Value) -> String {
@@ -1430,11 +1472,36 @@ impl DefaultLogger {
         )
     }
 
+    fn conf_context_summary(&self, payload: &Value) -> String {
+        self.context_field_text(payload, "entry").map_or_else(
+            || "conf".to_owned(),
+            |entry| format!("conf: entry `{entry}`"),
+        )
+    }
+
+    fn task_context_summary(&self, payload: &Value) -> String {
+        let operation = self.context_field_tag_text(payload, "operation");
+        let id = self.context_field_text(payload, "id");
+        match (operation, id) {
+            (Some(operation), Some(id)) => format!("task: {operation} task {id}"),
+            (Some(operation), None) => format!("task: {operation}"),
+            (None, Some(id)) => format!("task: task {id}"),
+            (None, None) => "task".to_owned(),
+        }
+    }
+
     fn context_field_text(&self, value: &Value, path: &str) -> Option<String> {
         self.evaluator
             .get(value, path)
             .ok()
             .and_then(|value| immediate_diagnostic_text(&value))
+    }
+
+    fn context_field_tag_text(&self, value: &Value, path: &str) -> Option<String> {
+        self.evaluator
+            .get(value, path)
+            .ok()
+            .and_then(|value| self.context_tag_text(&value))
     }
 
     fn context_tag_text(&self, tag: &Value) -> Option<String> {
@@ -1486,11 +1553,6 @@ impl DefaultLogger {
             .display()
             .to_string()
     }
-}
-
-fn tagged_context_summary(tag: &str, payload: &Value) -> String {
-    immediate_diagnostic_text(payload)
-        .map_or_else(|| tag.to_owned(), |text| format!("{tag}: {text}"))
 }
 
 fn immediate_diagnostic_text(value: &Value) -> Option<String> {
@@ -1717,6 +1779,24 @@ mod tests {
                                 "asm",
                                 Value::record([("result", Value::text("asm.result"))]),
                             )]),
+                            Value::record([(
+                                "eval",
+                                Value::record([
+                                    ("operation", Value::text("path lookup")),
+                                    ("path", Value::text("conf.env")),
+                                ]),
+                            )]),
+                            Value::record([(
+                                "conf",
+                                Value::record([("entry", Value::text("log"))]),
+                            )]),
+                            Value::record([(
+                                "task",
+                                Value::record([
+                                    ("operation", Value::atom_from_text("join")),
+                                    ("id", Value::integer(12)),
+                                ]),
+                            )]),
                         ]),
                     ),
                 ]),
@@ -1740,7 +1820,7 @@ mod tests {
         assert_eq!(
             rendered,
             Bytes::from_static(
-                b"error: broken\n    more detail\n  context:\n    eval: binary extraction\n    g: definition `result` on line 7\n    asm: result `asm.result`\n"
+                b"error: broken\n    more detail\n  context:\n    eval: binary extraction\n    g: definition `result` on line 7\n    asm: result `asm.result`\n    eval: path lookup `conf.env`\n    conf: entry `log`\n    task: join task 12\n"
             )
         );
     }

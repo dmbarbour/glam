@@ -8,6 +8,7 @@ use crate::evaluation::{
     EvalContext, EvaluationTaskCancellation, EvaluationTaskId, EvaluationTaskPoll,
     EvaluationTaskStatus, EvaluationTaskStatusSink, PendingReflectionTask,
 };
+use crate::number::Number;
 
 use super::{
     CommitResult, EffectRequestSpec, EvaluationQueryHandle, EvaluationQueryPoll,
@@ -341,7 +342,9 @@ where
                 EvaluationTaskPoll::Complete(value) => {
                     Ok(RequestResult::Return(Value::from_core(value)))
                 }
-                EvaluationTaskPoll::Failed(error) => Err(TaskError::failure(error)),
+                EvaluationTaskPoll::Failed(error) => {
+                    Err(TaskError::failure(error).with_core_context(task_join_context(handle.task)))
+                }
                 EvaluationTaskPoll::Cancelled => {
                     Err(TaskError::new("joined reflection task was cancelled"))
                 }
@@ -458,6 +461,17 @@ struct ReflectionTaskHandle {
 
 fn task_handle_value(handle: Arc<ReflectionTaskHandle>) -> Value {
     Value::from_core(CoreValue::Opaque(OpaqueValue::new(handle)))
+}
+
+fn task_join_context(task: EvaluationTaskId) -> CoreValue {
+    let operation = CoreValue::Atom(Atom::from_key(&Key::binary_from_text("join")));
+    let detail = Dict::new_sync()
+        .insert(Key::atom_from_text("operation"), operation)
+        .insert(
+            Key::atom_from_text("id"),
+            CoreValue::Number(Number::from_u64(task.get())),
+        );
+    CoreValue::Dict(Dict::new_sync().insert(Key::atom_from_text("task"), CoreValue::Dict(detail)))
 }
 
 fn task_status_query_value(status: EvaluationTaskStatus) -> CoreValue {
@@ -604,7 +618,7 @@ fn observe_query_change<S: TaskSpecialization>(
 pub(crate) fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskError> {
     let log_message_context = || eval::evaluation_context_frame("log message");
     let CoreValue::Dict(mut message) = evaluate(context, message.into_core())
-        .map_err(|error| error.with_context(log_message_context()))?
+        .map_err(|error| error.with_core_context(log_message_context()))?
     else {
         return Err(TaskError::new("`.log` message must evaluate to an object"));
     };
@@ -612,7 +626,7 @@ pub(crate) fn prepare_message(context: &EvalContext, message: Value) -> Result<V
         message = message.insert(
             (*keys::MSG).clone(),
             evaluate(context, interface.clone())
-                .map_err(|error| error.with_context(log_message_context()))?,
+                .map_err(|error| error.with_core_context(log_message_context()))?,
         );
     }
     Ok(Value::from_core(CoreValue::Dict(message)))
@@ -620,7 +634,7 @@ pub(crate) fn prepare_message(context: &EvalContext, message: Value) -> Result<V
 
 pub(crate) fn parse_severity(context: &EvalContext, value: Value) -> Result<Severity, TaskError> {
     let value = evaluate(context, value.into_core())
-        .map_err(|error| error.with_context(eval::evaluation_context_frame("log severity")))?;
+        .map_err(|error| error.with_core_context(eval::evaluation_context_frame("log severity")))?;
     if severity_matches(&value, "info", &keys::INFO_VALUE) {
         Ok(Severity::Info)
     } else if severity_matches(&value, "warn", &keys::WARN_VALUE) {

@@ -13,8 +13,8 @@ pub fn expand_configured(
     arguments: CliArguments,
 ) -> Result<CliExpansion, CliError> {
     let effect = assembler
-        .get(configuration, "conf.cli")
-        .ok()
+        .get_optional(configuration, "conf.cli")
+        .map_err(CliError::from_error)?
         .filter(|value| !value.is_undefined())
         .ok_or_else(|| CliError::new("configured `conf.cli` did not match the command line"))?;
     let result = run_cli_search(assembler, &effect, arguments)?;
@@ -29,8 +29,8 @@ pub fn complete_configured(
     request: CompletionRequest,
 ) -> Result<CliCompletion, CliError> {
     let Some(effect) = assembler
-        .get(configuration, "conf.cli")
-        .ok()
+        .get_optional(configuration, "conf.cli")
+        .map_err(CliError::from_error)?
         .filter(|value| !value.is_undefined())
     else {
         return Ok(CliCompletion::new(Vec::new(), Vec::new(), Vec::new()));

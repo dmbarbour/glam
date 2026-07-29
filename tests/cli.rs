@@ -19,6 +19,35 @@ fn short_file_option_writes_asm_result_to_stdout() {
 }
 
 #[test]
+fn configuration_environment_failure_reports_its_entry_and_path() {
+    let dir = unique_temp_dir("glam-conf-env-context");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nimport 'std as std\nconf = std.anno 'error \"configuration failed\"\n",
+    )
+    .unwrap_or_else(|error| panic!("failed to write {}: {error}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--script.g")
+        .arg("language g0\nasm.result = \"unreachable\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error: configuration failed")
+            && stderr.contains("conf: entry `env`")
+            && stderr.contains("eval: path lookup `conf.env`"),
+        "configuration failure context was not rendered:\n{stderr}"
+    );
+}
+
+#[test]
 fn manifest_records_local_sources_and_binary_imports() {
     let dir = unique_temp_dir("glam-manifest");
     fs::create_dir_all(&dir)
@@ -756,8 +785,12 @@ fn configured_logger_output_precedes_a_later_logger_failure() {
     assert_eq!(output.stdout, b"ok");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let failure = stderr
-        .find("configured logger failed")
+        .find("error: path-list operand must evaluate to a list value")
         .unwrap_or_else(|| panic!("logger failure diagnostic was not rendered:\n{stderr}"));
+    assert!(
+        stderr.contains("conf: entry `log`"),
+        "logger failure should identify the configuration entry:\n{stderr}"
+    );
     let emitted = stderr
         .find("REMAINING MESSAGE")
         .unwrap_or_else(|| panic!("logger diagnostic did not use its output target:\n{stderr}"));
@@ -790,8 +823,8 @@ fn configured_logger_requires_a_unit_result() {
     assert_eq!(output.stdout, b"ok");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("configured logger failed")
-            && stderr.contains("configured logger result: unit expected, received Binary"),
+        stderr.contains("configured logger result: unit expected, received Binary")
+            && stderr.contains("conf: entry `log`"),
         "non-unit logger result was not reported:\n{stderr}"
     );
 }
@@ -931,9 +964,10 @@ fn configured_logger_reports_an_unjoined_child_failure() {
     assert!(!output.status.success());
     assert_eq!(output.stdout, b"ok");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("configured logger failed"));
     assert!(
-        stderr.contains("task") && stderr.contains("failed"),
+        stderr.contains("task")
+            && stderr.contains("failed")
+            && stderr.contains("conf: entry `log`"),
         "child failure was not reported:\n{stderr}"
     );
 }

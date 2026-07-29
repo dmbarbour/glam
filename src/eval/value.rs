@@ -512,6 +512,7 @@ fn produce_lazy_source(context: &EvalContext, lazy: &LazyValue) -> Result<Value,
             let runtime = net.runtime().clone();
             let exposed = runtime.with(|runtime| runtime.exposed());
             extract_net_data(context, runtime, exposed, "lazy net computation")
+                .map_err(|error| error.with_context(evaluation_context_frame("net computation")))
         }
         LazySource::FunctionCall {
             function,

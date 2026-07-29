@@ -504,6 +504,23 @@ impl Diagnostic {
             .map_err(Error::new)
     }
 
+    /// Prepends one structured frame describing why this diagnostic was
+    /// produced or propagated. The original emission remains otherwise
+    /// unchanged.
+    pub fn with_context(self, context: Value) -> Self {
+        let emission = crate::diagnostic::prepend_context(
+            self.emission.as_core().clone(),
+            context.into_core(),
+        )
+        .unwrap_or_else(|_| self.emission.as_core().clone());
+        Self::from_parts(
+            self.source,
+            self.severity,
+            emission,
+            self.origin.map(Value::into_core),
+        )
+    }
+
     pub fn source(&self) -> Option<&str> {
         self.source.as_deref()
     }
@@ -1313,6 +1330,19 @@ fn net_build_error(error: NetBuildError) -> Error {
     Error::new(format!("invalid interaction net: {error}"))
 }
 
+fn path_lookup_context(path: &str) -> CoreValue {
+    let detail = Dict::new_sync()
+        .insert(
+            Key::atom_from_text("operation"),
+            CoreValue::binary_from_text("path lookup"),
+        )
+        .insert(
+            Key::atom_from_text("path"),
+            CoreValue::binary_from_text(path),
+        );
+    CoreValue::Dict(Dict::new_sync().insert(Key::atom_from_text("eval"), CoreValue::Dict(detail)))
+}
+
 /// Result of running every currently scheduled reflection task to a terminal
 /// state or to a stable quiescent pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2024,6 +2054,13 @@ impl Assembler {
             .map(Value::from_core)
     }
 
+    /// Returns a value at an atom path, distinguishing an absent path from a
+    /// failure while demanding an intermediate value.
+    pub fn get_optional(&self, root: &Value, path: &str) -> Result<Option<Value>, Error> {
+        self.core_value_at_path_optional(root.as_core(), path)
+            .map(|value| value.map(Value::from_core))
+    }
+
     pub fn to_binary(&self, value: &Value) -> Result<Bytes, Error> {
         self.core_value_bytes(value.as_core(), "value")
     }
@@ -2290,21 +2327,31 @@ impl Assembler {
     }
 
     fn core_value_at_path(&self, root: &CoreValue, path: &str) -> Result<CoreValue, Error> {
+        self.core_value_at_path_optional(root, path)?
+            .ok_or_else(|| Error::new(format!("module did not define `{path}`")))
+    }
+
+    fn core_value_at_path_optional(
+        &self,
+        root: &CoreValue,
+        path: &str,
+    ) -> Result<Option<CoreValue>, Error> {
         let mut current = root.clone();
         let context = self.eval_context();
 
         for part in path.split('.') {
-            let current_value = eval::eval_value(&context, &current).map_err(Error::from_eval)?;
+            let current_value = eval::eval_value(&context, &current)
+                .map_err(|error| Error::from_eval(error.with_context(path_lookup_context(path))))?;
             let CoreValue::Dict(dict) = current_value else {
-                return Err(Error::new(format!("module did not define `{path}`")));
+                return Ok(None);
             };
-            current = dict
-                .get(&Key::atom_from_text(part))
-                .cloned()
-                .ok_or_else(|| Error::new(format!("module did not define `{path}`")))?;
+            let Some(next) = dict.get(&Key::atom_from_text(part)) else {
+                return Ok(None);
+            };
+            current = next.clone();
         }
 
-        Ok(current)
+        Ok(Some(current))
     }
 
     fn core_value_bytes(&self, value: &CoreValue, label: &str) -> Result<Bytes, Error> {
@@ -2548,6 +2595,31 @@ mod tests {
                 .expect("ad hoc diagnostic fields should survive contextualization")
                 .as_binary(),
             Some(b"kept".as_slice())
+        );
+    }
+
+    #[test]
+    fn path_lookup_contextualizes_only_demand_failures() {
+        let assembler = Assembler::new();
+        let root = Value::from_core(CoreValue::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("broken"),
+            CoreValue::error("path target failed"),
+        )));
+
+        let error = assembler
+            .get(&root, "broken.member")
+            .expect_err("forcing an intermediate path value should fail");
+        assert_eq!(error.to_string(), "path target failed");
+        assert_eq!(
+            diagnostic_contexts(&assembler, error.diagnostic()),
+            [path_lookup_context("broken.member")]
+        );
+
+        assert!(
+            assembler
+                .get_optional(&root, "missing.member")
+                .expect("an absent path should not be an evaluation failure")
+                .is_none()
         );
     }
 

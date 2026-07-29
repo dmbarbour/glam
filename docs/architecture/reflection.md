@@ -145,7 +145,9 @@ not revoke it.
   updated only when the projected state changes between atoms `'launched` and
   `'blocked`, terminal tagged values `ok:Value` and `err:Error`, and the atom
   `'canceled`.
-- `.task.join` waits directly and propagates non-success terminal states.
+- `.task.join` waits directly and propagates non-success terminal states,
+  adding `{task:{operation:'join, id:TaskId}}` when it forwards a child
+  failure.
   `.task.status` returns that stored status value unchanged, while
   `.task.value` and `.task.error` project and transactionally wait for their
   matching terminal payload. `.task.cancel` journals a best-effort

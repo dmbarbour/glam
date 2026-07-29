@@ -104,10 +104,13 @@ and control flow.
   terminal errors. A joined dependency becoming terminal reruns the join
   operation; it does not select another `.alt` branch. An error with prior
   state observations remains blocked until those observations can retry its
-  checkpoint. `.task.status` returns the stored status value unchanged.
+  checkpoint. Propagation prepends
+  `{task:{operation:'join, id:TaskId}}`. `.task.status` returns the stored
+  status value unchanged.
   `.task.value` and `.task.error` project its matching terminal payload, fail
   transactionally while it is nonterminal, and fail permanently for the other
-  terminal outcome.
+  terminal outcome; observation through those operations never adds the join
+  frame.
 - `.task.cancel` is an unconditional best-effort, commit-ordered request; late
   and foreign cancellation are harmless no-ops. Losing branches discard
   cancellation requests.

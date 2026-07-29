@@ -3,13 +3,14 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::{Diagnostic, ModuleInput, Severity, Value};
+use crate::{Diagnostic, Error, ModuleInput, Severity, Value};
 
 use super::completion::{CliCaseExplanation, CompletionRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
     message: String,
+    cause: Option<Box<Diagnostic>>,
     diagnostics: Vec<Diagnostic>,
     explanations: Vec<CliCaseExplanation>,
 }
@@ -18,7 +19,17 @@ impl CliError {
     pub(super) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            cause: None,
             diagnostics: Vec::new(),
+            explanations: Vec::new(),
+        }
+    }
+
+    pub(super) fn from_error(error: Error) -> Self {
+        Self {
+            message: error.to_string(),
+            cause: Some(Box::new(error.diagnostic().clone())),
+            diagnostics: error.diagnostics().to_vec(),
             explanations: Vec::new(),
         }
     }
@@ -50,6 +61,12 @@ impl CliError {
     /// Projects this CLI failure into a rich diagnostic while retaining the
     /// original `.case` values for configured loggers and IDE clients.
     pub fn diagnostic(&self) -> Diagnostic {
+        if let Some(cause) = &self.cause {
+            return cause.clone().with_context(Value::record([(
+                "conf",
+                Value::record([("entry", Value::text("cli"))]),
+            )]));
+        }
         let mut entries = vec![("msg", Value::record([("text", Value::text(&self.message))]))];
         if !self.explanations.is_empty() {
             entries.push((
@@ -64,7 +81,9 @@ impl CliError {
                 )]),
             ));
         }
-        Diagnostic::from_emission(Severity::Error, Value::record(entries))
+        Diagnostic::from_emission(Severity::Error, Value::record(entries)).with_context(
+            Value::record([("conf", Value::record([("entry", Value::text("cli"))]))]),
+        )
     }
 }
 

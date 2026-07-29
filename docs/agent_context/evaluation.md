@@ -45,7 +45,9 @@ control-flow overview.
   inspect its exposed interface. `LazySource::NetComputation` is the internal
   arity-zero bridge, while `FunctionValue` staging supplies the positive-arity
   bridge. `import 'std` exposes the provisional `net_arity` builtin for both
-  forms, alongside `seq` and `spark`.
+  forms, alongside `seq` and `spark`. A permanent failure while the zero-arity
+  bridge demands data gains `eval:"net computation"`; raw net observation does
+  not.
 - Lazy identities are process-global nonzero IDs because a value and its result
   cell may cross evaluation sessions; each session uses them only as local
   scheduling keys.

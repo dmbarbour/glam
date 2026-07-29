@@ -33,12 +33,13 @@ use std::sync::Arc;
 
 use search::SearchPolicy;
 
-use crate::api::{EvaluationRuntime, Value as PublicValue};
+use crate::api::{Diagnostic, EvaluationRuntime, Value as PublicValue};
 use crate::core::{
     Atom, Builtin, Dict, EvaluationFailure, FunctionValue, Key, LazyValue, List, NetValue,
     PromisedValue, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
+use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSession,
@@ -348,12 +349,29 @@ impl TaskError {
         Self(TaskErrorKind::Failure(failure))
     }
 
-    fn with_context(self, context: Value) -> Self {
+    fn with_core_context(self, context: Value) -> Self {
         match self.0 {
             TaskErrorKind::Failure(failure) => {
                 Self::failure(Arc::new(failure.with_context(context)))
             }
             TaskErrorKind::Blocked(wait) => Self::blocked(wait),
+        }
+    }
+
+    /// Prepends one structured frame when a host client propagates this task
+    /// failure through another semantic boundary.
+    pub fn with_context(self, context: PublicValue) -> Self {
+        self.with_core_context(context.into_core())
+    }
+
+    /// Projects a permanent task failure into its structured diagnostic.
+    pub fn diagnostic(&self) -> Diagnostic {
+        match &self.0 {
+            TaskErrorKind::Failure(failure) => Diagnostic::from_emission(
+                Severity::Error,
+                PublicValue::from_core(eval::failure_diagnostic_value(failure)),
+            ),
+            TaskErrorKind::Blocked(_) => Diagnostic::new(Severity::Error, self.to_string()),
         }
     }
 
@@ -4931,6 +4949,26 @@ mod tests {
             panic!("join should propagate its child task error")
         };
         assert!(error.to_string().contains("failed permanently"));
+        let [frame] = error.contexts() else {
+            panic!("join should prepend exactly one propagation frame")
+        };
+        let Value::Dict(frame) = frame else {
+            panic!("join propagation context should be a tagged dictionary")
+        };
+        let Value::Dict(task_context) = frame
+            .get(&Key::atom_from_text("task"))
+            .expect("join propagation context should be tagged task")
+        else {
+            panic!("task context payload should be a dictionary")
+        };
+        assert_eq!(
+            task_context.get(&Key::atom_from_text("operation")),
+            Some(&Value::Atom(Atom::from_key(&Key::binary_from_text("join"))))
+        );
+        let Some(Value::Number(id)) = task_context.get(&Key::atom_from_text("id")) else {
+            panic!("join propagation context should identify the child task")
+        };
+        assert!(id.to_u64_if_integer().is_some_and(|id| id > 0));
 
         let (assembler, extract) =
             compile_effect(".task.new (.fail) >>= (\\task -> .task.error task)");
@@ -4976,7 +5014,11 @@ mod tests {
         };
         assert_eq!(
             eval::list_to_value_items(&assembler.eval_context(), contexts).unwrap(),
-            [Value::binary_from_text("child dispatch")]
+            [
+                eval::evaluation_context_frame("net computation"),
+                Value::binary_from_text("child dispatch"),
+                eval::evaluation_context_frame("net computation"),
+            ]
         );
     }
 
@@ -5372,7 +5414,10 @@ mod tests {
             run_reflection_test(&message_effect, Arc::new(TestHost::default())).unwrap_err();
         assert_eq!(
             task_error_contexts(&message_error),
-            [eval::evaluation_context_frame("log message")]
+            [
+                eval::evaluation_context_frame("log message"),
+                eval::evaluation_context_frame("net computation"),
+            ]
         );
 
         let (_, severity_effect) = compile_effect(
@@ -5382,7 +5427,10 @@ mod tests {
             run_reflection_test(&severity_effect, Arc::new(TestHost::default())).unwrap_err();
         assert_eq!(
             task_error_contexts(&severity_error),
-            [eval::evaluation_context_frame("log severity")]
+            [
+                eval::evaluation_context_frame("log severity"),
+                eval::evaluation_context_frame("net computation"),
+            ]
         );
     }
 

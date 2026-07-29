@@ -448,6 +448,27 @@ fn public_reflection_inspects_container_structure_and_atom_identity() {
 }
 
 #[test]
+fn optional_path_lookup_distinguishes_absence_from_failure() {
+    let assembler = Assembler::default();
+    let value = Value::record([("present", Value::integer(1))]);
+
+    assert_eq!(
+        assembler
+            .get_optional(&value, "present")
+            .expect("present path lookup should succeed")
+            .and_then(|value| value.as_i64()),
+        Some(1)
+    );
+    assert!(
+        assembler
+            .get_optional(&value, "missing")
+            .expect("an absent path should not be an evaluation failure")
+            .is_none()
+    );
+    assert!(assembler.get(&value, "missing").is_err());
+}
+
+#[test]
 fn assembler_owns_an_authoritative_reflection_environment() {
     let (builder, diagnostics) = collecting_builder();
     let assembler = builder

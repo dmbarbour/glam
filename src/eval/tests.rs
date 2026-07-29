@@ -98,9 +98,15 @@ fn net_backed_lazy_values_require_an_exposed_data_node() {
     });
     let value = Value::Lazy(LazyValue::from_net_computation(identity));
 
+    let error = eval_value(&test_context(), &value)
+        .expect_err("a net computation must expose data rather than a bind");
     assert_eq!(
-        eval_value(&test_context(), &value).unwrap_err().to_string(),
+        error.to_string(),
         "lazy net computation exposed a bind instead of data"
+    );
+    assert_eq!(
+        failure_context_items(&error),
+        [evaluation_context_frame("net computation")]
     );
 }
 
@@ -109,9 +115,15 @@ fn net_backed_lazy_values_reject_non_data_normal_forms() {
     let inert = closed_net(|builder| builder.copy(0).input);
     let value = Value::Lazy(LazyValue::from_net_computation(inert));
 
+    let error = eval_value(&test_context(), &value)
+        .expect_err("an inert net computation must not produce a value");
     assert_eq!(
-        eval_value(&test_context(), &value).unwrap_err().to_string(),
+        error.to_string(),
         "lazy net computation reached a non-data normal form"
+    );
+    assert_eq!(
+        failure_context_items(&error),
+        [evaluation_context_frame("net computation")]
     );
 }
 

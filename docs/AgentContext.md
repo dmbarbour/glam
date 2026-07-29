@@ -141,6 +141,18 @@ notes instead of appending history; put subsystem details in
   list segment, or target fails while being demanded. Immediate validation
   errors already identify the invalid byte or value and do not gain that
   nested-demand frame.
+- A failure while forcing an intermediate `Assembler::get` value gains
+  `{eval:{operation:"path lookup", path:Text}}`; a merely absent path does not.
+  `Assembler::get_optional` preserves that distinction for clients.
+- Configuration entry failures gain `{conf:{entry:Text}}` at the client
+  boundary. Current entries are `env`, `cli`, and `log`; apply the same policy
+  when `conf.ide` is introduced.
+- `.task.join` prepends `{task:{operation:'join, id:Number}}` only when it
+  propagates a child's failure. `.task.status` and `.task.error` observe the
+  terminal failure as data and must not add the join frame.
+- `LazySource::NetComputation` failures gain `eval:"net computation"` because
+  that bridge explicitly demands data from the net. Raw `Value::Net` remains
+  WHNF and receives no such frame.
 - The built-in `.g` compiler wraps source definition initialization in a
   shallow static frame
   `{g:{origin:OpaqueOrigin, line:Number, definition:Text}}`. It deliberately

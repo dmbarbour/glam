@@ -913,6 +913,26 @@ fn configured_cli_rejects_nonunit_unconsumed_and_ambiguous_results() {
         let error = expand_configured(&assembler, &configuration, configured_arguments(&["build"]))
             .expect_err("invalid configured command should fail");
         assert!(error.to_string().contains(expected), "{error}");
+        let diagnostic = error.diagnostic();
+        let contexts = assembler
+            .get(diagnostic.emission(), "msg.context")
+            .expect("configured CLI errors should carry entry-point context");
+        let frames = assembler
+            .reflection()
+            .list_items(&contexts)
+            .expect("configured CLI contexts should be a list");
+        assert_eq!(
+            assembler
+                .get(
+                    frames
+                        .first()
+                        .expect("configured CLI should have an entry-point frame"),
+                    "conf.entry",
+                )
+                .expect("configured CLI frame should identify its entry")
+                .as_binary(),
+            Some(b"cli".as_slice())
+        );
     }
 }
 
