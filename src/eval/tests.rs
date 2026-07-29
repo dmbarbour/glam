@@ -4193,6 +4193,199 @@ fn zero_worker_spark_returns_target_without_forcing_work() {
 }
 
 #[test]
+fn strategies_demand_hidden_metadata_without_exposing_the_carrier() {
+    let context = test_context();
+    let metadata_forces = Arc::new(AtomicUsize::new(0));
+    let counted_metadata_forces = metadata_forces.clone();
+    let metadata = Value::deferred("sequenced metadata", move |_| {
+        counted_metadata_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(7))
+    });
+    let carrier = Value::metadata_carrier(metadata);
+    let target_forces = Arc::new(AtomicUsize::new(0));
+    let counted_target_forces = target_forces.clone();
+    let target = Value::deferred("metadata sequence target", move |_| {
+        counted_target_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(42))
+    });
+
+    let result = apply_values(
+        &context,
+        Value::Builtin(Builtin::Seq),
+        vec![carrier, target],
+    )
+    .expect("seq should successfully demand hidden metadata");
+    assert_eq!(metadata_forces.load(Ordering::SeqCst), 1);
+    assert_eq!(target_forces.load(Ordering::SeqCst), 0);
+    assert_eq!(eval_value(&context, &result).unwrap(), n(42));
+    assert_eq!(target_forces.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn zero_worker_spark_discards_hidden_metadata_demand() {
+    let context = test_context();
+    let metadata = Value::deferred("discarded metadata spark", |_| {
+        panic!("zero-worker spark must not demand hidden metadata")
+    });
+    let carrier = Value::metadata_carrier(metadata);
+    let result = apply_values(
+        &context,
+        Value::Builtin(Builtin::Spark),
+        vec![carrier, n(42)],
+    )
+    .expect("spark should return its target with no workers");
+
+    assert_eq!(eval_value(&context, &result).unwrap(), n(42));
+}
+
+#[test]
+fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
+    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
+    let session = crate::evaluation::EvaluationSession::shared(&executor);
+    let context = EvalContext::new(session);
+    let (shell_sender, shell_receiver) = std::sync::mpsc::channel();
+    let (metadata_sender, metadata_receiver) = std::sync::mpsc::channel();
+    let metadata = Value::deferred("worker metadata", move |_| {
+        metadata_sender
+            .send(())
+            .expect("metadata receiver should remain open");
+        Ok(n(7))
+    });
+    let carrier = Value::metadata_carrier(metadata);
+    let lazy_carrier = Value::deferred("lazy worker metadata carrier", move |_| {
+        shell_sender
+            .send(())
+            .expect("carrier receiver should remain open");
+        Ok(carrier.clone())
+    });
+
+    let result = apply_values(
+        &context,
+        Value::Builtin(Builtin::Spark),
+        vec![lazy_carrier, n(42)],
+    )
+    .expect("spark should immediately return its target");
+    assert_eq!(result, n(42));
+    shell_receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("worker should demand the carrier shell");
+    metadata_receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("worker should continue into the hidden metadata");
+}
+
+#[test]
+fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
+    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
+    let session = crate::evaluation::EvaluationSession::shared(&executor);
+    let context = EvalContext::new(session);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted_attempts = attempts.clone();
+    let (attempt_sender, attempt_receiver) = std::sync::mpsc::channel();
+    let metadata = LazyValue::deferred("failing metadata strategy", move |_| {
+        counted_attempts.fetch_add(1, Ordering::SeqCst);
+        attempt_sender
+            .send(())
+            .expect("attempt receiver should remain open");
+        Err(EvaluationHalt::new("metadata strategy failed"))
+    });
+    let carrier = Value::metadata_carrier(Value::Lazy(metadata.clone()));
+
+    let result = apply_values(
+        &context,
+        Value::Builtin(Builtin::Spark),
+        vec![carrier.clone(), n(42)],
+    )
+    .expect("detached metadata failure must not replace the spark target");
+    assert_eq!(result, n(42));
+    attempt_receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("worker should demand the failing metadata");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while metadata.cached().is_none() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        metadata.cached().is_some(),
+        "the worker must cache the terminal metadata failure"
+    );
+
+    let error = apply_values(&context, Value::Builtin(Builtin::Seq), vec![carrier, n(43)])
+        .expect_err("seq must propagate the cached hidden failure");
+    assert_eq!(error.to_string(), "metadata strategy failed");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn metadata_seq_preserves_retryable_promise_blockage() {
+    let context = test_context();
+    let owner = context.with_new_task().unwrap();
+    let observer = context.with_new_task().unwrap();
+    let promise = PromisedValue::fixpoint(&owner, "blocked metadata").unwrap();
+    let carrier = Value::metadata_carrier(Value::Promised(promise.clone()));
+
+    let blocked = apply_values(
+        &observer,
+        Value::Builtin(Builtin::Seq),
+        vec![carrier.clone(), n(42)],
+    )
+    .expect_err("seq should block on unresolved hidden metadata");
+    assert!(blocked.blocked_on().is_some());
+
+    promise.set(n(7)).unwrap();
+    assert_eq!(
+        apply_values(
+            &observer,
+            Value::Builtin(Builtin::Seq),
+            vec![carrier, n(42)],
+        )
+        .expect("seq should resume after hidden metadata completes"),
+        n(42)
+    );
+}
+
+#[test]
+fn completed_metadata_updates_release_sources_and_task_records() {
+    let context = test_context();
+    let prior_source_dropped = Arc::new(AtomicBool::new(false));
+    let prior_signal = DropSignal(prior_source_dropped.clone());
+    let prior = Value::deferred("discardable prior metadata", move |_| {
+        let _keep_signal_captured = &prior_signal;
+        Ok(n(1))
+    });
+    let outputs = run_metadata_update(
+        &context,
+        closed_function_value(
+            1,
+            TestExpr::Value(Value::List(List::from_values(vec![n(7)]))),
+        ),
+        vec![Value::metadata_carrier(prior)],
+    )
+    .expect("metadata update should remain lazy");
+    assert!(
+        !prior_source_dropped.load(Ordering::Acquire),
+        "the unresolved update must retain its prior metadata input"
+    );
+
+    let result = apply_values(
+        &context,
+        Value::Builtin(Builtin::Seq),
+        vec![outputs[0].clone(), n(42)],
+    )
+    .expect("seq should complete the derived metadata");
+    assert_eq!(result, n(42));
+    assert!(
+        prior_source_dropped.load(Ordering::Acquire),
+        "a completed update which ignores its input should release the prior metadata graph"
+    );
+    let counts = context.task_registry_counts();
+    assert_eq!(counts.deferred_active, 0);
+    assert_eq!(counts.deferred_terminal, 0);
+    assert_eq!(counts.deferred_by_wait, 0);
+    assert_eq!(counts.deferred_by_task, 0);
+}
+
+#[test]
 fn strategy_annotations_share_builtin_semantics() {
     let context = test_context();
     let seq_annotation = Value::Dict(Dict::new_sync().insert(
