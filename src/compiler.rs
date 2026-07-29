@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::api::CompilationExecution;
 use crate::core::{Atom, Dict, EvaluationFailure, EvaluationHalt, Key, PromisedValue, Value, keys};
-use crate::diagnostic::{CompilationTrace, Severity, opaque_compilation_origin};
+use crate::diagnostic::{CompilationTrace, Severity};
 use crate::source::{RelativeSourcePath, SourceArtifact};
 
 pub(crate) type ModuleLoader =
@@ -292,7 +292,7 @@ pub(crate) fn import_failure(
     );
     let mut details = Dict::new_sync().insert((*keys::REQUEST).clone(), request);
     if let Some(trace) = trace {
-        details = details.insert((*keys::ORIGIN).clone(), opaque_compilation_origin(trace));
+        details = details.insert((*keys::ORIGIN).clone(), trace.origin_value());
     } else if let Some(source) = importer_source {
         details = details.insert(
             (*keys::SOURCE).clone(),

@@ -1010,15 +1010,8 @@ fn imported_source_diagnostics_include_the_import_chain() {
     let primary_import = import_context(&assembler, &primary_contexts, "child.g");
     let child_origin = assembler
         .get(primary_import, "import.origin")
-        .expect("failed child compilation should retain its opaque origin");
-    assert_eq!(child_origin.kind(), ValueKind::Opaque);
-    let inspect_origin = assembler
-        .get(&assembler.reflection_environment(), "glam.origin.inspect")
-        .expect("reflection should expose compilation-origin inspection");
-    let child_origin = assembler
-        .apply(&inspect_origin, [child_origin])
-        .and_then(|value| assembler.evaluate(&value))
-        .expect("reflection should inspect the child origin");
+        .expect("failed child compilation should retain its origin");
+    assert_eq!(child_origin.kind(), ValueKind::Dict);
     let child_source = assembler
         .to_binary(
             &assembler
@@ -1090,7 +1083,7 @@ fn missing_module_and_binary_imports_retain_requesting_origin() {
                 .get(context, "import.origin")
                 .expect("missing import should retain the requesting origin")
                 .kind(),
-            ValueKind::Opaque
+            ValueKind::Dict
         );
     }
 }

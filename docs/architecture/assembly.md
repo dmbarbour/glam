@@ -106,9 +106,11 @@ Main supplies presentation-only `viewer.header` as the complete textual prefix
 escapes) separately from authoritative `msg.severity`.
 
 Loader failures use a dedicated
-`import:{request:{file:Text}, origin?:OpaqueOrigin, source?:Source}` context
+`import:{request:{file:Text}, origin?:Origin, source?:Source}` context
 frame. The `g` tag remains reserved for locations and definitions supplied by
-the built-in `.g` front end.
+the built-in `.g` front end. Because the assembler constructs import frames
+after crossing the compiler capability boundary, their origins are projected
+data rather than opaque handles.
 
 The logger is wrapped with the native equivalent of `(=>> .r ())`; returning a
 non-unit result is an error. A logger failure produces a synthetic diagnostic,

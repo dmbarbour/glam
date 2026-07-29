@@ -163,10 +163,11 @@ notes instead of appending history; put subsystem details in
   for manual static frames; it is not a namespace and has no prior form. Other
   front ends may use different static span data.
 - Import discovery and loading failures use
-  `{import:{request:{file:Text}, origin?:OpaqueOrigin, source?:Source}}`.
+  `{import:{request:{file:Text}, origin?:Origin, source?:Source}}`.
   Reserve `g` frames for `.g` front-end syntax and source-definition context;
   importing is assembler infrastructure even when a `.g` declaration requests
-  it.
+  it. These assembler-authored frames carry ordinary projected origin data;
+  only front-end-authored frames need an opaque origin capability.
 - Opaque origins are never found or projected by recursively searching a
   diagnostic. Glam reflection tasks may iterate `msg.context` and explicitly
   call the capability at `.env '.glam.origin.inspect`. Rust clients use
