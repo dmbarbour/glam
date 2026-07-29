@@ -11,6 +11,8 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
+use rpds::RedBlackTreeMapSync;
+
 use crate::core::{
     DeferredValueId, EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue, PromisedValue, Value,
 };
@@ -311,14 +313,8 @@ pub(crate) enum EvaluationSessionRun {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EvaluationSessionReport {
-    pub(crate) failures: Vec<EvaluationTaskFailure>,
+    pub(crate) failures: RedBlackTreeMapSync<EvaluationTaskId, Arc<EvaluationFailure>>,
     pub(crate) unfinished: Vec<EvaluationUnfinishedTask>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EvaluationTaskFailure {
-    pub(crate) task: EvaluationTaskId,
-    pub(crate) error: Arc<EvaluationFailure>,
 }
 
 #[cfg(test)]
@@ -327,6 +323,7 @@ pub(crate) struct EvaluationTaskRegistryCounts {
     pub(crate) reflection_active: usize,
     pub(crate) reflection_terminal: usize,
     pub(crate) reflection_by_id: usize,
+    pub(crate) unacknowledged_failures: usize,
     pub(crate) deferred_active: usize,
     pub(crate) deferred_terminal: usize,
     pub(crate) deferred_by_wait: usize,
@@ -569,12 +566,68 @@ struct PromiseRecord {
 struct EvaluationTasks {
     reflection: HashMap<EvaluationWaitToken, ReflectionTaskRecord>,
     reflection_by_id: BTreeMap<EvaluationTaskId, EvaluationWaitToken>,
+    unacknowledged_failures: RedBlackTreeMapSync<EvaluationTaskId, Arc<EvaluationFailure>>,
     ready: VecDeque<EvaluationTaskId>,
     promises: HashMap<EvaluationWaitToken, PromiseRecord>,
     owned_promises: HashMap<EvaluationTaskId, Vec<EvaluationWaitToken>>,
     deferred: HashMap<DeferredValueId, DeferredTaskRecord>,
     deferred_by_wait: HashMap<EvaluationWaitToken, DeferredValueId>,
     deferred_by_task: HashMap<EvaluationTaskId, DeferredValueId>,
+}
+
+struct ReflectionTaskTransition {
+    retired: Option<ReflectionTaskRecord>,
+    status: Option<TaskStatusUpdate>,
+}
+
+fn transition_reflection_task(
+    tasks: &mut EvaluationTasks,
+    wait: &EvaluationWaitToken,
+    state: EvaluationTaskState,
+    prior: &EvaluationTaskState,
+) -> ReflectionTaskTransition {
+    let terminal = matches!(
+        state,
+        EvaluationTaskState::Complete(_)
+            | EvaluationTaskState::Failed(_)
+            | EvaluationTaskState::Cancelled
+    );
+    let (unacknowledged_failure, status) = {
+        let record = tasks
+            .reflection
+            .get_mut(wait)
+            .expect("transitioned reflection task must remain registered");
+        record.state = publish_reflection_state(wait, state);
+        let failure = match &record.state {
+            EvaluationTaskState::Failed(error) if !record.error_acknowledged => {
+                Some((record.id, error.clone()))
+            }
+            _ => None,
+        };
+        let status = task_status_update(record, Some(prior));
+        (failure, status)
+    };
+    if let Some((task, failure)) = unacknowledged_failure {
+        tasks.unacknowledged_failures.insert_mut(task, failure);
+    }
+    let retired = terminal.then(|| retire_reflection_task(tasks, wait));
+    ReflectionTaskTransition { retired, status }
+}
+
+fn retire_reflection_task(
+    tasks: &mut EvaluationTasks,
+    wait: &EvaluationWaitToken,
+) -> ReflectionTaskRecord {
+    let record = tasks
+        .reflection
+        .remove(wait)
+        .expect("retired reflection task must remain registered");
+    assert_eq!(
+        tasks.reflection_by_id.remove(&record.id),
+        Some(wait.clone()),
+        "reflection task ID index must agree with its task record"
+    );
+    record
 }
 
 fn retire_deferred_task(
@@ -1053,33 +1106,22 @@ impl EvalContext {
         if let Some(status_sink) = status_sink {
             record.status_sinks.push(status_sink);
         }
-        match result {
+        let state = match result {
             Ok(machine) => {
                 record.machine = Some(machine);
-                record.state = EvaluationTaskState::Queued;
-                tasks.ready.push_back(handle.id);
+                EvaluationTaskState::Queued
             }
-            Err(error) => {
-                record.state = publish_reflection_state(
-                    &handle.wait,
-                    EvaluationTaskState::Failed(evaluation_failure(error.as_ref())),
-                )
-            }
+            Err(error) => EvaluationTaskState::Failed(evaluation_failure(error.as_ref())),
+        };
+        let queued = matches!(state, EvaluationTaskState::Queued);
+        let transition = transition_reflection_task(&mut tasks, &handle.wait, state, &prior);
+        if queued {
+            tasks.ready.push_back(handle.id);
         }
         self.session.task_changed.notify_all();
-        let queued = matches!(
-            tasks
-                .reflection
-                .get(&handle.wait)
-                .map(|record| &record.state),
-            Some(EvaluationTaskState::Queued)
-        );
-        let status = tasks
-            .reflection
-            .get_mut(&handle.wait)
-            .and_then(|record| task_status_update(record, Some(&prior)));
         drop(tasks);
-        publish_task_status(status);
+        drop(transition.retired);
+        publish_task_status(transition.status);
         if queued {
             self.session.notify_executor_ready();
         }
@@ -1091,15 +1133,18 @@ impl EvalContext {
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
-        if tasks
+        let retired = if tasks
             .reflection
             .get(&handle.wait)
             .is_some_and(|record| matches!(record.state, EvaluationTaskState::Reserved))
         {
-            tasks.reflection.remove(&handle.wait);
-            tasks.reflection_by_id.remove(&handle.id);
             self.session.task_changed.notify_all();
-        }
+            Some(retire_reflection_task(&mut tasks, &handle.wait))
+        } else {
+            None
+        };
+        drop(tasks);
+        drop(retired);
     }
 
     fn cancel_pending_reflection_task(
@@ -1107,7 +1152,7 @@ impl EvalContext {
         handle: &EvaluationTaskHandle,
         status_sink: Arc<dyn EvaluationTaskStatusSink>,
     ) {
-        let status = {
+        let transition = {
             let mut tasks = self
                 .session
                 .tasks
@@ -1123,11 +1168,17 @@ impl EvalContext {
             );
             let prior = record.state.clone();
             record.status_sinks.push(status_sink);
-            record.state = publish_reflection_state(&handle.wait, EvaluationTaskState::Cancelled);
+            let transition = transition_reflection_task(
+                &mut tasks,
+                &handle.wait,
+                EvaluationTaskState::Cancelled,
+                &prior,
+            );
             self.session.task_changed.notify_all();
-            task_status_update(record, Some(&prior))
+            transition
         };
-        publish_task_status(status);
+        drop(transition.retired);
+        publish_task_status(transition.status);
     }
 
     pub(crate) fn reserve_reflection_task(
@@ -1212,7 +1263,7 @@ impl EvalContext {
         if task.wait.terminal_poll().is_some() {
             return EvaluationTaskCancellation::Late;
         }
-        let (machine, status) = {
+        let (retired, status) = {
             let mut tasks = self
                 .session
                 .tasks
@@ -1237,19 +1288,23 @@ impl EvalContext {
                 | EvaluationTaskState::Queued
                 | EvaluationTaskState::Blocked(_) => {
                     let prior = record.state.clone();
-                    record.state =
-                        publish_reflection_state(&task.wait, EvaluationTaskState::Cancelled);
+                    let transition = transition_reflection_task(
+                        &mut tasks,
+                        &task.wait,
+                        EvaluationTaskState::Cancelled,
+                        &prior,
+                    );
                     self.session.task_changed.notify_all();
-                    let machine = record.machine.take();
-                    let status = task_status_update(record, Some(&prior));
-                    (machine, status)
+                    (transition.retired, transition.status)
                 }
             }
         };
         publish_task_status(status);
-        if let Some(mut machine) = machine {
+        let mut retired = retired.expect("terminal cancellation must retire its task record");
+        if let Some(mut machine) = retired.machine.take() {
             machine.cancel();
         }
+        drop(retired);
         EvaluationTaskCancellation::Requested
     }
 
@@ -1268,6 +1323,8 @@ impl EvalContext {
             .expect("evaluation task registry was poisoned");
         if let Some(record) = tasks.reflection.get_mut(&task.wait) {
             record.error_acknowledged = true;
+        } else {
+            tasks.unacknowledged_failures.remove_mut(&task.id);
         }
         true
     }
@@ -1360,17 +1417,22 @@ impl EvalContext {
             .lock()
             .expect("evaluation task registry was poisoned");
         let wait = test_reflection_dependency(&tasks, wait);
-        let state = publish_reflection_state(
+        let prior = tasks
+            .reflection
+            .get(&wait)
+            .expect("test task must belong to this session")
+            .state
+            .clone();
+        let transition = transition_reflection_task(
+            &mut tasks,
             &wait,
             EvaluationTaskState::Complete((*crate::core::keys::UNIT_VALUE).clone()),
+            &prior,
         );
-        tasks
-            .reflection
-            .get_mut(&wait)
-            .expect("test task must belong to this session")
-            .state = state;
         self.session.task_changed.notify_all();
         drop(tasks);
+        drop(transition.retired);
+        publish_task_status(transition.status);
         while matches!(
             self.pump_wait(&target, 256),
             EvaluationPumpOutcome::BudgetExhausted
@@ -1387,17 +1449,22 @@ impl EvalContext {
             .lock()
             .expect("evaluation task registry was poisoned");
         let wait = test_reflection_dependency(&tasks, wait);
-        let state = publish_reflection_state(
+        let prior = tasks
+            .reflection
+            .get(&wait)
+            .expect("test task must belong to this session")
+            .state
+            .clone();
+        let transition = transition_reflection_task(
+            &mut tasks,
             &wait,
             EvaluationTaskState::Failed(evaluation_failure(error.as_ref())),
+            &prior,
         );
-        tasks
-            .reflection
-            .get_mut(&wait)
-            .expect("test task must belong to this session")
-            .state = state;
         self.session.task_changed.notify_all();
         drop(tasks);
+        drop(transition.retired);
+        publish_task_status(transition.status);
         while matches!(
             self.pump_wait(&target, 256),
             EvaluationPumpOutcome::BudgetExhausted
@@ -1459,6 +1526,7 @@ impl EvalContext {
             reflection_active: tasks.reflection.len() - reflection_terminal,
             reflection_terminal,
             reflection_by_id: tasks.reflection_by_id.len(),
+            unacknowledged_failures: tasks.unacknowledged_failures.size(),
             deferred_active: tasks.deferred.len() - deferred_terminal,
             deferred_terminal,
             deferred_by_wait: tasks.deferred_by_wait.len(),
@@ -1644,7 +1712,6 @@ impl EvaluationSession {
     }
 
     fn session_run_report(&self, tasks: &EvaluationTasks) -> EvaluationSessionRun {
-        let mut failures = Vec::new();
         let mut unfinished = Vec::new();
         let mut has_live_foreign_dependency = false;
         for (task, wait) in &tasks.reflection_by_id {
@@ -1652,54 +1719,38 @@ impl EvaluationSession {
                 .reflection
                 .get(wait)
                 .expect("task ID index must refer to a task record");
-            match &record.state {
-                EvaluationTaskState::Complete(_) | EvaluationTaskState::Cancelled => {}
-                EvaluationTaskState::Failed(error) if !record.error_acknowledged => {
-                    failures.push(EvaluationTaskFailure {
-                        task: *task,
-                        error: error.clone(),
-                    })
+            let (state, block) = match &record.state {
+                EvaluationTaskState::Dormant => (EvaluationUnfinishedState::Dormant, None),
+                EvaluationTaskState::Reserved => (EvaluationUnfinishedState::Reserved, None),
+                EvaluationTaskState::Queued => (EvaluationUnfinishedState::Queued, None),
+                EvaluationTaskState::Running => (EvaluationUnfinishedState::Running, None),
+                EvaluationTaskState::Blocked(block) => {
+                    (EvaluationUnfinishedState::Blocked, Some(block))
                 }
-                EvaluationTaskState::Failed(_) => {}
-                state => {
-                    let (state, block) = match state {
-                        EvaluationTaskState::Dormant => (EvaluationUnfinishedState::Dormant, None),
-                        EvaluationTaskState::Reserved => {
-                            (EvaluationUnfinishedState::Reserved, None)
-                        }
-                        EvaluationTaskState::Queued => (EvaluationUnfinishedState::Queued, None),
-                        EvaluationTaskState::Running => (EvaluationUnfinishedState::Running, None),
-                        EvaluationTaskState::Blocked(block) => {
-                            (EvaluationUnfinishedState::Blocked, Some(block))
-                        }
-                        EvaluationTaskState::Complete(_)
-                        | EvaluationTaskState::Failed(_)
-                        | EvaluationTaskState::Cancelled => {
-                            unreachable!("terminal task states were handled above")
-                        }
-                    };
-                    let dependency = block
-                        .and_then(|block| block.lazy.as_ref())
-                        .map(|wait| self.reported_dependency(tasks, wait));
-                    has_live_foreign_dependency |= dependency
-                        .as_ref()
-                        .is_some_and(|dependency| dependency.live_foreign);
-                    unfinished.push(EvaluationUnfinishedTask {
-                        task: *task,
-                        state,
-                        dependency: dependency.as_ref().map(|dependency| dependency.task),
-                        dependency_session: dependency
-                            .as_ref()
-                            .map(|dependency| dependency.session),
-                        wait: dependency.as_ref().map(|dependency| dependency.wait),
-                        observed_generation: block.and_then(|block| block.observed_generation),
-                        error: block.and_then(|block| block.error.clone()),
-                    });
+                EvaluationTaskState::Complete(_)
+                | EvaluationTaskState::Failed(_)
+                | EvaluationTaskState::Cancelled => {
+                    unreachable!("terminal reflection records must be retired")
                 }
-            }
+            };
+            let dependency = block
+                .and_then(|block| block.lazy.as_ref())
+                .map(|wait| self.reported_dependency(tasks, wait));
+            has_live_foreign_dependency |= dependency
+                .as_ref()
+                .is_some_and(|dependency| dependency.live_foreign);
+            unfinished.push(EvaluationUnfinishedTask {
+                task: *task,
+                state,
+                dependency: dependency.as_ref().map(|dependency| dependency.task),
+                dependency_session: dependency.as_ref().map(|dependency| dependency.session),
+                wait: dependency.as_ref().map(|dependency| dependency.wait),
+                observed_generation: block.and_then(|block| block.observed_generation),
+                error: block.and_then(|block| block.error.clone()),
+            });
         }
         let report = EvaluationSessionReport {
-            failures,
+            failures: tasks.unacknowledged_failures.clone(),
             unfinished,
         };
         if report.unfinished.is_empty() {
@@ -1853,14 +1904,20 @@ impl EvaluationSession {
         assert!(record.machine.is_none(), "claimed machine must be absent");
         if record.cancel_requested {
             record.cancel_requested = false;
-            record.state = publish_reflection_state(&claimed.wait, EvaluationTaskState::Cancelled);
+            let transition = transition_reflection_task(
+                &mut tasks,
+                &claimed.wait,
+                EvaluationTaskState::Cancelled,
+                &claimed.prior_state,
+            );
             self.task_changed.notify_all();
-            let status = task_status_update(record, Some(&claimed.prior_state));
+            drop(tasks);
+            drop(transition.retired);
             return (
                 true,
                 false,
                 Some(ReleasedTaskMachine::Cancel(claimed.machine)),
-                status,
+                transition.status,
             );
         }
         record.machine = Some(claimed.machine);
@@ -1882,26 +1939,21 @@ impl EvaluationSession {
             }
             EvaluationMachinePoll::Cancelled => (EvaluationTaskState::Cancelled, true, false),
         };
-        record.state = publish_reflection_state(&claimed.wait, state);
-        let released = if matches!(
-            record.state,
-            EvaluationTaskState::Complete(_)
-                | EvaluationTaskState::Failed(_)
-                | EvaluationTaskState::Cancelled
-        ) {
-            record.machine.take().map(ReleasedTaskMachine::Drop)
-        } else {
-            None
-        };
-        if matches!(record.state, EvaluationTaskState::Queued) {
+        let queued = matches!(state, EvaluationTaskState::Queued);
+        let transition =
+            transition_reflection_task(&mut tasks, &claimed.wait, state, &claimed.prior_state);
+        if queued {
             tasks.ready.push_back(claimed.id);
         }
-        let status = tasks
-            .reflection
-            .get_mut(&claimed.wait)
-            .and_then(|record| task_status_update(record, Some(&claimed.prior_state)));
+        let mut retired = transition.retired;
+        let released = retired
+            .as_mut()
+            .and_then(|record| record.machine.take())
+            .map(ReleasedTaskMachine::Drop);
         self.task_changed.notify_all();
-        (made_progress, remains_blocked, released, status)
+        drop(tasks);
+        drop(retired);
+        (made_progress, remains_blocked, released, transition.status)
     }
 
     fn release_deferred_task(
@@ -2728,6 +2780,7 @@ mod tests {
                 reflection_active: 0,
                 reflection_terminal: 0,
                 reflection_by_id: 0,
+                unacknowledged_failures: 0,
                 deferred_active: 0,
                 deferred_terminal: 0,
                 deferred_by_wait: 0,
@@ -2821,7 +2874,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_reflection_records_preserve_late_polling() {
+    fn terminal_reflection_handles_preserve_late_polling_without_records() {
         let context = EvalContext::standalone();
         let complete = context
             .schedule_task(|_| Ok(Box::new(Complete)))
@@ -2840,8 +2893,8 @@ mod tests {
         let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
             panic!("terminal tasks should leave no unfinished work");
         };
-        assert_eq!(report.failures.len(), 1);
-        assert_eq!(report.failures[0].task, failed.id());
+        assert_eq!(report.failures.size(), 1);
+        assert!(report.failures.contains_key(&failed.id()));
 
         for _ in 0..2 {
             assert!(matches!(
@@ -2863,8 +2916,9 @@ mod tests {
             context.task_registry_counts(),
             EvaluationTaskRegistryCounts {
                 reflection_active: 0,
-                reflection_terminal: 3,
-                reflection_by_id: 3,
+                reflection_terminal: 0,
+                reflection_by_id: 0,
+                unacknowledged_failures: 1,
                 deferred_active: 0,
                 deferred_terminal: 0,
                 deferred_by_wait: 0,
@@ -2873,7 +2927,7 @@ mod tests {
                 promises_terminal: 0,
                 owned_promise_waits: 0,
             },
-            "Phase 5 will preserve late polling while retiring these records"
+            "terminal handles retain outcomes while only unacknowledged failures remain indexed"
         );
     }
 
@@ -2901,16 +2955,23 @@ mod tests {
             dropped_without_registry_lock.load(Ordering::Acquire),
             "terminal reflection machine must be destroyed without the registry lock"
         );
-        let tasks = context
-            .session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        let record = tasks
-            .reflection
-            .get(task.wait())
-            .expect("Phase 5, not Phase 3, retires terminal reflection records");
-        assert!(record.machine.is_none());
+        assert_eq!(
+            context.task_registry_counts(),
+            EvaluationTaskRegistryCounts {
+                reflection_active: 0,
+                reflection_terminal: 0,
+                reflection_by_id: 0,
+                unacknowledged_failures: 0,
+                deferred_active: 0,
+                deferred_terminal: 0,
+                deferred_by_wait: 0,
+                deferred_by_task: 0,
+                promises_active: 0,
+                promises_terminal: 0,
+                owned_promise_waits: 0,
+            },
+            "the terminal record must be retired after its machine is dropped"
+        );
     }
 
     #[test]
@@ -3395,8 +3456,8 @@ mod tests {
         let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
             panic!("failing task should terminate")
         };
-        assert_eq!(report.failures.len(), 1);
-        assert_eq!(report.failures[0].task, failed.id());
+        assert_eq!(report.failures.size(), 1);
+        assert!(report.failures.contains_key(&failed.id()));
         assert!(context.acknowledge_reflection_task_error(&failed));
         assert!(context.acknowledge_reflection_task_error(&failed));
         for _ in 0..2 {
@@ -3438,6 +3499,14 @@ mod tests {
             context.poll_reflection_task(&cancelled),
             EvaluationTaskPoll::Cancelled
         );
+        let counts = context.task_registry_counts();
+        assert_eq!(counts.reflection_active, 0);
+        assert_eq!(counts.reflection_terminal, 0);
+        assert_eq!(counts.reflection_by_id, 0);
+        assert_eq!(
+            counts.unacknowledged_failures, 0,
+            "acknowledging before or after failure must leave no reporting entry"
+        );
     }
 
     #[test]
@@ -3457,7 +3526,7 @@ mod tests {
         };
         assert!(report.failures.is_empty());
         assert!(report.unfinished.is_empty());
-        assert_eq!(context.reflection_task_count(), 2);
+        assert_eq!(context.reflection_task_count(), 0);
     }
 
     #[test]
@@ -3470,9 +3539,15 @@ mod tests {
             let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
                 panic!("terminal failures do not leave unfinished work");
             };
-            assert_eq!(report.failures.len(), 1);
-            assert_eq!(report.failures[0].task, failed.id());
-            assert_eq!(report.failures[0].error.to_string(), "reasoning failed");
+            assert_eq!(report.failures.size(), 1);
+            assert_eq!(
+                report
+                    .failures
+                    .get(&failed.id())
+                    .expect("failed task should remain in the reporting ledger")
+                    .to_string(),
+                "reasoning failed"
+            );
             assert!(report.unfinished.is_empty());
         }
     }
@@ -3565,11 +3640,10 @@ mod tests {
         };
         let failure = report
             .failures
-            .iter()
-            .find(|failure| failure.task == follower.id())
+            .get(&follower.id())
             .expect("the foreign follower should fail");
         assert_eq!(
-            failure.error.to_string(),
+            failure.to_string(),
             "reflection task's evaluation session no longer exists"
         );
         assert!(report.unfinished.is_empty());

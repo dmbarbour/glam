@@ -10,8 +10,9 @@ interaction nets, and background workers. Detailed hazards live in
 Every production evaluator entry receives an `EvalContext` borrowed from an
 `EvaluationSession`. An `Assembler` and its clones share one internal
 `ReasoningSession`, which owns that evaluation session and the assembler's
-reflection host. `EvaluationSession` owns reflection and deferred-value task records,
-wait lookup, the reflection launcher, and its connection to a shared
+reflection host. `EvaluationSession` owns active reflection and deferred-value
+task records, wait lookup, the reflection launcher, a persistent ledger of
+unacknowledged reflection failures, and its connection to a shared
 `EvaluationExecutor`. The immutable reflection environment belongs to the
 active task host rather than the scheduler.
 
@@ -36,9 +37,11 @@ mutex. Polling checks the cell before and after taking the mutex, so a waiter
 racing publication sees either active state or the terminal result. A terminal
 token remains observable after its owner session is dropped; a pending token
 does not keep the session alive and reports a dead producer. Active registries
-retain only unresolved deferred producers. Reflection tasks still retain their
-terminal records and indexes until the public task operations move from
-session task-ID lookup to lifetime-bearing handles.
+retain only unresolved deferred producers and nonterminal reflection tasks.
+Reflection task handles own their shared terminal wait cells, so completion,
+failure, and cancellation remain observable after the active record and
+task-ID index are retired. An unacknowledged failure also leaves one minimal
+session-ledger entry until `.task.ack_error` removes it.
 
 When a lazy or assigned-promise task blocks on another deferred producer, the
 session records one strict dependency edge. The graph has at most one outgoing
@@ -141,11 +144,12 @@ not alter the wait result or status query. Modifiers for older tasks are
 applied after pending launches have committed. Status-query callbacks run
 after both the reasoning-store lock and scheduler lock have been released.
 
-Active reflection records retain machines; terminal records do not. Completion
-and failure take the claimed machine out of the record under the scheduler
-lock, then destroy it after unlocking. Cancellation similarly invokes the
-machine's cancellation hook only after unlocking. Terminal reflection records
-and their ID indexes remain until the later record-retirement phase.
+Active reflection records retain machines. Every terminal transition first
+publishes the shared wait result and status-query update under the scheduler
+lock, records an unacknowledged failure when needed, and then removes the
+active record and task-ID index. Completion and failure destroy the detached
+machine after unlocking. Cancellation similarly invokes the detached
+machine's cancellation hook only after unlocking.
 
 ## Interaction-Net Handoff
 

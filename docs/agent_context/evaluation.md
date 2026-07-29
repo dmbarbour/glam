@@ -67,8 +67,12 @@ control-flow overview.
   scheduler wait token shares a lock-free terminal cell. Terminal state is
   published while the session registry is locked, and polling checks it around
   registry lookup; a terminal result therefore outlives the weakly held owner
-  session while a pending wait does not keep that session alive. Reflection
-  task records and promise records retain their separate later cleanup phases.
+  session while a pending wait does not keep that session alive. Terminal
+  reflection records and their task-ID indexes are retired immediately.
+  Unacknowledged reflection failures remain only in the persistent reporting
+  ledger; `.task.ack_error` removes that entry without changing the handle's
+  terminal observation. Promise records retain their separate later cleanup
+  phase.
 - `Value::Function` is an independently observable curried stage. Partial
   application shares its staged runtime; saturation returns memoized work.
 - Lazy lists contain opaque `ListThunk` holes for either computed lazies or
@@ -124,8 +128,9 @@ control-flow overview.
   before an immediate failure can be reported. Older-task modifiers remain
   ordinary committed updates.
 - Never invoke task status sinks, task cancellation hooks, or machine
-  destructors while holding the scheduler registry mutex. Terminal reflection
-  records retain results for now but release their machines after unlocking.
+  destructors while holding the scheduler registry mutex. A terminal
+  reflection transition detaches its record under the mutex, then releases or
+  cancels the machine after unlocking.
 
 ## Sessions and Workers
 

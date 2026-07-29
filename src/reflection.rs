@@ -556,12 +556,8 @@ fn composed_child_error(run: EvaluationSessionRun) -> Option<TaskError> {
     }
 
     let mut details = Vec::new();
-    for failure in report.failures {
-        details.push(format!(
-            "task {} failed: {}",
-            failure.task.get(),
-            failure.error
-        ));
+    for (task, error) in report.failures.iter() {
+        details.push(format!("task {} failed: {}", task.get(), error));
     }
     if quiescent {
         details.push(format!(
@@ -5024,7 +5020,7 @@ mod tests {
             "winning alternative should complete, got {poll:?}"
         );
         assert!(host.diagnostics().is_empty());
-        assert_eq!(context.reflection_task_count(), 1);
+        assert_eq!(context.reflection_task_count(), 0);
     }
 
     #[test]
@@ -5122,7 +5118,7 @@ mod tests {
             report
                 .failures
                 .iter()
-                .map(|failure| failure.task)
+                .map(|(task, _)| *task)
                 .collect::<Vec<_>>(),
             [parent.id()],
             "join must propagate the error while the acknowledged child stays out of reports"
@@ -5144,11 +5140,11 @@ mod tests {
             panic!("child failure should be terminal")
         };
         assert_eq!(
-            report.failures.len(),
+            report.failures.size(),
             1,
             "rolled-back acknowledgement must leave the child failure unacknowledged"
         );
-        assert_ne!(report.failures[0].task, parent.id());
+        assert!(!report.failures.contains_key(&parent.id()));
     }
 
     #[test]

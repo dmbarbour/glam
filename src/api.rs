@@ -906,14 +906,10 @@ impl CompilationExecution {
             EvaluationSessionRun::Quiescent(report) => (Some("became quiescent"), report),
             EvaluationSessionRun::Deadlocked(report) => (Some("deadlocked"), report),
         };
-        for failure in report.failures {
+        for (task, error) in report.failures.iter() {
             self.macro_diagnostics.publish(Diagnostic::new(
                 Severity::Error,
-                format!(
-                    "macro reflection task {} failed: {}",
-                    failure.task.get(),
-                    failure.error
-                ),
+                format!("macro reflection task {} failed: {}", task.get(), error),
             ));
         }
         if let Some(kind) = kind {
@@ -1929,10 +1925,10 @@ impl Assembler {
             status,
             failures: report
                 .failures
-                .into_iter()
-                .map(|failure| ReasoningFailure {
-                    task_id: failure.task.get(),
-                    message: failure.error.legacy_message(),
+                .iter()
+                .map(|(task, error)| ReasoningFailure {
+                    task_id: task.get(),
+                    message: error.legacy_message(),
                 })
                 .collect(),
             unfinished: report

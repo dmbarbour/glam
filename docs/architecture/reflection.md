@@ -153,7 +153,9 @@ not revoke it.
   matching terminal payload. `.task.ack_error` transactionally acknowledges
   present or future failure reporting without changing any of those
   observations; it is valid before launch, while running, and after
-  termination. `.task.cancel` journals a best-effort cancellation request.
+  termination. A terminal failure otherwise remains in the session's
+  reporting ledger even though its active scheduler record has retired.
+  `.task.cancel` journals a best-effort cancellation request.
   Same-transaction modifiers are folded into the reserved task before launch,
   so cancellation can bypass machine construction and acknowledgement can
   precede an arbitrarily fast failure. Task inspection creates no secondary
