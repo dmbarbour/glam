@@ -15,35 +15,12 @@ pub(super) fn value() -> Value {
 }
 
 fn build() -> Value {
-    fn severity_values(message: &str, info: &str, warning: &str, error: &str) -> Value {
-        Value::Dict(
-            Dict::new_sync()
-                .insert((*keys::MSG).clone(), Value::binary_from_text(message))
-                .insert((*keys::INFO).clone(), Value::binary_from_text(info))
-                .insert((*keys::WARN).clone(), Value::binary_from_text(warning))
-                .insert((*keys::ERROR).clone(), Value::binary_from_text(error)),
-        )
-    }
-
     fn field(local: BindingId, path: &[&str]) -> ResolvedExpr<Value> {
         ResolvedExpr::Access {
             base: Box::new(ResolvedExpr::Local(local)),
             path: path
                 .iter()
                 .map(|name| ResolvedPathPart::Key(name_as_key(name)))
-                .collect(),
-        }
-    }
-
-    fn indexed(
-        value: Value,
-        indices: impl IntoIterator<Item = ResolvedExpr<Value>>,
-    ) -> ResolvedExpr<Value> {
-        ResolvedExpr::Access {
-            base: Box::new(ResolvedExpr::Embedded(value)),
-            path: indices
-                .into_iter()
-                .map(|index| ResolvedPathPart::Index(Box::new(index)))
                 .collect(),
         }
     }
@@ -55,33 +32,6 @@ fn build() -> Value {
             .unwrap_or_else(|| ResolvedExpr::Embedded(Value::List(crate::core::List::empty())))
     }
 
-    let severity_labels = severity_values("msg", "info", "warning", "error");
-    let plain_colors = severity_values("", "", "", "");
-    let ansi_colors = severity_values("", "\x1b[36m", "\x1b[33m", "\x1b[31m");
-    let color_prefixes = Value::Dict(
-        Dict::new_sync()
-            .insert(Key::binary_from_text("none"), plain_colors)
-            .insert(Key::binary_from_text("ansi16"), ansi_colors.clone())
-            .insert(Key::binary_from_text("ansi256"), ansi_colors.clone())
-            .insert(Key::binary_from_text("truecolor"), ansi_colors),
-    );
-    let color_suffixes = Value::Dict(
-        Dict::new_sync()
-            .insert(Key::binary_from_text("none"), Value::binary_from_text(""))
-            .insert(
-                Key::binary_from_text("ansi16"),
-                Value::binary_from_text("\x1b[0m"),
-            )
-            .insert(
-                Key::binary_from_text("ansi256"),
-                Value::binary_from_text("\x1b[0m"),
-            )
-            .insert(
-                Key::binary_from_text("truecolor"),
-                Value::binary_from_text("\x1b[0m"),
-            ),
-    );
-
     let mut locals = ResolverContext::default();
     let diagnostic = locals.push_internal_binding("<diagnostic>");
     let lines = locals.push_internal_binding("<diagnostic-lines>");
@@ -89,7 +39,6 @@ fn build() -> Value {
     let context_line = locals.push_internal_binding("<diagnostic-context-line>");
 
     let header = || field(diagnostic, &["viewer", "header"]);
-    let color = || field(diagnostic, &["viewer", "color"]);
     let indented_continuations = apply_builtin(
         Builtin::ListConcat,
         [apply_builtin(
@@ -123,14 +72,8 @@ fn build() -> Value {
             ],
         )],
     );
-    // Local source origin is already summarized by viewer.location. A future
-    // remote-origin summary can become another viewer-anchored sibling block.
     let formatted = append([
-        field(diagnostic, &["viewer", "location"]),
-        indexed(color_prefixes, [color(), header()]),
-        indexed(severity_labels, [header()]),
-        indexed(color_suffixes, [color()]),
-        ResolvedExpr::Embedded(Value::binary_from_text(": ")),
+        header(),
         apply_builtin(Builtin::ListHead, [ResolvedExpr::Local(lines)]),
         indented_continuations,
         context_lines,

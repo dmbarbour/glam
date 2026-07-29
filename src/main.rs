@@ -1359,11 +1359,11 @@ impl DefaultLogger {
     }
 
     fn viewer_updates(&self, diagnostic: &Diagnostic, terminal: &TerminalContext) -> Value {
-        let header = match diagnostic.severity() {
-            Severity::Info => Value::atom_from_text("info"),
-            Severity::Warning => Value::atom_from_text("warn"),
-            Severity::Error => Value::atom_from_text("error"),
-        };
+        let header = format!(
+            "{}{}",
+            self.location(diagnostic),
+            Self::severity_header(diagnostic.severity(), terminal)
+        );
         let source = diagnostic.source().and_then(|source| {
             let path = Path::new(source);
             path.is_absolute().then(|| self.display_source(path))
@@ -1375,7 +1375,7 @@ impl DefaultLogger {
         &self,
         terminal: &TerminalContext,
         base_indent: usize,
-        header: Value,
+        header: String,
         location: String,
         source: Option<String>,
     ) -> Value {
@@ -1386,7 +1386,7 @@ impl DefaultLogger {
                 Value::integer(i64::try_from(terminal.columns).unwrap_or(i64::MAX)),
             ),
             ("color", Value::text(terminal.color.name())),
-            ("header", header),
+            ("header", Value::text(header)),
             ("auto_indent", Value::integer(Self::AUTO_INDENT as i64)),
             (
                 "indent",
@@ -1500,7 +1500,7 @@ impl DefaultLogger {
         terminal: &TerminalContext,
         frame_indent: usize,
     ) -> Result<String, Error> {
-        let default_header = Value::atom_from_text("msg");
+        let default_header = "msg: ".to_owned();
         let message = Diagnostic::apply_updates(
             message,
             self.terminal_viewer_updates(
@@ -1511,7 +1511,7 @@ impl DefaultLogger {
                 None,
             ),
         )?;
-        let header = self.context_message_header(&message);
+        let header = self.context_message_header(&message, terminal);
         let message = if header == default_header {
             message
         } else {
@@ -1526,26 +1526,28 @@ impl DefaultLogger {
         Ok(format!("{}{rendered}", " ".repeat(frame_indent)))
     }
 
-    fn context_message_header(&self, message: &Value) -> Value {
+    fn context_message_header(&self, message: &Value, terminal: &TerminalContext) -> String {
         let Some(severity) = self
             .evaluator
             .get_optional(message, "msg.severity")
             .ok()
             .flatten()
         else {
-            return Value::atom_from_text("msg");
+            return "msg: ".to_owned();
         };
         let Ok(key) = self.evaluator.reflection().atom_key(&severity) else {
-            return Value::atom_from_text("msg");
+            return "msg: ".to_owned();
         };
         match immediate_diagnostic_text(&key).as_deref() {
-            Some("info" | "warn" | "error") => severity,
-            _ => Value::atom_from_text("msg"),
+            Some("info") => Self::severity_header(Severity::Info, terminal),
+            Some("warn") => Self::severity_header(Severity::Warning, terminal),
+            Some("error") => Self::severity_header(Severity::Error, terminal),
+            _ => "msg: ".to_owned(),
         }
     }
 
-    fn viewer_header_update(header: Value) -> Value {
-        Value::record([("viewer", Value::record([("header", header)]))])
+    fn viewer_header_update(header: String) -> Value {
+        Value::record([("viewer", Value::record([("header", Value::text(header))]))])
     }
 
     fn context_lines_update(lines: Vec<String>) -> Value {
@@ -1659,6 +1661,11 @@ impl DefaultLogger {
                 .ok()
                 .and_then(|key| immediate_diagnostic_text(&key))
         })
+    }
+
+    fn severity_header(severity: Severity, terminal: &TerminalContext) -> String {
+        let label = severity.to_string();
+        format!("{}: ", terminal.color.paint(severity, &label))
     }
 
     fn render(&self, diagnostic: &Diagnostic, text: &str, terminal: &TerminalContext) -> String {
@@ -2211,8 +2218,9 @@ mod tests {
             logger
                 .evaluator
                 .get(&enriched, "viewer.header")
-                .expect("viewer should choose the effective message header"),
-            Value::atom_from_text("info")
+                .expect("viewer should materialize the complete message header")
+                .as_binary(),
+            Some(b"\x1b[36minfo\x1b[0m: ".as_slice())
         );
         assert_eq!(
             logger

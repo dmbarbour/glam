@@ -187,8 +187,10 @@ notes instead of appending history; put subsystem details in
   interface is recursively enriched and formatted as a diagnostic-style
   dictionary or object; its standard severity becomes the header, otherwise
   the header is `msg:`. Main records that presentation choice in
-  `viewer.header`; it is not another semantic severity. The nested message is
-  a view, not another bus event. Nested indentation is absolute for that frame,
+  `viewer.header` as complete text, including location, punctuation, spacing,
+  and terminal escapes; it is not another semantic severity. The cached Glam
+  formatter prepends that text without interpreting it. The nested message is a
+  view, not another bus event. Nested indentation is absolute for that frame,
   while terminal, color, language, and width metadata retain the same snapshot.
   The conservative terminal view otherwise recognizes `eval`, `g`, `asm`,
   `conf`, and `task` frames, names an otherwise singleton tag, and falls back

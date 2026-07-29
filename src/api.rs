@@ -1878,7 +1878,7 @@ impl Assembler {
     /// Returns the cached closed Glam function used by the executable's
     /// default terminal logger. It expects an enriched diagnostic containing
     /// the conventional `msg` and `viewer` fields, including the observer's
-    /// effective `viewer.header` atom, and returns bytes.
+    /// complete textual `viewer.header`, and returns bytes.
     pub fn default_diagnostic_formatter(&self) -> Value {
         Value::from_core(crate::g_syntax::default_diagnostic_formatter())
     }
