@@ -541,6 +541,27 @@ struct EvaluationTasks {
     deferred_by_task: HashMap<EvaluationTaskId, DeferredValueId>,
 }
 
+fn retire_deferred_task(
+    tasks: &mut EvaluationTasks,
+    deferred: DeferredValueId,
+) -> DeferredTaskRecord {
+    let record = tasks
+        .deferred
+        .remove(&deferred)
+        .expect("retired deferred task must remain registered");
+    assert_eq!(
+        tasks.deferred_by_wait.remove(&record.wait),
+        Some(deferred),
+        "deferred wait index must agree with its task record"
+    );
+    assert_eq!(
+        tasks.deferred_by_task.remove(&record.id),
+        Some(deferred),
+        "deferred task ID index must agree with its task record"
+    );
+    record
+}
+
 pub(crate) struct EvaluationSession {
     id: EvaluationSessionId,
     tasks: Mutex<EvaluationTasks>,
@@ -1360,7 +1381,7 @@ impl EvalContext {
 
     #[cfg(test)]
     pub(crate) fn lazy_failure(&self, lazy: &LazyValue) -> Option<Arc<EvaluationFailure>> {
-        self.deferred_failure(lazy.id().into())
+        lazy.cached().and_then(Result::err)
     }
 
     #[cfg(test)]
@@ -1375,19 +1396,10 @@ impl EvalContext {
         &self,
         wait: &EvaluationWaitToken,
     ) -> Option<Arc<EvaluationFailure>> {
-        let tasks = self
-            .session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        if let Some(deferred) = tasks.deferred_by_wait.get(wait) {
-            let record = tasks.deferred.get(deferred)?;
-            if let DeferredTaskState::Failed(failure) = &record.state {
-                return Some(failure.clone());
-            }
-            return None;
+        match wait.terminal_poll() {
+            Some(EvaluationTaskPoll::Failed(failure)) => Some(failure),
+            _ => None,
         }
-        None
     }
 
     #[cfg(test)]
@@ -1803,7 +1815,7 @@ impl EvaluationSession {
             DeferredTaskState::Dormant | DeferredTaskState::Blocked(_)
         );
         let mut machine = Some(claimed.machine);
-        let mut retired_machines = Vec::new();
+        let mut retired_records = Vec::new();
         let mut tasks = self
             .tasks
             .lock()
@@ -1821,15 +1833,13 @@ impl EvaluationSession {
             assert!(record.machine.is_none(), "claimed machine must be absent");
             if retains_machine {
                 record.machine = machine.take();
-            } else {
-                retired_machines.push(
-                    machine
-                        .take()
-                        .expect("a terminal deferred task must retire its machine"),
-                );
             }
         }
-        debug_assert!(machine.is_none(), "the claimed machine must be consumed");
+        debug_assert_eq!(
+            machine.is_none(),
+            retains_machine,
+            "only an active deferred task may retain its machine"
+        );
         let dependency = match &state {
             DeferredTaskState::Blocked(block) => block
                 .lazy
@@ -1849,8 +1859,10 @@ impl EvaluationSession {
             && let Some(cycle) = deferred_dependency_cycle(&tasks, claimed.deferred)
             && let Some(cycle) = pure_lazy_cycle(&tasks, &cycle)
         {
-            retired_machines.extend(poison_lazy_cycle(&mut tasks, &cycle));
+            retired_records.extend(poison_lazy_cycle(&mut tasks, &cycle));
             made_progress = true;
+        } else if !retains_machine {
+            retired_records.push(retire_deferred_task(&mut tasks, claimed.deferred));
         }
         let remains_blocked = tasks
             .deferred
@@ -1858,7 +1870,8 @@ impl EvaluationSession {
             .is_some_and(|record| matches!(record.state, DeferredTaskState::Blocked(_)));
         self.task_changed.notify_all();
         drop(tasks);
-        drop(retired_machines);
+        drop(machine);
+        drop(retired_records);
         (made_progress, remains_blocked, None, None)
     }
 
@@ -2068,7 +2081,7 @@ fn pure_lazy_cycle(
 fn poison_lazy_cycle(
     tasks: &mut EvaluationTasks,
     members: &[crate::core::LazyId],
-) -> Vec<Box<dyn EvaluationTaskMachine>> {
+) -> Vec<DeferredTaskRecord> {
     let cycle = Arc::new(LazyCycle {
         members: members
             .iter()
@@ -2085,7 +2098,6 @@ fn poison_lazy_cycle(
             .collect(),
     });
     let failure = Arc::new(EvaluationFailure::dependency_cycle(cycle));
-    let mut retired_machines = Vec::new();
 
     for id in members {
         let record = tasks
@@ -2093,9 +2105,6 @@ fn poison_lazy_cycle(
             .get_mut(&DeferredValueId::Lazy(*id))
             .expect("cycle members must remain registered");
         record.dependency = None;
-        if let Some(machine) = record.machine.take() {
-            retired_machines.push(machine);
-        }
         let DeferredValue::Lazy(lazy) = &record.value else {
             unreachable!("a pure lazy cycle cannot contain a promise")
         };
@@ -2111,7 +2120,10 @@ fn poison_lazy_cycle(
         };
         record.state = publish_deferred_state(&record.wait, state);
     }
-    retired_machines
+    members
+        .iter()
+        .map(|id| retire_deferred_task(tasks, DeferredValueId::Lazy(*id)))
+        .collect()
 }
 
 fn prioritized_task(
@@ -2348,25 +2360,37 @@ mod tests {
             .expect("test lazy task should register")
     }
 
-    fn assert_deferred_machine_retired(context: &EvalContext, lazy: &LazyValue) {
+    fn assert_deferred_task_retired(context: &EvalContext, lazy: &LazyValue) {
         let tasks = context
             .session
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
-        let record = tasks
-            .deferred
-            .get(&DeferredValueId::Lazy(lazy.id()))
-            .expect("test lazy should remain registered");
         assert!(
-            record.machine.is_none(),
-            "terminal deferred records must not retain their machines"
+            !tasks
+                .deferred
+                .contains_key(&DeferredValueId::Lazy(lazy.id())),
+            "terminal deferred records must be removed"
+        );
+        assert!(
+            tasks
+                .deferred_by_wait
+                .values()
+                .all(|id| *id != DeferredValueId::Lazy(lazy.id())),
+            "terminal deferred wait indexes must be removed"
+        );
+        assert!(
+            tasks
+                .deferred_by_task
+                .values()
+                .all(|id| *id != DeferredValueId::Lazy(lazy.id())),
+            "terminal deferred task ID indexes must be removed"
         );
     }
 
-    fn dependency_cycle(context: &EvalContext, lazy: &LazyValue) -> Arc<LazyCycle> {
-        context
-            .lazy_failure(lazy)
+    fn dependency_cycle(lazy: &LazyValue) -> Arc<LazyCycle> {
+        lazy.cached()
+            .and_then(Result::err)
             .expect("test lazy should have a structured failure")
             .dependency_cycle_value()
             .cloned()
@@ -2444,6 +2468,20 @@ mod tests {
     impl Drop for CompleteAndSignalDrop {
         fn drop(&mut self) {
             self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    struct CacheLazyFailure {
+        lazy: LazyValue,
+        failure: Arc<EvaluationFailure>,
+    }
+
+    impl EvaluationTaskMachine for CacheLazyFailure {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            match self.lazy.cache(Err(self.failure.clone())) {
+                Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
+                Err(error) => EvaluationMachinePoll::Failed(error),
+            }
         }
     }
 
@@ -2528,7 +2566,7 @@ mod tests {
             dropped.load(Ordering::Acquire),
             "a completed deferred task must drop its machine"
         );
-        assert_deferred_machine_retired(&context, &lazy);
+        assert_deferred_task_retired(&context, &lazy);
         assert_eq!(
             context.task_registry_counts(),
             EvaluationTaskRegistryCounts {
@@ -2536,15 +2574,95 @@ mod tests {
                 reflection_terminal: 0,
                 reflection_by_id: 0,
                 deferred_active: 0,
-                deferred_terminal: 1,
-                deferred_by_wait: 1,
-                deferred_by_task: 1,
+                deferred_terminal: 0,
+                deferred_by_wait: 0,
+                deferred_by_task: 0,
                 promises_active: 0,
                 promises_terminal: 0,
                 owned_promise_waits: 0,
             },
-            "the terminal machine is gone, but Phase 2 has not yet retired its record and indexes"
+            "the terminal deferred task and all indexes must be retired"
         );
+    }
+
+    #[test]
+    fn redundant_deferred_registration_observes_the_canonical_lazy_cache() {
+        let context = EvalContext::standalone();
+        let lazy = inert_lazy("redundant registration");
+        let failure = evaluation_failure("canonical lazy failure");
+        let (build_started_sender, build_started_receiver) = mpsc::channel();
+        let (release_build_sender, release_build_receiver) = mpsc::channel();
+
+        let redundant_registration = {
+            let context = context.clone();
+            let lazy = lazy.clone();
+            let failure = failure.clone();
+            std::thread::spawn(move || {
+                let machine_lazy = lazy.clone();
+                context
+                    .lazy_task(&lazy, move |_| {
+                        build_started_sender
+                            .send(())
+                            .expect("test build observer should remain open");
+                        release_build_receiver
+                            .recv_timeout(Duration::from_secs(2))
+                            .expect("test should release the redundant registration");
+                        Box::new(CacheLazyFailure {
+                            lazy: machine_lazy,
+                            failure,
+                        })
+                    })
+                    .expect("redundant lazy task should register")
+            })
+        };
+        build_started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("redundant registration should pass its initial lookup");
+
+        let canonical_wait = context
+            .lazy_task(&lazy, {
+                let lazy = lazy.clone();
+                let failure = failure.clone();
+                move |_| Box::new(CacheLazyFailure { lazy, failure })
+            })
+            .expect("canonical lazy task should register");
+        assert_eq!(
+            context.pump_wait(&canonical_wait, 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert_deferred_task_retired(&context, &lazy);
+
+        release_build_sender
+            .send(())
+            .expect("redundant registration should still be waiting");
+        let redundant_wait = redundant_registration
+            .join()
+            .expect("redundant registration should not panic");
+        assert_ne!(
+            canonical_wait, redundant_wait,
+            "the raced registration should install a fresh active record"
+        );
+        assert_eq!(
+            context.task_registry_counts().deferred_active,
+            1,
+            "the redundant task should exist only until it observes the cache"
+        );
+        assert_eq!(
+            context.pump_wait(&redundant_wait, 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert_deferred_task_retired(&context, &lazy);
+
+        let EvaluationTaskPoll::Failed(canonical_failure) = context.poll_wait(&canonical_wait)
+        else {
+            panic!("canonical wait should retain the lazy failure");
+        };
+        let EvaluationTaskPoll::Failed(redundant_failure) = context.poll_wait(&redundant_wait)
+        else {
+            panic!("redundant wait should retain the lazy failure");
+        };
+        assert!(Arc::ptr_eq(&canonical_failure, &redundant_failure));
+        assert!(Arc::ptr_eq(&canonical_failure, &failure));
     }
 
     #[test]
@@ -2751,7 +2869,7 @@ mod tests {
             context.pump_wait(&wait, 256),
             EvaluationPumpOutcome::TargetReady
         );
-        let cycle = dependency_cycle(&context, &lazy);
+        let cycle = dependency_cycle(&lazy);
         assert_eq!(cycle.members.len(), 1);
         assert_eq!(cycle.members[0].id, lazy.id());
         assert_eq!(cycle.members[0].label.as_ref(), "self cycle");
@@ -2764,7 +2882,7 @@ mod tests {
             lazy.source_snapshot().is_none(),
             "cycle poisoning should release the lazy source"
         );
-        assert_deferred_machine_retired(&context, &lazy);
+        assert_deferred_task_retired(&context, &lazy);
     }
 
     #[test]
@@ -2831,9 +2949,9 @@ mod tests {
         assert!(Arc::ptr_eq(&left_failure, &right_failure));
         assert!(left.source_snapshot().is_none());
         assert!(right.source_snapshot().is_none());
-        assert_deferred_machine_retired(&context, &left);
-        assert_deferred_machine_retired(&context, &right);
-        let cycle = dependency_cycle(&context, &left);
+        assert_deferred_task_retired(&context, &left);
+        assert_deferred_task_retired(&context, &right);
+        let cycle = dependency_cycle(&left);
         assert_eq!(
             cycle
                 .members
@@ -2869,7 +2987,7 @@ mod tests {
             context.pump_wait(&upstream_wait, 512),
             EvaluationPumpOutcome::TargetReady
         );
-        let cycle = dependency_cycle(&context, &first);
+        let cycle = dependency_cycle(&first);
         assert_eq!(
             cycle
                 .members
@@ -2878,9 +2996,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first.id(), second.id(), third.id()]
         );
-        let upstream_failure = context
-            .lazy_failure(&upstream)
-            .expect("upstream dependent should receive the cycle failure");
+        let EvaluationTaskPoll::Failed(upstream_failure) = context.poll_wait(&upstream_wait) else {
+            panic!("upstream dependent should receive the cycle failure");
+        };
         let cycle_failure = context
             .lazy_failure(&first)
             .expect("cycle member should retain its failure");

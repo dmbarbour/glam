@@ -756,11 +756,19 @@ fn lazy_aliases_share_and_cache_their_final_whnf() {
 
     assert_eq!(context.deferred_task_count(), 0);
     assert_eq!(eval_value(&context, &value).unwrap(), n(42));
-    assert_eq!(context.deferred_task_count(), 2);
+    assert_eq!(
+        context.deferred_task_count(),
+        0,
+        "completed alias producers should retire from the session"
+    );
     assert_eq!(cached_value(&target_lazy), n(42));
     assert_eq!(cached_value(&root), n(42));
     assert_eq!(eval_value(&context, &value).unwrap(), n(42));
-    assert_eq!(context.deferred_task_count(), 2);
+    assert_eq!(
+        context.deferred_task_count(),
+        0,
+        "cached observation should not register new deferred work"
+    );
 }
 
 #[test]
