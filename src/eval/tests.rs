@@ -515,6 +515,96 @@ fn deferred_computation_caches_one_structured_failure() {
 }
 
 #[test]
+fn deferred_list_effect_work_blocks_and_resumes() {
+    let session = test_context();
+    let owner = session.with_new_task().unwrap();
+    let observer = session.with_new_task().unwrap();
+    let promise = PromisedValue::fixpoint(&owner, "deferred list effect input").unwrap();
+    let handled = apply_builtin(
+        &observer,
+        Builtin::ListEffect,
+        Vec::new(),
+        Value::Promised(promise.clone()),
+    )
+    .expect("constructing the lazy list-effect result should not demand its operation");
+    let Value::List(results) = handled else {
+        panic!("the list effect handler should return a list")
+    };
+
+    let blocked = list_to_value_items(&observer, &results)
+        .expect_err("observing the list should block on its unresolved effect");
+    assert!(blocked.blocked_on().is_some());
+
+    let return_effect = effect_value(closed_function_value(
+        1,
+        TestExpr::Apply(
+            Arc::new(TestExpr::Access(
+                Arc::new(TestExpr::Local(0)),
+                Arc::from([TestKey::Key((*keys::R).clone())]),
+            )),
+            Arc::new(TestExpr::Value(n(42))),
+        ),
+    ));
+    promise.set(return_effect).unwrap();
+
+    assert_eq!(
+        list_to_value_items(&observer, &results)
+            .expect("the list effect should resume after its operation is assigned"),
+        vec![n(42)]
+    );
+}
+
+#[test]
+fn deferred_computation_caches_one_text_failure() {
+    let context = test_context();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted_attempts = attempts.clone();
+    let lazy = LazyValue::deferred("text deferred failure", move |_| {
+        counted_attempts.fetch_add(1, Ordering::SeqCst);
+        Err(EvaluationHalt::new("text deferred failure"))
+    });
+    let value = Value::Lazy(lazy.clone());
+
+    let first = eval_value(&context, &value)
+        .expect_err("the deferred computation should fail")
+        .into_permanent_failure();
+    let cached = lazy
+        .cached()
+        .expect("the deferred failure should be cached")
+        .expect_err("the terminal cache should contain a failure");
+    assert!(Arc::ptr_eq(&first, &cached));
+
+    let second = eval_value(&context, &value)
+        .expect_err("the cached deferred computation should remain failed")
+        .into_permanent_failure();
+    assert!(Arc::ptr_eq(&cached, &second));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn deferred_computation_preserves_context_annotation_frames() {
+    let context = test_context();
+    let frame = Value::Dict(Dict::new_sync().insert(
+        Key::atom_from_text("deferred"),
+        Value::binary_from_text("context annotation"),
+    ));
+    let annotation = Value::Dict(Dict::new_sync().insert((*keys::CONTEXT).clone(), frame.clone()));
+    let lazy = LazyValue::deferred("context-annotated deferred failure", move |context| {
+        apply_builtin(
+            context,
+            Builtin::Anno,
+            vec![annotation.clone()],
+            Value::error("annotated deferred failure"),
+        )
+    });
+
+    let failure = eval_value(&context, &Value::Lazy(lazy))
+        .expect_err("the annotated deferred computation should fail")
+        .into_permanent_failure();
+    assert_eq!(failure.contexts(), [frame]);
+}
+
+#[test]
 fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
     let context = test_context();
     let promise = PromisedValue::new("late assignment");
