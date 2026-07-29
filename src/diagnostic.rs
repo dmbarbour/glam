@@ -211,22 +211,27 @@ pub(crate) fn assembler_metadata(severity: Severity, origin: Option<Value>) -> D
 /// Applies one set of object updates as a definitions mixin. Keeping this
 /// operation separate lets observers add their own context without mutating
 /// the original emission.
-pub(crate) fn apply_updates(message: Value, updates: Value) -> Result<Value, String> {
+pub(crate) fn apply_updates(
+    message: Value,
+    updates: Value,
+) -> Result<Value, crate::core::EvaluationHalt> {
     let context = crate::evaluation::EvalContext::standalone();
     let extension_defs = Value::builtin_call(Builtin::ObjectOverrideDefs, vec![updates]);
     let value = eval::apply_values(
         &context,
         Value::Builtin(Builtin::ObjectWithDefs),
         vec![message, extension_defs],
-    )
-    .map_err(|error| error.to_string())?;
-    eval::eval_value(&context, &value).map_err(|error| error.to_string())
+    )?;
+    eval::eval_value(&context, &value)
 }
 
 /// Turns a diagnostic emission into an object when needed, then applies an
 /// independent compiler- or observer-owned mixin without changing the source
 /// emission.
-pub(crate) fn apply_emission_updates(message: Value, updates: Value) -> Result<Value, String> {
+pub(crate) fn apply_emission_updates(
+    message: Value,
+    updates: Value,
+) -> Result<Value, crate::core::EvaluationHalt> {
     let message = diagnostic_object(message)?;
     apply_updates(message, updates)
 }
@@ -236,14 +241,20 @@ pub(crate) fn apply_emission_updates(message: Value, updates: Value) -> Result<V
 /// Evaluation failures already use outermost-to-innermost ordering. Keeping
 /// host-owned observation frames in that same list lets clients add context
 /// without rewriting the diagnostic's source text.
-pub(crate) fn prepend_context(message: Value, context: Value) -> Result<Value, String> {
+pub(crate) fn prepend_context(
+    message: Value,
+    context: Value,
+) -> Result<Value, crate::core::EvaluationHalt> {
     prepend_contexts(message, &[context])
 }
 
 /// Prepends semantic demand frames while preserving context supplied by the
 /// original diagnostic emission. An empty prefix still normalizes
 /// `msg.context` to a list.
-pub(crate) fn prepend_contexts(message: Value, contexts: &[Value]) -> Result<Value, String> {
+pub(crate) fn prepend_contexts(
+    message: Value,
+    contexts: &[Value],
+) -> Result<Value, crate::core::EvaluationHalt> {
     let message = diagnostic_object(message)?;
     let existing = match &message {
         Value::Dict(message) => match message.get(&*keys::MSG) {
@@ -270,18 +281,18 @@ pub(crate) fn enrich(
     message: Value,
     severity: Severity,
     origin: Option<Value>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::core::EvaluationHalt> {
     let message = diagnostic_object(message)?;
     apply_updates(message, Value::Dict(assembler_metadata(severity, origin)))
 }
 
-fn diagnostic_object(message: Value) -> Result<Value, String> {
+fn diagnostic_object(message: Value) -> Result<Value, crate::core::EvaluationHalt> {
     let context = crate::evaluation::EvalContext::standalone();
-    let message = eval::eval_value(&context, &message).map_err(|error| error.to_string())?;
+    let message = eval::eval_value(&context, &message)?;
     let has_defined_spec = match &message {
         Value::Dict(message) => match message.get(&*keys::SPEC) {
             Some(spec) => {
-                let spec = eval::eval_value(&context, spec).map_err(|error| error.to_string())?;
+                let spec = eval::eval_value(&context, spec)?;
                 !matches!(spec, Value::Dict(spec) if spec.is_empty())
             }
             None => false,
@@ -295,9 +306,8 @@ fn diagnostic_object(message: Value) -> Result<Value, String> {
             &context,
             Value::Builtin(Builtin::ObjectFromDict),
             vec![message],
-        )
-        .map_err(|error| error.to_string())?;
-        eval::eval_value(&context, &message).map_err(|error| error.to_string())?
+        )?;
+        eval::eval_value(&context, &message)?
     };
     Ok(message)
 }

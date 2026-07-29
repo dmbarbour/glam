@@ -515,7 +515,7 @@ impl Diagnostic {
             self.origin.as_ref().map(|origin| origin.as_core().clone()),
         )
         .map(Value::from_core)
-        .map_err(Error::new)
+        .map_err(Error::from_eval)
     }
 
     /// Applies assembler metadata followed by observer-specific object updates.
@@ -524,7 +524,7 @@ impl Diagnostic {
         let enriched = self.enrich()?;
         crate::diagnostic::apply_updates(enriched.into_core(), updates.into_core())
             .map(Value::from_core)
-            .map_err(Error::new)
+            .map_err(Error::from_eval)
     }
 
     /// Applies observer-owned updates to an arbitrary diagnostic-style value.
@@ -535,7 +535,7 @@ impl Diagnostic {
     pub fn apply_updates(message: &Value, updates: Value) -> Result<Value, Error> {
         crate::diagnostic::apply_emission_updates(message.as_core().clone(), updates.into_core())
             .map(Value::from_core)
-            .map_err(Error::new)
+            .map_err(Error::from_eval)
     }
 
     /// Prepends one structured frame describing why this diagnostic was
@@ -1289,7 +1289,7 @@ impl Error {
         }
     }
 
-    fn from_eval(error: EvaluationHalt) -> Self {
+    pub(crate) fn from_eval(error: EvaluationHalt) -> Self {
         let message: Arc<str> = Arc::from(error.to_string());
         Self::from_eval_parts(eval::halt_diagnostic_value(&error), message)
     }

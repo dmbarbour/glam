@@ -661,8 +661,7 @@ fn evaluated(
     context: &RequestContext<'_, CliEffects>,
     value: Value,
 ) -> Result<CoreValue, TaskHalt> {
-    eval::eval_value(context.eval_context(), value.as_core())
-        .map_err(|error| TaskHalt::new(error.to_string()))
+    eval::eval_value(context.eval_context(), value.as_core()).map_err(TaskHalt::from)
 }
 
 fn record_expectation(

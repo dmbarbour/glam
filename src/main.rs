@@ -853,7 +853,7 @@ impl TaskSpecialization for MainEffects {
                 let bytes = self
                     .assembler
                     .to_binary(&value)
-                    .map_err(|error| glam::reflection::TaskHalt::new(error.to_string()))?;
+                    .map_err(glam::reflection::TaskHalt::from)?;
                 if let Some(mut transaction) = context.transaction() {
                     transaction.parts().1.stderr.push(bytes);
                 } else {
@@ -907,7 +907,7 @@ fn read_log(
             return diagnostic
                 .enrich()
                 .map(RequestResult::Return)
-                .map_err(|error| glam::reflection::TaskHalt::new(error.to_string()));
+                .map_err(glam::reflection::TaskHalt::from);
         }
         // Queue reads observe only the host snapshot. Journaled writes remain
         // invisible until commit, just as writes from concurrent tasks do.
@@ -922,7 +922,7 @@ fn read_log(
         };
         let value = diagnostic
             .enrich()
-            .map_err(|error| glam::reflection::TaskHalt::new(error.to_string()))?;
+            .map_err(glam::reflection::TaskHalt::from)?;
         let commit = TaskCommit::new(
             glam::reflection::StoreJournal::new(snapshot.store().clone()),
             snapshot.extra().clone(),

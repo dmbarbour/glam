@@ -133,6 +133,10 @@ notes instead of appending history; put subsystem details in
   demanding `Expr`. Automatic evaluator frames use
   `eval:{op:Atom, args?:Dict}`, not renderer-owned prose. Do not stringify
   failures at scheduler boundaries.
+- Diagnostic-object normalization, enrichment, and viewer updates retain
+  `EvaluationHalt` internally. Public `Error` and `TaskHalt` conversions keep
+  the structured emission and contexts; only explicit CLI/display projections
+  reduce them to text.
 - Public `Error` retains one primary structured diagnostic separately from
   additional diagnostics emitted while attempting the operation. Its
   `Display` text is only a Rust-facing summary. CLI clients publish the primary

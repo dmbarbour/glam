@@ -236,8 +236,8 @@ fn text_value(
     value: Value,
     request: &str,
 ) -> Result<String, TaskHalt> {
-    let CoreValue::Binary(bytes) = eval::eval_value(context.eval_context(), value.as_core())
-        .map_err(|error| TaskHalt::new(error.to_string()))?
+    let CoreValue::Binary(bytes) =
+        eval::eval_value(context.eval_context(), value.as_core()).map_err(TaskHalt::from)?
     else {
         return Err(TaskHalt::new(format!("{request} requires text")));
     };

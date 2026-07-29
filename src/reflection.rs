@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use search::SearchPolicy;
 
-use crate::api::{Diagnostic, EvaluationRuntime, Value as PublicValue};
+use crate::api::{Diagnostic, Error as ApiError, EvaluationRuntime, Value as PublicValue};
 use crate::core::{
     Atom, Builtin, Dict, EvaluationFailure, EvaluationHalt, FunctionValue, Key, LazyValue, List,
     NetValue, PromisedValue, Value, keys,
@@ -426,6 +426,20 @@ impl fmt::Display for TaskHalt {
 }
 
 impl std::error::Error for TaskHalt {}
+
+impl From<EvaluationHalt> for TaskHalt {
+    fn from(error: EvaluationHalt) -> Self {
+        task_eval_error(error)
+    }
+}
+
+impl From<ApiError> for TaskHalt {
+    fn from(error: ApiError) -> Self {
+        Self::failure(Arc::new(EvaluationFailure::emission(
+            error.diagnostic().emission().as_core().clone(),
+        )))
+    }
+}
 
 /// Configures and synchronously runs one effect task.
 ///
@@ -3672,7 +3686,7 @@ mod tests {
             return diagnostic
                 .enrich()
                 .map(RequestResult::Return)
-                .map_err(|error| TaskHalt::new(error.to_string()));
+                .map_err(TaskHalt::from);
         }
 
         loop {
@@ -3681,9 +3695,7 @@ mod tests {
             let Some(diagnostic) = snapshot.extra().diagnostics.first() else {
                 return Ok(RequestResult::Fail);
             };
-            let value = diagnostic
-                .enrich()
-                .map_err(|error| TaskHalt::new(error.to_string()))?;
+            let value = diagnostic.enrich().map_err(TaskHalt::from)?;
             let commit = TaskCommit::new(
                 StoreJournal::new(snapshot.store().clone()),
                 snapshot.extra().clone(),
@@ -3998,7 +4010,7 @@ mod tests {
             Value::Binary(bytes) => Ok(bytes),
             Value::List(list) => eval::list_output_bytes(&context, &list)
                 .map(Bytes::from)
-                .map_err(|error| TaskHalt::new(error.to_string())),
+                .map_err(TaskHalt::from),
             _ => Err(TaskHalt::new("test stderr request requires binary data")),
         }
     }
@@ -5190,6 +5202,56 @@ mod tests {
                 Value::binary_from_text("child dispatch"),
                 eval::evaluation_context_frame("net_computation"),
             ]
+        );
+    }
+
+    #[test]
+    fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
+        let assembler = Assembler::default();
+        let frame = Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("host"),
+            Value::binary_from_text("conversion"),
+        ));
+        let emission = Value::Dict(
+            Dict::new_sync()
+                .insert(
+                    (*keys::MSG).clone(),
+                    Value::Dict(Dict::new_sync().insert(
+                        (*keys::TEXT).clone(),
+                        Value::binary_from_text("converted failure"),
+                    )),
+                )
+                .insert(
+                    Key::atom_from_text("detail"),
+                    Value::Number(Number::from(7)),
+                ),
+        );
+        let failure = Arc::new(EvaluationFailure::emission(emission).with_context(frame.clone()));
+
+        let evaluation_halt = TaskHalt::from(EvaluationHalt::failure(failure.clone()));
+        assert_eq!(evaluation_halt.diagnostic().message(), "converted failure");
+        assert_eq!(
+            task_halt_contexts(&evaluation_halt),
+            std::slice::from_ref(&frame)
+        );
+        assert_eq!(
+            assembler
+                .get(evaluation_halt.diagnostic().emission(), "detail")
+                .unwrap()
+                .as_i64(),
+            Some(7)
+        );
+
+        let public_error = ApiError::from_eval(EvaluationHalt::failure(failure));
+        let public_halt = TaskHalt::from(public_error);
+        assert_eq!(public_halt.diagnostic().message(), "converted failure");
+        assert_eq!(task_halt_contexts(&public_halt), [frame]);
+        assert_eq!(
+            assembler
+                .get(public_halt.diagnostic().emission(), "detail")
+                .unwrap()
+                .as_i64(),
+            Some(7)
         );
     }
 

@@ -596,6 +596,50 @@ fn diagnostic_value_updates_preserve_the_source_and_add_no_authoritative_metadat
 }
 
 #[test]
+fn diagnostic_value_updates_preserve_structured_evaluation_failures() {
+    let assembler = Assembler::default();
+    let (failed_update, resolver) = assembler.promise("diagnostic viewer update");
+    resolver
+        .fail(Value::record([
+            (
+                "msg",
+                Value::record([
+                    ("text", Value::text("viewer update failed")),
+                    (
+                        "context",
+                        Value::list([Value::record([(
+                            "viewer",
+                            Value::record([("operation", Value::atom_from_text("update"))]),
+                        )])]),
+                    ),
+                ]),
+            ),
+            ("detail", Value::integer(9)),
+        ]))
+        .expect("host should install the structured update failure");
+    let message = Value::record([("msg", Value::record([("text", Value::text("nested"))]))]);
+
+    let error = Diagnostic::apply_updates(&message, failed_update)
+        .expect_err("demanding the viewer update should preserve its failure");
+    assert_eq!(error.to_string(), "viewer update failed");
+    assert_eq!(
+        assembler
+            .get(error.diagnostic().emission(), "detail")
+            .expect("diagnostic update failure should retain ad hoc fields")
+            .as_i64(),
+        Some(9)
+    );
+    let contexts = diagnostic_contexts(&assembler, error.diagnostic());
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(
+        assembler
+            .get(&contexts[0], "viewer.operation")
+            .expect("diagnostic update failure should retain its context"),
+        Value::atom_from_text("update")
+    );
+}
+
+#[test]
 fn public_reflection_inspects_container_structure_and_atom_identity() {
     let assembler = Assembler::default();
     let reflection = assembler.reflection();

@@ -26,7 +26,9 @@ control-flow overview.
   Pollable computations may propagate all three cases. Only the permanent
   variant may enter a lazy cache, promise failure, terminal wait cell, or
   failure ledger. Diagnostic projection belongs to `eval`, not the core halt
-  representation.
+  representation. Diagnostic normalization and object/viewer mixins also
+  retain this halt until the public `Error` boundary; they must not stringify
+  a failure merely because they operate on diagnostics.
 - Computed lazy work is owned by demand-driven `EvaluationSession` task
   records. Contending observers receive the task's stable wait token; they do
   not wait on a lazy-specific condition variable. A pump distinguishes a

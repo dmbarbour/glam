@@ -169,8 +169,8 @@ fn environment(
     let [path]: [Value; 1] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("macro `.env` received the wrong number of arguments"))?;
-    let path = eval::eval_key_path_list(context.eval_context(), path.as_core())
-        .map_err(|error| TaskHalt::new(error.to_string()))?;
+    let path =
+        eval::eval_key_path_list(context.eval_context(), path.as_core()).map_err(TaskHalt::from)?;
     let environment = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("macro `.env` escaped its isolated transaction"))?
@@ -539,8 +539,8 @@ fn text_value(
     value: Value,
     request: &str,
 ) -> Result<String, TaskHalt> {
-    let CoreValue::Binary(bytes) = eval::eval_value(context.eval_context(), value.as_core())
-        .map_err(|error| TaskHalt::new(error.to_string()))?
+    let CoreValue::Binary(bytes) =
+        eval::eval_value(context.eval_context(), value.as_core()).map_err(TaskHalt::from)?
     else {
         return Err(TaskHalt::new(format!("{request} requires text")));
     };
