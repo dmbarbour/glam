@@ -6,7 +6,19 @@ import "minimal.g"
 # until `linux_x86_64.executable` interprets their instruction stream.
 object direct_standard_effects as effects with
   # `{}` is undefined and therefore cannot establish an overridable member.
-  initial_state = {handler:{initialized:()}}
+  initial_state = {
+    handler:{
+      initialized:(),
+      trace:anno 'meta (),
+      trace_policy:effects.trace.drop
+    }
+  }
+
+  object trace with
+    drop = {
+      update:\_event _prior -> {},
+      report:\_carrier -> .r ()
+    }
 
   run operation = effects.run_from effects.initial_state operation
   run_from state operation = effects.run_with effects.api state operation
@@ -45,6 +57,24 @@ object direct_standard_effects as effects with
       [] => value
       _ => (state with { .(path) ::= \_prior -> value })
 
+  trace_outcome event outcome = {
+    result:outcome.result,
+    state:
+      effects.updated_state
+        '.handler.trace
+        (
+          list.at 0 (
+            anno meta_upd:(\priors -> [
+              outcome.state.handler.trace_policy.update
+                event
+                (list.at 0 priors)
+            ])
+              [outcome.state.handler.trace]
+          )
+        )
+        outcome.state
+  }
+
   object api with
     r result = ^effects.return_effect result
     seq operation continuation =
@@ -60,7 +90,9 @@ object direct_x86_64 as x86 extends direct_standard_effects with
       next_label_id:1,
       roots:[],
       cursors:{},
-      symbols:{}
+      symbols:{},
+      trace:anno 'meta (),
+      trace_policy:x86.trace.drop
     }
   }
 
@@ -99,15 +131,142 @@ object direct_x86_64 as x86 extends direct_standard_effects with
   handler_error context =
     anno assert_unit:{context:context, value:"invalid handler operation"} {}
 
+  extend trace with
+    full = {
+      update:^x86.trace_full_update,
+      report:^x86.trace_full_report
+    }
+    summary = {
+      update:^x86.trace_summary_update,
+      report:^x86.trace_summary_report
+    }
+
+  trace_event op category result changes = {
+    effect:{
+      op:op,
+      category:category,
+      result:result,
+      changes:changes
+    }
+  }
+
+  trace_change path action = {
+    space:'handler,
+    path:path,
+    action:action
+  }
+
+  trace_full_update event prior = {
+    events:(
+      match prior with
+        {events:events, _} => events
+        _ => []
+    ) ++ [event]
+  }
+
+  trace_empty_summary = {
+    roots:0,
+    splits:0,
+    labels:0,
+    publications:0,
+    instructions:0
+  }
+
+  trace_prior_summary prior =
+    match prior with
+      {summary:summary, _} => summary
+      _ => x86.trace_empty_summary
+
+  trace_summary_update event prior = {
+    summary:
+      x86.trace_summary_event
+        event.effect.category
+        (x86.trace_prior_summary prior)
+  }
+
+  trace_summary_event category summary =
+    {
+      roots:
+        summary.roots +
+          (if category == 'root then 1 else 0),
+      splits:
+        summary.splits +
+          (if category == 'split then 1 else 0),
+      labels:
+        summary.labels +
+          (if category == 'label or category == 'global then 1 else 0),
+      publications:
+        summary.publications +
+          (if category == 'publish or category == 'global then 1 else 0),
+      instructions:
+        summary.instructions +
+          (if category == 'instruction then 1 else 0)
+    }
+
+  trace_full_report carrier =
+    .meta.inspect carrier >>= \metadata ->
+    .log 'info {
+      msg:{text:x86.trace_full_text metadata.events},
+      direct_assembly:{trace:metadata}
+    }
+
+  trace_summary_report carrier =
+    .meta.inspect carrier >>= \metadata ->
+    .log 'info {
+      msg:{text:x86.trace_summary_text metadata.summary},
+      direct_assembly:{trace:metadata}
+    }
+
+  trace_full_text events =
+    "direct assembly trace (" ++
+      x86.decimal (list.len events) ++
+      " events)" ++
+      list.concat (list.map x86.trace_event_text events)
+
+  trace_event_text event = [10] ++ event.effect.op
+
+  trace_summary_text summary =
+    "direct assembly summary" ++
+      [10] ++ "root sections: " ++ x86.decimal summary.roots ++
+      [10] ++ "region splits: " ++ x86.decimal summary.splits ++
+      [10] ++ "labels captured: " ++ x86.decimal summary.labels ++
+      [10] ++ "symbols published: " ++ x86.decimal summary.publications ++
+      [10] ++ "instructions emitted: " ++ x86.decimal summary.instructions
+
+  decimal_digits = ["0","1","2","3","4","5","6","7","8","9"]
+
+  decimal value =
+    if value < 10 then
+      list.at value x86.decimal_digits
+    else
+      x86.decimal (math.floor (value / 10)) ++
+        list.at (math.mod value 10) x86.decimal_digits
+
   cursor_record kind following =
     {kind:kind, content:[], following:following}
 
   root_section kind =
     \state ->
-      x86.allocate_root_section
-        kind
-        state.handler.next_cursor_id
-        state
+      x86.trace_outcome
+        (
+          x86.trace_event
+            ".section.root"
+            'root
+            {
+              kind:'cursor,
+              identity:x86.cursor_handle state.handler.next_cursor_id
+            }
+            [
+              x86.trace_change '.handler.roots 'append,
+              x86.trace_change '.handler.cursors 'insert
+            ]
+        )
+        (
+          x86.allocate_root_section
+            kind
+            state.handler.next_cursor_id
+            state
+        )
 
   allocate_root_section kind cursor_id state =
     {
@@ -131,11 +290,27 @@ object direct_x86_64 as x86 extends direct_standard_effects with
 
   split_section kind =
     \state ->
-      x86.allocate_split_section
-        kind
-        state.handler.current_cursor
-        state.handler.next_cursor_id
-        state
+      x86.trace_outcome
+        (
+          x86.trace_event
+            ".section.split"
+            'split
+            {
+              kind:'cursor,
+              identity:x86.cursor_handle state.handler.next_cursor_id
+            }
+            [
+              x86.trace_change '.handler.cursors 'insert,
+              x86.trace_change '.handler.cursors 'update
+            ]
+        )
+        (
+          x86.allocate_split_section
+            kind
+            state.handler.current_cursor
+            state.handler.next_cursor_id
+            state
+        )
 
   allocate_split_section kind prior_cursor cursor_id state =
     x86.allocate_split_section_id
@@ -186,10 +361,29 @@ object direct_x86_64 as x86 extends direct_standard_effects with
 
   emit instruction =
     \state ->
-      x86.emit_at
-        state.handler.current_cursor
-        instruction
-        state
+      x86.trace_outcome
+        (
+          x86.trace_event
+            (x86.instruction_effect_name instruction)
+            'instruction
+            {kind:'unit}
+            [x86.trace_change '.handler.cursors 'append]
+        )
+        (
+          x86.emit_at
+            state.handler.current_cursor
+            instruction
+            state
+        )
+
+  instruction_effect_name instruction =
+    match instruction with
+      mov_u32:{register:_, immediate:_} => ".mov_u32"
+      mov_label_u32:{register:_, label:_} => ".mov_label_u32"
+      xor_u32:{destination:_, source:_} => ".xor_u32"
+      bytes:_ => ".bytes"
+      syscall:() => ".syscall"
+      _ => ".instruction"
 
   emit_at cursor_handle instruction state =
     x86.emit_at_id (x86.cursor_id cursor_handle) instruction state
@@ -209,17 +403,43 @@ object direct_x86_64 as x86 extends direct_standard_effects with
 
   label_here =
     \state ->
-      x86.capture_label
-        state.handler.current_cursor
-        state.handler.next_label_id
-        state
+      x86.trace_outcome
+        (
+          x86.trace_event
+            ".label"
+            'label
+            {
+              kind:'label,
+              identity:x86.label_handle state.handler.next_label_id
+            }
+            [x86.trace_change '.handler.cursors 'append]
+        )
+        (
+          x86.capture_label
+            state.handler.current_cursor
+            state.handler.next_label_id
+            state
+        )
 
   label_at cursor_handle =
     \state ->
-      x86.capture_label
-        cursor_handle
-        state.handler.next_label_id
-        state
+      x86.trace_outcome
+        (
+          x86.trace_event
+            ".cursor.label"
+            'label
+            {
+              kind:'label,
+              identity:x86.label_handle state.handler.next_label_id
+            }
+            [x86.trace_change '.handler.cursors 'append]
+        )
+        (
+          x86.capture_label
+            cursor_handle
+            state.handler.next_label_id
+            state
+        )
 
   capture_label cursor_handle label_id state =
     x86.capture_label_handle
@@ -245,28 +465,60 @@ object direct_x86_64 as x86 extends direct_standard_effects with
 
   publish name label_handle =
     \state ->
-      if state.handler.symbols.[name] == {} then
-        {
-          result:(),
-          state:
-            x86.updated_state
-              ['handler, 'symbols, name]
-              label_handle
-              state
-        }
-      else
-        x86.handler_error "direct-assembly symbol is already published"
+      x86.trace_outcome
+        (
+          x86.trace_event
+            ".publish"
+            'publish
+            {kind:'unit}
+            [x86.trace_change '.handler.symbols 'insert]
+        )
+        (x86.publish_untraced name label_handle state)
+
+  publish_untraced name label_handle state =
+    if state.handler.symbols.[name] == {} then
+      {
+        result:(),
+        state:
+          x86.updated_state
+            ['handler, 'symbols, name]
+            label_handle
+            state
+      }
+    else
+      x86.handler_error "direct-assembly symbol is already published"
 
   global name =
     \state ->
-      x86.publish_captured_label
-        name
-        (x86.label_here state)
+      x86.trace_outcome
+        (
+          x86.trace_event
+            ".global"
+            'global
+            {
+              kind:'label,
+              identity:x86.label_handle state.handler.next_label_id
+            }
+            [
+              x86.trace_change '.handler.cursors 'append,
+              x86.trace_change '.handler.symbols 'insert
+            ]
+        )
+        (
+          x86.publish_captured_label
+            name
+            (
+              x86.capture_label
+                state.handler.current_cursor
+                state.handler.next_label_id
+                state
+            )
+        )
 
   publish_captured_label name captured =
     x86.published_label_outcome
       captured.result
-      ((x86.publish name captured.result) captured.state)
+      (x86.publish_untraced name captured.result captured.state)
 
   published_label_outcome label_handle published =
     {result:label_handle, state:published.state}
@@ -366,7 +618,26 @@ object direct_x86_64 as x86 extends direct_standard_effects with
       bytes:payload => payload
 
   compile code_address program =
-    x86.compile_state code_address (x86.run program).state
+    x86.compile_with_trace x86.trace.drop code_address program
+
+  compile_with_trace trace_policy code_address program =
+    x86.compile_traced_state
+      code_address
+      (
+        x86.run_from
+          (
+            x86.updated_state
+              '.handler.trace_policy
+              trace_policy
+              x86.initial_state
+          )
+          program
+      ).state
+
+  compile_traced_state code_address completed_state =
+    anno refl:(completed_state.handler.trace_policy.report completed_state.handler.trace) (
+      x86.compile_state code_address completed_state
+    )
 
   compile_state code_address completed_state =
     x86.compile_layout
@@ -405,6 +676,8 @@ object direct_x86_64 as x86 extends direct_standard_effects with
       x86.label_offset label_handle instructions 0
 
 object direct_linux_x86_64 as linux with
+  trace = ^direct_x86_64.trace
+
   little_endian width value =
     ^direct_x86_64.little_endian width value
 
@@ -436,6 +709,11 @@ object direct_linux_x86_64 as linux with
 
   executable program =
     linux.executable_compiled (^direct_x86_64.compile 0x400078 program)
+
+  executable_with_trace trace_policy program =
+    linux.executable_compiled (
+      ^direct_x86_64.compile_with_trace trace_policy 0x400078 program
+    )
 
   executable_compiled compiled =
     linux.executable_code

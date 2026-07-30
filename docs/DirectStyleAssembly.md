@@ -106,6 +106,51 @@ is `'eax`, `'ecx`, `'edx`, `'ebx`, `'esp`, `'ebp`, `'esi`, and `'edi`.
 The sample still emits one executable load segment, so `.bytes` can currently
 place either code or data in any logical region.
 
+### Associated trace metadata
+
+```g
+env.linux_x86_64.executable Program
+env.linux_x86_64.executable_with_trace TracePolicy Program
+
+env.linux_x86_64.trace.drop
+env.linux_x86_64.trace.full
+env.linux_x86_64.trace.summary
+```
+
+`executable` uses the `drop` policy and emits no trace diagnostic.
+`executable_with_trace` carries one sealed metadata token through protected
+handler state. Successful root-section allocation, region splitting, label
+capture, symbol publication, and instruction emission derive a new token.
+The program cannot inspect this token or the metadata associated with it.
+
+After the handler has selected its final state, the policy's reflection
+reporter receives that state's token. The bundled `full` policy inspects one
+ordered event list and emits an informational diagnostic. The `summary` policy
+retains only counters for roots, splits, labels, publications, and
+instructions, then emits those counters. Both diagnostics contain compact
+`msg.text` for the default logger and retain the inspected value under
+`direct_assembly.trace` for a configured logger or IDE.
+
+The policy is an ordinary object with two operations:
+
+```g
+{
+  update:\Event PriorMetadata -> NextMetadata,
+  report:\Carrier -> ReflectionTask
+}
+```
+
+This is deliberately extensible. A project may replace the representation and
+reporter without exposing metadata to the assembly program. `report` must
+return unit. A dropping policy can ignore both inputs and return `.r ()`
+without inspecting the carrier.
+
+The trace records logical history carried by the final handler state, not
+worker scheduling or evaluator demand order. The current handler has no choice
+effects yet. Once it gains `.alt`, metadata derived in rejected state branches
+must become unreachable, and only the carrier from the selected state is
+reported.
+
 ### Example
 
 ```g

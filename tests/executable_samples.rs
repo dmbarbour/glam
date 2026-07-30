@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
@@ -121,8 +121,120 @@ fn direct_assembly_rejects_duplicate_symbol_publication() {
     );
 }
 
+#[test]
+fn direct_assembly_trace_policies_render_full_and_summary_reports() {
+    let traced = Command::new(env!("CARGO_BIN_EXE_glam"))
+        .env("GLAM_CONF", "samples/config/direct_assembly.g")
+        .env_remove("GLAM_WORKERS")
+        .arg("--script.g")
+        .arg(
+            "language g0\n\
+             import 'std\n\
+             program = do\n\
+             \x20\x20.section.root 'text -> root\n\
+             \x20\x20.cursor.on root do\n\
+             \x20\x20\x20\x20.global \"_start\" -> _\n\
+             \x20\x20\x20\x20.mov_u32 'eax 60\n\
+             \x20\x20\x20\x20.xor_u32 'edi 'edi\n\
+             \x20\x20\x20\x20.syscall\n\
+             full = env.linux_x86_64.executable_with_trace\n\
+             \x20\x20env.linux_x86_64.trace.full\n\
+             \x20\x20program\n\
+             summary = env.linux_x86_64.executable_with_trace\n\
+             \x20\x20env.linux_x86_64.trace.summary\n\
+             \x20\x20program\n\
+             asm.result = anno 'binary (full ++ summary)",
+        )
+        .output()
+        .expect("traced direct-assembly programs should run through glam");
+
+    assert!(
+        traced.status.success(),
+        "traced assembly failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&traced.stdout),
+        String::from_utf8_lossy(&traced.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&traced.stderr);
+    assert!(
+        stderr.contains(
+            "info: direct assembly trace (5 events)\n\
+             \x20\x20\x20\x20.section.root\n\
+             \x20\x20\x20\x20.global\n\
+             \x20\x20\x20\x20.mov_u32\n\
+             \x20\x20\x20\x20.xor_u32\n\
+             \x20\x20\x20\x20.syscall\n"
+        ),
+        "missing full direct-assembly trace: {stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "info: direct assembly summary\n\
+             \x20\x20\x20\x20root sections: 1\n\
+             \x20\x20\x20\x20region splits: 0\n\
+             \x20\x20\x20\x20labels captured: 1\n\
+             \x20\x20\x20\x20symbols published: 1\n\
+             \x20\x20\x20\x20instructions emitted: 3\n"
+        ),
+        "missing direct-assembly trace summary: {stderr}"
+    );
+}
+
+#[test]
+fn configured_logger_can_observe_the_structured_direct_assembly_trace() {
+    let config_dir = generated_trace_config_path();
+    fs::create_dir_all(&config_dir).expect("trace test configuration folder should be creatable");
+    fs::copy("samples/config/minimal.g", config_dir.join("minimal.g"))
+        .expect("minimal configuration dependency should be copied");
+    let mut configuration = fs::read_to_string("samples/config/direct_assembly.g")
+        .expect("direct-assembly configuration should be readable");
+    configuration.push_str(
+        "\nconf.log = .read_log >>= \\message ->\n\
+         \x20\x20((list.head message.direct_assembly.trace.events).effect.op == \".section.root\") =>>\n\
+         \x20\x20\x20\x20.write_stderr (\"STRUCTURED TRACE\" ++ [10])\n",
+    );
+    let configuration_path = config_dir.join("direct_assembly.g");
+    fs::write(&configuration_path, configuration)
+        .expect("trace test configuration should be writable");
+
+    let observed = Command::new(env!("CARGO_BIN_EXE_glam"))
+        .env("GLAM_CONF", &configuration_path)
+        .env_remove("GLAM_WORKERS")
+        .arg("--script.g")
+        .arg(
+            "language g0\n\
+             import 'std\n\
+             program = do\n\
+             \x20\x20.section.root 'text -> root\n\
+             \x20\x20.cursor.on root do\n\
+             \x20\x20\x20\x20.global \"_start\" -> _\n\
+             \x20\x20\x20\x20.mov_u32 'eax 60\n\
+             \x20\x20\x20\x20.xor_u32 'edi 'edi\n\
+             \x20\x20\x20\x20.syscall\n\
+             asm.result = env.linux_x86_64.executable_with_trace\n\
+             \x20\x20env.linux_x86_64.trace.full\n\
+             \x20\x20program",
+        )
+        .output()
+        .expect("structured direct-assembly trace should run through glam");
+    let _ = fs::remove_dir_all(&config_dir);
+
+    assert!(
+        observed.status.success(),
+        "structured trace assembly failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&observed.stdout),
+        String::from_utf8_lossy(&observed.stderr)
+    );
+    assert_eq!(observed.stderr, b"STRUCTURED TRACE\n");
+}
+
 fn generated_executable_path() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join(format!("direct-assembly-hello-{}", std::process::id()))
+}
+
+fn generated_trace_config_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(format!("direct-assembly-trace-{}", std::process::id()))
 }

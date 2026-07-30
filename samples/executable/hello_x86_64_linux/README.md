@@ -33,6 +33,20 @@ before that label makes the distinction observable.
 Cursor and label identities are opaque to the program. The bootstrap handler
 currently implements them with private monotonic tagged integers.
 
+The normal `executable` entry point drops associated trace metadata. To inspect
+the logical writer history, replace the final call with:
+
+```g
+asm.result = env.linux_x86_64.executable_with_trace
+  env.linux_x86_64.trace.full
+  program
+```
+
+The `summary` policy reports fixed counters instead of retaining every event.
+Both forms emit one coherent informational diagnostic only after the final
+handler state is known. A configured logger can inspect the same diagnostic's
+structured `direct_assembly.trace` field.
+
 From the repository root:
 
 ```sh
