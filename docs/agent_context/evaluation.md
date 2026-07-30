@@ -152,6 +152,17 @@ control-flow overview.
   nor target. Demand on a gate waits for its session-owned task, requires
   canonical unit, and then transfers the same demand to the target. Waits are
   not cached as lazy failures.
+- The boxed reflection lazy source has an explicit completion policy. A gate
+  selects `RequireUnit` and then exposes its target; the internal
+  result-producing form selects `ReturnValue` and forwards the task result
+  through the ordinary WHNF demand. Keep this distinction at the launcher
+  boundary rather than inferring policy from whether a task happens to be
+  public or joinable. The result-producing constructor is reserved for
+  reflection-derived sealed metadata until that annotation is implemented.
+- When a demand-owned reflection task failure is propagated into its lazy
+  consumer, the task handle acknowledges the owner's reporting ledger,
+  including across a foreign observer. If nobody observes the failure, it
+  remains unacknowledged and is reported during reasoning drain.
 - A gate's first observer owns its task. Another session may poll but must not
   drive that task: pending work becomes a foreign dependency in the local
   lazy-task record, while a terminal result transfers demand to the target.

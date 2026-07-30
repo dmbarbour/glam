@@ -44,7 +44,7 @@ use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSession,
     EvaluationSessionRun, EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine,
-    EvaluationTaskPoll, EvaluationWaitToken, ReflectionTaskKind, ReflectionTaskLauncher,
+    EvaluationTaskPoll, EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskResultPolicy,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -624,7 +624,7 @@ impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
         &self,
         context: EvalContext,
         effect: Value,
-        kind: ReflectionTaskKind,
+        result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
         let task = EffectTask::new_in_context(
             effect,
@@ -633,11 +633,11 @@ impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
             context,
         )
         .map_err(TaskHalt::into_failure)?;
-        Ok(match kind {
-            ReflectionTaskKind::Annotation => Box::new(AnnotationEffectTask(
+        Ok(match result_policy {
+            ReflectionTaskResultPolicy::RequireUnit => Box::new(UnitEffectTask(
                 task.asserting_unit_result(Arc::from("reflection annotation result")),
             )),
-            ReflectionTaskKind::Joinable => Box::new(JoinableEffectTask(task)),
+            ReflectionTaskResultPolicy::ReturnValue => Box::new(ValueEffectTask(task)),
         })
     }
 }
@@ -2275,11 +2275,11 @@ fn effect_dispatch_context(stage: &str) -> Value {
     )
 }
 
-struct AnnotationEffectTask<S: TaskSpecialization>(EffectTask<S>);
+struct UnitEffectTask<S: TaskSpecialization>(EffectTask<S>);
 
-struct JoinableEffectTask<S: TaskSpecialization>(EffectTask<S>);
+struct ValueEffectTask<S: TaskSpecialization>(EffectTask<S>);
 
-impl<S: TaskSpecialization> EvaluationTaskMachine for JoinableEffectTask<S> {
+impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
         match self.0.poll(step_budget) {
             EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
@@ -2301,7 +2301,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for JoinableEffectTask<S> {
     }
 }
 
-impl<S: TaskSpecialization> EvaluationTaskMachine for AnnotationEffectTask<S> {
+impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
         match self.0.poll(step_budget) {
             EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
@@ -3571,10 +3571,10 @@ mod tests {
             &self,
             context: EvalContext,
             effect: Value,
-            kind: ReflectionTaskKind,
+            result_policy: ReflectionTaskResultPolicy,
         ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
             self.builds.fetch_add(1, Ordering::AcqRel);
-            self.inner.build(context, effect, kind)
+            self.inner.build(context, effect, result_policy)
         }
     }
 
@@ -4442,7 +4442,7 @@ mod tests {
                     .build(
                         task_context,
                         effect.as_core().clone(),
-                        ReflectionTaskKind::Annotation,
+                        ReflectionTaskResultPolicy::RequireUnit,
                     )
                     .map_err(|error| Arc::from(error.to_string()))
             })
@@ -4467,6 +4467,63 @@ mod tests {
         assert_eq!(host.stderr(), [Bytes::from_static(b"scheduled")]);
     }
 
+    #[test]
+    fn reflection_task_launcher_returns_arbitrary_effect_result_when_requested() {
+        let (_, effect) = compile_effect(".r 42");
+        let context = EvalContext::standalone();
+        let launcher = task_launcher(TestEffects, Arc::new(TestHost::default()));
+        let task = context
+            .schedule_task(|task_context| {
+                launcher
+                    .build(
+                        task_context,
+                        effect.as_core().clone(),
+                        ReflectionTaskResultPolicy::ReturnValue,
+                    )
+                    .map_err(|error| Arc::from(error.to_string()))
+            })
+            .expect("effect task should schedule");
+
+        assert_eq!(
+            context.pump_wait(task.wait(), 4096),
+            crate::evaluation::EvaluationPumpOutcome::TargetReady
+        );
+        let EvaluationTaskPoll::Complete(value) = context.poll_reflection_task(&task) else {
+            panic!("the result-returning task should complete")
+        };
+        assert_eq!(value, Value::Number(Number::from(42)));
+    }
+
+    #[test]
+    fn reflection_task_launcher_requires_unit_when_requested() {
+        let (_, effect) = compile_effect(".r 42");
+        let context = EvalContext::standalone();
+        let launcher = task_launcher(TestEffects, Arc::new(TestHost::default()));
+        let task = context
+            .schedule_task(|task_context| {
+                launcher
+                    .build(
+                        task_context,
+                        effect.as_core().clone(),
+                        ReflectionTaskResultPolicy::RequireUnit,
+                    )
+                    .map_err(|error| Arc::from(error.to_string()))
+            })
+            .expect("effect task should schedule");
+
+        assert_eq!(
+            context.pump_wait(task.wait(), 4096),
+            crate::evaluation::EvaluationPumpOutcome::TargetReady
+        );
+        let EvaluationTaskPoll::Failed(error) = context.poll_reflection_task(&task) else {
+            panic!("the unit-requiring task should fail")
+        };
+        assert_eq!(
+            error.to_string(),
+            "reflection annotation result: unit expected, received Number"
+        );
+    }
+
     fn schedule_composed_test_task(
         effect: &PublicValue,
         host: Arc<TestHost>,
@@ -4480,9 +4537,7 @@ mod tests {
         let task = context
             .schedule_task(move |task_context| {
                 EffectTask::new_in_context(effect, TestEffects, host, task_context)
-                    .map(|task| {
-                        Box::new(JoinableEffectTask(task)) as Box<dyn EvaluationTaskMachine>
-                    })
+                    .map(|task| Box::new(ValueEffectTask(task)) as Box<dyn EvaluationTaskMachine>)
                     .map_err(|error| Arc::from(error.to_string()))
             })
             .expect("test task should schedule");
@@ -5050,9 +5105,7 @@ mod tests {
         let task = context
             .schedule_task(move |task_context| {
                 EffectTask::new_in_context(effect, TestEffects, host.clone(), task_context)
-                    .map(|task| {
-                        Box::new(JoinableEffectTask(task)) as Box<dyn EvaluationTaskMachine>
-                    })
+                    .map(|task| Box::new(ValueEffectTask(task)) as Box<dyn EvaluationTaskMachine>)
                     .map_err(|error| Arc::from(error.to_string()))
             })
             .expect("parent task should schedule");

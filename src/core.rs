@@ -9,7 +9,10 @@ use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
-use crate::evaluation::{EvalContext, EvaluationTaskHandle, EvaluationTaskId, EvaluationWaitToken};
+use crate::evaluation::{
+    EvalContext, EvaluationTaskHandle, EvaluationTaskId, EvaluationWaitToken,
+    ReflectionTaskResultPolicy,
+};
 use crate::number::Number;
 
 mod evaluation_halt;
@@ -812,7 +815,7 @@ pub(crate) enum LazySource {
     Error,
     ComputedFixpoint(Arc<FixpointComputation>),
     Deferred(Arc<DeferredComputation>),
-    ReflectionGate(Arc<ReflectionGate>),
+    ReflectionTask(Arc<ReflectionComputation>),
     Access {
         path: Arc<[CoreDataKey]>,
         arguments: Arc<[Value]>,
@@ -863,18 +866,27 @@ impl TaskPromise {
 pub(crate) type DeferredComputation =
     dyn Fn(&EvalContext) -> Result<Value, EvaluationHalt> + Send + Sync;
 
-/// A lazy sequencing boundary for `anno refl:Effect Target`.
+/// A lazy reflection task which either gates a target or returns its result.
 ///
 /// The payload is boxed so adding reflection does not enlarge every
 /// `LazySource`. Task execution state remains in `EvaluationSession`; this
 /// cell only remembers which task the first observer started.
-pub(crate) struct ReflectionGate {
+pub(crate) struct ReflectionComputation {
     effect: Value,
-    target: Value,
+    completion: ReflectionCompletion,
     task: OnceLock<Result<EvaluationTaskHandle, Arc<EvaluationFailure>>>,
 }
 
-impl ReflectionGate {
+pub(crate) enum ReflectionCompletion {
+    Gate {
+        target: Value,
+    },
+    // Prepared for the effectful metadata annotation in the next spike.
+    #[allow(dead_code)]
+    ReturnValue,
+}
+
+impl ReflectionComputation {
     pub(crate) fn task(
         &self,
         context: &EvalContext,
@@ -882,14 +894,21 @@ impl ReflectionGate {
         self.task
             .get_or_init(|| {
                 context
-                    .start_reflection_task(self.effect.clone())
+                    .start_reflection_task(self.effect.clone(), self.result_policy())
                     .map_err(|error| Arc::new(EvaluationFailure::message(error)))
             })
             .as_ref()
     }
 
-    pub(crate) fn target(&self) -> &Value {
-        &self.target
+    pub(crate) fn completion(&self) -> &ReflectionCompletion {
+        &self.completion
+    }
+
+    fn result_policy(&self) -> ReflectionTaskResultPolicy {
+        match self.completion {
+            ReflectionCompletion::Gate { .. } => ReflectionTaskResultPolicy::RequireUnit,
+            ReflectionCompletion::ReturnValue => ReflectionTaskResultPolicy::ReturnValue,
+        }
     }
 }
 
@@ -940,9 +959,9 @@ impl LazyValue {
     pub(crate) fn from_reflection_gate(effect: Value, target: Value) -> Self {
         Self::with_source(
             "reflection annotation",
-            LazySource::ReflectionGate(Arc::new(ReflectionGate {
+            LazySource::ReflectionTask(Arc::new(ReflectionComputation {
                 effect,
-                target,
+                completion: ReflectionCompletion::Gate { target },
                 task: OnceLock::new(),
             })),
         )
@@ -1192,6 +1211,20 @@ impl Value {
         Self::Lazy(LazyValue::from_reflection_gate(effect, target))
     }
 
+    // Prepared for the effectful metadata annotation in the next spike and
+    // exercised directly by the focused evaluator tests.
+    #[allow(dead_code)]
+    pub(crate) fn reflection_task_result(effect: Value) -> Self {
+        Self::Lazy(LazyValue::with_source(
+            "reflection task result",
+            LazySource::ReflectionTask(Arc::new(ReflectionComputation {
+                effect,
+                completion: ReflectionCompletion::ReturnValue,
+                task: OnceLock::new(),
+            })),
+        ))
+    }
+
     /// Constructs a sealed unit carrier with reflection-only metadata.
     pub(crate) fn metadata_carrier(metadata: Value) -> Self {
         Self::Metadata(MetadataCarrier::new(metadata))
@@ -1312,7 +1345,7 @@ mod tests {
     }
 
     #[test]
-    fn boxed_reflection_gate_does_not_enlarge_lazy_source() {
+    fn boxed_reflection_computation_does_not_enlarge_lazy_source() {
         #[allow(dead_code)]
         enum LazySourceWithoutReflection {
             Error,
@@ -1336,7 +1369,7 @@ mod tests {
             std::mem::size_of::<LazySourceWithoutReflection>()
         );
         assert_eq!(
-            std::mem::size_of::<Arc<ReflectionGate>>(),
+            std::mem::size_of::<Arc<ReflectionComputation>>(),
             std::mem::size_of::<usize>()
         );
     }

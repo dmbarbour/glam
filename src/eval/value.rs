@@ -422,7 +422,7 @@ fn produce_lazy_source(
         )),
         LazySource::ComputedFixpoint(fixpoint) => eval_computed_fixpoint(context, lazy, fixpoint),
         LazySource::Deferred(thunk) => thunk(context),
-        LazySource::ReflectionGate(gate) => eval_reflection_gate_source(context, gate),
+        LazySource::ReflectionTask(task) => eval_reflection_task_source(context, task),
         LazySource::Access { path, arguments } => resolve_core_access(context, arguments, path),
         LazySource::Application(application) => apply_values(
             context,
@@ -477,22 +477,34 @@ fn eval_promised(context: &EvalContext, promise: &PromisedValue) -> Result<Value
     Err(EvaluationHalt::unassigned(promise.clone()))
 }
 
-fn eval_reflection_gate_source(
+fn eval_reflection_task_source(
     context: &EvalContext,
-    gate: &crate::core::ReflectionGate,
+    computation: &crate::core::ReflectionComputation,
 ) -> Result<Value, EvaluationHalt> {
-    let task = gate.task(context).map_err(|error| {
+    let (context_name, cancellation_message) = match computation.completion() {
+        crate::core::ReflectionCompletion::Gate { .. } => (
+            "reflection_annotation",
+            "reflection annotation task was cancelled",
+        ),
+        crate::core::ReflectionCompletion::ReturnValue => {
+            ("reflection_task", "reflection result task was cancelled")
+        }
+    };
+    let task = computation.task(context).map_err(|error| {
         EvaluationHalt::failure(Arc::clone(error))
-            .with_context(evaluation_context_frame("reflection_annotation"))
+            .with_context(evaluation_context_frame(context_name))
     })?;
     match context.poll_reflection_task(task) {
         EvaluationTaskPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
-        EvaluationTaskPoll::Complete(_) => Ok(gate.target().clone()),
-        EvaluationTaskPoll::Failed(error) => Err(EvaluationHalt::failure(error)
-            .with_context(evaluation_context_frame("reflection_annotation"))),
-        EvaluationTaskPoll::Cancelled => Err(EvaluationHalt::new(
-            "reflection annotation task was cancelled",
-        )),
+        EvaluationTaskPoll::Complete(value) => match computation.completion() {
+            crate::core::ReflectionCompletion::Gate { target } => Ok(target.clone()),
+            crate::core::ReflectionCompletion::ReturnValue => Ok(value),
+        },
+        EvaluationTaskPoll::Failed(error) => {
+            task.acknowledge_propagated_failure();
+            Err(EvaluationHalt::failure(error).with_context(evaluation_context_frame(context_name)))
+        }
+        EvaluationTaskPoll::Cancelled => Err(EvaluationHalt::new(cancellation_message)),
     }
 }
 

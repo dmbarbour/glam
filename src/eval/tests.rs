@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
@@ -7,8 +7,8 @@ use crate::core::{
     Dict, EvaluatedValue, EvaluationFailure, FixpointComputation, Key, LazyValue, Value, keys,
 };
 use crate::evaluation::{
-    EvaluationMachinePoll, EvaluationTaskMachine, EvaluationTaskPoll, ReflectionTaskKind,
-    ReflectionTaskLauncher,
+    EvaluationMachinePoll, EvaluationTaskMachine, EvaluationTaskPoll, ReflectionTaskLauncher,
+    ReflectionTaskResultPolicy,
 };
 use crate::number::Number;
 
@@ -61,7 +61,7 @@ impl ReflectionTaskLauncher for GateFailureLauncher {
         &self,
         _context: EvalContext,
         _effect: Value,
-        _kind: ReflectionTaskKind,
+        _result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
         self.builds.fetch_add(1, Ordering::SeqCst);
         match self.stage {
@@ -76,6 +76,55 @@ struct GateFailureMachine(Arc<EvaluationFailure>);
 impl EvaluationTaskMachine for GateFailureMachine {
     fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Failed(self.0.clone())
+    }
+}
+
+#[derive(Clone)]
+enum FixtureTaskTerminal {
+    Complete(Value),
+    Failed(Arc<EvaluationFailure>),
+    Cancelled,
+}
+
+struct FixtureTaskLauncher {
+    terminal: FixtureTaskTerminal,
+    builds: Arc<AtomicUsize>,
+    result_policies: Arc<Mutex<Vec<ReflectionTaskResultPolicy>>>,
+}
+
+impl ReflectionTaskLauncher for FixtureTaskLauncher {
+    fn build(
+        &self,
+        _context: EvalContext,
+        _effect: Value,
+        result_policy: ReflectionTaskResultPolicy,
+    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
+        self.builds.fetch_add(1, Ordering::SeqCst);
+        self.result_policies
+            .lock()
+            .expect("fixture result policies were poisoned")
+            .push(result_policy);
+        Ok(Box::new(FixtureTaskMachine {
+            terminal: Some(self.terminal.clone()),
+        }))
+    }
+}
+
+struct FixtureTaskMachine {
+    terminal: Option<FixtureTaskTerminal>,
+}
+
+impl EvaluationTaskMachine for FixtureTaskMachine {
+    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+        match self
+            .terminal
+            .take()
+            .expect("a terminal fixture task must be polled only once")
+        {
+            FixtureTaskTerminal::Complete(value) => EvaluationMachinePoll::Complete(value),
+            FixtureTaskTerminal::Failed(error) => EvaluationMachinePoll::Failed(error),
+            FixtureTaskTerminal::Cancelled => EvaluationMachinePoll::Cancelled,
+        }
     }
 }
 
@@ -3994,6 +4043,104 @@ fn reflection_annotation(context: &EvalContext, effect: Value, target: Value) ->
 }
 
 #[test]
+fn reflection_task_result_returns_arbitrary_lazy_value_once() {
+    let context = test_context();
+    let result_forces = Arc::new(AtomicUsize::new(0));
+    let counted_result_forces = result_forces.clone();
+    let result = Value::deferred("returned reflection result", move |_| {
+        counted_result_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(42))
+    });
+    let builds = Arc::new(AtomicUsize::new(0));
+    let result_policies = Arc::new(Mutex::new(Vec::new()));
+    context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Complete(result),
+            builds: builds.clone(),
+            result_policies: result_policies.clone(),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+
+    let computation = Value::reflection_task_result(n(0));
+    let copy = computation.clone();
+    assert_eq!(eval_value(&context, &computation).unwrap(), n(42));
+    assert_eq!(eval_value(&context, &copy).unwrap(), n(42));
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+    assert_eq!(result_forces.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *result_policies
+            .lock()
+            .expect("fixture result policies were poisoned"),
+        [ReflectionTaskResultPolicy::ReturnValue]
+    );
+}
+
+#[test]
+fn reflection_task_result_blocks_across_sessions_and_returns_completion_value() {
+    let owner = test_context();
+    let observer = test_context();
+    let computation = Value::reflection_task_result(n(0));
+    let blocked = eval_value(&owner, &computation)
+        .expect_err("an unlaunched reflection result task should block");
+    let wait = blocked
+        .blocked_on()
+        .expect("the result computation should expose its stable wait");
+
+    let foreign = eval_value(&observer, &computation)
+        .expect_err("a foreign observer should follow the owner task");
+    assert!(foreign.blocked_on().is_some());
+
+    owner.complete_wait_with_value(&wait.0, n(43));
+    assert_eq!(eval_value(&observer, &computation).unwrap(), n(43));
+    assert_eq!(eval_value(&owner, &computation).unwrap(), n(43));
+}
+
+#[test]
+fn reflection_task_result_preserves_failure_and_transfers_reporting_responsibility() {
+    let context = test_context();
+    let producer_frame = evaluation_context_frame("reflection_result_producer");
+    let failure = Arc::new(
+        EvaluationFailure::message("reflection result failed").with_context(producer_frame.clone()),
+    );
+    context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Failed(failure),
+            builds: Arc::new(AtomicUsize::new(0)),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+
+    let error = eval_value(&context, &Value::reflection_task_result(n(0)))
+        .expect_err("a failed result task must fail its lazy consumer");
+    assert_eq!(error.to_string(), "reflection result failed");
+    assert_eq!(
+        failure_context_items(&error),
+        [evaluation_context_frame("reflection_task"), producer_frame,]
+    );
+    assert_eq!(
+        context.task_registry_counts().unacknowledged_failures,
+        0,
+        "propagating the failure must remove detached-task reporting responsibility"
+    );
+}
+
+#[test]
+fn reflection_task_result_propagates_cancellation() {
+    let context = test_context();
+    context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Cancelled,
+            builds: Arc::new(AtomicUsize::new(0)),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+
+    let error = eval_value(&context, &Value::reflection_task_result(n(0)))
+        .expect_err("a cancelled result task must fail its lazy consumer");
+    assert_eq!(error.to_string(), "reflection result task was cancelled");
+}
+
+#[test]
 fn reflection_gate_waits_before_continuing_target_demand() {
     let context = test_context();
     let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -4131,6 +4278,11 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
         panic!("structured gate failure should project to a diagnostic dictionary")
     };
     assert_eq!(diagnostic.get(&detail), Some(&n(7)));
+    assert_eq!(
+        context.task_registry_counts().unacknowledged_failures,
+        0,
+        "a propagated gate failure must not remain a detached task failure"
+    );
 }
 
 #[test]

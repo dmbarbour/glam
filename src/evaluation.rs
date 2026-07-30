@@ -206,6 +206,15 @@ impl EvaluationTaskHandle {
     pub(crate) fn wait(&self) -> &EvaluationWaitToken {
         &self.wait
     }
+
+    /// Transfers reporting responsibility for a propagated terminal failure
+    /// from the task ledger to the consumer of this handle.
+    pub(crate) fn acknowledge_propagated_failure(&self) {
+        let Some(owner) = self.wait.owner() else {
+            return;
+        };
+        owner.acknowledge_reflection_task_error(self);
+    }
 }
 
 impl fmt::Debug for EvaluationTaskHandle {
@@ -282,7 +291,7 @@ pub(crate) trait ReflectionTaskLauncher: Send + Sync {
         &self,
         context: EvalContext,
         effect: Value,
-        kind: ReflectionTaskKind,
+        result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>>;
 }
 
@@ -300,9 +309,9 @@ pub(crate) trait EvaluationTaskStatusSink: Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReflectionTaskKind {
-    Annotation,
-    Joinable,
+pub(crate) enum ReflectionTaskResultPolicy {
+    RequireUnit,
+    ReturnValue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -545,7 +554,7 @@ impl PendingReflectionTask {
                 self.inner.context.activate_reflection_task(
                     &self.inner.handle,
                     self.inner.effect.clone(),
-                    ReflectionTaskKind::Joinable,
+                    ReflectionTaskResultPolicy::ReturnValue,
                     Some(status),
                     policy.acknowledge_error,
                 );
@@ -746,6 +755,18 @@ impl Drop for EvaluationSession {
 }
 
 impl EvaluationSession {
+    fn acknowledge_reflection_task_error(&self, task: &EvaluationTaskHandle) {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .expect("evaluation task registry was poisoned");
+        if let Some(record) = tasks.reflection.get_mut(&task.wait) {
+            record.error_acknowledged = true;
+        } else {
+            tasks.unacknowledged_failures.remove_mut(&task.id);
+        }
+    }
+
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -1186,7 +1207,7 @@ impl EvalContext {
         &self,
         handle: &EvaluationTaskHandle,
         effect: Value,
-        kind: ReflectionTaskKind,
+        result_policy: ReflectionTaskResultPolicy,
         status_sink: Option<Arc<dyn EvaluationTaskStatusSink>>,
         error_acknowledged: bool,
     ) {
@@ -1203,7 +1224,7 @@ impl EvalContext {
                 launcher.build(
                     Self::for_task(self.session.clone(), handle.id),
                     effect,
-                    kind,
+                    result_policy,
                 )
             });
         let mut tasks = self
@@ -1319,16 +1340,11 @@ impl EvalContext {
     pub(crate) fn start_reflection_task(
         &self,
         effect: Value,
+        result_policy: ReflectionTaskResultPolicy,
     ) -> Result<EvaluationTaskHandle, Arc<str>> {
         if self.session.reflection_launcher.get().is_some() {
             let handle = self.reserve_task()?;
-            self.activate_reflection_task(
-                &handle,
-                effect,
-                ReflectionTaskKind::Annotation,
-                None,
-                false,
-            );
+            self.activate_reflection_task(&handle, effect, result_policy, None, false);
             return Ok(handle);
         }
 
@@ -1434,16 +1450,7 @@ impl EvalContext {
         if !self.owns_task(task) {
             return false;
         }
-        let mut tasks = self
-            .session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        if let Some(record) = tasks.reflection.get_mut(&task.wait) {
-            record.error_acknowledged = true;
-        } else {
-            tasks.unacknowledged_failures.remove_mut(&task.id);
-        }
+        self.session.acknowledge_reflection_task_error(task);
         true
     }
 
@@ -1510,6 +1517,11 @@ impl EvalContext {
 
     #[cfg(test)]
     pub(crate) fn complete_wait(&self, wait: &EvaluationWaitToken) {
+        self.complete_wait_with_value(wait, (*crate::core::keys::UNIT_VALUE).clone());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_wait_with_value(&self, wait: &EvaluationWaitToken, value: Value) {
         let target = wait.clone();
         let mut tasks = self
             .session
@@ -1526,7 +1538,7 @@ impl EvalContext {
         let transition = transition_reflection_task(
             &mut tasks,
             &wait,
-            EvaluationTaskState::Complete((*crate::core::keys::UNIT_VALUE).clone()),
+            EvaluationTaskState::Complete(value),
             &prior,
         );
         self.session.task_changed.notify_all();
