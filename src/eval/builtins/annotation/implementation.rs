@@ -40,6 +40,9 @@ pub(super) fn eval_anno_builtin(
         RecognizedAnnotation::MetadataPure { function } => {
             eval_metadata_pure_annotation(context, function, target)
         }
+        RecognizedAnnotation::MetadataReflection { function } => {
+            eval_metadata_reflection_annotation(context, function, target)
+        }
         RecognizedAnnotation::Deque => eval_deque_annotation(context, target),
         RecognizedAnnotation::Binary => eval_binary_annotation(context, target),
         RecognizedAnnotation::Array => eval_array_annotation(context, target),
@@ -81,6 +84,9 @@ enum RecognizedAnnotation {
     },
     MetadataInitialize,
     MetadataPure {
+        function: Value,
+    },
+    MetadataReflection {
         function: Value,
     },
     Deque,
@@ -144,6 +150,11 @@ fn recognize_annotation(
         }
         Key::Atom(atom) if atom_name(atom) == Some("meta_pure") => {
             Ok(RecognizedAnnotation::MetadataPure {
+                function: payload.clone(),
+            })
+        }
+        Key::Atom(atom) if atom_name(atom) == Some("meta_refl") => {
+            Ok(RecognizedAnnotation::MetadataReflection {
                 function: payload.clone(),
             })
         }
@@ -293,10 +304,41 @@ fn eval_metadata_pure_annotation(
     function: Value,
     target: &Value,
 ) -> Result<Value, EvaluationHalt> {
+    let metadata = metadata_update_inputs(context, target, "meta_pure")?;
+    let output_count = metadata.len();
+    let updates = Value::Lazy(LazyValue::from_application(
+        function,
+        Arc::from([Value::List(List::from_values(metadata))]),
+    ));
+    Ok(metadata_update_outputs(output_count, updates))
+}
+
+fn eval_metadata_reflection_annotation(
+    context: &EvalContext,
+    function: Value,
+    target: &Value,
+) -> Result<Value, EvaluationHalt> {
+    let metadata = metadata_update_inputs(context, target, "meta_refl")?;
+    let output_count = metadata.len();
+    let effect = Value::Lazy(LazyValue::from_application(
+        function,
+        Arc::from([Value::List(List::from_values(metadata))]),
+    ));
+    Ok(metadata_update_outputs(
+        output_count,
+        Value::reflection_task_result(effect),
+    ))
+}
+
+fn metadata_update_inputs(
+    context: &EvalContext,
+    target: &Value,
+    annotation_name: &str,
+) -> Result<Vec<Value>, EvaluationHalt> {
     let Value::List(carriers) = eval_value(context, target)? else {
-        return Err(EvaluationHalt::new(
-            "`meta_pure` annotation requires a list of sealed metadata carriers",
-        ));
+        return Err(EvaluationHalt::new(format!(
+            "`{annotation_name}` annotation requires a list of sealed metadata carriers"
+        )));
     };
     let carriers = list_to_value_items(context, &carriers)?;
     let mut metadata = Vec::with_capacity(carriers.len());
@@ -304,18 +346,16 @@ fn eval_metadata_pure_annotation(
         let carrier = eval_value(context, &carrier)?;
         let Some(value) = carrier.associated_metadata() else {
             return Err(EvaluationHalt::new(format!(
-                "`meta_pure` annotation item {index} must be a sealed metadata carrier, received {}",
+                "`{annotation_name}` annotation item {index} must be a sealed metadata carrier, received {}",
                 carrier.diagnostic_kind_name()
             )));
         };
         metadata.push(value);
     }
+    Ok(metadata)
+}
 
-    let output_count = metadata.len();
-    let updates = Value::Lazy(LazyValue::from_application(
-        function,
-        Arc::from([Value::List(List::from_values(metadata))]),
-    ));
+fn metadata_update_outputs(output_count: usize, updates: Value) -> Value {
     let projection_context = Value::Dict(crate::core::Dict::new_sync().insert(
         (*keys::CONTEXT).clone(),
         evaluation_context_frame("wrap_metadata"),
@@ -332,7 +372,7 @@ fn eval_metadata_pure_annotation(
             ))
         })
         .collect();
-    Ok(Value::List(List::from_values(carriers)))
+    Value::List(List::from_values(carriers))
 }
 
 fn eval_deque_annotation(context: &EvalContext, target: &Value) -> Result<Value, EvaluationHalt> {

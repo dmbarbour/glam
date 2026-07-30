@@ -101,11 +101,18 @@ control-flow overview.
   eagerly require the update result to be a list or have a matching length.
   Each derived carrier holds an immutable hidden `Value`; there is no mutable
   metadata cell and no evaluator-defined merge.
-- Associated metadata is a one-way evaluation-to-reflection boundary.
-  Ordinary transport leaves hidden work latent; `seq` demands it and `spark`
-  may demand it on a worker. Only reflection `.meta.inspect` and the
-  reflection-aware Rust facade may retrieve it. A mismatch is effect failure,
-  not a permanent evaluation error or transactional observation.
+- `anno meta_refl:EffectfulUpdate Carriers` uses the same validation,
+  arity-preserving projections, and sealed outputs, but its one shared update
+  is a result-producing reflection task. Annotation construction and ordinary
+  transport never launch it. The first demand owns the task; copied carriers
+  and projections share its result, waits, failure, and cancellation.
+- Associated metadata has bidirectional hidden transport but one-way
+  observability. Ordinary transport leaves hidden work latent; `seq` demands
+  it and `spark` may demand it on a worker. Only reflection `.meta.inspect`
+  and the reflection-aware Rust facade may retrieve it. A mismatch is effect
+  failure, not a permanent evaluation error or transactional observation.
+  Committed reflection effects are not undone if semantic code later discards
+  a demanded carrier.
 - Metadata records logical history carried by surviving values. Never present
   it as evidence of worker order, evaluator demand order, or discarded
   alternatives. A handler trace should retain its carrier in protected state
@@ -157,8 +164,8 @@ control-flow overview.
   result-producing form selects `ReturnValue` and forwards the task result
   through the ordinary WHNF demand. Keep this distinction at the launcher
   boundary rather than inferring policy from whether a task happens to be
-  public or joinable. The result-producing constructor is reserved for
-  reflection-derived sealed metadata until that annotation is implemented.
+  public or joinable. `meta_refl` is the evaluator production use of the
+  result-producing form; its result remains hidden behind metadata carriers.
 - When a demand-owned reflection task failure is propagated into its lazy
   consumer, the task handle acknowledges the owner's reporting ledger,
   including across a foreign observer. If nobody observes the failure, it

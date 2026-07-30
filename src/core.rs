@@ -878,11 +878,7 @@ pub(crate) struct ReflectionComputation {
 }
 
 pub(crate) enum ReflectionCompletion {
-    Gate {
-        target: Value,
-    },
-    // Prepared for the effectful metadata annotation in the next spike.
-    #[allow(dead_code)]
+    Gate { target: Value },
     ReturnValue,
 }
 
@@ -1211,9 +1207,6 @@ impl Value {
         Self::Lazy(LazyValue::from_reflection_gate(effect, target))
     }
 
-    // Prepared for the effectful metadata annotation in the next spike and
-    // exercised directly by the focused evaluator tests.
-    #[allow(dead_code)]
     pub(crate) fn reflection_task_result(effect: Value) -> Self {
         Self::Lazy(LazyValue::with_source(
             "reflection task result",

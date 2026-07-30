@@ -571,18 +571,21 @@ We'll express annotations as a builtin function.
 
 Annotations are not observable within the computation, but may guide performance, debugging, and other use cases. To avoid silent degradation of performance or reasoning, the assembler shall warn about unrecognized annotations. 
 
-Two annotations provide sealed associated-metadata carriers:
+Three annotations provide and transform sealed associated-metadata carriers:
 
 ```g
 carrier = anno 'meta_init ()
-updated = anno meta_pure:UpdateFn [carrier, otherCarrier]
+pureUpdated = anno meta_pure:UpdateFn [carrier, otherCarrier]
+reflectionUpdated = anno meta_refl:EffectfulUpdate [carrier, otherCarrier]
 ```
 
-The first form creates the initial carrier. The second returns one carrier for
-each input carrier. Ordinary expressions may transport these values but cannot
-inspect them as unit or as metadata. Reflection uses `.meta.inspect` to test
-and inspect a carrier. See [Associated Metadata](Design.md#associated-metadata)
-for the boundary, demand, and update semantics.
+The first form creates the initial carrier. Each update returns one carrier
+for each input carrier. `meta_pure` applies an ordinary function;
+`meta_refl` runs a reflection task when its hidden result is demanded.
+Ordinary expressions may transport these values but cannot inspect them as
+unit or as metadata. Reflection uses `.meta.inspect` to test and inspect a
+carrier. See [Associated Metadata](Design.md#associated-metadata) for the
+boundary, demand, and update semantics.
 
 ## Local Definitions
 

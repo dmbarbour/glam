@@ -3662,8 +3662,25 @@ fn run_metadata_update(
     function: Value,
     carriers: Vec<Value>,
 ) -> Result<Vec<Value>, EvaluationHalt> {
+    run_metadata_transform(context, "meta_pure", function, carriers)
+}
+
+fn run_metadata_reflection_update(
+    context: &EvalContext,
+    function: Value,
+    carriers: Vec<Value>,
+) -> Result<Vec<Value>, EvaluationHalt> {
+    run_metadata_transform(context, "meta_refl", function, carriers)
+}
+
+fn run_metadata_transform(
+    context: &EvalContext,
+    annotation_name: &str,
+    function: Value,
+    carriers: Vec<Value>,
+) -> Result<Vec<Value>, EvaluationHalt> {
     let annotation =
-        Value::Dict(Dict::new_sync().insert(Key::atom_from_text("meta_pure"), function));
+        Value::Dict(Dict::new_sync().insert(Key::atom_from_text(annotation_name), function));
     let result = apply_values(
         context,
         Value::Builtin(Builtin::Anno),
@@ -3934,6 +3951,307 @@ fn metadata_update_delegates_output_interpretation_to_list_at() {
     assert_eq!(
         error.into_permanent_failure().contexts(),
         [evaluation_context_frame("wrap_metadata")]
+    );
+}
+
+#[test]
+fn metadata_reflection_update_is_inert_until_demand_and_shares_one_task() {
+    let context = test_context();
+    let builds = Arc::new(AtomicUsize::new(0));
+    let result_policies = Arc::new(Mutex::new(Vec::new()));
+    context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Complete(Value::List(List::from_values(vec![
+                n(2),
+                n(1),
+            ]))),
+            builds: builds.clone(),
+            result_policies: result_policies.clone(),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+
+    let outputs = run_metadata_reflection_update(
+        &context,
+        Value::error("the fixture launcher must not evaluate the effect"),
+        vec![Value::metadata_carrier(n(1)), Value::metadata_carrier(n(2))],
+    )
+    .expect("effectful metadata update should construct its output carriers");
+    let copied_first = outputs[0].clone();
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        0,
+        "constructing, copying, and transporting carriers must not launch their task"
+    );
+
+    assert_eq!(evaluated_metadata(&context, &outputs[1]).unwrap(), n(1));
+    assert_eq!(evaluated_metadata(&context, &outputs[0]).unwrap(), n(2));
+    assert_eq!(evaluated_metadata(&context, &copied_first).unwrap(), n(2));
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "all projections and carrier copies must share one reflection task"
+    );
+    assert_eq!(
+        *result_policies
+            .lock()
+            .expect("fixture result policies were poisoned"),
+        [ReflectionTaskResultPolicy::ReturnValue]
+    );
+}
+
+#[test]
+fn metadata_reflection_update_blocks_and_resumes_on_its_shared_task() {
+    let context = test_context();
+    let outputs = run_metadata_reflection_update(
+        &context,
+        Value::error("unlaunched effect"),
+        vec![Value::initial_metadata_carrier()],
+    )
+    .expect("effectful metadata update should remain latent");
+
+    let blocked = evaluated_metadata(&context, &outputs[0])
+        .expect_err("an unlaunched metadata task should block");
+    let wait = blocked
+        .blocked_on()
+        .expect("the metadata projection should expose its task wait");
+    context.complete_wait_with_value(&wait.0, Value::List(List::from_values(vec![n(42)])));
+    assert_eq!(evaluated_metadata(&context, &outputs[0]).unwrap(), n(42));
+}
+
+#[test]
+fn metadata_reflection_update_propagates_task_failure_and_cancellation() {
+    let failure = Arc::new(
+        EvaluationFailure::message("metadata reflection task failed")
+            .with_context(evaluation_context_frame("metadata_producer")),
+    );
+    let failed_context = test_context();
+    failed_context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Failed(failure),
+            builds: Arc::new(AtomicUsize::new(0)),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let failed = run_metadata_reflection_update(
+        &failed_context,
+        n(0),
+        vec![Value::initial_metadata_carrier()],
+    )
+    .expect("task failure should remain latent in its output carrier");
+    let error = evaluated_metadata(&failed_context, &failed[0])
+        .expect_err("demanding failed effectful metadata must propagate its failure");
+    assert_eq!(error.to_string(), "metadata reflection task failed");
+    assert_eq!(
+        failed_context
+            .task_registry_counts()
+            .unacknowledged_failures,
+        0,
+        "the demanding metadata projection owns reporting responsibility"
+    );
+
+    let cancelled_context = test_context();
+    cancelled_context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Cancelled,
+            builds: Arc::new(AtomicUsize::new(0)),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let cancelled = run_metadata_reflection_update(
+        &cancelled_context,
+        n(0),
+        vec![Value::initial_metadata_carrier()],
+    )
+    .expect("task cancellation should remain latent in its output carrier");
+    let error = evaluated_metadata(&cancelled_context, &cancelled[0])
+        .expect_err("demanding cancelled effectful metadata must fail");
+    assert_eq!(error.to_string(), "reflection result task was cancelled");
+}
+
+#[test]
+fn metadata_reflection_update_preserves_projection_semantics_and_input_validation() {
+    let short_context = test_context();
+    short_context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Complete(Value::List(List::from_values(vec![n(7)]))),
+            builds: Arc::new(AtomicUsize::new(0)),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let short = run_metadata_reflection_update(
+        &short_context,
+        n(0),
+        vec![
+            Value::initial_metadata_carrier(),
+            Value::initial_metadata_carrier(),
+        ],
+    )
+    .expect("a short result should remain latent");
+    assert_eq!(evaluated_metadata(&short_context, &short[0]).unwrap(), n(7));
+    assert_eq!(
+        evaluated_metadata(&short_context, &short[1])
+            .expect_err("the missing projection should fail")
+            .to_string(),
+        "list at builtin index is out of bounds"
+    );
+
+    let long_context = test_context();
+    let unused_extra = Value::deferred("unused effectful metadata result", |_| {
+        panic!("an extra metadata result must remain unused")
+    });
+    long_context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Complete(Value::List(List::from_values(vec![
+                n(8),
+                unused_extra,
+            ]))),
+            builds: Arc::new(AtomicUsize::new(0)),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let long = run_metadata_reflection_update(
+        &long_context,
+        n(0),
+        vec![Value::initial_metadata_carrier()],
+    )
+    .expect("an extra result should be ignored");
+    assert_eq!(evaluated_metadata(&long_context, &long[0]).unwrap(), n(8));
+
+    let non_list_context = test_context();
+    non_list_context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Complete(n(42)),
+            builds: Arc::new(AtomicUsize::new(0)),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let non_list = run_metadata_reflection_update(
+        &non_list_context,
+        n(0),
+        vec![Value::initial_metadata_carrier()],
+    )
+    .expect("an unindexable result should remain latent");
+    assert_eq!(
+        evaluated_metadata(&non_list_context, &non_list[0])
+            .expect_err("the projection should delegate its error to list.at")
+            .to_string(),
+        "list at builtin requires a list or binary value"
+    );
+
+    let partial_context = test_context();
+    partial_context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Complete(Value::List(List::from_values(vec![
+                Value::error("one metadata projection failed"),
+                n(9),
+            ]))),
+            builds: Arc::new(AtomicUsize::new(0)),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let partial = run_metadata_reflection_update(
+        &partial_context,
+        n(0),
+        vec![
+            Value::initial_metadata_carrier(),
+            Value::initial_metadata_carrier(),
+        ],
+    )
+    .expect("individual failed results should remain latent");
+    assert_eq!(
+        evaluated_metadata(&partial_context, &partial[0])
+            .expect_err("the first metadata result should fail")
+            .to_string(),
+        "one metadata projection failed"
+    );
+    assert_eq!(
+        evaluated_metadata(&partial_context, &partial[1]).unwrap(),
+        n(9),
+        "one failed result must not poison a sibling projection"
+    );
+
+    let invalid_context = test_context();
+    let error = run_metadata_reflection_update(&invalid_context, n(0), vec![n(1)])
+        .expect_err("ordinary values must be rejected before task launch");
+    assert_eq!(
+        error.to_string(),
+        "`meta_refl` annotation item 0 must be a sealed metadata carrier, received Number"
+    );
+    let error = run_metadata_reflection_update(&invalid_context, n(0), Vec::new())
+        .expect("an empty carrier list should construct no projections");
+    assert!(error.is_empty());
+    assert_eq!(invalid_context.reflection_task_count(), 0);
+
+    let annotation = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("meta_refl"), n(0)));
+    let error = apply_values(
+        &invalid_context,
+        Value::Builtin(Builtin::Anno),
+        vec![annotation, n(1)],
+    )
+    .expect_err("effectful metadata target must be a list");
+    assert_eq!(
+        error.to_string(),
+        "`meta_refl` annotation requires a list of sealed metadata carriers"
+    );
+}
+
+#[test]
+fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
+    let seq_context = test_context();
+    let seq_builds = Arc::new(AtomicUsize::new(0));
+    seq_context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Complete(Value::List(List::from_values(vec![n(7)]))),
+            builds: seq_builds.clone(),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let seq_outputs =
+        run_metadata_reflection_update(&seq_context, n(0), vec![Value::initial_metadata_carrier()])
+            .unwrap();
+    assert_eq!(
+        apply_values(
+            &seq_context,
+            Value::Builtin(Builtin::Seq),
+            vec![seq_outputs[0].clone(), n(42)],
+        )
+        .unwrap(),
+        n(42)
+    );
+    assert_eq!(seq_builds.load(Ordering::SeqCst), 1);
+
+    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
+    let session = crate::evaluation::EvaluationSession::shared(&executor);
+    let spark_context = EvalContext::new(session);
+    let spark_builds = Arc::new(AtomicUsize::new(0));
+    spark_context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Complete(Value::List(List::from_values(vec![n(8)]))),
+            builds: spark_builds.clone(),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let spark_outputs = run_metadata_reflection_update(
+        &spark_context,
+        n(0),
+        vec![Value::initial_metadata_carrier()],
+    )
+    .unwrap();
+    let result = apply_values(
+        &spark_context,
+        Value::Builtin(Builtin::Spark),
+        vec![spark_outputs[0].clone(), n(43)],
+    )
+    .expect("spark should immediately return its target");
+    assert_eq!(result, n(43));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while spark_builds.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        spark_builds.load(Ordering::SeqCst),
+        1,
+        "a worker spark should demand the hidden reflection task"
     );
 }
 

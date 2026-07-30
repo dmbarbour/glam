@@ -4677,6 +4677,60 @@ mod tests {
     }
 
     #[test]
+    fn effectful_metadata_update_observes_environment_and_commits_log_once() {
+        let (assembler, effect) = compile_effect(&format!(
+            ".meta.inspect (list.at 0 (anno meta_refl:(\\_priors -> .env ['glam,'version] >>= (\\version -> .log 'info {{msg:{{text:\"metadata update ran\"}}}} =>> .r [version])) [anno 'meta_init ()])) >>= (\\metadata -> (metadata == \"{}\") =>> .r metadata)",
+            env!("CARGO_PKG_VERSION")
+        ));
+        let host = Arc::new(TestHost::default());
+        let (context, task) = schedule_composed_test_task(&effect, host.clone());
+        let EvaluationTaskPoll::Complete(metadata) = pump_composed_test_task(&context, &task)
+        else {
+            panic!("demanded effectful metadata should complete");
+        };
+        assert_eq!(
+            assembler
+                .to_binary(&PublicValue::from_core(metadata))
+                .unwrap(),
+            env!("CARGO_PKG_VERSION").as_bytes()
+        );
+        assert_eq!(
+            host.diagnostics().len(),
+            1,
+            "the shared metadata task must commit its diagnostic exactly once"
+        );
+    }
+
+    #[test]
+    fn effectful_metadata_update_retries_after_observed_state_changes() {
+        let (assembler, effect) = compile_effect(
+            ".meta.inspect (list.at 0 (anno meta_refl:(\\_priors -> .heap.get ['ready] >>= (\\ready -> (ready == \"arrived for metadata\") =>> .r [ready])) [anno 'meta_init ()])) >>= (\\metadata -> (metadata == \"arrived for metadata\") =>> .r metadata)",
+        );
+        let host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
+            "ready",
+            PublicValue::text("arrived for metadata"),
+        )])));
+        let (context, task) = schedule_composed_test_task(&effect, host.clone());
+        assert_eq!(
+            context.pump_wait(task.wait(), 16_384),
+            crate::evaluation::EvaluationPumpOutcome::NoProgress,
+            "the metadata task should first block on its observed heap state"
+        );
+        assert!(host.wait_for_change(1));
+        let EvaluationTaskPoll::Complete(metadata) = pump_composed_test_task(&context, &task)
+        else {
+            panic!("the resumed metadata task should complete");
+        };
+        assert_eq!(
+            assembler
+                .to_binary(&PublicValue::from_core(metadata))
+                .unwrap(),
+            b"arrived for metadata".as_slice()
+        );
+        assert_eq!(host.wait_count(), 1);
+    }
+
+    #[test]
     fn metadata_inspection_mismatches_are_unobserved_effect_failures() {
         for ordinary in ["()", "42"] {
             let (assembler, effect) = compile_effect(&format!(

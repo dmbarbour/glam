@@ -566,10 +566,11 @@ Reflection is not reproducible. Between resource and scheduling variability, cac
 
 ### Associated Metadata
 
-Associated metadata is a deliberate one-way boundary from ordinary evaluation
-to reflection. It lets a computation construct provenance, traces, summaries,
-or other observer-oriented data without making that data observable to the
-computation itself.
+Associated metadata is a sealed channel between ordinary evaluation and
+reflection. It lets a computation carry provenance, traces, summaries, or
+other observer-oriented data without making that data observable to the
+computation itself. Reflection may inspect or transform the hidden value;
+ordinary evaluation can only route the resulting sealed carrier.
 
 The initial carrier is:
 
@@ -589,14 +590,23 @@ Metadata is transformed persistently:
 
 ```glam
 anno meta_pure:UpdateFn [CarrierA, CarrierB, ...]
+anno meta_refl:EffectfulUpdate [CarrierA, CarrierB, ...]
 ```
 
-`UpdateFn` receives the hidden metadata values and returns an ordinary value
-whose indexed elements become the metadata of the corresponding result
-carriers. The outer carrier list preserves its input arity. Indexing remains
-lazy: an absent output poisons only the carrier which selects it, while
-surplus output is ignored. No evaluator-defined merge, log order, or metadata
-schema is implied.
+Both update functions receive the hidden metadata values and return an
+ordinary value whose indexed elements become the metadata of the
+corresponding result carriers. `meta_pure` applies an ordinary pure function.
+`meta_refl` runs an effectful reflection task, allowing the update to observe
+the reflection environment, heap, diagnostics, clocks, or future
+reflection-only facilities. Its result remains sealed; ordinary evaluation
+does not gain a route to inspect reflection data.
+
+The outer carrier list preserves its input arity. Indexing remains lazy: an
+absent output poisons only the carrier which selects it, while surplus output
+is ignored. All projections from one update share the same pure application
+or reflection task. Merely constructing, copying, transporting, or abandoning
+the output carriers does not launch a `meta_refl` task. No evaluator-defined
+merge, log order, or metadata schema is implied.
 
 This boundary exists because all simpler tracing locations impose the wrong
 dependency:
@@ -619,16 +629,21 @@ any other Glam value; it need not be a chronological log.
 
 Transporting a carrier does not demand its metadata. `seq` deliberately
 demands the hidden metadata before continuing, while `spark` makes the same
-demand as a best-effort worker hint. Metadata failures and waits otherwise
-remain latent until an explicit strategy or reflection inspection demands
-them. Future producer annotations, such as a timestamp annotation, may create
-other sealed carriers while preserving the same one-way boundary.
+demand as a best-effort worker hint. Reflection inspection can retrieve the
+hidden value, and demand on that result starts any latent `meta_refl` task.
+Metadata failures and waits otherwise remain latent.
+
+An effectful update follows ordinary reflection transaction semantics. Effects
+committed by a demanded task, such as a diagnostic or heap update, are not
+rolled back merely because semantic code later discards the resulting
+carrier. Users should therefore place effectful updates at demand boundaries
+where committing those effects is intended.
 
 Associated metadata is not an automatic profiler or scheduler trace. Worker
 order, discarded evaluation attempts, and timing require separate operational
-instrumentation. Its purpose is dependency control: evaluation describes
-metadata, reflection observes it, and no value can flow back across that
-boundary into the pure result.
+instrumentation. Its purpose is dependency control: evaluation carries sealed
+metadata, reflection may inspect or enrich it, and no reflection result can
+flow into the pure assembly result except as still-sealed metadata.
 
 ### Logging
 
