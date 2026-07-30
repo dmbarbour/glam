@@ -4238,6 +4238,28 @@ fn zero_worker_spark_discards_hidden_metadata_demand() {
     assert_eq!(eval_value(&context, &result).unwrap(), n(42));
 }
 
+fn wait_for_lazy_cache(lazy: &LazyValue, message: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while lazy.cached().is_none() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(lazy.cached().is_some(), "{message}");
+}
+
+fn wait_for_no_deferred_tasks(context: &EvalContext, message: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while context.task_registry_counts().deferred_active != 0
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        context.task_registry_counts().deferred_active,
+        0,
+        "{message}"
+    );
+}
+
 #[test]
 fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
     let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
@@ -4301,19 +4323,109 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
     attempt_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker should demand the failing metadata");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while metadata.cached().is_none() && std::time::Instant::now() < deadline {
-        std::thread::yield_now();
-    }
-    assert!(
-        metadata.cached().is_some(),
-        "the worker must cache the terminal metadata failure"
+    wait_for_lazy_cache(
+        &metadata,
+        "the worker must cache the terminal metadata failure",
     );
 
     let error = apply_values(&context, Value::Builtin(Builtin::Seq), vec![carrier, n(43)])
         .expect_err("seq must propagate the cached hidden failure");
     assert_eq!(error.to_string(), "metadata strategy failed");
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn strategies_stop_at_nested_metadata_carriers() {
+    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
+    let session = crate::evaluation::EvaluationSession::shared(&executor);
+    let context = EvalContext::new(session);
+    let hidden_forces = Arc::new(AtomicUsize::new(0));
+    let counted_hidden_forces = hidden_forces.clone();
+    let hidden = Value::deferred("nested hidden metadata", move |_| {
+        counted_hidden_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(7))
+    });
+    let outer = Value::metadata_carrier(Value::metadata_carrier(hidden));
+
+    assert_eq!(
+        apply_values(
+            &context,
+            Value::Builtin(Builtin::Seq),
+            vec![outer.clone(), n(42)],
+        )
+        .expect("seq should stop after demanding one hidden metadata value"),
+        n(42)
+    );
+    assert_eq!(hidden_forces.load(Ordering::SeqCst), 0);
+
+    context.spark(outer);
+    let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
+    let sentinel = LazyValue::deferred("nested metadata spark sentinel", move |_| {
+        finished_sender
+            .send(())
+            .expect("sentinel receiver should remain open");
+        Ok((*keys::UNIT_VALUE).clone())
+    });
+    context.spark(Value::Lazy(sentinel.clone()));
+    finished_receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("worker should finish the preceding metadata spark");
+    wait_for_lazy_cache(&sentinel, "worker must finish the sentinel spark");
+    assert_eq!(
+        hidden_forces.load(Ordering::SeqCst),
+        0,
+        "spark must share seq's single metadata-boundary demand"
+    );
+}
+
+#[test]
+fn spark_admission_drops_whnf_and_follows_completed_promises() {
+    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
+    let session = crate::evaluation::EvaluationSession::shared(&executor);
+    let context = EvalContext::new(session);
+    let net = closed_net(|builder| builder.data(n(1)));
+    context.spark(Value::Net(net));
+    context.spark(Value::Promised(PromisedValue::new(
+        "unassigned spark input",
+    )));
+    let promised_forces = Arc::new(AtomicUsize::new(0));
+    let counted_promised_forces = promised_forces.clone();
+    let promised_work = LazyValue::deferred("promised spark work", move |_| {
+        counted_promised_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(7))
+    });
+    let promise = PromisedValue::new("resolved spark input");
+    promise
+        .set(Value::Lazy(promised_work.clone()))
+        .expect("test promise should accept its one assignment");
+    context.spark(Value::Promised(promise));
+
+    let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
+    let sentinel = LazyValue::deferred("spark admission sentinel", move |_| {
+        finished_sender
+            .send(())
+            .expect("sentinel receiver should remain open");
+        Ok((*keys::UNIT_VALUE).clone())
+    });
+    context.spark(Value::Lazy(sentinel.clone()));
+    finished_receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("worker should process the earlier spark jobs first");
+    wait_for_lazy_cache(&sentinel, "worker must finish the sentinel spark");
+    wait_for_no_deferred_tasks(
+        &context,
+        "completed spark jobs must retire their deferred records",
+    );
+
+    let counts = context.task_registry_counts();
+    assert_eq!(
+        promised_forces.load(Ordering::SeqCst),
+        1,
+        "a worker should pursue useful lazy work through a completed promise"
+    );
+    assert!(promised_work.cached().is_some());
+    assert_eq!(counts.deferred_active, 0);
+    assert_eq!(counts.promises_active, 0);
 }
 
 #[test]

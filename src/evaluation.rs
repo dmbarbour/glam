@@ -858,7 +858,13 @@ impl EvalContext {
     }
 
     pub(crate) fn spark(&self, value: Value) {
-        if matches!(value, Value::Lazy(_) | Value::Promised(_) | Value::Net(_)) {
+        // A promise names data whose producer or completed assignment may
+        // expose useful work. Nets and the remaining variants are already in
+        // WHNF; metadata adds one privileged hidden demand.
+        if matches!(
+            value,
+            Value::Lazy(_) | Value::Promised(_) | Value::Metadata(_)
+        ) {
             self.session.submit_spark(value);
         }
     }

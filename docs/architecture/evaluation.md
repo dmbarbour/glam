@@ -216,13 +216,26 @@ Related assembler, logger, and future IDE sessions register with one
 sessions and optional spark work. The serial pump remains available for exact
 foreground dependencies and explicit batch draining.
 
-Demand on `seq A B` forces the outer semantic value of `A` before transferring
-that demand to `B`. Demand on `spark A B` submits `A` and transfers foreground
-demand to `B`; merely constructing either expression demands neither target.
-Their annotation forms use the same paths. Only workers consume sparks, so a
-zero-worker executor discards them immediately.
+Demand on `seq A B` demands `A` to weak-head normal form before transferring
+that demand to `B`. Demand on `spark A B` records the same demand as
+best-effort worker activity, then transfers foreground demand to `B`
+immediately. If `A` reaches a sealed metadata carrier, both strategies demand
+that carrier's one hidden value to weak-head normal form without recursively
+unsealing a hidden carrier. Merely constructing either expression demands
+neither target. Their annotation forms use the same paths.
+
+Sparks express “this value will probably be needed soon,” not merely “run work
+stored directly in this value.” Lazy values, promises, and sealed metadata
+carriers are therefore admitted. A promise may expose work through its
+producer or completed assignment; waiting on the promise is not itself the
+goal. Nets and the remaining values are already in weak-head normal form.
+Only workers consume sparks, so a zero-worker executor discards them
+immediately.
 
 Sparks are performance hints outside reflection transactions and reasoning
 completion. They do not keep sessions alive or report independent failure. A
 divergent spark can occupy a worker forever; the bootstrap currently provides
-neither evaluator fuel nor cooperative cancellation.
+neither evaluator fuel nor cooperative cancellation. The current bootstrap
+does not yet retain a spark blocked on an unresolved resolver-owned promise:
+that attempt observes the unassigned promise and is forgotten. Resumable spark
+demand is required to preserve the hint across later host resolution.

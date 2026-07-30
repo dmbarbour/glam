@@ -237,7 +237,7 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
                     continue;
                 };
                 let context = EvalContext::new(session);
-                let _ = crate::eval::eval_value(&context, &job.value);
+                let _ = crate::eval::demand_strategy_value(&context, &job.value);
             }
             ExecutorWork::Stop => return,
         }

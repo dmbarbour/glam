@@ -19,6 +19,7 @@ use super::*;
 pub(super) use annotation::is_undefined_value;
 pub(super) use net::NetConstructionMachine;
 pub(super) use object::construct_fixpoint_object;
+pub(crate) use strategy::demand as demand_strategy_value;
 
 pub(super) fn apply_builtin(
     context: &EvalContext,

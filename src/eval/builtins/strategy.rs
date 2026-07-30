@@ -25,30 +25,13 @@ pub(in crate::eval) fn seq(
 }
 
 pub(in crate::eval) fn spark(context: &EvalContext, first: Value, target: &Value) -> Value {
-    match &first {
-        Value::Metadata(_) => {
-            context.spark(
-                first
-                    .associated_metadata()
-                    .expect("a metadata carrier must retain its hidden value"),
-            );
-        }
-        Value::Lazy(_) | Value::Promised(_) | Value::Net(_) => {
-            // The strategy input may itself resolve to a carrier. Queue a
-            // private demand rather than stopping at that outer shell.
-            context.spark(Value::deferred("spark strategy demand", move |context| {
-                demand(context, &first)?;
-                Ok((*keys::UNIT_VALUE).clone())
-            }));
-        }
-        _ => {}
-    }
+    context.spark(first);
     target.clone()
 }
 
 /// Demands an ordinary strategy input, then its hidden value when that input
 /// resolves to a sealed metadata carrier.
-fn demand(context: &EvalContext, value: &Value) -> Result<(), EvaluationHalt> {
+pub(crate) fn demand(context: &EvalContext, value: &Value) -> Result<(), EvaluationHalt> {
     let value = eval_value(context, value)?;
     if let Some(metadata) = value.associated_metadata() {
         eval_value(context, &metadata)?;
