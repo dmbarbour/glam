@@ -571,6 +571,19 @@ We'll express annotations as a builtin function.
 
 Annotations are not observable within the computation, but may guide performance, debugging, and other use cases. To avoid silent degradation of performance or reasoning, the assembler shall warn about unrecognized annotations. 
 
+Two annotations provide sealed associated-metadata carriers:
+
+```g
+carrier = anno 'meta ()
+updated = anno meta_upd:UpdateFn [carrier, otherCarrier]
+```
+
+The first form creates the initial carrier. The second returns one carrier for
+each input carrier. Ordinary expressions may transport these values but cannot
+inspect them as unit or as metadata. Reflection uses `.meta.inspect` to test
+and inspect a carrier. See [Associated Metadata](Design.md#associated-metadata)
+for the boundary, demand, and update semantics.
+
 ## Local Definitions
 
 We'll support Haskell-style locals. 

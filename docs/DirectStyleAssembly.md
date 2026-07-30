@@ -108,6 +108,10 @@ place either code or data in any logical region.
 
 ### Associated trace metadata
 
+This is one application of the general
+[associated-metadata boundary](Design.md#associated-metadata): assembly
+evaluation constructs the trace, but only reflection may inspect it.
+
 ```g
 env.linux_x86_64.executable Program
 env.linux_x86_64.executable_with_trace TracePolicy Program

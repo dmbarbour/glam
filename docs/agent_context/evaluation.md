@@ -91,6 +91,25 @@ control-flow overview.
   the same cell and retire both promise indexes before returning it.
 - `Value::Function` is an independently observable curried stage. Partial
   application shares its staged runtime; saturation returns memoized work.
+- `Value::Metadata` is a sealed carrier, not an observable unit value or an
+  opaque host payload. Ordinary equality, key conversion, unit assertion,
+  pattern matching, application, kind reporting, and debug formatting must
+  not expose either its implicit unit payload or hidden Glam metadata.
+  `anno 'meta ()` returns the cached initial carrier with `{}` metadata.
+- `anno meta_upd:UpdateFn Carriers` builds one shared lazy update and one lazy
+  `list.at` projection per input slot. It preserves only outer arity: do not
+  eagerly require the update result to be a list or have a matching length.
+  Each derived carrier holds an immutable hidden `Value`; there is no mutable
+  metadata cell and no evaluator-defined merge.
+- Associated metadata is a one-way evaluation-to-reflection boundary.
+  Ordinary transport leaves hidden work latent; `seq` demands it and `spark`
+  may demand it on a worker. Only reflection `.meta.inspect` and the
+  reflection-aware Rust facade may retrieve it. A mismatch is effect failure,
+  not a permanent evaluation error or transactional observation.
+- Metadata records logical history carried by surviving values. Never present
+  it as evidence of worker order, evaluator demand order, or discarded
+  alternatives. A handler trace should retain its carrier in protected state
+  and inspect only the carrier selected at the final reflection boundary.
 - Lazy lists contain opaque `ListThunk` holes for either computed lazies or
   named promises, but list code never evaluates them. Evaluator-owned
   operations force only the required pieces. Keep compact byte leaves compact.

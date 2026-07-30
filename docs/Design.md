@@ -564,6 +564,72 @@ Reflection is not reproducible. Between resource and scheduling variability, cac
 
 *Note:* Depending on API, reflection can control reflection. For example, we could provide methods to lazily rewrite annotations in a term, or disable reflection for a hierarchical namespace.
 
+### Associated Metadata
+
+Associated metadata is a deliberate one-way boundary from ordinary evaluation
+to reflection. It lets a computation construct provenance, traces, summaries,
+or other observer-oriented data without making that data observable to the
+computation itself.
+
+The initial carrier is:
+
+```glam
+anno 'meta ()
+```
+
+It is a sealed unit value whose associated metadata initially is `{}`.
+Ordinary evaluation may store, copy, return, or discard the carrier, but
+cannot inspect its metadata, observe its unit payload, compare it as unit, or
+use it as a dictionary key. Reflection may test a value with `.meta.inspect`;
+that operation returns the associated metadata through `.r` when the value is
+a carrier and otherwise `.fail`s. Inspection is therefore explicit and
+remains under reflection policy.
+
+Metadata is transformed persistently:
+
+```glam
+anno meta_upd:UpdateFn [CarrierA, CarrierB, ...]
+```
+
+`UpdateFn` receives the hidden metadata values and returns an ordinary value
+whose indexed elements become the metadata of the corresponding result
+carriers. The outer carrier list preserves its input arity. Indexing remains
+lazy: an absent output poisons only the carrier which selects it, while
+surplus output is ignored. No evaluator-defined merge, log order, or metadata
+schema is implied.
+
+This boundary exists because all simpler tracing locations impose the wrong
+dependency:
+
+- ordinary handler state makes instrumentation part of program semantics and
+  available to client effects;
+- a diagnostic stream records observations immediately, so lazy demand,
+  sparks, and abandoned choices can produce misleading history;
+- the reflection heap requires transactional undo and makes trace construction
+  depend on reflection scheduling; and
+- a host-owned evaluator trace records operational execution rather than the
+  logical history selected by the program's dataflow.
+
+Instead, a handler may keep a carrier in protected state and derive a new
+carrier with each logical operation. Persistent state and ordinary
+reachability then select the surviving history: a rejected choice merely
+abandons its derived carrier, and the final carrier can be inspected by one
+reflection reporter. The metadata can be a list, dictionary, summary, tree, or
+any other Glam value; it need not be a chronological log.
+
+Transporting a carrier does not demand its metadata. `seq` deliberately
+demands the hidden metadata before continuing, while `spark` makes the same
+demand as a best-effort worker hint. Metadata failures and waits otherwise
+remain latent until an explicit strategy or reflection inspection demands
+them. Future producer annotations, such as a timestamp annotation, may create
+other sealed carriers while preserving the same one-way boundary.
+
+Associated metadata is not an automatic profiler or scheduler trace. Worker
+order, discarded evaluation attempts, and timing require separate operational
+instrumentation. Its purpose is dependency control: evaluation describes
+metadata, reflection observes it, and no value can flow back across that
+boundary into the pure result.
+
 ### Logging
 
 Reflection emits diagnostics through the effect:
