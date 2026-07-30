@@ -45,7 +45,9 @@ asm.result = env.linux_x86_64.executable_with_trace
 The `summary` policy reports fixed counters instead of retaining every event.
 Both forms emit one coherent informational diagnostic only after the final
 handler state is known. A configured logger can inspect the same diagnostic's
-structured `direct_assembly.trace` field.
+structured `direct_assembly.trace` field. Internally, pure `meta_pure` updates
+carry the history; one final `meta_refl` task receives the selected metadata
+and reports it before the compiled result is exposed.
 
 From the repository root:
 

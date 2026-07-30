@@ -17,7 +17,7 @@ object direct_standard_effects as effects with
   object trace with
     drop = {
       update:\_event _prior -> {},
-      report:\_carrier -> .r ()
+      report:\_metadata -> .r ()
     }
 
   run operation = effects.run_from effects.initial_state operation
@@ -57,23 +57,23 @@ object direct_standard_effects as effects with
       [] => value
       _ => (state with { .(path) ::= \_prior -> value })
 
-  trace_outcome event outcome = {
-    result:outcome.result,
-    state:
-      effects.updated_state
-        '.handler.trace
-        (
-          list.at 0 (
-            anno meta_pure:(\priors -> [
-              outcome.state.handler.trace_policy.update
-                event
-                (list.at 0 priors)
+  trace_outcome event outcome =
+    match (
+      anno meta_pure:(\priors ->
+          match priors with
+            [prior] => [
+              outcome.state.handler.trace_policy.update event prior
             ])
-              [outcome.state.handler.trace]
-          )
-        )
-        outcome.state
-  }
+        [outcome.state.handler.trace]
+    ) with
+      [updated_trace] => {
+        result:outcome.result,
+        state:
+          effects.updated_state
+            '.handler.trace
+            updated_trace
+            outcome.state
+      }
 
   object api with
     r result = ^effects.return_effect result
@@ -203,17 +203,19 @@ object direct_x86_64 as x86 extends direct_standard_effects with
           (if category == 'instruction then 1 else 0)
     }
 
-  trace_full_report carrier =
-    .meta.inspect carrier >>= \metadata ->
+  trace_full_report metadata = do
+    text = x86.trace_full_text metadata.events
+    seq text (.r ())
     .log 'info {
-      msg:{text:x86.trace_full_text metadata.events},
+      msg:{text:text},
       direct_assembly:{trace:metadata}
     }
 
-  trace_summary_report carrier =
-    .meta.inspect carrier >>= \metadata ->
+  trace_summary_report metadata = do
+    text = x86.trace_summary_text metadata.summary
+    seq text (.r ())
     .log 'info {
-      msg:{text:x86.trace_summary_text metadata.summary},
+      msg:{text:text},
       direct_assembly:{trace:metadata}
     }
 
@@ -618,7 +620,9 @@ object direct_x86_64 as x86 extends direct_standard_effects with
       bytes:payload => payload
 
   compile code_address program =
-    x86.compile_with_trace x86.trace.drop code_address program
+    x86.compile_state
+      code_address
+      (x86.run_from x86.initial_state program).state
 
   compile_with_trace trace_policy code_address program =
     x86.compile_traced_state
@@ -635,9 +639,18 @@ object direct_x86_64 as x86 extends direct_standard_effects with
       ).state
 
   compile_traced_state code_address completed_state =
-    anno refl:(completed_state.handler.trace_policy.report completed_state.handler.trace) (
-      x86.compile_state code_address completed_state
-    )
+    match (
+      anno meta_refl:(\metadata -> do
+          [trace_metadata] = metadata
+          seq trace_metadata (.r trace_metadata) -> evaluated_metadata
+          completed_state.handler.trace_policy.report evaluated_metadata
+          .r [evaluated_metadata])
+        [completed_state.handler.trace]
+    ) with
+      [reported_trace] =>
+        seq
+          reported_trace
+          (x86.compile_state code_address completed_state)
 
   compile_state code_address completed_state =
     x86.compile_layout

@@ -155,6 +155,16 @@ fn direct_assembly_trace_policies_render_full_and_summary_reports() {
         String::from_utf8_lossy(&traced.stderr)
     );
     let stderr = String::from_utf8_lossy(&traced.stderr);
+    assert_eq!(
+        stderr.matches("info: direct assembly trace").count(),
+        1,
+        "the full reporter should run exactly once: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("info: direct assembly summary").count(),
+        1,
+        "the summary reporter should run exactly once: {stderr}"
+    );
     assert!(
         stderr.contains(
             "info: direct assembly trace (5 events)\n\
