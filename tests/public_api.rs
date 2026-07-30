@@ -676,8 +676,8 @@ fn public_reflection_recognizes_sealed_metadata_without_forcing_it() {
             concat!(
                 "language g0\n",
                 "import 'std\n",
-                "carrier = anno 'meta ()\n",
-                "failed = list.at 0 (anno meta_upd:(\\_ -> [1 / 0]) [carrier])\n",
+                "carrier = anno 'meta_init ()\n",
+                "failed = list.at 0 (anno meta_pure:(\\_ -> [1 / 0]) [carrier])\n",
                 "ordinary = 42\n",
             ),
         )

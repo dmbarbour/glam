@@ -3496,7 +3496,11 @@ fn context_annotations_are_transparent_and_do_not_demand_context_on_success() {
 #[test]
 fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
     let context = test_context();
-    let annotation = || Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text("meta")));
+    let annotation = || {
+        Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
+            "meta_init",
+        )))
+    };
     let target_forces = Arc::new(AtomicUsize::new(0));
     let counted_target_forces = target_forces.clone();
     let unit = Value::deferred("metadata annotation unit", move |_| {
@@ -3542,7 +3546,11 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
 #[test]
 fn metadata_annotation_rejects_non_unit_and_existing_carriers() {
     let context = test_context();
-    let annotation = || Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text("meta")));
+    let annotation = || {
+        Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
+            "meta_init",
+        )))
+    };
 
     for (target, expected_kind) in [
         (n(42), "Number"),
@@ -3562,13 +3570,51 @@ fn metadata_annotation_rejects_non_unit_and_existing_carriers() {
     }
 }
 
+#[test]
+fn old_metadata_annotation_spellings_are_unrecognized() {
+    let context = test_context();
+    let old_initial = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text("meta")));
+    assert_eq!(
+        apply_values(
+            &context,
+            Value::Builtin(Builtin::Anno),
+            vec![old_initial, n(42)],
+        )
+        .expect("an unrecognized annotation should preserve its target"),
+        n(42),
+        "the old initializer must not create a sealed carrier"
+    );
+
+    let carrier = Value::metadata_carrier(n(7));
+    let old_update = Value::Dict(Dict::new_sync().insert(
+        Key::atom_from_text("meta_upd"),
+        Value::error("the old update function must remain unused"),
+    ));
+    let target = Value::List(List::from_values(vec![carrier.clone()]));
+    let result = apply_values(
+        &context,
+        Value::Builtin(Builtin::Anno),
+        vec![old_update, target.clone()],
+    )
+    .expect("an unrecognized annotation should preserve its target");
+    assert_eq!(result, target);
+    let Value::List(result) = result else {
+        panic!("the preserved target must remain a list");
+    };
+    assert_eq!(
+        list_to_value_items(&context, &result).unwrap(),
+        vec![carrier],
+        "the old updater must not derive another carrier"
+    );
+}
+
 fn run_metadata_update(
     context: &EvalContext,
     function: Value,
     carriers: Vec<Value>,
 ) -> Result<Vec<Value>, EvaluationHalt> {
     let annotation =
-        Value::Dict(Dict::new_sync().insert(Key::atom_from_text("meta_upd"), function));
+        Value::Dict(Dict::new_sync().insert(Key::atom_from_text("meta_pure"), function));
     let result = apply_values(
         context,
         Value::Builtin(Builtin::Anno),
@@ -3759,11 +3805,11 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
     .expect_err("ordinary input values must be rejected before update evaluation");
     assert_eq!(
         error.to_string(),
-        "`meta_upd` annotation item 0 must be a sealed metadata carrier, received Number"
+        "`meta_pure` annotation item 0 must be a sealed metadata carrier, received Number"
     );
 
     let annotation = Value::Dict(Dict::new_sync().insert(
-        Key::atom_from_text("meta_upd"),
+        Key::atom_from_text("meta_pure"),
         Value::error("update function must remain unused"),
     ));
     let error = apply_values(
@@ -3774,7 +3820,7 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
     .expect_err("metadata update target must be a list");
     assert_eq!(
         error.to_string(),
-        "`meta_upd` annotation requires a list of sealed metadata carriers"
+        "`meta_pure` annotation requires a list of sealed metadata carriers"
     );
 }
 

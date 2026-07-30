@@ -574,7 +574,7 @@ computation itself.
 The initial carrier is:
 
 ```glam
-anno 'meta ()
+anno 'meta_init ()
 ```
 
 It is a sealed unit value whose associated metadata initially is `{}`.
@@ -588,7 +588,7 @@ remains under reflection policy.
 Metadata is transformed persistently:
 
 ```glam
-anno meta_upd:UpdateFn [CarrierA, CarrierB, ...]
+anno meta_pure:UpdateFn [CarrierA, CarrierB, ...]
 ```
 
 `UpdateFn` receives the hidden metadata values and returns an ordinary value

@@ -574,8 +574,8 @@ Annotations are not observable within the computation, but may guide performance
 Two annotations provide sealed associated-metadata carriers:
 
 ```g
-carrier = anno 'meta ()
-updated = anno meta_upd:UpdateFn [carrier, otherCarrier]
+carrier = anno 'meta_init ()
+updated = anno meta_pure:UpdateFn [carrier, otherCarrier]
 ```
 
 The first form creates the initial carrier. The second returns one carrier for

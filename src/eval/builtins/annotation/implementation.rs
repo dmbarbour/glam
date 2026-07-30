@@ -33,12 +33,12 @@ pub(super) fn eval_anno_builtin(
             &value,
             target,
         ),
-        RecognizedAnnotation::Metadata => {
+        RecognizedAnnotation::MetadataInitialize => {
             let carrier = Value::initial_metadata_carrier();
             super::super::assertion::assert_unit(context, None, target, &carrier)
         }
-        RecognizedAnnotation::MetadataUpdate { function } => {
-            eval_metadata_update_annotation(context, function, target)
+        RecognizedAnnotation::MetadataPure { function } => {
+            eval_metadata_pure_annotation(context, function, target)
         }
         RecognizedAnnotation::Deque => eval_deque_annotation(context, target),
         RecognizedAnnotation::Binary => eval_binary_annotation(context, target),
@@ -79,8 +79,8 @@ enum RecognizedAnnotation {
         value: Value,
         diagnostic_context: Option<Value>,
     },
-    Metadata,
-    MetadataUpdate {
+    MetadataInitialize,
+    MetadataPure {
         function: Value,
     },
     Deque,
@@ -142,8 +142,8 @@ fn recognize_annotation(
                 context: payload.clone(),
             })
         }
-        Key::Atom(atom) if atom_name(atom) == Some("meta_upd") => {
-            Ok(RecognizedAnnotation::MetadataUpdate {
+        Key::Atom(atom) if atom_name(atom) == Some("meta_pure") => {
+            Ok(RecognizedAnnotation::MetadataPure {
                 function: payload.clone(),
             })
         }
@@ -187,7 +187,7 @@ fn recognize_simple_annotation(atom: &crate::core::Atom) -> Option<RecognizedAnn
         "binary" => Some(RecognizedAnnotation::Binary),
         "array" => Some(RecognizedAnnotation::Array),
         "error" => Some(RecognizedAnnotation::Error),
-        "meta" => Some(RecognizedAnnotation::Metadata),
+        "meta_init" => Some(RecognizedAnnotation::MetadataInitialize),
         _ => None,
     }
 }
@@ -288,14 +288,14 @@ pub(in crate::eval) fn annotation_error_value(message: impl Into<String>) -> Val
     Value::error(message.into())
 }
 
-fn eval_metadata_update_annotation(
+fn eval_metadata_pure_annotation(
     context: &EvalContext,
     function: Value,
     target: &Value,
 ) -> Result<Value, EvaluationHalt> {
     let Value::List(carriers) = eval_value(context, target)? else {
         return Err(EvaluationHalt::new(
-            "`meta_upd` annotation requires a list of sealed metadata carriers",
+            "`meta_pure` annotation requires a list of sealed metadata carriers",
         ));
     };
     let carriers = list_to_value_items(context, &carriers)?;
@@ -304,7 +304,7 @@ fn eval_metadata_update_annotation(
         let carrier = eval_value(context, &carrier)?;
         let Some(value) = carrier.associated_metadata() else {
             return Err(EvaluationHalt::new(format!(
-                "`meta_upd` annotation item {index} must be a sealed metadata carrier, received {}",
+                "`meta_pure` annotation item {index} must be a sealed metadata carrier, received {}",
                 carrier.diagnostic_kind_name()
             )));
         };

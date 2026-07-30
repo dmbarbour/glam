@@ -4593,7 +4593,7 @@ mod tests {
 
     #[test]
     fn metadata_inspection_returns_hidden_values_without_forcing_them() {
-        let (_, initial) = compile_effect(".meta.inspect (anno 'meta ())");
+        let (_, initial) = compile_effect(".meta.inspect (anno 'meta_init ())");
         let (context, task) = schedule_composed_test_task(&initial, Arc::new(TestHost::default()));
         let EvaluationTaskPoll::Complete(Value::Dict(metadata)) =
             pump_composed_test_task(&context, &task)

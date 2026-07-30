@@ -9,7 +9,7 @@ object direct_standard_effects as effects with
   initial_state = {
     handler:{
       initialized:(),
-      trace:anno 'meta (),
+      trace:anno 'meta_init (),
       trace_policy:effects.trace.drop
     }
   }
@@ -64,7 +64,7 @@ object direct_standard_effects as effects with
         '.handler.trace
         (
           list.at 0 (
-            anno meta_upd:(\priors -> [
+            anno meta_pure:(\priors -> [
               outcome.state.handler.trace_policy.update
                 event
                 (list.at 0 priors)
@@ -91,7 +91,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
       roots:[],
       cursors:{},
       symbols:{},
-      trace:anno 'meta (),
+      trace:anno 'meta_init (),
       trace_policy:x86.trace.drop
     }
   }
