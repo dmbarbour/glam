@@ -235,7 +235,10 @@ immediately.
 Sparks are performance hints outside reflection transactions and reasoning
 completion. They do not keep sessions alive or report independent failure. A
 divergent spark can occupy a worker forever; the bootstrap currently provides
-neither evaluator fuel nor cooperative cancellation. The current bootstrap
-does not yet retain a spark blocked on an unresolved resolver-owned promise:
-that attempt observes the unassigned promise and is forgotten. Resumable spark
-demand is required to preserve the hint across later host resolution.
+neither evaluator fuel nor cooperative cancellation. A retryably blocked spark
+is parked without occupying a worker and re-advertised after its evaluation
+session changes. A session generation check prevents promise resolution racing
+with parking from losing the wakeup. This is deliberately conservative until
+fine-grained wait indexes are introduced: one relevant change may retry other
+blocked sparks in the same session. Dropping the session discards its parked
+sparks.

@@ -737,6 +737,14 @@ impl fmt::Debug for EvaluationSession {
     }
 }
 
+impl Drop for EvaluationSession {
+    fn drop(&mut self) {
+        if let Some(executor) = self.executor.upgrade() {
+            executor.unregister_session(self.id.get());
+        }
+    }
+}
+
 impl EvaluationSession {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -770,6 +778,12 @@ impl EvaluationSession {
     fn notify_executor_ready(&self) {
         if let Some(executor) = self.executor.upgrade() {
             executor.notify_session_ready(self.id.get());
+        }
+    }
+
+    fn notify_spark_disturbance(&self) {
+        if let Some(executor) = self.executor.upgrade() {
+            executor.notify_spark_disturbance(self.id.get());
         }
     }
 
@@ -886,6 +900,7 @@ impl EvalContext {
         prune_terminal_promise_waits(&mut tasks);
         self.session.task_changed.notify_all();
         drop(tasks);
+        self.session.notify_spark_disturbance();
     }
 
     pub(crate) fn runs_scheduled_task(&self) -> bool {
@@ -1944,10 +1959,14 @@ impl EvaluationSession {
         Option<ReleasedTaskMachine>,
         Option<TaskStatusUpdate>,
     ) {
-        match claimed {
+        let result = match claimed {
             ClaimedTask::Reflection(claimed) => self.release_reflection_task(claimed, poll),
             ClaimedTask::Deferred(claimed) => self.release_deferred_task(claimed, poll),
+        };
+        if result.0 {
+            self.notify_spark_disturbance();
         }
+        result
     }
 
     fn release_reflection_task(

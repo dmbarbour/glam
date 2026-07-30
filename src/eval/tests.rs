@@ -4260,6 +4260,18 @@ fn wait_for_no_deferred_tasks(context: &EvalContext, message: &str) {
     );
 }
 
+fn wait_for_blocked_sparks(
+    executor: &crate::evaluation::EvaluationExecutor,
+    expected: usize,
+    message: &str,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while executor.blocked_spark_count() != expected && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(executor.blocked_spark_count(), expected, "{message}");
+}
+
 #[test]
 fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
     let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
@@ -4426,6 +4438,68 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
     assert!(promised_work.cached().is_some());
     assert_eq!(counts.deferred_active, 0);
     assert_eq!(counts.promises_active, 0);
+}
+
+#[test]
+fn spark_resumes_after_a_resolver_owned_promise_completes() {
+    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
+    let session = crate::evaluation::EvaluationSession::shared(&executor);
+    let context = EvalContext::new(session);
+    let promise = PromisedValue::new("later spark input");
+    context.spark(Value::Promised(promise.clone()));
+    wait_for_blocked_sparks(
+        &executor,
+        1,
+        "an unassigned promise should retain its spark demand",
+    );
+
+    let (forced_sender, forced_receiver) = std::sync::mpsc::channel();
+    let assigned = LazyValue::deferred("resolved spark work", move |_| {
+        forced_sender
+            .send(())
+            .expect("spark result receiver should remain open");
+        Ok(n(7))
+    });
+    promise
+        .set(Value::Lazy(assigned.clone()))
+        .expect("promise should accept its one assignment");
+    context.notify_promise_changed();
+
+    forced_receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("promise completion should resume and finish its spark");
+    wait_for_lazy_cache(&assigned, "resumed spark work must be cached");
+    wait_for_blocked_sparks(
+        &executor,
+        0,
+        "a completed spark must leave no parked executor job",
+    );
+    wait_for_no_deferred_tasks(
+        &context,
+        "promise and lazy followers must retire after spark completion",
+    );
+}
+
+#[test]
+fn dropping_a_session_discards_its_blocked_sparks() {
+    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
+    {
+        let session = crate::evaluation::EvaluationSession::shared(&executor);
+        let context = EvalContext::new(session);
+        context.spark(Value::Promised(PromisedValue::new(
+            "discarded blocked spark",
+        )));
+        wait_for_blocked_sparks(
+            &executor,
+            1,
+            "unassigned promise should park before its session is dropped",
+        );
+    }
+    wait_for_blocked_sparks(
+        &executor,
+        0,
+        "parked spark values must not outlive their evaluation session",
+    );
 }
 
 #[test]
