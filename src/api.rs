@@ -4,16 +4,18 @@
 //! core values, evaluator topology, and interaction-net scheduling remain
 //! implementation details behind the facade.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::ops::{Deref, Range};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 
 use bytes::Bytes;
+use rpds::RedBlackTreeMapSync;
 
 use crate::compiler::{
     BinaryFileLoader, BinaryLoadArgs, CompileContext, CompileDiagnosticEmitter, ModuleLoadArgs,
@@ -66,6 +68,34 @@ impl EvaluationRuntimeId {
     }
 
     pub(crate) fn from_u64(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(Self)
+    }
+}
+
+/// Runtime-local identity of one buffered-output endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RuntimeOutputEndpointId(NonZeroU64);
+
+impl RuntimeOutputEndpointId {
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    fn from_u64(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(Self)
+    }
+}
+
+/// Runtime-local identity of one accepted output-delivery obligation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RuntimeDeliveryId(NonZeroU64);
+
+impl RuntimeDeliveryId {
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    fn from_u64(id: u64) -> Option<Self> {
         NonZeroU64::new(id).map(Self)
     }
 }
@@ -1125,6 +1155,8 @@ struct RuntimeObservationState {
 struct RuntimeIds {
     next_reasoning_session: AtomicU64,
     next_input_endpoint: AtomicU64,
+    next_output_endpoint: AtomicU64,
+    next_delivery: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -1150,8 +1182,112 @@ impl Default for RuntimeInputBuffer {
     }
 }
 
+#[derive(Clone)]
+struct RuntimeOutputIntent {
+    delivery: RuntimeDeliveryId,
+    endpoint: RuntimeOutputEndpointId,
+    payload: RuntimeValueRoot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeDeliveryState {
+    Queued,
+    Running,
+}
+
+struct RuntimeDeliveryRecord {
+    endpoint: RuntimeOutputEndpointId,
+    payload: RuntimeValueRoot,
+    state: RuntimeDeliveryState,
+}
+
+#[derive(Default)]
+struct RuntimeOutputState {
+    accepted: BTreeSet<RuntimeDeliveryId>,
+    records: BTreeMap<RuntimeDeliveryId, RuntimeDeliveryRecord>,
+    ready_by_endpoint:
+        BTreeMap<RuntimeOutputEndpointId, std::collections::VecDeque<RuntimeDeliveryId>>,
+    failures: RedBlackTreeMapSync<RuntimeDeliveryId, Arc<RuntimeDeliveryFailure>>,
+}
+
+/// Stage of external output delivery which failed after semantic commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeDeliveryFailureKind {
+    Decode,
+    Adapter,
+    Panic,
+}
+
+/// Durable Rust-layer evidence for one failed external delivery.
+#[derive(Clone, Debug)]
+pub struct RuntimeDeliveryFailure {
+    runtime: EvaluationRuntimeId,
+    delivery: RuntimeDeliveryId,
+    endpoint: RuntimeOutputEndpointId,
+    kind: RuntimeDeliveryFailureKind,
+    error: Error,
+}
+
+impl RuntimeDeliveryFailure {
+    pub fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime
+    }
+
+    pub fn delivery_id(&self) -> RuntimeDeliveryId {
+        self.delivery
+    }
+
+    pub fn endpoint_id(&self) -> RuntimeOutputEndpointId {
+        self.endpoint
+    }
+
+    pub fn kind(&self) -> RuntimeDeliveryFailureKind {
+        self.kind
+    }
+
+    pub fn error(&self) -> &Error {
+        &self.error
+    }
+}
+
+/// Persistent view of delivery failures retained at one instant.
+#[derive(Clone)]
+pub struct RuntimeDeliveryFailureSnapshot {
+    runtime: EvaluationRuntimeId,
+    failures: RedBlackTreeMapSync<RuntimeDeliveryId, Arc<RuntimeDeliveryFailure>>,
+}
+
+impl RuntimeDeliveryFailureSnapshot {
+    pub fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.failures.is_empty()
+    }
+
+    pub fn get(&self, delivery: RuntimeDeliveryId) -> Option<Arc<RuntimeDeliveryFailure>> {
+        self.failures.get(&delivery).cloned()
+    }
+
+    pub fn failures(&self) -> Vec<Arc<RuntimeDeliveryFailure>> {
+        self.failures
+            .iter()
+            .map(|(_, failure)| failure.clone())
+            .collect()
+    }
+}
+
+/// Terminal result of one claimed output delivery.
+#[derive(Clone, Debug)]
+pub enum RuntimeDeliveryOutcome {
+    Delivered(RuntimeDeliveryId),
+    Failed(Arc<RuntimeDeliveryFailure>),
+}
+
 struct RuntimeEventState {
     inputs: BTreeMap<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>,
+    outputs: RuntimeOutputState,
     revision: u64,
     latest_changes: BTreeMap<ConflictAddress, u64>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
@@ -1161,6 +1297,7 @@ impl RuntimeEventState {
     fn new(strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
         Self {
             inputs: BTreeMap::new(),
+            outputs: RuntimeOutputState::default(),
             revision: 0,
             latest_changes: BTreeMap::new(),
             strategy,
@@ -1194,7 +1331,7 @@ impl RuntimeEventState {
         if self.conflicts(journal) {
             return false;
         }
-        journal.cursors.iter().all(|(endpoint, cursor)| {
+        let inputs_valid = journal.cursors.iter().all(|(endpoint, cursor)| {
             if cursor.next == cursor.start {
                 return true;
             }
@@ -1204,7 +1341,14 @@ impl RuntimeEventState {
             input.head_sequence == cursor.start
                 && cursor.next.get().saturating_sub(cursor.start.get())
                     <= input.admitted.len() as u64
-        })
+        });
+        inputs_valid
+            && journal.outputs.iter().all(|intent| {
+                self.outputs
+                    .ready_by_endpoint
+                    .contains_key(&intent.endpoint)
+                    && !self.outputs.accepted.contains(&intent.delivery)
+            })
     }
 
     fn commit_validated(&mut self, journal: &RuntimeEventJournal) -> bool {
@@ -1232,14 +1376,34 @@ impl RuntimeEventState {
                     .expect("an admitted input always has a successor boundary");
             }
         }
-        if consumed.is_empty() {
-            return false;
+        let input_changed = !consumed.is_empty();
+        if input_changed {
+            self.revision = self.revision.wrapping_add(1);
+            for address in consumed {
+                self.latest_changes.insert(address, self.revision);
+            }
         }
-        self.revision = self.revision.wrapping_add(1);
-        for address in consumed {
-            self.latest_changes.insert(address, self.revision);
+        for intent in &journal.outputs {
+            assert!(
+                self.outputs.accepted.insert(intent.delivery),
+                "validated delivery IDs remain unique"
+            );
+            let replaced = self.outputs.records.insert(
+                intent.delivery,
+                RuntimeDeliveryRecord {
+                    endpoint: intent.endpoint,
+                    payload: intent.payload.clone(),
+                    state: RuntimeDeliveryState::Queued,
+                },
+            );
+            assert!(replaced.is_none(), "validated delivery IDs remain unique");
+            self.outputs
+                .ready_by_endpoint
+                .get_mut(&intent.endpoint)
+                .expect("event validation retained every output endpoint")
+                .push_back(intent.delivery);
         }
-        true
+        input_changed || !journal.outputs.is_empty()
     }
 }
 
@@ -1271,6 +1435,7 @@ pub struct RuntimeEventJournal {
     snapshot: RuntimeEventSnapshot,
     observations: Box<dyn ConflictObservationIndex>,
     cursors: BTreeMap<RuntimeInputEndpointId, RuntimeInputCursor>,
+    outputs: Vec<RuntimeOutputIntent>,
 }
 
 impl RuntimeEventJournal {
@@ -1281,6 +1446,7 @@ impl RuntimeEventJournal {
             observations: snapshot.strategy.begin(),
             snapshot,
             cursors: BTreeMap::new(),
+            outputs: Vec::new(),
         }
     }
 
@@ -1319,6 +1485,29 @@ impl RuntimeEventJournal {
             .checked_next()
             .expect("an admitted input always has a successor boundary");
         Ok(Some(record.payload.value(self.runtime)))
+    }
+
+    /// Buffers an external output intent in this transaction. The delivery ID
+    /// is reserved immediately and may be burned if the journal is abandoned.
+    /// No output becomes visible before combined commit.
+    pub fn write(
+        &mut self,
+        output: &RuntimeOutputWriter,
+        value: Value,
+    ) -> Result<RuntimeDeliveryId, Error> {
+        let owner = output.validate_runtime(self.runtime)?;
+        let id = owner
+            .ids
+            .next_delivery
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| Error::new("runtime delivery IDs exhausted"))?;
+        let delivery = RuntimeDeliveryId::from_u64(id).expect("runtime delivery IDs start at one");
+        self.outputs.push(RuntimeOutputIntent {
+            delivery,
+            endpoint: output.endpoint,
+            payload: owner.values.root(value),
+        });
+        Ok(delivery)
     }
 }
 
@@ -1417,6 +1606,182 @@ impl<T> RuntimeInputEndpoint<T> {
     pub fn into_parts(self) -> (RuntimeInputSender<T>, RuntimeInputReader) {
         (self.sender, self.reader)
     }
+}
+
+/// Runtime-bound authority to add an output intent to an event journal.
+#[derive(Clone)]
+pub struct RuntimeOutputWriter {
+    runtime: EvaluationRuntimeId,
+    owner: Weak<RuntimeState>,
+    endpoint: RuntimeOutputEndpointId,
+}
+
+impl RuntimeOutputWriter {
+    pub fn id(&self) -> RuntimeOutputEndpointId {
+        self.endpoint
+    }
+
+    fn validate_runtime(&self, runtime: EvaluationRuntimeId) -> Result<Arc<RuntimeState>, Error> {
+        if self.runtime != runtime {
+            return Err(Error::new(format!(
+                "output endpoint {} belongs to evaluation runtime {}, not {}",
+                self.endpoint.get(),
+                self.runtime.get(),
+                runtime.get()
+            )));
+        }
+        self.owner.upgrade().ok_or_else(|| {
+            Error::new(format!(
+                "evaluation runtime {} for output endpoint {} has been dropped",
+                self.runtime.get(),
+                self.endpoint.get()
+            ))
+        })
+    }
+}
+
+type RuntimeOutputDecoder<T> = dyn Fn(Value) -> Result<T, Error> + Send + Sync;
+type RuntimeOutputAdapter<T> = dyn Fn(T) -> Result<(), Error> + Send + Sync;
+
+/// Host-side claimant and adapter for one runtime output endpoint.
+pub struct RuntimeOutputDelivery<T> {
+    runtime: EvaluationRuntimeId,
+    owner: Weak<RuntimeState>,
+    endpoint: RuntimeOutputEndpointId,
+    decode: Arc<RuntimeOutputDecoder<T>>,
+    adapter: Arc<RuntimeOutputAdapter<T>>,
+}
+
+impl<T> Clone for RuntimeOutputDelivery<T> {
+    fn clone(&self) -> Self {
+        Self {
+            runtime: self.runtime,
+            owner: self.owner.clone(),
+            endpoint: self.endpoint,
+            decode: self.decode.clone(),
+            adapter: self.adapter.clone(),
+        }
+    }
+}
+
+impl<T> RuntimeOutputDelivery<T> {
+    pub fn id(&self) -> RuntimeOutputEndpointId {
+        self.endpoint
+    }
+
+    /// Claims and terminally delivers the next committed output, if one is
+    /// ready. Decode and adapter failures are retained by the runtime and
+    /// returned as ordinary terminal outcomes; caught panics follow the same
+    /// path instead of unwinding through runtime state.
+    pub fn deliver_next(&self) -> Result<Option<RuntimeDeliveryOutcome>, Error> {
+        let owner = self.owner.upgrade().ok_or_else(|| {
+            Error::new(format!(
+                "evaluation runtime {} for output endpoint {} has been dropped",
+                self.runtime.get(),
+                self.endpoint.get()
+            ))
+        })?;
+        if owner.id != self.runtime {
+            return Err(Error::new("output endpoint runtime provenance mismatch"));
+        }
+        let Some(ticket) = claim_runtime_delivery(
+            owner,
+            self.endpoint,
+            self.decode.clone(),
+            self.adapter.clone(),
+        )?
+        else {
+            return Ok(None);
+        };
+        ticket.deliver().map(Some)
+    }
+
+    /// Returns retained failures belonging to this endpoint.
+    pub fn failure_snapshot(&self) -> Result<RuntimeDeliveryFailureSnapshot, Error> {
+        let owner = self.owner.upgrade().ok_or_else(|| {
+            Error::new(format!(
+                "evaluation runtime {} for output endpoint {} has been dropped",
+                self.runtime.get(),
+                self.endpoint.get()
+            ))
+        })?;
+        Ok(runtime_delivery_failure_snapshot(
+            &owner,
+            Some(self.endpoint),
+        ))
+    }
+}
+
+/// Host-facing transactional and delivery halves of one output endpoint.
+pub struct RuntimeOutputEndpoint<T> {
+    writer: RuntimeOutputWriter,
+    delivery: RuntimeOutputDelivery<T>,
+}
+
+impl<T> RuntimeOutputEndpoint<T> {
+    pub fn writer(&self) -> RuntimeOutputWriter {
+        self.writer.clone()
+    }
+
+    pub fn delivery(&self) -> RuntimeOutputDelivery<T> {
+        self.delivery.clone()
+    }
+
+    pub fn into_parts(self) -> (RuntimeOutputWriter, RuntimeOutputDelivery<T>) {
+        (self.writer, self.delivery)
+    }
+}
+
+struct RuntimeDeliveryTicket<T> {
+    runtime: Arc<RuntimeState>,
+    delivery: RuntimeDeliveryId,
+    endpoint: RuntimeOutputEndpointId,
+    payload: RuntimeValueRoot,
+    decode: Arc<RuntimeOutputDecoder<T>>,
+    adapter: Arc<RuntimeOutputAdapter<T>>,
+}
+
+impl<T> RuntimeDeliveryTicket<T> {
+    fn deliver(self) -> Result<RuntimeDeliveryOutcome, Error> {
+        let Self {
+            runtime,
+            delivery,
+            endpoint,
+            payload,
+            decode,
+            adapter,
+        } = self;
+        let invocation = catch_unwind(AssertUnwindSafe(|| {
+            let decoded = decode(payload.value(runtime.id))
+                .map_err(|error| (RuntimeDeliveryFailureKind::Decode, error))?;
+            adapter(decoded).map_err(|error| (RuntimeDeliveryFailureKind::Adapter, error))
+        }));
+        let failure = match invocation {
+            Ok(Ok(())) => None,
+            Ok(Err(failure)) => Some(failure),
+            Err(panic) => Some((
+                RuntimeDeliveryFailureKind::Panic,
+                Error::new(format!(
+                    "output delivery panicked: {}",
+                    panic_payload_message(panic.as_ref())
+                )),
+            )),
+        };
+        let failure = terminalize_runtime_delivery(&runtime, endpoint, delivery, failure)?;
+        drop(payload);
+        Ok(match failure {
+            Some(failure) => RuntimeDeliveryOutcome::Failed(failure),
+            None => RuntimeDeliveryOutcome::Delivered(delivery),
+        })
+    }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 #[derive(Default)]
@@ -1533,6 +1898,159 @@ fn admit_runtime_input(
     Ok(sequence)
 }
 
+fn claim_runtime_delivery<T>(
+    runtime: Arc<RuntimeState>,
+    endpoint: RuntimeOutputEndpointId,
+    decode: Arc<RuntimeOutputDecoder<T>>,
+    adapter: Arc<RuntimeOutputAdapter<T>>,
+) -> Result<Option<RuntimeDeliveryTicket<T>>, Error> {
+    let mutation = RuntimeMutationGuard {
+        _guard: runtime
+            .settlement_gate
+            .read()
+            .expect("runtime settlement gate should not be poisoned"),
+    };
+    let claimed = {
+        let mut state = runtime
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned");
+        let Some(delivery) = state
+            .events
+            .outputs
+            .ready_by_endpoint
+            .get(&endpoint)
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "runtime output endpoint {} is not registered",
+                    endpoint.get()
+                ))
+            })?
+            .front()
+            .copied()
+        else {
+            return Ok(None);
+        };
+        let record = state
+            .events
+            .outputs
+            .records
+            .get_mut(&delivery)
+            .expect("every ready delivery has a record");
+        if record.state == RuntimeDeliveryState::Running {
+            return Ok(None);
+        }
+        debug_assert_eq!(record.endpoint, endpoint);
+        record.state = RuntimeDeliveryState::Running;
+        Some((delivery, record.payload.clone()))
+    };
+    drop(mutation);
+    Ok(claimed.map(|(delivery, payload)| RuntimeDeliveryTicket {
+        runtime,
+        delivery,
+        endpoint,
+        payload,
+        decode,
+        adapter,
+    }))
+}
+
+fn terminalize_runtime_delivery(
+    runtime: &Arc<RuntimeState>,
+    endpoint: RuntimeOutputEndpointId,
+    delivery: RuntimeDeliveryId,
+    failure: Option<(RuntimeDeliveryFailureKind, Error)>,
+) -> Result<Option<Arc<RuntimeDeliveryFailure>>, Error> {
+    let failure = failure.map(|(kind, error)| {
+        Arc::new(RuntimeDeliveryFailure {
+            runtime: runtime.id,
+            delivery,
+            endpoint,
+            kind,
+            error,
+        })
+    });
+    let mutation = RuntimeMutationGuard {
+        _guard: runtime
+            .settlement_gate
+            .read()
+            .expect("runtime settlement gate should not be poisoned"),
+    };
+    let retired =
+        {
+            let mut state = runtime
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            let record =
+                state.events.outputs.records.get(&delivery).ok_or_else(|| {
+                    Error::new("delivery record disappeared before terminalization")
+                })?;
+            if record.endpoint != endpoint || record.state != RuntimeDeliveryState::Running {
+                return Err(Error::new("delivery record changed before terminalization"));
+            }
+            let queued = state
+                .events
+                .outputs
+                .ready_by_endpoint
+                .get_mut(&endpoint)
+                .expect("a running delivery retains its endpoint queue");
+            if queued.front().copied() != Some(delivery) {
+                return Err(Error::new(
+                    "running delivery is no longer the endpoint queue head",
+                ));
+            }
+            queued.pop_front();
+            let retired = state
+                .events
+                .outputs
+                .records
+                .remove(&delivery)
+                .expect("the validated running delivery remains present");
+            if let Some(failure) = &failure {
+                state
+                    .events
+                    .outputs
+                    .failures
+                    .insert_mut(delivery, failure.clone());
+            }
+            retired
+        };
+    publish_runtime_observation(runtime, mutation);
+    drop(retired);
+    Ok(failure)
+}
+
+fn runtime_delivery_failure_snapshot(
+    runtime: &RuntimeState,
+    endpoint: Option<RuntimeOutputEndpointId>,
+) -> RuntimeDeliveryFailureSnapshot {
+    let state = runtime
+        .transactions
+        .state
+        .lock()
+        .expect("runtime transaction mutex should not be poisoned");
+    let failures = match endpoint {
+        Some(endpoint) => state
+            .events
+            .outputs
+            .failures
+            .iter()
+            .filter(|(_, failure)| failure.endpoint == endpoint)
+            .fold(
+                RedBlackTreeMapSync::new_sync(),
+                |failures, (id, failure)| failures.insert(*id, failure.clone()),
+            ),
+        None => state.events.outputs.failures.clone(),
+    };
+    RuntimeDeliveryFailureSnapshot {
+        runtime: runtime.id,
+        failures,
+    }
+}
+
 fn publish_runtime_observation(runtime: &RuntimeState, mutation: RuntimeMutationGuard<'_>) {
     let mut epoch = runtime
         .observations
@@ -1578,6 +2096,8 @@ impl EvaluationRuntime {
                 ids: RuntimeIds {
                     next_reasoning_session: AtomicU64::new(1),
                     next_input_endpoint: AtomicU64::new(1),
+                    next_output_endpoint: AtomicU64::new(1),
+                    next_delivery: AtomicU64::new(1),
                 },
                 settlement_gate: RwLock::new(()),
             }),
@@ -1634,6 +2154,97 @@ impl EvaluationRuntime {
                 endpoint,
             },
         })
+    }
+
+    /// Registers a buffered output endpoint with separate typed decoding and
+    /// external delivery policy.
+    pub fn output_endpoint<T, D, A>(
+        &self,
+        decode: D,
+        adapter: A,
+    ) -> Result<RuntimeOutputEndpoint<T>, Error>
+    where
+        D: Fn(Value) -> Result<T, Error> + Send + Sync + 'static,
+        A: Fn(T) -> Result<(), Error> + Send + Sync + 'static,
+    {
+        let id = self
+            .state
+            .ids
+            .next_output_endpoint
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| Error::new("runtime output endpoint IDs exhausted"))?;
+        let endpoint = RuntimeOutputEndpointId::from_u64(id)
+            .expect("runtime output endpoint IDs start at one");
+        let _mutation = self.mutation_guard();
+        self.state
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .events
+            .outputs
+            .ready_by_endpoint
+            .insert(endpoint, std::collections::VecDeque::new());
+        let owner = Arc::downgrade(&self.state);
+        Ok(RuntimeOutputEndpoint {
+            writer: RuntimeOutputWriter {
+                runtime: self.id(),
+                owner: owner.clone(),
+                endpoint,
+            },
+            delivery: RuntimeOutputDelivery {
+                runtime: self.id(),
+                owner,
+                endpoint,
+                decode: Arc::new(decode),
+                adapter: Arc::new(adapter),
+            },
+        })
+    }
+
+    /// Captures every currently retained external delivery failure.
+    pub fn delivery_failure_snapshot(&self) -> RuntimeDeliveryFailureSnapshot {
+        runtime_delivery_failure_snapshot(&self.state, None)
+    }
+
+    /// Acknowledges one retained delivery failure. This changes reporting
+    /// state only and therefore does not advance the semantic observation
+    /// epoch.
+    pub fn acknowledge_delivery_failure(&self, delivery: RuntimeDeliveryId) -> bool {
+        let mutation = self.mutation_guard();
+        let removed = {
+            let mut state = self
+                .state
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            let removed = state.events.outputs.failures.get(&delivery).cloned();
+            if removed.is_some() {
+                state.events.outputs.failures.remove_mut(&delivery);
+            }
+            removed
+        };
+        drop(mutation);
+        let acknowledged = removed.is_some();
+        drop(removed);
+        acknowledged
+    }
+
+    /// Internal activity inspection for the scheduler pump. Retained failures
+    /// and buffered input are reporting/state, not active delivery work.
+    #[doc(hidden)]
+    pub fn has_delivery_activity(&self) -> bool {
+        !self
+            .state
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .events
+            .outputs
+            .records
+            .is_empty()
     }
 
     /// Starts this runtime's worker pool exactly once. A runtime constructed
@@ -4430,6 +5041,505 @@ mod tests {
 
         endpoint.sender().admit(1).expect("input should admit");
         waiter.join().expect("broad observer should wake cleanly");
+    }
+
+    fn decode_test_integer(value: Value) -> Result<i64, Error> {
+        value
+            .as_number_text()
+            .and_then(|text| text.parse().ok())
+            .ok_or_else(|| Error::new("integer output expected"))
+    }
+
+    #[test]
+    fn abandoned_output_intents_burn_ids_without_publishing_work() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+        let endpoint = runtime
+            .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+            .expect("output endpoint should register");
+        let next = runtime
+            .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+            .expect("second output endpoint should register");
+        assert_eq!(next.writer().id().get(), endpoint.writer().id().get() + 1);
+
+        let (_, mut abandoned) = input_transaction(&runtime);
+        let burned = abandoned
+            .write(&endpoint.writer(), Value::integer(1))
+            .expect("intent should reserve an ID");
+        drop(abandoned);
+        assert!(!runtime.has_delivery_activity());
+        assert!(endpoint.delivery().deliver_next().unwrap().is_none());
+
+        let (_, _, foreign_snapshot) = foreign.transaction_snapshot();
+        let mut foreign_events = RuntimeEventJournal::new(foreign_snapshot);
+        assert!(
+            foreign_events
+                .write(&endpoint.writer(), Value::integer(2))
+                .is_err()
+        );
+
+        let (store, mut events) = input_transaction(&runtime);
+        let committed = events
+            .write(&endpoint.writer(), Value::integer(3))
+            .expect("second intent should reserve an ID");
+        assert!(committed.get() > burned.get());
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert!(runtime.has_delivery_activity());
+    }
+
+    #[test]
+    fn output_identity_exhaustion_changes_no_runtime_state() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let endpoint = runtime
+            .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+            .expect("output endpoint should register");
+        runtime
+            .state
+            .ids
+            .next_delivery
+            .store(u64::MAX, Ordering::Relaxed);
+        let (_, mut events) = input_transaction(&runtime);
+        assert!(events.write(&endpoint.writer(), Value::integer(1)).is_err());
+        assert!(!runtime.has_delivery_activity());
+
+        let endpoint_count = runtime
+            .state
+            .transactions
+            .state
+            .lock()
+            .unwrap()
+            .events
+            .outputs
+            .ready_by_endpoint
+            .len();
+        runtime
+            .state
+            .ids
+            .next_output_endpoint
+            .store(u64::MAX, Ordering::Relaxed);
+        assert!(
+            runtime
+                .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+                .is_err()
+        );
+        assert_eq!(
+            runtime
+                .state
+                .transactions
+                .state
+                .lock()
+                .unwrap()
+                .events
+                .outputs
+                .ready_by_endpoint
+                .len(),
+            endpoint_count
+        );
+    }
+
+    #[test]
+    fn combined_heap_conflict_rolls_back_output_admission() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let endpoint = runtime
+            .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+            .expect("output endpoint should register");
+        let (_, store_snapshot, event_snapshot) = runtime.transaction_snapshot();
+        let mut combined_store = crate::reflection::StoreJournal::new(store_snapshot.clone());
+        combined_store.observe_read(&[Key::atom_from_text("output_atomic")]);
+        combined_store.write(
+            vec![Key::atom_from_text("output_atomic")],
+            Value::text("stale"),
+        );
+        let mut combined_events = RuntimeEventJournal::new(event_snapshot);
+        combined_events
+            .write(&endpoint.writer(), Value::integer(1))
+            .unwrap();
+
+        let mut winner = crate::reflection::StoreJournal::new(store_snapshot);
+        winner.write(
+            vec![Key::atom_from_text("output_atomic")],
+            Value::text("winner"),
+        );
+        assert_eq!(
+            runtime.commit_reflection(&winner),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert_eq!(
+            runtime.try_commit_transaction(&combined_store, &combined_events),
+            crate::reflection::StoreCommitResult::Conflict
+        );
+        assert!(!runtime.has_delivery_activity());
+        assert!(endpoint.delivery().deliver_next().unwrap().is_none());
+    }
+
+    #[test]
+    fn output_claim_is_unique_and_callbacks_run_outside_runtime_guards() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let decode_runtime = runtime.clone();
+        let adapter_runtime = runtime.clone();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let callback_barrier = barrier.clone();
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let endpoint = runtime
+            .output_endpoint(
+                move |value| {
+                    assert!(decode_runtime.exclusive_admission_available());
+                    decode_test_integer(value)
+                },
+                move |_: i64| {
+                    assert!(adapter_runtime.exclusive_admission_available());
+                    entered.send(()).expect("test receiver should remain live");
+                    callback_barrier.wait();
+                    Ok(())
+                },
+            )
+            .expect("output endpoint should register");
+        let (store, mut events) = input_transaction(&runtime);
+        let delivery = events.write(&endpoint.writer(), Value::integer(1)).unwrap();
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        let worker_delivery = endpoint.delivery();
+        let worker = std::thread::spawn(move || worker_delivery.deliver_next().unwrap());
+        waiting.recv().expect("callback should begin");
+
+        assert!(runtime.has_delivery_activity());
+        assert!(endpoint.delivery().deliver_next().unwrap().is_none());
+        barrier.wait();
+        assert!(matches!(
+            worker.join().expect("delivery thread should finish"),
+            Some(RuntimeDeliveryOutcome::Delivered(id)) if id == delivery
+        ));
+        assert!(!runtime.has_delivery_activity());
+    }
+
+    #[test]
+    fn output_delivery_preserves_endpoint_order_and_allows_endpoint_concurrency() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let ordered = Arc::new(Mutex::new(Vec::new()));
+        let ordered_sink = ordered.clone();
+        let sequential = runtime
+            .output_endpoint(decode_test_integer, move |value| {
+                ordered_sink.lock().unwrap().push(value);
+                Ok(())
+            })
+            .expect("sequential endpoint should register");
+        let (store, mut events) = input_transaction(&runtime);
+        events
+            .write(&sequential.writer(), Value::integer(1))
+            .unwrap();
+        events
+            .write(&sequential.writer(), Value::integer(2))
+            .unwrap();
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert!(sequential.delivery().deliver_next().unwrap().is_some());
+        assert!(sequential.delivery().deliver_next().unwrap().is_some());
+        assert_eq!(*ordered.lock().unwrap(), [1, 2]);
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let left_barrier = barrier.clone();
+        let right_barrier = barrier.clone();
+        let left = runtime
+            .output_endpoint(decode_test_integer, move |_: i64| {
+                left_barrier.wait();
+                Ok(())
+            })
+            .expect("left endpoint should register");
+        let right = runtime
+            .output_endpoint(decode_test_integer, move |_: i64| {
+                right_barrier.wait();
+                Ok(())
+            })
+            .expect("right endpoint should register");
+        let (store, mut events) = input_transaction(&runtime);
+        events.write(&left.writer(), Value::integer(3)).unwrap();
+        events.write(&right.writer(), Value::integer(4)).unwrap();
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        let left_delivery = left.delivery();
+        let right_delivery = right.delivery();
+        let left_worker = std::thread::spawn(move || left_delivery.deliver_next().unwrap());
+        let right_worker = std::thread::spawn(move || right_delivery.deliver_next().unwrap());
+        barrier.wait();
+        assert!(left_worker.join().unwrap().is_some());
+        assert!(right_worker.join().unwrap().is_some());
+        assert!(!runtime.has_delivery_activity());
+    }
+
+    #[test]
+    fn output_delivery_orders_by_commit_not_reservation() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let sink = delivered.clone();
+        let endpoint = runtime
+            .output_endpoint(decode_test_integer, move |value| {
+                sink.lock().unwrap().push(value);
+                Ok(())
+            })
+            .expect("output endpoint should register");
+        let (_, store_snapshot, event_snapshot) = runtime.transaction_snapshot();
+        let first_store = crate::reflection::StoreJournal::new(store_snapshot.clone());
+        let second_store = crate::reflection::StoreJournal::new(store_snapshot);
+        let mut first_events = RuntimeEventJournal::new(event_snapshot.clone());
+        let mut second_events = RuntimeEventJournal::new(event_snapshot);
+        first_events
+            .write(&endpoint.writer(), Value::integer(1))
+            .unwrap();
+        second_events
+            .write(&endpoint.writer(), Value::integer(2))
+            .unwrap();
+
+        assert_eq!(
+            runtime.try_commit_transaction(&second_store, &second_events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert_eq!(
+            runtime.try_commit_transaction(&first_store, &first_events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert!(endpoint.delivery().deliver_next().unwrap().is_some());
+        assert!(endpoint.delivery().deliver_next().unwrap().is_some());
+        assert_eq!(*delivered.lock().unwrap(), [2, 1]);
+    }
+
+    #[test]
+    fn cloned_output_intent_cannot_republish_a_terminal_delivery_id() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let endpoint = runtime
+            .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+            .expect("output endpoint should register");
+        let (_, store_snapshot, event_snapshot) = runtime.transaction_snapshot();
+        let first_store = crate::reflection::StoreJournal::new(store_snapshot.clone());
+        let replay_store = crate::reflection::StoreJournal::new(store_snapshot);
+        let mut first_events = RuntimeEventJournal::new(event_snapshot);
+        first_events
+            .write(&endpoint.writer(), Value::integer(1))
+            .unwrap();
+        let replay_events = first_events.clone();
+
+        assert_eq!(
+            runtime.try_commit_transaction(&first_store, &first_events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert!(endpoint.delivery().deliver_next().unwrap().is_some());
+        assert_eq!(
+            runtime.try_commit_transaction(&replay_store, &replay_events),
+            crate::reflection::StoreCommitResult::Conflict
+        );
+        assert!(!runtime.has_delivery_activity());
+    }
+
+    #[test]
+    fn output_failures_are_terminal_durable_and_acknowledgeable() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let decode = runtime
+            .output_endpoint(
+                |_: Value| -> Result<(), Error> { Err(Error::new("decode failure")) },
+                |()| Ok(()),
+            )
+            .expect("decode endpoint should register");
+        let adapter = runtime
+            .output_endpoint(decode_test_integer, |_: i64| {
+                Err(Error::new("adapter failure"))
+            })
+            .expect("adapter endpoint should register");
+        let panic = runtime
+            .output_endpoint(decode_test_integer, |_: i64| -> Result<(), Error> {
+                panic!("adapter panic")
+            })
+            .expect("panic endpoint should register");
+        let (store, mut events) = input_transaction(&runtime);
+        let decode_id = events.write(&decode.writer(), Value::integer(1)).unwrap();
+        let adapter_id = events.write(&adapter.writer(), Value::integer(2)).unwrap();
+        let panic_id = events.write(&panic.writer(), Value::integer(3)).unwrap();
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+
+        let outcomes = [
+            decode.delivery().deliver_next().unwrap().unwrap(),
+            adapter.delivery().deliver_next().unwrap().unwrap(),
+            panic.delivery().deliver_next().unwrap().unwrap(),
+        ];
+        let kinds = outcomes.map(|outcome| match outcome {
+            RuntimeDeliveryOutcome::Failed(failure) => failure.kind(),
+            RuntimeDeliveryOutcome::Delivered(_) => panic!("delivery should fail"),
+        });
+        assert_eq!(
+            kinds,
+            [
+                RuntimeDeliveryFailureKind::Decode,
+                RuntimeDeliveryFailureKind::Adapter,
+                RuntimeDeliveryFailureKind::Panic,
+            ]
+        );
+        assert!(!runtime.has_delivery_activity());
+        let snapshot = runtime.delivery_failure_snapshot();
+        assert_eq!(snapshot.failures().len(), 3);
+        assert_eq!(
+            decode
+                .delivery()
+                .failure_snapshot()
+                .unwrap()
+                .failures()
+                .len(),
+            1
+        );
+        assert!(snapshot.get(decode_id).is_some());
+        assert!(snapshot.get(adapter_id).is_some());
+        assert!(snapshot.get(panic_id).is_some());
+
+        let (generation, _, _) = runtime.transaction_snapshot();
+        assert!(runtime.acknowledge_delivery_failure(adapter_id));
+        assert!(!runtime.acknowledge_delivery_failure(adapter_id));
+        let (after_acknowledgement, _, _) = runtime.transaction_snapshot();
+        assert_eq!(after_acknowledgement, generation);
+        assert!(
+            runtime
+                .delivery_failure_snapshot()
+                .get(adapter_id)
+                .is_none()
+        );
+        assert!(snapshot.get(adapter_id).is_some());
+    }
+
+    #[test]
+    fn output_callback_response_reenters_as_later_admitted_input() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let input = runtime
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("input endpoint should register");
+        let response = input.sender();
+        let output = runtime
+            .output_endpoint(decode_test_integer, move |value| {
+                response.admit(value)?;
+                Ok(())
+            })
+            .expect("output endpoint should register");
+        let (producing_store, mut producing_events) = input_transaction(&runtime);
+        assert_eq!(producing_events.read(&input.reader()).unwrap(), None);
+        producing_events
+            .write(&output.writer(), Value::integer(42))
+            .unwrap();
+        assert_eq!(
+            runtime.try_commit_transaction(&producing_store, &producing_events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        let (stale_store, mut stale_events) = input_transaction(&runtime);
+        assert_eq!(stale_events.read(&input.reader()).unwrap(), None);
+
+        assert!(output.delivery().deliver_next().unwrap().is_some());
+        assert_eq!(
+            runtime.try_commit_transaction(&stale_store, &stale_events),
+            crate::reflection::StoreCommitResult::Conflict
+        );
+        let (_, mut fresh_events) = input_transaction(&runtime);
+        assert_eq!(
+            fresh_events
+                .read(&input.reader())
+                .unwrap()
+                .and_then(|value| value.as_number_text()),
+            Some("42".to_owned())
+        );
+    }
+
+    #[test]
+    fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
+        struct DeliveryLease {
+            runtime: Weak<RuntimeState>,
+            dropped: Arc<AtomicBool>,
+        }
+
+        impl Drop for DeliveryLease {
+            fn drop(&mut self) {
+                if let Some(runtime) = self.runtime.upgrade() {
+                    assert!(runtime.settlement_gate.try_write().is_ok());
+                }
+                self.dropped.store(true, Ordering::Release);
+            }
+        }
+
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let lease = Arc::new(DeliveryLease {
+            runtime: Arc::downgrade(&runtime.state),
+            dropped: dropped.clone(),
+        });
+        let retained = Arc::downgrade(&lease);
+        let callback_retained = retained.clone();
+        let endpoint = runtime
+            .output_endpoint(
+                |value| {
+                    assert!(matches!(value.as_core(), CoreValue::Opaque(_)));
+                    Ok(())
+                },
+                move |()| {
+                    assert!(callback_retained.upgrade().is_some());
+                    Ok(())
+                },
+            )
+            .expect("output endpoint should register");
+        let (store, mut events) = input_transaction(&runtime);
+        events
+            .write(
+                &endpoint.writer(),
+                Value::from_core(CoreValue::Opaque(OpaqueValue::new(lease))),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        drop(events);
+        drop(store);
+        assert!(retained.upgrade().is_some());
+        assert!(endpoint.delivery().deliver_next().unwrap().is_some());
+        assert!(retained.upgrade().is_none());
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn running_delivery_retains_runtime_until_terminal_publication() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let runtime_state = Arc::downgrade(&runtime.state);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let callback_barrier = barrier.clone();
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let endpoint = runtime
+            .output_endpoint(decode_test_integer, move |_: i64| {
+                entered.send(()).unwrap();
+                callback_barrier.wait();
+                Ok(())
+            })
+            .expect("output endpoint should register");
+        let (store, mut events) = input_transaction(&runtime);
+        events.write(&endpoint.writer(), Value::integer(1)).unwrap();
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        drop(events);
+        drop(store);
+        let delivery = endpoint.delivery();
+        let worker = std::thread::spawn(move || delivery.deliver_next().unwrap());
+        waiting.recv().expect("callback should begin");
+
+        drop(endpoint);
+        drop(runtime);
+        assert!(runtime_state.upgrade().is_some());
+        barrier.wait();
+        assert!(worker.join().unwrap().is_some());
+        assert!(runtime_state.upgrade().is_none());
     }
 
     #[test]

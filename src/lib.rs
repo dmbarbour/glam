@@ -21,8 +21,11 @@ pub use api::{
     EvaluationRuntimeId, ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort,
     PromiseResolver, ReasoningFailure, ReasoningReport, ReasoningStatus, ReasoningTask,
     ReasoningTaskState, ReasoningVolume, ReflectionEnvironmentBuilder, ReflectionInspector,
-    RuntimeCompatibilitySnapshot, RuntimeEventJournal, RuntimeEventSnapshot, RuntimeInputEndpoint,
-    RuntimeInputReader, RuntimeInputSender, Value, ValueKind,
+    RuntimeCompatibilitySnapshot, RuntimeDeliveryFailure, RuntimeDeliveryFailureKind,
+    RuntimeDeliveryFailureSnapshot, RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeEventJournal,
+    RuntimeEventSnapshot, RuntimeInputEndpoint, RuntimeInputReader, RuntimeInputSender,
+    RuntimeOutputDelivery, RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter,
+    Value, ValueKind,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

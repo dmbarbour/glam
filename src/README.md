@@ -96,6 +96,16 @@ the next empty slot, and combined store/event commit prevents either the heap
 edit or input consumption from being applied alone. Input-slot conflicts reuse
 the runtime's configured conflict-analysis strategy without manufacturing
 dummy heap values.
+The same event journal buffers output intents as runtime roots. It reserves a
+non-reused delivery ID before commit, then atomically installs an identified
+`Queued` outbox record only after store and input validation succeed. A typed
+delivery handle claims one endpoint head as `Running`, releases every runtime
+guard, decodes and invokes the host callback, and terminally removes the
+record. Endpoint queues preserve commit order while independent endpoints may
+deliver concurrently. Decode errors, callback errors, and caught panics remain
+in a persistent Rust-layer failure snapshot until explicitly acknowledged;
+queued or running records count as delivery activity, while retained failures
+and unused input do not.
 The configured logger attaches another demand host to that same runtime. Its
 temporary diagnostic-input and buffered-stderr state commits atomically with
 the runtime store until the generic endpoints replace that compatibility path
