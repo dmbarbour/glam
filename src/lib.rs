@@ -18,9 +18,10 @@ mod text_pattern;
 pub use api::{
     Assembler, AssemblerBuilder, BuiltModule, Diagnostic, DiagnosticBus, DiagnosticCounts,
     DiagnosticEvent, DiagnosticSubscriber, DiagnosticSubscription, Error, EvaluationRuntime,
-    ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort, PromiseResolver,
-    ReasoningFailure, ReasoningReport, ReasoningStatus, ReasoningTask, ReasoningTaskState,
-    ReasoningVolume, ReflectionEnvironmentBuilder, ReflectionInspector, Value, ValueKind,
+    EvaluationRuntimeId, ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort,
+    PromiseResolver, ReasoningFailure, ReasoningReport, ReasoningStatus, ReasoningTask,
+    ReasoningTaskState, ReasoningVolume, ReflectionEnvironmentBuilder, ReflectionInspector, Value,
+    ValueKind,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

@@ -258,7 +258,7 @@ fn committed_reflection_heap_and_children_outlive_macro_alternatives() {
 }
 
 #[test]
-fn macro_reflection_heap_is_private_to_the_compilation_execution() {
+fn macro_reflection_heap_is_shared_with_the_evaluation_runtime() {
     let (assembler, effect) = compile_effects("anno refl:(.heap.set '.macro_only \"yes\") (.r ())");
     let execution = assembler.test_compilation_execution();
 
@@ -271,7 +271,12 @@ fn macro_reflection_heap_is_private_to_the_compilation_execution() {
         .expect("macro heap read should succeed");
     let assembler_value = assembler.get(&assembler.test_reflection_heap(), "macro_only");
     assert_eq!(macro_value.as_core(), &Value::binary_from_text("yes"));
-    assert!(assembler_value.is_err());
+    assert_eq!(
+        assembler_value
+            .expect("the assembler session should see the runtime reflection heap")
+            .as_core(),
+        &Value::binary_from_text("yes")
+    );
 }
 
 #[test]

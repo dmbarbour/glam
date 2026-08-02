@@ -33,7 +33,9 @@ use std::sync::Arc;
 
 use search::SearchPolicy;
 
-use crate::api::{Diagnostic, Error as ApiError, EvaluationRuntime, Value as PublicValue};
+use crate::api::{
+    Diagnostic, Error as ApiError, EvaluationRuntime, EvaluationRuntimeId, Value as PublicValue,
+};
 use crate::core::{
     Atom, Builtin, Dict, EvaluationFailure, EvaluationHalt, FunctionValue, Key, LazyValue, List,
     NetValue, PromisedValue, Value, keys,
@@ -128,8 +130,7 @@ pub enum RequestResult {
     Cancelled,
 }
 
-/// Globally unique identity of one reasoning session. Volume IDs are local to
-/// this scope and capability requests carry both identities.
+/// Runtime-local identity of one reasoning session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReasoningSessionId(NonZeroU64);
 
@@ -316,6 +317,12 @@ pub trait TaskHost<S: TaskSpecialization>: TaskEnvironment + Send + Sync {
     /// Identifies the reasoning scope accepted by private volume capability
     /// requests. Hosts without protected volumes retain the default.
     fn reasoning_session_id(&self) -> Option<ReasoningSessionId> {
+        None
+    }
+
+    /// Identifies the runtime accepted by transitional protected-volume
+    /// capability tags. Phase 1C moves this check to the value boundary.
+    fn evaluation_runtime_id(&self) -> Option<EvaluationRuntimeId> {
         None
     }
 
@@ -2261,7 +2268,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             request,
             &self.tags,
             &self.specialized_requests,
-            self.host.reasoning_session_id(),
+            self.host.evaluation_runtime_id(),
         )
     }
 }
@@ -2879,24 +2886,24 @@ enum VolumeOperation {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct VolumeRequestIdentity {
-    reasoning_session: ReasoningSessionId,
+    runtime: EvaluationRuntimeId,
     volume: VolumeId,
     operation: VolumeOperation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VolumeRequestError {
-    ForeignVolume(ReasoningSessionId, VolumeId),
+    ForeignVolume(EvaluationRuntimeId, VolumeId),
 }
 
 impl fmt::Display for VolumeRequestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ForeignVolume(reasoning_session, volume) => write!(
+            Self::ForeignVolume(runtime, volume) => write!(
                 formatter,
-                "foreign reflection volume {} from reasoning session {}",
+                "foreign reflection volume {} from evaluation runtime {}",
                 volume.get(),
-                reasoning_session.get()
+                runtime.get()
             ),
         }
     }
@@ -2907,7 +2914,7 @@ fn parse_request<R: Clone>(
     value: Value,
     tags: &Tags,
     specialized: &[SpecializedRequest<R>],
-    reasoning_session: Option<ReasoningSessionId>,
+    runtime: Option<EvaluationRuntimeId>,
 ) -> Result<Request<R>, TaskHalt> {
     let Value::Dict(dict) = value else {
         return Err(TaskHalt::new("effect API returned a non-request value"));
@@ -2997,10 +3004,9 @@ fn parse_request<R: Clone>(
         let Some(identity) = parse_volume_request_tag(tag)? else {
             continue;
         };
-        if reasoning_session != Some(identity.reasoning_session) {
+        if runtime != Some(identity.runtime) {
             return Err(TaskHalt::new(
-                VolumeRequestError::ForeignVolume(identity.reasoning_session, identity.volume)
-                    .to_string(),
+                VolumeRequestError::ForeignVolume(identity.runtime, identity.volume).to_string(),
             ));
         }
         let arguments = parse(tag)?.expect("the request tag came from this dictionary");
@@ -3027,7 +3033,7 @@ fn parse_request<R: Clone>(
 const VOLUME_REQUEST_PREFIX: [&str; 3] = ["reflection_runtime", "v0", "volume"];
 
 fn volume_request_tag(
-    reasoning_session: ReasoningSessionId,
+    runtime: EvaluationRuntimeId,
     volume: VolumeId,
     operation: VolumeOperation,
 ) -> Key {
@@ -3040,7 +3046,7 @@ fn volume_request_tag(
         VOLUME_REQUEST_PREFIX[0].to_owned(),
         VOLUME_REQUEST_PREFIX[1].to_owned(),
         VOLUME_REQUEST_PREFIX[2].to_owned(),
-        reasoning_session.get().to_string(),
+        runtime.get().to_string(),
         volume.get().to_string(),
         operation.to_owned(),
     ])
@@ -3058,14 +3064,14 @@ fn parse_volume_request_tag(tag: &Key) -> Result<Option<VolumeRequestIdentity>, 
     {
         return Ok(None);
     }
-    let [_, _, _, reasoning_session, volume, operation] = parts.as_ref() else {
+    let [_, _, _, runtime, volume, operation] = parts.as_ref() else {
         return Err(TaskHalt::new("malformed private volume capability request"));
     };
-    let reasoning_session = reasoning_session
+    let runtime = runtime
         .parse::<u64>()
         .ok()
-        .and_then(ReasoningSessionId::from_u64)
-        .ok_or_else(|| TaskHalt::new("volume capability has an invalid reasoning session"))?;
+        .and_then(EvaluationRuntimeId::from_u64)
+        .ok_or_else(|| TaskHalt::new("volume capability has an invalid evaluation runtime"))?;
     let volume = volume
         .parse::<u64>()
         .ok()
@@ -3078,21 +3084,18 @@ fn parse_volume_request_tag(tag: &Key) -> Result<Option<VolumeRequestIdentity>, 
         _ => return Err(TaskHalt::new("volume capability has an invalid operation")),
     };
     Ok(Some(VolumeRequestIdentity {
-        reasoning_session,
+        runtime,
         volume,
         operation,
     }))
 }
 
-pub(crate) fn volume_effects(
-    reasoning_session: ReasoningSessionId,
-    volume: VolumeId,
-) -> PublicValue {
+pub(crate) fn volume_effects(runtime: EvaluationRuntimeId, volume: VolumeId) -> PublicValue {
     let entry = |name: &str, operation, arity| {
         (
             Key::atom_from_text(name),
             request_function(
-                volume_request_tag(reasoning_session, volume, operation),
+                volume_request_tag(runtime, volume, operation),
                 arity,
                 Vec::new(),
                 true,
@@ -3722,6 +3725,7 @@ mod tests {
     #[derive(Default)]
     struct TestHost {
         reasoning_session: Option<ReasoningSessionId>,
+        runtime: Option<EvaluationRuntimeId>,
         state: Mutex<TestHostState>,
     }
 
@@ -3757,6 +3761,7 @@ mod tests {
         fn with_diagnostics(diagnostics: Vec<Diagnostic>) -> Self {
             Self {
                 reasoning_session: None,
+                runtime: None,
                 state: Mutex::new(TestHostState {
                     diagnostics,
                     ..TestHostState::default()
@@ -3767,6 +3772,7 @@ mod tests {
         fn with_wake_diagnostic(diagnostic: Diagnostic) -> Self {
             Self {
                 reasoning_session: None,
+                runtime: None,
                 state: Mutex::new(TestHostState {
                     wake_diagnostic: Some(diagnostic),
                     ..TestHostState::default()
@@ -3777,6 +3783,7 @@ mod tests {
         fn with_wake_heap(heap: PublicValue) -> Self {
             Self {
                 reasoning_session: None,
+                runtime: None,
                 state: Mutex::new(TestHostState {
                     wake_heap: Some(heap),
                     ..TestHostState::default()
@@ -3784,9 +3791,10 @@ mod tests {
             }
         }
 
-        fn with_reasoning_session(reasoning_session: ReasoningSessionId) -> Self {
+        fn with_runtime(runtime: EvaluationRuntimeId) -> Self {
             Self {
-                reasoning_session: Some(reasoning_session),
+                reasoning_session: None,
+                runtime: Some(runtime),
                 state: Mutex::new(TestHostState::default()),
             }
         }
@@ -3997,6 +4005,10 @@ mod tests {
 
         fn reasoning_session_id(&self) -> Option<ReasoningSessionId> {
             self.reasoning_session
+        }
+
+        fn evaluation_runtime_id(&self) -> Option<EvaluationRuntimeId> {
+            self.runtime
         }
 
         fn wait_for_change(&self, observed_generation: u64) -> bool {
@@ -6207,8 +6219,8 @@ mod tests {
 
     #[test]
     fn child_tasks_inherit_same_session_volume_capabilities() {
-        let reasoning_session = ReasoningSessionId::from_u64(41).unwrap();
-        let host = Arc::new(TestHost::with_reasoning_session(reasoning_session));
+        let runtime = EvaluationRuntimeId::from_u64(41).unwrap();
+        let host = Arc::new(TestHost::with_runtime(runtime));
         let volume = host
             .state
             .lock()
@@ -6229,7 +6241,7 @@ mod tests {
             .get(module.value(), "launch")
             .expect("volume child fixture should define launch");
         let effect = assembler
-            .apply(&launch, [volume_effects(reasoning_session, volume)])
+            .apply(&launch, [volume_effects(runtime, volume)])
             .expect("volume capability should apply to the child launcher");
         let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
 

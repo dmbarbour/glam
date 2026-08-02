@@ -78,9 +78,10 @@ main or embedding client
 
 Imports re-enter the same assembler session and compilation execution through
 artifact-installed relative resolvers. The compilation execution owns a
-private macro evaluation session whose reflection heap, tasks, and diagnostic
-counts do not alias assembler reasoning; both sessions share only the
-configured executor.
+separate macro demand session whose tasks and diagnostic counts do not alias
+assembler reasoning. Both sessions belong to one `EvaluationRuntime`, and
+therefore share its executor, reflection heap, protected-volume namespace,
+query domain, and fixed conflict-analysis strategy.
 For a bare command, the CLI first loads configuration with a dormant runtime,
 runs `conf.cli` as an isolated all-results search, resolves the promised
 canonical argument environment, and only then activates the selected worker

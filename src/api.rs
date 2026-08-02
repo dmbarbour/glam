@@ -7,10 +7,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, Weak};
 
 use bytes::Bytes;
 
@@ -43,13 +44,29 @@ use crate::source::{
 
 const GLAM_COMPATIBILITY_VERSION: &str = "0.1.0";
 const IMPLEMENTATION_NAME: &str = "rust-bootstrap";
-static NEXT_REASONING_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_EVALUATION_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
-fn allocate_reasoning_session_id() -> ReasoningSessionId {
-    let id = NEXT_REASONING_SESSION_ID
+fn allocate_evaluation_runtime_id() -> EvaluationRuntimeId {
+    let id = NEXT_EVALUATION_RUNTIME_ID
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .expect("reasoning session IDs exhausted");
-    ReasoningSessionId::from_u64(id).expect("reasoning session IDs start at one")
+        .expect("evaluation runtime IDs exhausted");
+    EvaluationRuntimeId::from_u64(id).expect("evaluation runtime IDs start at one")
+}
+
+/// Process-unique identity of one evaluation runtime.
+///
+/// Numeric IDs are diagnostic provenance, not transferable authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EvaluationRuntimeId(NonZeroU64);
+
+impl EvaluationRuntimeId {
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    pub(crate) fn from_u64(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(Self)
+    }
 }
 
 /// An assembly-time value whose concrete evaluator representation is private.
@@ -833,24 +850,19 @@ where
 }
 
 struct AssemblerReflectionHost {
+    runtime: EvaluationRuntime,
     reasoning_session: ReasoningSessionId,
-    reflection_environment: OnceLock<Value>,
+    reflection_environment: OnceLock<RuntimeValueRoot>,
     diagnostics: DiagnosticBus,
-    state: Mutex<AssemblerReflectionState>,
-    changed: Condvar,
-}
-
-struct AssemblerReflectionState {
-    wake_generation: u64,
-    store: ReflectionStore,
 }
 
 /// Execution resources shared by every source and recursive import in one
 /// top-level module build.
 ///
 /// Macro lookup runs in the assembler reasoning session. Macro effects and
-/// explicit reflection annotations run in a separate session on the same
-/// executor, with private task, heap, and diagnostic state.
+/// explicit reflection annotations run in a separate demand session on the
+/// same runtime, sharing its reflection heap while retaining their own task
+/// and diagnostic state.
 pub(crate) struct CompilationExecution {
     lookup: EvalContext,
     macros: EvalContext,
@@ -867,9 +879,8 @@ impl CompilationExecution {
     ) -> Result<Self, Error> {
         let diagnostics = DiagnosticBus::new();
         let host = Arc::new(AssemblerReflectionHost::new_unsealed(
-            allocate_reasoning_session_id(),
+            reasoning.runtime(),
             diagnostics.clone(),
-            reasoning.conflict_analysis(),
         ));
         host.seal_environment(reflection_environment_for_role(
             &reasoning.environment(),
@@ -915,13 +926,7 @@ impl CompilationExecution {
 
     #[cfg(test)]
     pub(crate) fn macro_heap(&self) -> Value {
-        self.macro_host
-            .state
-            .lock()
-            .expect("macro reflection state mutex should not be poisoned")
-            .store
-            .root()
-            .clone()
+        self.macro_host.runtime.reflection_root()
     }
 
     fn drain(&self) -> bool {
@@ -989,68 +994,28 @@ fn macro_reflection_diagnostic(diagnostic: &Diagnostic) -> Diagnostic {
 }
 
 impl AssemblerReflectionHost {
-    fn new_unsealed(
-        reasoning_session: ReasoningSessionId,
-        diagnostics: DiagnosticBus,
-        conflict_analysis: Arc<dyn ConflictAnalysisStrategy>,
-    ) -> Self {
+    fn new_unsealed(runtime: EvaluationRuntime, diagnostics: DiagnosticBus) -> Self {
         Self {
-            reasoning_session,
+            reasoning_session: runtime.allocate_reasoning_session_id(),
+            runtime,
             reflection_environment: OnceLock::new(),
             diagnostics,
-            state: Mutex::new(AssemblerReflectionState {
-                wake_generation: 1,
-                store: ReflectionStore::new(conflict_analysis),
-            }),
-            changed: Condvar::new(),
         }
     }
 
     fn seal_environment(&self, environment: Value) -> Result<(), Error> {
         self.reflection_environment
-            .set(environment)
+            .set(self.runtime.root_value(environment))
             .map_err(|_| Error::new("reflection environment was already configured"))
     }
 
-    fn set_conflict_analysis(&self, strategy: Arc<dyn ConflictAnalysisStrategy>) {
-        self.state
-            .lock()
-            .expect("assembler reflection host mutex should not be poisoned")
-            .store
-            .set_strategy(strategy);
-    }
-
     fn create_volume(&self, initial: Value) -> Result<(VolumeId, Value), Error> {
-        let volume = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("assembler reflection host mutex should not be poisoned");
-            state
-                .store
-                .create_volume(initial)
-                .map_err(|error| Error::new(error.as_ref()))?
-        };
-        Ok((volume, volume_effects(self.reasoning_session, volume)))
+        let volume = self.runtime.create_volume(initial)?;
+        Ok((volume, volume_effects(self.runtime.id(), volume)))
     }
 
     fn revoke_volume(&self, volume: VolumeId) -> Result<Value, Error> {
-        let value = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("assembler reflection host mutex should not be poisoned");
-            let value = state.store.revoke_volume(volume).ok_or_else(|| {
-                Error::new(format!(
-                    "reflection volume {} has already been revoked",
-                    volume.get()
-                ))
-            })?;
-            state.wake_generation = state.wake_generation.wrapping_add(1);
-            self.changed.notify_all();
-            value
-        };
-        Ok(value)
+        self.runtime.revoke_volume(volume)
     }
 }
 
@@ -1059,7 +1024,7 @@ impl TaskEnvironment for AssemblerReflectionHost {
         self.reflection_environment
             .get()
             .expect("reasoning host must be sealed before it runs tasks")
-            .clone()
+            .value(self.runtime.id())
     }
 }
 
@@ -1069,46 +1034,28 @@ impl ReflectionServices for AssemblerReflectionHost {
     }
 
     fn update_query(&self, handle: &Arc<crate::reflection::EvaluationQueryHandle>, result: Value) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("assembler reflection host mutex should not be poisoned");
-        if state.store.update_query(handle, result) {
-            state.wake_generation = state.wake_generation.wrapping_add(1);
-            self.changed.notify_all();
-        }
+        self.runtime.update_query(handle, result);
     }
 }
 
 impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
     fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
-        let state = self
-            .state
-            .lock()
-            .expect("assembler reflection host mutex should not be poisoned");
-        HostSnapshot::new(state.wake_generation, state.store.snapshot(), ())
+        let (generation, store) = self.runtime.reflection_snapshot();
+        HostSnapshot::new(generation, store, ())
     }
 
     fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
         let (store, _extra_snapshot, extra) = commit.into_parts();
-        let diagnostics = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("assembler reflection host mutex should not be poisoned");
-            match state.store.try_commit(&store) {
-                crate::reflection::StoreCommitResult::Committed => {}
-                crate::reflection::StoreCommitResult::Conflict => {
-                    return CommitResult::Conflict;
-                }
-                crate::reflection::StoreCommitResult::MissingVolume(volume) => {
-                    return CommitResult::MissingVolume(volume);
-                }
+        match self.runtime.commit_reflection(&store) {
+            crate::reflection::StoreCommitResult::Committed => {}
+            crate::reflection::StoreCommitResult::Conflict => {
+                return CommitResult::Conflict;
             }
-            state.wake_generation = state.wake_generation.wrapping_add(1);
-            self.changed.notify_all();
-            extra.diagnostics().to_vec()
-        };
+            crate::reflection::StoreCommitResult::MissingVolume(volume) => {
+                return CommitResult::MissingVolume(volume);
+            }
+        }
+        let diagnostics = extra.diagnostics().to_vec();
         for diagnostic in diagnostics {
             self.diagnostics.publish(diagnostic);
         }
@@ -1120,18 +1067,12 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
         Some(self.reasoning_session)
     }
 
+    fn evaluation_runtime_id(&self) -> Option<EvaluationRuntimeId> {
+        Some(self.runtime.id())
+    }
+
     fn wait_for_change(&self, observed_generation: u64) -> bool {
-        let mut state = self
-            .state
-            .lock()
-            .expect("assembler reflection host mutex should not be poisoned");
-        while state.wake_generation == observed_generation {
-            state = self
-                .changed
-                .wait(state)
-                .expect("assembler reflection host mutex should not be poisoned");
-        }
-        true
+        self.runtime.wait_for_change(observed_generation)
     }
 }
 
@@ -1139,31 +1080,254 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
 /// sessions, including the assembler, logger, and future IDE services.
 #[derive(Clone)]
 pub struct EvaluationRuntime {
+    state: Arc<RuntimeState>,
+}
+
+struct RuntimeState {
+    id: EvaluationRuntimeId,
     executor: Arc<EvaluationExecutor>,
+    values: RuntimeValueFactory,
+    transactions: RuntimeTransactionState,
+    observations: RuntimeObservationState,
+    ids: RuntimeIds,
+    // Phase 0A establishes settlement as a runtime ownership boundary. The
+    // exclusive probe is activated only when readiness snapshots arrive.
+    _settlement_gate: RwLock<()>,
+}
+
+struct RuntimeTransactionState {
+    reflection: Mutex<ReflectionStore>,
+}
+
+struct RuntimeObservationState {
+    epoch: Mutex<u64>,
+    changed: Condvar,
+}
+
+struct RuntimeIds {
+    next_reasoning_session: AtomicU64,
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeValueFactory {
+    runtime: EvaluationRuntimeId,
+}
+
+#[derive(Clone)]
+struct RuntimeValueRoot {
+    runtime: EvaluationRuntimeId,
+    value: Value,
+}
+
+impl RuntimeValueFactory {
+    fn root(self, value: Value) -> RuntimeValueRoot {
+        RuntimeValueRoot {
+            runtime: self.runtime,
+            value,
+        }
+    }
+}
+
+impl RuntimeValueRoot {
+    fn value(&self, runtime: EvaluationRuntimeId) -> Value {
+        debug_assert_eq!(self.runtime, runtime);
+        self.value.clone()
+    }
 }
 
 impl EvaluationRuntime {
     pub fn new(worker_threads: usize) -> Result<Self, Error> {
+        Self::with_conflict_analysis(worker_threads, Arc::new(ExactConflictAnalysis))
+    }
+
+    /// Constructs a runtime with its immutable reflection conflict policy.
+    /// Assemblers attached later observe this policy and cannot replace it.
+    pub fn with_conflict_analysis(
+        worker_threads: usize,
+        conflict_analysis: Arc<dyn ConflictAnalysisStrategy>,
+    ) -> Result<Self, Error> {
+        let id = allocate_evaluation_runtime_id();
         Ok(Self {
-            executor: EvaluationExecutor::new(worker_threads)
-                .map_err(|error| Error::new(error.as_ref()))?,
+            state: Arc::new(RuntimeState {
+                id,
+                executor: EvaluationExecutor::new(worker_threads)
+                    .map_err(|error| Error::new(error.as_ref()))?,
+                values: RuntimeValueFactory { runtime: id },
+                transactions: RuntimeTransactionState {
+                    reflection: Mutex::new(ReflectionStore::new(conflict_analysis)),
+                },
+                observations: RuntimeObservationState {
+                    epoch: Mutex::new(1),
+                    changed: Condvar::new(),
+                },
+                ids: RuntimeIds {
+                    next_reasoning_session: AtomicU64::new(1),
+                },
+                _settlement_gate: RwLock::new(()),
+            }),
         })
     }
 
+    pub fn id(&self) -> EvaluationRuntimeId {
+        self.state.id
+    }
+
     pub fn worker_threads(&self) -> usize {
-        self.executor.worker_count()
+        self.state.executor.worker_count()
     }
 
     /// Starts this runtime's worker pool exactly once. A runtime constructed
     /// with zero workers remains dormant until this method is called.
     pub fn activate_workers(&self, worker_threads: usize) -> Result<(), Error> {
-        self.executor
+        self.state
+            .executor
             .activate_workers(worker_threads)
             .map_err(|error| Error::new(error.as_ref()))
     }
 
     pub(crate) fn executor(&self) -> &Arc<EvaluationExecutor> {
-        &self.executor
+        &self.state.executor
+    }
+
+    fn root_value(&self, value: Value) -> RuntimeValueRoot {
+        self.state.values.root(value)
+    }
+
+    fn allocate_reasoning_session_id(&self) -> ReasoningSessionId {
+        let id = self
+            .state
+            .ids
+            .next_reasoning_session
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("reasoning session IDs exhausted for this evaluation runtime");
+        ReasoningSessionId::from_u64(id).expect("reasoning session IDs start at one")
+    }
+
+    fn reflection_snapshot(&self) -> (u64, crate::reflection::StoreSnapshot) {
+        // Reading the epoch first is intentionally conservative. A concurrent
+        // commit can make the returned store newer than the epoch, but cannot
+        // leave a waiter holding an old store and a new epoch with no wake.
+        let generation = *self
+            .state
+            .observations
+            .epoch
+            .lock()
+            .expect("runtime observation mutex should not be poisoned");
+        let store = self
+            .state
+            .transactions
+            .reflection
+            .lock()
+            .expect("runtime reflection mutex should not be poisoned")
+            .snapshot();
+        (generation, store)
+    }
+
+    fn commit_reflection(
+        &self,
+        journal: &crate::reflection::StoreJournal,
+    ) -> crate::reflection::StoreCommitResult {
+        let result = self
+            .state
+            .transactions
+            .reflection
+            .lock()
+            .expect("runtime reflection mutex should not be poisoned")
+            .try_commit(journal);
+        if matches!(result, crate::reflection::StoreCommitResult::Committed) {
+            self.advance_observation_epoch();
+        }
+        result
+    }
+
+    fn create_volume(&self, initial: Value) -> Result<VolumeId, Error> {
+        self.state
+            .transactions
+            .reflection
+            .lock()
+            .expect("runtime reflection mutex should not be poisoned")
+            .create_volume(initial)
+            .map_err(|error| Error::new(error.as_ref()))
+    }
+
+    fn revoke_volume(&self, volume: VolumeId) -> Result<Value, Error> {
+        let value = self
+            .state
+            .transactions
+            .reflection
+            .lock()
+            .expect("runtime reflection mutex should not be poisoned")
+            .revoke_volume(volume)
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "reflection volume {} has already been revoked",
+                    volume.get()
+                ))
+            })?;
+        self.advance_observation_epoch();
+        Ok(value)
+    }
+
+    fn update_query(&self, handle: &Arc<crate::reflection::EvaluationQueryHandle>, result: Value) {
+        let updated = self
+            .state
+            .transactions
+            .reflection
+            .lock()
+            .expect("runtime reflection mutex should not be poisoned")
+            .update_query(handle, result);
+        if updated {
+            self.advance_observation_epoch();
+        }
+    }
+
+    fn advance_observation_epoch(&self) {
+        let mut epoch = self
+            .state
+            .observations
+            .epoch
+            .lock()
+            .expect("runtime observation mutex should not be poisoned");
+        *epoch = epoch.wrapping_add(1);
+        self.state.observations.changed.notify_all();
+    }
+
+    fn wait_for_change(&self, observed_generation: u64) -> bool {
+        let mut epoch = self
+            .state
+            .observations
+            .epoch
+            .lock()
+            .expect("runtime observation mutex should not be poisoned");
+        while *epoch == observed_generation {
+            epoch = self
+                .state
+                .observations
+                .changed
+                .wait(epoch)
+                .expect("runtime observation mutex should not be poisoned");
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn reflection_root(&self) -> Value {
+        self.state
+            .transactions
+            .reflection
+            .lock()
+            .expect("runtime reflection mutex should not be poisoned")
+            .root()
+            .clone()
+    }
+
+    fn conflict_analysis(&self) -> Arc<dyn ConflictAnalysisStrategy> {
+        self.state
+            .transactions
+            .reflection
+            .lock()
+            .expect("runtime reflection mutex should not be poisoned")
+            .strategy()
     }
 }
 
@@ -1210,12 +1374,7 @@ impl ReasoningSession {
     }
 
     fn conflict_analysis(&self) -> Arc<dyn ConflictAnalysisStrategy> {
-        self.host
-            .state
-            .lock()
-            .expect("assembler reflection host mutex should not be poisoned")
-            .store
-            .strategy()
+        self.runtime.conflict_analysis()
     }
 }
 
@@ -1557,7 +1716,7 @@ fn reflection_environment_for_role(environment: &Value, role: &str) -> Value {
     )))
 }
 
-/// Owner handle for one protected volume in a reasoning session.
+/// Owner handle for one protected volume in an evaluation runtime.
 ///
 /// Capability values may be cloned freely, but only this handle can remove the
 /// volume and recover its final unforced value. Dropping the handle does not
@@ -1696,6 +1855,10 @@ pub struct AssemblerBuilder {
     diagnostic_attachments: Vec<DiagnosticAttachment>,
     pending_diagnostics: Vec<Diagnostic>,
     environment_promises: Vec<Arc<OnceLock<EvalContext>>>,
+    runtime_locked: bool,
+    runtime_supplied: bool,
+    conflict_analysis_requested: bool,
+    construction_error: Option<Arc<str>>,
 }
 
 /// Capabilities available while constructing the immutable reflection
@@ -1706,7 +1869,7 @@ pub struct ReflectionEnvironmentBuilder<'a> {
 }
 
 impl ReflectionEnvironmentBuilder<'_> {
-    /// Creates a protected volume belonging to the future reasoning session.
+    /// Creates a protected volume belonging to the selected evaluation runtime.
     pub fn create_volume(&mut self, initial: Value) -> Result<ReasoningVolume, Error> {
         create_reasoning_volume(self.host, initial)
     }
@@ -1731,21 +1894,25 @@ impl ReflectionEnvironmentBuilder<'_> {
 impl Default for AssemblerBuilder {
     fn default() -> Self {
         let diagnostics = DiagnosticBus::new();
+        let runtime = EvaluationRuntime::new(0)
+            .expect("zero-worker evaluation runtime must be constructible");
         let host = Arc::new(AssemblerReflectionHost::new_unsealed(
-            allocate_reasoning_session_id(),
+            runtime.clone(),
             diagnostics.clone(),
-            Arc::new(ExactConflictAnalysis),
         ));
         Self {
             source_system: Arc::new(FileSourceSystem::default()),
-            runtime: EvaluationRuntime::new(0)
-                .expect("zero-worker evaluation runtime must be constructible"),
+            runtime,
             host,
             diagnostics,
             reflection_environment: None,
             diagnostic_attachments: Vec::new(),
             pending_diagnostics: Vec::new(),
             environment_promises: Vec::new(),
+            runtime_locked: false,
+            runtime_supplied: false,
+            conflict_analysis_requested: false,
+            construction_error: None,
         }
     }
 }
@@ -1766,13 +1933,58 @@ impl AssemblerBuilder {
     }
 
     pub fn evaluation_runtime(mut self, runtime: EvaluationRuntime) -> Self {
+        if self.runtime_locked {
+            self.record_construction_error(
+                "the evaluation runtime must be selected before creating protected volumes or the reflection environment",
+            );
+            return self;
+        }
+        if self.conflict_analysis_requested {
+            self.record_construction_error(
+                "an attached evaluation runtime already owns its conflict-analysis strategy",
+            );
+            return self;
+        }
         self.runtime = runtime;
+        self.host = Arc::new(AssemblerReflectionHost::new_unsealed(
+            self.runtime.clone(),
+            self.diagnostics.clone(),
+        ));
+        self.runtime_supplied = true;
         self
     }
 
-    pub fn conflict_analysis(self, strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
-        self.host.set_conflict_analysis(strategy);
+    pub fn conflict_analysis(mut self, strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
+        if self.runtime_locked {
+            self.record_construction_error(
+                "the conflict-analysis strategy must be selected before creating protected volumes or the reflection environment",
+            );
+            return self;
+        }
+        if self.runtime_supplied {
+            self.record_construction_error(
+                "an attached evaluation runtime already owns its conflict-analysis strategy",
+            );
+            return self;
+        }
+        match EvaluationRuntime::with_conflict_analysis(self.runtime.worker_threads(), strategy) {
+            Ok(runtime) => {
+                self.runtime = runtime;
+                self.host = Arc::new(AssemblerReflectionHost::new_unsealed(
+                    self.runtime.clone(),
+                    self.diagnostics.clone(),
+                ));
+                self.conflict_analysis_requested = true;
+            }
+            Err(error) => self.record_construction_error(error.to_string()),
+        }
         self
+    }
+
+    fn record_construction_error(&mut self, message: impl Into<Arc<str>>) {
+        if self.construction_error.is_none() {
+            self.construction_error = Some(message.into());
+        }
     }
 
     pub fn diagnostic_subscriber(
@@ -1795,6 +2007,7 @@ impl AssemblerBuilder {
     }
 
     pub fn create_volume(&mut self, initial: Value) -> Result<ReasoningVolume, Error> {
+        self.runtime_locked = true;
         create_reasoning_volume(&self.host, initial)
     }
 
@@ -1808,6 +2021,7 @@ impl AssemblerBuilder {
         if self.reflection_environment.is_some() {
             return Err(Error::new("reflection environment was already configured"));
         }
+        self.runtime_locked = true;
         let environment = build(&mut ReflectionEnvironmentBuilder {
             host: &self.host,
             environment_promises: &mut self.environment_promises,
@@ -1825,6 +2039,9 @@ impl AssemblerBuilder {
     }
 
     pub fn build(mut self) -> Result<Assembler, Error> {
+        if let Some(error) = self.construction_error.take() {
+            return Err(Error::new(error));
+        }
         let environment = match self.reflection_environment.take() {
             Some(environment) => environment,
             None => authoritative_reflection_environment(Value::empty_record(), "assembler")?.0,
@@ -1898,14 +2115,7 @@ impl Assembler {
 
     #[cfg(test)]
     pub(crate) fn test_reflection_heap(&self) -> Value {
-        self.reasoning
-            .host
-            .state
-            .lock()
-            .expect("assembler reflection state mutex should not be poisoned")
-            .store
-            .root()
-            .clone()
+        self.reasoning.runtime.reflection_root()
     }
 
     /// Creates a host-resolved promised value and its unique resolver.
@@ -1926,7 +2136,8 @@ impl Assembler {
 
     /// Creates a protected reflection volume initialized with `initial`.
     /// Possession of the returned Glam capability value is the authority to
-    /// access it; ordinary `.heap.*` requests cannot address the volume.
+    /// access it from any reasoning session in this runtime; ordinary
+    /// `.heap.*` requests cannot address the volume.
     pub fn create_volume(&self, initial: Value) -> Result<ReasoningVolume, Error> {
         create_reasoning_volume(&self.reasoning.host, initial)
     }
@@ -3043,6 +3254,46 @@ mod tests {
     }
 
     #[test]
+    fn evaluation_runtime_ids_are_process_unique() {
+        let first = EvaluationRuntime::new(0).expect("first runtime should build");
+        let second = EvaluationRuntime::new(0).expect("second runtime should build");
+
+        assert_ne!(first.id(), second.id());
+    }
+
+    #[test]
+    fn independent_runtimes_have_independent_reflection_heaps() {
+        let owner = Assembler::default();
+        let foreign = Assembler::default();
+        let module = owner
+            .module(["runtime_heap_isolation"])
+            .script(
+                "g",
+                "language g0\nimport 'std\nresult = anno refl:(.heap.set '.runtime_only \"yes\") \"done\"\n",
+            )
+            .build()
+            .expect("heap isolation fixture should compile");
+        owner
+            .evaluate(
+                &owner
+                    .get(module.value(), "result")
+                    .expect("fixture should define result"),
+            )
+            .expect("reflection gate should complete");
+
+        assert!(
+            owner
+                .get(&owner.test_reflection_heap(), "runtime_only")
+                .is_ok()
+        );
+        assert!(
+            foreign
+                .get(&foreign.test_reflection_heap(), "runtime_only")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn reasoning_failure_acknowledgement_is_idempotent_and_session_bound() {
         let runtime = EvaluationRuntime::new(0).expect("dormant runtime should build");
         let assembler = Assembler::builder()
@@ -3157,6 +3408,36 @@ mod tests {
             .expect("assembler should build");
 
         assert_eq!(assembler.conflict_analysis().name(), "coarse");
+    }
+
+    #[test]
+    fn attached_runtime_conflict_analysis_cannot_be_replaced() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let result = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .conflict_analysis(Arc::new(crate::reflection::CoarseConflictAnalysis))
+            .build();
+        let Err(error) = result else {
+            panic!("an attached runtime must retain its conflict policy")
+        };
+
+        assert!(error.to_string().contains("already owns"));
+        assert_eq!(runtime.conflict_analysis().name(), "exact");
+    }
+
+    #[test]
+    fn builder_selects_runtime_before_exposing_runtime_bound_state() {
+        let mut builder = Assembler::builder();
+        let _volume = builder
+            .create_volume(Value::empty_record())
+            .expect("the initial runtime should create the volume");
+        let replacement = EvaluationRuntime::new(0).expect("replacement runtime should build");
+        let result = builder.evaluation_runtime(replacement).build();
+        let Err(error) = result else {
+            panic!("runtime replacement after state construction must be rejected")
+        };
+
+        assert!(error.to_string().contains("must be selected before"));
     }
 
     #[test]

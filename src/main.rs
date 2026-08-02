@@ -323,15 +323,15 @@ fn prepare_assembly(
     initial_environment: Option<(Value, Value)>,
 ) -> Result<PreparedAssembly, ExitCode> {
     let local_files = FileSourceSystem::default();
-    let runtime = EvaluationRuntime::new(0).expect("a dormant evaluation runtime is valid");
     let conflict_analysis: Arc<dyn ConflictAnalysisStrategy> = Arc::new(ExactConflictAnalysis);
+    let runtime = EvaluationRuntime::with_conflict_analysis(0, conflict_analysis.clone())
+        .expect("a dormant evaluation runtime is valid");
     let log_host = Arc::new(LogHost::with_conflict_analysis(conflict_analysis.clone()));
     let mut process_args = None;
     let mut reflection_args = None;
     let assembler = Assembler::builder()
         .source_system(local_files.clone())
         .evaluation_runtime(runtime.clone())
-        .conflict_analysis(conflict_analysis)
         .diagnostic_subscriber(log_host.clone())
         .reflection_environment(|environment| {
             let (process_value, process_resolver) =

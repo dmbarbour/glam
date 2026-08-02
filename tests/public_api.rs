@@ -498,7 +498,7 @@ fn revoked_volume_get_exposes_a_lazy_error_through_reflection_eval() {
 }
 
 #[test]
-fn protected_volume_capabilities_are_reasoning_session_local() {
+fn protected_volume_capabilities_reject_foreign_runtimes() {
     let owner = Assembler::default();
     let foreign = Assembler::default();
     let volume = owner
@@ -508,13 +508,39 @@ fn protected_volume_capabilities_are_reasoning_session_local() {
 
     let error = foreign
         .to_binary(&annotated)
-        .expect_err("foreign reasoning session must reject the capability");
+        .expect_err("a foreign runtime must reject the capability");
     assert!(error.to_string().contains("foreign reflection volume"));
     assert_eq!(
         owner
             .to_binary(&volume.revoke().unwrap())
             .expect("foreign use must not modify the volume"),
         b"initial".as_slice()
+    );
+}
+
+#[test]
+fn protected_volume_capabilities_cross_sessions_in_one_runtime() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let owner = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("owner assembler should build");
+    let observer = Assembler::builder()
+        .evaluation_runtime(runtime)
+        .build()
+        .expect("observer assembler should build");
+    let volume = owner
+        .create_volume(Value::text("initial"))
+        .expect("protected volume should be created");
+    let annotated =
+        volume_write_annotation(&observer, volume.effects(), Value::text("shared runtime"));
+
+    observer
+        .to_binary(&annotated)
+        .expect("same-runtime reasoning sessions should accept the capability");
+    assert_eq!(
+        owner.to_binary(&volume.revoke().unwrap()).unwrap(),
+        b"shared runtime".as_slice()
     );
 }
 

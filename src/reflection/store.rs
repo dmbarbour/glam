@@ -339,7 +339,7 @@ pub struct StoreSnapshot {
     identity: Arc<()>,
     revision: u64,
     heap_volume: VolumeId,
-    query_volume: VolumeId,
+    runtime_volume: VolumeId,
     query_domain: Arc<QueryDomain>,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
@@ -361,7 +361,7 @@ impl StoreSnapshot {
         if !query_belongs_to(&self.query_domain, handle) {
             return EvaluationQueryPoll::ForeignSession;
         }
-        let Some(root) = self.volume(self.query_volume) else {
+        let Some(root) = self.volume(self.runtime_volume) else {
             return EvaluationQueryPoll::State {
                 value: PublicValue::empty_record(),
                 observed: true,
@@ -481,7 +481,7 @@ impl StoreJournal {
         state: PublicValue,
     ) -> Result<Arc<EvaluationQueryHandle>, Arc<str>> {
         let handle = self.snapshot.query_domain.allocate()?;
-        self.write_volume(self.snapshot.query_volume, query_path(handle.id), state);
+        self.write_volume(self.snapshot.runtime_volume, query_path(handle.id), state);
         Ok(handle)
     }
 
@@ -503,7 +503,7 @@ impl StoreJournal {
             return false;
         }
         let path = query_path(handle.id);
-        self.observe_volume_read(self.snapshot.query_volume, &path)
+        self.observe_volume_read(self.snapshot.runtime_volume, &path)
     }
 
     fn peek_query_with_observation(
@@ -514,7 +514,7 @@ impl StoreJournal {
         if !query_belongs_to(&self.snapshot.query_domain, handle) {
             return EvaluationQueryPoll::ForeignSession;
         }
-        let Some(root) = self.volume_view(self.snapshot.query_volume) else {
+        let Some(root) = self.volume_view(self.snapshot.runtime_volume) else {
             return EvaluationQueryPoll::State {
                 value: PublicValue::empty_record(),
                 observed,
@@ -577,7 +577,7 @@ pub enum StoreCommitResult {
 pub struct ReflectionStore {
     identity: Arc<()>,
     heap_volume: VolumeId,
-    query_volume: VolumeId,
+    runtime_volume: VolumeId,
     query_domain: Arc<QueryDomain>,
     query_retirements: Receiver<EvaluationQueryId>,
     next_volume: u64,
@@ -590,18 +590,18 @@ pub struct ReflectionStore {
 impl ReflectionStore {
     pub fn new(strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
         let heap_volume = VolumeId::from_u64(1).expect("one is a nonzero volume ID");
-        let query_volume = VolumeId::from_u64(2).expect("two is a nonzero volume ID");
+        let runtime_volume = VolumeId::from_u64(2).expect("two is a nonzero volume ID");
         let (query_domain, query_retirements) = QueryDomain::new();
         Self {
             identity: Arc::new(()),
             heap_volume,
-            query_volume,
+            runtime_volume,
             query_domain,
             query_retirements,
             next_volume: 3,
             roots: RedBlackTreeMapSync::new_sync()
                 .insert(heap_volume, PublicValue::empty_record())
-                .insert(query_volume, PublicValue::empty_record()),
+                .insert(runtime_volume, PublicValue::empty_record()),
             revision: 0,
             latest_changes: BTreeMap::new(),
             strategy,
@@ -614,7 +614,7 @@ impl ReflectionStore {
             identity: self.identity.clone(),
             revision: self.revision,
             heap_volume: self.heap_volume,
-            query_volume: self.query_volume,
+            runtime_volume: self.runtime_volume,
             query_domain: self.query_domain.clone(),
             roots: self.roots.clone(),
             strategy: self.strategy.clone(),
@@ -636,10 +636,6 @@ impl ReflectionStore {
     #[doc(hidden)]
     pub fn strategy(&self) -> Arc<dyn ConflictAnalysisStrategy> {
         self.strategy.clone()
-    }
-
-    pub(crate) fn set_strategy(&mut self, strategy: Arc<dyn ConflictAnalysisStrategy>) {
-        self.strategy = strategy;
     }
 
     #[doc(hidden)]
@@ -665,7 +661,7 @@ impl ReflectionStore {
     }
 
     pub(crate) fn revoke_volume(&mut self, volume: VolumeId) -> Option<PublicValue> {
-        if volume == self.heap_volume || volume == self.query_volume {
+        if volume == self.heap_volume || volume == self.runtime_volume {
             return None;
         }
         let root = self.roots.get(&volume).cloned()?;
@@ -685,12 +681,12 @@ impl ReflectionStore {
         if !query_belongs_to(&self.query_domain, handle) {
             return false;
         }
-        if self.roots.get(&self.query_volume).is_none() {
+        if self.roots.get(&self.runtime_volume).is_none() {
             return false;
         }
         let mut journal = StoreJournal::new(self.snapshot());
         journal.write_volume(
-            self.query_volume,
+            self.runtime_volume,
             query_path(handle.id),
             complete_query_value(result),
         );
@@ -737,7 +733,7 @@ impl ReflectionStore {
         if retired.is_empty() {
             return;
         }
-        let Some(mut root) = self.roots.get(&self.query_volume).cloned() else {
+        let Some(mut root) = self.roots.get(&self.runtime_volume).cloned() else {
             return;
         };
         self.revision = self.revision.wrapping_add(1);
@@ -745,9 +741,9 @@ impl ReflectionStore {
             let path = ConflictPath::from_keys(query_path(id));
             root = apply_value_at_path(root, &path, Value::Dict(Dict::new_sync()));
             self.latest_changes
-                .insert(StoreAddress::new(self.query_volume, path), self.revision);
+                .insert(StoreAddress::new(self.runtime_volume, path), self.revision);
         }
-        self.roots.insert_mut(self.query_volume, root);
+        self.roots.insert_mut(self.runtime_volume, root);
     }
 
     fn conflicts(&self, journal: &StoreJournal) -> bool {
@@ -800,6 +796,7 @@ static QUERY_RESULT: LazyLock<Key> = LazyLock::new(|| {
 static QUERY_PRESENT: LazyLock<Key> = LazyLock::new(|| {
     Key::abstract_global_path(["reflection_runtime", "v0", "query_state", "present"])
 });
+static QUERY_NAMESPACE: LazyLock<Key> = LazyLock::new(|| Key::atom_from_text("queries"));
 
 pub(crate) enum EvaluationQueryState {
     Pending,
@@ -814,7 +811,10 @@ fn query_belongs_to(domain: &Arc<QueryDomain>, handle: &Arc<EvaluationQueryHandl
 }
 
 fn query_path(id: EvaluationQueryId) -> Vec<Key> {
-    vec![Key::Number(Number::from_u64(id.get()))]
+    vec![
+        QUERY_NAMESPACE.clone(),
+        Key::Number(Number::from_u64(id.get())),
+    ]
 }
 
 #[cfg(test)]
@@ -1011,12 +1011,21 @@ mod tests {
         drop(handle);
         let maintenance = StoreJournal::new(store.snapshot());
         assert_eq!(store.try_commit(&maintenance), StoreCommitResult::Committed);
-        let root = store.roots.get(&store.query_volume).unwrap();
+        let root = store.roots.get(&store.runtime_volume).unwrap();
         let retired = PublicValue::from_core(lazy_core_value_path(
             root.as_core().clone(),
             &query_path(id),
         ));
         assert!(assembler.evaluate(&retired).unwrap().is_undefined());
+    }
+
+    #[test]
+    fn runtime_coordination_volume_is_not_client_revocable() {
+        let mut store = store();
+        assert!(store.revoke_volume(store.runtime_volume).is_none());
+
+        let snapshot = store.snapshot();
+        assert!(snapshot.volume(store.runtime_volume).is_some());
     }
 
     #[test]
