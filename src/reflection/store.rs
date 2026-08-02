@@ -70,6 +70,43 @@ impl VolumeId {
     }
 }
 
+/// Runtime-local identity of one admitted-input endpoint.
+///
+/// IDs are allocated monotonically by the evaluation runtime and are never
+/// reused during that runtime's lifetime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RuntimeInputEndpointId(NonZeroU64);
+
+impl RuntimeInputEndpointId {
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    pub(crate) fn from_u64(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(Self)
+    }
+}
+
+/// Per-endpoint identity of one admitted input.
+///
+/// Sequence values are ordered only within their endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RuntimeInputSequence(u64);
+
+impl RuntimeInputSequence {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    pub(crate) fn from_u64(sequence: u64) -> Self {
+        Self(sequence)
+    }
+
+    pub(crate) fn checked_next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct EvaluationQueryId(NonZeroU64);
 
@@ -148,35 +185,75 @@ pub(crate) enum EvaluationQueryPoll {
     ForeignSession,
 }
 
-/// A conflict-analysis address. Hierarchical path relationships never cross
-/// volume boundaries.
+/// An address understood by the runtime's conflict-analysis strategy.
+///
+/// Reflection paths retain hierarchical overlap within one volume. Runtime
+/// input slots are exact virtual addresses: neither endpoints nor sequences
+/// imply hierarchy or ordering for conflict analysis.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StoreAddress {
-    volume: VolumeId,
-    path: ConflictPath,
+pub enum ConflictAddress {
+    Reflection {
+        volume: VolumeId,
+        path: ConflictPath,
+    },
+    InputSlot {
+        endpoint: RuntimeInputEndpointId,
+        sequence: RuntimeInputSequence,
+    },
 }
 
-impl StoreAddress {
-    fn new(volume: VolumeId, path: ConflictPath) -> Self {
-        Self { volume, path }
+impl ConflictAddress {
+    fn reflection(volume: VolumeId, path: ConflictPath) -> Self {
+        Self::Reflection { volume, path }
     }
 
-    fn root(volume: VolumeId) -> Self {
-        Self::new(volume, ConflictPath::root())
+    fn reflection_root(volume: VolumeId) -> Self {
+        Self::reflection(volume, ConflictPath::root())
+    }
+
+    pub(crate) fn input_slot(
+        endpoint: RuntimeInputEndpointId,
+        sequence: RuntimeInputSequence,
+    ) -> Self {
+        Self::InputSlot { endpoint, sequence }
     }
 
     fn is_prefix_of(&self, other: &Self) -> bool {
-        self.volume == other.volume && self.path.is_prefix_of(&other.path)
+        match (self, other) {
+            (
+                Self::Reflection {
+                    volume: left_volume,
+                    path: left_path,
+                },
+                Self::Reflection {
+                    volume: right_volume,
+                    path: right_path,
+                },
+            ) => left_volume == right_volume && left_path.is_prefix_of(right_path),
+            (Self::InputSlot { .. }, Self::InputSlot { .. }) => self == other,
+            _ => false,
+        }
     }
 
     fn overlaps(&self, other: &Self) -> bool {
-        self.volume == other.volume && self.path.overlaps(&other.path)
+        self.is_prefix_of(other) || other.is_prefix_of(self)
     }
 
-    fn prefixes(&self) -> impl Iterator<Item = Self> + '_ {
-        self.path
-            .prefixes()
-            .map(|path| Self::new(self.volume, path))
+    fn prefixes(&self) -> Vec<Self> {
+        match self {
+            Self::Reflection { volume, path } => path
+                .prefixes()
+                .map(|path| Self::reflection(*volume, path))
+                .collect(),
+            Self::InputSlot { .. } => vec![self.clone()],
+        }
+    }
+
+    fn reflection_parts(&self) -> Option<(VolumeId, &ConflictPath)> {
+        match self {
+            Self::Reflection { volume, path } => Some((*volume, path)),
+            Self::InputSlot { .. } => None,
+        }
     }
 }
 
@@ -200,8 +277,8 @@ pub trait ConflictAnalysisStrategy: Send + Sync {
 /// A cloneable summary of paths observed by one transaction branch.
 pub trait ConflictObservationIndex: Send + Sync {
     fn clone_box(&self) -> Box<dyn ConflictObservationIndex>;
-    fn observe(&mut self, address: &StoreAddress);
-    fn may_conflict(&self, changed: &StoreAddress) -> bool;
+    fn observe(&mut self, address: &ConflictAddress);
+    fn may_conflict(&self, changed: &ConflictAddress) -> bool;
 }
 
 impl Clone for Box<dyn ConflictObservationIndex> {
@@ -226,7 +303,7 @@ impl ConflictAnalysisStrategy for ExactConflictAnalysis {
 
 #[derive(Clone, Default)]
 struct ExactObservationIndex {
-    addresses: BTreeSet<StoreAddress>,
+    addresses: BTreeSet<ConflictAddress>,
 }
 
 impl ConflictObservationIndex for ExactObservationIndex {
@@ -234,7 +311,7 @@ impl ConflictObservationIndex for ExactObservationIndex {
         Box::new(self.clone())
     }
 
-    fn observe(&mut self, address: &StoreAddress) {
+    fn observe(&mut self, address: &ConflictAddress) {
         if self.addresses.iter().any(|seen| seen.is_prefix_of(address)) {
             return;
         }
@@ -242,7 +319,7 @@ impl ConflictObservationIndex for ExactObservationIndex {
         self.addresses.insert(address.clone());
     }
 
-    fn may_conflict(&self, changed: &StoreAddress) -> bool {
+    fn may_conflict(&self, changed: &ConflictAddress) -> bool {
         self.addresses.iter().any(|read| read.overlaps(changed))
     }
 }
@@ -274,7 +351,7 @@ struct FingerprintObservationIndex {
 }
 
 impl FingerprintObservationIndex {
-    fn fingerprint(&self, address: &StoreAddress) -> u64 {
+    fn fingerprint(&self, address: &ConflictAddress) -> u64 {
         self.hash_builder.hash_one(address)
     }
 }
@@ -284,17 +361,18 @@ impl ConflictObservationIndex for FingerprintObservationIndex {
         Box::new(self.clone())
     }
 
-    fn observe(&mut self, address: &StoreAddress) {
+    fn observe(&mut self, address: &ConflictAddress) {
         self.complete_reads.insert(self.fingerprint(address));
         for prefix in address.prefixes() {
             self.read_prefixes.insert(self.fingerprint(&prefix));
         }
     }
 
-    fn may_conflict(&self, changed: &StoreAddress) -> bool {
+    fn may_conflict(&self, changed: &ConflictAddress) -> bool {
         self.read_prefixes.contains(&self.fingerprint(changed))
             || changed
                 .prefixes()
+                .into_iter()
                 .any(|prefix| self.complete_reads.contains(&self.fingerprint(&prefix)))
     }
 }
@@ -322,11 +400,11 @@ impl ConflictObservationIndex for CoarseObservationIndex {
         Box::new(self.clone())
     }
 
-    fn observe(&mut self, _address: &StoreAddress) {
+    fn observe(&mut self, _address: &ConflictAddress) {
         self.0 = true;
     }
 
-    fn may_conflict(&self, _changed: &StoreAddress) -> bool {
+    fn may_conflict(&self, _changed: &ConflictAddress) -> bool {
         self.0
     }
 }
@@ -380,17 +458,17 @@ impl StoreSnapshot {
 #[derive(Clone)]
 enum StoreEdit {
     Set {
-        address: StoreAddress,
+        address: ConflictAddress,
         value: PublicValue,
     },
     Rewrite {
-        address: StoreAddress,
+        address: ConflictAddress,
         updater: PublicValue,
     },
 }
 
 impl StoreEdit {
-    fn address(&self) -> &StoreAddress {
+    fn address(&self) -> &ConflictAddress {
         match self {
             Self::Set { address, .. } | Self::Rewrite { address, .. } => address,
         }
@@ -427,31 +505,34 @@ impl StoreJournal {
     }
 
     pub(crate) fn observe_volume_read(&mut self, volume: VolumeId, path: &[Key]) -> bool {
-        let address = StoreAddress::new(volume, ConflictPath::from_keys(path.to_vec()));
+        let address = ConflictAddress::reflection(volume, ConflictPath::from_keys(path.to_vec()));
         if self.snapshot.volume(volume).is_none() {
             self.observations.observe(&address);
             return true;
         }
         let mut dependency = ConflictPath::from_keys(path.to_vec());
         for edit in self.edits.iter().rev() {
+            let Some((edit_volume, edit_path)) = edit.address().reflection_parts() else {
+                unreachable!("store journals contain only reflection addresses")
+            };
             match edit {
-                StoreEdit::Set { address, .. }
-                    if address.volume == volume && address.path.is_prefix_of(&dependency) =>
+                StoreEdit::Set { .. }
+                    if edit_volume == volume && edit_path.is_prefix_of(&dependency) =>
                 {
                     return false;
                 }
-                StoreEdit::Rewrite { address, .. }
-                    if address.volume == volume && address.path.overlaps(&dependency) =>
+                StoreEdit::Rewrite { .. }
+                    if edit_volume == volume && edit_path.overlaps(&dependency) =>
                 {
-                    if address.path.is_prefix_of(&dependency) {
-                        dependency = address.path.clone();
+                    if edit_path.is_prefix_of(&dependency) {
+                        dependency = edit_path.clone();
                     }
                 }
                 StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } => {}
             }
         }
         self.observations
-            .observe(&StoreAddress::new(volume, dependency));
+            .observe(&ConflictAddress::reflection(volume, dependency));
         true
     }
 
@@ -535,7 +616,7 @@ impl StoreJournal {
 
     pub(crate) fn write_volume(&mut self, volume: VolumeId, path: Vec<Key>, value: PublicValue) {
         let edit = StoreEdit::Set {
-            address: StoreAddress::new(volume, ConflictPath::from_keys(path)),
+            address: ConflictAddress::reflection(volume, ConflictPath::from_keys(path)),
             value,
         };
         if let Some(view) = self.views.get(&volume).cloned() {
@@ -555,7 +636,7 @@ impl StoreJournal {
         updater: PublicValue,
     ) {
         let edit = StoreEdit::Rewrite {
-            address: StoreAddress::new(volume, ConflictPath::from_keys(path)),
+            address: ConflictAddress::reflection(volume, ConflictPath::from_keys(path)),
             updater,
         };
         if let Some(view) = self.views.get(&volume).cloned() {
@@ -583,7 +664,7 @@ pub struct ReflectionStore {
     next_volume: u64,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     revision: u64,
-    latest_changes: BTreeMap<StoreAddress, u64>,
+    latest_changes: BTreeMap<ConflictAddress, u64>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
 }
 
@@ -642,8 +723,10 @@ impl ReflectionStore {
     pub fn replace_root(&mut self, root: PublicValue) {
         self.roots.insert_mut(self.heap_volume, root);
         self.revision = self.revision.wrapping_add(1);
-        self.latest_changes
-            .insert(StoreAddress::root(self.heap_volume), self.revision);
+        self.latest_changes.insert(
+            ConflictAddress::reflection_root(self.heap_volume),
+            self.revision,
+        );
     }
 
     pub(crate) fn create_volume(&mut self, initial: PublicValue) -> Result<VolumeId, Arc<str>> {
@@ -656,7 +739,7 @@ impl ReflectionStore {
         self.roots.insert_mut(volume, initial);
         self.revision = self.revision.wrapping_add(1);
         self.latest_changes
-            .insert(StoreAddress::root(volume), self.revision);
+            .insert(ConflictAddress::reflection_root(volume), self.revision);
         Ok(volume)
     }
 
@@ -668,7 +751,7 @@ impl ReflectionStore {
         self.roots.remove_mut(&volume);
         self.revision = self.revision.wrapping_add(1);
         self.latest_changes
-            .insert(StoreAddress::root(volume), self.revision);
+            .insert(ConflictAddress::reflection_root(volume), self.revision);
         Some(root)
     }
 
@@ -697,10 +780,27 @@ impl ReflectionStore {
     /// remain independent of the selected read-analysis strategy.
     #[doc(hidden)]
     pub fn try_commit(&mut self, journal: &StoreJournal) -> StoreCommitResult {
+        let validation = self.validate(journal);
+        if !matches!(validation, StoreCommitResult::Committed) {
+            return validation;
+        }
+        self.commit_validated(journal);
+        StoreCommitResult::Committed
+    }
+
+    /// Validates a journal without changing the store. The caller must retain
+    /// exclusive access to the store until [`commit_validated`](Self::commit_validated)
+    /// is called.
+    pub(crate) fn validate(&self, journal: &StoreJournal) -> StoreCommitResult {
         if let Some(volume) = journal
             .edits
             .iter()
-            .map(|edit| edit.address().volume)
+            .map(|edit| {
+                edit.address()
+                    .reflection_parts()
+                    .expect("store journals contain only reflection addresses")
+                    .0
+            })
             .find(|volume| self.roots.get(volume).is_none())
         {
             return StoreCommitResult::MissingVolume(volume);
@@ -708,9 +808,14 @@ impl ReflectionStore {
         if self.conflicts(journal) {
             return StoreCommitResult::Conflict;
         }
+        StoreCommitResult::Committed
+    }
+
+    /// Applies a journal already accepted by [`validate`](Self::validate).
+    /// Returns whether the store changed, including private query retirement.
+    pub(crate) fn commit_validated(&mut self, journal: &StoreJournal) -> bool {
         if journal.edits.is_empty() {
-            self.retire_queries();
-            return StoreCommitResult::Committed;
+            return self.retire_queries();
         }
 
         self.roots = if Arc::ptr_eq(&self.identity, &journal.snapshot.identity)
@@ -725,25 +830,28 @@ impl ReflectionStore {
             self.latest_changes.insert(path, self.revision);
         }
         self.retire_queries();
-        StoreCommitResult::Committed
+        true
     }
 
-    fn retire_queries(&mut self) {
+    fn retire_queries(&mut self) -> bool {
         let retired = self.query_retirements.try_iter().collect::<Vec<_>>();
         if retired.is_empty() {
-            return;
+            return false;
         }
         let Some(mut root) = self.roots.get(&self.runtime_volume).cloned() else {
-            return;
+            return false;
         };
         self.revision = self.revision.wrapping_add(1);
         for id in retired {
             let path = ConflictPath::from_keys(query_path(id));
             root = apply_value_at_path(root, &path, Value::Dict(Dict::new_sync()));
-            self.latest_changes
-                .insert(StoreAddress::new(self.runtime_volume, path), self.revision);
+            self.latest_changes.insert(
+                ConflictAddress::reflection(self.runtime_volume, path),
+                self.revision,
+            );
         }
         self.roots.insert_mut(self.runtime_volume, root);
+        true
     }
 
     fn conflicts(&self, journal: &StoreJournal) -> bool {
@@ -753,13 +861,13 @@ impl ReflectionStore {
     }
 }
 
-fn normalized_edit_paths(edits: &[StoreEdit]) -> Vec<StoreAddress> {
+fn normalized_edit_paths(edits: &[StoreEdit]) -> Vec<ConflictAddress> {
     let mut addresses = BTreeSet::new();
     for edit in edits {
         let edit_address = edit.address();
         if addresses
             .iter()
-            .any(|address: &StoreAddress| address.is_prefix_of(edit_address))
+            .any(|address: &ConflictAddress| address.is_prefix_of(edit_address))
         {
             continue;
         }
@@ -774,7 +882,11 @@ fn apply_edits(
     edits: &[StoreEdit],
 ) -> RedBlackTreeMapSync<VolumeId, PublicValue> {
     for edit in edits {
-        let volume = edit.address().volume;
+        let volume = edit
+            .address()
+            .reflection_parts()
+            .expect("store journals contain only reflection addresses")
+            .0;
         let root = roots
             .get(&volume)
             .cloned()
@@ -860,15 +972,21 @@ pub(crate) fn decode_query_state(value: &Value) -> Option<EvaluationQueryState> 
 fn apply_edit(root: PublicValue, edit: &StoreEdit) -> PublicValue {
     match edit {
         StoreEdit::Set { address, value } => {
-            apply_value_at_path(root, &address.path, value.as_core().clone())
+            let (_, path) = address
+                .reflection_parts()
+                .expect("store edits contain only reflection addresses");
+            apply_value_at_path(root, path, value.as_core().clone())
         }
         StoreEdit::Rewrite { address, updater } => {
-            let prior = lazy_core_value_path(root.as_core().clone(), address.path.keys());
+            let (_, path) = address
+                .reflection_parts()
+                .expect("store edits contain only reflection addresses");
+            let prior = lazy_core_value_path(root.as_core().clone(), path.keys());
             let updated = Value::Lazy(LazyValue::from_application(
                 updater.as_core().clone(),
                 Arc::from([prior]),
             ));
-            apply_value_at_path(root, &address.path, updated)
+            apply_value_at_path(root, path, updated)
         }
     }
 }
@@ -932,8 +1050,8 @@ mod tests {
         parts.iter().map(Key::atom_from_text).collect()
     }
 
-    fn address(volume: VolumeId, parts: &[&str]) -> StoreAddress {
-        StoreAddress::new(volume, ConflictPath::from_keys(path(parts)))
+    fn address(volume: VolumeId, parts: &[&str]) -> ConflictAddress {
+        ConflictAddress::reflection(volume, ConflictPath::from_keys(path(parts)))
     }
 
     fn store() -> ReflectionStore {

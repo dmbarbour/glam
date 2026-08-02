@@ -34,9 +34,10 @@ use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
 use crate::number::Number;
 use crate::reflection::{
-    CommitResult, ConflictAnalysisStrategy, ExactConflictAnalysis, HostSnapshot,
-    ReasoningSessionId, ReflectionEffects, ReflectionServices, ReflectionStore, TaskCommit,
-    TaskEnvironment, TaskHost, VolumeId, task_launcher, volume_effects,
+    CommitResult, ConflictAddress, ConflictAnalysisStrategy, ConflictObservationIndex,
+    ExactConflictAnalysis, HostSnapshot, ReasoningSessionId, ReflectionEffects, ReflectionServices,
+    ReflectionStore, RuntimeInputEndpointId, RuntimeInputSequence, TaskCommit, TaskEnvironment,
+    TaskHost, VolumeId, task_launcher, volume_effects,
 };
 use crate::source::{
     FileSourceSystem, Host, HostSourceSystem, SourceArtifact, SourceIdentity, SourceSystem,
@@ -1112,6 +1113,7 @@ struct RuntimeTransactionState {
 
 struct RuntimeTransactionData {
     reflection: ReflectionStore,
+    events: RuntimeEventState,
     compatibility: RuntimeCompatibilityState,
 }
 
@@ -1122,6 +1124,299 @@ struct RuntimeObservationState {
 
 struct RuntimeIds {
     next_reasoning_session: AtomicU64,
+    next_input_endpoint: AtomicU64,
+}
+
+#[derive(Clone)]
+struct RuntimeInputRecord {
+    sequence: RuntimeInputSequence,
+    payload: RuntimeValueRoot,
+}
+
+#[derive(Clone)]
+struct RuntimeInputBuffer {
+    head_sequence: RuntimeInputSequence,
+    next_sequence: RuntimeInputSequence,
+    admitted: std::collections::VecDeque<RuntimeInputRecord>,
+}
+
+impl Default for RuntimeInputBuffer {
+    fn default() -> Self {
+        Self {
+            head_sequence: RuntimeInputSequence::from_u64(0),
+            next_sequence: RuntimeInputSequence::from_u64(0),
+            admitted: std::collections::VecDeque::new(),
+        }
+    }
+}
+
+struct RuntimeEventState {
+    inputs: BTreeMap<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>,
+    revision: u64,
+    latest_changes: BTreeMap<ConflictAddress, u64>,
+    strategy: Arc<dyn ConflictAnalysisStrategy>,
+}
+
+impl RuntimeEventState {
+    fn new(strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
+        Self {
+            inputs: BTreeMap::new(),
+            revision: 0,
+            latest_changes: BTreeMap::new(),
+            strategy,
+        }
+    }
+
+    fn snapshot(&self, runtime: EvaluationRuntimeId) -> RuntimeEventSnapshot {
+        RuntimeEventSnapshot {
+            runtime,
+            revision: self.revision,
+            inputs: Arc::new(
+                self.inputs
+                    .iter()
+                    .map(|(endpoint, input)| (*endpoint, input.clone()))
+                    .collect(),
+            ),
+            strategy: self.strategy.clone(),
+        }
+    }
+
+    fn conflicts(&self, journal: &RuntimeEventJournal) -> bool {
+        self.latest_changes.iter().any(|(changed, revision)| {
+            *revision > journal.snapshot.revision && journal.observations.may_conflict(changed)
+        })
+    }
+
+    fn validate(&self, journal: &RuntimeEventJournal) -> bool {
+        if journal.snapshot.runtime != journal.runtime {
+            return false;
+        }
+        if self.conflicts(journal) {
+            return false;
+        }
+        journal.cursors.iter().all(|(endpoint, cursor)| {
+            if cursor.next == cursor.start {
+                return true;
+            }
+            let Some(input) = self.inputs.get(endpoint) else {
+                return false;
+            };
+            input.head_sequence == cursor.start
+                && cursor.next.get().saturating_sub(cursor.start.get())
+                    <= input.admitted.len() as u64
+        })
+    }
+
+    fn commit_validated(&mut self, journal: &RuntimeEventJournal) -> bool {
+        let mut consumed = Vec::new();
+        for (endpoint, cursor) in &journal.cursors {
+            let count = cursor.next.get() - cursor.start.get();
+            if count == 0 {
+                continue;
+            }
+            let input = self
+                .inputs
+                .get_mut(endpoint)
+                .expect("event validation retained every claimed endpoint");
+            let input = Arc::make_mut(input);
+            for _ in 0..count {
+                let record = input
+                    .admitted
+                    .pop_front()
+                    .expect("event validation retained every claimed input");
+                debug_assert_eq!(record.sequence, input.head_sequence);
+                consumed.push(ConflictAddress::input_slot(*endpoint, record.sequence));
+                input.head_sequence = input
+                    .head_sequence
+                    .checked_next()
+                    .expect("an admitted input always has a successor boundary");
+            }
+        }
+        if consumed.is_empty() {
+            return false;
+        }
+        self.revision = self.revision.wrapping_add(1);
+        for address in consumed {
+            self.latest_changes.insert(address, self.revision);
+        }
+        true
+    }
+}
+
+/// Immutable admitted-input state captured with a reflection-store snapshot.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct RuntimeEventSnapshot {
+    runtime: EvaluationRuntimeId,
+    revision: u64,
+    inputs: Arc<BTreeMap<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>>,
+    strategy: Arc<dyn ConflictAnalysisStrategy>,
+}
+
+#[derive(Clone)]
+struct RuntimeInputCursor {
+    start: RuntimeInputSequence,
+    next: RuntimeInputSequence,
+    claimed: Vec<RuntimeValueRoot>,
+}
+
+/// Transaction-local observations and FIFO input claims.
+///
+/// Dropping this value abandons every claim; input is removed only by a
+/// successful combined runtime commit.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct RuntimeEventJournal {
+    runtime: EvaluationRuntimeId,
+    snapshot: RuntimeEventSnapshot,
+    observations: Box<dyn ConflictObservationIndex>,
+    cursors: BTreeMap<RuntimeInputEndpointId, RuntimeInputCursor>,
+}
+
+impl RuntimeEventJournal {
+    #[doc(hidden)]
+    pub fn new(snapshot: RuntimeEventSnapshot) -> Self {
+        Self {
+            runtime: snapshot.runtime,
+            observations: snapshot.strategy.begin(),
+            snapshot,
+            cursors: BTreeMap::new(),
+        }
+    }
+
+    /// Reads and claims the next value from `input` in this transaction's
+    /// frozen FIFO view. `None` is a precise observation of the next absent
+    /// slot and does not advance the local cursor.
+    pub fn read(&mut self, input: &RuntimeInputReader) -> Result<Option<Value>, Error> {
+        input.validate_runtime(self.runtime)?;
+        let snapshot = self
+            .snapshot
+            .inputs
+            .get(&input.endpoint)
+            .ok_or_else(|| Error::new("runtime input endpoint is not registered"))?;
+        let cursor = self
+            .cursors
+            .entry(input.endpoint)
+            .or_insert_with(|| RuntimeInputCursor {
+                start: snapshot.head_sequence,
+                next: snapshot.head_sequence,
+                claimed: Vec::new(),
+            });
+        let address = ConflictAddress::input_slot(input.endpoint, cursor.next);
+        self.observations.observe(&address);
+        if cursor.next == snapshot.next_sequence {
+            return Ok(None);
+        }
+        let offset = cursor.next.get() - snapshot.head_sequence.get();
+        let record = snapshot
+            .admitted
+            .get(offset as usize)
+            .expect("the snapshot sequence range and admitted roots agree");
+        debug_assert_eq!(record.sequence, cursor.next);
+        cursor.claimed.push(record.payload.clone());
+        cursor.next = cursor
+            .next
+            .checked_next()
+            .expect("an admitted input always has a successor boundary");
+        Ok(Some(record.payload.value(self.runtime)))
+    }
+}
+
+/// Runtime-bound transactional read authority for one admitted-input FIFO.
+#[derive(Clone)]
+pub struct RuntimeInputReader {
+    runtime: EvaluationRuntimeId,
+    owner: Weak<RuntimeState>,
+    endpoint: RuntimeInputEndpointId,
+}
+
+impl RuntimeInputReader {
+    pub fn id(&self) -> RuntimeInputEndpointId {
+        self.endpoint
+    }
+
+    fn validate_runtime(&self, runtime: EvaluationRuntimeId) -> Result<(), Error> {
+        if self.runtime != runtime {
+            return Err(Error::new(format!(
+                "input endpoint {} belongs to evaluation runtime {}, not {}",
+                self.endpoint.get(),
+                self.runtime.get(),
+                runtime.get()
+            )));
+        }
+        if self.owner.upgrade().is_none() {
+            return Err(Error::new(format!(
+                "evaluation runtime {} for input endpoint {} has been dropped",
+                self.runtime.get(),
+                self.endpoint.get()
+            )));
+        }
+        Ok(())
+    }
+}
+
+type RuntimeInputConverter<T> = dyn Fn(T) -> Result<Value, Error> + Send + Sync;
+
+/// Typed host-side sender for one runtime input FIFO.
+pub struct RuntimeInputSender<T> {
+    runtime: EvaluationRuntimeId,
+    owner: Weak<RuntimeState>,
+    endpoint: RuntimeInputEndpointId,
+    convert: Arc<RuntimeInputConverter<T>>,
+    marker: PhantomData<fn(T)>,
+}
+
+impl<T> Clone for RuntimeInputSender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            runtime: self.runtime,
+            owner: self.owner.clone(),
+            endpoint: self.endpoint,
+            convert: self.convert.clone(),
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<T> RuntimeInputSender<T> {
+    pub fn id(&self) -> RuntimeInputEndpointId {
+        self.endpoint
+    }
+
+    /// Converts and admits one host value. Conversion happens before runtime
+    /// mutation admission, so failure publishes neither state nor a wake.
+    pub fn admit(&self, input: T) -> Result<RuntimeInputSequence, Error> {
+        let owner = self.owner.upgrade().ok_or_else(|| {
+            Error::new(format!(
+                "evaluation runtime {} for input endpoint {} has been dropped",
+                self.runtime.get(),
+                self.endpoint.get()
+            ))
+        })?;
+        let value = (self.convert)(input)?;
+        let root = owner.values.root(value);
+        admit_runtime_input(&owner, self.endpoint, root)
+    }
+}
+
+/// Host-facing halves of one runtime input FIFO.
+pub struct RuntimeInputEndpoint<T> {
+    sender: RuntimeInputSender<T>,
+    reader: RuntimeInputReader,
+}
+
+impl<T> RuntimeInputEndpoint<T> {
+    pub fn sender(&self) -> RuntimeInputSender<T> {
+        self.sender.clone()
+    }
+
+    pub fn reader(&self) -> RuntimeInputReader {
+        self.reader.clone()
+    }
+
+    pub fn into_parts(self) -> (RuntimeInputSender<T>, RuntimeInputReader) {
+        (self.sender, self.reader)
+    }
 }
 
 #[derive(Default)]
@@ -1190,6 +1485,66 @@ impl RuntimeValueRoot {
     }
 }
 
+fn admit_runtime_input(
+    runtime: &Arc<RuntimeState>,
+    endpoint: RuntimeInputEndpointId,
+    payload: RuntimeValueRoot,
+) -> Result<RuntimeInputSequence, Error> {
+    debug_assert_eq!(payload.runtime, runtime.id);
+    let mutation = RuntimeMutationGuard {
+        _guard: runtime
+            .settlement_gate
+            .read()
+            .expect("runtime settlement gate should not be poisoned"),
+    };
+    let sequence = {
+        let mut state = runtime
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned");
+        let input = state.events.inputs.get_mut(&endpoint).ok_or_else(|| {
+            Error::new(format!(
+                "runtime input endpoint {} is not registered",
+                endpoint.get()
+            ))
+        })?;
+        let input = Arc::make_mut(input);
+        let sequence = input.next_sequence;
+        let next = sequence.checked_next().ok_or_else(|| {
+            Error::new(format!(
+                "input sequence exhausted for endpoint {}",
+                endpoint.get()
+            ))
+        })?;
+        input
+            .admitted
+            .push_back(RuntimeInputRecord { sequence, payload });
+        input.next_sequence = next;
+        state.events.revision = state.events.revision.wrapping_add(1);
+        let revision = state.events.revision;
+        state
+            .events
+            .latest_changes
+            .insert(ConflictAddress::input_slot(endpoint, sequence), revision);
+        sequence
+    };
+    publish_runtime_observation(runtime, mutation);
+    Ok(sequence)
+}
+
+fn publish_runtime_observation(runtime: &RuntimeState, mutation: RuntimeMutationGuard<'_>) {
+    let mut epoch = runtime
+        .observations
+        .epoch
+        .lock()
+        .expect("runtime observation mutex should not be poisoned");
+    *epoch = epoch.wrapping_add(1);
+    drop(epoch);
+    drop(mutation);
+    runtime.observations.changed.notify_all();
+}
+
 impl EvaluationRuntime {
     pub fn new(worker_threads: usize) -> Result<Self, Error> {
         Self::with_conflict_analysis(worker_threads, Arc::new(ExactConflictAnalysis))
@@ -1202,6 +1557,7 @@ impl EvaluationRuntime {
         conflict_analysis: Arc<dyn ConflictAnalysisStrategy>,
     ) -> Result<Self, Error> {
         let id = allocate_evaluation_runtime_id();
+        let event_conflict_analysis = conflict_analysis.clone();
         Ok(Self {
             state: Arc::new(RuntimeState {
                 id,
@@ -1211,6 +1567,7 @@ impl EvaluationRuntime {
                 transactions: RuntimeTransactionState {
                     state: Mutex::new(RuntimeTransactionData {
                         reflection: ReflectionStore::new(conflict_analysis),
+                        events: RuntimeEventState::new(event_conflict_analysis),
                         compatibility: RuntimeCompatibilityState::default(),
                     }),
                 },
@@ -1220,6 +1577,7 @@ impl EvaluationRuntime {
                 },
                 ids: RuntimeIds {
                     next_reasoning_session: AtomicU64::new(1),
+                    next_input_endpoint: AtomicU64::new(1),
                 },
                 settlement_gate: RwLock::new(()),
             }),
@@ -1233,6 +1591,49 @@ impl EvaluationRuntime {
 
     pub fn worker_threads(&self) -> usize {
         self.state.executor.worker_count()
+    }
+
+    /// Registers a runtime-local FIFO input boundary.
+    ///
+    /// The converter is host policy: it runs before mutation admission and
+    /// leaves the runtime untouched when it fails. The returned sender and
+    /// reader retain only weak links to this runtime.
+    pub fn input_endpoint<T, F>(&self, convert: F) -> Result<RuntimeInputEndpoint<T>, Error>
+    where
+        F: Fn(T) -> Result<Value, Error> + Send + Sync + 'static,
+    {
+        let id = self
+            .state
+            .ids
+            .next_input_endpoint
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| Error::new("runtime input endpoint IDs exhausted"))?;
+        let endpoint =
+            RuntimeInputEndpointId::from_u64(id).expect("runtime input endpoint IDs start at one");
+        let _mutation = self.mutation_guard();
+        self.state
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .events
+            .inputs
+            .insert(endpoint, Arc::new(RuntimeInputBuffer::default()));
+        let owner = Arc::downgrade(&self.state);
+        Ok(RuntimeInputEndpoint {
+            sender: RuntimeInputSender {
+                runtime: self.id(),
+                owner: owner.clone(),
+                endpoint,
+                convert: Arc::new(convert),
+                marker: PhantomData,
+            },
+            reader: RuntimeInputReader {
+                runtime: self.id(),
+                owner,
+                endpoint,
+            },
+        })
     }
 
     /// Starts this runtime's worker pool exactly once. A runtime constructed
@@ -1335,6 +1736,72 @@ impl EvaluationRuntime {
         (generation, store)
     }
 
+    /// Captures the reflection store and admitted-input state under the same
+    /// transactional-state lock.
+    #[doc(hidden)]
+    pub fn transaction_snapshot(
+        &self,
+    ) -> (u64, crate::reflection::StoreSnapshot, RuntimeEventSnapshot) {
+        // As with `reflection_snapshot`, reading the epoch first prevents a
+        // waiter from retaining a new epoch beside stale transactional state.
+        let generation = *self
+            .state
+            .observations
+            .epoch
+            .lock()
+            .expect("runtime observation mutex should not be poisoned");
+        let state = self
+            .state
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned");
+        (
+            generation,
+            state.reflection.snapshot(),
+            state.events.snapshot(self.id()),
+        )
+    }
+
+    /// Atomically validates and applies one reflection-store journal and its
+    /// admitted-input claims. Neither side is applied if either conflicts.
+    #[doc(hidden)]
+    pub fn try_commit_transaction(
+        &self,
+        store: &crate::reflection::StoreJournal,
+        events: &RuntimeEventJournal,
+    ) -> crate::reflection::StoreCommitResult {
+        if events.runtime != self.id() {
+            return crate::reflection::StoreCommitResult::Conflict;
+        }
+        let mutation = self.mutation_guard();
+        let (result, changed) = {
+            let mut state = self
+                .state
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            let result = state.reflection.validate(store);
+            if !matches!(result, crate::reflection::StoreCommitResult::Committed) {
+                return result;
+            }
+            if !state.events.validate(events) {
+                return crate::reflection::StoreCommitResult::Conflict;
+            }
+            let reflection_changed = state.reflection.commit_validated(store);
+            let event_changed = state.events.commit_validated(events);
+            (
+                crate::reflection::StoreCommitResult::Committed,
+                reflection_changed || event_changed,
+            )
+        };
+        if changed {
+            self.publish_observation(mutation);
+        }
+        result
+    }
+
     #[doc(hidden)]
     pub fn commit_reflection(
         &self,
@@ -1411,16 +1878,7 @@ impl EvaluationRuntime {
     }
 
     fn publish_observation(&self, mutation: RuntimeMutationGuard<'_>) {
-        let mut epoch = self
-            .state
-            .observations
-            .epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned");
-        *epoch = epoch.wrapping_add(1);
-        drop(epoch);
-        drop(mutation);
-        self.state.observations.changed.notify_all();
+        publish_runtime_observation(&self.state, mutation);
     }
 
     #[doc(hidden)]
@@ -1788,7 +2246,8 @@ pub struct Error {
 }
 
 impl Error {
-    fn new(message: impl Into<Arc<str>>) -> Self {
+    /// Constructs an embedding-boundary error from a plain diagnostic message.
+    pub fn new(message: impl Into<Arc<str>>) -> Self {
         let message = message.into();
         Self {
             diagnostic: Arc::new(Diagnostic::new(Severity::Error, message.clone())),
@@ -3620,6 +4079,357 @@ mod tests {
         let second = EvaluationRuntime::new(0).expect("second runtime should build");
 
         assert_ne!(first.id(), second.id());
+    }
+
+    fn input_transaction(
+        runtime: &EvaluationRuntime,
+    ) -> (crate::reflection::StoreJournal, RuntimeEventJournal) {
+        let (_, store, events) = runtime.transaction_snapshot();
+        (
+            crate::reflection::StoreJournal::new(store),
+            RuntimeEventJournal::new(events),
+        )
+    }
+
+    #[test]
+    fn runtime_input_endpoints_are_local_monotonic_capabilities() {
+        let owner = EvaluationRuntime::new(0).expect("owner runtime should build");
+        let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+        let first = owner
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("first endpoint should register");
+        let second = owner
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("second endpoint should register");
+
+        assert_eq!(second.reader().id().get(), first.reader().id().get() + 1);
+        assert_eq!(first.sender().id(), first.reader().id());
+
+        let (_, _, snapshot) = foreign.transaction_snapshot();
+        let mut journal = RuntimeEventJournal::new(snapshot);
+        let error = journal
+            .read(&first.reader())
+            .expect_err("an input capability must reject a foreign runtime");
+        assert!(error.to_string().contains("belongs to evaluation runtime"));
+    }
+
+    #[test]
+    fn runtime_input_conversion_precedes_admission_and_stores_only_roots() {
+        struct HostPayload(Arc<()>);
+
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let converter_runtime = runtime.clone();
+        let endpoint = runtime
+            .input_endpoint(move |payload: HostPayload| {
+                assert!(converter_runtime.exclusive_admission_available());
+                let HostPayload(lease) = payload;
+                drop(lease);
+                Ok(Value::text("rooted"))
+            })
+            .expect("endpoint should register");
+        let host_payload = Arc::new(());
+        let retained = Arc::downgrade(&host_payload);
+
+        let sequence = endpoint
+            .sender()
+            .admit(HostPayload(host_payload))
+            .expect("input should be admitted");
+        assert_eq!(sequence.get(), 0);
+        assert!(retained.upgrade().is_none());
+
+        let state = runtime
+            .state
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned");
+        let record = state
+            .events
+            .inputs
+            .get(&endpoint.reader().id())
+            .expect("endpoint should remain registered")
+            .admitted
+            .front()
+            .expect("the converted root should be buffered");
+        assert_eq!(record.payload.runtime, runtime.id());
+        assert_eq!(
+            record.payload.value(runtime.id()).as_binary(),
+            Some(b"rooted".as_slice())
+        );
+    }
+
+    #[test]
+    fn failed_runtime_input_conversion_publishes_nothing() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let endpoint = runtime
+            .input_endpoint(|_: ()| -> Result<Value, Error> { Err(Error::new("rejected")) })
+            .expect("endpoint should register");
+        let (generation, _, before) = runtime.transaction_snapshot();
+
+        assert!(endpoint.sender().admit(()).is_err());
+
+        let (after_generation, _, after) = runtime.transaction_snapshot();
+        assert_eq!(after_generation, generation);
+        assert_eq!(after.revision, before.revision);
+        let mut journal = RuntimeEventJournal::new(after);
+        assert_eq!(
+            journal
+                .read(&endpoint.reader())
+                .expect("empty endpoint should be readable"),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_input_identity_exhaustion_changes_no_state() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let endpoint = runtime
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("endpoint should register");
+        {
+            let mut state = runtime
+                .state
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            let input = Arc::make_mut(
+                state
+                    .events
+                    .inputs
+                    .get_mut(&endpoint.reader().id())
+                    .expect("endpoint should remain registered"),
+            );
+            input.head_sequence = RuntimeInputSequence::from_u64(u64::MAX);
+            input.next_sequence = RuntimeInputSequence::from_u64(u64::MAX);
+        }
+        let (generation, _, before) = runtime.transaction_snapshot();
+
+        assert!(endpoint.sender().admit(1).is_err());
+
+        let (after_generation, _, after) = runtime.transaction_snapshot();
+        assert_eq!(after_generation, generation);
+        assert_eq!(after.revision, before.revision);
+        assert!(
+            after
+                .inputs
+                .get(&endpoint.reader().id())
+                .expect("endpoint should remain registered")
+                .admitted
+                .is_empty()
+        );
+
+        let endpoint_count = after.inputs.len();
+        runtime
+            .state
+            .ids
+            .next_input_endpoint
+            .store(u64::MAX, Ordering::Relaxed);
+        assert!(
+            runtime
+                .input_endpoint(|value: i64| Ok(Value::integer(value)))
+                .is_err()
+        );
+        let (_, _, after_id_failure) = runtime.transaction_snapshot();
+        assert_eq!(after_id_failure.inputs.len(), endpoint_count);
+    }
+
+    #[test]
+    fn runtime_input_reads_and_commits_a_fifo_prefix() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let endpoint = runtime
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("endpoint should register");
+        assert_eq!(endpoint.sender().admit(10).unwrap().get(), 0);
+        assert_eq!(endpoint.sender().admit(20).unwrap().get(), 1);
+        let (store, mut events) = input_transaction(&runtime);
+
+        assert_eq!(
+            events
+                .read(&endpoint.reader())
+                .unwrap()
+                .and_then(|value| value.as_number_text()),
+            Some("10".to_owned())
+        );
+        assert_eq!(
+            events
+                .read(&endpoint.reader())
+                .unwrap()
+                .and_then(|value| value.as_number_text()),
+            Some("20".to_owned())
+        );
+        assert_eq!(events.read(&endpoint.reader()).unwrap(), None);
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+
+        let (_, mut empty) = input_transaction(&runtime);
+        assert_eq!(empty.read(&endpoint.reader()).unwrap(), None);
+    }
+
+    #[test]
+    fn empty_runtime_input_observation_is_stable_and_precise() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let left = runtime
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("left endpoint should register");
+        let right = runtime
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("right endpoint should register");
+        let (unrelated_store, mut unrelated_events) = input_transaction(&runtime);
+        assert_eq!(unrelated_events.read(&left.reader()).unwrap(), None);
+        assert_eq!(unrelated_events.read(&left.reader()).unwrap(), None);
+
+        right.sender().admit(1).expect("right input should admit");
+        assert_eq!(
+            runtime.try_commit_transaction(&unrelated_store, &unrelated_events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+
+        let (stale_store, mut stale_events) = input_transaction(&runtime);
+        assert_eq!(stale_events.read(&left.reader()).unwrap(), None);
+        left.sender().admit(2).expect("left input should admit");
+        assert_eq!(
+            runtime.try_commit_transaction(&stale_store, &stale_events),
+            crate::reflection::StoreCommitResult::Conflict
+        );
+    }
+
+    #[test]
+    fn runtime_input_uses_the_configured_conflict_strategy() {
+        let strategies: [Arc<dyn ConflictAnalysisStrategy>; 3] = [
+            Arc::new(crate::reflection::ExactConflictAnalysis),
+            Arc::new(crate::reflection::FingerprintConflictAnalysis),
+            Arc::new(crate::reflection::CoarseConflictAnalysis),
+        ];
+        for strategy in strategies {
+            let runtime = EvaluationRuntime::with_conflict_analysis(0, strategy)
+                .expect("runtime should build");
+            let endpoint = runtime
+                .input_endpoint(|value: i64| Ok(Value::integer(value)))
+                .expect("endpoint should register");
+            let (store, mut events) = input_transaction(&runtime);
+            assert_eq!(events.read(&endpoint.reader()).unwrap(), None);
+            endpoint.sender().admit(1).expect("input should admit");
+            assert_eq!(
+                runtime.try_commit_transaction(&store, &events),
+                crate::reflection::StoreCommitResult::Conflict
+            );
+        }
+    }
+
+    #[test]
+    fn competing_runtime_input_consumers_conflict_but_independent_ones_commit() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let left = runtime
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("left endpoint should register");
+        let right = runtime
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("right endpoint should register");
+        left.sender().admit(1).unwrap();
+        right.sender().admit(2).unwrap();
+        let (_, store, events) = runtime.transaction_snapshot();
+        let left_store = crate::reflection::StoreJournal::new(store.clone());
+        let right_store = crate::reflection::StoreJournal::new(store.clone());
+        let competing_store = crate::reflection::StoreJournal::new(store);
+        let mut left_events = RuntimeEventJournal::new(events.clone());
+        let mut right_events = RuntimeEventJournal::new(events.clone());
+        let mut competing_events = RuntimeEventJournal::new(events);
+        assert!(left_events.read(&left.reader()).unwrap().is_some());
+        assert!(right_events.read(&right.reader()).unwrap().is_some());
+        assert!(competing_events.read(&left.reader()).unwrap().is_some());
+
+        assert_eq!(
+            runtime.try_commit_transaction(&left_store, &left_events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert_eq!(
+            runtime.try_commit_transaction(&right_store, &right_events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert_eq!(
+            runtime.try_commit_transaction(&competing_store, &competing_events),
+            crate::reflection::StoreCommitResult::Conflict
+        );
+    }
+
+    #[test]
+    fn abandoned_runtime_input_claim_does_not_consume() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let endpoint = runtime
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("endpoint should register");
+        endpoint.sender().admit(7).unwrap();
+        {
+            let (_, mut abandoned) = input_transaction(&runtime);
+            assert!(abandoned.read(&endpoint.reader()).unwrap().is_some());
+        }
+        let (store, mut events) = input_transaction(&runtime);
+        assert_eq!(
+            events
+                .read(&endpoint.reader())
+                .unwrap()
+                .and_then(|value| value.as_number_text()),
+            Some("7".to_owned())
+        );
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+    }
+
+    #[test]
+    fn combined_heap_conflict_rolls_back_runtime_input_consumption() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let endpoint = runtime
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("endpoint should register");
+        endpoint.sender().admit(9).unwrap();
+        let (_, store_snapshot, event_snapshot) = runtime.transaction_snapshot();
+        let mut combined_store = crate::reflection::StoreJournal::new(store_snapshot.clone());
+        combined_store.observe_read(&[Key::atom_from_text("combined")]);
+        combined_store.write(vec![Key::atom_from_text("combined")], Value::text("stale"));
+        let mut combined_events = RuntimeEventJournal::new(event_snapshot);
+        assert!(combined_events.read(&endpoint.reader()).unwrap().is_some());
+
+        let mut winner = crate::reflection::StoreJournal::new(store_snapshot);
+        winner.write(vec![Key::atom_from_text("combined")], Value::text("winner"));
+        assert_eq!(
+            runtime.commit_reflection(&winner),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert_eq!(
+            runtime.try_commit_transaction(&combined_store, &combined_events),
+            crate::reflection::StoreCommitResult::Conflict
+        );
+
+        let (_, mut retry) = input_transaction(&runtime);
+        assert_eq!(
+            retry
+                .read(&endpoint.reader())
+                .unwrap()
+                .and_then(|value| value.as_number_text()),
+            Some("9".to_owned())
+        );
+    }
+
+    #[test]
+    fn runtime_input_admission_wakes_after_releasing_mutation_admission() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let endpoint = runtime
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("endpoint should register");
+        let (generation, _, _) = runtime.transaction_snapshot();
+        let waiting_runtime = runtime.clone();
+        let waiter = std::thread::spawn(move || {
+            assert!(waiting_runtime.wait_for_change(generation));
+            assert!(waiting_runtime.exclusive_admission_available());
+        });
+
+        endpoint.sender().admit(1).expect("input should admit");
+        waiter.join().expect("broad observer should wake cleanly");
     }
 
     #[test]

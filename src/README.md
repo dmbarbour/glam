@@ -87,10 +87,20 @@ runtime default, independent of the demand session which first observes them.
 By contrast, `.task.new` inherits its parent's complete role profile, including
 the effect specialization, environment, diagnostic destination, and host
 resources.
+The runtime transaction domain also owns registered admitted-input FIFOs.
+Rust hosts create a typed sender plus a runtime-bound transactional reader with
+`EvaluationRuntime::input_endpoint`; conversion occurs before admission, while
+the authoritative buffer and transaction journal retain only runtime roots.
+Reads claim FIFO prefixes optimistically, including precise observations of
+the next empty slot, and combined store/event commit prevents either the heap
+edit or input consumption from being applied alone. Input-slot conflicts reuse
+the runtime's configured conflict-analysis strategy without manufacturing
+dummy heap values.
 The configured logger attaches another demand host to that same runtime. Its
 temporary diagnostic-input and buffered-stderr state commits atomically with
-the runtime store, while its environment and output diagnostic bus remain
-role-specific.
+the runtime store until the generic endpoints replace that compatibility path
+in the logger-integration phase; its environment and output diagnostic bus
+remain role-specific.
 For a bare command, the CLI first loads configuration with a dormant runtime,
 runs `conf.cli` as an isolated all-results search, resolves the promised
 canonical argument environment, and only then activates the selected worker

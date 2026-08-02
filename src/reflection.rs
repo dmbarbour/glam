@@ -19,9 +19,10 @@ pub use requests::{
 };
 pub(crate) use requests::{environment_log_request_specs, parse_severity, prepare_message};
 pub use store::{
-    CoarseConflictAnalysis, ConflictAnalysisStrategy, ConflictObservationIndex, ConflictPath,
-    EvaluationQueryHandle, ExactConflictAnalysis, FingerprintConflictAnalysis, ReflectionStore,
-    StoreCommitResult, StoreJournal, StoreSnapshot, VolumeId,
+    CoarseConflictAnalysis, ConflictAddress, ConflictAnalysisStrategy, ConflictObservationIndex,
+    ConflictPath, EvaluationQueryHandle, ExactConflictAnalysis, FingerprintConflictAnalysis,
+    ReflectionStore, RuntimeInputEndpointId, RuntimeInputSequence, StoreCommitResult, StoreJournal,
+    StoreSnapshot, VolumeId,
 };
 pub(crate) use store::{EvaluationQueryPoll, EvaluationQueryState, decode_query_state};
 

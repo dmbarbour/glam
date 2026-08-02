@@ -21,12 +21,14 @@ pub use api::{
     EvaluationRuntimeId, ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort,
     PromiseResolver, ReasoningFailure, ReasoningReport, ReasoningStatus, ReasoningTask,
     ReasoningTaskState, ReasoningVolume, ReflectionEnvironmentBuilder, ReflectionInspector,
-    RuntimeCompatibilitySnapshot, Value, ValueKind,
+    RuntimeCompatibilitySnapshot, RuntimeEventJournal, RuntimeEventSnapshot, RuntimeInputEndpoint,
+    RuntimeInputReader, RuntimeInputSender, Value, ValueKind,
 };
 pub use diagnostic::Severity;
 pub use g_source::{
     GDeclarationKind, GDeclarationSummary, GSourceDiagnostic, GSourceInspection, inspect_g_source,
 };
+pub use reflection::{RuntimeInputEndpointId, RuntimeInputSequence};
 pub use source::{
     CONTENT_DIGEST_ALGORITHM, ContentDigest, FileSourceSystem, Host, HostError, HostSourceSystem,
     ImportResolver, ManifestMismatch, RelativeSourcePath, SourceArtifact, SourceError,
