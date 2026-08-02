@@ -46,7 +46,8 @@ use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSession,
     EvaluationSessionRun, EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine,
-    EvaluationTaskPoll, EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskResultPolicy,
+    EvaluationTaskPoll, EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskProfile,
+    ReflectionTaskResultPolicy,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -450,15 +451,14 @@ impl From<ApiError> for TaskHalt {
 
 /// Configures and synchronously runs one effect task.
 ///
-/// Runtime attachment and child reflection capabilities are independent. If
-/// child reflection is enabled, all scheduled children are drained before the
-/// run returns; a child failure or stable deadlock fails the composed run.
+/// `.task.new` children inherit this task's complete specialization and host
+/// profile. All scheduled children are drained before the run returns; a
+/// child failure or stable deadlock fails the composed run.
 pub struct EffectRun<S: TaskSpecialization> {
     effect: PublicValue,
     specialization: S,
     host: Arc<S::Host>,
     runtime: Option<EvaluationRuntime>,
-    reflection_children: Option<Arc<dyn ReflectionHost<ReflectionEffects>>>,
     result_policy: EffectResultPolicy,
     result_assertion_context: Option<Arc<str>>,
 }
@@ -476,7 +476,6 @@ impl<S: TaskSpecialization> EffectRun<S> {
             specialization,
             host,
             runtime: None,
-            reflection_children: None,
             result_policy: EffectResultPolicy::Return,
             result_assertion_context: None,
         }
@@ -485,15 +484,6 @@ impl<S: TaskSpecialization> EffectRun<S> {
     /// Runs the task in a service session using the runtime's shared executor.
     pub fn with_runtime(mut self, runtime: &EvaluationRuntime) -> Self {
         self.runtime = Some(runtime.clone());
-        self
-    }
-
-    /// Gives `.task.new` children only the reusable reflection capabilities.
-    pub fn with_reflection_children(
-        mut self,
-        host: Arc<dyn ReflectionHost<ReflectionEffects>>,
-    ) -> Self {
-        self.reflection_children = Some(host);
         self
     }
 
@@ -520,25 +510,24 @@ impl<S: TaskSpecialization> EffectRun<S> {
             specialization,
             host,
             runtime,
-            reflection_children,
             result_policy,
             result_assertion_context,
         } = self;
+        let task_profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
+            specialization.clone(),
+            host.clone(),
+        )));
         let session = match runtime {
-            Some(runtime) => EvaluationSession::shared(runtime.executor()),
-            None => Arc::new(EvaluationSession::new()),
+            Some(runtime) => runtime.new_evaluation_session()?,
+            None => Arc::new(EvaluationSession::with_default_profile(
+                task_profile.clone(),
+            )),
         };
-        let drain_children = reflection_children.is_some();
-        if let Some(reflection_host) = reflection_children {
-            session
-                .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
-                .map_err(|error| TaskHalt::new(error.as_ref()))?;
-        }
         let mut task = EffectTask::new_in_context(
             effect.into_core(),
             specialization,
             host,
-            EvalContext::new(session),
+            EvalContext::with_task_profile(session, task_profile),
         )?;
         if result_policy == EffectResultPolicy::RequireUnit {
             task = task.requiring_unit_result();
@@ -546,11 +535,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
         if let Some(diagnostic_context) = result_assertion_context {
             task = task.asserting_unit_result(diagnostic_context);
         }
-        if drain_children {
-            run_composed_effect_task(task)
-        } else {
-            task.run()
-        }
+        run_composed_effect_task(task)
     }
 }
 
@@ -4541,9 +4526,8 @@ mod tests {
         host: Arc<TestHost>,
     ) -> (EvalContext, EvaluationTaskHandle) {
         let context = EvalContext::standalone();
-        let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
         context
-            .install_reflection_launcher(task_launcher(ReflectionEffects, reflection_host))
+            .install_reflection_launcher(task_launcher(TestEffects, host.clone()))
             .expect("fresh test session should accept a reflection launcher");
         let effect = effect.as_core().clone();
         let task = context
@@ -4573,18 +4557,61 @@ mod tests {
             ".task.new (.log 'warn { msg:{ text:\"child\" } }) >>= (\\_task -> .r ())",
         );
         let host = Arc::new(TestHost::default());
-        let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
 
         assert!(matches!(
             EffectRun::new(&effect, TestEffects, host.clone())
                 .with_runtime(&assembler.evaluation_runtime())
-                .with_reflection_children(reflection_host)
                 .requiring_unit_result()
                 .run()
                 .unwrap(),
             TaskOutcome::Complete(_)
         ));
         assert_eq!(host.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn annotations_use_one_runtime_default_profile_across_demand_sessions() {
+        let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let captured = diagnostics.clone();
+        let assembler = Assembler::builder()
+            .diagnostic_callback(move |event| {
+                captured.lock().unwrap().push(event.diagnostic().clone());
+            })
+            .build()
+            .expect("assembler should seal its runtime reflection profile");
+        let module = assembler
+            .module(["runtime_default_profile"])
+            .script(
+                "g",
+                "language g0\nimport 'std\nfirst = anno refl:(.log 'warn {msg:{text:\"first\"}}) (.r ())\nsecond = anno refl:(.log 'warn {msg:{text:\"second\"}}) (.r ())\n",
+            )
+            .build()
+            .expect("annotation profile fixture should compile");
+        diagnostics.lock().unwrap().clear();
+
+        for name in ["first", "second"] {
+            let effect = assembler
+                .get(module.value(), name)
+                .expect("fixture should define both effects");
+            let claim_host = Arc::new(TestHost::default());
+            assert!(matches!(
+                EffectRun::new(&effect, TestEffects, claim_host.clone())
+                    .with_runtime(&assembler.evaluation_runtime())
+                    .run()
+                    .unwrap(),
+                TaskOutcome::Complete(_)
+            ));
+            assert!(
+                claim_host.diagnostics().is_empty(),
+                "annotation diagnostics must not use the claim-site profile"
+            );
+        }
+
+        assert_eq!(
+            diagnostics.lock().unwrap().len(),
+            2,
+            "both demand sessions must use the runtime's sealed default profile"
+        );
     }
 
     #[test]
@@ -4975,7 +5002,7 @@ mod tests {
         let EvaluationTaskPoll::Complete(Value::List(arguments)) =
             pump_composed_test_task(&context, &task)
         else {
-            panic!("child reflection task should inherit its session environment")
+            panic!("child reflection task should inherit its parent profile environment")
         };
         assert_eq!(
             eval::list_to_value_items(&context, &arguments).unwrap(),
@@ -5590,40 +5617,20 @@ mod tests {
     }
 
     #[test]
-    fn spawned_tasks_receive_only_reusable_reflection_capabilities() {
+    fn spawned_tasks_inherit_the_parent_task_profile() {
         let (assembler, effect) = compile_effect(
-            ".task.new (.write_stderr \"forbidden\") >>= (\\task -> .task.error task)",
+            ".task.new ((.write_stderr \"child\") =>> .r \"done\") >>= (\\task -> .task.join task)",
         );
         let host = Arc::new(TestHost::default());
         let (context, task) = schedule_composed_test_task(&effect, host.clone());
-        let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
-            panic!("child capability error should be observable through task_error")
+        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+            panic!("child should inherit the parent's extended effect vocabulary")
         };
-        let error = PublicValue::from_core(error);
-        let message = assembler
-            .to_binary(
-                &assembler
-                    .get(&error, "msg.text")
-                    .expect("task error should have a diagnostic text view"),
-            )
-            .expect("task error diagnostic text should be binary");
-        assert!(
-            String::from_utf8_lossy(&message).contains("requires a function value"),
-            "unexpected capability error: {}",
-            String::from_utf8_lossy(&message)
+        assert_eq!(
+            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            b"done".as_slice()
         );
-        let contexts = assembler
-            .get(&error, "msg.context")
-            .expect("task error should retain dispatch context");
-        let Value::List(contexts) = contexts.as_core() else {
-            panic!("task error contexts should be a list")
-        };
-        assert!(
-            eval::list_to_value_items(&assembler.eval_context(), contexts)
-                .unwrap()
-                .contains(&effect_dispatch_context("application"))
-        );
-        assert!(host.stderr().is_empty());
+        assert_eq!(host.stderr(), [Bytes::from_static(b"child")]);
     }
 
     #[test]
@@ -6247,7 +6254,6 @@ mod tests {
 
         assert!(matches!(
             EffectRun::new(&effect, ReflectionEffects, reflection_host.clone())
-                .with_reflection_children(reflection_host)
                 .run()
                 .unwrap(),
             TaskOutcome::Complete(_)

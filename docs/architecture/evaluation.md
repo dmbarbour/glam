@@ -11,10 +11,17 @@ Every production evaluator entry receives an `EvalContext` borrowed from an
 `EvaluationSession`. An `Assembler` and its clones share one internal
 `ReasoningSession`, which owns that evaluation session and the assembler's
 reflection host. `EvaluationSession` owns active reflection and deferred-value
-task records, wait lookup, the reflection launcher, a persistent ledger of
+task records, wait lookup, a reference to the runtime-default annotation
+profile, a persistent ledger of
 unacknowledged reflection failures, and its connection to a shared
 `EvaluationExecutor`. The immutable reflection environment belongs to the
 active task host rather than the scheduler.
+
+`EvalContext` separately carries the complete profile inherited by
+`.task.new`. A type-erased launcher closes over the specialization, immutable
+environment, diagnostic destination, and shared host resources. This keeps
+child-task inheritance distinct from annotation policy: annotations select the
+runtime default, while their own children inherit that selected default.
 
 Lazy values retain computation and a stable identity, not a captured evaluator
 session. The observing `EvalContext` supplies host and scheduling behavior when

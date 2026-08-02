@@ -28,7 +28,7 @@ use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionId, EvaluationSessionRun,
-    EvaluationTaskId, EvaluationUnfinishedState,
+    EvaluationTaskId, EvaluationUnfinishedState, ReflectionTaskProfile,
 };
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -850,7 +850,9 @@ where
 }
 
 struct AssemblerReflectionHost {
-    runtime: EvaluationRuntime,
+    runtime: Arc<RuntimeState>,
+    default_reflection_profile: Weak<ReflectionTaskProfile>,
+    runtime_id: EvaluationRuntimeId,
     reasoning_session: ReasoningSessionId,
     reflection_environment: OnceLock<RuntimeValueRoot>,
     diagnostics: DiagnosticBus,
@@ -879,17 +881,18 @@ impl CompilationExecution {
     ) -> Result<Self, Error> {
         let diagnostics = DiagnosticBus::new();
         let host = Arc::new(AssemblerReflectionHost::new_unsealed(
-            reasoning.runtime(),
+            &reasoning.runtime(),
             diagnostics.clone(),
         ));
         host.seal_environment(reflection_environment_for_role(
             &reasoning.environment(),
             "macro",
         ))?;
-        let evaluation = EvaluationSession::shared(reasoning.runtime.executor());
-        evaluation
-            .install_reflection_launcher(task_launcher(ReflectionEffects, host.clone()))
-            .map_err(|error| Error::new(error.as_ref()))?;
+        let task_profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
+            ReflectionEffects,
+            host.clone(),
+        )));
+        let evaluation = reasoning.runtime.new_evaluation_session()?;
 
         let assembler_diagnostics = reasoning.diagnostics();
         let forwarder = diagnostics.subscribe(DiagnosticCallback(move |event: DiagnosticEvent| {
@@ -903,7 +906,7 @@ impl CompilationExecution {
 
         Ok(Self {
             lookup: reasoning.eval_context(),
-            macros: EvalContext::patient(evaluation),
+            macros: EvalContext::patient_with_task_profile(evaluation, task_profile),
             #[cfg(test)]
             macro_host: host,
             macro_diagnostics: diagnostics,
@@ -926,7 +929,7 @@ impl CompilationExecution {
 
     #[cfg(test)]
     pub(crate) fn macro_heap(&self) -> Value {
-        self.macro_host.runtime.reflection_root()
+        self.macro_host.runtime().reflection_root()
     }
 
     fn drain(&self) -> bool {
@@ -994,28 +997,37 @@ fn macro_reflection_diagnostic(diagnostic: &Diagnostic) -> Diagnostic {
 }
 
 impl AssemblerReflectionHost {
-    fn new_unsealed(runtime: EvaluationRuntime, diagnostics: DiagnosticBus) -> Self {
+    fn new_unsealed(runtime: &EvaluationRuntime, diagnostics: DiagnosticBus) -> Self {
         Self {
             reasoning_session: runtime.allocate_reasoning_session_id(),
-            runtime,
+            runtime: runtime.state.clone(),
+            default_reflection_profile: Arc::downgrade(&runtime.default_reflection_profile),
+            runtime_id: runtime.id(),
             reflection_environment: OnceLock::new(),
             diagnostics,
         }
     }
 
+    fn runtime(&self) -> EvaluationRuntime {
+        EvaluationRuntime {
+            state: self.runtime.clone(),
+            default_reflection_profile: self
+                .default_reflection_profile
+                .upgrade()
+                .expect("a running reflection host must retain its evaluation runtime"),
+        }
+    }
+
     fn seal_environment(&self, environment: Value) -> Result<(), Error> {
         self.reflection_environment
-            .set(self.runtime.root_value(environment))
+            .set(self.runtime().root_value(environment))
             .map_err(|_| Error::new("reflection environment was already configured"))
     }
 
     fn create_volume(&self, initial: Value) -> Result<(VolumeId, Value), Error> {
-        let volume = self.runtime.create_volume(initial)?;
-        Ok((volume, volume_effects(self.runtime.id(), volume)))
-    }
-
-    fn revoke_volume(&self, volume: VolumeId) -> Result<Value, Error> {
-        self.runtime.revoke_volume(volume)
+        let runtime = self.runtime();
+        let volume = runtime.create_volume(initial)?;
+        Ok((volume, volume_effects(self.runtime_id, volume)))
     }
 }
 
@@ -1024,7 +1036,7 @@ impl TaskEnvironment for AssemblerReflectionHost {
         self.reflection_environment
             .get()
             .expect("reasoning host must be sealed before it runs tasks")
-            .value(self.runtime.id())
+            .value(self.runtime_id)
     }
 }
 
@@ -1034,19 +1046,19 @@ impl ReflectionServices for AssemblerReflectionHost {
     }
 
     fn update_query(&self, handle: &Arc<crate::reflection::EvaluationQueryHandle>, result: Value) {
-        self.runtime.update_query(handle, result);
+        self.runtime().update_query(handle, result);
     }
 }
 
 impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
     fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
-        let (generation, store) = self.runtime.reflection_snapshot();
+        let (generation, store) = self.runtime().reflection_snapshot();
         HostSnapshot::new(generation, store, ())
     }
 
     fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
         let (store, _extra_snapshot, extra) = commit.into_parts();
-        match self.runtime.commit_reflection(&store) {
+        match self.runtime().commit_reflection(&store) {
             crate::reflection::StoreCommitResult::Committed => {}
             crate::reflection::StoreCommitResult::Conflict => {
                 return CommitResult::Conflict;
@@ -1068,11 +1080,11 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
     }
 
     fn evaluation_runtime_id(&self) -> Option<EvaluationRuntimeId> {
-        Some(self.runtime.id())
+        Some(self.runtime_id)
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
-        self.runtime.wait_for_change(observed_generation)
+        self.runtime().wait_for_change(observed_generation)
     }
 }
 
@@ -1081,6 +1093,7 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
 #[derive(Clone)]
 pub struct EvaluationRuntime {
     state: Arc<RuntimeState>,
+    default_reflection_profile: Arc<ReflectionTaskProfile>,
 }
 
 struct RuntimeState {
@@ -1210,6 +1223,7 @@ impl EvaluationRuntime {
                 },
                 settlement_gate: RwLock::new(()),
             }),
+            default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
         })
     }
 
@@ -1232,6 +1246,31 @@ impl EvaluationRuntime {
 
     pub(crate) fn executor(&self) -> &Arc<EvaluationExecutor> {
         &self.state.executor
+    }
+
+    pub(crate) fn new_evaluation_session(&self) -> Result<Arc<EvaluationSession>, Error> {
+        if !self.has_default_reflection_profile() {
+            return Err(Error::new(
+                "evaluation runtime default reflection task profile must be sealed before creating a session",
+            ));
+        }
+        Ok(EvaluationSession::shared_with_default_profile(
+            self.executor(),
+            self.default_reflection_profile.clone(),
+        ))
+    }
+
+    fn seal_default_reflection_profile(
+        &self,
+        launcher: Arc<dyn crate::evaluation::ReflectionTaskLauncher>,
+    ) -> Result<(), Error> {
+        self.default_reflection_profile
+            .seal(launcher)
+            .map_err(Error::new)
+    }
+
+    fn has_default_reflection_profile(&self) -> bool {
+        self.default_reflection_profile.is_sealed()
     }
 
     fn root_value(&self, value: Value) -> RuntimeValueRoot {
@@ -1639,6 +1678,7 @@ impl EvaluationRuntime {
 #[derive(Clone)]
 struct ReasoningSession {
     host: Arc<AssemblerReflectionHost>,
+    task_profile: Arc<ReflectionTaskProfile>,
     diagnostics: DiagnosticBus,
     runtime: EvaluationRuntime,
     evaluation: Arc<EvaluationSession>,
@@ -1649,17 +1689,19 @@ impl ReasoningSession {
         host: Arc<AssemblerReflectionHost>,
         diagnostics: DiagnosticBus,
         runtime: EvaluationRuntime,
-    ) -> Self {
-        let evaluation = EvaluationSession::shared(runtime.executor());
-        evaluation
-            .install_reflection_launcher(task_launcher(ReflectionEffects, host.clone()))
-            .expect("fresh evaluation session must accept its reflection launcher");
-        Self {
+    ) -> Result<Self, Error> {
+        let task_profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
+            ReflectionEffects,
+            host.clone(),
+        )));
+        let evaluation = runtime.new_evaluation_session()?;
+        Ok(Self {
             host,
+            task_profile,
             diagnostics,
             runtime,
             evaluation,
-        }
+        })
     }
 
     fn environment(&self) -> Value {
@@ -1675,7 +1717,7 @@ impl ReasoningSession {
     }
 
     fn eval_context(&self) -> EvalContext {
-        EvalContext::patient(self.evaluation.clone())
+        EvalContext::patient_with_task_profile(self.evaluation.clone(), self.task_profile.clone())
     }
 
     fn conflict_analysis(&self) -> Arc<dyn ConflictAnalysisStrategy> {
@@ -2027,7 +2069,7 @@ fn reflection_environment_for_role(environment: &Value, role: &str) -> Value {
 /// volume and recover its final unforced value. Dropping the handle does not
 /// revoke the volume.
 pub struct ReasoningVolume {
-    host: Arc<AssemblerReflectionHost>,
+    runtime: EvaluationRuntime,
     volume: VolumeId,
     effects: Value,
 }
@@ -2042,7 +2084,7 @@ impl ReasoningVolume {
     /// Further uses of any capability for this volume produce
     /// use-after-revoke errors.
     pub fn revoke(self) -> Result<Value, Error> {
-        self.host.revoke_volume(self.volume)
+        self.runtime.revoke_volume(self.volume)
     }
 }
 
@@ -2202,7 +2244,7 @@ impl Default for AssemblerBuilder {
         let runtime = EvaluationRuntime::new(0)
             .expect("zero-worker evaluation runtime must be constructible");
         let host = Arc::new(AssemblerReflectionHost::new_unsealed(
-            runtime.clone(),
+            &runtime,
             diagnostics.clone(),
         ));
         Self {
@@ -2252,7 +2294,7 @@ impl AssemblerBuilder {
         }
         self.runtime = runtime;
         self.host = Arc::new(AssemblerReflectionHost::new_unsealed(
-            self.runtime.clone(),
+            &self.runtime,
             self.diagnostics.clone(),
         ));
         self.runtime_supplied = true;
@@ -2276,7 +2318,7 @@ impl AssemblerBuilder {
             Ok(runtime) => {
                 self.runtime = runtime;
                 self.host = Arc::new(AssemblerReflectionHost::new_unsealed(
-                    self.runtime.clone(),
+                    &self.runtime,
                     self.diagnostics.clone(),
                 ));
                 self.conflict_analysis_requested = true;
@@ -2352,8 +2394,22 @@ impl AssemblerBuilder {
             None => authoritative_reflection_environment(Value::empty_record(), "assembler")?.0,
         };
         self.host.seal_environment(environment)?;
+        if !self.runtime.has_default_reflection_profile() {
+            match self.runtime.seal_default_reflection_profile(task_launcher(
+                ReflectionEffects,
+                self.host.clone(),
+            )) {
+                Ok(()) => {}
+                Err(error) if self.runtime.has_default_reflection_profile() => {
+                    // Another builder sealed the same dormant runtime first.
+                    // This assembler reuses that immutable default profile.
+                    drop(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
         let reasoning =
-            ReasoningSession::from_host(self.host, self.diagnostics.clone(), self.runtime);
+            ReasoningSession::from_host(self.host, self.diagnostics.clone(), self.runtime)?;
         let context = reasoning.eval_context();
         for wake in self.environment_promises {
             wake.set(context.clone())
@@ -2377,7 +2433,7 @@ fn create_reasoning_volume(
 ) -> Result<ReasoningVolume, Error> {
     let (volume, effects) = host.create_volume(initial)?;
     Ok(ReasoningVolume {
-        host: host.clone(),
+        runtime: host.runtime(),
         volume,
         effects,
     })
@@ -3842,6 +3898,43 @@ mod tests {
 
         assert!(error.to_string().contains("already owns"));
         assert_eq!(runtime.conflict_analysis().name(), "exact");
+    }
+
+    #[test]
+    fn attached_runtime_default_reflection_profile_cannot_be_replaced() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let error = runtime
+            .new_evaluation_session()
+            .expect_err("an unsealed runtime must not expose a runnable session");
+        assert!(error.to_string().contains("must be sealed"));
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("first assembler should seal the runtime profile");
+        let replacement = Arc::new(AssemblerReflectionHost::new_unsealed(
+            &runtime,
+            DiagnosticBus::new(),
+        ));
+        replacement
+            .seal_environment(
+                authoritative_reflection_environment(Value::empty_record(), "replacement")
+                    .unwrap()
+                    .0,
+            )
+            .unwrap();
+
+        let error = runtime
+            .seal_default_reflection_profile(task_launcher(ReflectionEffects, replacement))
+            .expect_err("a sealed runtime profile must reject replacement");
+        assert!(error.to_string().contains("already sealed"));
+
+        let runtime_state = Arc::downgrade(&runtime.state);
+        drop(assembler);
+        drop(runtime);
+        assert!(
+            runtime_state.upgrade().is_none(),
+            "the sealed launcher must not form an Arc cycle through its host"
+        );
     }
 
     #[test]

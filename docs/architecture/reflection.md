@@ -15,8 +15,15 @@ reusable by mapping their request type into a specialization.
 The reusable `ReflectionEffects` family adds environment lookup, diagnostic
 emission, dictionary iteration, lazy-shell value observation, and child-task
 operations. `main` defines a broader logger specialization with diagnostic
-stream reads and stderr output. Children launched through `.task.new` receive
-only the reusable reflection family.
+stream reads and stderr output. Children launched through `.task.new` inherit
+their parent's complete profile, so logger children retain those additional
+operations, its role environment, and its diagnostic destination.
+
+`refl` and `meta_refl` annotations instead use the runtime's immutable default
+reflection profile. Their behavior therefore does not depend on whether an
+assembler, macro, logger, or other demand session happened to claim the lazy
+annotation first. Children launched by an annotation inherit that default
+profile from the annotation task.
 
 Core operators merely construct tagged request values. Host operations occur
 when the effect task dispatches those requests.
@@ -110,9 +117,15 @@ released.
 `AssemblerBuilder` selects the runtime and creates an unsealed host before
 constructing the reflection environment. Its environment closure may therefore
 create runtime-owned protected volumes and embed their capabilities. `build()`
-then seals the environment and installs the task launcher; it does not copy or
-replace the store. Selecting another runtime or conflict strategy after this
-state exists makes construction fail.
+then seals the environment. The first assembler attached to a dormant runtime
+also seals its default annotation-task profile; later assemblers reuse that
+profile and cannot replace it. Each assembler still owns its complete task
+profile for `.task.new`. Runtime resources and the default profile are held as
+siblings: the retained host may keep the resources alive, but has only a weak
+link back to the profile. This avoids a runtime/profile ownership cycle while
+allowing cached evaluation contexts to keep their resources usable. Selecting
+another runtime or conflict strategy after runtime-bound builder state exists
+makes construction fail.
 
 `Assembler::create_volume` installs an explicitly initialized volume and
 returns a Rust owner handle. The handle exposes one closed Glam

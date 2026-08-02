@@ -81,7 +81,12 @@ artifact-installed relative resolvers. The compilation execution owns a
 separate macro demand session whose tasks and diagnostic counts do not alias
 assembler reasoning. Both sessions belong to one `EvaluationRuntime`, and
 therefore share its executor, reflection heap, protected-volume namespace,
-query domain, and fixed conflict-analysis strategy.
+query domain, fixed conflict-analysis strategy, and immutable default
+reflection-task profile. `refl` and `meta_refl` annotations always use that
+runtime default, independent of the demand session which first observes them.
+By contrast, `.task.new` inherits its parent's complete role profile, including
+the effect specialization, environment, diagnostic destination, and host
+resources.
 The configured logger attaches another demand host to that same runtime. Its
 temporary diagnostic-input and buffered-stderr state commits atomically with
 the runtime store, while its environment and output diagnostic bus remain

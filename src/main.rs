@@ -14,10 +14,10 @@ use glam::cli::{
     format_parse_summary, parse_worker_count, route_completion,
 };
 use glam::reflection::{
-    CommitResult, EffectRequestSpec, EffectRun, HostSnapshot, ReflectionEffects, ReflectionHost,
-    ReflectionJournal, ReflectionRequest, ReflectionServices, ReflectionTransaction,
-    RequestContext, RequestResult, TaskCommit, TaskEnvironment, TaskHost, TaskOutcome,
-    TaskSpecialization, handle_reflection_request, reflection_request_specs,
+    CommitResult, EffectRequestSpec, EffectRun, HostSnapshot, ReflectionEffects, ReflectionJournal,
+    ReflectionRequest, ReflectionServices, ReflectionTransaction, RequestContext, RequestResult,
+    TaskCommit, TaskEnvironment, TaskHost, TaskOutcome, TaskSpecialization,
+    handle_reflection_request, reflection_request_specs,
 };
 use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, Error,
@@ -712,10 +712,8 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
     let thread = thread::spawn(move || {
         let _subscription = subscription;
         if let Some(custom) = custom {
-            let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
             match EffectRun::new(&custom, MainEffects::new(effect_assembler), host.clone())
                 .with_runtime(&evaluation_runtime)
-                .with_reflection_children(reflection_host)
                 .asserting_unit_result("configured logger result")
                 .requiring_unit_result()
                 .run()

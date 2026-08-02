@@ -159,6 +159,12 @@ control-flow overview.
   nor target. Demand on a gate waits for its session-owned task, requires
   canonical unit, and then transfers the same demand to the target. Waits are
   not cached as lazy failures.
+- `refl` and `meta_refl` select the runtime's once-sealed default task profile,
+  never the profile of the session which claims the lazy annotation. A
+  `.task.new` child instead inherits its parent's whole profile, including
+  effect vocabulary, environment, diagnostic routing, and shared host
+  resources. An annotation child therefore inherits the runtime default which
+  its parent received.
 - The boxed reflection lazy source has an explicit completion policy. A gate
   selects `RequireUnit` and then exposes its target; the internal
   result-producing form selects `ReturnValue` and forwards the task result

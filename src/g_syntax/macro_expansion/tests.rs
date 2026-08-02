@@ -230,7 +230,8 @@ fn committed_reflection_log_survives_failed_macro_alternative() {
     let result = run(&execution, &effect, Value::Dict(Dict::new_sync()))
         .expect("fallback macro branch should succeed");
     assert!(result.diagnostics().is_empty());
-    assert_eq!(execution.macro_diagnostic_counts().warnings(), 1);
+    assert_eq!(execution.macro_diagnostic_counts().warnings(), 0);
+    assert_eq!(assembler.diagnostic_bus().counts().warnings(), 1);
 }
 
 #[test]
@@ -250,8 +251,8 @@ fn committed_reflection_heap_and_children_outlive_macro_alternatives() {
     }
     assert!(!execution.drain_for_test());
     let counts = execution.macro_diagnostic_counts();
-    assert_eq!(counts.info(), 1);
-    assert_eq!(counts.warnings(), 1);
+    assert_eq!(counts.info(), 0);
+    assert_eq!(counts.warnings(), 0);
     let assembler_counts = assembler.diagnostic_bus().counts();
     assert_eq!(assembler_counts.info(), 2);
     assert_eq!(assembler_counts.warnings(), 1);

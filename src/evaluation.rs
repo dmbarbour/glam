@@ -295,6 +295,55 @@ pub(crate) trait ReflectionTaskLauncher: Send + Sync {
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>>;
 }
 
+/// One immutable, type-erased reflection task host profile.
+///
+/// The launcher closes over the profile's effect specialization, environment,
+/// diagnostic destination, and shared host resources. Runtime-default and
+/// current-task profiles use the same representation but have different
+/// selection rules.
+pub(crate) struct ReflectionTaskProfile {
+    launcher: OnceLock<Arc<dyn ReflectionTaskLauncher>>,
+}
+
+impl fmt::Debug for ReflectionTaskProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReflectionTaskProfile")
+            .field("sealed", &self.launcher.get().is_some())
+            .finish()
+    }
+}
+
+impl ReflectionTaskProfile {
+    pub(crate) fn unsealed() -> Self {
+        Self {
+            launcher: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn sealed(launcher: Arc<dyn ReflectionTaskLauncher>) -> Self {
+        let profile = Self::unsealed();
+        profile
+            .seal(launcher)
+            .expect("a fresh reflection task profile must be unsealed");
+        profile
+    }
+
+    pub(crate) fn seal(&self, launcher: Arc<dyn ReflectionTaskLauncher>) -> Result<(), Arc<str>> {
+        self.launcher
+            .set(launcher)
+            .map_err(|_| Arc::from("reflection task profile is already sealed"))
+    }
+
+    fn launcher(&self) -> Option<&Arc<dyn ReflectionTaskLauncher>> {
+        self.launcher.get()
+    }
+
+    pub(crate) fn is_sealed(&self) -> bool {
+        self.launcher.get().is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EvaluationTaskStatus {
     Launched,
@@ -555,6 +604,7 @@ impl PendingReflectionTask {
                     &self.inner.handle,
                     self.inner.effect.clone(),
                     ReflectionTaskResultPolicy::ReturnValue,
+                    self.inner.context.task_profile.clone(),
                     Some(status),
                     policy.acknowledge_error,
                 );
@@ -728,7 +778,8 @@ pub(crate) struct EvaluationSession {
     id: EvaluationSessionId,
     tasks: Mutex<EvaluationTasks>,
     task_changed: Condvar,
-    reflection_launcher: OnceLock<Arc<dyn ReflectionTaskLauncher>>,
+    default_reflection_profile: Arc<ReflectionTaskProfile>,
+    require_default_reflection_profile: bool,
     executor: Weak<EvaluationExecutor>,
 }
 
@@ -771,29 +822,54 @@ impl EvaluationSession {
         Self::default()
     }
 
+    pub(crate) fn with_default_profile(
+        default_reflection_profile: Arc<ReflectionTaskProfile>,
+    ) -> Self {
+        Self::with_executor_and_default_profile(Weak::new(), default_reflection_profile)
+    }
+
     fn with_executor(executor: Weak<EvaluationExecutor>) -> Self {
         Self {
             id: allocate_session_id(),
             tasks: Mutex::new(EvaluationTasks::default()),
             task_changed: Condvar::new(),
-            reflection_launcher: OnceLock::new(),
+            default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
+            require_default_reflection_profile: false,
             executor,
         }
     }
 
+    fn with_executor_and_default_profile(
+        executor: Weak<EvaluationExecutor>,
+        default_reflection_profile: Arc<ReflectionTaskProfile>,
+    ) -> Self {
+        Self {
+            id: allocate_session_id(),
+            tasks: Mutex::new(EvaluationTasks::default()),
+            task_changed: Condvar::new(),
+            default_reflection_profile,
+            require_default_reflection_profile: true,
+            executor,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn shared(executor: &Arc<EvaluationExecutor>) -> Arc<Self> {
         let session = Arc::new(Self::with_executor(Arc::downgrade(executor)));
         executor.register_session(&session);
         session
     }
 
-    pub(crate) fn install_reflection_launcher(
-        &self,
-        launcher: Arc<dyn ReflectionTaskLauncher>,
-    ) -> Result<(), Arc<str>> {
-        self.reflection_launcher
-            .set(launcher)
-            .map_err(|_| Arc::from("evaluation session already has a reflection task launcher"))
+    pub(crate) fn shared_with_default_profile(
+        executor: &Arc<EvaluationExecutor>,
+        default_reflection_profile: Arc<ReflectionTaskProfile>,
+    ) -> Arc<Self> {
+        let session = Arc::new(Self::with_executor_and_default_profile(
+            Arc::downgrade(executor),
+            default_reflection_profile,
+        ));
+        executor.register_session(&session);
+        session
     }
 
     fn notify_executor_ready(&self) {
@@ -832,6 +908,7 @@ impl EvaluationSession {
 #[derive(Debug, Clone)]
 pub(crate) struct EvalContext {
     session: Arc<EvaluationSession>,
+    task_profile: Arc<ReflectionTaskProfile>,
     task: Arc<OnceLock<Result<EvaluationTaskId, Arc<str>>>>,
     scheduled_task: bool,
     waits_for_claimed_tasks: bool,
@@ -840,8 +917,10 @@ pub(crate) struct EvalContext {
 
 impl EvalContext {
     pub(crate) fn new(session: Arc<EvaluationSession>) -> Self {
+        let task_profile = session.default_reflection_profile.clone();
         Self {
             session,
+            task_profile,
             task: Arc::new(OnceLock::new()),
             scheduled_task: false,
             waits_for_claimed_tasks: false,
@@ -849,19 +928,41 @@ impl EvalContext {
         }
     }
 
-    pub(crate) fn patient(session: Arc<EvaluationSession>) -> Self {
+    pub(crate) fn with_task_profile(
+        session: Arc<EvaluationSession>,
+        task_profile: Arc<ReflectionTaskProfile>,
+    ) -> Self {
         Self {
-            waits_for_claimed_tasks: true,
-            ..Self::new(session)
+            session,
+            task_profile,
+            task: Arc::new(OnceLock::new()),
+            scheduled_task: false,
+            waits_for_claimed_tasks: false,
+            originating_task: None,
         }
     }
 
-    fn for_task(session: Arc<EvaluationSession>, id: EvaluationTaskId) -> Self {
+    pub(crate) fn patient_with_task_profile(
+        session: Arc<EvaluationSession>,
+        task_profile: Arc<ReflectionTaskProfile>,
+    ) -> Self {
+        Self {
+            waits_for_claimed_tasks: true,
+            ..Self::with_task_profile(session, task_profile)
+        }
+    }
+
+    fn for_task(
+        session: Arc<EvaluationSession>,
+        id: EvaluationTaskId,
+        task_profile: Arc<ReflectionTaskProfile>,
+    ) -> Self {
         let task = Arc::new(OnceLock::new());
         task.set(Ok(id))
             .expect("fresh task identity cell must be empty");
         Self {
             session,
+            task_profile,
             task,
             scheduled_task: true,
             waits_for_claimed_tasks: false,
@@ -873,12 +974,14 @@ impl EvalContext {
         session: Arc<EvaluationSession>,
         id: EvaluationTaskId,
         originating_task: Option<EvaluationTaskId>,
+        task_profile: Arc<ReflectionTaskProfile>,
     ) -> Self {
         let task = Arc::new(OnceLock::new());
         task.set(Ok(id))
             .expect("fresh deferred task identity cell must be empty");
         Self {
             session,
+            task_profile,
             task,
             scheduled_task: true,
             waits_for_claimed_tasks: false,
@@ -1013,6 +1116,7 @@ impl EvalContext {
             self.session.clone(),
             id,
             originating_task,
+            self.task_profile.clone(),
         ));
         let mut tasks = self
             .session
@@ -1048,13 +1152,18 @@ impl EvalContext {
         &self,
         launcher: Arc<dyn ReflectionTaskLauncher>,
     ) -> Result<(), Arc<str>> {
-        self.session.install_reflection_launcher(launcher)
+        self.task_profile.seal(launcher.clone())?;
+        if Arc::ptr_eq(&self.task_profile, &self.session.default_reflection_profile) {
+            return Ok(());
+        }
+        self.session.default_reflection_profile.seal(launcher)
     }
 
     #[cfg(test)]
     pub(crate) fn with_new_task(&self) -> Result<Self, Arc<str>> {
         let context = Self {
             session: self.session.clone(),
+            task_profile: self.task_profile.clone(),
             task: Arc::new(OnceLock::new()),
             scheduled_task: false,
             waits_for_claimed_tasks: false,
@@ -1145,7 +1254,7 @@ impl EvalContext {
     {
         let id = allocate_task_id()?;
         let wait = allocate_wait_token(&self.session, id)?;
-        let context = Self::for_task(self.session.clone(), id);
+        let context = Self::for_task(self.session.clone(), id, self.task_profile.clone());
         let machine = build(context)?;
         let mut tasks = self
             .session
@@ -1208,21 +1317,20 @@ impl EvalContext {
         handle: &EvaluationTaskHandle,
         effect: Value,
         result_policy: ReflectionTaskResultPolicy,
+        task_profile: Arc<ReflectionTaskProfile>,
         status_sink: Option<Arc<dyn EvaluationTaskStatusSink>>,
         error_acknowledged: bool,
     ) {
-        let result = self
-            .session
-            .reflection_launcher
-            .get()
+        let result = task_profile
+            .launcher()
             .ok_or_else(|| {
                 Arc::new(EvaluationFailure::message(
-                    "evaluation session has no reflection task launcher",
+                    "reflection task profile is not sealed",
                 ))
             })
             .and_then(|launcher| {
                 launcher.build(
-                    Self::for_task(self.session.clone(), handle.id),
+                    Self::for_task(self.session.clone(), handle.id, task_profile.clone()),
                     effect,
                     result_policy,
                 )
@@ -1322,9 +1430,9 @@ impl EvalContext {
         &self,
         effect: Value,
     ) -> Result<PendingReflectionTask, Arc<str>> {
-        if self.session.reflection_launcher.get().is_none() {
+        if !self.task_profile.is_sealed() {
             return Err(Arc::from(
-                "evaluation session has no reflection task launcher",
+                "current task has no sealed reflection task profile",
             ));
         }
         Ok(PendingReflectionTask {
@@ -1342,10 +1450,24 @@ impl EvalContext {
         effect: Value,
         result_policy: ReflectionTaskResultPolicy,
     ) -> Result<EvaluationTaskHandle, Arc<str>> {
-        if self.session.reflection_launcher.get().is_some() {
+        let default_profile = self.session.default_reflection_profile.clone();
+        if default_profile.is_sealed() {
             let handle = self.reserve_task()?;
-            self.activate_reflection_task(&handle, effect, result_policy, None, false);
+            self.activate_reflection_task(
+                &handle,
+                effect,
+                result_policy,
+                default_profile,
+                None,
+                false,
+            );
             return Ok(handle);
+        }
+
+        if self.session.require_default_reflection_profile {
+            return Err(Arc::from(
+                "evaluation runtime default reflection task profile is not sealed",
+            ));
         }
 
         // Focused evaluator tests and internal clients may intentionally use a
