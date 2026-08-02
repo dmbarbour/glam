@@ -184,8 +184,10 @@ after the selected branch and its generated syntax are accepted.
 The macro effect API does not expose the shared reflection heap, task
 operations, files, clocks, process state, or source paths. A demanded
 `anno refl:Task Target` inside a helper may still start ordinary reflection
-reasoning in the compilation-private macro session. Such committed reflection
-work is not rolled back when the surrounding macro alternative is abandoned.
+reasoning in the compilation macro demand session. Such committed reflection
+work uses the surrounding evaluation runtime's shared reflection heap and is
+not rolled back when the surrounding macro alternative is abandoned. The
+macro demand session still owns its task lifecycle and diagnostic bus.
 
 ## Text patterns
 

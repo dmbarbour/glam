@@ -38,9 +38,10 @@ Standard effects include `r`, `seq`, `alt`, `fail`, `cut`, `fix`, indexed
 task-local `get`/`set`, shared `heap.get`/`heap.set`/`heap.rewrite`, and indexed
 `reset`/`shift`.
 Local user state, including the reset stack, is ordinary task state. Shared
-store state is staged separately in the host transaction; it is never
-projected into local state. The ordinary heap is one host-private store volume.
-Choice frames, journals, and host queues remain machine or host bookkeeping.
+store state is staged separately in the runtime transaction; it is never
+projected into local state. The ordinary heap is one runtime-owned store
+volume shared by every attached reasoning host. Choice frames and journals
+remain machine or host bookkeeping.
 
 An outer `cut` provides an optimistic transaction boundary. Alternatives start
 from snapshots; losing branches discard changes; a winning outer branch
@@ -81,8 +82,8 @@ including overlapping parent and child paths, serialize in commit order while
 their target volume exists. A session-selected
 `Arc<dyn ConflictAnalysisStrategy>` controls only how reads are summarized:
 the bootstrap supplies exact, conservative fingerprint, and fully coarse
-strategies. `AssemblerBuilder` fixes the strategy before the reasoning session
-becomes runnable.
+strategies. `EvaluationRuntime` fixes the strategy at construction; an
+assembler which attaches that runtime cannot replace it.
 
 Heap paths are ordinary lazy value operations rather than a store schema.
 `.heap.set` stages a replacement without inspecting the old heap.
@@ -95,18 +96,23 @@ covering set can still make that widened dependency entirely local.
 updaters therefore remain latent evaluator errors, which `.eval` can observe
 as data.
 
-Host locks still make store and specialization changes atomic. For example,
-the logger validates its input-stream revision, validates and applies its heap
-journal, then consumes input and publishes deferred output. A failed store
-validation therefore cannot duplicate a diagnostic or child-task launch.
+The runtime transaction lock makes store and temporary logger-specialization
+changes atomic. The logger validates its input-stream revision and heap
+journal before applying either, then consumes input and accepts buffered
+stderr output. A failed validation therefore cannot partially edit the heap or
+duplicate a diagnostic. The outer runtime mutation gate spans authoritative
+publication through the broad observation-epoch advance; diagnostics,
+condition-variable notification, and stderr delivery occur after it is
+released.
 
 ## Protected Client Volumes
 
-`AssemblerBuilder` allocates the future session identity and an unsealed host
-before constructing the reflection environment. Its environment closure may
-therefore create protected volumes and embed their capabilities. `build()`
+`AssemblerBuilder` selects the runtime and creates an unsealed host before
+constructing the reflection environment. Its environment closure may therefore
+create runtime-owned protected volumes and embed their capabilities. `build()`
 then seals the environment and installs the task launcher; it does not copy or
-replace the store.
+replace the store. Selecting another runtime or conflict strategy after this
+state exists makes construction fail.
 
 `Assembler::create_volume` installs an explicitly initialized volume and
 returns a Rust owner handle. The handle exposes one closed Glam

@@ -42,7 +42,7 @@ ModuleBuilder + ordered ModuleInput values
        -> selected front end parses and lowers one source
        -> imports re-enter the same Assembler session and CompilationExecution
   -> module final-definition promise closes the module fixpoint
-  -> drain compilation-private macro reflection reasoning
+  -> drain compilation-session macro reflection reasoning
   -> assembled module Value
 ```
 
@@ -59,14 +59,15 @@ bytes, without retaining module values or environments. Observers choose when
 to enrich that provenance into `msg.origin`.
 
 `CompilationExecution` is narrower than `Assembler` or `ReasoningSession`. It
-supplies the lookup context plus one private macro evaluation session shared by
+supplies the lookup context plus one dedicated macro demand session shared by
 all source inputs and recursive imports in the build. Macro reflection uses a
-separate heap, task registry, and diagnostic bus while sharing the assembler's
-executor. Its diagnostic events are bridged into build diagnostics with a
-`macro` reasoning origin, but the two buses retain independent sequence
-numbers and severity counts. Compilation drains detached macro reflection
-children without a timeout; terminal failures and stable deadlocks fail the
-build.
+separate task registry and diagnostic bus, but belongs to the assembler's
+`EvaluationRuntime` and therefore shares its reflection heap, protected
+volumes, query domain, observation epoch, and executor. Its diagnostic events
+are bridged into build diagnostics with a `macro` reasoning origin, but the two
+buses retain independent sequence numbers and severity counts. Compilation
+drains detached macro reflection children without a timeout; terminal failures
+and stable deadlocks fail the build.
 
 ## Diagnostics and Logging
 

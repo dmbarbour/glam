@@ -666,15 +666,15 @@ fn configured_logger_observes_its_own_reasoning_role() {
 }
 
 #[test]
-fn assembler_and_logger_reasoning_heaps_are_isolated() {
-    let dir = unique_temp_dir("glam-conf-log-heap-isolation");
+fn assembler_and_logger_reasoning_sessions_share_the_runtime_heap() {
+    let dir = unique_temp_dir("glam-conf-log-runtime-heap");
     fs::create_dir_all(&dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
     let config = dir.join("conf.g");
     let assembly = dir.join("assembly.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .read_log >>= (\\_message -> .heap.get ['marker] >>= (\\marker -> (marker == {}) =>> .write_stderr (\"ISOLATED\" ++ [10])))\n",
+        "language g0\nobject conf.env\nconf.log = .read_log >>= (\\_message -> .heap.get ['marker] >>= (\\marker -> (marker == \"assembler\") =>> .write_stderr (\"SHARED\" ++ [10])))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(
@@ -693,8 +693,8 @@ fn assembler_and_logger_reasoning_heaps_are_isolated() {
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ISOLATED\n"),
-        "configured logger observed assembler heap state:\n{stderr}"
+        stderr.contains("SHARED\n"),
+        "configured logger did not observe assembler heap state:\n{stderr}"
     );
 }
 

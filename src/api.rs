@@ -11,7 +11,7 @@ use std::num::NonZeroU64;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 
 use bytes::Bytes;
 
@@ -1090,13 +1090,16 @@ struct RuntimeState {
     transactions: RuntimeTransactionState,
     observations: RuntimeObservationState,
     ids: RuntimeIds,
-    // Phase 0A establishes settlement as a runtime ownership boundary. The
-    // exclusive probe is activated only when readiness snapshots arrive.
-    _settlement_gate: RwLock<()>,
+    settlement_gate: RwLock<()>,
 }
 
 struct RuntimeTransactionState {
-    reflection: Mutex<ReflectionStore>,
+    state: Mutex<RuntimeTransactionData>,
+}
+
+struct RuntimeTransactionData {
+    reflection: ReflectionStore,
+    compatibility: RuntimeCompatibilityState,
 }
 
 struct RuntimeObservationState {
@@ -1106,6 +1109,45 @@ struct RuntimeObservationState {
 
 struct RuntimeIds {
     next_reasoning_session: AtomicU64,
+}
+
+#[derive(Default)]
+struct RuntimeCompatibilityState {
+    input_revision: u64,
+    diagnostics: std::collections::VecDeque<DiagnosticEvent>,
+    stderr: std::collections::VecDeque<Bytes>,
+    input_closed: bool,
+    cancelled: bool,
+}
+
+/// Temporary transactional logger-input snapshot used until Phase 0D installs
+/// generic runtime event endpoints.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct RuntimeCompatibilitySnapshot {
+    diagnostics: Arc<[DiagnosticEvent]>,
+    input_closed: bool,
+    input_revision: u64,
+}
+
+impl RuntimeCompatibilitySnapshot {
+    #[doc(hidden)]
+    pub fn diagnostics(&self) -> &[DiagnosticEvent] {
+        &self.diagnostics
+    }
+
+    #[doc(hidden)]
+    pub fn input_closed(&self) -> bool {
+        self.input_closed
+    }
+}
+
+struct RuntimeMutationGuard<'a> {
+    _guard: RwLockReadGuard<'a, ()>,
+}
+
+struct RuntimeSettlementGuard<'a> {
+    _guard: RwLockWriteGuard<'a, ()>,
 }
 
 #[derive(Clone, Copy)]
@@ -1154,7 +1196,10 @@ impl EvaluationRuntime {
                     .map_err(|error| Error::new(error.as_ref()))?,
                 values: RuntimeValueFactory { runtime: id },
                 transactions: RuntimeTransactionState {
-                    reflection: Mutex::new(ReflectionStore::new(conflict_analysis)),
+                    state: Mutex::new(RuntimeTransactionData {
+                        reflection: ReflectionStore::new(conflict_analysis),
+                        compatibility: RuntimeCompatibilityState::default(),
+                    }),
                 },
                 observations: RuntimeObservationState {
                     epoch: Mutex::new(1),
@@ -1163,7 +1208,7 @@ impl EvaluationRuntime {
                 ids: RuntimeIds {
                     next_reasoning_session: AtomicU64::new(1),
                 },
-                _settlement_gate: RwLock::new(()),
+                settlement_gate: RwLock::new(()),
             }),
         })
     }
@@ -1203,7 +1248,34 @@ impl EvaluationRuntime {
         ReasoningSessionId::from_u64(id).expect("reasoning session IDs start at one")
     }
 
-    fn reflection_snapshot(&self) -> (u64, crate::reflection::StoreSnapshot) {
+    fn mutation_guard(&self) -> RuntimeMutationGuard<'_> {
+        RuntimeMutationGuard {
+            _guard: self
+                .state
+                .settlement_gate
+                .read()
+                .expect("runtime settlement gate should not be poisoned"),
+        }
+    }
+
+    fn try_settlement_guard(&self) -> Option<RuntimeSettlementGuard<'_>> {
+        self.state
+            .settlement_gate
+            .try_write()
+            .ok()
+            .map(|guard| RuntimeSettlementGuard { _guard: guard })
+    }
+
+    /// Reports whether exclusive runtime mutation admission can be acquired
+    /// immediately. This is a transitional readiness probe; it does not retain
+    /// or settle a snapshot.
+    #[doc(hidden)]
+    pub fn exclusive_admission_available(&self) -> bool {
+        self.try_settlement_guard().is_some()
+    }
+
+    #[doc(hidden)]
+    pub fn reflection_snapshot(&self) -> (u64, crate::reflection::StoreSnapshot) {
         // Reading the epoch first is intentionally conservative. A concurrent
         // commit can make the returned store newer than the epoch, but cannot
         // leave a waiter holding an old store and a new epoch with no wake.
@@ -1216,72 +1288,90 @@ impl EvaluationRuntime {
         let store = self
             .state
             .transactions
-            .reflection
+            .state
             .lock()
-            .expect("runtime reflection mutex should not be poisoned")
+            .expect("runtime transaction mutex should not be poisoned")
+            .reflection
             .snapshot();
         (generation, store)
     }
 
-    fn commit_reflection(
+    #[doc(hidden)]
+    pub fn commit_reflection(
         &self,
         journal: &crate::reflection::StoreJournal,
     ) -> crate::reflection::StoreCommitResult {
-        let result = self
-            .state
-            .transactions
-            .reflection
-            .lock()
-            .expect("runtime reflection mutex should not be poisoned")
-            .try_commit(journal);
+        let mutation = self.mutation_guard();
+        let result = {
+            self.state
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned")
+                .reflection
+                .try_commit(journal)
+        };
         if matches!(result, crate::reflection::StoreCommitResult::Committed) {
-            self.advance_observation_epoch();
+            self.publish_observation(mutation);
         }
         result
     }
 
     fn create_volume(&self, initial: Value) -> Result<VolumeId, Error> {
+        let _mutation = self.mutation_guard();
         self.state
             .transactions
-            .reflection
+            .state
             .lock()
-            .expect("runtime reflection mutex should not be poisoned")
+            .expect("runtime transaction mutex should not be poisoned")
+            .reflection
             .create_volume(initial)
             .map_err(|error| Error::new(error.as_ref()))
     }
 
     fn revoke_volume(&self, volume: VolumeId) -> Result<Value, Error> {
-        let value = self
-            .state
-            .transactions
-            .reflection
-            .lock()
-            .expect("runtime reflection mutex should not be poisoned")
-            .revoke_volume(volume)
-            .ok_or_else(|| {
-                Error::new(format!(
-                    "reflection volume {} has already been revoked",
-                    volume.get()
-                ))
-            })?;
-        self.advance_observation_epoch();
+        let mutation = self.mutation_guard();
+        let value = {
+            self.state
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned")
+                .reflection
+                .revoke_volume(volume)
+                .ok_or_else(|| {
+                    Error::new(format!(
+                        "reflection volume {} has already been revoked",
+                        volume.get()
+                    ))
+                })?
+        };
+        self.publish_observation(mutation);
         Ok(value)
     }
 
-    fn update_query(&self, handle: &Arc<crate::reflection::EvaluationQueryHandle>, result: Value) {
-        let updated = self
-            .state
-            .transactions
-            .reflection
-            .lock()
-            .expect("runtime reflection mutex should not be poisoned")
-            .update_query(handle, result);
+    #[doc(hidden)]
+    pub fn update_query(
+        &self,
+        handle: &Arc<crate::reflection::EvaluationQueryHandle>,
+        result: Value,
+    ) {
+        let mutation = self.mutation_guard();
+        let updated = {
+            self.state
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned")
+                .reflection
+                .update_query(handle, result)
+        };
         if updated {
-            self.advance_observation_epoch();
+            self.publish_observation(mutation);
         }
     }
 
-    fn advance_observation_epoch(&self) {
+    fn publish_observation(&self, mutation: RuntimeMutationGuard<'_>) {
         let mut epoch = self
             .state
             .observations
@@ -1289,10 +1379,13 @@ impl EvaluationRuntime {
             .lock()
             .expect("runtime observation mutex should not be poisoned");
         *epoch = epoch.wrapping_add(1);
+        drop(epoch);
+        drop(mutation);
         self.state.observations.changed.notify_all();
     }
 
-    fn wait_for_change(&self, observed_generation: u64) -> bool {
+    #[doc(hidden)]
+    pub fn wait_for_change(&self, observed_generation: u64) -> bool {
         let mut epoch = self
             .state
             .observations
@@ -1310,13 +1403,224 @@ impl EvaluationRuntime {
         true
     }
 
+    /// Captures the runtime reflection store and temporary logger input state
+    /// under one transaction lock.
+    #[doc(hidden)]
+    pub fn compatibility_snapshot(
+        &self,
+    ) -> (
+        u64,
+        crate::reflection::StoreSnapshot,
+        RuntimeCompatibilitySnapshot,
+    ) {
+        let generation = *self
+            .state
+            .observations
+            .epoch
+            .lock()
+            .expect("runtime observation mutex should not be poisoned");
+        let state = self
+            .state
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned");
+        (
+            generation,
+            state.reflection.snapshot(),
+            RuntimeCompatibilitySnapshot {
+                diagnostics: Arc::from(
+                    state
+                        .compatibility
+                        .diagnostics
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ),
+                input_closed: state.compatibility.input_closed,
+                input_revision: state.compatibility.input_revision,
+            },
+        )
+    }
+
+    /// Atomically validates and applies one reflection-store journal together
+    /// with the temporary logger input/output journal.
+    #[doc(hidden)]
+    pub fn compatibility_try_commit(
+        &self,
+        store: &crate::reflection::StoreJournal,
+        snapshot: &RuntimeCompatibilitySnapshot,
+        observed_input: bool,
+        consumed_diagnostics: usize,
+        stderr: &[Bytes],
+    ) -> crate::reflection::StoreCommitResult {
+        let mutation = self.mutation_guard();
+        let result = {
+            let mut state = self
+                .state
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            if (observed_input && state.compatibility.input_revision != snapshot.input_revision)
+                || state.compatibility.diagnostics.len() < consumed_diagnostics
+            {
+                return crate::reflection::StoreCommitResult::Conflict;
+            }
+            let result = state.reflection.try_commit(store);
+            if !matches!(result, crate::reflection::StoreCommitResult::Committed) {
+                return result;
+            }
+            state
+                .compatibility
+                .diagnostics
+                .drain(..consumed_diagnostics);
+            if consumed_diagnostics != 0 {
+                state.compatibility.input_revision =
+                    state.compatibility.input_revision.wrapping_add(1);
+            }
+            state.compatibility.stderr.extend(stderr.iter().cloned());
+            result
+        };
+        self.publish_observation(mutation);
+        result
+    }
+
+    #[doc(hidden)]
+    pub fn compatibility_publish_diagnostic(&self, event: DiagnosticEvent) {
+        let mutation = self.mutation_guard();
+        {
+            let mut state = self
+                .state
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            state.compatibility.diagnostics.push_back(event);
+            state.compatibility.input_revision = state.compatibility.input_revision.wrapping_add(1);
+        }
+        self.publish_observation(mutation);
+    }
+
+    #[doc(hidden)]
+    pub fn compatibility_close_input(&self) {
+        let mutation = self.mutation_guard();
+        {
+            let mut state = self
+                .state
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            state.compatibility.input_closed = true;
+            state.compatibility.input_revision = state.compatibility.input_revision.wrapping_add(1);
+        }
+        self.publish_observation(mutation);
+    }
+
+    #[doc(hidden)]
+    pub fn compatibility_cancel(&self) {
+        let mutation = self.mutation_guard();
+        {
+            let mut state = self
+                .state
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            state.compatibility.cancelled = true;
+            state.compatibility.input_revision = state.compatibility.input_revision.wrapping_add(1);
+        }
+        self.publish_observation(mutation);
+    }
+
+    #[doc(hidden)]
+    pub fn compatibility_take_diagnostic(&self) -> Option<DiagnosticEvent> {
+        let mutation = self.mutation_guard();
+        let diagnostic = {
+            let mut state = self
+                .state
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            let diagnostic = state.compatibility.diagnostics.pop_front()?;
+            state.compatibility.input_revision = state.compatibility.input_revision.wrapping_add(1);
+            diagnostic
+        };
+        self.publish_observation(mutation);
+        Some(diagnostic)
+    }
+
+    #[doc(hidden)]
+    pub fn compatibility_finished(&self) -> bool {
+        let state = self
+            .state
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned");
+        state.compatibility.cancelled
+            || (state.compatibility.input_closed && state.compatibility.diagnostics.is_empty())
+    }
+
+    #[doc(hidden)]
+    pub fn compatibility_wait_for_change(&self, observed_generation: u64) -> bool {
+        let current_generation = || {
+            *self
+                .state
+                .observations
+                .epoch
+                .lock()
+                .expect("runtime observation mutex should not be poisoned")
+        };
+        if current_generation() != observed_generation {
+            return true;
+        }
+        if self.compatibility_finished() {
+            // Recheck after inspecting the terminal condition so a concurrent
+            // close cannot hide the final retry which observes `closed`.
+            return current_generation() != observed_generation;
+        }
+        self.wait_for_change(observed_generation)
+    }
+
+    #[doc(hidden)]
+    pub fn compatibility_buffer_stderr(&self, bytes: Bytes) {
+        let mutation = self.mutation_guard();
+        self.state
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .compatibility
+            .stderr
+            .push_back(bytes);
+        self.publish_observation(mutation);
+    }
+
+    #[doc(hidden)]
+    pub fn compatibility_drain_stderr(&self) -> Vec<Bytes> {
+        let _mutation = self.mutation_guard();
+        self.state
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .compatibility
+            .stderr
+            .drain(..)
+            .collect()
+    }
+
     #[cfg(test)]
     fn reflection_root(&self) -> Value {
         self.state
             .transactions
-            .reflection
+            .state
             .lock()
-            .expect("runtime reflection mutex should not be poisoned")
+            .expect("runtime transaction mutex should not be poisoned")
+            .reflection
             .root()
             .clone()
     }
@@ -1324,9 +1628,10 @@ impl EvaluationRuntime {
     fn conflict_analysis(&self) -> Arc<dyn ConflictAnalysisStrategy> {
         self.state
             .transactions
-            .reflection
+            .state
             .lock()
-            .expect("runtime reflection mutex should not be poisoned")
+            .expect("runtime transaction mutex should not be poisoned")
+            .reflection
             .strategy()
     }
 }
@@ -3291,6 +3596,120 @@ mod tests {
                 .get(&foreign.test_reflection_heap(), "runtime_only")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn runtime_combines_reflection_and_compatibility_input_commit() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("assembler should build");
+        let (initial_generation, store, input) = runtime.compatibility_snapshot();
+        let mut stale = crate::reflection::StoreJournal::new(store);
+        stale.write(vec![Key::atom_from_text("atomic")], Value::text("stale"));
+        let event = DiagnosticBus::new().publish(Diagnostic::new(Severity::Info, "input"));
+        runtime.compatibility_publish_diagnostic(event);
+        let (input_generation, _, _) = runtime.compatibility_snapshot();
+        assert_ne!(input_generation, initial_generation);
+
+        assert_eq!(
+            runtime.compatibility_try_commit(&stale, &input, true, 0, &[]),
+            crate::reflection::StoreCommitResult::Conflict
+        );
+        assert!(assembler.get(&runtime.reflection_root(), "atomic").is_err());
+
+        let (_, store, input) = runtime.compatibility_snapshot();
+        let mut committed = crate::reflection::StoreJournal::new(store);
+        committed.write(
+            vec![Key::atom_from_text("atomic")],
+            Value::text("committed"),
+        );
+        assert_eq!(
+            runtime.compatibility_try_commit(&committed, &input, true, 1, &[]),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        let (committed_generation, _, input) = runtime.compatibility_snapshot();
+        assert_ne!(committed_generation, input_generation);
+        assert!(input.diagnostics().is_empty());
+        assert_eq!(
+            assembler
+                .get(&runtime.reflection_root(), "atomic")
+                .expect("the store edit should commit")
+                .as_binary(),
+            Some(b"committed".as_slice())
+        );
+    }
+
+    #[test]
+    fn exclusive_admission_probe_rejects_an_active_mutation() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let mutation = runtime.mutation_guard();
+
+        assert!(!runtime.exclusive_admission_available());
+        drop(mutation);
+        assert!(runtime.exclusive_admission_available());
+    }
+
+    #[test]
+    fn runtime_store_publication_wakes_broad_observers() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let (generation, store) = runtime.reflection_snapshot();
+        let waiting_runtime = runtime.clone();
+        let (awake, observed) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            awake
+                .send(waiting_runtime.wait_for_change(generation))
+                .expect("test should still receive the wake result");
+        });
+        let mut journal = crate::reflection::StoreJournal::new(store);
+        journal.write(vec![Key::atom_from_text("wake")], Value::empty_record());
+
+        assert_eq!(
+            runtime.commit_reflection(&journal),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert!(
+            observed
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("store publication should wake the observer")
+        );
+        waiter.join().expect("observer thread should finish");
+    }
+
+    #[test]
+    fn diagnostic_callbacks_run_after_runtime_mutation_admission_is_released() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let callback_runtime = runtime.clone();
+        let callback_observed = Arc::new(AtomicBool::new(false));
+        let callback_result = callback_observed.clone();
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime)
+            .diagnostic_callback(move |_| {
+                callback_result.store(
+                    callback_runtime.exclusive_admission_available(),
+                    Ordering::Relaxed,
+                );
+            })
+            .build()
+            .expect("assembler should build");
+        let module = assembler
+            .module(["runtime_callback_admission"])
+            .script(
+                "g",
+                "language g0\nimport 'std\nresult = anno refl:(.log 'info {msg:{text:\"callback\"}}) \"done\"\n",
+            )
+            .build()
+            .expect("callback fixture should compile");
+        assembler
+            .evaluate(
+                &assembler
+                    .get(module.value(), "result")
+                    .expect("fixture should define result"),
+            )
+            .expect("reflection gate should complete");
+
+        assert!(callback_observed.load(Ordering::Relaxed));
     }
 
     #[test]

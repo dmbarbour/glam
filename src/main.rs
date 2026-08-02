@@ -1,10 +1,9 @@
-use std::collections::VecDeque;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 use bytes::Bytes;
@@ -15,16 +14,16 @@ use glam::cli::{
     format_parse_summary, parse_worker_count, route_completion,
 };
 use glam::reflection::{
-    CommitResult, ConflictAnalysisStrategy, EffectRequestSpec, EffectRun, ExactConflictAnalysis,
-    HostSnapshot, ReflectionEffects, ReflectionHost, ReflectionJournal, ReflectionRequest,
-    ReflectionServices, ReflectionStore, ReflectionTransaction, RequestContext, RequestResult,
-    TaskCommit, TaskEnvironment, TaskHost, TaskOutcome, TaskSpecialization,
-    handle_reflection_request, reflection_request_specs,
+    CommitResult, EffectRequestSpec, EffectRun, HostSnapshot, ReflectionEffects, ReflectionHost,
+    ReflectionJournal, ReflectionRequest, ReflectionServices, ReflectionTransaction,
+    RequestContext, RequestResult, TaskCommit, TaskEnvironment, TaskHost, TaskOutcome,
+    TaskSpecialization, handle_reflection_request, reflection_request_specs,
 };
 use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, Error,
     EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, ReasoningReport,
-    ReasoningStatus, ReasoningTaskState, Severity, Value, check_local_manifest, inspect_g_source,
+    ReasoningStatus, ReasoningTaskState, RuntimeCompatibilitySnapshot, Severity, Value,
+    check_local_manifest, inspect_g_source,
 };
 
 fn main() -> ExitCode {
@@ -323,10 +322,8 @@ fn prepare_assembly(
     initial_environment: Option<(Value, Value)>,
 ) -> Result<PreparedAssembly, ExitCode> {
     let local_files = FileSourceSystem::default();
-    let conflict_analysis: Arc<dyn ConflictAnalysisStrategy> = Arc::new(ExactConflictAnalysis);
-    let runtime = EvaluationRuntime::with_conflict_analysis(0, conflict_analysis.clone())
-        .expect("a dormant evaluation runtime is valid");
-    let log_host = Arc::new(LogHost::with_conflict_analysis(conflict_analysis.clone()));
+    let runtime = EvaluationRuntime::new(0).expect("a dormant evaluation runtime is valid");
+    let log_host = Arc::new(LogHost::with_runtime(runtime.clone()));
     let mut process_args = None;
     let mut reflection_args = None;
     let assembler = Assembler::builder()
@@ -778,12 +775,7 @@ enum MainRequest {
     WriteStderr,
 }
 
-#[derive(Clone)]
-struct MainSnapshot {
-    diagnostics: Arc<[DiagnosticEvent]>,
-    input_closed: bool,
-    input_revision: u64,
-}
+type MainSnapshot = RuntimeCompatibilitySnapshot;
 
 #[derive(Clone, Default)]
 struct MainJournal {
@@ -881,10 +873,10 @@ fn log_status(
             .expect("checked active reflection transaction");
         let (snapshot, journal) = transaction.parts();
         journal.observed_input = true;
-        (generation, snapshot.input_closed)
+        (generation, snapshot.input_closed())
     } else {
         let snapshot = <LoggerTaskHost as TaskHost<MainEffects>>::snapshot(context.host());
-        (snapshot.generation(), snapshot.extra().input_closed)
+        (snapshot.generation(), snapshot.extra().input_closed())
     };
     context.observe_host_generation(generation);
     Ok(RequestResult::Return(Value::atom_from_text(
@@ -902,7 +894,7 @@ fn read_log(
             .expect("checked active reflection transaction");
         let (snapshot, journal) = transaction.parts();
         journal.observed_input = true;
-        if let Some(diagnostic) = snapshot.diagnostics.get(journal.consumed_diagnostics) {
+        if let Some(diagnostic) = snapshot.diagnostics().get(journal.consumed_diagnostics) {
             journal.consumed_diagnostics += 1;
             return diagnostic
                 .enrich()
@@ -917,7 +909,7 @@ fn read_log(
     loop {
         let snapshot = <LoggerTaskHost as TaskHost<MainEffects>>::snapshot(context.host());
         context.observe_host_generation(snapshot.generation());
-        let Some(diagnostic) = snapshot.extra().diagnostics.first() else {
+        let Some(diagnostic) = snapshot.extra().diagnostics().first() else {
             return Ok(RequestResult::Fail);
         };
         let value = diagnostic
@@ -951,8 +943,7 @@ fn read_log(
 }
 
 struct LogHost {
-    state: Mutex<LogHostState>,
-    changed: Condvar,
+    runtime: EvaluationRuntime,
 }
 
 /// Capabilities and mutable state belonging to the logger's evaluation
@@ -978,57 +969,24 @@ impl LoggerTaskHost {
     }
 }
 
-struct LogHostState {
-    wake_generation: u64,
-    input_revision: u64,
-    store: ReflectionStore,
-    diagnostics: VecDeque<DiagnosticEvent>,
-    stderr: VecDeque<Bytes>,
-    input_closed: bool,
-    cancelled: bool,
-}
-
 impl LogHost {
     #[cfg(test)]
     fn new() -> Self {
-        Self::with_conflict_analysis(Arc::new(glam::reflection::ExactConflictAnalysis))
+        Self::with_runtime(
+            EvaluationRuntime::new(0).expect("test logger runtime should be constructible"),
+        )
     }
 
-    fn with_conflict_analysis(strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
-        Self {
-            state: Mutex::new(LogHostState {
-                wake_generation: 1,
-                input_revision: 0,
-                store: ReflectionStore::new(strategy),
-                diagnostics: VecDeque::new(),
-                stderr: VecDeque::new(),
-                input_closed: false,
-                cancelled: false,
-            }),
-            changed: Condvar::new(),
-        }
+    fn with_runtime(runtime: EvaluationRuntime) -> Self {
+        Self { runtime }
     }
 
     fn close_input(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("log host mutex should not be poisoned");
-        state.input_closed = true;
-        state.input_revision = state.input_revision.wrapping_add(1);
-        state.wake_generation = state.wake_generation.wrapping_add(1);
-        self.changed.notify_all();
+        self.runtime.compatibility_close_input();
     }
 
     fn cancel(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("log host mutex should not be poisoned");
-        state.cancelled = true;
-        state.input_revision = state.input_revision.wrapping_add(1);
-        state.wake_generation = state.wake_generation.wrapping_add(1);
-        self.changed.notify_all();
+        self.runtime.compatibility_cancel();
     }
 
     fn drain_default(&self, logger: &DefaultLogger) {
@@ -1039,35 +997,20 @@ impl LogHost {
     }
 
     fn take_diagnostic(&self) -> Option<DiagnosticEvent> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("log host mutex should not be poisoned");
         loop {
-            if let Some(diagnostic) = state.diagnostics.pop_front() {
-                state.input_revision = state.input_revision.wrapping_add(1);
-                state.wake_generation = state.wake_generation.wrapping_add(1);
-                self.changed.notify_all();
+            let (generation, _store, _input) = self.runtime.compatibility_snapshot();
+            if let Some(diagnostic) = self.runtime.compatibility_take_diagnostic() {
                 return Some(diagnostic);
             }
-            if state.input_closed || state.cancelled {
+            if self.runtime.compatibility_finished() {
                 return None;
             }
-            state = self
-                .changed
-                .wait(state)
-                .expect("log host mutex should not be poisoned");
+            self.runtime.wait_for_change(generation);
         }
     }
 
     fn flush_stderr(&self) {
-        let output = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("log host mutex should not be poisoned");
-            state.stderr.drain(..).collect::<Vec<_>>()
-        };
+        let output = self.runtime.compatibility_drain_stderr();
         let mut stderr = io::stderr().lock();
         for bytes in output {
             let _ = stderr.write_all(&bytes);
@@ -1075,29 +1018,14 @@ impl LogHost {
     }
 
     fn write_stderr(&self, bytes: Bytes) {
-        self.state
-            .lock()
-            .expect("log host mutex should not be poisoned")
-            .stderr
-            .push_back(bytes);
+        self.runtime.compatibility_buffer_stderr(bytes);
         self.flush_stderr();
-    }
-
-    fn push_diagnostic(&self, state: &mut LogHostState, event: DiagnosticEvent) {
-        state.diagnostics.push_back(event);
     }
 }
 
 impl DiagnosticSubscriber for LogHost {
     fn receive(&self, event: DiagnosticEvent) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("log host mutex should not be poisoned");
-        self.push_diagnostic(&mut state, event);
-        state.input_revision = state.input_revision.wrapping_add(1);
-        state.wake_generation = state.wake_generation.wrapping_add(1);
-        self.changed.notify_all();
+        self.runtime.compatibility_publish_diagnostic(event);
     }
 }
 
@@ -1113,67 +1041,34 @@ impl ReflectionServices for LoggerTaskHost {
     }
 
     fn update_query(&self, handle: &Arc<glam::reflection::EvaluationQueryHandle>, result: Value) {
-        let mut state = self
-            .input
-            .state
-            .lock()
-            .expect("log host mutex should not be poisoned");
-        if state.store.update_query(handle, result) {
-            state.wake_generation = state.wake_generation.wrapping_add(1);
-            self.input.changed.notify_all();
-        }
+        self.input.runtime.update_query(handle, result);
     }
 }
 
 impl TaskHost<MainEffects> for LoggerTaskHost {
     fn snapshot(&self) -> HostSnapshot<MainEffects> {
-        let state = self
-            .input
-            .state
-            .lock()
-            .expect("log host mutex should not be poisoned");
-        HostSnapshot::new(
-            state.wake_generation,
-            state.store.snapshot(),
-            MainSnapshot {
-                diagnostics: Arc::from(state.diagnostics.iter().cloned().collect::<Vec<_>>()),
-                input_closed: state.input_closed,
-                input_revision: state.input_revision,
-            },
-        )
+        let (generation, store, input) = self.input.runtime.compatibility_snapshot();
+        HostSnapshot::new(generation, store, input)
     }
 
     fn commit(&self, commit: TaskCommit<MainEffects>) -> CommitResult {
         let (store, snapshot, journal) = commit.into_parts();
-        let diagnostics = {
-            let mut state = self
-                .input
-                .state
-                .lock()
-                .expect("log host mutex should not be poisoned");
-            if (journal.observed_input && state.input_revision != snapshot.input_revision)
-                || state.diagnostics.len() < journal.consumed_diagnostics
-            {
+        match self.input.runtime.compatibility_try_commit(
+            &store,
+            &snapshot,
+            journal.observed_input,
+            journal.consumed_diagnostics,
+            &journal.stderr,
+        ) {
+            glam::reflection::StoreCommitResult::Committed => {}
+            glam::reflection::StoreCommitResult::Conflict => {
                 return CommitResult::Conflict;
             }
-            match state.store.try_commit(&store) {
-                glam::reflection::StoreCommitResult::Committed => {}
-                glam::reflection::StoreCommitResult::Conflict => {
-                    return CommitResult::Conflict;
-                }
-                glam::reflection::StoreCommitResult::MissingVolume(volume) => {
-                    return CommitResult::MissingVolume(volume);
-                }
+            glam::reflection::StoreCommitResult::MissingVolume(volume) => {
+                return CommitResult::MissingVolume(volume);
             }
-            state.diagnostics.drain(..journal.consumed_diagnostics);
-            if journal.consumed_diagnostics != 0 {
-                state.input_revision = state.input_revision.wrapping_add(1);
-            }
-            state.stderr.extend(journal.stderr.iter().cloned());
-            state.wake_generation = state.wake_generation.wrapping_add(1);
-            self.input.changed.notify_all();
-            journal.reflection.diagnostics().to_vec()
-        };
+        }
+        let diagnostics = journal.reflection.diagnostics().to_vec();
         for diagnostic in diagnostics {
             self.emit_output(diagnostic);
         }
@@ -1183,59 +1078,34 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
-        let mut state = self
-            .input
-            .state
-            .lock()
-            .expect("log host mutex should not be poisoned");
-        if state.wake_generation != observed_generation {
-            return true;
-        }
-        while state.wake_generation == observed_generation
-            && !state.cancelled
-            && !(state.input_closed && state.diagnostics.is_empty())
-        {
-            state = self
-                .input
-                .changed
-                .wait(state)
-                .expect("log host mutex should not be poisoned");
-        }
-        state.wake_generation != observed_generation
+        self.input
+            .runtime
+            .compatibility_wait_for_change(observed_generation)
+    }
+
+    fn evaluation_runtime_id(&self) -> Option<glam::EvaluationRuntimeId> {
+        Some(self.input.runtime.id())
     }
 }
 
 impl TaskHost<ReflectionEffects> for LoggerTaskHost {
     fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
-        let state = self
-            .input
-            .state
-            .lock()
-            .expect("log host mutex should not be poisoned");
-        HostSnapshot::new(state.wake_generation, state.store.snapshot(), ())
+        let (generation, store) = self.input.runtime.reflection_snapshot();
+        HostSnapshot::new(generation, store, ())
     }
 
     fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
         let (store, _snapshot, journal) = commit.into_parts();
-        let diagnostics = {
-            let mut state = self
-                .input
-                .state
-                .lock()
-                .expect("log host mutex should not be poisoned");
-            match state.store.try_commit(&store) {
-                glam::reflection::StoreCommitResult::Committed => {}
-                glam::reflection::StoreCommitResult::Conflict => {
-                    return CommitResult::Conflict;
-                }
-                glam::reflection::StoreCommitResult::MissingVolume(volume) => {
-                    return CommitResult::MissingVolume(volume);
-                }
+        match self.input.runtime.commit_reflection(&store) {
+            glam::reflection::StoreCommitResult::Committed => {}
+            glam::reflection::StoreCommitResult::Conflict => {
+                return CommitResult::Conflict;
             }
-            state.wake_generation = state.wake_generation.wrapping_add(1);
-            self.input.changed.notify_all();
-            journal.diagnostics().to_vec()
-        };
+            glam::reflection::StoreCommitResult::MissingVolume(volume) => {
+                return CommitResult::MissingVolume(volume);
+            }
+        }
+        let diagnostics = journal.diagnostics().to_vec();
         for diagnostic in diagnostics {
             self.emit_output(diagnostic);
         }
@@ -1245,6 +1115,10 @@ impl TaskHost<ReflectionEffects> for LoggerTaskHost {
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
         <LoggerTaskHost as TaskHost<MainEffects>>::wait_for_change(self, observed_generation)
+    }
+
+    fn evaluation_runtime_id(&self) -> Option<glam::EvaluationRuntimeId> {
+        Some(self.input.runtime.id())
     }
 }
 
@@ -2310,10 +2184,10 @@ mod tests {
 
         assert!(
             input
-                .state
-                .lock()
-                .expect("log host mutex should not be poisoned")
-                .diagnostics
+                .runtime
+                .compatibility_snapshot()
+                .2
+                .diagnostics()
                 .is_empty()
         );
         let output = output

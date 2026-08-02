@@ -82,6 +82,10 @@ separate macro demand session whose tasks and diagnostic counts do not alias
 assembler reasoning. Both sessions belong to one `EvaluationRuntime`, and
 therefore share its executor, reflection heap, protected-volume namespace,
 query domain, and fixed conflict-analysis strategy.
+The configured logger attaches another demand host to that same runtime. Its
+temporary diagnostic-input and buffered-stderr state commits atomically with
+the runtime store, while its environment and output diagnostic bus remain
+role-specific.
 For a bare command, the CLI first loads configuration with a dormant runtime,
 runs `conf.cli` as an isolated all-results search, resolves the promised
 canonical argument environment, and only then activates the selected worker
