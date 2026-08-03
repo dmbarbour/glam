@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::api::Value;
+use crate::core::CoreValueFactory;
 use crate::reflection::{
     CommitResult, ExactConflictAnalysis, HostSnapshot, ReflectionStore, StoreSnapshot, TaskCommit,
     TaskEnvironment, TaskHost,
@@ -134,13 +135,13 @@ pub(super) struct MacroHost {
 }
 
 impl MacroHost {
-    pub(super) fn new(environment: Value, input: MacroInput) -> Self {
+    pub(super) fn new(values: CoreValueFactory, environment: Value, input: MacroInput) -> Self {
         Self {
             snapshot: MacroSnapshot {
                 environment: environment.clone(),
                 input: Arc::new(input),
             },
-            store: ReflectionStore::new(Arc::new(ExactConflictAnalysis)).snapshot(),
+            store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)).snapshot(),
         }
     }
 }

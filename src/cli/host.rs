@@ -1,8 +1,8 @@
 use std::ffi::OsString;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::api::{Diagnostic, Value};
+use crate::core::CoreValueFactory;
 use crate::reflection::{
     CommitResult, ExactConflictAnalysis, HostSnapshot, ReflectionJournal, ReflectionServices,
     ReflectionStore, ReflectionTransaction, StoreSnapshot, TaskCommit, TaskEnvironment, TaskHost,
@@ -12,8 +12,6 @@ use super::completion::{CompletionEvidence, ExpectationEvidence};
 use super::effects::CliEffects;
 use super::model::CommandEdit;
 
-static NEXT_CLI_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
-
 #[derive(Clone)]
 pub(super) struct CliInvocation {
     pub(super) id: u64,
@@ -22,17 +20,19 @@ pub(super) struct CliInvocation {
 }
 
 impl CliInvocation {
-    pub(super) fn new(args: Arc<[OsString]>) -> Self {
-        Self::from_parts(args, None)
+    pub(super) fn new(id: u64, args: Arc<[OsString]>) -> Self {
+        Self::from_parts(id, args, None)
     }
 
     pub(super) fn for_completion(
+        id: u64,
         args: Arc<[OsString]>,
         argument: usize,
         prefix: OsString,
         suffix: OsString,
     ) -> Self {
         Self::from_parts(
+            id,
             args,
             Some(CompletionPoint {
                 argument,
@@ -42,10 +42,7 @@ impl CliInvocation {
         )
     }
 
-    fn from_parts(args: Arc<[OsString]>, completion: Option<CompletionPoint>) -> Self {
-        let id = NEXT_CLI_INVOCATION_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .expect("CLI invocation IDs exhausted");
+    fn from_parts(id: u64, args: Arc<[OsString]>, completion: Option<CompletionPoint>) -> Self {
         Self {
             id,
             args,
@@ -94,11 +91,15 @@ pub(super) struct CliHost {
 }
 
 impl CliHost {
-    pub(super) fn new(environment: Value, invocation: CliInvocation) -> Self {
+    pub(super) fn new(
+        values: CoreValueFactory,
+        environment: Value,
+        invocation: CliInvocation,
+    ) -> Self {
         Self {
             environment,
             snapshot: CliSnapshot { invocation },
-            store: ReflectionStore::new(Arc::new(ExactConflictAnalysis)).snapshot(),
+            store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)).snapshot(),
         }
     }
 }

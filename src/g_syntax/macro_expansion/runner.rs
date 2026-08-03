@@ -80,6 +80,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
 ) -> Result<MacroRun, Box<MacroFailure>> {
     let effect = PublicValue::from_core(effect);
     let host = Arc::new(MacroHost::new(
+        execution.macro_context().values().clone(),
         PublicValue::from_core(environment),
         input.clone(),
     ));

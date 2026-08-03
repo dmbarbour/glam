@@ -1,7 +1,9 @@
-use std::any::Any;
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use bytes::Bytes;
@@ -14,6 +16,7 @@ use crate::evaluation::{
     ReflectionTaskResultPolicy,
 };
 use crate::number::Number;
+use crate::runtime::RuntimeIds;
 
 mod evaluation_halt;
 pub(crate) mod keys;
@@ -260,12 +263,88 @@ pub(crate) struct TaskPromise {
     wait: EvaluationWaitToken,
 }
 
-static NEXT_DEFERRED_VALUE_ID: AtomicU64 = AtomicU64::new(1);
+/// Runtime-selected construction authority for values which allocate stable
+/// evaluator identities.
+#[derive(Clone)]
+pub(crate) struct CoreValueFactory {
+    ids: Arc<RuntimeIds>,
+    cache: Arc<RuntimeValueCache>,
+}
+
+/// Runtime-owned storage for closed values constructed by optional compiler
+/// layers. The core does not depend on those layers: `TypeId` supplies the
+/// private namespace, while each layer owns the concrete cached type.
+struct RuntimeValueCache {
+    values: Mutex<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
+}
+
+impl CoreValueFactory {
+    pub(crate) fn new(ids: Arc<RuntimeIds>) -> Self {
+        Self {
+            ids,
+            cache: Arc::new(RuntimeValueCache {
+                values: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    pub(crate) fn ids(&self) -> &Arc<RuntimeIds> {
+        &self.ids
+    }
+
+    fn deferred_value_id(&self) -> NonZeroU64 {
+        self.ids.deferred_value()
+    }
+
+    /// Returns one runtime-local cache entry, allowing harmless duplicate
+    /// construction when callers race. Only the completed value is installed.
+    pub(crate) fn cached<T>(&self, build: impl FnOnce() -> T) -> Arc<T>
+    where
+        T: Any + Send + Sync,
+    {
+        let type_id = TypeId::of::<T>();
+        if let Some(value) = self
+            .cache
+            .values
+            .lock()
+            .expect("runtime value-cache mutex should not be poisoned")
+            .get(&type_id)
+            .and_then(|value| value.downcast_ref::<Arc<T>>())
+            .cloned()
+        {
+            return value;
+        }
+
+        let candidate = Arc::new(build());
+        let mut values = self
+            .cache
+            .values
+            .lock()
+            .expect("runtime value-cache mutex should not be poisoned");
+        values
+            .entry(type_id)
+            .or_insert_with(|| Box::new(candidate.clone()))
+            .downcast_ref::<Arc<T>>()
+            .expect("a runtime value-cache type ID has one concrete type")
+            .clone()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_value_factory() -> CoreValueFactory {
+    static FACTORY: LazyLock<CoreValueFactory> =
+        LazyLock::new(|| CoreValueFactory::new(RuntimeIds::compiler_test_values()));
+    FACTORY.clone()
+}
 
 impl LazyValue {
-    fn with_source(label: impl Into<Arc<str>>, source: LazySource) -> Self {
+    fn with_source(
+        values: &CoreValueFactory,
+        label: impl Into<Arc<str>>,
+        source: LazySource,
+    ) -> Self {
         Self(Arc::new(LazyCell {
-            id: allocate_lazy_id(),
+            id: LazyId(values.deferred_value_id()),
             label: label.into(),
             source: Mutex::new(Some(source)),
             result: OnceLock::new(),
@@ -273,21 +352,27 @@ impl LazyValue {
     }
 
     pub(crate) fn computed_fixpoint(
+        values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
         computation: FixpointComputation,
     ) -> Self {
-        Self::with_source(label, LazySource::ComputedFixpoint(Arc::new(computation)))
+        Self::with_source(
+            values,
+            label,
+            LazySource::ComputedFixpoint(Arc::new(computation)),
+        )
     }
 
     pub(crate) fn deferred(
+        values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
         thunk: impl Fn(&EvalContext) -> Result<Value, EvaluationHalt> + Send + Sync + 'static,
     ) -> Self {
-        Self::with_source(label, LazySource::Deferred(Arc::new(thunk)))
+        Self::with_source(values, label, LazySource::Deferred(Arc::new(thunk)))
     }
 
-    pub fn error(message: impl Into<Arc<str>>) -> Self {
-        let value = Self::with_source("error", LazySource::Error);
+    pub(crate) fn error(values: &CoreValueFactory, message: impl Into<Arc<str>>) -> Self {
+        let value = Self::with_source(values, "error", LazySource::Error);
         let result = value.cache(Err(Arc::new(EvaluationFailure::message(message.into()))));
         debug_assert!(result.is_err(), "new lazy errors must cache a failure");
         value
@@ -348,9 +433,9 @@ impl LazyValue {
 }
 
 impl PromisedValue {
-    pub(crate) fn new(label: impl Into<Arc<str>>) -> Self {
+    pub(crate) fn new(values: &CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
         Self {
-            id: allocate_promise_id(),
+            id: PromiseId(values.deferred_value_id()),
             label: label.into(),
             assignment: Arc::new(OnceLock::new()),
             task: None,
@@ -361,7 +446,7 @@ impl PromisedValue {
         context: &EvalContext,
         label: impl Into<Arc<str>>,
     ) -> Result<Self, Arc<str>> {
-        let id = allocate_promise_id();
+        let id = PromiseId(context.values().deferred_value_id());
         let assignment = Arc::new(OnceLock::new());
         let (owner, wait) = context.register_promise(&assignment)?;
         Ok(Self {
@@ -426,21 +511,6 @@ impl PromisedValue {
                 .expect("a completed task promise must retain its assignment"),
         );
     }
-}
-
-fn allocate_lazy_id() -> LazyId {
-    LazyId(allocate_deferred_value_id())
-}
-
-fn allocate_promise_id() -> PromiseId {
-    PromiseId(allocate_deferred_value_id())
-}
-
-fn allocate_deferred_value_id() -> NonZeroU64 {
-    let id = NEXT_DEFERRED_VALUE_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .expect("deferred value IDs exhausted");
-    NonZeroU64::new(id).expect("deferred value IDs start at one")
 }
 
 impl PartialEq for LazyValue {
@@ -909,16 +979,25 @@ impl ReflectionComputation {
 }
 
 impl LazyValue {
-    pub(crate) fn from_access(path: Arc<[CoreDataKey]>, arguments: Arc<[Value]>) -> Self {
-        Self::with_source("access", LazySource::Access { path, arguments })
+    pub(crate) fn from_access(
+        values: &CoreValueFactory,
+        path: Arc<[CoreDataKey]>,
+        arguments: Arc<[Value]>,
+    ) -> Self {
+        Self::with_source(values, "access", LazySource::Access { path, arguments })
     }
 
-    pub(crate) fn from_application(function: Value, arguments: Arc<[Value]>) -> Self {
+    pub(crate) fn from_application(
+        values: &CoreValueFactory,
+        function: Value,
+        arguments: Arc<[Value]>,
+    ) -> Self {
         assert!(
             !arguments.is_empty(),
             "lazy application requires an argument"
         );
         Self::with_source(
+            values,
             "application",
             LazySource::Application(Arc::new(LazyApplication {
                 function,
@@ -927,19 +1006,25 @@ impl LazyValue {
         )
     }
 
-    pub(crate) fn from_builtin(call: BuiltinCall) -> Self {
-        Self::with_source("builtin call", LazySource::Builtin(call))
+    pub(crate) fn from_builtin(values: &CoreValueFactory, call: BuiltinCall) -> Self {
+        Self::with_source(values, "builtin call", LazySource::Builtin(call))
     }
 
-    pub(crate) fn from_net_construction(effect: Value) -> Self {
+    pub(crate) fn from_net_construction(values: &CoreValueFactory, effect: Value) -> Self {
         Self::with_source(
+            values,
             "interaction-net construction",
             LazySource::NetConstruction(Arc::new(effect)),
         )
     }
 
-    pub(crate) fn from_function_call(function: FunctionValue, arguments: Arc<[Value]>) -> Self {
+    pub(crate) fn from_function_call(
+        values: &CoreValueFactory,
+        function: FunctionValue,
+        arguments: Arc<[Value]>,
+    ) -> Self {
         Self::with_source(
+            values,
             "function call",
             LazySource::FunctionCall {
                 function,
@@ -948,12 +1033,17 @@ impl LazyValue {
         )
     }
 
-    pub(crate) fn from_net_computation(net: NetValue) -> Self {
-        Self::with_source("net computation", LazySource::NetComputation(net))
+    pub(crate) fn from_net_computation(values: &CoreValueFactory, net: NetValue) -> Self {
+        Self::with_source(values, "net computation", LazySource::NetComputation(net))
     }
 
-    pub(crate) fn from_reflection_gate(effect: Value, target: Value) -> Self {
+    pub(crate) fn from_reflection_gate(
+        values: &CoreValueFactory,
+        effect: Value,
+        target: Value,
+    ) -> Self {
         Self::with_source(
+            values,
             "reflection annotation",
             LazySource::ReflectionTask(Arc::new(ReflectionComputation {
                 effect,
@@ -1193,22 +1283,24 @@ impl Value {
     }
 
     pub(crate) fn deferred(
+        values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
         thunk: impl Fn(&EvalContext) -> Result<Value, EvaluationHalt> + Send + Sync + 'static,
     ) -> Self {
-        Self::Lazy(LazyValue::deferred(label, thunk))
+        Self::Lazy(LazyValue::deferred(values, label, thunk))
     }
 
-    pub fn error(message: impl Into<Arc<str>>) -> Self {
-        Self::Lazy(LazyValue::error(message))
+    pub(crate) fn error(values: &CoreValueFactory, message: impl Into<Arc<str>>) -> Self {
+        Self::Lazy(LazyValue::error(values, message))
     }
 
-    pub(crate) fn reflection_gate(effect: Value, target: Value) -> Self {
-        Self::Lazy(LazyValue::from_reflection_gate(effect, target))
+    pub(crate) fn reflection_gate(values: &CoreValueFactory, effect: Value, target: Value) -> Self {
+        Self::Lazy(LazyValue::from_reflection_gate(values, effect, target))
     }
 
-    pub(crate) fn reflection_task_result(effect: Value) -> Self {
+    pub(crate) fn reflection_task_result(values: &CoreValueFactory, effect: Value) -> Self {
         Self::Lazy(LazyValue::with_source(
+            values,
             "reflection task result",
             LazySource::ReflectionTask(Arc::new(ReflectionComputation {
                 effect,
@@ -1238,7 +1330,11 @@ impl Value {
 
     /// Constructs a builtin value at a specific curried stage without
     /// evaluating a saturated call.
-    pub fn builtin_call(builtin: Builtin, arguments: Vec<Value>) -> Self {
+    pub(crate) fn builtin_call(
+        values: &CoreValueFactory,
+        builtin: Builtin,
+        arguments: Vec<Value>,
+    ) -> Self {
         assert!(
             arguments.len() <= builtin.arity(),
             "builtin call contains too many arguments"
@@ -1249,10 +1345,13 @@ impl Value {
                 builtin,
                 arguments: Arc::from(arguments),
             }),
-            _ => Self::Lazy(LazyValue::from_builtin(BuiltinCall {
-                builtin,
-                arguments: Arc::from(arguments),
-            })),
+            _ => Self::Lazy(LazyValue::from_builtin(
+                values,
+                BuiltinCall {
+                    builtin,
+                    arguments: Arc::from(arguments),
+                },
+            )),
         }
     }
 
@@ -1297,6 +1396,10 @@ mod tests {
     use bytes::Bytes;
     use std::sync::atomic::AtomicBool;
 
+    fn values() -> CoreValueFactory {
+        test_value_factory()
+    }
+
     struct DropSignal(Arc<AtomicBool>);
 
     impl Drop for DropSignal {
@@ -1309,7 +1412,7 @@ mod tests {
     fn terminal_lazy_cache_releases_its_shared_source_after_active_snapshots() {
         let dropped = Arc::new(AtomicBool::new(false));
         let signal = DropSignal(dropped.clone());
-        let lazy = LazyValue::deferred("source release", move |_| {
+        let lazy = LazyValue::deferred(&values(), "source release", move |_| {
             let _keep_signal_captured = &signal;
             Ok((*keys::UNIT_VALUE).clone())
         });
@@ -1469,7 +1572,7 @@ mod tests {
 
     #[test]
     fn semantic_values_can_hold_lazy_errors() {
-        let value = Value::error("ambiguous key");
+        let value = Value::error(&values(), "ambiguous key");
 
         assert!(
             matches!(value, Value::Lazy(lazy) if lazy.cached().is_some_and(|value| value.is_err()))
@@ -1478,8 +1581,8 @@ mod tests {
 
     #[test]
     fn evaluated_values_reject_deferred_outer_shells_only() {
-        let field = Value::deferred("lazy field", |_| Ok(Value::Number(1.into())));
-        let promise = PromisedValue::new("promised field");
+        let field = Value::deferred(&values(), "lazy field", |_| Ok(Value::Number(1.into())));
+        let promise = PromisedValue::new(&values(), "promised field");
         let container =
             Value::Dict(Dict::new_sync().insert(Key::atom_from_text("field"), field.clone()));
         let sealed = Value::initial_metadata_carrier();
@@ -1505,8 +1608,8 @@ mod tests {
 
     #[test]
     fn promised_assignments_retain_deferred_aliases() {
-        let target = PromisedValue::new("target");
-        let forwarding = PromisedValue::new("forwarding");
+        let target = PromisedValue::new(&values(), "target");
+        let forwarding = PromisedValue::new(&values(), "forwarding");
         forwarding
             .set(Value::Promised(target))
             .expect("new promise should accept its target");
@@ -1516,7 +1619,7 @@ mod tests {
             Some(Ok(Value::Promised(_)))
         ));
 
-        let ready = PromisedValue::new("ready");
+        let ready = PromisedValue::new(&values(), "ready");
         ready
             .set(Value::Number(42.into()))
             .expect("new promise should accept its value");
@@ -1525,8 +1628,8 @@ mod tests {
 
     #[test]
     fn lazy_cycle_failures_retain_member_identity_and_labels() {
-        let first = LazyValue::error("first failure");
-        let second = LazyValue::error("second failure");
+        let first = LazyValue::error(&values(), "first failure");
+        let second = LazyValue::error(&values(), "second failure");
         let cycle = EvaluationFailure::dependency_cycle(Arc::new(LazyCycle {
             members: vec![
                 LazyCycleMember {
@@ -1592,11 +1695,13 @@ mod tests {
     #[test]
     fn keys_reject_deferred_values() {
         assert_eq!(
-            Key::from_value(&Value::deferred("number", |_| Ok(Value::Number(1.into())))),
+            Key::from_value(&Value::deferred(&values(), "number", |_| {
+                Ok(Value::Number(1.into()))
+            })),
             None
         );
         assert_eq!(
-            Key::from_value(&Value::Promised(PromisedValue::new("number"))),
+            Key::from_value(&Value::Promised(PromisedValue::new(&values(), "number"))),
             None
         );
     }

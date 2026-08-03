@@ -29,24 +29,27 @@ pub(in crate::g_syntax) fn lower_object(
         &mut locals,
     )?;
     let object_value = annotate_definition_context(object_value, &object.target, line, context);
-    *definitions = lower_resolved_expr(update_module_resolved(
-        definitions_root.expr(),
-        &object.target,
-        object_value,
-    ));
+    *definitions = lower_resolved_expr(
+        context.values(),
+        update_module_resolved(definitions_root.expr(), &object.target, object_value),
+    );
     Ok(())
 }
 
 pub(in crate::g_syntax) fn object_instance_from_parts_value(
+    values: &CoreValueFactory,
     name: Value,
     deps: Value,
     defs: Value,
 ) -> Value {
-    lower_resolved_expr(object_instance_from_parts_resolved(
-        ResolvedExpr::Provided(name),
-        ResolvedExpr::Provided(deps),
-        ResolvedExpr::Provided(defs),
-    ))
+    lower_resolved_expr(
+        values,
+        object_instance_from_parts_resolved(
+            ResolvedExpr::Provided(name),
+            ResolvedExpr::Provided(deps),
+            ResolvedExpr::Provided(defs),
+        ),
+    )
 }
 
 pub(in crate::g_syntax) fn apply_builtin_resolved(
@@ -172,7 +175,11 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
         bindings.bind(
             locals,
             "<object-reflection-annotator>",
-            compiler_values::reflection_annotator_resolved(guard.expr(), object_final_defs.expr()),
+            compiler_values::reflection_annotator_resolved(
+                context.values(),
+                guard.expr(),
+                object_final_defs.expr(),
+            ),
         )
     });
     let mut definitions = bindings.bind(
@@ -360,7 +367,7 @@ pub(in crate::g_syntax) fn lower_extend(
         &mut locals,
         declared_target_has_reflection(&extend.target),
     )?;
-    *definitions = lower_resolved_expr(updated);
+    *definitions = lower_resolved_expr(context.values(), updated);
     Ok(())
 }
 
@@ -445,6 +452,7 @@ fn extend_object_resolved_in_scope(
 }
 
 pub(in crate::g_syntax) fn extend_object_with_defs(
+    values: &CoreValueFactory,
     target: &str,
     extension_defs: Value,
     visible_definitions: Value,
@@ -472,12 +480,13 @@ pub(in crate::g_syntax) fn extend_object_with_defs(
             [prior_result, ResolvedExpr::Local(self_value)],
         ),
     );
-    Ok(lower_resolved_expr(bindings.wrap(
-        object_from_parts_resolved(
+    Ok(lower_resolved_expr(
+        values,
+        bindings.wrap(object_from_parts_resolved(
             ObjectRealization::Instance,
             spec_member("name"),
             spec_member("deps"),
             composed_defs,
-        ),
-    )))
+        )),
+    ))
 }

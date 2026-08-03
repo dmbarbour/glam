@@ -80,7 +80,7 @@ pub(super) fn lower_guard_choices_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    Ok(resolve_guard_choice(alternatives, context, scope, locals)?.emit())
+    Ok(resolve_guard_choice(alternatives, context, scope, locals)?.emit(context.values()))
 }
 
 pub(super) fn lower_if_expr_resolved(
@@ -108,7 +108,9 @@ pub(super) fn lower_if_expr_resolved(
     ];
     let search = lower_guard_choices_resolved(&alternatives, context, scope, locals)?;
     Ok(match if_expr.mode {
-        ConditionalMode::Pure => compiler_values::run_pure_conditional_resolved(search),
+        ConditionalMode::Pure => {
+            compiler_values::run_pure_conditional_resolved(context.values(), search)
+        }
         ConditionalMode::Host => search,
     })
 }
@@ -131,7 +133,12 @@ pub(super) fn lower_match_expr_resolved(
     let resolved = (|| {
         let selected =
             resolve_match_choice(&match_expr.arms, subject_binding, context, scope, locals)?
-                .emit_match(match_expr.mode, match_expr.commitment, match_expr.line);
+                .emit_match(
+                    context.values(),
+                    match_expr.mode,
+                    match_expr.commitment,
+                    match_expr.line,
+                );
         Ok(ResolvedExpr::apply(
             ResolvedExpr::lambda(vec![subject_binding], selected),
             [subject],
@@ -149,6 +156,7 @@ pub(super) fn lower_match_when_expr_resolved(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     Ok(
         resolve_when_choice(&match_when.arms, context, scope, locals)?.emit_match(
+            context.values(),
             match_when.mode,
             match_when.commitment,
             match_when.line,
@@ -343,54 +351,55 @@ fn resolve_prefix_steps(
 impl ResolvedChoice {
     fn emit_match(
         self,
+        values: &CoreValueFactory,
         mode: ConditionalMode,
         commitment: MatchCommitment,
         line: usize,
     ) -> ResolvedExpr<Value> {
         match (mode, commitment) {
             (ConditionalMode::Pure, MatchCommitment::Cut) => {
-                compiler_values::run_pure_match_resolved(self.emit_search(), line)
+                compiler_values::run_pure_match_resolved(values, self.emit_search(values), line)
             }
             (ConditionalMode::Pure, MatchCommitment::Open) => {
-                compiler_values::run_pure_open_match_resolved(self.emit_search())
+                compiler_values::run_pure_open_match_resolved(self.emit_search(values))
             }
-            (ConditionalMode::Host, MatchCommitment::Cut) => self.emit(),
-            (ConditionalMode::Host, MatchCommitment::Open) => self.emit_search(),
+            (ConditionalMode::Host, MatchCommitment::Cut) => self.emit(values),
+            (ConditionalMode::Host, MatchCommitment::Open) => self.emit_search(values),
         }
     }
 
-    fn emit(self) -> ResolvedExpr<Value> {
-        effect_call_resolved("cut", [self.emit_search()])
+    fn emit(self, values: &CoreValueFactory) -> ResolvedExpr<Value> {
+        effect_call_resolved(values, "cut", [self.emit_search(values)])
     }
 
-    fn emit_search(self) -> ResolvedExpr<Value> {
+    fn emit_search(self, values: &CoreValueFactory) -> ResolvedExpr<Value> {
         let mut alternatives = self
             .alternatives
             .into_iter()
-            .map(ResolvedAlternative::emit)
+            .map(|alternative| alternative.emit(values))
             .rev();
         let mut search = alternatives
             .next()
-            .unwrap_or_else(|| lower_effect_expr_resolved("fail"));
+            .unwrap_or_else(|| lower_effect_expr_resolved(values, "fail"));
         for alternative in alternatives {
-            search = effect_call_resolved("alt", [alternative, search]);
+            search = effect_call_resolved(values, "alt", [alternative, search]);
         }
         search
     }
 }
 
 impl ResolvedAlternative {
-    fn emit(self) -> ResolvedExpr<Value> {
-        emit_effect_steps(self.steps, self.outcome.emit())
+    fn emit(self, values: &CoreValueFactory) -> ResolvedExpr<Value> {
+        emit_effect_steps(values, self.steps, self.outcome.emit(values))
     }
 }
 
 impl ResolvedChoiceOutcome {
-    fn emit(self) -> ResolvedExpr<Value> {
+    fn emit(self, values: &CoreValueFactory) -> ResolvedExpr<Value> {
         match self {
-            Self::Value(result) => effect_call_resolved("r", [result]),
+            Self::Value(result) => effect_call_resolved(values, "r", [result]),
             Self::Effect(result) => result,
-            Self::Nested(choice) => choice.emit_search(),
+            Self::Nested(choice) => choice.emit_search(values),
         }
     }
 }
@@ -428,16 +437,18 @@ mod tests {
     }
 
     fn is_root_effect_call(expression: &ResolvedExpr<Value>, name: &str) -> bool {
+        let values = crate::core::test_value_factory();
         matches!(
             expression,
             ResolvedExpr::Apply { function, .. }
                 if function.as_ref()
-                    == &ResolvedExpr::Embedded(compiler_values::effect_value(name))
+                    == &ResolvedExpr::Embedded(compiler_values::effect_value(&values, name))
         )
     }
 
     fn returned(value: i64) -> ResolvedExpr<Value> {
         effect_call_resolved(
+            &crate::core::test_value_factory(),
             "r",
             [ResolvedExpr::Embedded(Value::Number(Number::from(value)))],
         )
@@ -447,7 +458,14 @@ mod tests {
     fn zero_alternatives_lower_to_one_cut_around_failure() {
         assert_eq!(
             resolve(&[]),
-            effect_call_resolved("cut", [lower_effect_expr_resolved("fail")])
+            effect_call_resolved(
+                &crate::core::test_value_factory(),
+                "cut",
+                [lower_effect_expr_resolved(
+                    &crate::core::test_value_factory(),
+                    "fail",
+                )],
+            )
         );
     }
 
@@ -456,7 +474,7 @@ mod tests {
         let result = number(1);
         assert_eq!(
             resolve(&[pass(&result)]),
-            effect_call_resolved("cut", [returned(1)])
+            effect_call_resolved(&crate::core::test_value_factory(), "cut", [returned(1)])
         );
     }
 
@@ -471,7 +489,14 @@ mod tests {
                 result_mode: ConditionalResultMode::Tentative,
                 result: &result,
             }]),
-            effect_call_resolved("cut", [lower_effect_expr_resolved("fail")])
+            effect_call_resolved(
+                &crate::core::test_value_factory(),
+                "cut",
+                [lower_effect_expr_resolved(
+                    &crate::core::test_value_factory(),
+                    "fail",
+                )],
+            )
         );
     }
 
@@ -497,12 +522,18 @@ mod tests {
         let second = number(2);
         let third = number(3);
         let expected = effect_call_resolved(
+            &crate::core::test_value_factory(),
             "cut",
             [effect_call_resolved(
+                &crate::core::test_value_factory(),
                 "alt",
                 [
                     returned(1),
-                    effect_call_resolved("alt", [returned(2), returned(3)]),
+                    effect_call_resolved(
+                        &crate::core::test_value_factory(),
+                        "alt",
+                        [returned(2), returned(3)],
+                    ),
                 ],
             )],
         );
@@ -722,7 +753,10 @@ mod tests {
             &mut ResolverContext::default(),
         )
         .expect("empty open host match should resolve");
-        assert_eq!(resolved_host, lower_effect_expr_resolved("fail"));
+        assert_eq!(
+            resolved_host,
+            lower_effect_expr_resolved(&crate::core::test_value_factory(), "fail")
+        );
 
         let pure = MatchWhenExpr {
             line: 1,
@@ -739,7 +773,10 @@ mod tests {
         .expect("empty open pure match should resolve");
         assert_eq!(
             resolved_pure,
-            compiler_values::run_pure_open_match_resolved(lower_effect_expr_resolved("fail"))
+            compiler_values::run_pure_open_match_resolved(lower_effect_expr_resolved(
+                &crate::core::test_value_factory(),
+                "fail",
+            ))
         );
         assert!(!contains_effect(&resolved_pure, "cut"));
     }
@@ -873,7 +910,7 @@ mod tests {
     }
 
     fn contains_effect(expression: &ResolvedExpr<Value>, name: &str) -> bool {
-        let target = compiler_values::effect_value(name);
+        let target = compiler_values::effect_value(&crate::core::test_value_factory(), name);
         match expression {
             ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => value == &target,
             ResolvedExpr::Local(_) => false,

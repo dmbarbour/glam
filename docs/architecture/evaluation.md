@@ -7,6 +7,15 @@ interaction nets, and background workers. Detailed hazards live in
 
 ## Context and Session
 
+`EvaluationRuntime` is the allocation and construction boundary. It owns the
+local ID domain used by sessions, tasks, waits, lazies and promises, reasoning
+sessions, CLI invocations, and runtime event work. Numeric local IDs may repeat
+in two runtimes; `EvaluationRuntimeId` supplies their eventual public
+provenance. `EvaluationRuntime::values()` and `Assembler::values()` select the
+construction domain before an embedding client builds a value. The remaining
+public primitive `Value` constructors are transitional until public values
+carry enforced runtime provenance in Phase 1C.
+
 Every production evaluator entry receives an `EvalContext` borrowed from an
 `EvaluationSession`. An `Assembler` and its clones share one internal
 `ReasoningSession`, which owns that evaluation session and the assembler's
@@ -25,7 +34,9 @@ runtime default, while their own children inherit that selected default.
 
 Lazy values retain computation and a stable identity, not a captured evaluator
 session. The observing `EvalContext` supplies host and scheduling behavior when
-the value is forced.
+the value is forced. There is no production `EvaluationSession::new` or
+`EvalContext::standalone`: even isolated pure evaluation receives an explicitly
+selected runtime value factory.
 
 `core::EvaluationHalt` is the typed result of a demand that cannot currently
 produce WHNF. Its permanent-failure case carries an arbitrary diagnostic value

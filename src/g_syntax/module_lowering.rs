@@ -41,6 +41,7 @@ impl<'context> ModuleLowerer<'context> {
             definitions: context.prior_defs().clone(),
             module_reflection: ReflectionBoundary {
                 annotator: compiler_values::reflection_annotator_value(
+                    context.values(),
                     context.abstract_global_path("refl"),
                     context.final_defs().clone(),
                 ),
@@ -153,6 +154,6 @@ pub(super) fn lower_definition(
         &scope.resolved(),
         &mut locals,
     )?;
-    *definitions = lower_resolved_expr(resolved);
+    *definitions = lower_resolved_expr(context.values(), resolved);
     Ok(())
 }

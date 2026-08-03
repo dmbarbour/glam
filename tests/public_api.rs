@@ -115,7 +115,7 @@ fn public_evaluation_errors_preserve_their_structured_diagnostic() {
     assert_eq!(error.diagnostic().message(), "structured failure");
     let enriched = error
         .diagnostic()
-        .enrich()
+        .enrich(&assembler.values())
         .expect("the primary failure diagnostic should remain enrichable");
     assert_eq!(
         assembler
@@ -339,11 +339,13 @@ fn volume_write_annotation(assembler: &Assembler, effects: Value, value: Value) 
     let effect = assembler
         .apply(&set, [Value::list([]), value])
         .expect("volume set should construct an effect");
-    reflection_annotation(effect)
+    reflection_annotation(assembler, effect)
 }
 
-fn reflection_annotation(effect: Value) -> Value {
-    Value::after_reflection(effect, Value::text("done"))
+fn reflection_annotation(assembler: &Assembler, effect: Value) -> Value {
+    assembler
+        .values()
+        .after_reflection(effect, Value::text("done"))
 }
 
 #[test]
@@ -411,7 +413,7 @@ fn protected_volume_rewrite_uses_the_commit_time_value() {
         .apply(&rewrite, [Value::list([]), increment])
         .expect("volume rewrite should construct an effect");
     assembler
-        .to_binary(&reflection_annotation(effect))
+        .to_binary(&reflection_annotation(&assembler, effect))
         .expect("volume rewrite annotation should complete");
 
     let final_value = volume.revoke().unwrap();
@@ -447,7 +449,7 @@ fn protected_volume_get_is_an_ordinary_effect_result() {
 
     assert_eq!(
         assembler
-            .to_binary(&reflection_annotation(discard_effect))
+            .to_binary(&reflection_annotation(&assembler, discard_effect))
             .expect("volume get should complete"),
         b"done".as_slice()
     );
@@ -486,7 +488,7 @@ fn revoked_volume_get_exposes_a_lazy_error_through_reflection_eval() {
         .apply(&inspect, [get_effect])
         .expect("missing-volume inspector should accept the effect");
     assembler
-        .to_binary(&reflection_annotation(inspect_effect))
+        .to_binary(&reflection_annotation(&assembler, inspect_effect))
         .expect("`.eval` should contain the missing-volume error");
 
     let diagnostics = take_diagnostics(&diagnostics);
@@ -592,6 +594,7 @@ fn diagnostic_value_updates_preserve_the_source_and_add_no_authoritative_metadat
     let assembler = Assembler::default();
     let message = Value::record([("msg", Value::record([("text", Value::text("nested"))]))]);
     let enriched = Diagnostic::apply_updates(
+        &assembler.values(),
         &message,
         Value::record([("viewer", Value::record([("kind", Value::text("terminal"))]))]),
     )
@@ -645,7 +648,7 @@ fn diagnostic_value_updates_preserve_structured_evaluation_failures() {
         .expect("host should install the structured update failure");
     let message = Value::record([("msg", Value::record([("text", Value::text("nested"))]))]);
 
-    let error = Diagnostic::apply_updates(&message, failed_update)
+    let error = Diagnostic::apply_updates(&assembler.values(), &message, failed_update)
         .expect_err("demanding the viewer update should preserve its failure");
     assert_eq!(error.to_string(), "viewer update failed");
     assert_eq!(
@@ -1109,7 +1112,7 @@ fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
     assert_eq!(diagnostic.severity(), Severity::Error);
     assert!(diagnostic.message().contains("not valid UTF-8"));
     let enriched = diagnostic
-        .enrich()
+        .enrich(&assembler.values())
         .expect("assembler metadata should enrich the diagnostic");
     assert_eq!(
         assembler
@@ -1164,7 +1167,7 @@ fn repeated_source_compilations_have_distinct_invocations() {
     assert_eq!(error.diagnostics().len(), 2);
     let invocation = |diagnostic: &glam::Diagnostic| {
         let enriched = diagnostic
-            .enrich()
+            .enrich(&assembler.values())
             .expect("assembler metadata should enrich the diagnostic");
         assembler
             .get(&enriched, "msg.origin.invocation")
@@ -1239,7 +1242,7 @@ fn imported_source_diagnostics_include_the_import_chain() {
     let source_path = absolute_path_text("child.g");
     assert_eq!(diagnostic.source(), Some(source_path.as_str()));
     let enriched = diagnostic
-        .enrich()
+        .enrich(&assembler.values())
         .expect("assembler metadata should enrich the diagnostic");
     assert_eq!(
         assembler
@@ -1302,7 +1305,9 @@ fn caller_selected_module_path_scopes_abstract_global_paths() {
         assembler
             .get(module.value(), "Marker")
             .expect("unique declaration should define Marker"),
-        Value::abstract_global_path(["client", "root", "Marker"])
+        assembler
+            .values()
+            .abstract_global_path(["client", "root", "Marker"])
     );
 }
 

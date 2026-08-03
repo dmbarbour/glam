@@ -2,10 +2,11 @@ use super::super::super::*;
 use crate::core::FixpointComputation;
 
 pub(super) fn eval_object_instance_builtin(
-    _context: &EvalContext,
+    context: &EvalContext,
     spec: &Value,
 ) -> Result<Value, EvaluationHalt> {
     Ok(Value::Lazy(LazyValue::computed_fixpoint(
+        context.values(),
         "object self",
         FixpointComputation::ObjectInstance(spec.clone()),
     )))

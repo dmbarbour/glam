@@ -332,7 +332,7 @@ impl DoEmitter<'_> {
                 .expect("planned recursive-do step is emitted exactly once")
                 .effect
         });
-        emit_effect_steps(effects, continuation)
+        emit_effect_steps(self.context.values(), effects, continuation)
     }
 
     fn emit_fix_scope(
@@ -362,6 +362,7 @@ impl DoEmitter<'_> {
             .expect("planned abstract name has a continuation parameter");
 
         let payload = effect_call_resolved(
+            self.context.values(),
             "r",
             [ResolvedExpr::List(vec![
                 ResolvedExpr::Local(resolved_binding),
@@ -373,13 +374,18 @@ impl DoEmitter<'_> {
             ResolvedExpr::lambda(vec![forward_binding], body),
             [list_at_resolved(0, ResolvedExpr::Local(future_binding))],
         );
-        let fixed = effect_call_resolved("fix", [ResolvedExpr::lambda(vec![future_binding], body)]);
+        let fixed = effect_call_resolved(
+            self.context.values(),
+            "fix",
+            [ResolvedExpr::lambda(vec![future_binding], body)],
+        );
         let continuation = list_at_resolved(1, ResolvedExpr::Local(fixed_result_binding));
         let resumed = ResolvedExpr::apply(
             continuation,
             [ResolvedExpr::Embedded(self.context.unit_value())],
         );
         effect_call_resolved(
+            self.context.values(),
             "seq",
             [
                 fixed,
@@ -560,7 +566,10 @@ mod tests {
         assert_eq!(
             count_embedded_value(
                 &resolved,
-                &crate::g_syntax::compiler_values::effect_value("r")
+                &crate::g_syntax::compiler_values::effect_value(
+                    &crate::core::test_value_factory(),
+                    "r",
+                )
             ),
             0
         );
@@ -680,7 +689,10 @@ mod tests {
         assert_eq!(
             count_embedded_value(
                 &resolved,
-                &crate::g_syntax::compiler_values::effect_value("fix")
+                &crate::g_syntax::compiler_values::effect_value(
+                    &crate::core::test_value_factory(),
+                    "fix",
+                )
             ),
             2
         );
@@ -731,7 +743,10 @@ mod tests {
         assert_eq!(
             count_embedded_value(
                 &resolved,
-                &crate::g_syntax::compiler_values::effect_value("fix")
+                &crate::g_syntax::compiler_values::effect_value(
+                    &crate::core::test_value_factory(),
+                    "fix",
+                )
             ),
             3
         );

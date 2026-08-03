@@ -647,7 +647,7 @@ fn assemble(
         .build()?;
     assembler
         .binary_at(module.value(), "asm.result")
-        .map_err(|error| error.with_context(assembly_result_context()))
+        .map_err(|error| error.with_context(&assembler.values(), assembly_result_context()))
 }
 
 fn assembly_result_context() -> Value {
@@ -663,7 +663,7 @@ struct LoadedConfiguration {
 }
 
 fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Error> {
-    let default_environment = empty_environment_object();
+    let default_environment = empty_environment_object(&assembler.values());
     let initial_definitions = Value::record([("env", default_environment.clone())]);
     let module = assembler
         .module(["configuration"])
@@ -673,11 +673,14 @@ fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Erro
 
     let environment = match assembler
         .get_optional(module.value(), "conf.env")
-        .map_err(|error| error.with_context(configuration_entry_context("env")))?
-    {
-        Some(environment) if !environment.is_undefined() => assembler
-            .evaluate(&environment)
-            .map_err(|error| error.with_context(configuration_entry_context("env")))?,
+        .map_err(|error| {
+            error.with_context(&assembler.values(), configuration_entry_context("env"))
+        })? {
+        Some(environment) if !environment.is_undefined() => {
+            assembler.evaluate(&environment).map_err(|error| {
+                error.with_context(&assembler.values(), configuration_entry_context("env"))
+            })?
+        }
         Some(_) | None => default_environment,
     };
     Ok(LoadedConfiguration {
@@ -703,7 +706,7 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
         Err(error) => {
             diagnostics.publish(
                 error
-                    .with_context(configuration_entry_context("log"))
+                    .with_context(&assembler.values(), configuration_entry_context("log"))
                     .diagnostic()
                     .clone(),
             );
@@ -711,14 +714,19 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
         }
     };
     let task_diagnostics = diagnostics.clone();
+    let task_values = evaluation_runtime.values();
     let thread = thread::spawn(move || {
         let _subscription = subscription;
         if let Some(custom) = custom {
-            match EffectRun::new(&custom, MainEffects::new(effect_assembler), host.clone())
-                .with_runtime(&evaluation_runtime)
-                .asserting_unit_result("configured logger result")
-                .requiring_unit_result()
-                .run()
+            match EffectRun::new(
+                &evaluation_runtime,
+                &custom,
+                MainEffects::new(effect_assembler),
+                host.clone(),
+            )
+            .asserting_unit_result("configured logger result")
+            .requiring_unit_result()
+            .run()
             {
                 Ok(TaskOutcome::Complete(_)) => {}
                 Ok(TaskOutcome::Cancelled) => {
@@ -734,7 +742,7 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
                     task_diagnostics.publish(
                         error
                             .with_context(configuration_entry_context("log"))
-                            .diagnostic(),
+                            .diagnostic(&task_values),
                     );
                 }
             }
@@ -915,7 +923,7 @@ fn read_log(
             .map_err(glam::reflection::TaskHalt::from)?
         {
             return Diagnostic::from_transport_value(&value)
-                .and_then(|diagnostic| diagnostic.enrich())
+                .and_then(|diagnostic| diagnostic.enrich(&context.host().input.runtime.values()))
                 .map(RequestResult::Return)
                 .map_err(glam::reflection::TaskHalt::from);
         }
@@ -935,7 +943,7 @@ fn read_log(
             return Ok(RequestResult::Fail);
         };
         let value = Diagnostic::from_transport_value(&value)
-            .and_then(|diagnostic| diagnostic.enrich())
+            .and_then(|diagnostic| diagnostic.enrich(&context.host().input.runtime.values()))
             .map_err(glam::reflection::TaskHalt::from)?;
         let commit = TaskCommit::new(
             glam::reflection::StoreJournal::new(snapshot.store().clone()),
@@ -1220,7 +1228,13 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
-        self.input.runtime.wait_for_change(observed_generation)
+        let (_, _, snapshot) = self.input.runtime.logger_transaction_snapshot();
+        if snapshot.cancelled() || snapshot.input_closed() {
+            return false;
+        }
+        self.input.runtime.wait_for_change(observed_generation);
+        let (_, _, snapshot) = self.input.runtime.logger_transaction_snapshot();
+        !snapshot.cancelled() && !snapshot.input_closed()
     }
 
     fn evaluation_runtime_id(&self) -> Option<glam::EvaluationRuntimeId> {
@@ -1228,8 +1242,8 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
     }
 }
 
-fn empty_environment_object() -> Value {
-    Value::empty_object(Value::abstract_global_path(["configuration", "env"]))
+fn empty_environment_object(values: &glam::Values) -> Value {
+    values.empty_object(values.abstract_global_path(["configuration", "env"]))
 }
 
 fn configuration_paths() -> Vec<PathBuf> {
@@ -1325,10 +1339,14 @@ impl DefaultLogger {
         diagnostic: &Diagnostic,
         terminal: &TerminalContext,
     ) -> Result<Bytes, Error> {
-        let message = diagnostic.enrich_with(self.viewer_updates(diagnostic, terminal))?;
+        let values = self.evaluator.values();
+        let message = diagnostic.enrich_with(&values, self.viewer_updates(diagnostic, terminal))?;
         let context_lines = self.context_lines(&message, terminal, 0);
-        let message =
-            Diagnostic::apply_updates(&message, Self::context_lines_update(context_lines))?;
+        let message = Diagnostic::apply_updates(
+            &values,
+            &message,
+            Self::context_lines_update(context_lines),
+        )?;
         self.format_message(message)
     }
 
@@ -1481,7 +1499,9 @@ impl DefaultLogger {
         frame_indent: usize,
     ) -> Result<String, Error> {
         let default_header = "msg: ".to_owned();
+        let values = self.evaluator.values();
         let message = Diagnostic::apply_updates(
+            &values,
             message,
             self.terminal_viewer_updates(
                 terminal,
@@ -1495,11 +1515,14 @@ impl DefaultLogger {
         let message = if header == default_header {
             message
         } else {
-            Diagnostic::apply_updates(&message, Self::viewer_header_update(header))?
+            Diagnostic::apply_updates(&values, &message, Self::viewer_header_update(header))?
         };
         let context_lines = self.context_lines(&message, terminal, frame_indent);
-        let message =
-            Diagnostic::apply_updates(&message, Self::context_lines_update(context_lines))?;
+        let message = Diagnostic::apply_updates(
+            &values,
+            &message,
+            Self::context_lines_update(context_lines),
+        )?;
         let rendered = self.format_message(message)?;
         let rendered = String::from_utf8_lossy(&rendered);
         let rendered = rendered.strip_suffix('\n').unwrap_or(&rendered);
@@ -1543,10 +1566,10 @@ impl DefaultLogger {
     fn summarize_context_frame(&self, frame: &Value) -> String {
         let reflection = self.evaluator.reflection();
         let Ok(entries) = reflection.dictionary_items(frame) else {
-            return diagnostic_value_kind(frame).to_owned();
+            return diagnostic_value_kind(&self.evaluator.values(), frame).to_owned();
         };
         let [(tag, payload)] = entries.as_slice() else {
-            return diagnostic_value_kind(frame).to_owned();
+            return diagnostic_value_kind(&self.evaluator.values(), frame).to_owned();
         };
 
         if tag == &Value::atom_from_text("eval") {
@@ -1568,7 +1591,7 @@ impl DefaultLogger {
             return self.task_context_summary(payload);
         }
         self.context_tag_text(tag)
-            .unwrap_or_else(|| diagnostic_value_kind(frame).to_owned())
+            .unwrap_or_else(|| diagnostic_value_kind(&self.evaluator.values(), frame).to_owned())
     }
 
     fn eval_context_summary(&self, payload: &Value) -> String {
@@ -1707,11 +1730,11 @@ fn immediate_diagnostic_text(value: &Value) -> Option<String> {
         .or_else(|| value.as_number_text())
 }
 
-fn diagnostic_value_kind(value: &Value) -> &'static str {
+fn diagnostic_value_kind(values: &glam::Values, value: &Value) -> &'static str {
     if value.is_undefined() {
         return "Undefined";
     }
-    if value == &Value::abstract_global_path(["builtin", "unit"]) {
+    if value == &values.abstract_global_path(["builtin", "unit"]) {
         return "Unit";
     }
     match value.kind() {
@@ -2200,8 +2223,9 @@ mod tests {
             term: Some("xterm-256color".to_owned()),
             language: Some("en_US.UTF-8".to_owned()),
         };
+        let values = logger.evaluator.values();
         let enriched = diagnostic
-            .enrich_with(logger.viewer_updates(&diagnostic, &terminal))
+            .enrich_with(&values, logger.viewer_updates(&diagnostic, &terminal))
             .expect("terminal viewer metadata should mix into a diagnostic");
 
         assert_eq!(

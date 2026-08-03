@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::api::{Diagnostic, Value};
-use crate::core::{Atom, Dict, Key, OpaqueValue, Value as CoreValue, keys};
+use crate::core::{Atom, CoreValueFactory, Dict, Key, OpaqueValue, Value as CoreValue, keys};
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{
@@ -49,6 +49,7 @@ enum ReflectionUpdate {
 struct TaskStatusQuery<H: ?Sized> {
     host: Arc<H>,
     handle: Arc<EvaluationQueryHandle>,
+    values: CoreValueFactory,
 }
 
 impl<H> EvaluationTaskStatusSink for TaskStatusQuery<H>
@@ -58,7 +59,7 @@ where
     fn update(&self, status: EvaluationTaskStatus) {
         self.host.update_query(
             &self.handle,
-            Value::from_core(task_status_query_value(status)),
+            Value::from_core(task_status_query_value(&self.values, status)),
         );
     }
 }
@@ -331,6 +332,7 @@ where
                     let result = transaction
                         .store()
                         .reserve_query_with(Value::from_core(task_status_query_value(
+                            eval_context.values(),
                             EvaluationTaskStatus::Launched,
                         )))
                         .map_err(|error| TaskHalt::new(error.as_ref()))?;
@@ -344,6 +346,7 @@ where
                     let status = Arc::new(TaskStatusQuery {
                         host,
                         handle: result,
+                        values: eval_context.values().clone(),
                     });
                     transaction.parts().1.reflection_journal().updates.push(
                         ReflectionUpdate::Launch {
@@ -357,6 +360,7 @@ where
                     let mut store = StoreJournal::new(snapshot.store().clone());
                     let result = store
                         .reserve_query_with(Value::from_core(task_status_query_value(
+                            eval_context.values(),
                             EvaluationTaskStatus::Launched,
                         )))
                         .map_err(|error| TaskHalt::new(error.as_ref()))?;
@@ -370,6 +374,7 @@ where
                     let status = Arc::new(TaskStatusQuery {
                         host,
                         handle: result,
+                        values: eval_context.values().clone(),
                     });
                     let mut journal = S::Journal::default();
                     journal
@@ -517,7 +522,7 @@ fn evaluate_request(
                 return Ok(RequestResult::Return(tagged_result(
                     &keys::ERR,
                     Value::from_core(
-                        eval::halt_diagnostic_value(&error)
+                        eval::halt_diagnostic_value_with(context.values(), &error)
                             .expect("non-blocked evaluator error must have a failure value"),
                     ),
                 )));
@@ -556,16 +561,17 @@ fn task_join_context(task: EvaluationTaskId) -> CoreValue {
     CoreValue::Dict(Dict::new_sync().insert(Key::atom_from_text("task"), CoreValue::Dict(detail)))
 }
 
-fn task_status_query_value(status: EvaluationTaskStatus) -> CoreValue {
+fn task_status_query_value(values: &CoreValueFactory, status: EvaluationTaskStatus) -> CoreValue {
     match status {
         EvaluationTaskStatus::Launched => keys::LAUNCHED.to_value(),
         EvaluationTaskStatus::Blocked => keys::BLOCKED.to_value(),
         EvaluationTaskStatus::Complete(value) => {
             CoreValue::Dict(Dict::new_sync().insert((*keys::OK).clone(), value))
         }
-        EvaluationTaskStatus::Failed(error) => CoreValue::Dict(
-            Dict::new_sync().insert((*keys::ERR).clone(), eval::failure_diagnostic_value(&error)),
-        ),
+        EvaluationTaskStatus::Failed(error) => CoreValue::Dict(Dict::new_sync().insert(
+            (*keys::ERR).clone(),
+            eval::failure_diagnostic_value_with(values, &error),
+        )),
         EvaluationTaskStatus::Cancelled => keys::CANCELED.to_value(),
     }
 }

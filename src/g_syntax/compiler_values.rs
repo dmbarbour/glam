@@ -6,7 +6,7 @@
 //! lowered once, then cloned through its shared backing value.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::*;
 
@@ -28,15 +28,31 @@ struct GCompilerValues {
     macro_environment: Value,
 }
 
-static EFFECT_VALUES: LazyLock<Mutex<HashMap<Key, Value>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static COMPILER_VALUES: LazyLock<GCompilerValues> = LazyLock::new(GCompilerValues::build);
+struct GCompilerCache {
+    values: OnceLock<GCompilerValues>,
+    effects: Mutex<HashMap<Key, Value>>,
+}
+
+fn cache(values: &CoreValueFactory) -> Arc<GCompilerCache> {
+    values.cached(|| GCompilerCache {
+        values: OnceLock::new(),
+        effects: Mutex::new(HashMap::new()),
+    })
+}
+
+fn with_values<R>(values: &CoreValueFactory, use_values: impl FnOnce(&GCompilerValues) -> R) -> R {
+    let cache = cache(values);
+    let compiler_values = cache
+        .values
+        .get_or_init(|| GCompilerValues::build(values, &cache));
+    use_values(compiler_values)
+}
 
 impl GCompilerValues {
-    fn build() -> Self {
-        let not = build_not();
-        let could = build_could(not.clone());
-        let constant_object_defs = build_constant_object_defs();
+    fn build(values: &CoreValueFactory, cache: &GCompilerCache) -> Self {
+        let not = build_not(values, cache);
+        let could = build_could(values, not.clone());
+        let constant_object_defs = build_constant_object_defs(values);
 
         let math_value = Value::Dict(
             Dict::new_sync()
@@ -87,7 +103,7 @@ impl GCompilerValues {
         );
 
         let make_module = |value: Value| BuiltinModule {
-            definitions: apply_closed(constant_object_defs.clone(), [value.clone()]),
+            definitions: apply_closed(values, constant_object_defs.clone(), [value.clone()]),
             value,
         };
 
@@ -95,12 +111,12 @@ impl GCompilerValues {
             math: make_module(math_value),
             list: make_module(list_value),
             std: make_module(std_value),
-            empty_object_defs: build_empty_object_defs(),
+            empty_object_defs: build_empty_object_defs(values),
             constant_object_defs,
-            reflection_annotator: build_reflection_annotator(),
-            pure_if_runner: build_pure_conditional_runner(Builtin::IfResult),
-            pure_match_runner: build_pure_conditional_runner(Builtin::MatchResult),
-            macro_environment: build_macro_environment(),
+            reflection_annotator: build_reflection_annotator(values, cache),
+            pure_if_runner: build_pure_conditional_runner(values, Builtin::IfResult),
+            pure_match_runner: build_pure_conditional_runner(values, Builtin::MatchResult),
+            macro_environment: build_macro_environment(values),
         }
     }
 
@@ -113,75 +129,99 @@ impl GCompilerValues {
     }
 }
 
-pub(in crate::g_syntax) fn builtin_module(name: &str) -> Option<BuiltinModule> {
-    match name {
-        "math" => Some(COMPILER_VALUES.math.clone()),
-        "list" => Some(COMPILER_VALUES.list.clone()),
-        "std" | "prelude" => Some(COMPILER_VALUES.std.clone()),
+pub(in crate::g_syntax) fn builtin_module(
+    values: &CoreValueFactory,
+    name: &str,
+) -> Option<BuiltinModule> {
+    with_values(values, |compiler| match name {
+        "math" => Some(compiler.math.clone()),
+        "list" => Some(compiler.list.clone()),
+        "std" | "prelude" => Some(compiler.std.clone()),
         _ => None,
-    }
+    })
 }
 
 #[cfg(test)]
-pub(in crate::g_syntax) fn builtin_list_module() -> Dict {
-    value_dict(&COMPILER_VALUES.list.value)
+pub(in crate::g_syntax) fn builtin_list_module(values: &CoreValueFactory) -> Dict {
+    with_values(values, |compiler| value_dict(&compiler.list.value))
 }
 
-pub(in crate::g_syntax) fn empty_object_defs() -> Value {
-    COMPILER_VALUES.empty_object_defs.clone()
+pub(in crate::g_syntax) fn empty_object_defs(values: &CoreValueFactory) -> Value {
+    with_values(values, |compiler| compiler.empty_object_defs.clone())
 }
 
-pub(in crate::g_syntax) fn constant_object_defs(value: Value) -> Value {
-    apply_closed(COMPILER_VALUES.constant_object_defs.clone(), [value])
+pub(in crate::g_syntax) fn constant_object_defs(values: &CoreValueFactory, value: Value) -> Value {
+    let function = with_values(values, |compiler| compiler.constant_object_defs.clone());
+    apply_closed(values, function, [value])
 }
 
 pub(in crate::g_syntax) fn reflection_annotator_resolved(
+    values: &CoreValueFactory,
     guard: ResolvedExpr<Value>,
     final_defs: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
     ResolvedExpr::apply(
-        ResolvedExpr::Embedded(COMPILER_VALUES.reflection_annotator.clone()),
+        ResolvedExpr::Embedded(with_values(values, |compiler| {
+            compiler.reflection_annotator.clone()
+        })),
         [guard, final_defs],
     )
 }
 
-pub(in crate::g_syntax) fn reflection_annotator_value(guard: Value, final_defs: Value) -> Value {
-    evaluate_closed(reflection_annotator_resolved(
-        ResolvedExpr::Provided(guard),
-        ResolvedExpr::Provided(final_defs),
-    ))
+pub(in crate::g_syntax) fn reflection_annotator_value(
+    values: &CoreValueFactory,
+    guard: Value,
+    final_defs: Value,
+) -> Value {
+    evaluate_closed(
+        values,
+        reflection_annotator_resolved(
+            values,
+            ResolvedExpr::Provided(guard),
+            ResolvedExpr::Provided(final_defs),
+        ),
+    )
 }
 
 pub(in crate::g_syntax) fn run_pure_conditional_resolved(
+    values: &CoreValueFactory,
     operation: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
     ResolvedExpr::apply(
-        ResolvedExpr::Embedded(
-            COMPILER_VALUES
-                .pure_conditional_runner(Builtin::IfResult)
-                .clone(),
-        ),
+        ResolvedExpr::Embedded(with_values(values, |compiler| {
+            compiler.pure_conditional_runner(Builtin::IfResult).clone()
+        })),
         [operation],
     )
 }
 
 pub(in crate::g_syntax) fn run_pure_match_resolved(
+    values: &CoreValueFactory,
     search: ResolvedExpr<Value>,
     line: usize,
 ) -> ResolvedExpr<Value> {
+    let cache = cache(values);
     let exhausted = effect_call(
+        values,
+        &cache,
         "r",
-        [ResolvedExpr::Embedded(Value::error(format!(
-            "match exhausted on line {line}"
-        )))],
+        [ResolvedExpr::Embedded(Value::error(
+            values,
+            format!("match exhausted on line {line}"),
+        ))],
     );
-    let operation = effect_call("cut", [effect_call("alt", [search, exhausted])]);
+    let operation = effect_call(
+        values,
+        &cache,
+        "cut",
+        [effect_call(values, &cache, "alt", [search, exhausted])],
+    );
     ResolvedExpr::apply(
-        ResolvedExpr::Embedded(
-            COMPILER_VALUES
+        ResolvedExpr::Embedded(with_values(values, |compiler| {
+            compiler
                 .pure_conditional_runner(Builtin::MatchResult)
-                .clone(),
-        ),
+                .clone()
+        })),
         [operation],
     )
 }
@@ -194,23 +234,38 @@ pub(in crate::g_syntax) fn run_pure_open_match_resolved(
 
 /// Extends a file-provided macro environment through the language's ordinary
 /// `with` operation, introducing the authoritative language declaration.
-pub(in crate::g_syntax) fn macro_environment(base: Value, language: Value) -> Value {
-    apply_closed(COMPILER_VALUES.macro_environment.clone(), [base, language])
+pub(in crate::g_syntax) fn macro_environment(
+    values: &CoreValueFactory,
+    base: Value,
+    language: Value,
+) -> Value {
+    let function = with_values(values, |compiler| compiler.macro_environment.clone());
+    apply_closed(values, function, [base, language])
 }
 
-pub(in crate::g_syntax) fn effect_value(name: &str) -> Value {
-    effect_path_value(&[name])
+pub(in crate::g_syntax) fn effect_value(values: &CoreValueFactory, name: &str) -> Value {
+    effect_path_value(values, &[name])
 }
 
-pub(in crate::g_syntax) fn effect_path_value(path: &[&str]) -> Value {
+pub(in crate::g_syntax) fn effect_path_value(values: &CoreValueFactory, path: &[&str]) -> Value {
+    let cache = cache(values);
+    effect_path_value_with_cache(values, &cache, path)
+}
+
+fn effect_path_value_with_cache(
+    values: &CoreValueFactory,
+    cache: &GCompilerCache,
+    path: &[&str],
+) -> Value {
     let path: Arc<[Key]> = path.iter().map(Key::atom_from_text).collect();
     let cache_key = Key::List(path.clone());
-    let mut values = EFFECT_VALUES
+    let mut effects = cache
+        .effects
         .lock()
         .expect("g compiler effect-value cache must not be poisoned");
-    values
+    effects
         .entry(cache_key)
-        .or_insert_with(|| build_effect_path_value(path))
+        .or_insert_with(|| build_effect_path_value(values, path))
         .clone()
 }
 
@@ -222,17 +277,27 @@ fn value_dict(value: &Value) -> Dict {
     dict.clone()
 }
 
-fn apply_closed(function: Value, arguments: impl IntoIterator<Item = Value>) -> Value {
-    evaluate_closed(ResolvedExpr::apply(
-        ResolvedExpr::Embedded(function),
-        arguments.into_iter().map(ResolvedExpr::Provided),
-    ))
+fn apply_closed(
+    values: &CoreValueFactory,
+    function: Value,
+    arguments: impl IntoIterator<Item = Value>,
+) -> Value {
+    evaluate_closed(
+        values,
+        ResolvedExpr::apply(
+            ResolvedExpr::Embedded(function),
+            arguments.into_iter().map(ResolvedExpr::Provided),
+        ),
+    )
 }
 
-fn evaluate_closed(expression: ResolvedExpr<Value>) -> Value {
-    let value = lower_resolved_expr(expression);
-    crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), &value)
-        .expect("closed g compiler helper must evaluate without session capabilities")
+fn evaluate_closed(values: &CoreValueFactory, expression: ResolvedExpr<Value>) -> Value {
+    let value = lower_resolved_expr(values, expression);
+    crate::eval::eval_value(
+        &crate::evaluation::EvalContext::isolated(values.clone()),
+        &value,
+    )
+    .expect("closed g compiler helper must evaluate without session capabilities")
 }
 
 fn apply_builtin(
@@ -243,17 +308,27 @@ fn apply_builtin(
 }
 
 fn effect_call(
+    values: &CoreValueFactory,
+    cache: &GCompilerCache,
     name: &str,
     arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
 ) -> ResolvedExpr<Value> {
-    ResolvedExpr::apply(ResolvedExpr::Embedded(effect_value(name)), arguments)
+    ResolvedExpr::apply(
+        ResolvedExpr::Embedded(effect_path_value_with_cache(values, cache, &[name])),
+        arguments,
+    )
 }
 
 fn effect_path_call(
+    values: &CoreValueFactory,
+    cache: &GCompilerCache,
     path: &[&str],
     arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
 ) -> ResolvedExpr<Value> {
-    ResolvedExpr::apply(ResolvedExpr::Embedded(effect_path_value(path)), arguments)
+    ResolvedExpr::apply(
+        ResolvedExpr::Embedded(effect_path_value_with_cache(values, cache, path)),
+        arguments,
+    )
 }
 
 fn assert_unit(
@@ -272,6 +347,8 @@ fn assert_unit(
 }
 
 fn effect_then(
+    values: &CoreValueFactory,
+    cache: &GCompilerCache,
     operation: ResolvedExpr<Value>,
     next: ResolvedExpr<Value>,
     diagnostic_context: &'static str,
@@ -284,10 +361,10 @@ fn effect_then(
         assert_unit(diagnostic_context, ResolvedExpr::Local(result), next),
     );
     locals.truncate(base_len);
-    effect_call("seq", [operation, continuation])
+    effect_call(values, cache, "seq", [operation, continuation])
 }
 
-fn build_effect_path_value(path: Arc<[Key]>) -> Value {
+fn build_effect_path_value(values: &CoreValueFactory, path: Arc<[Key]>) -> Value {
     let mut locals = ResolverContext::default();
     let api = locals.push_internal_binding("<effect-api>");
     let body = ResolvedExpr::Access {
@@ -301,57 +378,75 @@ fn build_effect_path_value(path: Arc<[Key]>) -> Value {
             ResolvedExpr::lambda(vec![api], body),
         ],
     );
-    evaluate_closed(effect)
+    evaluate_closed(values, effect)
 }
 
-fn build_not() -> Value {
+fn build_not(values: &CoreValueFactory, cache: &GCompilerCache) -> Value {
     let mut locals = ResolverContext::default();
     let condition = locals.push_internal_binding("<not-condition>");
-    let fail_operation = ResolvedExpr::Embedded(effect_value("fail"));
-    let true_operation = effect_call("r", [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())]);
-    let returned_failure = effect_call("r", [fail_operation]);
+    let fail_operation =
+        ResolvedExpr::Embedded(effect_path_value_with_cache(values, cache, &["fail"]));
+    let true_operation = effect_call(
+        values,
+        cache,
+        "r",
+        [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())],
+    );
+    let returned_failure = effect_call(values, cache, "r", [fail_operation]);
     let fail_if_condition_succeeds = effect_then(
+        values,
+        cache,
         ResolvedExpr::Local(condition),
         returned_failure,
         "`not` condition",
         &mut locals,
     );
-    let succeed_if_condition_fails = effect_call("r", [true_operation]);
+    let succeed_if_condition_fails = effect_call(values, cache, "r", [true_operation]);
     let alternate = effect_call(
+        values,
+        cache,
         "alt",
         [fail_if_condition_succeeds, succeed_if_condition_fails],
     );
-    let select_operation = effect_call("cut", [alternate]);
+    let select_operation = effect_call(values, cache, "cut", [alternate]);
     let selected = locals.push_internal_binding("<selected-operation>");
     let run_selected_operation =
         ResolvedExpr::lambda(vec![selected], ResolvedExpr::Local(selected));
-    let body = effect_call("seq", [select_operation, run_selected_operation]);
-    evaluate_closed(ResolvedExpr::lambda(vec![condition], body))
+    let body = effect_call(
+        values,
+        cache,
+        "seq",
+        [select_operation, run_selected_operation],
+    );
+    evaluate_closed(values, ResolvedExpr::lambda(vec![condition], body))
 }
 
-fn build_could(not: Value) -> Value {
+fn build_could(values: &CoreValueFactory, not: Value) -> Value {
     let mut locals = ResolverContext::default();
     let condition = locals.push_internal_binding("<could-condition>");
     let inner = ResolvedExpr::apply(
         ResolvedExpr::Embedded(not.clone()),
         [ResolvedExpr::Local(condition)],
     );
-    evaluate_closed(ResolvedExpr::lambda(
-        vec![condition],
-        ResolvedExpr::apply(ResolvedExpr::Embedded(not), [inner]),
-    ))
+    evaluate_closed(
+        values,
+        ResolvedExpr::lambda(
+            vec![condition],
+            ResolvedExpr::apply(ResolvedExpr::Embedded(not), [inner]),
+        ),
+    )
 }
 
-fn build_pure_conditional_runner(selector: Builtin) -> Value {
+fn build_pure_conditional_runner(values: &CoreValueFactory, selector: Builtin) -> Value {
     assert!(matches!(selector, Builtin::IfResult | Builtin::MatchResult));
     let mut locals = ResolverContext::default();
     let operation = locals.push_internal_binding("<conditional-operation>");
     let results = apply_builtin(Builtin::ListEffect, [ResolvedExpr::Local(operation)]);
     let selected = apply_builtin(selector, [results]);
-    evaluate_closed(ResolvedExpr::lambda(vec![operation], selected))
+    evaluate_closed(values, ResolvedExpr::lambda(vec![operation], selected))
 }
 
-fn build_macro_environment() -> Value {
+fn build_macro_environment(values: &CoreValueFactory) -> Value {
     let mut locals = ResolverContext::default();
     let environment_parameter = locals.push_internal_binding("<macro-environment>");
     let language_parameter = locals.push_internal_binding("<macro-language>");
@@ -401,13 +496,13 @@ fn build_macro_environment() -> Value {
         Builtin::ObjectWithDefs,
         [ResolvedExpr::Local(environment_parameter), definitions],
     );
-    evaluate_closed(ResolvedExpr::lambda(
-        vec![environment_parameter, language_parameter],
-        result,
-    ))
+    evaluate_closed(
+        values,
+        ResolvedExpr::lambda(vec![environment_parameter, language_parameter], result),
+    )
 }
 
-fn build_empty_object_defs() -> Value {
+fn build_empty_object_defs(values: &CoreValueFactory) -> Value {
     let mut locals = ResolverContext::default();
     let prior_self = locals.push_internal_binding("<object-prior-self>");
     let final_self = locals.push_internal_binding("<object-final-self>");
@@ -421,24 +516,27 @@ fn build_empty_object_defs() -> Value {
             ResolvedExpr::Local(prior_self),
         ],
     );
-    evaluate_closed(ResolvedExpr::lambda(
-        vec![prior_self, final_self],
-        without_spec,
-    ))
+    evaluate_closed(
+        values,
+        ResolvedExpr::lambda(vec![prior_self, final_self], without_spec),
+    )
 }
 
-fn build_constant_object_defs() -> Value {
+fn build_constant_object_defs(values: &CoreValueFactory) -> Value {
     let mut locals = ResolverContext::default();
     let value = locals.push_internal_binding("<constant-object-definitions>");
     let prior_self = locals.push_internal_binding("<object-prior-self>");
     let final_self = locals.push_internal_binding("<object-final-self>");
-    evaluate_closed(ResolvedExpr::lambda(
-        vec![value, prior_self, final_self],
-        ResolvedExpr::Local(value),
-    ))
+    evaluate_closed(
+        values,
+        ResolvedExpr::lambda(
+            vec![value, prior_self, final_self],
+            ResolvedExpr::Local(value),
+        ),
+    )
 }
 
-fn build_reflection_annotator() -> Value {
+fn build_reflection_annotator(values: &CoreValueFactory, cache: &GCompilerCache) -> Value {
     let mut locals = ResolverContext::default();
     let guard = locals.push_internal_binding("<reflection-guard>");
     let final_defs = locals.push_internal_binding("<reflection-final-definitions>");
@@ -461,8 +559,15 @@ fn build_reflection_annotator() -> Value {
         path: vec![ResolvedPathPart::Key(name_as_key(name))],
     };
     let require_unit = effect_then(
+        values,
+        cache,
         item_field("value"),
-        effect_call("r", [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())]),
+        effect_call(
+            values,
+            cache,
+            "r",
+            [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())],
+        ),
         "`refl.*` task result",
         &mut locals,
     );
@@ -487,10 +592,12 @@ fn build_reflection_annotator() -> Value {
         ],
     );
     let launch_item = effect_call(
+        values,
+        cache,
         "seq",
         [
-            effect_path_call(&["task", "new"], [require_unit]),
-            ResolvedExpr::lambda(vec![handle], effect_call("r", [task_record])),
+            effect_path_call(values, cache, &["task", "new"], [require_unit]),
+            ResolvedExpr::lambda(vec![handle], effect_call(values, cache, "r", [task_record])),
         ],
     );
     let launcher = ResolvedExpr::lambda(vec![item], launch_item);
@@ -502,32 +609,44 @@ fn build_reflection_annotator() -> Value {
     );
     let records = locals.push_internal_binding("<reflection-task-records>");
     let store_records = effect_path_call(
+        values,
+        cache,
         &["heap", "set"],
         [state_path("tasks"), ResolvedExpr::Local(records)],
     );
     let map_and_store = effect_call(
+        values,
+        cache,
         "cut",
         [effect_call(
+            values,
+            cache,
             "seq",
             [mapped, ResolvedExpr::lambda(vec![records], store_records)],
         )],
     );
     let scanner = effect_call(
+        values,
+        cache,
         "seq",
         [
-            effect_call("dict_items", [final_refl]),
+            effect_call(values, cache, "dict_items", [final_refl]),
             ResolvedExpr::lambda(vec![items], map_and_store),
         ],
     );
 
     let scanner_handle = locals.push_internal_binding("<reflection-scanner-handle>");
     let launch_and_remember = effect_call(
+        values,
+        cache,
         "seq",
         [
-            effect_path_call(&["task", "new"], [scanner]),
+            effect_path_call(values, cache, &["task", "new"], [scanner]),
             ResolvedExpr::lambda(
                 vec![scanner_handle],
                 effect_path_call(
+                    values,
+                    cache,
                     &["heap", "set"],
                     [state_path("claim"), ResolvedExpr::Local(scanner_handle)],
                 ),
@@ -543,19 +662,30 @@ fn build_reflection_annotator() -> Value {
         ],
     );
     let start_if_missing = effect_then(
+        values,
+        cache,
         guard_is_empty,
         launch_and_remember,
         "automatic reflection boundary claim test",
         &mut locals,
     );
-    let already_started = effect_call("r", [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())]);
-    let choose = effect_call("alt", [start_if_missing, already_started]);
+    let already_started = effect_call(
+        values,
+        cache,
+        "r",
+        [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())],
+    );
+    let choose = effect_call(values, cache, "alt", [start_if_missing, already_started]);
     let ensure_tasks = effect_call(
+        values,
+        cache,
         "cut",
         [effect_call(
+            values,
+            cache,
             "seq",
             [
-                effect_path_call(&["heap", "get"], [state_path("claim")]),
+                effect_path_call(values, cache, &["heap", "get"], [state_path("claim")]),
                 ResolvedExpr::lambda(vec![existing], choose),
             ],
         )],
@@ -568,10 +698,10 @@ fn build_reflection_annotator() -> Value {
         ],
     );
     let annotated = apply_builtin(Builtin::Anno, [annotation, ResolvedExpr::Local(target)]);
-    evaluate_closed(ResolvedExpr::lambda(
-        vec![guard, final_defs, target],
-        annotated,
-    ))
+    evaluate_closed(
+        values,
+        ResolvedExpr::lambda(vec![guard, final_defs, target], annotated),
+    )
 }
 
 #[cfg(test)]
@@ -581,52 +711,54 @@ mod tests {
 
     #[test]
     fn closed_compiler_values_are_cached_after_exposing_their_functions() {
-        let first_effect = effect_value("compiler_cache_test");
-        let second_effect = effect_value("compiler_cache_test");
+        let values = crate::core::test_value_factory();
+        let first_effect = effect_value(&values, "compiler_cache_test");
+        let second_effect = effect_value(&values, "compiler_cache_test");
         assert_eq!(first_effect, second_effect);
         assert!(matches!(first_effect, Value::Dict(_)));
 
-        let first_std = builtin_module("std").expect("std should be built in");
-        let second_std = builtin_module("std").expect("std should remain built in");
+        let first_std = builtin_module(&values, "std").expect("std should be built in");
+        let second_std = builtin_module(&values, "std").expect("std should remain built in");
         assert_eq!(first_std.value, second_std.value);
         assert_eq!(first_std.definitions, second_std.definitions);
         assert!(matches!(first_std.definitions, Value::Function(_)));
-        assert!(matches!(
-            COMPILER_VALUES.reflection_annotator,
-            Value::Function(_)
-        ));
-        assert!(matches!(COMPILER_VALUES.pure_if_runner, Value::Function(_)));
-        assert!(matches!(
-            COMPILER_VALUES.pure_match_runner,
-            Value::Function(_)
-        ));
-        assert!(matches!(
-            COMPILER_VALUES.macro_environment,
-            Value::Function(_)
-        ));
+        with_values(&values, |compiler| {
+            assert!(matches!(compiler.reflection_annotator, Value::Function(_)));
+            assert!(matches!(compiler.pure_if_runner, Value::Function(_)));
+            assert!(matches!(compiler.pure_match_runner, Value::Function(_)));
+            assert!(matches!(compiler.macro_environment, Value::Function(_)));
+        });
     }
 
     #[test]
     fn macro_environment_extends_a_dictionary_with_ordinary_introduction_rules() {
+        let values = crate::core::test_value_factory();
         let base = Value::Dict(
             Dict::new_sync().insert(name_as_key("existing"), Value::Number(Number::integer(1))),
         );
-        let environment = macro_environment(base, Value::binary_from_text("g0"));
+        let environment = macro_environment(&values, base, Value::binary_from_text("g0"));
 
-        let existing = evaluate_closed(ResolvedExpr::Access {
-            base: Box::new(ResolvedExpr::Provided(environment.clone())),
-            path: vec![ResolvedPathPart::Key(name_as_key("existing"))],
-        });
-        let language = evaluate_closed(ResolvedExpr::Access {
-            base: Box::new(ResolvedExpr::Provided(environment)),
-            path: vec![ResolvedPathPart::Key(name_as_key("language"))],
-        });
+        let existing = evaluate_closed(
+            &values,
+            ResolvedExpr::Access {
+                base: Box::new(ResolvedExpr::Provided(environment.clone())),
+                path: vec![ResolvedPathPart::Key(name_as_key("existing"))],
+            },
+        );
+        let language = evaluate_closed(
+            &values,
+            ResolvedExpr::Access {
+                base: Box::new(ResolvedExpr::Provided(environment)),
+                path: vec![ResolvedPathPart::Key(name_as_key("language"))],
+            },
+        );
         assert_eq!(existing, Value::Number(Number::integer(1)));
         assert_eq!(language, Value::binary_from_text("g0"));
     }
 
     #[test]
     fn macro_environment_reinstantiates_an_adapting_object() {
+        let values = crate::core::test_value_factory();
         let mut locals = ResolverContext::default();
         let base = locals.push_internal_binding("<base>");
         let self_value = locals.push_internal_binding("<self>");
@@ -647,19 +779,25 @@ mod tests {
                 ],
             ),
         );
-        let object = evaluate_closed(apply_builtin(
-            Builtin::ObjectInstanceFromParts,
-            [
-                ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
-                ResolvedExpr::List(Vec::new()),
-                definitions,
-            ],
-        ));
-        let environment = macro_environment(object, Value::binary_from_text("g0"));
-        let adapted = evaluate_closed(ResolvedExpr::Access {
-            base: Box::new(ResolvedExpr::Provided(environment)),
-            path: vec![ResolvedPathPart::Key(name_as_key("adapted"))],
-        });
+        let object = evaluate_closed(
+            &values,
+            apply_builtin(
+                Builtin::ObjectInstanceFromParts,
+                [
+                    ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
+                    ResolvedExpr::List(Vec::new()),
+                    definitions,
+                ],
+            ),
+        );
+        let environment = macro_environment(&values, object, Value::binary_from_text("g0"));
+        let adapted = evaluate_closed(
+            &values,
+            ResolvedExpr::Access {
+                base: Box::new(ResolvedExpr::Provided(environment)),
+                path: vec![ResolvedPathPart::Key(name_as_key("adapted"))],
+            },
+        );
         assert_eq!(adapted, Value::binary_from_text("g0"));
     }
 }

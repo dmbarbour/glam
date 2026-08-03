@@ -38,8 +38,9 @@ mod tests {
     use super::*;
 
     fn select(builtin: Builtin, values: Vec<Value>) -> Result<Value, EvaluationHalt> {
+        let context = crate::eval::test_support::test_context();
         apply(
-            &EvalContext::standalone(),
+            &context,
             builtin,
             vec![Value::List(List::from_values(values))],
         )
@@ -63,10 +64,14 @@ mod tests {
     fn selection_does_not_force_the_branch_result() {
         let forced = Arc::new(AtomicBool::new(false));
         let forced_by_thunk = forced.clone();
-        let selected = Value::deferred("selected conditional result", move |_| {
-            forced_by_thunk.store(true, Ordering::Relaxed);
-            Err(EvaluationHalt::new("selected result was forced"))
-        });
+        let selected = Value::deferred(
+            &crate::core::test_value_factory(),
+            "selected conditional result",
+            move |_| {
+                forced_by_thunk.store(true, Ordering::Relaxed);
+                Err(EvaluationHalt::new("selected result was forced"))
+            },
+        );
 
         let result = select(Builtin::IfResult, vec![selected])
             .expect("selection should not observe the chosen result");

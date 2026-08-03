@@ -238,6 +238,7 @@ impl<'source> StagedSourceParser<'source> {
             }
         };
         let environment = super::super::compiler_values::macro_environment(
+            context.values(),
             base_environment,
             declared_language_value(language),
         );
@@ -260,6 +261,7 @@ impl<'source> StagedSourceParser<'source> {
                 Ok(effect) if effect != Value::Dict(Dict::new_sync()) => effect,
                 Ok(_) => {
                     self.diagnostics.push(macro_compiler_diagnostic(
+                        context.values(),
                         &original,
                         format!("macro `{}` is not defined", original.path.join(".")),
                         None,
@@ -270,6 +272,7 @@ impl<'source> StagedSourceParser<'source> {
                 }
                 Err(error) => {
                     self.diagnostics.push(macro_compiler_diagnostic(
+                        context.values(),
                         &original,
                         format!(
                             "macro `{}` could not be selected: {error}",
@@ -308,6 +311,7 @@ impl<'source> StagedSourceParser<'source> {
                         format!(" at input line {line}, column {column}")
                     });
                     self.diagnostics.push(macro_compiler_diagnostic(
+                        context.values(),
                         &original,
                         format!(
                             "macro `{}` failed{position_detail}: {}{case_detail}",
@@ -327,6 +331,7 @@ impl<'source> StagedSourceParser<'source> {
                 self.diagnostics
                     .extend(diagnostics.into_iter().map(|diagnostic| {
                         macro_compiler_diagnostic(
+                            context.values(),
                             &original,
                             format!(
                                 "macro `{}` generated invalid source structure: {}",
@@ -353,6 +358,7 @@ impl<'source> StagedSourceParser<'source> {
             for (_, original, diagnostics) in macro_diagnostics {
                 for diagnostic in diagnostics {
                     let emission = apply_macro_context(
+                        context.values(),
                         diagnostic.emission().as_core().clone(),
                         None,
                         &[],
@@ -380,6 +386,7 @@ impl<'source> StagedSourceParser<'source> {
                     excerpt.clone()
                 };
                 *diagnostic = macro_compiler_diagnostic(
+                    context.values(),
                     primary,
                     format!(
                         "expanded declaration is invalid `.g` syntax (generated line {parser_line}): {parser_message}; expansion: `{excerpt}`"
@@ -444,6 +451,7 @@ fn validate_inspected_language_position(
 }
 
 fn macro_compiler_diagnostic(
+    values: &crate::core::CoreValueFactory,
     invocation: &OriginalMacroInvocation,
     message: String,
     frontier: Option<(usize, usize, usize)>,
@@ -451,11 +459,12 @@ fn macro_compiler_diagnostic(
     frames: &[OriginalMacroInvocation],
 ) -> Diagnostic {
     let emission = crate::diagnostic::text_message(Some(invocation.line), &message);
-    let emission = apply_macro_context(emission, frontier, cases, frames);
+    let emission = apply_macro_context(values, emission, frontier, cases, frames);
     Diagnostic::error(invocation.line, message).with_emission(emission)
 }
 
 fn apply_macro_context(
+    values: &crate::core::CoreValueFactory,
     message: Value,
     frontier: Option<(usize, usize, usize)>,
     cases: &[PublicValue],
@@ -493,7 +502,7 @@ fn apply_macro_context(
     }
     let updates =
         Value::Dict(Dict::new_sync().insert(Key::atom_from_text("macro"), Value::Dict(context)));
-    crate::diagnostic::apply_emission_updates(message.clone(), updates).unwrap_or(message)
+    crate::diagnostic::apply_emission_updates(values, message.clone(), updates).unwrap_or(message)
 }
 
 fn macro_frame_value(frame: &OriginalMacroInvocation) -> Value {

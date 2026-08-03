@@ -13,7 +13,7 @@ use std::sync::{Arc, LazyLock, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use crate::api::Value as PublicValue;
-use crate::core::{Atom, Builtin, Dict, Key, LazyValue, List, Value, keys};
+use crate::core::{Atom, Builtin, CoreValueFactory, Dict, Key, LazyValue, List, Value, keys};
 use crate::core_net::CoreDataKey;
 use crate::number::Number;
 
@@ -421,6 +421,7 @@ pub struct StoreSnapshot {
     query_domain: Arc<QueryDomain>,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
+    values: CoreValueFactory,
 }
 
 impl StoreSnapshot {
@@ -447,6 +448,7 @@ impl StoreSnapshot {
         };
         EvaluationQueryPoll::State {
             value: PublicValue::from_core(lazy_core_value_path(
+                &self.values,
                 root.as_core().clone(),
                 &query_path(handle.id),
             )),
@@ -603,6 +605,7 @@ impl StoreJournal {
         };
         EvaluationQueryPoll::State {
             value: PublicValue::from_core(lazy_core_value_path(
+                &self.snapshot.values,
                 root.into_core(),
                 &query_path(handle.id),
             )),
@@ -620,7 +623,8 @@ impl StoreJournal {
             value,
         };
         if let Some(view) = self.views.get(&volume).cloned() {
-            self.views.insert_mut(volume, apply_edit(view, &edit));
+            self.views
+                .insert_mut(volume, apply_edit(&self.snapshot.values, view, &edit));
         }
         self.edits.push(edit);
     }
@@ -640,7 +644,8 @@ impl StoreJournal {
             updater,
         };
         if let Some(view) = self.views.get(&volume).cloned() {
-            self.views.insert_mut(volume, apply_edit(view, &edit));
+            self.views
+                .insert_mut(volume, apply_edit(&self.snapshot.values, view, &edit));
         }
         self.edits.push(edit);
     }
@@ -666,10 +671,14 @@ pub struct ReflectionStore {
     revision: u64,
     latest_changes: BTreeMap<ConflictAddress, u64>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
+    values: CoreValueFactory,
 }
 
 impl ReflectionStore {
-    pub fn new(strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
+    pub(crate) fn new(
+        values: CoreValueFactory,
+        strategy: Arc<dyn ConflictAnalysisStrategy>,
+    ) -> Self {
         let heap_volume = VolumeId::from_u64(1).expect("one is a nonzero volume ID");
         let runtime_volume = VolumeId::from_u64(2).expect("two is a nonzero volume ID");
         let (query_domain, query_retirements) = QueryDomain::new();
@@ -686,6 +695,7 @@ impl ReflectionStore {
             revision: 0,
             latest_changes: BTreeMap::new(),
             strategy,
+            values,
         }
     }
 
@@ -699,6 +709,7 @@ impl ReflectionStore {
             query_domain: self.query_domain.clone(),
             roots: self.roots.clone(),
             strategy: self.strategy.clone(),
+            values: self.values.clone(),
         }
     }
 
@@ -823,7 +834,7 @@ impl ReflectionStore {
         {
             journal.views.clone()
         } else {
-            apply_edits(self.roots.clone(), &journal.edits)
+            apply_edits(&self.values, self.roots.clone(), &journal.edits)
         };
         self.revision = self.revision.wrapping_add(1);
         for path in normalized_edit_paths(&journal.edits) {
@@ -844,7 +855,7 @@ impl ReflectionStore {
         self.revision = self.revision.wrapping_add(1);
         for id in retired {
             let path = ConflictPath::from_keys(query_path(id));
-            root = apply_value_at_path(root, &path, Value::Dict(Dict::new_sync()));
+            root = apply_value_at_path(&self.values, root, &path, Value::Dict(Dict::new_sync()));
             self.latest_changes.insert(
                 ConflictAddress::reflection(self.runtime_volume, path),
                 self.revision,
@@ -878,6 +889,7 @@ fn normalized_edit_paths(edits: &[StoreEdit]) -> Vec<ConflictAddress> {
 }
 
 fn apply_edits(
+    values: &CoreValueFactory,
     mut roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     edits: &[StoreEdit],
 ) -> RedBlackTreeMapSync<VolumeId, PublicValue> {
@@ -891,7 +903,7 @@ fn apply_edits(
             .get(&volume)
             .cloned()
             .expect("commit validates every edited volume before replay");
-        roots.insert_mut(volume, apply_edit(root, edit));
+        roots.insert_mut(volume, apply_edit(values, root, edit));
     }
     roots
 }
@@ -969,29 +981,35 @@ pub(crate) fn decode_query_state(value: &Value) -> Option<EvaluationQueryState> 
     )))
 }
 
-fn apply_edit(root: PublicValue, edit: &StoreEdit) -> PublicValue {
+fn apply_edit(values: &CoreValueFactory, root: PublicValue, edit: &StoreEdit) -> PublicValue {
     match edit {
         StoreEdit::Set { address, value } => {
             let (_, path) = address
                 .reflection_parts()
                 .expect("store edits contain only reflection addresses");
-            apply_value_at_path(root, path, value.as_core().clone())
+            apply_value_at_path(values, root, path, value.as_core().clone())
         }
         StoreEdit::Rewrite { address, updater } => {
             let (_, path) = address
                 .reflection_parts()
                 .expect("store edits contain only reflection addresses");
-            let prior = lazy_core_value_path(root.as_core().clone(), path.keys());
+            let prior = lazy_core_value_path(values, root.as_core().clone(), path.keys());
             let updated = Value::Lazy(LazyValue::from_application(
+                values,
                 updater.as_core().clone(),
                 Arc::from([prior]),
             ));
-            apply_value_at_path(root, path, updated)
+            apply_value_at_path(values, root, path, updated)
         }
     }
 }
 
-fn apply_value_at_path(root: PublicValue, path: &ConflictPath, value: Value) -> PublicValue {
+fn apply_value_at_path(
+    values: &CoreValueFactory,
+    root: PublicValue,
+    path: &ConflictPath,
+    value: Value,
+) -> PublicValue {
     if path.depth() == 0 {
         return PublicValue::from_core(value);
     }
@@ -999,16 +1017,18 @@ fn apply_value_at_path(root: PublicValue, path: &ConflictPath, value: Value) -> 
         path.keys().iter().cloned().map(key_value).collect(),
     ));
     PublicValue::from_core(Value::builtin_call(
+        values,
         Builtin::DictUpdate,
         vec![path, value, root.into_core()],
     ))
 }
 
-fn lazy_core_value_path(value: Value, path: &[Key]) -> Value {
+fn lazy_core_value_path(values: &CoreValueFactory, value: Value, path: &[Key]) -> Value {
     if path.is_empty() {
         return value;
     }
     Value::Lazy(LazyValue::from_access(
+        values,
         Arc::from(
             path.iter()
                 .cloned()
@@ -1055,7 +1075,10 @@ mod tests {
     }
 
     fn store() -> ReflectionStore {
-        ReflectionStore::new(Arc::new(ExactConflictAnalysis))
+        ReflectionStore::new(
+            crate::core::test_value_factory(),
+            Arc::new(ExactConflictAnalysis),
+        )
     }
 
     fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &PublicValue) {
@@ -1131,6 +1154,7 @@ mod tests {
         assert_eq!(store.try_commit(&maintenance), StoreCommitResult::Committed);
         let root = store.roots.get(&store.runtime_volume).unwrap();
         let retired = PublicValue::from_core(lazy_core_value_path(
+            &store.values,
             root.as_core().clone(),
             &query_path(id),
         ));

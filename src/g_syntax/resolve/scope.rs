@@ -300,8 +300,11 @@ mod resolver_context_tests {
     fn direct_net_emitter_wires_identity_without_a_fan_or_erase() {
         let mut resolver = ResolverContext::default();
         let parameter = resolver.fresh_binding();
-        let net =
-            ResolvedNetLowerer::lower_template(vec![parameter], ResolvedExpr::Local(parameter));
+        let net = ResolvedNetLowerer::lower_template(
+            &crate::core::test_value_factory(),
+            vec![parameter],
+            ResolvedExpr::Local(parameter),
+        );
 
         assert_eq!(
             net.nodes()
@@ -322,8 +325,11 @@ mod resolver_context_tests {
     fn direct_net_emitter_erases_unused_parameters() {
         let mut resolver = ResolverContext::default();
         let parameter = resolver.fresh_binding();
-        let net =
-            ResolvedNetLowerer::lower_template(vec![parameter], ResolvedExpr::Embedded(unit()));
+        let net = ResolvedNetLowerer::lower_template(
+            &crate::core::test_value_factory(),
+            vec![parameter],
+            ResolvedExpr::Embedded(unit()),
+        );
 
         assert!(net.nodes().iter().any(|node| matches!(node, Node::Erase)));
     }
@@ -336,7 +342,11 @@ mod resolver_context_tests {
             ResolvedExpr::Local(parameter),
             [ResolvedExpr::Local(parameter)],
         );
-        let net = ResolvedNetLowerer::lower_template(vec![parameter], body);
+        let net = ResolvedNetLowerer::lower_template(
+            &crate::core::test_value_factory(),
+            vec![parameter],
+            body,
+        );
 
         assert_eq!(
             net.nodes()
@@ -352,8 +362,11 @@ mod resolver_context_tests {
         let mut resolver = ResolverContext::default();
         let first = resolver.fresh_binding();
         let second = resolver.fresh_binding();
-        let net =
-            ResolvedNetLowerer::lower_template(vec![first, second], ResolvedExpr::Local(first));
+        let net = ResolvedNetLowerer::lower_template(
+            &crate::core::test_value_factory(),
+            vec![first, second],
+            ResolvedExpr::Local(first),
+        );
 
         assert_eq!(
             net.nodes()
@@ -369,8 +382,11 @@ mod resolver_context_tests {
         let mut resolver = ResolverContext::default();
         let parameter = resolver.fresh_binding();
         let capture = resolver.fresh_binding();
-        let (code, captures) =
-            ResolvedNetLowerer::lower_code(vec![parameter], ResolvedExpr::Local(capture));
+        let (code, captures) = ResolvedNetLowerer::lower_code(
+            &crate::core::test_value_factory(),
+            vec![parameter],
+            ResolvedExpr::Local(capture),
+        );
 
         assert_eq!(code.arity(), 1);
         assert_eq!(code.capture_count(), 1);
@@ -450,6 +466,7 @@ impl NameScope<Value> {
     ) -> Self {
         let reflection = ReflectionBoundary {
             annotator: compiler_values::reflection_annotator_value(
+                context.values(),
                 context.abstract_global_path("refl"),
                 context.final_defs().clone(),
             ),

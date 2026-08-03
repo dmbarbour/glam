@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::core::{Builtin, Dict, List, OpaqueValue, Value, keys};
+use crate::core::{Builtin, CoreValueFactory, Dict, List, OpaqueValue, Value, keys};
 use crate::eval;
 use crate::number::Number;
 use crate::source::{ContentDigest, SourceArtifact, SourceIdentity};
@@ -212,11 +212,12 @@ pub(crate) fn assembler_metadata(severity: Severity, origin: Option<Value>) -> D
 /// operation separate lets observers add their own context without mutating
 /// the original emission.
 pub(crate) fn apply_updates(
+    values: &CoreValueFactory,
     message: Value,
     updates: Value,
 ) -> Result<Value, crate::core::EvaluationHalt> {
-    let context = crate::evaluation::EvalContext::standalone();
-    let extension_defs = Value::builtin_call(Builtin::ObjectOverrideDefs, vec![updates]);
+    let context = crate::evaluation::EvalContext::isolated(values.clone());
+    let extension_defs = Value::builtin_call(values, Builtin::ObjectOverrideDefs, vec![updates]);
     let value = eval::apply_values(
         &context,
         Value::Builtin(Builtin::ObjectWithDefs),
@@ -229,11 +230,12 @@ pub(crate) fn apply_updates(
 /// independent compiler- or observer-owned mixin without changing the source
 /// emission.
 pub(crate) fn apply_emission_updates(
+    values: &CoreValueFactory,
     message: Value,
     updates: Value,
 ) -> Result<Value, crate::core::EvaluationHalt> {
-    let message = diagnostic_object(message)?;
-    apply_updates(message, updates)
+    let message = diagnostic_object(values, message)?;
+    apply_updates(values, message, updates)
 }
 
 /// Prepends one semantic demand frame to the conventional diagnostic context.
@@ -255,15 +257,48 @@ pub(crate) fn prepend_contexts(
     message: Value,
     contexts: &[Value],
 ) -> Result<Value, crate::core::EvaluationHalt> {
-    let message = diagnostic_object(message)?;
+    let Value::Dict(message) = message else {
+        return Err(crate::core::EvaluationHalt::new(
+            "diagnostic context requires an immediately structured diagnostic",
+        ));
+    };
+    let interface = match message.get(&*keys::MSG) {
+        Some(Value::Dict(interface)) => interface.clone(),
+        _ => Dict::new_sync(),
+    };
+    let existing = match interface.get(&*keys::CONTEXT) {
+        Some(Value::List(contexts)) => contexts.clone(),
+        Some(context) => List::from_values(vec![context.clone()]),
+        None => List::empty(),
+    };
+    let contexts = List::concat(List::from_values(contexts.to_vec()), existing);
+    let interface = interface.insert((*keys::CONTEXT).clone(), Value::List(contexts));
+    Ok(Value::Dict(
+        message.insert((*keys::MSG).clone(), Value::Dict(interface)),
+    ))
+}
+
+/// Runtime-aware context projection for evaluator failures. Unlike the
+/// structural fast path, this may demand an error emission far enough to
+/// expose its diagnostic object before adding the context list.
+pub(crate) fn prepend_contexts_with(
+    values: &CoreValueFactory,
+    message: Value,
+    contexts: &[Value],
+) -> Result<Value, crate::core::EvaluationHalt> {
+    let message = diagnostic_object(values, message)?;
+    let context = crate::evaluation::EvalContext::isolated(values.clone());
     let existing = match &message {
         Value::Dict(message) => match message.get(&*keys::MSG) {
-            Some(Value::Dict(interface)) => match interface.get(&*keys::CONTEXT) {
-                Some(Value::List(contexts)) => contexts.clone(),
-                Some(context) => List::from_values(vec![context.clone()]),
-                None => List::empty(),
+            Some(interface) => match eval::eval_value(&context, interface)? {
+                Value::Dict(interface) => match interface.get(&*keys::CONTEXT) {
+                    Some(Value::List(contexts)) => contexts.clone(),
+                    Some(context) => List::from_values(vec![context.clone()]),
+                    None => List::empty(),
+                },
+                _ => List::empty(),
             },
-            _ => List::empty(),
+            None => List::empty(),
         },
         _ => unreachable!("diagnostic_object always returns a dictionary"),
     };
@@ -272,22 +307,30 @@ pub(crate) fn prepend_contexts(
         (*keys::MSG).clone(),
         Value::Dict(Dict::new_sync().insert((*keys::CONTEXT).clone(), Value::List(contexts))),
     ));
-    apply_updates(message, updates)
+    apply_updates(values, message, updates)
 }
 
 /// Applies assembler-owned metadata as a real object definitions mixin so the
 /// resulting `spec` also records the extension for subsequent observers.
 pub(crate) fn enrich(
+    values: &CoreValueFactory,
     message: Value,
     severity: Severity,
     origin: Option<Value>,
 ) -> Result<Value, crate::core::EvaluationHalt> {
-    let message = diagnostic_object(message)?;
-    apply_updates(message, Value::Dict(assembler_metadata(severity, origin)))
+    let message = diagnostic_object(values, message)?;
+    apply_updates(
+        values,
+        message,
+        Value::Dict(assembler_metadata(severity, origin)),
+    )
 }
 
-fn diagnostic_object(message: Value) -> Result<Value, crate::core::EvaluationHalt> {
-    let context = crate::evaluation::EvalContext::standalone();
+fn diagnostic_object(
+    values: &CoreValueFactory,
+    message: Value,
+) -> Result<Value, crate::core::EvaluationHalt> {
+    let context = crate::evaluation::EvalContext::isolated(values.clone());
     let message = eval::eval_value(&context, &message)?;
     let has_defined_spec = match &message {
         Value::Dict(message) => match message.get(&*keys::SPEC) {
@@ -329,6 +372,42 @@ pub(crate) fn conventional_summary(message: &Value) -> (Option<usize>, Option<Ar
             Value::Dict(location) => location.get(&*keys::LINE),
             _ => None,
         })
+        .and_then(|value| match value {
+            Value::Number(number) => number.to_i64_if_integer(),
+            _ => None,
+        })
+        .and_then(|line| usize::try_from(line).ok());
+    (line, text)
+}
+
+pub(crate) fn conventional_summary_with(
+    values: &CoreValueFactory,
+    message: &Value,
+) -> (Option<usize>, Option<Arc<str>>) {
+    let context = crate::evaluation::EvalContext::isolated(values.clone());
+    let Ok(Value::Dict(message)) = eval::eval_value(&context, message) else {
+        return (None, None);
+    };
+    let Some(interface) = message.get(&*keys::MSG) else {
+        return (None, None);
+    };
+    let Ok(Value::Dict(interface)) = eval::eval_value(&context, interface) else {
+        return (None, None);
+    };
+    let text = interface.get(&*keys::TEXT).and_then(|value| {
+        let Value::Binary(bytes) = eval::eval_value(&context, value).ok()? else {
+            return None;
+        };
+        Some(Arc::from(String::from_utf8_lossy(&bytes).as_ref()))
+    });
+    let line = interface
+        .get(&*keys::LOCATION)
+        .and_then(|value| eval::eval_value(&context, value).ok())
+        .and_then(|value| match value {
+            Value::Dict(location) => location.get(&*keys::LINE).cloned(),
+            _ => None,
+        })
+        .and_then(|value| eval::eval_value(&context, &value).ok())
         .and_then(|value| match value {
             Value::Number(number) => number.to_i64_if_integer(),
             _ => None,

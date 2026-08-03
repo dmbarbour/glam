@@ -161,11 +161,13 @@ pub struct IsolatedEffectSearch<S: TaskSpecialization> {
 
 impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
     pub fn new(
+        runtime: &crate::api::EvaluationRuntime,
         effect: &PublicValue,
         specialization: S,
         host: Arc<S::Host>,
     ) -> Result<Self, TaskHalt> {
-        Self::new_in_context(effect, specialization, host, EvalContext::standalone())
+        let context = EvalContext::new(runtime.new_evaluation_session()?);
+        Self::new_in_context(effect, specialization, host, context)
     }
 
     pub(crate) fn new_in_context(

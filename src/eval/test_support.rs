@@ -24,7 +24,7 @@ pub(super) enum TestKey {
 }
 
 pub(crate) fn test_context() -> EvalContext {
-    EvalContext::standalone()
+    EvalContext::isolated(crate::core::test_value_factory())
 }
 
 pub(super) fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvaluationHalt> {
@@ -42,9 +42,10 @@ pub(super) fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvaluationHalt>
 pub(super) fn lower_test_computation_value(expr: TestExpr) -> Value {
     let code = lower_test_function_code(0, expr);
     assert_eq!(code.capture_count(), 0, "test computation must be closed");
-    Value::Lazy(LazyValue::from_net_computation(NetValue::new(
-        code.runtime().clone(),
-    )))
+    Value::Lazy(LazyValue::from_net_computation(
+        &crate::core::test_value_factory(),
+        NetValue::new(code.runtime().clone()),
+    ))
 }
 
 pub(super) fn eval_key(value: &Value) -> Result<Key, EvaluationHalt> {
@@ -214,9 +215,10 @@ impl FixtureNetLowerer {
         let code = Arc::new(lower_test_function_code(0, expr.clone()));
         if code.capture_count() == 0 {
             self.data_into(
-                Value::Lazy(LazyValue::from_net_computation(NetValue::new(
-                    code.runtime().clone(),
-                ))),
+                Value::Lazy(LazyValue::from_net_computation(
+                    &crate::core::test_value_factory(),
+                    NetValue::new(code.runtime().clone()),
+                )),
                 target,
             );
         } else {

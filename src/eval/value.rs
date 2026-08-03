@@ -47,9 +47,40 @@ pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
     })
 }
 
+pub(crate) fn failure_diagnostic_value_with(
+    values: &crate::core::CoreValueFactory,
+    failure: &EvaluationFailure,
+) -> Value {
+    let emission = match failure.emission_value() {
+        Some(Value::Binary(text)) => {
+            crate::diagnostic::text_message(None, String::from_utf8_lossy(text))
+        }
+        Some(emission) => emission.clone(),
+        None => crate::diagnostic::text_message(None, failure.to_string()),
+    };
+
+    crate::diagnostic::prepend_contexts_with(values, emission.clone(), failure.contexts())
+        .unwrap_or_else(|_| {
+            fallback_failure_diagnostic(
+                failure,
+                Some(emission),
+                Value::List(List::from_values(failure.contexts().to_vec())),
+            )
+        })
+}
+
+#[cfg(test)]
 pub(crate) fn halt_diagnostic_value(halt: &EvaluationHalt) -> Option<Value> {
     halt.permanent_failure()
         .map(|failure| failure_diagnostic_value(failure))
+}
+
+pub(crate) fn halt_diagnostic_value_with(
+    values: &crate::core::CoreValueFactory,
+    halt: &EvaluationHalt,
+) -> Option<Value> {
+    halt.permanent_failure()
+        .map(|failure| failure_diagnostic_value_with(values, failure))
 }
 
 pub(crate) fn evaluation_context_frame(operation: &str) -> Value {

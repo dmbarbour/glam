@@ -25,6 +25,7 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::Text(text) => ResolvedExpr::Embedded(Value::binary_from_text(text)),
         SyntaxExpr::Atom(name) => ResolvedExpr::Embedded(Value::Atom(atom_from_str(name))),
         SyntaxExpr::Effect(path) => ResolvedExpr::Embedded(compiler_values::effect_path_value(
+            context.values(),
             &path.iter().map(String::as_str).collect::<Vec<_>>(),
         )),
         SyntaxExpr::AbstractGlobalPath {
@@ -392,8 +393,11 @@ pub(in crate::g_syntax) fn lower_builtin_expr_resolved(
     ))
 }
 
-pub(in crate::g_syntax) fn lower_effect_expr_resolved(name: &str) -> ResolvedExpr<Value> {
-    ResolvedExpr::Embedded(compiler_values::effect_value(name))
+pub(in crate::g_syntax) fn lower_effect_expr_resolved(
+    values: &CoreValueFactory,
+    name: &str,
+) -> ResolvedExpr<Value> {
+    ResolvedExpr::Embedded(compiler_values::effect_value(values, name))
 }
 
 pub(in crate::g_syntax) fn lower_operator_section_resolved(
@@ -407,7 +411,11 @@ pub(in crate::g_syntax) fn lower_operator_section_resolved(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     match (left, right) {
         (None, None) => {
-            return Ok(lower_syntax_operator_function_resolved(operator, locals));
+            return Ok(lower_syntax_operator_function_resolved(
+                context.values(),
+                operator,
+                locals,
+            ));
         }
         (Some(left), Some(right)) => {
             return lower_syntax_operator_expr_resolved(
@@ -429,12 +437,20 @@ pub(in crate::g_syntax) fn lower_operator_section_resolved(
         .transpose()?;
     let argument = ResolvedExpr::Local(parameter);
     let body = match (left, right) {
-        (None, Some(right)) => {
-            lower_syntax_operator_values_resolved(operator, argument, right, locals)
-        }
-        (Some(left), None) => {
-            lower_syntax_operator_values_resolved(operator, left, argument, locals)
-        }
+        (None, Some(right)) => lower_syntax_operator_values_resolved(
+            context.values(),
+            operator,
+            argument,
+            right,
+            locals,
+        ),
+        (Some(left), None) => lower_syntax_operator_values_resolved(
+            context.values(),
+            operator,
+            left,
+            argument,
+            locals,
+        ),
         _ => unreachable!("operator section arity was handled before lowering operands"),
     };
     locals.truncate(base_len);
@@ -453,11 +469,16 @@ pub(in crate::g_syntax) fn lower_syntax_operator_expr_resolved(
     let left = syntax_expr_to_resolved_in_semantic_scope(left, line, context, scope, locals)?;
     let right = syntax_expr_to_resolved_in_semantic_scope(right, line, context, scope, locals)?;
     Ok(lower_syntax_operator_values_resolved(
-        operator, left, right, locals,
+        context.values(),
+        operator,
+        left,
+        right,
+        locals,
     ))
 }
 
 pub(in crate::g_syntax) fn lower_syntax_operator_function_resolved(
+    values: &CoreValueFactory,
     operator: SyntaxOperator,
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
@@ -469,6 +490,7 @@ pub(in crate::g_syntax) fn lower_syntax_operator_function_resolved(
     let left = locals.push_internal_binding("<operator-left>");
     let right = locals.push_internal_binding("<operator-right>");
     let body = lower_syntax_operator_values_resolved(
+        values,
         operator,
         ResolvedExpr::Local(left),
         ResolvedExpr::Local(right),
@@ -479,6 +501,7 @@ pub(in crate::g_syntax) fn lower_syntax_operator_function_resolved(
 }
 
 pub(in crate::g_syntax) fn lower_syntax_operator_values_resolved(
+    values: &CoreValueFactory,
     operator: SyntaxOperator,
     left: ResolvedExpr<Value>,
     right: ResolvedExpr<Value>,
@@ -489,18 +512,24 @@ pub(in crate::g_syntax) fn lower_syntax_operator_values_resolved(
             ResolvedExpr::Embedded(Value::Builtin(builtin)),
             [left, right],
         ),
-        SyntaxOperator::BoolAnd => effect_then_resolved(left, right, "`and` left operand", locals),
-        SyntaxOperator::BoolOr => effect_call_resolved("alt", [left, right]),
+        SyntaxOperator::BoolAnd => {
+            effect_then_resolved(values, left, right, "`and` left operand", locals)
+        }
+        SyntaxOperator::BoolOr => effect_call_resolved(values, "alt", [left, right]),
         SyntaxOperator::PipeForward => ResolvedExpr::apply(right, [left]),
         SyntaxOperator::PipeBackward => ResolvedExpr::apply(left, [right]),
-        SyntaxOperator::ApplicativeForward => applicative_resolved(left, right, false, locals),
-        SyntaxOperator::ApplicativeBackward => applicative_resolved(left, right, true, locals),
+        SyntaxOperator::ApplicativeForward => {
+            applicative_resolved(values, left, right, false, locals)
+        }
+        SyntaxOperator::ApplicativeBackward => {
+            applicative_resolved(values, left, right, true, locals)
+        }
         SyntaxOperator::ComposeForward => compose_resolved(left, right, locals),
         SyntaxOperator::ComposeBackward => compose_resolved(right, left, locals),
-        SyntaxOperator::EffectBind => effect_call_resolved("seq", [left, right]),
-        SyntaxOperator::KleisliCompose => kleisli_compose_resolved(left, right, locals),
+        SyntaxOperator::EffectBind => effect_call_resolved(values, "seq", [left, right]),
+        SyntaxOperator::KleisliCompose => kleisli_compose_resolved(values, left, right, locals),
         SyntaxOperator::EffectThen => {
-            effect_then_resolved(left, right, "`=>>` discarded result", locals)
+            effect_then_resolved(values, left, right, "`=>>` discarded result", locals)
         }
     }
 }
@@ -508,6 +537,7 @@ pub(in crate::g_syntax) fn lower_syntax_operator_values_resolved(
 /// Sequences two effects in source order, then applies the function produced
 /// by one to the value produced by the other and returns that result.
 pub(in crate::g_syntax) fn applicative_resolved(
+    values: &CoreValueFactory,
     first_operation: ResolvedExpr<Value>,
     second_operation: ResolvedExpr<Value>,
     first_is_function: bool,
@@ -528,12 +558,12 @@ pub(in crate::g_syntax) fn applicative_resolved(
         )
     };
     let result = ResolvedExpr::apply(function, [argument]);
-    let returned = effect_call_resolved("r", [result]);
+    let returned = effect_call_resolved(values, "r", [result]);
     let second_continuation = ResolvedExpr::lambda(vec![second_result], returned);
-    let after_first = effect_call_resolved("seq", [second_operation, second_continuation]);
+    let after_first = effect_call_resolved(values, "seq", [second_operation, second_continuation]);
     let first_continuation = ResolvedExpr::lambda(vec![first_result], after_first);
     locals.truncate(base_len);
-    effect_call_resolved("seq", [first_operation, first_continuation])
+    effect_call_resolved(values, "seq", [first_operation, first_continuation])
 }
 
 pub(in crate::g_syntax) fn compose_resolved(
@@ -552,6 +582,7 @@ pub(in crate::g_syntax) fn compose_resolved(
 }
 
 pub(in crate::g_syntax) fn kleisli_compose_resolved(
+    values: &CoreValueFactory,
     first: ResolvedExpr<Value>,
     second: ResolvedExpr<Value>,
     locals: &mut ResolverContext,
@@ -559,12 +590,13 @@ pub(in crate::g_syntax) fn kleisli_compose_resolved(
     let base_len = locals.len();
     let input = locals.push_internal_binding("<kleisli-input>");
     let operation = ResolvedExpr::apply(first, [ResolvedExpr::Local(input)]);
-    let body = effect_call_resolved("seq", [operation, second]);
+    let body = effect_call_resolved(values, "seq", [operation, second]);
     locals.truncate(base_len);
     ResolvedExpr::lambda(vec![input], body)
 }
 
 pub(in crate::g_syntax) fn effect_then_resolved(
+    values: &CoreValueFactory,
     operation: ResolvedExpr<Value>,
     next: ResolvedExpr<Value>,
     diagnostic_context: &'static str,
@@ -575,14 +607,15 @@ pub(in crate::g_syntax) fn effect_then_resolved(
     let body = assert_unit_resolved(diagnostic_context, ResolvedExpr::Local(result), next);
     let continuation = ResolvedExpr::lambda(vec![result], body);
     locals.truncate(base_len);
-    effect_call_resolved("seq", [operation, continuation])
+    effect_call_resolved(values, "seq", [operation, continuation])
 }
 
 pub(in crate::g_syntax) fn effect_call_resolved(
+    values: &CoreValueFactory,
     name: &str,
     arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
 ) -> ResolvedExpr<Value> {
-    ResolvedExpr::apply(lower_effect_expr_resolved(name), arguments)
+    ResolvedExpr::apply(lower_effect_expr_resolved(values, name), arguments)
 }
 
 pub(in crate::g_syntax) fn assert_unit_resolved(
@@ -625,6 +658,7 @@ pub(in crate::g_syntax) fn lower_comparison_chain_resolved(
         })
         .collect::<Result<Vec<_>, Diagnostic>>()?;
     Ok(lower_comparison_chain_values_resolved(
+        context.values(),
         left,
         rest.into_iter(),
         locals,
@@ -632,6 +666,7 @@ pub(in crate::g_syntax) fn lower_comparison_chain_resolved(
 }
 
 pub(in crate::g_syntax) fn lower_comparison_chain_values_resolved(
+    values: &CoreValueFactory,
     left: ResolvedExpr<Value>,
     mut rest: std::vec::IntoIter<(SyntaxOperator, ResolvedExpr<Value>)>,
     locals: &mut ResolverContext,
@@ -640,20 +675,26 @@ pub(in crate::g_syntax) fn lower_comparison_chain_values_resolved(
         return left;
     };
     if rest.len() == 0 {
-        return lower_syntax_operator_values_resolved(operator, left, right, locals);
+        return lower_syntax_operator_values_resolved(values, operator, left, right, locals);
     }
 
     let base_len = locals.len();
     let right_binding = locals.push_internal_binding("<comparison-right>");
     let first_condition = lower_syntax_operator_values_resolved(
+        values,
         operator,
         left,
         ResolvedExpr::Local(right_binding),
         locals,
     );
-    let remaining_condition =
-        lower_comparison_chain_values_resolved(ResolvedExpr::Local(right_binding), rest, locals);
+    let remaining_condition = lower_comparison_chain_values_resolved(
+        values,
+        ResolvedExpr::Local(right_binding),
+        rest,
+        locals,
+    );
     let body = lower_syntax_operator_values_resolved(
+        values,
         SyntaxOperator::BoolAnd,
         first_condition,
         remaining_condition,
@@ -903,7 +944,10 @@ pub(in crate::g_syntax) fn lower_name_expr_resolved(
         "module" => return scope.module_final_defs.expr(),
         "module_origin" => {
             return ResolvedExpr::Embedded(context.opaque_origin().unwrap_or_else(|| {
-                Value::error("module origin is unavailable outside a source compilation context")
+                Value::error(
+                    context.values(),
+                    "module origin is unavailable outside a source compilation context",
+                )
             }));
         }
         "self" => {

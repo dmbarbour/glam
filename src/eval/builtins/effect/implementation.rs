@@ -14,6 +14,7 @@ pub(super) fn eval_fixpoint_builtin(
     }
 
     Ok(Value::Lazy(LazyValue::computed_fixpoint(
+        context.values(),
         "fixpoint",
         FixpointComputation::Function(function),
     )))

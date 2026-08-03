@@ -79,6 +79,7 @@ pub(super) fn apply_function_values(
     let mut saturating = arguments;
     let rest = saturating.split_off(remaining);
     let result = Value::Lazy(LazyValue::from_function_call(
+        context.values(),
         function,
         Arc::from(saturating),
     ));

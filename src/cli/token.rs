@@ -5,6 +5,7 @@ mod effects;
 use std::sync::Arc;
 
 use crate::api::Value;
+use crate::core::CoreValueFactory;
 use crate::evaluation::EvalContext;
 use crate::reflection::{
     CommitResult, ExactConflictAnalysis, HostSnapshot, IsolatedEffectSearch, IsolatedSearchPoll,
@@ -53,13 +54,13 @@ pub(super) struct TokenHost {
 }
 
 impl TokenHost {
-    fn new(input: Arc<str>, completion_offset: Option<usize>) -> Self {
+    fn new(values: CoreValueFactory, input: Arc<str>, completion_offset: Option<usize>) -> Self {
         Self {
             snapshot: TokenSnapshot {
                 input,
                 completion_offset,
             },
-            store: ReflectionStore::new(Arc::new(ExactConflictAnalysis)).snapshot(),
+            store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)).snapshot(),
         }
     }
 }
@@ -91,7 +92,11 @@ pub(super) fn run(
     eval_context: EvalContext,
 ) -> Result<TokenRun, String> {
     let input_len = input.len();
-    let host = Arc::new(TokenHost::new(input, completion_offset));
+    let host = Arc::new(TokenHost::new(
+        eval_context.values().clone(),
+        input,
+        completion_offset,
+    ));
     let mut search =
         IsolatedEffectSearch::new_in_context(parser, effects::TokenEffects, host, eval_context)
             .map_err(|error| format!("token parser could not start: {error}"))?;

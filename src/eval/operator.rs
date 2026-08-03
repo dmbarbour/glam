@@ -29,10 +29,13 @@ pub(super) fn apply_builtin_values_lazily(
     let mut saturating = arguments;
     let rest = saturating.split_off(remaining);
     supplied.extend(saturating);
-    let result = Value::Lazy(LazyValue::from_builtin(BuiltinCall {
-        builtin,
-        arguments: Arc::from(supplied),
-    }));
+    let result = Value::Lazy(LazyValue::from_builtin(
+        context.values(),
+        BuiltinCall {
+            builtin,
+            arguments: Arc::from(supplied),
+        },
+    ));
     if rest.is_empty() {
         Ok(result)
     } else {
@@ -160,7 +163,7 @@ pub(super) fn apply_core_operator(
             let stage =
                 attach_net_many(Value::Net(NetValue::new(code.runtime().clone())), captures);
             Ok(OperatorYield::Data(Value::Lazy(
-                LazyValue::from_net_computation(stage),
+                LazyValue::from_net_computation(context.values(), stage),
             )))
         }
         CoreOperator::Dict { keys, supplied } => {
@@ -196,6 +199,7 @@ pub(super) fn apply_core_operator(
                 ));
             }
             Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_builtin(
+                context.values(),
                 BuiltinCall {
                     builtin: call.builtin,
                     arguments: Arc::from(arguments),
@@ -235,6 +239,7 @@ pub(super) fn apply_core_operator(
                 )));
             }
             Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_access(
+                context.values(),
                 path.clone(),
                 Arc::from(arguments),
             ))))

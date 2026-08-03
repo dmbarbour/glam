@@ -1,5 +1,5 @@
 use crate::compiler::CompileContext;
-use crate::core::{Atom, Dict, Key, Value};
+use crate::core::{Atom, CoreValueFactory, Dict, Key, Value};
 use crate::core::{Builtin, keys};
 use crate::diagnostic::Severity;
 
@@ -57,8 +57,8 @@ pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
     definitions
 }
 
-pub(crate) fn default_diagnostic_formatter() -> Value {
-    diagnostic_formatter::value()
+pub(crate) fn default_diagnostic_formatter(values: &CoreValueFactory) -> Value {
+    diagnostic_formatter::value(values)
 }
 
 impl Diagnostic {

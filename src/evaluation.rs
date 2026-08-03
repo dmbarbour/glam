@@ -8,14 +8,14 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
 use crate::core::{
-    DeferredValueId, EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue, PromiseAssignment,
-    PromisedValue, Value,
+    CoreValueFactory, DeferredValueId, EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue,
+    PromiseAssignment, PromisedValue, Value,
 };
 
 mod executor;
@@ -43,12 +43,8 @@ impl EvaluationSessionId {
     }
 }
 
-static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_WAIT_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
-
-fn allocate_task_id() -> Result<EvaluationTaskId, Arc<str>> {
-    allocate_id(&NEXT_TASK_ID, "evaluation task IDs exhausted").map(EvaluationTaskId)
+fn allocate_task_id(values: &CoreValueFactory) -> Result<EvaluationTaskId, Arc<str>> {
+    values.ids().evaluation_task().map(EvaluationTaskId)
 }
 
 fn allocate_wait_token(
@@ -56,26 +52,12 @@ fn allocate_wait_token(
     producer: EvaluationTaskId,
 ) -> Result<EvaluationWaitToken, Arc<str>> {
     Ok(EvaluationWaitToken(Arc::new(EvaluationWaitState {
-        id: allocate_id(&NEXT_WAIT_ID, "evaluation wait-token IDs exhausted")?,
+        id: session.values.ids().evaluation_wait()?,
         owner_id: session.id,
         owner: Arc::downgrade(session),
         producer,
         terminal: OnceLock::new(),
     })))
-}
-
-fn allocate_session_id() -> EvaluationSessionId {
-    EvaluationSessionId(
-        allocate_id(&NEXT_SESSION_ID, "evaluation session IDs exhausted")
-            .expect("evaluation session IDs are process-global"),
-    )
-}
-
-fn allocate_id(source: &AtomicU64, exhausted: &'static str) -> Result<NonZeroU64, Arc<str>> {
-    source
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .map(|id| NonZeroU64::new(id).expect("evaluation IDs start at one"))
-        .map_err(|_| Arc::from(exhausted))
 }
 
 fn evaluation_failure(message: impl AsRef<str>) -> Arc<EvaluationFailure> {
@@ -776,17 +758,12 @@ fn retire_deferred_task(
 
 pub(crate) struct EvaluationSession {
     id: EvaluationSessionId,
+    values: CoreValueFactory,
     tasks: Mutex<EvaluationTasks>,
     task_changed: Condvar,
     default_reflection_profile: Arc<ReflectionTaskProfile>,
     require_default_reflection_profile: bool,
     executor: Weak<EvaluationExecutor>,
-}
-
-impl Default for EvaluationSession {
-    fn default() -> Self {
-        Self::with_executor(Weak::new())
-    }
 }
 
 impl fmt::Debug for EvaluationSession {
@@ -818,19 +795,10 @@ impl EvaluationSession {
         }
     }
 
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn with_default_profile(
-        default_reflection_profile: Arc<ReflectionTaskProfile>,
-    ) -> Self {
-        Self::with_executor_and_default_profile(Weak::new(), default_reflection_profile)
-    }
-
-    fn with_executor(executor: Weak<EvaluationExecutor>) -> Self {
+    fn with_executor(executor: Weak<EvaluationExecutor>, values: CoreValueFactory) -> Self {
         Self {
-            id: allocate_session_id(),
+            id: EvaluationSessionId(values.ids().evaluation_session()),
+            values,
             tasks: Mutex::new(EvaluationTasks::default()),
             task_changed: Condvar::new(),
             default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
@@ -839,12 +807,18 @@ impl EvaluationSession {
         }
     }
 
+    fn isolated(values: CoreValueFactory) -> Arc<Self> {
+        Arc::new(Self::with_executor(Weak::new(), values))
+    }
+
     fn with_executor_and_default_profile(
         executor: Weak<EvaluationExecutor>,
+        values: CoreValueFactory,
         default_reflection_profile: Arc<ReflectionTaskProfile>,
     ) -> Self {
         Self {
-            id: allocate_session_id(),
+            id: EvaluationSessionId(values.ids().evaluation_session()),
+            values,
             tasks: Mutex::new(EvaluationTasks::default()),
             task_changed: Condvar::new(),
             default_reflection_profile,
@@ -855,17 +829,22 @@ impl EvaluationSession {
 
     #[cfg(test)]
     pub(crate) fn shared(executor: &Arc<EvaluationExecutor>) -> Arc<Self> {
-        let session = Arc::new(Self::with_executor(Arc::downgrade(executor)));
+        let session = Arc::new(Self::with_executor(
+            Arc::downgrade(executor),
+            crate::core::test_value_factory(),
+        ));
         executor.register_session(&session);
         session
     }
 
     pub(crate) fn shared_with_default_profile(
         executor: &Arc<EvaluationExecutor>,
+        values: CoreValueFactory,
         default_reflection_profile: Arc<ReflectionTaskProfile>,
     ) -> Arc<Self> {
         let session = Arc::new(Self::with_executor_and_default_profile(
             Arc::downgrade(executor),
+            values,
             default_reflection_profile,
         ));
         executor.register_session(&session);
@@ -916,6 +895,11 @@ pub(crate) struct EvalContext {
 }
 
 impl EvalContext {
+    #[cfg(test)]
+    pub(crate) fn standalone() -> Self {
+        Self::isolated(crate::core::test_value_factory())
+    }
+
     pub(crate) fn new(session: Arc<EvaluationSession>) -> Self {
         let task_profile = session.default_reflection_profile.clone();
         Self {
@@ -989,10 +973,15 @@ impl EvalContext {
         }
     }
 
-    /// Creates a session for internal clients that do not yet run under an
-    /// assembler, notably standalone reflection tasks and focused tests.
-    pub(crate) fn standalone() -> Self {
-        Self::new(Arc::new(EvaluationSession::new()))
+    pub(crate) fn values(&self) -> &CoreValueFactory {
+        &self.session.values
+    }
+
+    /// Creates a zero-worker context in an explicitly selected runtime value
+    /// domain. This is for pure closed bootstrap construction and focused
+    /// tests; production task services use a runtime-registered session.
+    pub(crate) fn isolated(values: CoreValueFactory) -> Self {
+        Self::new(EvaluationSession::isolated(values))
     }
 
     pub(crate) fn spark(&self, value: Value) {
@@ -1107,7 +1096,7 @@ impl EvalContext {
             }
         }
 
-        let id = allocate_task_id()?;
+        let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
         let originating_task = self
             .originating_task
@@ -1177,7 +1166,9 @@ impl EvalContext {
     }
 
     pub(crate) fn task_id(&self) -> Result<EvaluationTaskId, Arc<str>> {
-        self.task.get_or_init(allocate_task_id).clone()
+        self.task
+            .get_or_init(|| allocate_task_id(self.values()))
+            .clone()
     }
 
     pub(crate) fn session_id(&self) -> EvaluationSessionId {
@@ -1252,7 +1243,7 @@ impl EvalContext {
     where
         F: FnOnce(EvalContext) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>,
     {
-        let id = allocate_task_id()?;
+        let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
         let context = Self::for_task(self.session.clone(), id, self.task_profile.clone());
         let machine = build(context)?;
@@ -1285,7 +1276,7 @@ impl EvalContext {
     }
 
     fn reserve_task(&self) -> Result<EvaluationTaskHandle, Arc<str>> {
-        let id = allocate_task_id()?;
+        let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
         let mut tasks = self
             .session
@@ -1473,7 +1464,7 @@ impl EvalContext {
         // Focused evaluator tests and internal clients may intentionally use a
         // bare session. Preserve an inspectable wait record for them; ordinary
         // Assembler sessions always install a launcher.
-        let id = allocate_task_id()?;
+        let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
         let mut tasks = self
             .session
@@ -2716,7 +2707,7 @@ mod tests {
     }
 
     fn inert_lazy(label: &'static str) -> LazyValue {
-        LazyValue::deferred(label, |_| {
+        LazyValue::deferred(&crate::core::test_value_factory(), label, |_| {
             panic!("scheduler cycle fixtures must use their installed test machine")
         })
     }
@@ -3299,18 +3290,22 @@ mod tests {
             );
             cancelled.push(cancellation);
 
-            let lazy = LazyValue::deferred(format!("successful lazy {index}"), |_| {
-                Ok((*crate::core::keys::UNIT_VALUE).clone())
-            });
+            let lazy = LazyValue::deferred(
+                &crate::core::test_value_factory(),
+                format!("successful lazy {index}"),
+                |_| Ok((*crate::core::keys::UNIT_VALUE).clone()),
+            );
             assert_eq!(
                 crate::eval::eval_value(&context, &Value::Lazy(lazy))
                     .expect("successful lazy should evaluate"),
                 (*crate::core::keys::UNIT_VALUE).clone()
             );
 
-            let lazy = LazyValue::deferred(format!("failed lazy {index}"), |_| {
-                Err(crate::core::EvaluationHalt::new("long-lived lazy failure"))
-            });
+            let lazy = LazyValue::deferred(
+                &crate::core::test_value_factory(),
+                format!("failed lazy {index}"),
+                |_| Err(crate::core::EvaluationHalt::new("long-lived lazy failure")),
+            );
             assert!(
                 crate::eval::eval_value(&context, &Value::Lazy(lazy)).is_err(),
                 "failed lazy should terminate without retaining its task record"
@@ -3995,9 +3990,11 @@ mod tests {
         let executor = EvaluationExecutor::new(0).unwrap();
         let session = EvaluationSession::shared(&executor);
         let context = EvalContext::new(session);
-        let lazy = crate::core::LazyValue::deferred("unforced spark", |_| {
-            panic!("zero-worker spark must never be evaluated")
-        });
+        let lazy = crate::core::LazyValue::deferred(
+            &crate::core::test_value_factory(),
+            "unforced spark",
+            |_| panic!("zero-worker spark must never be evaluated"),
+        );
 
         context.spark(Value::Lazy(lazy.clone()));
 
@@ -4010,12 +4007,16 @@ mod tests {
         let session = EvaluationSession::shared(&executor);
         let context = EvalContext::new(session);
         let (spark_sender, spark_receiver) = mpsc::channel();
-        let lazy = crate::core::LazyValue::deferred("worker spark", move |_| {
-            spark_sender
-                .send(())
-                .expect("spark receiver should remain open");
-            Ok((*crate::core::keys::UNIT_VALUE).clone())
-        });
+        let lazy = crate::core::LazyValue::deferred(
+            &crate::core::test_value_factory(),
+            "worker spark",
+            move |_| {
+                spark_sender
+                    .send(())
+                    .expect("spark receiver should remain open");
+                Ok((*crate::core::keys::UNIT_VALUE).clone())
+            },
+        );
         context.spark(Value::Lazy(lazy));
         spark_receiver
             .recv_timeout(Duration::from_secs(2))

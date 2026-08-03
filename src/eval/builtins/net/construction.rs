@@ -4,7 +4,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use crate::api::Value as PublicValue;
-use crate::core::{List, NetValue, OpaqueValue, Value};
+use crate::core::{CoreValueFactory, List, NetValue, OpaqueValue, Value};
 use crate::core_net::{CoreSpecialization, CoreWaitToken};
 use crate::evaluation::EvalContext;
 use crate::interaction_net::{NetBuilder, Port};
@@ -187,9 +187,9 @@ struct ConstructionHost {
 }
 
 impl ConstructionHost {
-    fn new() -> Self {
+    fn new(values: CoreValueFactory) -> Self {
         Self {
-            store: ReflectionStore::new(Arc::new(ExactConflictAnalysis)).snapshot(),
+            store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)).snapshot(),
         }
     }
 }
@@ -228,7 +228,7 @@ impl NetConstructionMachine {
         let search = IsolatedEffectSearch::new_in_context(
             &effect,
             specialization,
-            Arc::new(ConstructionHost::new()),
+            Arc::new(ConstructionHost::new(context.values().clone())),
             context,
         )
         .map_err(TaskHalt::into_evaluation_halt)?;
@@ -518,7 +518,8 @@ mod tests {
             id: ConstructionPortId(NonZeroU64::new(1).unwrap()),
         })));
 
-        let error = construction_port(&EvalContext::standalone(), &value, &local).unwrap_err();
+        let context = crate::eval::test_support::test_context();
+        let error = construction_port(&context, &value, &local).unwrap_err();
         assert_eq!(
             error.to_string(),
             "interaction-net construction port belongs to another invocation"

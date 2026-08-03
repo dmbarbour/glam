@@ -133,10 +133,14 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
     let context = test_context();
     let success_dropped = Arc::new(AtomicBool::new(false));
     let success_signal = DropSignal(success_dropped.clone());
-    let success = LazyValue::deferred("successful source release", move |_| {
-        let _keep_signal_captured = &success_signal;
-        Ok((*keys::UNIT_VALUE).clone())
-    });
+    let success = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "successful source release",
+        move |_| {
+            let _keep_signal_captured = &success_signal;
+            Ok((*keys::UNIT_VALUE).clone())
+        },
+    );
 
     assert_eq!(
         eval_lazy(&context, &success).expect("lazy source should succeed"),
@@ -150,10 +154,14 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
 
     let failure_dropped = Arc::new(AtomicBool::new(false));
     let failure_signal = DropSignal(failure_dropped.clone());
-    let failure = LazyValue::deferred("failed source release", move |_| {
-        let _keep_signal_captured = &failure_signal;
-        Err(EvaluationHalt::new("expected lazy failure"))
-    });
+    let failure = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "failed source release",
+        move |_| {
+            let _keep_signal_captured = &failure_signal;
+            Err(EvaluationHalt::new("expected lazy failure"))
+        },
+    );
 
     let error = eval_lazy(&context, &failure).expect_err("lazy source should fail");
     assert_eq!(error.to_string(), "expected lazy failure");
@@ -203,7 +211,10 @@ fn raw_net_values_are_opaque_while_net_computations_expose_data() {
 
     assert_eq!(eval_value(&test_context(), &raw).unwrap(), raw);
 
-    let computation = Value::Lazy(LazyValue::from_net_computation(net));
+    let computation = Value::Lazy(LazyValue::from_net_computation(
+        &crate::core::test_value_factory(),
+        net,
+    ));
     assert_eq!(eval_value(&test_context(), &computation).unwrap(), n(42));
     assert_eq!(eval_value(&test_context(), &computation).unwrap(), n(42));
 }
@@ -232,7 +243,13 @@ fn net_arity_contextualizes_failure_while_demanding_its_arity() {
     let error = apply_values(
         &test_context(),
         Value::Builtin(Builtin::NetArity),
-        vec![Value::error("arity computation failed"), Value::Net(net)],
+        vec![
+            Value::error(
+                &crate::core::test_value_factory(),
+                "arity computation failed",
+            ),
+            Value::Net(net),
+        ],
     )
     .expect_err("failure while evaluating net arity must propagate");
     assert_eq!(
@@ -263,7 +280,10 @@ fn net_backed_lazy_values_require_an_exposed_data_node() {
         builder.wire(argument, result);
         application
     });
-    let value = Value::Lazy(LazyValue::from_net_computation(identity));
+    let value = Value::Lazy(LazyValue::from_net_computation(
+        &crate::core::test_value_factory(),
+        identity,
+    ));
 
     let error = eval_value(&test_context(), &value)
         .expect_err("a net computation must expose data rather than a bind");
@@ -280,7 +300,10 @@ fn net_backed_lazy_values_require_an_exposed_data_node() {
 #[test]
 fn net_backed_lazy_values_reject_non_data_normal_forms() {
     let inert = closed_net(|builder| builder.copy(0).input);
-    let value = Value::Lazy(LazyValue::from_net_computation(inert));
+    let value = Value::Lazy(LazyValue::from_net_computation(
+        &crate::core::test_value_factory(),
+        inert,
+    ));
 
     let error = eval_value(&test_context(), &value)
         .expect_err("an inert net computation must not produce a value");
@@ -449,7 +472,7 @@ fn batched_application_spine_keeps_unused_arguments_lazy() {
     let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let lazy_argument = |label: &'static str| {
         let forced = forced.clone();
-        Value::deferred(label, move |_| {
+        Value::deferred(&crate::core::test_value_factory(), label, move |_| {
             forced.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(n(99))
         })
@@ -482,7 +505,13 @@ fn batched_application_preserves_captured_access() {
 
 #[test]
 fn compiling_a_function_does_not_evaluate_its_body() {
-    let function = closed_function_value(1, TestExpr::Value(Value::error("unreached body")));
+    let function = closed_function_value(
+        1,
+        TestExpr::Value(Value::error(
+            &crate::core::test_value_factory(),
+            "unreached body",
+        )),
+    );
 
     assert!(matches!(function, Value::Function(_)));
 }
@@ -493,7 +522,7 @@ fn n(value: i64) -> Value {
 
 #[test]
 fn promised_values_fail_fast_without_poisoning_later_assignment() {
-    let promised = PromisedValue::new("test promised value");
+    let promised = PromisedValue::new(&crate::core::test_value_factory(), "test promised value");
     let value = Value::Promised(promised.clone());
 
     assert_eq!(
@@ -514,10 +543,14 @@ fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
     let promised_value = Value::Promised(promise.clone());
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
-    let lazy = LazyValue::deferred("promise-demanding deferred computation", move |context| {
-        counted_attempts.fetch_add(1, Ordering::SeqCst);
-        eval_value(context, &promised_value)
-    });
+    let lazy = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "promise-demanding deferred computation",
+        move |context| {
+            counted_attempts.fetch_add(1, Ordering::SeqCst);
+            eval_value(context, &promised_value)
+        },
+    );
     let value = Value::Lazy(lazy.clone());
 
     let blocked =
@@ -568,10 +601,15 @@ fn deferred_computation_caches_one_structured_failure() {
     let thunk_frame = frame.clone();
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
-    let lazy = LazyValue::deferred("structured deferred failure", move |_| {
-        counted_attempts.fetch_add(1, Ordering::SeqCst);
-        Err(EvaluationHalt::from_value(thunk_emission.clone()).with_context(thunk_frame.clone()))
-    });
+    let lazy = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "structured deferred failure",
+        move |_| {
+            counted_attempts.fetch_add(1, Ordering::SeqCst);
+            Err(EvaluationHalt::from_value(thunk_emission.clone())
+                .with_context(thunk_frame.clone()))
+        },
+    );
     let value = Value::Lazy(lazy.clone());
 
     let error =
@@ -649,7 +687,10 @@ fn interaction_net_construction_dependency_does_not_poison_its_lazy_value() {
     let owner = session.with_new_task().unwrap();
     let observer = session.with_new_task().unwrap();
     let promise = PromisedValue::fixpoint(&owner, "pending net effect").unwrap();
-    let lazy = LazyValue::from_net_construction(Value::Promised(promise));
+    let lazy = LazyValue::from_net_construction(
+        &crate::core::test_value_factory(),
+        Value::Promised(promise),
+    );
     let value = Value::Lazy(lazy.clone());
 
     let blocked = eval_value(&observer, &value)
@@ -666,10 +707,14 @@ fn deferred_computation_caches_one_text_failure() {
     let context = test_context();
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
-    let lazy = LazyValue::deferred("text deferred failure", move |_| {
-        counted_attempts.fetch_add(1, Ordering::SeqCst);
-        Err(EvaluationHalt::new("text deferred failure"))
-    });
+    let lazy = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "text deferred failure",
+        move |_| {
+            counted_attempts.fetch_add(1, Ordering::SeqCst);
+            Err(EvaluationHalt::new("text deferred failure"))
+        },
+    );
     let value = Value::Lazy(lazy.clone());
 
     let first = eval_value(&context, &value)
@@ -696,14 +741,21 @@ fn deferred_computation_preserves_context_annotation_frames() {
         Value::binary_from_text("context annotation"),
     ));
     let annotation = Value::Dict(Dict::new_sync().insert((*keys::CONTEXT).clone(), frame.clone()));
-    let lazy = LazyValue::deferred("context-annotated deferred failure", move |context| {
-        apply_builtin(
-            context,
-            Builtin::Anno,
-            vec![annotation.clone()],
-            Value::error("annotated deferred failure"),
-        )
-    });
+    let lazy = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "context-annotated deferred failure",
+        move |context| {
+            apply_builtin(
+                context,
+                Builtin::Anno,
+                vec![annotation.clone()],
+                Value::error(
+                    &crate::core::test_value_factory(),
+                    "annotated deferred failure",
+                ),
+            )
+        },
+    );
 
     let failure = eval_value(&context, &Value::Lazy(lazy))
         .expect_err("the annotated deferred computation should fail")
@@ -714,8 +766,12 @@ fn deferred_computation_preserves_context_annotation_frames() {
 #[test]
 fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
     let context = test_context();
-    let promise = PromisedValue::new("late assignment");
-    let lazy = LazyValue::from_access(Arc::from([]), Arc::from([Value::Promised(promise.clone())]));
+    let promise = PromisedValue::new(&crate::core::test_value_factory(), "late assignment");
+    let lazy = LazyValue::from_access(
+        &crate::core::test_value_factory(),
+        Arc::from([]),
+        Arc::from([Value::Promised(promise.clone())]),
+    );
     let value = Value::Lazy(lazy.clone());
 
     let blocked = eval_value(&context, &value).expect_err("empty promise should block its lazy");
@@ -734,8 +790,10 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
 #[test]
 fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
     let context = test_context();
-    let target = LazyValue::deferred("promise target", |_| Ok(n(42)));
-    let promise = PromisedValue::new("forwarding promise");
+    let target = LazyValue::deferred(&crate::core::test_value_factory(), "promise target", |_| {
+        Ok(n(42))
+    });
+    let promise = PromisedValue::new(&crate::core::test_value_factory(), "forwarding promise");
     promise.set(Value::Lazy(target.clone())).unwrap();
 
     assert_eq!(
@@ -801,7 +859,7 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
 #[test]
 fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
     let context = test_context();
-    let promise = PromisedValue::new("promise cycle");
+    let promise = PromisedValue::new(&crate::core::test_value_factory(), "promise cycle");
     promise
         .set(Value::Promised(promise.clone()))
         .expect("promise should accept its own named assignment");
@@ -819,8 +877,12 @@ fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
 #[test]
 fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
     let context = test_context();
-    let promise = PromisedValue::new("mixed promise");
-    let lazy = LazyValue::from_access(Arc::from([]), Arc::from([Value::Promised(promise.clone())]));
+    let promise = PromisedValue::new(&crate::core::test_value_factory(), "mixed promise");
+    let lazy = LazyValue::from_access(
+        &crate::core::test_value_factory(),
+        Arc::from([]),
+        Arc::from([Value::Promised(promise.clone())]),
+    );
     promise.set(Value::Lazy(lazy.clone())).unwrap();
 
     let error = eval_value(&context, &Value::Promised(promise.clone()))
@@ -1005,6 +1067,7 @@ fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
     let context = test_context();
     let function = closed_function_value(1, TestExpr::Local(0));
     let fixpoint = Value::Lazy(LazyValue::computed_fixpoint(
+        &crate::core::test_value_factory(),
         "recursive value fixpoint",
         FixpointComputation::Function(function),
     ));
@@ -1059,6 +1122,7 @@ fn suspended_value_fixpoint_keeps_one_knot_for_concurrent_observers() {
     let gate = reflection_annotation(&owner, n(0), n(42));
     let function = closed_function_value(1, TestExpr::Value(gate));
     let fixpoint = Value::Lazy(LazyValue::computed_fixpoint(
+        &crate::core::test_value_factory(),
         "suspended value fixpoint",
         FixpointComputation::Function(function),
     ));
@@ -1085,9 +1149,13 @@ fn suspended_value_fixpoint_keeps_one_knot_for_concurrent_observers() {
 fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
     let first = test_context();
     let second = test_context();
-    let promise = PromisedValue::new("cross-session fixpoint input");
+    let promise = PromisedValue::new(
+        &crate::core::test_value_factory(),
+        "cross-session fixpoint input",
+    );
     let function = closed_function_value(1, TestExpr::Value(Value::Promised(promise.clone())));
     let lazy = LazyValue::computed_fixpoint(
+        &crate::core::test_value_factory(),
         "cross-session value fixpoint",
         FixpointComputation::Function(function),
     );
@@ -1110,9 +1178,10 @@ fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
 #[test]
 fn computed_fixpoint_preserves_a_forwarded_structured_failure() {
     let context = test_context();
-    let source = LazyValue::error("fixpoint source failed");
+    let source = LazyValue::error(&crate::core::test_value_factory(), "fixpoint source failed");
     let function = closed_function_value(1, TestExpr::Value(Value::Lazy(source.clone())));
     let fixpoint = LazyValue::computed_fixpoint(
+        &crate::core::test_value_factory(),
         "failed value fixpoint",
         FixpointComputation::Function(function),
     );
@@ -1130,10 +1199,14 @@ fn computed_fixpoint_preserves_a_forwarded_structured_failure() {
 fn deferred_values_use_the_context_that_forces_them() {
     let context = test_context();
     let expected_context = context.clone();
-    let value = Value::deferred("context-sensitive test value", move |actual_context| {
-        assert!(actual_context.shares_session_with(&expected_context));
-        Ok(n(42))
-    });
+    let value = Value::deferred(
+        &crate::core::test_value_factory(),
+        "context-sensitive test value",
+        move |actual_context| {
+            assert!(actual_context.shares_session_with(&expected_context));
+            Ok(n(42))
+        },
+    );
 
     assert_eq!(eval_value(&context, &value).unwrap(), n(42));
 }
@@ -1143,17 +1216,29 @@ fn forcing_a_lazy_value_reaches_outer_whnf_without_forcing_lazy_fields() {
     let context = test_context();
     let field_forces = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted_field_forces = field_forces.clone();
-    let field = Value::deferred("lazy dictionary field", move |_| {
-        counted_field_forces.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(n(42))
-    });
+    let field = Value::deferred(
+        &crate::core::test_value_factory(),
+        "lazy dictionary field",
+        move |_| {
+            counted_field_forces.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(n(42))
+        },
+    );
     let expected_field = field.clone();
-    let forwarded = Value::deferred("forwarded dictionary", move |_| {
-        Ok(Value::Dict(
-            Dict::new_sync().insert(Key::atom_from_text("field"), field.clone()),
-        ))
-    });
-    let root = Value::deferred("forwarding root", move |_| Ok(forwarded.clone()));
+    let forwarded = Value::deferred(
+        &crate::core::test_value_factory(),
+        "forwarded dictionary",
+        move |_| {
+            Ok(Value::Dict(
+                Dict::new_sync().insert(Key::atom_from_text("field"), field.clone()),
+            ))
+        },
+    );
+    let root = Value::deferred(
+        &crate::core::test_value_factory(),
+        "forwarding root",
+        move |_| Ok(forwarded.clone()),
+    );
 
     let forced = eval_value(&context, &root).expect("root should reach dictionary WHNF");
     let Value::Dict(dict) = forced else {
@@ -1171,19 +1256,23 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
     let context = test_context();
     let self_reference = Arc::new(std::sync::OnceLock::<LazyValue>::new());
     let captured = self_reference.clone();
-    let lazy = LazyValue::deferred("guarded self reference", move |_| {
-        Ok(Value::Dict(
-            Dict::new_sync().insert(
-                Key::atom_from_text("tail"),
-                Value::Lazy(
-                    captured
-                        .get()
-                        .expect("guarded self reference should be installed")
-                        .clone(),
+    let lazy = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "guarded self reference",
+        move |_| {
+            Ok(Value::Dict(
+                Dict::new_sync().insert(
+                    Key::atom_from_text("tail"),
+                    Value::Lazy(
+                        captured
+                            .get()
+                            .expect("guarded self reference should be installed")
+                            .clone(),
+                    ),
                 ),
-            ),
-        ))
-    });
+            ))
+        },
+    );
     self_reference
         .set(lazy.clone())
         .expect("guarded self reference should be installed once");
@@ -1202,12 +1291,18 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
 #[test]
 fn lazy_aliases_share_and_cache_their_final_whnf() {
     let context = test_context();
-    let target = Value::deferred("alias target", |_| Ok(n(42)));
+    let target = Value::deferred(&crate::core::test_value_factory(), "alias target", |_| {
+        Ok(n(42))
+    });
     let Value::Lazy(target_lazy) = &target else {
         unreachable!()
     };
     let target_lazy = target_lazy.clone();
-    let root = LazyValue::deferred("shallow alias", move |_| Ok(target.clone()));
+    let root = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "shallow alias",
+        move |_| Ok(target.clone()),
+    );
     let value = Value::Lazy(root.clone());
 
     assert_eq!(context.deferred_task_count(), 0);
@@ -1231,10 +1326,21 @@ fn lazy_aliases_share_and_cache_their_final_whnf() {
 fn demanded_forwarding_chain_caches_whnf_in_every_lazy_member() {
     let context = test_context();
     let identity = closed_function_value(1, TestExpr::Local(0));
-    let leaf = LazyValue::deferred("forwarding leaf", |_| Ok(n(42)));
-    let middle =
-        LazyValue::from_application(identity.clone(), Arc::from([Value::Lazy(leaf.clone())]));
-    let root = LazyValue::from_application(identity, Arc::from([Value::Lazy(middle.clone())]));
+    let leaf = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "forwarding leaf",
+        |_| Ok(n(42)),
+    );
+    let middle = LazyValue::from_application(
+        &crate::core::test_value_factory(),
+        identity.clone(),
+        Arc::from([Value::Lazy(leaf.clone())]),
+    );
+    let root = LazyValue::from_application(
+        &crate::core::test_value_factory(),
+        identity,
+        Arc::from([Value::Lazy(middle.clone())]),
+    );
 
     assert_eq!(
         eval_value(&context, &Value::Lazy(root.clone())).unwrap(),
@@ -1249,8 +1355,12 @@ fn demanded_forwarding_chain_caches_whnf_in_every_lazy_member() {
 fn forwarding_chain_preserves_one_structured_failure() {
     let context = test_context();
     let identity = closed_function_value(1, TestExpr::Local(0));
-    let leaf = LazyValue::error("shared failure");
-    let root = LazyValue::from_application(identity, Arc::from([Value::Lazy(leaf.clone())]));
+    let leaf = LazyValue::error(&crate::core::test_value_factory(), "shared failure");
+    let root = LazyValue::from_application(
+        &crate::core::test_value_factory(),
+        identity,
+        Arc::from([Value::Lazy(leaf.clone())]),
+    );
 
     let error = eval_value(&context, &Value::Lazy(root.clone()))
         .expect_err("forwarding into an error should fail");
@@ -1267,19 +1377,23 @@ fn concurrent_lazy_observers_receive_one_wait_without_parking() {
     let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let producer_release = release.clone();
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
-    let lazy = LazyValue::deferred("contended lazy", move |_| {
-        started_sender
-            .send(())
-            .expect("test should still be waiting for its producer");
-        let (lock, changed) = &*producer_release;
-        let mut released = lock.lock().expect("test release lock was poisoned");
-        while !*released {
-            released = changed
-                .wait(released)
-                .expect("test release lock was poisoned");
-        }
-        Ok(n(42))
-    });
+    let lazy = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "contended lazy",
+        move |_| {
+            started_sender
+                .send(())
+                .expect("test should still be waiting for its producer");
+            let (lock, changed) = &*producer_release;
+            let mut released = lock.lock().expect("test release lock was poisoned");
+            while !*released {
+                released = changed
+                    .wait(released)
+                    .expect("test release lock was poisoned");
+            }
+            Ok(n(42))
+        },
+    );
     let value = Value::Lazy(lazy);
     let producer_context = context.clone();
     let producer_value = value.clone();
@@ -1326,7 +1440,7 @@ fn concurrent_lazy_observers_receive_one_wait_without_parking() {
 
 #[test]
 fn ready_lazy_errors_fail_when_observed() {
-    let value = Value::error("deliberate failure");
+    let value = Value::error(&crate::core::test_value_factory(), "deliberate failure");
 
     assert_eq!(
         eval_value(&test_context(), &value).unwrap_err().to_string(),
@@ -1648,7 +1762,10 @@ fn binary_output_does_not_flatten_nested_binary_values() {
 
 #[test]
 fn binary_output_contextualizes_only_nested_evaluation_failures() {
-    let list = List::from_values(vec![Value::error("byte computation failed")]);
+    let list = List::from_values(vec![Value::error(
+        &crate::core::test_value_factory(),
+        "byte computation failed",
+    )]);
 
     let error = list_output_bytes(&test_context(), &list)
         .expect_err("a failed byte computation must propagate");
@@ -1700,7 +1817,7 @@ fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
 
 #[test]
 fn promised_list_chunks_remain_assignable_after_early_observation() {
-    let promise = PromisedValue::new("promised list tail");
+    let promise = PromisedValue::new(&crate::core::test_value_factory(), "promised list tail");
     let list = append_sequence(Value::Promised(promise.clone()))
         .expect("a promise remains a valid deferred list tail");
 
@@ -1721,7 +1838,9 @@ fn promised_list_chunks_remain_assignable_after_early_observation() {
 
 #[test]
 fn split_end_does_not_force_lazy_left_branch_when_suffix_is_in_right_branch() {
-    let lazy_left = List::from_thunk(LazyValue::error("left branch was forced").into());
+    let lazy_left = List::from_thunk(
+        LazyValue::error(&crate::core::test_value_factory(), "left branch was forced").into(),
+    );
     let list = List::concat(lazy_left, List::from_bytes(Bytes::from_static(b"abc")));
     let split = eval_closed_expr(&builtin2_expr(
         Builtin::ListSplitEnd,
@@ -1774,10 +1893,14 @@ fn evaluates_arithmetic_builtins() {
 fn lazy_arguments_share_forced_values() {
     let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = force_count.clone();
-    let counted = TestExpr::Value(Value::deferred("counted", move |_| {
-        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(n(2))
-    }));
+    let counted = TestExpr::Value(Value::deferred(
+        &crate::core::test_value_factory(),
+        "counted",
+        move |_| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(n(2))
+        },
+    ));
     let expr = TestExpr::Apply(
         Arc::new(function_expr(
             1,
@@ -2005,7 +2128,11 @@ fn compiler_pattern_list_predicates_return_pass_fail_effects() {
         Value::List(List::empty()),
         Value::List(List::from_values(vec![n(1)])),
         Value::List(List::from_thunk(
-            LazyValue::error("list predicate forced its contents").into(),
+            LazyValue::error(
+                &crate::core::test_value_factory(),
+                "list predicate forced its contents",
+            )
+            .into(),
         )),
     ] {
         assert_eq!(
@@ -2073,9 +2200,12 @@ fn compiler_pattern_equality_mismatches_incompatible_values() {
         );
     }
     assert_eq!(
-        run_pattern_equal(n(1), Value::error("literal input failed"))
-            .expect_err("forcing failures must propagate")
-            .to_string(),
+        run_pattern_equal(
+            n(1),
+            Value::error(&crate::core::test_value_factory(), "literal input failed")
+        )
+        .expect_err("forcing failures must propagate")
+        .to_string(),
         "literal input failed"
     );
 }
@@ -2119,6 +2249,7 @@ fn compiler_pattern_path_equality_matches_keyable_lists_directionally() {
             Builtin::PatternPathEqual,
             expected,
             Value::List(List::from_values(vec![Value::error(
+                &crate::core::test_value_factory(),
                 "quoted path value failed"
             )])),
         )
@@ -2191,9 +2322,11 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
 
     let logically_empty = Dict::new_sync().insert(
         key,
-        Value::Lazy(LazyValue::deferred("empty dictionary field", |_| {
-            Ok(Value::Dict(Dict::new_sync()))
-        })),
+        Value::Lazy(LazyValue::deferred(
+            &crate::core::test_value_factory(),
+            "empty dictionary field",
+            |_| Ok(Value::Dict(Dict::new_sync())),
+        )),
     );
     assert_eq!(
         run_pattern_builtin(Builtin::PatternDictIsEmpty, Value::Dict(logically_empty))
@@ -2213,7 +2346,7 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
             Builtin::PatternDictIsEmpty,
             Value::Dict(Dict::new_sync().insert(
                 Key::atom_from_text("broken"),
-                Value::error("dict value failed")
+                Value::error(&crate::core::test_value_factory(), "dict value failed")
             ),),
         )
         .expect_err("forcing failures while establishing emptiness must propagate")
@@ -2282,8 +2415,13 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
         .is_empty()
     );
 
-    let failed =
-        Value::Dict(Dict::new_sync().insert(foo, Value::error("optional dict path failed")));
+    let failed = Value::Dict(Dict::new_sync().insert(
+        foo,
+        Value::error(
+            &crate::core::test_value_factory(),
+            "optional dict path failed",
+        ),
+    ));
     assert_eq!(
         run_pattern_builtin2(Builtin::PatternDictTryTakeOptional, path, failed)
             .expect_err("forcing failures along an optional path must propagate")
@@ -2359,9 +2497,12 @@ fn compiler_pattern_list_decomposition_mismatches_without_masking_failures() {
             );
         }
         assert_eq!(
-            run_pattern_builtin(builtin, Value::error("pattern input failed"))
-                .expect_err("forcing failures must propagate")
-                .to_string(),
+            run_pattern_builtin(
+                builtin,
+                Value::error(&crate::core::test_value_factory(), "pattern input failed")
+            )
+            .expect_err("forcing failures must propagate")
+            .to_string(),
             "pattern input failed"
         );
     }
@@ -2370,7 +2511,9 @@ fn compiler_pattern_list_decomposition_mismatches_without_masking_failures() {
 #[test]
 fn compiler_pattern_unsnoc_does_not_force_an_unrelated_prefix_hole() {
     let list = List::concat(
-        List::from_thunk(LazyValue::error("prefix was forced").into()),
+        List::from_thunk(
+            LazyValue::error(&crate::core::test_value_factory(), "prefix was forced").into(),
+        ),
         List::from_values(vec![n(9)]),
     );
     let [parts]: [Value; 1] = run_pattern_builtin(Builtin::PatternListTryUnsnoc, Value::List(list))
@@ -2526,10 +2669,14 @@ fn function_nets_capture_outer_values() {
 fn partial_builtins_share_lazy_arguments() {
     let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = force_count.clone();
-    let argument = TestExpr::Value(Value::deferred("partial argument", move |_| {
-        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(n(40))
-    }));
+    let argument = TestExpr::Value(Value::deferred(
+        &crate::core::test_value_factory(),
+        "partial argument",
+        move |_| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(n(40))
+        },
+    ));
     let make_partial = function_expr(
         1,
         TestExpr::Apply(
@@ -2559,10 +2706,14 @@ fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
             1,
             TestExpr::List(Arc::from([Arc::new(TestExpr::Local(0))])),
         )),
-        Arc::new(TestExpr::Value(Value::deferred("list value", move |_| {
-            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(n(42))
-        }))),
+        Arc::new(TestExpr::Value(Value::deferred(
+            &crate::core::test_value_factory(),
+            "list value",
+            move |_| {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(n(42))
+            },
+        ))),
     );
     let Value::List(list) = eval_closed_expr(&expression).unwrap() else {
         panic!("net-backed list literal should produce a list");
@@ -2587,9 +2738,11 @@ fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
 
 #[test]
 fn closed_semantic_list_holes_remain_host_observable() {
-    let Value::Lazy(hole) = Value::deferred("list hole", |_| {
-        Ok(Value::List(List::from_values(vec![n(42)])))
-    }) else {
+    let Value::Lazy(hole) =
+        Value::deferred(&crate::core::test_value_factory(), "list hole", |_| {
+            Ok(Value::List(List::from_values(vec![n(42)])))
+        })
+    else {
         unreachable!()
     };
     let list = List::from_thunk(hole.into());
@@ -2712,9 +2865,11 @@ fn non_callable_application_reports_semantic_value_kinds() {
 #[test]
 fn tagged_payload_ignores_only_semantically_undefined_extra_entries() {
     let payload = n(42);
-    let lazy_empty = Value::Lazy(LazyValue::deferred("empty tag field", |_| {
-        Ok(Value::Dict(Dict::new_sync()))
-    }));
+    let lazy_empty = Value::Lazy(LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "empty tag field",
+        |_| Ok(Value::Dict(Dict::new_sync())),
+    ));
     let recursively_empty =
         Value::Dict(Dict::new_sync().insert(Key::atom_from_text("nested"), lazy_empty));
     let tagged = Dict::new_sync()
@@ -3426,7 +3581,10 @@ fn error_annotations_contextualize_failure_while_evaluating_their_message() {
         TestExpr::Value(Value::Atom(crate::core::Atom::from_key(
             &Key::binary_from_text("error"),
         ))),
-        TestExpr::Value(Value::error("message construction failed")),
+        TestExpr::Value(Value::error(
+            &crate::core::test_value_factory(),
+            "message construction failed",
+        )),
     ))
     .expect_err("failure while constructing an error message must propagate");
     assert_eq!(error.to_string(), "message construction failed");
@@ -3466,7 +3624,10 @@ fn error_annotations_contextualize_failure_while_evaluating_their_message() {
 fn annotation_selection_contextualizes_only_nested_evaluation_failures() {
     let error = eval_closed_expr(&builtin2_expr(
         Builtin::Anno,
-        TestExpr::Value(Value::error("annotation selection failed")),
+        TestExpr::Value(Value::error(
+            &crate::core::test_value_factory(),
+            "annotation selection failed",
+        )),
         TestExpr::Value(n(42)),
     ))
     .expect_err("failure while selecting an annotation must propagate");
@@ -3481,7 +3642,10 @@ fn index_builtins_contextualize_demand_without_decorating_validation_errors() {
     let values = Value::List(List::from_values(vec![n(42)]));
     let nested = eval_closed_expr(&builtin2_expr(
         Builtin::ListAt,
-        TestExpr::Value(Value::error("index computation failed")),
+        TestExpr::Value(Value::error(
+            &crate::core::test_value_factory(),
+            "index computation failed",
+        )),
         TestExpr::Value(values.clone()),
     ))
     .expect_err("failure while evaluating the index must propagate");
@@ -3531,7 +3695,10 @@ fn failure_context_items(error: &EvaluationHalt) -> Vec<Value> {
 fn context_annotations_are_transparent_and_do_not_demand_context_on_success() {
     let annotation = TestExpr::Value(Value::Dict(Dict::new_sync().insert(
         (*keys::CONTEXT).clone(),
-        Value::error("unused context must remain lazy"),
+        Value::error(
+            &crate::core::test_value_factory(),
+            "unused context must remain lazy",
+        ),
     )));
     let value = eval_closed_expr(&builtin2_expr(
         Builtin::Anno,
@@ -3552,10 +3719,14 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
     };
     let target_forces = Arc::new(AtomicUsize::new(0));
     let counted_target_forces = target_forces.clone();
-    let unit = Value::deferred("metadata annotation unit", move |_| {
-        counted_target_forces.fetch_add(1, Ordering::SeqCst);
-        Ok((*keys::UNIT_VALUE).clone())
-    });
+    let unit = Value::deferred(
+        &crate::core::test_value_factory(),
+        "metadata annotation unit",
+        move |_| {
+            counted_target_forces.fetch_add(1, Ordering::SeqCst);
+            Ok((*keys::UNIT_VALUE).clone())
+        },
+    );
 
     let first = apply_values(
         &context,
@@ -3637,7 +3808,10 @@ fn old_metadata_annotation_spellings_are_unrecognized() {
     let carrier = Value::metadata_carrier(n(7));
     let old_update = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("meta_upd"),
-        Value::error("the old update function must remain unused"),
+        Value::error(
+            &crate::core::test_value_factory(),
+            "the old update function must remain unused",
+        ),
     ));
     let target = Value::List(List::from_values(vec![carrier.clone()]));
     let result = apply_values(
@@ -3778,8 +3952,12 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
 #[test]
 fn metadata_update_preserves_input_arity_without_validating_output_length() {
     let context = test_context();
-    let empty = run_metadata_update(&context, Value::error("unused update"), Vec::new())
-        .expect("an empty carrier list should not demand its update function");
+    let empty = run_metadata_update(
+        &context,
+        Value::error(&crate::core::test_value_factory(), "unused update"),
+        Vec::new(),
+    )
+    .expect("an empty carrier list should not demand its update function");
     assert!(empty.is_empty());
 
     let too_short = run_metadata_update(
@@ -3809,10 +3987,14 @@ fn metadata_update_preserves_input_arity_without_validating_output_length() {
 
     let extra_forces = Arc::new(AtomicUsize::new(0));
     let counted_extra_forces = extra_forces.clone();
-    let extra = Value::deferred("unused metadata update result", move |_| {
-        counted_extra_forces.fetch_add(1, Ordering::SeqCst);
-        Ok(n(9))
-    });
+    let extra = Value::deferred(
+        &crate::core::test_value_factory(),
+        "unused metadata update result",
+        move |_| {
+            counted_extra_forces.fetch_add(1, Ordering::SeqCst);
+            Ok(n(9))
+        },
+    );
     let too_long = run_metadata_update(
         &context,
         closed_function_value(
@@ -3838,15 +4020,23 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
     let counted_carrier_forces = carrier_forces.clone();
     let hidden_forces = Arc::new(AtomicUsize::new(0));
     let counted_hidden_forces = hidden_forces.clone();
-    let hidden = Value::deferred("hidden metadata", move |_| {
-        counted_hidden_forces.fetch_add(1, Ordering::SeqCst);
-        Ok(n(11))
-    });
+    let hidden = Value::deferred(
+        &crate::core::test_value_factory(),
+        "hidden metadata",
+        move |_| {
+            counted_hidden_forces.fetch_add(1, Ordering::SeqCst);
+            Ok(n(11))
+        },
+    );
     let carrier = Value::metadata_carrier(hidden);
-    let lazy_carrier = Value::deferred("lazy metadata carrier", move |_| {
-        counted_carrier_forces.fetch_add(1, Ordering::SeqCst);
-        Ok(carrier.clone())
-    });
+    let lazy_carrier = Value::deferred(
+        &crate::core::test_value_factory(),
+        "lazy metadata carrier",
+        move |_| {
+            counted_carrier_forces.fetch_add(1, Ordering::SeqCst);
+            Ok(carrier.clone())
+        },
+    );
 
     let result = run_metadata_update(
         &context,
@@ -3865,7 +4055,10 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
 
     let error = run_metadata_update(
         &context,
-        Value::error("update function must remain unused"),
+        Value::error(
+            &crate::core::test_value_factory(),
+            "update function must remain unused",
+        ),
         vec![n(1)],
     )
     .expect_err("ordinary input values must be rejected before update evaluation");
@@ -3876,7 +4069,10 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
 
     let annotation = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("meta_pure"),
-        Value::error("update function must remain unused"),
+        Value::error(
+            &crate::core::test_value_factory(),
+            "update function must remain unused",
+        ),
     ));
     let error = apply_values(
         &context,
@@ -3895,10 +4091,14 @@ fn metadata_update_shares_update_failures_between_projections() {
     let context = test_context();
     let update_forces = Arc::new(AtomicUsize::new(0));
     let counted_update_forces = update_forces.clone();
-    let function = Value::deferred("failing metadata update", move |_| {
-        counted_update_forces.fetch_add(1, Ordering::SeqCst);
-        Err(EvaluationHalt::new("shared metadata update failed"))
-    });
+    let function = Value::deferred(
+        &crate::core::test_value_factory(),
+        "failing metadata update",
+        move |_| {
+            counted_update_forces.fetch_add(1, Ordering::SeqCst);
+            Err(EvaluationHalt::new("shared metadata update failed"))
+        },
+    );
     let result = run_metadata_update(
         &context,
         function,
@@ -3972,7 +4172,10 @@ fn metadata_reflection_update_is_inert_until_demand_and_shares_one_task() {
 
     let outputs = run_metadata_reflection_update(
         &context,
-        Value::error("the fixture launcher must not evaluate the effect"),
+        Value::error(
+            &crate::core::test_value_factory(),
+            "the fixture launcher must not evaluate the effect",
+        ),
         vec![Value::metadata_carrier(n(1)), Value::metadata_carrier(n(2))],
     )
     .expect("effectful metadata update should construct its output carriers");
@@ -4004,7 +4207,7 @@ fn metadata_reflection_update_blocks_and_resumes_on_its_shared_task() {
     let context = test_context();
     let outputs = run_metadata_reflection_update(
         &context,
-        Value::error("unlaunched effect"),
+        Value::error(&crate::core::test_value_factory(), "unlaunched effect"),
         vec![Value::initial_metadata_carrier()],
     )
     .expect("effectful metadata update should remain latent");
@@ -4096,9 +4299,11 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
     );
 
     let long_context = test_context();
-    let unused_extra = Value::deferred("unused effectful metadata result", |_| {
-        panic!("an extra metadata result must remain unused")
-    });
+    let unused_extra = Value::deferred(
+        &crate::core::test_value_factory(),
+        "unused effectful metadata result",
+        |_| panic!("an extra metadata result must remain unused"),
+    );
     long_context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
             terminal: FixtureTaskTerminal::Complete(Value::List(List::from_values(vec![
@@ -4142,7 +4347,10 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
     partial_context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
             terminal: FixtureTaskTerminal::Complete(Value::List(List::from_values(vec![
-                Value::error("one metadata projection failed"),
+                Value::error(
+                    &crate::core::test_value_factory(),
+                    "one metadata projection failed",
+                ),
                 n(9),
             ]))),
             builds: Arc::new(AtomicUsize::new(0)),
@@ -4365,10 +4573,14 @@ fn reflection_task_result_returns_arbitrary_lazy_value_once() {
     let context = test_context();
     let result_forces = Arc::new(AtomicUsize::new(0));
     let counted_result_forces = result_forces.clone();
-    let result = Value::deferred("returned reflection result", move |_| {
-        counted_result_forces.fetch_add(1, Ordering::SeqCst);
-        Ok(n(42))
-    });
+    let result = Value::deferred(
+        &crate::core::test_value_factory(),
+        "returned reflection result",
+        move |_| {
+            counted_result_forces.fetch_add(1, Ordering::SeqCst);
+            Ok(n(42))
+        },
+    );
     let builds = Arc::new(AtomicUsize::new(0));
     let result_policies = Arc::new(Mutex::new(Vec::new()));
     context
@@ -4379,7 +4591,7 @@ fn reflection_task_result_returns_arbitrary_lazy_value_once() {
         }))
         .expect("fresh test session should accept its reflection launcher");
 
-    let computation = Value::reflection_task_result(n(0));
+    let computation = Value::reflection_task_result(&crate::core::test_value_factory(), n(0));
     let copy = computation.clone();
     assert_eq!(eval_value(&context, &computation).unwrap(), n(42));
     assert_eq!(eval_value(&context, &copy).unwrap(), n(42));
@@ -4397,7 +4609,7 @@ fn reflection_task_result_returns_arbitrary_lazy_value_once() {
 fn reflection_task_result_blocks_across_sessions_and_returns_completion_value() {
     let owner = test_context();
     let observer = test_context();
-    let computation = Value::reflection_task_result(n(0));
+    let computation = Value::reflection_task_result(&crate::core::test_value_factory(), n(0));
     let blocked = eval_value(&owner, &computation)
         .expect_err("an unlaunched reflection result task should block");
     let wait = blocked
@@ -4428,8 +4640,11 @@ fn reflection_task_result_preserves_failure_and_transfers_reporting_responsibili
         }))
         .expect("fresh test session should accept its reflection launcher");
 
-    let error = eval_value(&context, &Value::reflection_task_result(n(0)))
-        .expect_err("a failed result task must fail its lazy consumer");
+    let error = eval_value(
+        &context,
+        &Value::reflection_task_result(&crate::core::test_value_factory(), n(0)),
+    )
+    .expect_err("a failed result task must fail its lazy consumer");
     assert_eq!(error.to_string(), "reflection result failed");
     assert_eq!(
         failure_context_items(&error),
@@ -4453,8 +4668,11 @@ fn reflection_task_result_propagates_cancellation() {
         }))
         .expect("fresh test session should accept its reflection launcher");
 
-    let error = eval_value(&context, &Value::reflection_task_result(n(0)))
-        .expect_err("a cancelled result task must fail its lazy consumer");
+    let error = eval_value(
+        &context,
+        &Value::reflection_task_result(&crate::core::test_value_factory(), n(0)),
+    )
+    .expect_err("a cancelled result task must fail its lazy consumer");
     assert_eq!(error.to_string(), "reflection result task was cancelled");
 }
 
@@ -4463,10 +4681,14 @@ fn reflection_gate_waits_before_continuing_target_demand() {
     let context = test_context();
     let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let forced_by_target = forced.clone();
-    let target = Value::deferred("reflection target", move |_| {
-        forced_by_target.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(n(42))
-    });
+    let target = Value::deferred(
+        &crate::core::test_value_factory(),
+        "reflection target",
+        move |_| {
+            forced_by_target.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(n(42))
+        },
+    );
     let gate = reflection_annotation(&context, n(0), target.clone());
 
     assert_eq!(context.reflection_task_count(), 0);
@@ -4632,7 +4854,10 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
     });
     let runtime = applied.runtime().clone();
 
-    let computation = Value::Lazy(LazyValue::from_net_computation(applied));
+    let computation = Value::Lazy(LazyValue::from_net_computation(
+        &crate::core::test_value_factory(),
+        applied,
+    ));
     let blocked =
         eval_value(&context, &computation).expect_err("call should wait for its reflection gate");
     let wait = blocked
@@ -4642,15 +4867,20 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
 
     context.complete_wait(&wait.0);
     let observer = test_context();
-    let resumed = Value::Lazy(LazyValue::from_net_computation(NetValue::new(runtime)));
+    let resumed = Value::Lazy(LazyValue::from_net_computation(
+        &crate::core::test_value_factory(),
+        NetValue::new(runtime),
+    ));
     assert_eq!(eval_value(&observer, &resumed).unwrap(), n(42));
 }
 
 #[test]
 fn builtins_are_curried_and_do_not_force_arguments_early() {
-    let unforced = Value::deferred("unforced builtin argument", |_| {
-        panic!("partial builtin application forced its first argument")
-    });
+    let unforced = Value::deferred(
+        &crate::core::test_value_factory(),
+        "unforced builtin argument",
+        |_| panic!("partial builtin application forced its first argument"),
+    );
     let partial = apply_values(
         &test_context(),
         Value::Builtin(Builtin::Append),
@@ -4674,17 +4904,24 @@ fn seq_forces_its_first_argument_before_continuing_target_demand() {
     let error = apply_values(
         &context,
         Value::Builtin(Builtin::Seq),
-        vec![Value::error("seq forced this error"), n(42)],
+        vec![
+            Value::error(&crate::core::test_value_factory(), "seq forced this error"),
+            n(42),
+        ],
     )
     .unwrap_err();
     assert_eq!(error.to_string(), "seq forced this error");
 
     let target_forces = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted_target_forces = target_forces.clone();
-    let target = Value::deferred("seq target", move |_| {
-        counted_target_forces.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(n(42))
-    });
+    let target = Value::deferred(
+        &crate::core::test_value_factory(),
+        "seq target",
+        move |_| {
+            counted_target_forces.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(n(42))
+        },
+    );
     let result = apply_values(&context, Value::Builtin(Builtin::Seq), vec![n(0), target]).unwrap();
 
     assert_eq!(target_forces.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -4695,9 +4932,11 @@ fn seq_forces_its_first_argument_before_continuing_target_demand() {
 #[test]
 fn zero_worker_spark_returns_target_without_forcing_work() {
     let context = test_context();
-    let unforced = Value::deferred("discarded spark", |_| {
-        panic!("zero-worker spark should be silently dropped")
-    });
+    let unforced = Value::deferred(
+        &crate::core::test_value_factory(),
+        "discarded spark",
+        |_| panic!("zero-worker spark should be silently dropped"),
+    );
     let result = apply_values(
         &context,
         Value::Builtin(Builtin::Spark),
@@ -4713,17 +4952,25 @@ fn strategies_demand_hidden_metadata_without_exposing_the_carrier() {
     let context = test_context();
     let metadata_forces = Arc::new(AtomicUsize::new(0));
     let counted_metadata_forces = metadata_forces.clone();
-    let metadata = Value::deferred("sequenced metadata", move |_| {
-        counted_metadata_forces.fetch_add(1, Ordering::SeqCst);
-        Ok(n(7))
-    });
+    let metadata = Value::deferred(
+        &crate::core::test_value_factory(),
+        "sequenced metadata",
+        move |_| {
+            counted_metadata_forces.fetch_add(1, Ordering::SeqCst);
+            Ok(n(7))
+        },
+    );
     let carrier = Value::metadata_carrier(metadata);
     let target_forces = Arc::new(AtomicUsize::new(0));
     let counted_target_forces = target_forces.clone();
-    let target = Value::deferred("metadata sequence target", move |_| {
-        counted_target_forces.fetch_add(1, Ordering::SeqCst);
-        Ok(n(42))
-    });
+    let target = Value::deferred(
+        &crate::core::test_value_factory(),
+        "metadata sequence target",
+        move |_| {
+            counted_target_forces.fetch_add(1, Ordering::SeqCst);
+            Ok(n(42))
+        },
+    );
 
     let result = apply_values(
         &context,
@@ -4740,9 +4987,11 @@ fn strategies_demand_hidden_metadata_without_exposing_the_carrier() {
 #[test]
 fn zero_worker_spark_discards_hidden_metadata_demand() {
     let context = test_context();
-    let metadata = Value::deferred("discarded metadata spark", |_| {
-        panic!("zero-worker spark must not demand hidden metadata")
-    });
+    let metadata = Value::deferred(
+        &crate::core::test_value_factory(),
+        "discarded metadata spark",
+        |_| panic!("zero-worker spark must not demand hidden metadata"),
+    );
     let carrier = Value::metadata_carrier(metadata);
     let result = apply_values(
         &context,
@@ -4795,19 +5044,27 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
     let context = EvalContext::new(session);
     let (shell_sender, shell_receiver) = std::sync::mpsc::channel();
     let (metadata_sender, metadata_receiver) = std::sync::mpsc::channel();
-    let metadata = Value::deferred("worker metadata", move |_| {
-        metadata_sender
-            .send(())
-            .expect("metadata receiver should remain open");
-        Ok(n(7))
-    });
+    let metadata = Value::deferred(
+        &crate::core::test_value_factory(),
+        "worker metadata",
+        move |_| {
+            metadata_sender
+                .send(())
+                .expect("metadata receiver should remain open");
+            Ok(n(7))
+        },
+    );
     let carrier = Value::metadata_carrier(metadata);
-    let lazy_carrier = Value::deferred("lazy worker metadata carrier", move |_| {
-        shell_sender
-            .send(())
-            .expect("carrier receiver should remain open");
-        Ok(carrier.clone())
-    });
+    let lazy_carrier = Value::deferred(
+        &crate::core::test_value_factory(),
+        "lazy worker metadata carrier",
+        move |_| {
+            shell_sender
+                .send(())
+                .expect("carrier receiver should remain open");
+            Ok(carrier.clone())
+        },
+    );
 
     let result = apply_values(
         &context,
@@ -4832,13 +5089,17 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
     let (attempt_sender, attempt_receiver) = std::sync::mpsc::channel();
-    let metadata = LazyValue::deferred("failing metadata strategy", move |_| {
-        counted_attempts.fetch_add(1, Ordering::SeqCst);
-        attempt_sender
-            .send(())
-            .expect("attempt receiver should remain open");
-        Err(EvaluationHalt::new("metadata strategy failed"))
-    });
+    let metadata = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "failing metadata strategy",
+        move |_| {
+            counted_attempts.fetch_add(1, Ordering::SeqCst);
+            attempt_sender
+                .send(())
+                .expect("attempt receiver should remain open");
+            Err(EvaluationHalt::new("metadata strategy failed"))
+        },
+    );
     let carrier = Value::metadata_carrier(Value::Lazy(metadata.clone()));
 
     let result = apply_values(
@@ -4869,10 +5130,14 @@ fn strategies_stop_at_nested_metadata_carriers() {
     let context = EvalContext::new(session);
     let hidden_forces = Arc::new(AtomicUsize::new(0));
     let counted_hidden_forces = hidden_forces.clone();
-    let hidden = Value::deferred("nested hidden metadata", move |_| {
-        counted_hidden_forces.fetch_add(1, Ordering::SeqCst);
-        Ok(n(7))
-    });
+    let hidden = Value::deferred(
+        &crate::core::test_value_factory(),
+        "nested hidden metadata",
+        move |_| {
+            counted_hidden_forces.fetch_add(1, Ordering::SeqCst);
+            Ok(n(7))
+        },
+    );
     let outer = Value::metadata_carrier(Value::metadata_carrier(hidden));
 
     assert_eq!(
@@ -4888,12 +5153,16 @@ fn strategies_stop_at_nested_metadata_carriers() {
 
     context.spark(outer);
     let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
-    let sentinel = LazyValue::deferred("nested metadata spark sentinel", move |_| {
-        finished_sender
-            .send(())
-            .expect("sentinel receiver should remain open");
-        Ok((*keys::UNIT_VALUE).clone())
-    });
+    let sentinel = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "nested metadata spark sentinel",
+        move |_| {
+            finished_sender
+                .send(())
+                .expect("sentinel receiver should remain open");
+            Ok((*keys::UNIT_VALUE).clone())
+        },
+    );
     context.spark(Value::Lazy(sentinel.clone()));
     finished_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -4914,27 +5183,36 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
     let net = closed_net(|builder| builder.data(n(1)));
     context.spark(Value::Net(net));
     context.spark(Value::Promised(PromisedValue::new(
+        &crate::core::test_value_factory(),
         "unassigned spark input",
     )));
     let promised_forces = Arc::new(AtomicUsize::new(0));
     let counted_promised_forces = promised_forces.clone();
-    let promised_work = LazyValue::deferred("promised spark work", move |_| {
-        counted_promised_forces.fetch_add(1, Ordering::SeqCst);
-        Ok(n(7))
-    });
-    let promise = PromisedValue::new("resolved spark input");
+    let promised_work = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "promised spark work",
+        move |_| {
+            counted_promised_forces.fetch_add(1, Ordering::SeqCst);
+            Ok(n(7))
+        },
+    );
+    let promise = PromisedValue::new(&crate::core::test_value_factory(), "resolved spark input");
     promise
         .set(Value::Lazy(promised_work.clone()))
         .expect("test promise should accept its one assignment");
     context.spark(Value::Promised(promise));
 
     let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
-    let sentinel = LazyValue::deferred("spark admission sentinel", move |_| {
-        finished_sender
-            .send(())
-            .expect("sentinel receiver should remain open");
-        Ok((*keys::UNIT_VALUE).clone())
-    });
+    let sentinel = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "spark admission sentinel",
+        move |_| {
+            finished_sender
+                .send(())
+                .expect("sentinel receiver should remain open");
+            Ok((*keys::UNIT_VALUE).clone())
+        },
+    );
     context.spark(Value::Lazy(sentinel.clone()));
     finished_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -4961,7 +5239,7 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
     let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
     let session = crate::evaluation::EvaluationSession::shared(&executor);
     let context = EvalContext::new(session);
-    let promise = PromisedValue::new("later spark input");
+    let promise = PromisedValue::new(&crate::core::test_value_factory(), "later spark input");
     context.spark(Value::Promised(promise.clone()));
     wait_for_blocked_sparks(
         &executor,
@@ -4970,12 +5248,16 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
     );
 
     let (forced_sender, forced_receiver) = std::sync::mpsc::channel();
-    let assigned = LazyValue::deferred("resolved spark work", move |_| {
-        forced_sender
-            .send(())
-            .expect("spark result receiver should remain open");
-        Ok(n(7))
-    });
+    let assigned = LazyValue::deferred(
+        &crate::core::test_value_factory(),
+        "resolved spark work",
+        move |_| {
+            forced_sender
+                .send(())
+                .expect("spark result receiver should remain open");
+            Ok(n(7))
+        },
+    );
     promise
         .set(Value::Lazy(assigned.clone()))
         .expect("promise should accept its one assignment");
@@ -5003,6 +5285,7 @@ fn dropping_a_session_discards_its_blocked_sparks() {
         let session = crate::evaluation::EvaluationSession::shared(&executor);
         let context = EvalContext::new(session);
         context.spark(Value::Promised(PromisedValue::new(
+            &crate::core::test_value_factory(),
             "discarded blocked spark",
         )));
         wait_for_blocked_sparks(
@@ -5051,10 +5334,14 @@ fn completed_metadata_updates_release_sources_and_task_records() {
     let context = test_context();
     let prior_source_dropped = Arc::new(AtomicBool::new(false));
     let prior_signal = DropSignal(prior_source_dropped.clone());
-    let prior = Value::deferred("discardable prior metadata", move |_| {
-        let _keep_signal_captured = &prior_signal;
-        Ok(n(1))
-    });
+    let prior = Value::deferred(
+        &crate::core::test_value_factory(),
+        "discardable prior metadata",
+        move |_| {
+            let _keep_signal_captured = &prior_signal;
+            Ok(n(1))
+        },
+    );
     let outputs = run_metadata_update(
         &context,
         closed_function_value(
@@ -5092,7 +5379,7 @@ fn strategy_annotations_share_builtin_semantics() {
     let context = test_context();
     let seq_annotation = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("seq"),
-        Value::error("annotation forced"),
+        Value::error(&crate::core::test_value_factory(), "annotation forced"),
     ));
     let error = apply_values(
         &context,
@@ -5104,9 +5391,11 @@ fn strategy_annotations_share_builtin_semantics() {
 
     let spark_annotation = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("spark"),
-        Value::deferred("discarded annotated spark", |_| {
-            panic!("zero-worker annotated spark should be silently dropped")
-        }),
+        Value::deferred(
+            &crate::core::test_value_factory(),
+            "discarded annotated spark",
+            |_| panic!("zero-worker annotated spark should be silently dropped"),
+        ),
     ));
     let result = apply_values(
         &context,

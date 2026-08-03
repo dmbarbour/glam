@@ -3,14 +3,19 @@ use crate::core::{Dict, Key, Value};
 use crate::number::Number;
 
 fn test_eval_context() -> crate::evaluation::EvalContext {
-    crate::api::Assembler::default().eval_context()
+    static ASSEMBLER: std::sync::LazyLock<crate::api::Assembler> =
+        std::sync::LazyLock::new(crate::api::Assembler::default);
+    ASSEMBLER.eval_context()
 }
 
 fn core_global_access(context: &CompileContext, path: Vec<Key>) -> Value {
-    lower_resolved_expr(ResolvedExpr::Access {
-        base: Box::new(ResolvedExpr::Provided(context.final_defs().clone())),
-        path: path.into_iter().map(ResolvedPathPart::Key).collect(),
-    })
+    lower_resolved_expr(
+        context.values(),
+        ResolvedExpr::Access {
+            base: Box::new(ResolvedExpr::Provided(context.final_defs().clone())),
+            path: path.into_iter().map(ResolvedPathPart::Key).collect(),
+        },
+    )
 }
 
 fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> Value {

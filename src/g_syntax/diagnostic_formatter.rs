@@ -4,17 +4,18 @@
 //! compiler. This module uses the g front end's private semantic IR only to
 //! lower that policy once; callers receive an ordinary closed function value.
 
-use std::sync::LazyLock;
-
 use super::*;
 
-static FORMATTER: LazyLock<Value> = LazyLock::new(build);
+struct CachedDiagnosticFormatter(Value);
 
-pub(super) fn value() -> Value {
-    (*FORMATTER).clone()
+pub(super) fn value(values: &CoreValueFactory) -> Value {
+    values
+        .cached(|| CachedDiagnosticFormatter(build(values)))
+        .0
+        .clone()
 }
 
-fn build() -> Value {
+fn build(values: &CoreValueFactory) -> Value {
     fn field(local: BindingId, path: &[&str]) -> ResolvedExpr<Value> {
         ResolvedExpr::Access {
             base: Box::new(ResolvedExpr::Local(local)),
@@ -93,13 +94,16 @@ fn build() -> Value {
             [field(diagnostic, &["msg", "text"])],
         )],
     );
-    evaluate_closed(ResolvedExpr::lambda(vec![diagnostic], with_lines))
+    evaluate_closed(values, ResolvedExpr::lambda(vec![diagnostic], with_lines))
 }
 
-fn evaluate_closed(expression: ResolvedExpr<Value>) -> Value {
-    let value = lower_resolved_expr(expression);
-    crate::eval::eval_value(&crate::evaluation::EvalContext::standalone(), &value)
-        .expect("default diagnostic formatter must be a closed function")
+fn evaluate_closed(values: &CoreValueFactory, expression: ResolvedExpr<Value>) -> Value {
+    let value = lower_resolved_expr(values, expression);
+    crate::eval::eval_value(
+        &crate::evaluation::EvalContext::isolated(values.clone()),
+        &value,
+    )
+    .expect("default diagnostic formatter must be a closed function")
 }
 
 fn apply_builtin(
@@ -115,6 +119,10 @@ mod tests {
 
     #[test]
     fn formatter_is_cached_after_exposing_its_function() {
-        assert!(matches!(&*FORMATTER, Value::Function(_)));
+        let values = crate::core::test_value_factory();
+        let first = value(&values);
+        let second = value(&values);
+        assert!(matches!(first, Value::Function(_)));
+        assert_eq!(first, second);
     }
 }

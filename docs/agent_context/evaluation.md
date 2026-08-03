@@ -56,9 +56,11 @@ control-flow overview.
   forms, alongside `seq` and `spark`. A permanent failure while the zero-arity
   bridge demands data gains `eval:{op:'net_computation}`; raw net observation
   does not.
-- Lazy identities are process-global nonzero IDs because a value and its result
-  cell may cross evaluation sessions; each session uses them only as local
-  scheduling keys.
+- Lazy and promise identities are runtime-local nonzero IDs. Values may cross
+  evaluation sessions belonging to the same `EvaluationRuntime`, so escaped
+  identities must always be interpreted with that runtime rather than as
+  process-global keys. `EvaluationRuntimeId` is the sole process-global ID
+  allocator.
 - A computed `LazyValue` caches
   `Result<EvaluatedValue, Arc<EvaluationFailure>>`.
   Successful cache installation therefore rejects deferred outer shells at the

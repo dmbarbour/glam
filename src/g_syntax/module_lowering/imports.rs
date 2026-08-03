@@ -37,19 +37,27 @@ pub(in crate::g_syntax) fn lower_builtin_import(
     context: &CompileContext,
     definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
-    let module = compiler_values::builtin_module(name)
+    let module = compiler_values::builtin_module(context.values(), name)
         .ok_or_else(|| Diagnostic::error(line, format!("unknown built-in module `'{name}`")))?;
 
     *definitions = match placement {
-        ImportPlacement::Inline => update_module_dict_value(definitions.clone(), module.value),
+        ImportPlacement::Inline => {
+            update_module_dict_value(context.values(), definitions.clone(), module.value)
+        }
         ImportPlacement::As(target) => update_module_value(
+            context.values(),
             definitions.clone(),
             target,
             module_object_value_with_defs(target, module.definitions, context),
         ),
         ImportPlacement::At(target) => {
-            let object = extend_object_with_defs(target, module.definitions, definitions.clone())?;
-            update_module_value(definitions.clone(), target, object)
+            let object = extend_object_with_defs(
+                context.values(),
+                target,
+                module.definitions,
+                definitions.clone(),
+            )?;
+            update_module_value(context.values(), definitions.clone(), target, object)
         }
     };
 
@@ -75,17 +83,24 @@ pub(in crate::g_syntax) fn lower_local_import(
             let prior_defs = import_as_prior_defs(target, definitions.clone(), context)?;
             let loaded = scoped_local_import_value(request, target, prior_defs, context)?;
             *definitions = update_module_value(
+                context.values(),
                 definitions.clone(),
                 target,
                 module_object_value(target, loaded, context),
             );
         }
         ImportPlacement::At(target) => {
-            let scoped_prior = path_value_in_definitions(target, definitions.clone())?;
+            let scoped_prior =
+                path_value_in_definitions(context.values(), target, definitions.clone())?;
             let loaded = scoped_local_import_value(request, target, scoped_prior, context)?;
-            let object =
-                extend_object_with_defs(target, constant_object_defs(loaded), definitions.clone())?;
-            *definitions = update_module_value(definitions.clone(), target, object);
+            let object = extend_object_with_defs(
+                context.values(),
+                target,
+                constant_object_defs(context, loaded),
+                definitions.clone(),
+            )?;
+            *definitions =
+                update_module_value(context.values(), definitions.clone(), target, object);
         }
     };
 
@@ -107,7 +122,7 @@ pub(in crate::g_syntax) fn lower_local_binary_import(
     };
 
     let loaded = context.import_binary(request);
-    *definitions = update_module_value(definitions.clone(), target, loaded);
+    *definitions = update_module_value(context.values(), definitions.clone(), target, loaded);
     Ok(())
 }
 
@@ -117,7 +132,8 @@ pub(in crate::g_syntax) fn scoped_local_import_value(
     prior_defs: Value,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
-    let final_defs = path_value_in_definitions(target, context.final_defs().clone())?;
+    let final_defs =
+        path_value_in_definitions(context.values(), target, context.final_defs().clone())?;
     Ok(context.import_module(request, Some(target), prior_defs, final_defs))
 }
 
@@ -128,6 +144,7 @@ pub(in crate::g_syntax) fn import_as_prior_defs(
 ) -> Result<Value, Diagnostic> {
     let env = inherited_import_env_object_value(target, definitions, context)?;
     Ok(update_module_value(
+        context.values(),
         Value::Dict(Dict::new_sync()),
         "env",
         env,
@@ -139,15 +156,19 @@ pub(in crate::g_syntax) fn inherited_import_env_object_value(
     definitions: Value,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
-    let parent_env = path_value_in_definitions("env", definitions)?;
+    let parent_env = path_value_in_definitions(context.values(), "env", definitions)?;
     let name = context.abstract_global_path(&format!("{target}.env"));
-    let deps = lower_resolved_expr(ResolvedExpr::List(vec![object_spec_resolved(
-        ResolvedExpr::Provided(parent_env),
-    )]));
+    let deps = lower_resolved_expr(
+        context.values(),
+        ResolvedExpr::List(vec![object_spec_resolved(ResolvedExpr::Provided(
+            parent_env,
+        ))]),
+    );
     Ok(object_instance_from_parts_value(
+        context.values(),
         name,
         deps,
-        compiler_values::empty_object_defs(),
+        compiler_values::empty_object_defs(context.values()),
     ))
 }
 
@@ -156,7 +177,7 @@ pub(in crate::g_syntax) fn module_object_value(
     module: Value,
     context: &CompileContext,
 ) -> Value {
-    module_object_value_with_defs(target, constant_object_defs(module), context)
+    module_object_value_with_defs(target, constant_object_defs(context, module), context)
 }
 
 fn module_object_value_with_defs(
@@ -164,15 +185,18 @@ fn module_object_value_with_defs(
     definitions: Value,
     context: &CompileContext,
 ) -> Value {
-    lower_resolved_expr(object_instance_from_parts_resolved(
-        ResolvedExpr::Embedded(context.abstract_global_path(target)),
-        ResolvedExpr::List(Vec::new()),
-        ResolvedExpr::Provided(definitions),
-    ))
+    lower_resolved_expr(
+        context.values(),
+        object_instance_from_parts_resolved(
+            ResolvedExpr::Embedded(context.abstract_global_path(target)),
+            ResolvedExpr::List(Vec::new()),
+            ResolvedExpr::Provided(definitions),
+        ),
+    )
 }
 
-pub(in crate::g_syntax) fn constant_object_defs(value: Value) -> Value {
-    compiler_values::constant_object_defs(value)
+pub(in crate::g_syntax) fn constant_object_defs(context: &CompileContext, value: Value) -> Value {
+    compiler_values::constant_object_defs(context.values(), value)
 }
 
 pub(in crate::g_syntax) fn lower_unique(
@@ -183,12 +207,12 @@ pub(in crate::g_syntax) fn lower_unique(
 ) -> Result<(), Diagnostic> {
     for name in names {
         let value = context.abstract_global_path(name);
-        *definitions = update_module_value(definitions.clone(), name, value);
+        *definitions = update_module_value(context.values(), definitions.clone(), name, value);
     }
     Ok(())
 }
 
 #[cfg(test)]
 pub(in crate::g_syntax) fn builtin_list_module() -> Dict {
-    compiler_values::builtin_list_module()
+    compiler_values::builtin_list_module(&crate::core::test_value_factory())
 }

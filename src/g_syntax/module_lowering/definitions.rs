@@ -372,30 +372,39 @@ pub(in crate::g_syntax) fn path_resolved_in_definitions(
 }
 
 pub(in crate::g_syntax) fn update_module_value(
+    values: &CoreValueFactory,
     definitions: Value,
     target: &str,
     value: Value,
 ) -> Value {
     // Module definitions are ordered updates over the incoming namespace.
     // Ordinary dictionary literals still lower through DictUnion.
-    lower_resolved_expr(apply_builtin_resolved(
-        Builtin::DictUpdate,
-        [
-            ResolvedExpr::Embedded(path_value(target)),
-            ResolvedExpr::Provided(value),
-            ResolvedExpr::Provided(definitions),
-        ],
-    ))
+    lower_resolved_expr(
+        values,
+        apply_builtin_resolved(
+            Builtin::DictUpdate,
+            [
+                ResolvedExpr::Embedded(path_value(target)),
+                ResolvedExpr::Provided(value),
+                ResolvedExpr::Provided(definitions),
+            ],
+        ),
+    )
 }
 
-pub(in crate::g_syntax) fn update_module_dict_value(definitions: Value, item: Value) -> Value {
+pub(in crate::g_syntax) fn update_module_dict_value(
+    values: &CoreValueFactory,
+    definitions: Value,
+    item: Value,
+) -> Value {
     match item {
-        Value::Dict(dict) => update_module_dict_entries(definitions, Vec::new(), &dict),
+        Value::Dict(dict) => update_module_dict_entries(values, definitions, Vec::new(), &dict),
         _ => definitions,
     }
 }
 
 pub(in crate::g_syntax) fn update_module_dict_entries(
+    values: &CoreValueFactory,
     definitions: Value,
     prefix: Vec<Value>,
     dict: &Dict,
@@ -405,16 +414,19 @@ pub(in crate::g_syntax) fn update_module_dict_entries(
         path.push(key_to_value(key));
         match value {
             Value::Dict(nested) if !nested.is_empty() => {
-                update_module_dict_entries(definitions, path, nested)
+                update_module_dict_entries(values, definitions, path, nested)
             }
-            _ => lower_resolved_expr(apply_builtin_resolved(
-                Builtin::DictUpdate,
-                [
-                    ResolvedExpr::Embedded(Value::List(crate::core::List::from_values(path))),
-                    ResolvedExpr::Provided(value.clone()),
-                    ResolvedExpr::Provided(definitions),
-                ],
-            )),
+            _ => lower_resolved_expr(
+                values,
+                apply_builtin_resolved(
+                    Builtin::DictUpdate,
+                    [
+                        ResolvedExpr::Embedded(Value::List(crate::core::List::from_values(path))),
+                        ResolvedExpr::Provided(value.clone()),
+                        ResolvedExpr::Provided(definitions),
+                    ],
+                ),
+            ),
         }
     })
 }
@@ -433,6 +445,7 @@ pub(in crate::g_syntax) fn key_to_value(key: &Key) -> Value {
 }
 
 pub(in crate::g_syntax) fn path_value_in_definitions(
+    values: &CoreValueFactory,
     target: &str,
     definitions: Value,
 ) -> Result<Value, Diagnostic> {
@@ -440,8 +453,11 @@ pub(in crate::g_syntax) fn path_value_in_definitions(
         .split('.')
         .map(|part| ResolvedPathPart::Key(name_as_key(part)))
         .collect::<Vec<_>>();
-    Ok(lower_resolved_expr(ResolvedExpr::Access {
-        base: Box::new(ResolvedExpr::Provided(definitions)),
-        path,
-    }))
+    Ok(lower_resolved_expr(
+        values,
+        ResolvedExpr::Access {
+            base: Box::new(ResolvedExpr::Provided(definitions)),
+            path,
+        },
+    ))
 }

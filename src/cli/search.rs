@@ -31,7 +31,10 @@ pub(super) fn run_cli_search(
     let branches = run_search(
         assembler,
         effect,
-        CliInvocation::new(arguments.shared_args()),
+        CliInvocation::new(
+            assembler.allocate_cli_invocation_id(),
+            arguments.shared_args(),
+        ),
     )?;
     select_branch(assembler, arguments, &branches)
 }
@@ -50,6 +53,7 @@ pub(super) fn run_cli_completion(
         assembler,
         effect,
         CliInvocation::for_completion(
+            assembler.allocate_cli_invocation_id(),
             arguments.clone(),
             active,
             active_argument.prefix().to_owned(),
@@ -130,7 +134,11 @@ fn run_search(
     effect: &Value,
     invocation: CliInvocation,
 ) -> Result<Arc<[IsolatedSearchBranch<CliEffects>]>, CliError> {
-    let host = Arc::new(CliHost::new(assembler.reflection_environment(), invocation));
+    let host = Arc::new(CliHost::new(
+        assembler.core_values(),
+        assembler.reflection_environment(),
+        invocation,
+    ));
     let mut search =
         IsolatedEffectSearch::new_in_context(effect, CliEffects, host, assembler.eval_context())
             .map_err(|error| CliError::new(format!("configured CLI could not start: {error}")))?;
@@ -174,7 +182,11 @@ fn completion_candidate_viable(
     arguments[active] = replacement.to_owned();
     let argument_count = arguments.len();
     let cli_arguments = CliArguments::new(arguments.clone().into());
-    let branches = run_search(assembler, effect, CliInvocation::new(arguments.into()))?;
+    let branches = run_search(
+        assembler,
+        effect,
+        CliInvocation::new(assembler.allocate_cli_invocation_id(), arguments.into()),
+    )?;
     Ok(branches.iter().any(|branch| {
         let journal = branch.journal();
         branch.value().is_some_and(|value| {

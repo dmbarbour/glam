@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use crate::api::CompilationExecution;
-use crate::core::{Atom, Dict, EvaluationFailure, EvaluationHalt, Key, PromisedValue, Value, keys};
+use crate::core::{
+    Atom, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, PromisedValue, Value,
+    keys,
+};
 use crate::diagnostic::{CompilationTrace, Severity};
 use crate::source::{RelativeSourcePath, SourceArtifact};
 
@@ -42,6 +45,7 @@ pub(crate) struct ModuleLoadArgs {
 pub(crate) struct CompileContext {
     // Invocation-scoped inputs and capabilities for a front end. Ordinary
     // values belong to the front end and are not constructed through here.
+    values: CoreValueFactory,
     importer_source: Option<Arc<SourceArtifact>>,
     compilation_trace: Option<Arc<CompilationTrace>>,
     opaque_origin: Option<Value>,
@@ -54,30 +58,49 @@ pub(crate) struct CompileContext {
     compilation_execution: Option<Arc<CompilationExecution>>,
 }
 
+#[cfg(test)]
 impl Default for CompileContext {
     fn default() -> Self {
+        Self::new(crate::core::test_value_factory())
+    }
+}
+
+impl CompileContext {
+    pub(crate) fn new(values: CoreValueFactory) -> Self {
         Self {
+            values: values.clone(),
             importer_source: None,
             compilation_trace: None,
             opaque_origin: None,
             module_path: Arc::from([]),
             prior_defs: Value::Dict(Dict::new_sync()), // empty prior dictionary
-            final_defs: Value::Promised(PromisedValue::new("final definitions")),
+            final_defs: Value::Promised(PromisedValue::new(&values, "final definitions")),
             local_module_loader: None,
             local_binary_loader: None,
             diagnostic_emitter: None,
             compilation_execution: None,
         }
     }
-}
 
-impl CompileContext {
+    pub(crate) fn from_module_path_with_values<I, S>(values: CoreValueFactory, parts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::new(values).with_module_path(parts)
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_module_path<I, S>(parts: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        Self::default().with_module_path(parts)
+        Self::from_module_path_with_values(crate::core::test_value_factory(), parts)
+    }
+
+    pub(crate) fn values(&self) -> &CoreValueFactory {
+        &self.values
     }
 
     pub(crate) fn with_importer_source(mut self, source: Arc<SourceArtifact>) -> Self {
@@ -193,6 +216,7 @@ impl CompileContext {
             Ok(request) => request,
             Err(error) => {
                 return invalid_import_request(
+                    &self.values,
                     request,
                     error.to_string(),
                     self.compilation_trace.as_deref(),
@@ -213,7 +237,7 @@ impl CompileContext {
         let label: Arc<str> = Arc::from(format!("import {}", args.request.as_str()));
         let loader = self.local_module_loader.clone();
 
-        Value::deferred(label, move |_| {
+        Value::deferred(&self.values, label, move |_| {
             let Some(loader) = &loader else {
                 return Err(EvaluationHalt::failure(import_failure(
                     format!(
@@ -234,6 +258,7 @@ impl CompileContext {
             Ok(request) => request,
             Err(error) => {
                 return invalid_import_request(
+                    &self.values,
                     request,
                     error.to_string(),
                     self.compilation_trace.as_deref(),
@@ -249,7 +274,7 @@ impl CompileContext {
         let label: Arc<str> = Arc::from(format!("import binary {}", args.request.as_str()));
         let loader = self.local_binary_loader.clone();
 
-        Value::deferred(label, move |_| {
+        Value::deferred(&self.values, label, move |_| {
             let Some(loader) = &loader else {
                 return Err(EvaluationHalt::failure(import_failure(
                     format!(
@@ -305,6 +330,7 @@ pub(crate) fn import_failure(
 }
 
 fn invalid_import_request(
+    values: &CoreValueFactory,
     request: &str,
     message: impl AsRef<str>,
     trace: Option<&CompilationTrace>,
@@ -312,6 +338,7 @@ fn invalid_import_request(
 ) -> Value {
     let failure = import_failure(message, request, trace, importer_source);
     Value::deferred(
+        values,
         Arc::from(format!("invalid import request {request}")),
         move |_| Err(EvaluationHalt::failure(failure.clone())),
     )

@@ -1,39 +1,46 @@
 use super::super::super::*;
 
 pub(super) fn eval_list_effect_builtin(
-    _context: &EvalContext,
+    context: &EvalContext,
     effect: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    Ok(Value::List(lazy_run_list_effect(effect.clone())))
+    Ok(Value::List(lazy_run_list_effect(
+        context.values(),
+        effect.clone(),
+    )))
 }
 
 pub(super) fn eval_list_effect_seq_builtin(
-    _context: &EvalContext,
+    context: &EvalContext,
     operation: &Value,
     continuation: &Value,
 ) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(flat_map_list_effect_results(
-        lazy_run_list_effect(operation.clone()),
+        context.values(),
+        lazy_run_list_effect(context.values(), operation.clone()),
         continuation.clone(),
     )))
 }
 
 pub(super) fn eval_list_effect_alt_builtin(
-    _context: &EvalContext,
+    context: &EvalContext,
     left: &Value,
     right: &Value,
 ) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(List::concat(
-        lazy_run_list_effect(left.clone()),
-        lazy_run_list_effect(right.clone()),
+        lazy_run_list_effect(context.values(), left.clone()),
+        lazy_run_list_effect(context.values(), right.clone()),
     )))
 }
 
 pub(super) fn eval_list_effect_cut_builtin(
-    _context: &EvalContext,
+    context: &EvalContext,
     operation: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    Ok(Value::List(cut_list_effect_results(operation.clone())))
+    Ok(Value::List(cut_list_effect_results(
+        context.values(),
+        operation.clone(),
+    )))
 }
 
 pub(super) fn eval_list_effect_fix_builtin(
@@ -41,14 +48,18 @@ pub(super) fn eval_list_effect_fix_builtin(
     function: &Value,
 ) -> Result<Value, EvaluationHalt> {
     let function = eval_value(context, function)?;
-    let handle = PromisedValue::new("list effect fixpoint");
+    let handle = PromisedValue::new(context.values(), "list effect fixpoint");
     let marker = Value::Promised(handle.clone());
     let operation = apply_value(context, function, marker.clone())?;
-    Ok(Value::List(fix_list_effect_results(operation, handle)))
+    Ok(Value::List(fix_list_effect_results(
+        context.values(),
+        operation,
+        handle,
+    )))
 }
 
-fn lazy_run_list_effect(effect: Value) -> List {
-    deferred_list("list effect", move |context| {
+fn lazy_run_list_effect(values: &CoreValueFactory, effect: Value) -> List {
+    deferred_list(values, "list effect", move |context| {
         run_list_effect_to_list(context, effect.clone())
     })
 }
@@ -80,23 +91,27 @@ fn run_list_effect_to_list(context: &EvalContext, effect: Value) -> Result<List,
     Ok(results)
 }
 
-fn flat_map_list_effect_results(results: List, continuation: Value) -> List {
-    deferred_list("list effect seq", move |context| {
+fn flat_map_list_effect_results(
+    values: &CoreValueFactory,
+    results: List,
+    continuation: Value,
+) -> List {
+    deferred_list(values, "list effect seq", move |context| {
         let Some((head, tail)) = pop_list_front(context, &results)? else {
             return Ok(List::empty());
         };
         let continuation = eval_value(context, &continuation)?;
         let next = apply_value(context, continuation.clone(), head)?;
         Ok(List::concat(
-            lazy_run_list_effect(next),
-            flat_map_list_effect_results(tail, continuation),
+            lazy_run_list_effect(context.values(), next),
+            flat_map_list_effect_results(context.values(), tail, continuation),
         ))
     })
 }
 
-fn cut_list_effect_results(operation: Value) -> List {
-    deferred_list("list effect cut", move |context| {
-        let results = lazy_run_list_effect(operation.clone());
+fn cut_list_effect_results(values: &CoreValueFactory, operation: Value) -> List {
+    deferred_list(values, "list effect cut", move |context| {
+        let results = lazy_run_list_effect(context.values(), operation.clone());
         let Some((head, _)) = pop_list_front(context, &results)? else {
             return Ok(List::empty());
         };
@@ -104,9 +119,13 @@ fn cut_list_effect_results(operation: Value) -> List {
     })
 }
 
-fn fix_list_effect_results(operation: Value, handle: PromisedValue) -> List {
-    deferred_list("list effect fix", move |context| {
-        let results = lazy_run_list_effect(operation.clone());
+fn fix_list_effect_results(
+    values: &CoreValueFactory,
+    operation: Value,
+    handle: PromisedValue,
+) -> List {
+    deferred_list(values, "list effect fix", move |context| {
+        let results = lazy_run_list_effect(context.values(), operation.clone());
         let Some((head, tail)) = pop_list_front(context, &results)? else {
             handle
                 .set(Value::List(List::empty()))
@@ -121,11 +140,15 @@ fn fix_list_effect_results(operation: Value, handle: PromisedValue) -> List {
 }
 
 fn deferred_list(
+    values: &CoreValueFactory,
     label: &'static str,
     thunk: impl Fn(&EvalContext) -> Result<List, EvaluationHalt> + Send + Sync + 'static,
 ) -> List {
     List::from_thunk(
-        LazyValue::deferred(label, move |context| thunk(context).map(Value::List)).into(),
+        LazyValue::deferred(values, label, move |context| {
+            thunk(context).map(Value::List)
+        })
+        .into(),
     )
 }
 

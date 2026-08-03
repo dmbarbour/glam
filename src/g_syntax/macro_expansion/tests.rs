@@ -198,7 +198,11 @@ fn unstarted_reflection_gate_runs_inside_the_macro_session() {
     let assembler = Assembler::default();
     let execution = assembler.test_compilation_execution();
     let reflection = return_effect((*keys::UNIT_VALUE).clone());
-    let gate = Value::reflection_gate(reflection, (*keys::UNIT_VALUE).clone());
+    let gate = Value::reflection_gate(
+        &crate::core::test_value_factory(),
+        reflection,
+        (*keys::UNIT_VALUE).clone(),
+    );
     let macro_effect = PublicValue::from_core(return_effect(gate));
 
     run(&execution, &macro_effect, Value::Dict(Dict::new_sync()))
@@ -209,7 +213,11 @@ fn unstarted_reflection_gate_runs_inside_the_macro_session() {
 fn assembler_owned_reflection_gate_is_foreign_to_macro_execution() {
     let (assembler, reflection) = compile_effects(".cut (.heap.get '.missing >>= (\\_ -> .fail))");
     let execution = assembler.test_compilation_execution();
-    let gate = Value::reflection_gate(reflection.as_core().clone(), (*keys::UNIT_VALUE).clone());
+    let gate = Value::reflection_gate(
+        &crate::core::test_value_factory(),
+        reflection.as_core().clone(),
+        (*keys::UNIT_VALUE).clone(),
+    );
     let error = eval::eval_value(&assembler.eval_context(), &gate)
         .expect_err("assembler observation should start and block the gate");
     assert!(error.blocked_on().is_some());

@@ -10,16 +10,18 @@ pub(super) fn eval_anno_builtin(
             if defined {
                 Ok(target.clone())
             } else {
-                Ok(annotation_error_value(format!(
-                    "cannot override `{name}` because it is not defined"
-                )))
+                Ok(annotation_error_value(
+                    context,
+                    format!("cannot override `{name}` because it is not defined"),
+                ))
             }
         }
         RecognizedAnnotation::AssertUndefined { name, defined } => {
             if defined {
-                Ok(annotation_error_value(format!(
-                    "cannot introduce `{name}` because it is already defined"
-                )))
+                Ok(annotation_error_value(
+                    context,
+                    format!("cannot introduce `{name}` because it is already defined"),
+                ))
             } else {
                 Ok(target.clone())
             }
@@ -46,9 +48,11 @@ pub(super) fn eval_anno_builtin(
         RecognizedAnnotation::Deque => eval_deque_annotation(context, target),
         RecognizedAnnotation::Binary => eval_binary_annotation(context, target),
         RecognizedAnnotation::Array => eval_array_annotation(context, target),
-        RecognizedAnnotation::Reflection { effect } => {
-            Ok(Value::reflection_gate(effect, target.clone()))
-        }
+        RecognizedAnnotation::Reflection { effect } => Ok(Value::reflection_gate(
+            context.values(),
+            effect,
+            target.clone(),
+        )),
         RecognizedAnnotation::Seq { value } => super::super::strategy::seq(context, &value, target),
         RecognizedAnnotation::Spark { value } => {
             Ok(super::super::strategy::spark(context, value, target))
@@ -61,7 +65,7 @@ pub(super) fn eval_anno_builtin(
         RecognizedAnnotation::Context {
             context: diagnostic_context,
         } => eval_value(context, target).map_err(|error| error.with_context(diagnostic_context)),
-        RecognizedAnnotation::Invalid(message) => Ok(annotation_error_value(message)),
+        RecognizedAnnotation::Invalid(message) => Ok(annotation_error_value(context, message)),
         RecognizedAnnotation::Unknown(rendered) => {
             eprintln!("warning: unrecognized annotation encountered: {rendered}");
             Ok(target.clone())
@@ -295,8 +299,11 @@ pub(in crate::eval) fn is_undefined_value(value: &Value) -> bool {
     matches!(value, Value::Dict(dict) if dict.is_empty())
 }
 
-pub(in crate::eval) fn annotation_error_value(message: impl Into<String>) -> Value {
-    Value::error(message.into())
+pub(in crate::eval) fn annotation_error_value(
+    context: &EvalContext,
+    message: impl Into<String>,
+) -> Value {
+    Value::error(context.values(), message.into())
 }
 
 fn eval_metadata_pure_annotation(
@@ -307,10 +314,11 @@ fn eval_metadata_pure_annotation(
     let metadata = metadata_update_inputs(context, target, "meta_pure")?;
     let output_count = metadata.len();
     let updates = Value::Lazy(LazyValue::from_application(
+        context.values(),
         function,
         Arc::from([Value::List(List::from_values(metadata))]),
     ));
-    Ok(metadata_update_outputs(output_count, updates))
+    Ok(metadata_update_outputs(context, output_count, updates))
 }
 
 fn eval_metadata_reflection_annotation(
@@ -321,12 +329,14 @@ fn eval_metadata_reflection_annotation(
     let metadata = metadata_update_inputs(context, target, "meta_refl")?;
     let output_count = metadata.len();
     let effect = Value::Lazy(LazyValue::from_application(
+        context.values(),
         function,
         Arc::from([Value::List(List::from_values(metadata))]),
     ));
     Ok(metadata_update_outputs(
+        context,
         output_count,
-        Value::reflection_task_result(effect),
+        Value::reflection_task_result(context.values(), effect),
     ))
 }
 
@@ -355,18 +365,25 @@ fn metadata_update_inputs(
     Ok(metadata)
 }
 
-fn metadata_update_outputs(output_count: usize, updates: Value) -> Value {
+fn metadata_update_outputs(context: &EvalContext, output_count: usize, updates: Value) -> Value {
     let projection_context = Value::Dict(crate::core::Dict::new_sync().insert(
         (*keys::CONTEXT).clone(),
         evaluation_context_frame("wrap_metadata"),
     ));
     let carriers = (0..output_count)
         .map(|index| {
-            let projection = Value::Lazy(LazyValue::from_builtin(BuiltinCall {
-                builtin: Builtin::ListAt,
-                arguments: Arc::from([Value::Number(Number::from_usize(index)), updates.clone()]),
-            }));
+            let projection = Value::Lazy(LazyValue::from_builtin(
+                context.values(),
+                BuiltinCall {
+                    builtin: Builtin::ListAt,
+                    arguments: Arc::from([
+                        Value::Number(Number::from_usize(index)),
+                        updates.clone(),
+                    ]),
+                },
+            ));
             Value::metadata_carrier(Value::builtin_call(
+                context.values(),
                 Builtin::Anno,
                 vec![projection_context.clone(), projection],
             ))
@@ -382,9 +399,10 @@ fn eval_deque_annotation(context: &EvalContext, target: &Value) -> Result<Value,
                 force_list_thunk(context, thunk)
             })?))
         }
-        other => Ok(annotation_error_value(format!(
-            "`deque` annotation requires a list target, got {other:?}"
-        ))),
+        other => Ok(annotation_error_value(
+            context,
+            format!("`deque` annotation requires a list target, got {other:?}"),
+        )),
     }
 }
 
@@ -396,9 +414,10 @@ fn eval_binary_annotation(context: &EvalContext, target: &Value) -> Result<Value
             &list,
             "`binary` annotation",
         )?))),
-        other => Ok(annotation_error_value(format!(
-            "`binary` annotation requires a list or binary target, got {other:?}"
-        ))),
+        other => Ok(annotation_error_value(
+            context,
+            format!("`binary` annotation requires a list or binary target, got {other:?}"),
+        )),
     }
 }
 
@@ -413,8 +432,9 @@ fn eval_array_annotation(context: &EvalContext, target: &Value) -> Result<Value,
         Value::List(list) => Ok(Value::List(List::from_values(list_to_value_items(
             context, &list,
         )?))),
-        other => Ok(annotation_error_value(format!(
-            "`array` annotation requires a list or binary target, got {other:?}"
-        ))),
+        other => Ok(annotation_error_value(
+            context,
+            format!("`array` annotation requires a list or binary target, got {other:?}"),
+        )),
     }
 }
