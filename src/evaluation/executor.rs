@@ -232,6 +232,16 @@ impl EvaluationExecutor {
             .map(Vec::len)
             .sum()
     }
+
+    #[cfg(test)]
+    pub(crate) fn retained_spark_count(&self) -> usize {
+        let queue = self
+            .inner
+            .queue
+            .lock()
+            .expect("evaluation executor queue was poisoned");
+        queue.sparks.len() + queue.blocked_sparks.values().map(Vec::len).sum::<usize>()
+    }
 }
 
 impl Drop for EvaluationExecutor {

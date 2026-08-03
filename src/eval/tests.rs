@@ -4594,9 +4594,9 @@ fn reflection_task_result_blocks_across_sessions_and_returns_completion_value() 
         .blocked_on()
         .expect("the result computation should expose its stable wait");
 
-    let foreign = eval_value(&observer, &computation)
-        .expect_err("a foreign observer should follow the owner task");
-    assert!(foreign.blocked_on().is_some());
+    let cross_session = eval_value(&observer, &computation)
+        .expect_err("a cross-session observer should follow the owner task");
+    assert!(cross_session.blocked_on().is_some());
 
     owner.complete_wait_with_value(&wait.0, n(43));
     assert_eq!(eval_value(&observer, &computation).unwrap(), n(43));
@@ -4693,7 +4693,7 @@ fn reflection_gate_waits_before_continuing_target_demand() {
 }
 
 #[test]
-fn running_reflection_gate_blocks_a_foreign_session_without_poisoning_its_cache() {
+fn running_reflection_gate_blocks_an_observer_session_without_poisoning_its_cache() {
     let owner = test_context();
     let observer = test_context();
     let gate = reflection_annotation(&owner, n(0), n(42));
@@ -4702,12 +4702,13 @@ fn running_reflection_gate_blocks_a_foreign_session_without_poisoning_its_cache(
     };
     let blocked = eval_value(&owner, &gate).expect_err("new reflection task should block");
 
-    let foreign = eval_value(&observer, &gate).expect_err("foreign gate task should block");
-    assert!(foreign.blocked_on().is_some());
+    let cross_session =
+        eval_value(&observer, &gate).expect_err("cross-session gate task should block");
+    assert!(cross_session.blocked_on().is_some());
     assert_eq!(
         gate_lazy.cached(),
         None,
-        "a live foreign dependency must not become a permanent lazy failure"
+        "a live cross-session dependency must not become a permanent lazy failure"
     );
 
     owner.complete_wait(&blocked.blocked_on().unwrap().0);

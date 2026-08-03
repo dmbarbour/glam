@@ -671,7 +671,7 @@ fn report_reasoning(diagnostics: &DiagnosticBus, values: &Values, report: &Reaso
         ReasoningStatus::Complete => return,
         ReasoningStatus::Quiescent => (
             Severity::Warning,
-            "reflection scheduler is quiescent on live foreign work",
+            "reflection scheduler is quiescent on live cross-session work",
         ),
         ReasoningStatus::Deadlocked => (Severity::Error, "reflection scheduler deadlocked"),
     };

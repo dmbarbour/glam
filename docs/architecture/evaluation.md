@@ -5,6 +5,10 @@ interaction nets, and background workers. Detailed hazards live in
 [`../agent_context/evaluation.md`](../agent_context/evaluation.md) and
 [`../agent_context/interaction_nets.md`](../agent_context/interaction_nets.md).
 
+In evaluation lifecycle terminology, **foreign** means another
+`EvaluationRuntime`. An owner session, observer session, non-owner session, or
+cross-session dependency always refers to sessions within one runtime.
+
 ## Context and Session
 
 `EvaluationRuntime` is the allocation and construction boundary. It owns the
@@ -12,9 +16,10 @@ local ID domain used by sessions, tasks, waits, lazies and promises, reasoning
 sessions, CLI invocations, and runtime event work. Numeric local IDs may repeat
 in two runtimes; `EvaluationRuntimeId` supplies their eventual public
 provenance. `EvaluationRuntime::values()` and `Assembler::values()` select the
-construction domain before an embedding client builds a value. The remaining
-public primitive `Value` constructors are transitional until public values
-carry enforced runtime provenance in Phase 1C.
+construction domain before an embedding client builds a value. Every public
+`Value` carries that runtime provenance; consuming APIs reject a value from
+another runtime before exposing its recursive core representation or retaining
+it in runtime-owned state.
 
 Every production evaluator entry receives an `EvalContext` borrowed from an
 `EvaluationSession`. An `Assembler` and its clones share one internal
@@ -199,10 +204,12 @@ neither its effect nor its target. Demand on the gate registers or resumes the
 effect task; after checking that it returned unit, the same demand continues
 into the target. Blocking remains session task state rather than a cached lazy
 error. If another session owns a still-pending gate task, the observer records
-a foreign dependency and polls it once per quiescence pass without driving its
-owner. Reports retain the producing session and task IDs; clients decide when
-to poll again. Terminal foreign results remain observable, while a dropped
-owner is a permanent producer failure.
+a cross-session dependency and polls it once per quiescence pass without
+driving its owner. Both sessions belong to the same runtime; another runtime
+would reject the containing value before evaluation. Reports retain the
+producing session and task IDs; clients decide when to poll again. Terminal
+cross-session results remain observable, while a dropped owner is a permanent
+producer failure.
 
 ## Reflection Task Handles
 

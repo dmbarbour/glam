@@ -5315,7 +5315,7 @@ mod tests {
                         handle.clone(),
                     )],
                 )
-                .expect("foreign task inspection should apply");
+                .expect("non-owner task inspection should apply");
             let (second_context, second_task) =
                 schedule_composed_test_task(&assembler, &inspect, host.clone());
             assert!(
@@ -5325,7 +5325,7 @@ mod tests {
                         if error.to_string()
                             == "task handle does not belong to this evaluation session"
                 ),
-                "task.{operation} should reject a foreign handle"
+                "task.{operation} should reject a handle owned by another session"
             );
         }
     }
@@ -5378,32 +5378,32 @@ mod tests {
             "serial commit should cancel a same-transaction task before polling it"
         );
 
-        let (_, spawn_foreign) =
+        let (_, spawn_non_owner) =
             compile_effect_with_runtime(&assembler.evaluation_runtime(), ".task.new (.r ())");
         let (source_context, source_task) =
-            schedule_composed_test_task(&assembler, &spawn_foreign, host.clone());
-        let EvaluationTaskPoll::Complete(foreign_handle) =
+            schedule_composed_test_task(&assembler, &spawn_non_owner, host.clone());
+        let EvaluationTaskPoll::Complete(non_owner_handle) =
             pump_composed_test_task(&source_context, &source_task)
         else {
-            panic!("source session should produce a foreign task handle")
+            panic!("source session should produce a task handle for the non-owner test")
         };
-        let (_, cancel_foreign) = compile_effect_with_runtime(
+        let (_, cancel_non_owner) = compile_effect_with_runtime(
             &assembler.evaluation_runtime(),
             "\\task -> .task.cancel task",
         );
-        let cancel_foreign = assembler
+        let cancel_non_owner = assembler
             .apply(
-                &cancel_foreign,
+                &cancel_non_owner,
                 [PublicValue::from_core(
                     &assembler.core_values(),
-                    foreign_handle,
+                    non_owner_handle,
                 )],
             )
-            .expect("foreign cancellation should apply");
-        let (foreign_context, foreign_task) =
-            schedule_composed_test_task(&assembler, &cancel_foreign, host.clone());
+            .expect("non-owner cancellation should apply");
+        let (non_owner_context, non_owner_task) =
+            schedule_composed_test_task(&assembler, &cancel_non_owner, host.clone());
         assert!(matches!(
-            pump_composed_test_task(&foreign_context, &foreign_task),
+            pump_composed_test_task(&non_owner_context, &non_owner_task),
             EvaluationTaskPoll::Complete(_)
         ));
 
@@ -6425,12 +6425,12 @@ mod tests {
         else {
             panic!("continuation capture should complete")
         };
-        let foreign_invocation = assembler
-            .apply(&continuation, [assembler.values().text("foreign")])
+        let cross_task_invocation = assembler
+            .apply(&continuation, [assembler.values().text("cross-task")])
             .expect("continuation should remain an applicable value");
 
         assert!(
-            run_standard_test(&assembler, &foreign_invocation)
+            run_standard_test(&assembler, &cross_task_invocation)
                 .unwrap_err()
                 .to_string()
                 .contains("belongs to another reflection task")

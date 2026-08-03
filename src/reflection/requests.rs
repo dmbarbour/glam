@@ -519,7 +519,7 @@ where
                 match eval_context.cancel_reflection_task(&handle.task) {
                     EvaluationTaskCancellation::Requested => context.committed(),
                     EvaluationTaskCancellation::Late
-                    | EvaluationTaskCancellation::ForeignSession => {}
+                    | EvaluationTaskCancellation::NotOwnerSession => {}
                 }
             }
             Ok(RequestResult::ReturnUnit)
@@ -716,7 +716,7 @@ fn read_query<S: TaskSpecialization>(
     };
     let EvaluationQueryPoll::State { value, .. } = result else {
         return Err(TaskHalt::new(
-            "query handle does not belong to this reasoning session",
+            "query handle does not belong to this runtime's protected query domain",
         ));
     };
     let state = evaluate(context.eval_context(), value.into_core())?;

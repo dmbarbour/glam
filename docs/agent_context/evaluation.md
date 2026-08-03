@@ -181,17 +181,21 @@ control-flow overview.
   result-producing form; its result remains hidden behind metadata carriers.
 - When a demand-owned reflection task failure is propagated into its lazy
   consumer, the task handle acknowledges the owner's reporting ledger,
-  including across a foreign observer. If nobody observes the failure, it
-  remains unacknowledged and is reported during reasoning drain.
+  including when demand transfers through an observer in another session of
+  the same runtime. If nobody observes the failure, it remains unacknowledged
+  and is reported during reasoning drain.
 - A gate's first observer owns its task. Another session may poll but must not
-  drive that task: pending work becomes a foreign dependency in the local
-  lazy-task record, while a terminal result transfers demand to the target.
-  Wait tokens retain the owner weakly plus stable session and producer IDs, so
-  a dropped owner is a terminal failure and live foreign work remains visible
-  in quiescence reports without becoming a cached `LazyFailure`.
+  drive that task: pending work becomes a cross-session dependency in the
+  local lazy-task record, while a terminal result transfers demand to the
+  target. Both sessions are in the same runtime; another runtime rejects the
+  value before demand. Wait tokens retain the owner weakly plus stable session
+  and producer IDs, so a dropped owner is a terminal failure and live
+  cross-session work remains visible in quiescence reports without becoming a
+  cached `LazyFailure`.
 - Opaque reflection task values retain `EvaluationTaskHandle`, not a bare task
   ID. Public join and cancellation validate the handle's session provenance;
-  internal foreign followers deliberately operate on wait tokens instead.
+  internal cross-session followers deliberately operate on wait tokens
+  instead.
 - A transaction folds modifiers for its newly reserved tasks before launch.
   In particular, same-transaction cancellation must publish `'canceled`
   without constructing a task machine or exposing runnable work to the shared
@@ -227,7 +231,7 @@ control-flow overview.
 - Claimed interaction-net pairs are live work, not quiescence. An observer must
   wait for that runtime's generation to change before deciding the net is
   blocked or complete.
-- A stable pass containing a live foreign task dependency is quiescent, not a
-  proven deadlock. The client may poll the reported session/task later. The
-  bootstrap does not spin or pump the foreign session, and cross-session cycle
-  diagnosis remains future work.
+- A stable pass containing a live cross-session task dependency is quiescent,
+  not a proven deadlock. The client may poll the reported session/task later.
+  The bootstrap does not spin or pump the producer's session, and
+  cross-session cycle diagnosis remains future work.

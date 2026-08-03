@@ -57,10 +57,11 @@ and control flow.
   commit, but `.heap.*` can never address them. Exact and fingerprint conflict
   analysis includes `VolumeId`; the coarse strategy may conflict across
   volumes.
-- A protected capability request carries `ReasoningSessionId`, `VolumeId`, and
-  operation. Child tasks on the same host may use it; a foreign reasoning
-  session rejects it before journaling. Volume IDs are session-local and never
-  reused.
+- A protected capability value carries evaluation-runtime provenance and a
+  request containing `VolumeId` plus operation. Any reasoning or demand
+  session in that runtime may use a capability explicitly supplied to it;
+  another runtime rejects the value before journaling. Volume IDs are
+  runtime-local and never reused.
 - Only explicit creation installs a volume. A missing-volume read returns a
   latent error value. Blind writes and rewrites remain blind but commit with a
   terminal missing-volume error rather than recreating storage. Explicit
@@ -84,8 +85,9 @@ and control flow.
 - Top-level `.alt` is invalid for ordinary reflection tasks. The isolated
   all-results runner is an explicit host policy that supplies its own outer
   transaction and may enumerate top-level alternatives without changing that
-  general rule. `.shift` continuations are task-local and carry a global task
-  ID so foreign invocation fails before consulting a local continuation ID.
+  general rule. `.shift` continuations are task-local and carry a runtime-local
+  task identity so invocation by another task fails before consulting a local
+  continuation ID.
 - Isolated all-results search never commits its branches. It retains successful
   values and specialization journals in deterministic left-to-right order;
   nested `.cut` remains first-success. A changed state observation restarts the
@@ -116,8 +118,8 @@ and control flow.
   terminal outcome; observation through those operations never adds the join
   frame.
 - `.task.cancel` is an unconditional best-effort, commit-ordered request; late
-  and foreign cancellation are harmless no-ops. Losing branches discard
-  cancellation requests.
+  and non-owner-session cancellation are harmless no-ops. Losing branches
+  discard cancellation requests.
 - `.task.ack_error` is a timing-independent, commit-ordered modifier for a
   local handle. It suppresses the task's present or future failure from
   reasoning reports but never mutates `.task.status`, `.task.error`, or
@@ -154,8 +156,8 @@ and control flow.
   remain in its report. A reported `ReasoningFailure` is an opaque capability
   bound to its originating assembler session:
   `Assembler::acknowledge_reasoning_failure` is idempotent, accepts assembler
-  clones, rejects foreign sessions, and removes only the reporting-ledger
-  entry. It does not alter the task's terminal result.
+  clones, currently rejects non-owner sessions, and removes only the
+  reporting-ledger entry. It does not alter the task's terminal result.
 
 ## Front-End and Logger Integration
 

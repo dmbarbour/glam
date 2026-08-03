@@ -182,7 +182,7 @@ impl Drop for EvaluationQueryHandle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EvaluationQueryPoll {
     State { value: PublicValue, observed: bool },
-    ForeignSession,
+    ForeignQueryDomain,
 }
 
 /// An address understood by the runtime's conflict-analysis strategy.
@@ -438,7 +438,7 @@ impl StoreSnapshot {
 
     pub(crate) fn poll_query(&self, handle: &Arc<EvaluationQueryHandle>) -> EvaluationQueryPoll {
         if !query_belongs_to(&self.query_domain, handle) {
-            return EvaluationQueryPoll::ForeignSession;
+            return EvaluationQueryPoll::ForeignQueryDomain;
         }
         let Some(root) = self.volume(self.runtime_volume) else {
             return EvaluationQueryPoll::State {
@@ -594,7 +594,7 @@ impl StoreJournal {
         observed: bool,
     ) -> EvaluationQueryPoll {
         if !query_belongs_to(&self.snapshot.query_domain, handle) {
-            return EvaluationQueryPoll::ForeignSession;
+            return EvaluationQueryPoll::ForeignQueryDomain;
         }
         let Some(root) = self.volume_view(self.snapshot.runtime_volume) else {
             return EvaluationQueryPoll::State {

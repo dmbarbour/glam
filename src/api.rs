@@ -3317,8 +3317,8 @@ impl ReasoningReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningStatus {
     Complete,
-    /// Stable local quiescence while a live foreign evaluation session may
-    /// still satisfy an unfinished dependency.
+    /// Stable local quiescence while another live demand session in the same
+    /// runtime may still satisfy an unfinished dependency.
     Quiescent,
     Deadlocked,
 }

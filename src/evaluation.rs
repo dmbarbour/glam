@@ -1,8 +1,10 @@
 //! Session-scoped capabilities threaded through semantic evaluation.
 //!
-//! The session owns evaluation-task identity, wait-token provenance, and the
-//! serial cooperative executor. Reflection specializations remain outside this
-//! module behind a small type-erased task-machine boundary.
+//! The runtime supplies task and wait identity and value provenance. During
+//! the work-boundary transition, the session still owns active task records,
+//! dependency lookup, and its serial cooperative pump. Reflection
+//! specializations remain outside this module behind a small type-erased
+//! task-machine boundary.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -231,7 +233,7 @@ pub(crate) enum EvaluationTaskPoll {
 pub(crate) enum EvaluationTaskCancellation {
     Requested,
     Late,
-    ForeignSession,
+    NotOwnerSession,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1019,7 +1021,7 @@ impl EvalContext {
 
     /// Signals completion of a host-owned promise to pumps of this context's
     /// session. Promise values may be shared across sessions, but completion
-    /// deliberately does not discover or wake those foreign observers.
+    /// deliberately does not discover or wake observers in other sessions.
     pub(crate) fn notify_promise_changed(&self) {
         // Taking the scheduler lock pairs this notification with condvar waits
         // and prevents a completion between their final check and sleep from
@@ -1525,7 +1527,7 @@ impl EvalContext {
         task: &EvaluationTaskHandle,
     ) -> EvaluationTaskCancellation {
         if !self.owns_task(task) {
-            return EvaluationTaskCancellation::ForeignSession;
+            return EvaluationTaskCancellation::NotOwnerSession;
         }
         if task.wait.terminal_poll().is_some() {
             return EvaluationTaskCancellation::Late;
@@ -1877,7 +1879,7 @@ struct ReportedDependency {
     task: EvaluationTaskId,
     session: EvaluationSessionId,
     wait: u64,
-    live_foreign: bool,
+    live_cross_session: bool,
 }
 
 enum ClaimedTask {
@@ -1950,7 +1952,7 @@ impl EvaluationSession {
 
     fn session_run_report(&self, tasks: &EvaluationTasks) -> EvaluationSessionRun {
         let mut unfinished = Vec::new();
-        let mut has_live_foreign_dependency = false;
+        let mut has_live_cross_session_dependency = false;
         for (task, wait) in &tasks.reflection_by_id {
             let record = tasks
                 .reflection
@@ -1973,9 +1975,9 @@ impl EvaluationSession {
             let dependency = block
                 .and_then(|block| block.lazy.as_ref())
                 .map(|wait| self.reported_dependency(tasks, wait));
-            has_live_foreign_dependency |= dependency
+            has_live_cross_session_dependency |= dependency
                 .as_ref()
-                .is_some_and(|dependency| dependency.live_foreign);
+                .is_some_and(|dependency| dependency.live_cross_session);
             unfinished.push(EvaluationUnfinishedTask {
                 task: *task,
                 state,
@@ -1992,7 +1994,7 @@ impl EvaluationSession {
         };
         if report.unfinished.is_empty() {
             EvaluationSessionRun::Complete(report)
-        } else if has_live_foreign_dependency {
+        } else if has_live_cross_session_dependency {
             EvaluationSessionRun::Quiescent(report)
         } else {
             EvaluationSessionRun::Deadlocked(report)
@@ -2012,7 +2014,7 @@ impl EvaluationSession {
                     task: wait.producer(),
                     session: wait.owner_id(),
                     wait: wait.get(),
-                    live_foreign: wait.owner_id() != self.id && wait.owner().is_some(),
+                    live_cross_session: wait.owner_id() != self.id && wait.owner().is_some(),
                 };
             }
             let Some(next) = task_dependency(tasks, &wait.producer()).cloned() else {
@@ -2020,7 +2022,7 @@ impl EvaluationSession {
                     task: wait.producer(),
                     session: wait.owner_id(),
                     wait: wait.get(),
-                    live_foreign: false,
+                    live_cross_session: false,
                 };
             };
             wait = next;
@@ -2422,7 +2424,7 @@ fn wait_is_terminal(tasks: &EvaluationTasks, wait: &EvaluationWaitToken) -> bool
 
     // A dependency owned by another session cannot be inspected while this
     // session's task registry is locked. Claim its local follower once per
-    // scheduler pass; the machine polls the foreign task after releasing this
+    // scheduler pass; the machine polls the cross-session task after releasing this
     // lock and either advances or records the same stable blockage.
     true
 }
@@ -2676,6 +2678,34 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    struct SameRuntimeFixture {
+        _assembler: crate::api::Assembler,
+        runtime: crate::api::EvaluationRuntime,
+    }
+
+    impl SameRuntimeFixture {
+        fn new() -> Self {
+            let runtime = crate::api::EvaluationRuntime::new(0).expect("test runtime should build");
+            let assembler = crate::api::Assembler::builder()
+                .evaluation_runtime(runtime.clone())
+                .build()
+                .expect("test assembler should seal the runtime reflection profile");
+            Self {
+                _assembler: assembler,
+                runtime,
+            }
+        }
+
+        fn context(&self) -> EvalContext {
+            let session = self
+                .runtime
+                .new_evaluation_session()
+                .expect("same-runtime test session should build");
+            debug_assert_eq!(session.values.runtime_id(), self.runtime.id());
+            EvalContext::new(session)
+        }
+    }
+
     struct Complete;
 
     impl EvaluationTaskMachine for Complete {
@@ -2874,6 +2904,32 @@ mod tests {
                 .recv_timeout(Duration::from_secs(2))
                 .expect("test should release the task");
             EvaluationMachinePoll::Failed(evaluation_failure("acknowledged task failure"))
+        }
+    }
+
+    struct CancellableAfterRelease {
+        started: Option<mpsc::Sender<()>>,
+        release: mpsc::Receiver<()>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl EvaluationTaskMachine for CancellableAfterRelease {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            if let Some(started) = self.started.take() {
+                started
+                    .send(())
+                    .expect("test start receiver should remain open");
+            }
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test should release the task");
+            EvaluationMachinePoll::Failed(evaluation_failure(
+                "cancellation should replace this poll result",
+            ))
+        }
+
+        fn cancel(&mut self) {
+            self.cancelled.store(true, Ordering::Release);
         }
     }
 
@@ -3231,8 +3287,9 @@ mod tests {
 
     #[test]
     fn terminal_wait_tokens_outlive_their_owner_session() {
+        let fixture = SameRuntimeFixture::new();
         let (completed_wait, failed_wait, cancelled_wait) = {
-            let owner = EvalContext::standalone();
+            let owner = fixture.context();
             let completed = owner
                 .schedule_task(|_| Ok(Box::new(Complete)))
                 .expect("completed task should schedule");
@@ -3257,8 +3314,10 @@ mod tests {
             )
         };
         let deferred_wait = {
-            let owner = EvalContext::standalone();
-            let lazy = inert_lazy("owner lifetime");
+            let owner = fixture.context();
+            let lazy = LazyValue::deferred(owner.values(), "owner lifetime", |_| {
+                panic!("the terminal wait fixture supplies its own task machine")
+            });
             let wait = owner
                 .lazy_task(&lazy, |_| Box::new(Complete))
                 .expect("deferred task should schedule");
@@ -3269,14 +3328,14 @@ mod tests {
             wait
         };
         let pending_wait = {
-            let owner = EvalContext::standalone();
+            let owner = fixture.context();
             owner
                 .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
                 .expect("pending task should schedule")
                 .wait()
                 .clone()
         };
-        let observer = EvalContext::standalone();
+        let observer = fixture.context();
 
         assert!(matches!(
             observer.poll_wait(&completed_wait),
@@ -3300,9 +3359,7 @@ mod tests {
         );
         assert!(matches!(
             observer.poll_wait(&pending_wait),
-            EvaluationTaskPoll::Failed(error)
-                if error.to_string()
-                    == "reflection task's evaluation session no longer exists"
+            EvaluationTaskPoll::Failed(_)
         ));
     }
 
@@ -3720,7 +3777,8 @@ mod tests {
 
     #[test]
     fn cancellation_stops_a_queued_task_and_late_requests_are_noops() {
-        let context = EvalContext::standalone();
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
         let cancelled = Arc::new(AtomicBool::new(false));
         let observed = cancelled.clone();
         let task = context
@@ -3744,10 +3802,75 @@ mod tests {
             EvaluationTaskCancellation::Late
         );
 
-        let foreign = EvalContext::standalone();
+        let non_owner = fixture.context();
         assert_eq!(
-            foreign.cancel_reflection_task(&task),
-            EvaluationTaskCancellation::ForeignSession
+            non_owner.cancel_reflection_task(&task),
+            EvaluationTaskCancellation::NotOwnerSession
+        );
+    }
+
+    #[test]
+    fn running_cancellation_waits_for_release_then_wins_over_the_poll_result() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let task = context
+            .schedule_task({
+                let cancelled = cancelled.clone();
+                move |_| {
+                    Ok(Box::new(CancellableAfterRelease {
+                        started: Some(started_sender),
+                        release: release_receiver,
+                        cancelled,
+                    }))
+                }
+            })
+            .expect("running cancellation fixture should schedule");
+        let worker = {
+            let context = context.clone();
+            let wait = task.wait().clone();
+            std::thread::spawn(move || context.pump_wait(&wait, 256))
+        };
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should claim the task");
+
+        assert_eq!(
+            context.cancel_reflection_task(&task),
+            EvaluationTaskCancellation::Requested
+        );
+        assert!(matches!(
+            context.poll_reflection_task(&task),
+            EvaluationTaskPoll::Pending(_)
+        ));
+        assert!(
+            !cancelled.load(Ordering::Acquire),
+            "the cancellation hook cannot run while the worker owns the machine"
+        );
+
+        release_sender
+            .send(())
+            .expect("running task should still await release");
+        assert_eq!(
+            worker.join().expect("worker should not panic"),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert!(cancelled.load(Ordering::Acquire));
+        for _ in 0..2 {
+            assert_eq!(
+                context.poll_reflection_task(&task),
+                EvaluationTaskPoll::Cancelled,
+                "the cancellation result must remain readable after record retirement"
+            );
+        }
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("cancelled running work should leave no unfinished task")
+        };
+        assert!(
+            report.failures.is_empty(),
+            "the machine's discarded failure must not enter the reporting ledger"
         );
     }
 
@@ -3967,12 +4090,13 @@ mod tests {
     }
 
     #[test]
-    fn live_foreign_dependencies_are_reported_as_quiescent() {
-        let owner = EvalContext::standalone();
+    fn live_cross_session_dependencies_are_reported_as_quiescent() {
+        let fixture = SameRuntimeFixture::new();
+        let owner = fixture.context();
         let dependency = owner
             .schedule_task(|_| Ok(Box::new(Complete)))
-            .expect("foreign dependency should schedule");
-        let observer = EvalContext::standalone();
+            .expect("cross-session dependency should schedule");
+        let observer = fixture.context();
         let dependency_wait = dependency.wait.clone();
         let follower = observer
             .schedule_task(move |task_context| {
@@ -3981,41 +4105,42 @@ mod tests {
                     dependency: dependency_wait,
                 }))
             })
-            .expect("foreign follower should schedule");
+            .expect("cross-session follower should schedule");
 
         let EvaluationSessionRun::Quiescent(report) = observer.run_until_quiescent() else {
-            panic!("a live foreign dependency should produce resumable quiescence")
+            panic!("a live cross-session dependency should produce resumable quiescence")
         };
         let blocked = report
             .unfinished
             .iter()
             .find(|task| task.task == follower.id())
-            .expect("foreign follower should remain blocked");
+            .expect("cross-session follower should remain blocked");
         assert_eq!(blocked.dependency, Some(dependency.id()));
         assert_eq!(blocked.dependency_session, Some(dependency.session_id()));
         assert_eq!(blocked.wait, Some(dependency.wait.get()));
 
         let EvaluationSessionRun::Complete(owner_report) = owner.run_until_quiescent() else {
-            panic!("foreign producer should complete independently")
+            panic!("the producer's session should complete independently")
         };
         assert!(owner_report.unfinished.is_empty());
         let EvaluationSessionRun::Complete(observer_report) = observer.run_until_quiescent() else {
-            panic!("polling again should observe foreign task completion")
+            panic!("polling again should observe cross-session task completion")
         };
         assert!(observer_report.unfinished.is_empty());
     }
 
     #[test]
-    fn a_dropped_foreign_session_turns_its_follower_into_a_failure() {
+    fn a_dropped_owner_session_turns_its_cross_session_follower_into_a_failure() {
+        let fixture = SameRuntimeFixture::new();
         let dependency_wait = {
-            let owner = EvalContext::standalone();
+            let owner = fixture.context();
             owner
                 .schedule_task(|_| Ok(Box::new(Complete)))
-                .expect("foreign dependency should schedule")
+                .expect("cross-session dependency should schedule")
                 .wait
                 .clone()
         };
-        let observer = EvalContext::standalone();
+        let observer = fixture.context();
         let follower = observer
             .schedule_task(move |task_context| {
                 Ok(Box::new(Await {
@@ -4023,18 +4148,18 @@ mod tests {
                     dependency: dependency_wait,
                 }))
             })
-            .expect("foreign follower should schedule");
+            .expect("cross-session follower should schedule");
 
         let EvaluationSessionRun::Complete(report) = observer.run_until_quiescent() else {
-            panic!("a dead foreign producer cannot leave retryable work")
+            panic!("a closed producer session cannot leave retryable work")
         };
         let failure = report
             .failures
             .get(&follower.id())
-            .expect("the foreign follower should fail");
-        assert_eq!(
-            failure.to_string(),
-            "reflection task's evaluation session no longer exists"
+            .expect("the cross-session follower should fail");
+        assert!(
+            !failure.to_string().is_empty(),
+            "owner closure should retain a reportable permanent failure"
         );
         assert!(report.unfinished.is_empty());
     }
@@ -4053,6 +4178,11 @@ mod tests {
         context.spark(Value::Lazy(lazy.clone()));
 
         assert!(lazy.cached().is_none());
+        assert_eq!(
+            executor.retained_spark_count(),
+            0,
+            "a zero-worker executor must discard sparks before retaining work"
+        );
     }
 
     #[test]

@@ -133,11 +133,10 @@ returns a Rust owner handle. The handle exposes one closed Glam
 are not members of the ordinary reflection API, while `.heap.*` remains rooted
 to the session's private heap volume.
 
-Each capability request embeds its globally unique `ReasoningSessionId`, its
-session-local `VolumeId`, and its operation. Ordinary child tasks share the
-host identity and may use capabilities passed to them. Logger, IDE, and other
-foreign reasoning sessions reject the request before it enters a
-store journal.
+The capability value carries its evaluation-runtime provenance and embeds the
+runtime-local `VolumeId` plus its operation. Possession authorizes use from any
+reasoning or demand session in that runtime. Another runtime rejects the
+capability value before the request enters a store journal.
 
 The owner explicitly revokes the complete volume and recovers its final
 unforced value. Volume IDs are never reused. A missing `get` returns a latent
