@@ -192,19 +192,37 @@ impl Values {
     }
 
     pub fn empty_object(&self, name: Value) -> Result<Value, Error> {
-        let spec = self.record([
-            ("name", name),
-            ("deps", self.list(std::iter::empty())?),
-            (
-                "defs",
-                self.wrap(CoreValue::Builtin(Builtin::ObjectDefaultDefs)),
-            ),
-        ])?;
-        self.builtin_call(Builtin::ObjectInstance, [spec])
+        self.require(&name)?;
+        let spec = CoreValue::Dict(
+            Dict::new_sync()
+                .insert(Key::atom_from_text("name"), name.into_core())
+                .insert(
+                    Key::atom_from_text("deps"),
+                    CoreValue::List(List::from_values(Vec::new())),
+                )
+                .insert(
+                    Key::atom_from_text("defs"),
+                    CoreValue::Builtin(Builtin::ObjectDefaultDefs),
+                ),
+        );
+        Ok(self.wrap(CoreValue::builtin_call(
+            &self.core,
+            Builtin::ObjectInstance,
+            vec![spec],
+        )))
     }
 
     pub fn after_reflection(&self, effect: Value, target: Value) -> Result<Value, Error> {
-        self.builtin_call(Builtin::Anno, [self.record([("refl", effect)])?, target])
+        self.require(&effect)?;
+        self.require(&target)?;
+        let annotation = CoreValue::Dict(
+            Dict::new_sync().insert(Key::atom_from_text("refl"), effect.into_core()),
+        );
+        Ok(self.wrap(CoreValue::builtin_call(
+            &self.core,
+            Builtin::Anno,
+            vec![annotation, target.into_core()],
+        )))
     }
 
     pub fn abstract_global_path<I, S>(&self, parts: I) -> Value
@@ -215,21 +233,6 @@ impl Values {
         self.wrap(CoreValue::Atom(crate::core::Atom::from_key(
             &Key::abstract_global_path(parts),
         )))
-    }
-
-    pub(crate) fn builtin_call(
-        &self,
-        builtin: Builtin,
-        arguments: impl IntoIterator<Item = Value>,
-    ) -> Result<Value, Error> {
-        let arguments = arguments
-            .into_iter()
-            .map(|value| {
-                self.require(&value)?;
-                Ok(value.into_core())
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        Ok(self.wrap(CoreValue::builtin_call(&self.core, builtin, arguments)))
     }
 }
 
@@ -683,23 +686,31 @@ impl Diagnostic {
         if let Some(origin) = &self.origin {
             origin.require_runtime(values.runtime)?;
         }
-        let mut fields = vec![
-            ("emission", self.emission.clone()),
-            (
-                "severity",
-                Value::from_core(values.core(), self.severity.value(values.core())),
-            ),
-        ];
+        let mut fields = Dict::new_sync()
+            .insert(
+                Key::atom_from_text("emission"),
+                self.emission.as_core().clone(),
+            )
+            .insert(
+                Key::atom_from_text("severity"),
+                self.severity.value(values.core()),
+            );
         if let Some(origin) = &self.origin {
-            fields.push(("origin", origin.clone()));
+            fields = fields.insert(Key::atom_from_text("origin"), origin.as_core().clone());
         }
         if let Some(source) = &self.source {
-            fields.push(("source", values.text(source.as_ref())));
+            fields = fields.insert(
+                Key::atom_from_text("source"),
+                CoreValue::binary_from_text(source.as_ref()),
+            );
         }
         if let Some(line) = self.line {
-            fields.push(("line", values.integer(line as i64)));
+            fields = fields.insert(
+                Key::atom_from_text("line"),
+                CoreValue::Number(Number::integer(line as i64)),
+            );
         }
-        values.record(fields)
+        Ok(values.wrap(CoreValue::Dict(fields)))
     }
 
     #[doc(hidden)]
@@ -4837,7 +4848,12 @@ mod tests {
         assert!(values.empty_object(foreign_value.clone()).is_err());
         assert!(
             values
-                .after_reflection(foreign_value, values.text("target"))
+                .after_reflection(foreign_value.clone(), values.text("target"))
+                .is_err()
+        );
+        assert!(
+            values
+                .after_reflection(values.empty_record(), foreign_value)
                 .is_err()
         );
     }
