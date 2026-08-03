@@ -279,7 +279,10 @@ where
                         .map(|(key, value)| {
                             CoreValue::Dict(
                                 Dict::new_sync()
-                                    .insert((*keys::KEY).clone(), key.to_value())
+                                    .insert(
+                                        (*keys::KEY).clone(),
+                                        key.to_value_with(context.eval_context().values()),
+                                    )
                                     .insert((*keys::VALUE).clone(), value.clone()),
                             )
                         })
@@ -440,7 +443,7 @@ where
                 observe_query_change(context, &handle.status, query.generation);
                 return Ok(RequestResult::Fail);
             };
-            match tagged_task_state(&state)? {
+            match tagged_task_state(context.eval_context().values(), &state)? {
                 TaggedTaskState::Complete(value) => Ok(RequestResult::Return(value)),
                 TaggedTaskState::Launched | TaggedTaskState::Blocked => {
                     observe_query_change(context, &handle.status, query.generation);
@@ -455,7 +458,7 @@ where
                 observe_query_change(context, &handle.status, query.generation);
                 return Ok(RequestResult::Fail);
             };
-            match tagged_task_state(&state)? {
+            match tagged_task_state(context.eval_context().values(), &state)? {
                 TaggedTaskState::Failed(error) => Ok(RequestResult::Return(error)),
                 TaggedTaskState::Cancelled => Ok(RequestResult::Return(Value::text(
                     "reflection task was cancelled",
@@ -563,8 +566,8 @@ fn task_join_context(task: EvaluationTaskId) -> CoreValue {
 
 fn task_status_query_value(values: &CoreValueFactory, status: EvaluationTaskStatus) -> CoreValue {
     match status {
-        EvaluationTaskStatus::Launched => keys::LAUNCHED.to_value(),
-        EvaluationTaskStatus::Blocked => keys::BLOCKED.to_value(),
+        EvaluationTaskStatus::Launched => values.key_value(&keys::LAUNCHED),
+        EvaluationTaskStatus::Blocked => values.key_value(&keys::BLOCKED),
         EvaluationTaskStatus::Complete(value) => {
             CoreValue::Dict(Dict::new_sync().insert((*keys::OK).clone(), value))
         }
@@ -572,7 +575,7 @@ fn task_status_query_value(values: &CoreValueFactory, status: EvaluationTaskStat
             (*keys::ERR).clone(),
             eval::failure_diagnostic_value_with(values, &error),
         )),
-        EvaluationTaskStatus::Cancelled => keys::CANCELED.to_value(),
+        EvaluationTaskStatus::Cancelled => values.key_value(&keys::CANCELED),
     }
 }
 
@@ -584,14 +587,17 @@ enum TaggedTaskState {
     Cancelled,
 }
 
-fn tagged_task_state(value: &Value) -> Result<TaggedTaskState, TaskHalt> {
-    if value.as_core() == &keys::LAUNCHED.to_value() {
+fn tagged_task_state(
+    values: &CoreValueFactory,
+    value: &Value,
+) -> Result<TaggedTaskState, TaskHalt> {
+    if value.as_core() == &values.key_value(&keys::LAUNCHED) {
         return Ok(TaggedTaskState::Launched);
     }
-    if value.as_core() == &keys::BLOCKED.to_value() {
+    if value.as_core() == &values.key_value(&keys::BLOCKED) {
         return Ok(TaggedTaskState::Blocked);
     }
-    if value.as_core() == &keys::CANCELED.to_value() {
+    if value.as_core() == &values.key_value(&keys::CANCELED) {
         return Ok(TaggedTaskState::Cancelled);
     }
     let CoreValue::Dict(state) = value.as_core() else {
@@ -717,11 +723,11 @@ pub(crate) fn prepare_message(context: &EvalContext, message: Value) -> Result<V
 pub(crate) fn parse_severity(context: &EvalContext, value: Value) -> Result<Severity, TaskHalt> {
     let value = evaluate(context, value.into_core())
         .map_err(|error| error.with_core_context(eval::evaluation_context_frame("log_severity")))?;
-    if severity_matches(&value, "info", &keys::INFO_VALUE) {
+    if severity_matches(&value, "info", &keys::INFO) {
         Ok(Severity::Info)
-    } else if severity_matches(&value, "warn", &keys::WARN_VALUE) {
+    } else if severity_matches(&value, "warn", &keys::WARN) {
         Ok(Severity::Warning)
-    } else if severity_matches(&value, "error", &keys::ERROR_VALUE) {
+    } else if severity_matches(&value, "error", &keys::ERROR) {
         Ok(Severity::Error)
     } else {
         Err(TaskHalt::new(
@@ -730,6 +736,7 @@ pub(crate) fn parse_severity(context: &EvalContext, value: Value) -> Result<Seve
     }
 }
 
-fn severity_matches(value: &CoreValue, name: &str, canonical: &CoreValue) -> bool {
-    value == canonical || value == &CoreValue::Atom(Atom::from_key(&Key::binary_from_text(name)))
+fn severity_matches(value: &CoreValue, name: &str, canonical: &Key) -> bool {
+    Key::from_value(value).as_ref() == Some(canonical)
+        || value == &CoreValue::Atom(Atom::from_key(&Key::binary_from_text(name)))
 }

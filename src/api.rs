@@ -708,10 +708,13 @@ impl Diagnostic {
     /// transport. The configured logger decodes the envelope before applying
     /// its own enrichment and viewing policy.
     #[doc(hidden)]
-    pub fn transport_value(&self) -> Value {
+    pub fn transport_value(&self, values: &Values) -> Value {
         let mut fields = vec![
             ("emission", self.emission.clone()),
-            ("severity", Value::from_core(self.severity.value())),
+            (
+                "severity",
+                Value::from_core(self.severity.value(values.core())),
+            ),
         ];
         if let Some(origin) = &self.origin {
             fields.push(("origin", origin.clone()));
@@ -741,10 +744,10 @@ impl Diagnostic {
         };
         let emission = field("emission")
             .ok_or_else(|| Error::new("diagnostic transport is missing `emission`"))?;
-        let severity = match field("severity") {
-            Some(value) if value.as_core() == &*crate::core::keys::INFO_VALUE => Severity::Info,
-            Some(value) if value.as_core() == &*crate::core::keys::WARN_VALUE => Severity::Warning,
-            Some(value) if value.as_core() == &*crate::core::keys::ERROR_VALUE => Severity::Error,
+        let severity = match field("severity").and_then(|value| Key::from_value(value.as_core())) {
+            Some(value) if value == *crate::core::keys::INFO => Severity::Info,
+            Some(value) if value == *crate::core::keys::WARN => Severity::Warning,
+            Some(value) if value == *crate::core::keys::ERROR => Severity::Error,
             _ => return Err(Error::new("diagnostic transport has an invalid severity")),
         };
         let source = field("source")
@@ -1009,6 +1012,7 @@ impl DiagnosticBus {
         let ingress = DiagnosticIngress {
             inner: Arc::new(DiagnosticIngressInner {
                 sender,
+                values: runtime.values(),
                 state: Mutex::new(DiagnosticIngressState {
                     next_sequence: state.counts.next_sequence,
                     pending: BTreeMap::new(),
@@ -1145,13 +1149,14 @@ struct DiagnosticIngressState {
 
 struct DiagnosticIngressInner {
     sender: RuntimeInputSender<Value>,
+    values: Values,
     state: Mutex<DiagnosticIngressState>,
 }
 
 impl DiagnosticIngressInner {
     fn receive(&self, event: DiagnosticEvent) {
         let sequence = event.sequence();
-        let value = event.diagnostic().transport_value();
+        let value = event.diagnostic().transport_value(&self.values);
         let prepared = match self.sender.prepare(value) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -3521,7 +3526,7 @@ impl ReflectionInspector<'_> {
             .iter()
             .map(|(key, value)| {
                 (
-                    Value::from_core(key.to_value()),
+                    Value::from_core(key.to_value_with(&self.assembler.core_values())),
                     Value::from_core(value.clone()),
                 )
             })
@@ -3538,7 +3543,9 @@ impl ReflectionInspector<'_> {
                 value.diagnostic_kind_name()
             )));
         };
-        Ok(Value::from_core(atom.key().to_value()))
+        Ok(Value::from_core(
+            atom.key().to_value_with(&self.assembler.core_values()),
+        ))
     }
 }
 
@@ -4718,11 +4725,15 @@ mod tests {
             .expect("assembler should retain its selected runtime");
         assert_eq!(assembler.values().runtime_id(), first.id());
 
-        let first_lazy = LazyValue::deferred(&first.values().core, "first runtime", |_| {
-            Ok((*keys::UNIT_VALUE).clone())
+        let first_values = first.values().core;
+        let first_unit = first_values.unit();
+        let first_lazy = LazyValue::deferred(&first_values, "first runtime", move |_| {
+            Ok(first_unit.clone())
         });
-        let second_lazy = LazyValue::deferred(&second.values().core, "second runtime", |_| {
-            Ok((*keys::UNIT_VALUE).clone())
+        let second_values = second.values().core;
+        let second_unit = second_values.unit();
+        let second_lazy = LazyValue::deferred(&second_values, "second runtime", move |_| {
+            Ok(second_unit.clone())
         });
         assert_eq!(first_lazy.id().get(), second_lazy.id().get());
     }
@@ -6269,6 +6280,29 @@ mod tests {
     }
 
     #[test]
+    fn evaluation_context_retains_runtime_cache_and_profile_without_a_cycle() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let state = Arc::downgrade(&runtime.state);
+        let profile = Arc::downgrade(&runtime.default_reflection_profile);
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("assembler should seal the runtime profile");
+        let context = assembler.eval_context();
+        let unit = context.values().unit();
+
+        drop(assembler);
+        drop(runtime);
+        assert!(state.upgrade().is_some());
+        assert!(profile.upgrade().is_some());
+        assert_eq!(eval::eval_value(&context, &unit).unwrap(), unit);
+
+        drop(context);
+        assert!(state.upgrade().is_none());
+        assert!(profile.upgrade().is_none());
+    }
+
+    #[test]
     fn builder_selects_runtime_before_exposing_runtime_bound_state() {
         let mut builder = Assembler::builder();
         let _volume = builder
@@ -6607,7 +6641,7 @@ mod tests {
         };
         let interface = interface.insert(
             (*crate::core::keys::SEVERITY).clone(),
-            (*crate::core::keys::ERROR_VALUE).clone(),
+            crate::core::test_value_factory().error(),
         );
         let message = CoreValue::Dict(message.insert(
             (*crate::core::keys::MSG).clone(),
@@ -6626,7 +6660,7 @@ mod tests {
         };
         assert_eq!(
             interface.get(&*crate::core::keys::SEVERITY),
-            Some(&*crate::core::keys::ERROR_VALUE)
+            Some(&crate::core::test_value_factory().error())
         );
         assert!(interface.get(&*crate::core::keys::ORIGIN).is_none());
         assert!(emission.get(&*crate::core::keys::SPEC).is_none());
@@ -6643,7 +6677,7 @@ mod tests {
         };
         assert_eq!(
             interface.get(&*crate::core::keys::SEVERITY),
-            Some(&*crate::core::keys::WARN_VALUE)
+            Some(&values.core.warn())
         );
         assert_eq!(
             interface

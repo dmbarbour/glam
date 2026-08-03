@@ -1630,7 +1630,7 @@ impl EvalContext {
 
     #[cfg(test)]
     pub(crate) fn complete_wait(&self, wait: &EvaluationWaitToken) {
-        self.complete_wait_with_value(wait, (*crate::core::keys::UNIT_VALUE).clone());
+        self.complete_wait_with_value(wait, crate::core::keys::unit_value());
     }
 
     #[cfg(test)]
@@ -2646,7 +2646,7 @@ mod tests {
 
     impl EvaluationTaskMachine for Complete {
         fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
-            EvaluationMachinePoll::Complete((*crate::core::keys::UNIT_VALUE).clone())
+            EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
         }
     }
 
@@ -2801,7 +2801,7 @@ mod tests {
             if let Some(signal) = self.0.take() {
                 signal.send(()).expect("test receiver should remain open");
             }
-            EvaluationMachinePoll::Complete((*crate::core::keys::UNIT_VALUE).clone())
+            EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
         }
     }
 
@@ -2820,7 +2820,7 @@ mod tests {
             self.release
                 .recv_timeout(Duration::from_secs(2))
                 .expect("test should release the task");
-            EvaluationMachinePoll::Complete((*crate::core::keys::UNIT_VALUE).clone())
+            EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
         }
     }
 
@@ -2849,7 +2849,7 @@ mod tests {
 
     impl EvaluationTaskMachine for CompleteAndSignalDrop {
         fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
-            EvaluationMachinePoll::Complete((*crate::core::keys::UNIT_VALUE).clone())
+            EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
         }
     }
 
@@ -2866,7 +2866,7 @@ mod tests {
 
     impl EvaluationTaskMachine for CompleteAndCheckReflectionDrop {
         fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
-            EvaluationMachinePoll::Complete((*crate::core::keys::UNIT_VALUE).clone())
+            EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
         }
     }
 
@@ -2906,7 +2906,7 @@ mod tests {
                     .schedule_task(|_| Ok(Box::new(Complete)))
                     .expect("child should schedule while its parent is polled");
             }
-            EvaluationMachinePoll::Complete((*crate::core::keys::UNIT_VALUE).clone())
+            EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
         }
     }
 
@@ -3293,12 +3293,12 @@ mod tests {
             let lazy = LazyValue::deferred(
                 &crate::core::test_value_factory(),
                 format!("successful lazy {index}"),
-                |_| Ok((*crate::core::keys::UNIT_VALUE).clone()),
+                |_| Ok(crate::core::keys::unit_value()),
             );
             assert_eq!(
                 crate::eval::eval_value(&context, &Value::Lazy(lazy))
                     .expect("successful lazy should evaluate"),
-                (*crate::core::keys::UNIT_VALUE).clone()
+                crate::core::keys::unit_value()
             );
 
             let lazy = LazyValue::deferred(
@@ -3323,7 +3323,7 @@ mod tests {
                 .clone();
             if index % 2 == 0 {
                 promise
-                    .set((*crate::core::keys::UNIT_VALUE).clone())
+                    .set(crate::core::keys::unit_value())
                     .expect("successful promise should complete once");
             } else {
                 promise
@@ -4014,7 +4014,7 @@ mod tests {
                 spark_sender
                     .send(())
                     .expect("spark receiver should remain open");
-                Ok((*crate::core::keys::UNIT_VALUE).clone())
+                Ok(crate::core::keys::unit_value())
             },
         );
         context.spark(Value::Lazy(lazy));

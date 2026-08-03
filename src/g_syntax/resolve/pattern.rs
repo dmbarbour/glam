@@ -165,7 +165,10 @@ fn append_match_steps(
                 pattern_builtin(
                     Builtin::PatternEqual,
                     [
-                        ResolvedExpr::Embedded(pattern_literal_value(literal)),
+                        ResolvedExpr::Embedded(pattern_literal_value(
+                            lowering.context.values(),
+                            literal,
+                        )),
                         ResolvedExpr::Local(subject),
                     ],
                 ),
@@ -387,9 +390,9 @@ fn part_access(parts: BindingId, key: &Key) -> ResolvedExpr<Value> {
     }
 }
 
-fn pattern_literal_value(literal: &SyntaxPatternLiteral) -> Value {
+fn pattern_literal_value(values: &CoreValueFactory, literal: &SyntaxPatternLiteral) -> Value {
     match literal {
-        SyntaxPatternLiteral::Unit => (*keys::UNIT_VALUE).clone(),
+        SyntaxPatternLiteral::Unit => values.unit(),
         SyntaxPatternLiteral::Number(number) => Value::Number(number.clone()),
         SyntaxPatternLiteral::Atom(name) => {
             Value::Atom(Atom::from_key(&Key::binary_from_text(name)))

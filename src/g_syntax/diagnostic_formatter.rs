@@ -4,15 +4,18 @@
 //! compiler. This module uses the g front end's private semantic IR only to
 //! lower that policy once; callers receive an ordinary closed function value.
 
+use std::sync::Arc;
+
 use super::*;
 
 struct CachedDiagnosticFormatter(Value);
 
 pub(super) fn value(values: &CoreValueFactory) -> Value {
-    values
-        .cached(|| CachedDiagnosticFormatter(build(values)))
-        .0
-        .clone()
+    cached(values).0.clone()
+}
+
+fn cached(values: &CoreValueFactory) -> Arc<CachedDiagnosticFormatter> {
+    values.cached(|| CachedDiagnosticFormatter(build(values)))
 }
 
 fn build(values: &CoreValueFactory) -> Value {
@@ -124,5 +127,12 @@ mod tests {
         let second = value(&values);
         assert!(matches!(first, Value::Function(_)));
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn formatter_cache_is_owned_by_one_runtime() {
+        let first = CoreValueFactory::new(crate::runtime::RuntimeIds::new());
+        let second = CoreValueFactory::new(crate::runtime::RuntimeIds::new());
+        assert!(!Arc::ptr_eq(&cached(&first), &cached(&second)));
     }
 }

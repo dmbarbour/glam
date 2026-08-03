@@ -14,6 +14,14 @@ use crate::number::Number;
 
 use super::*;
 
+fn unit_value() -> Value {
+    crate::core::test_value_factory().unit()
+}
+
+fn initial_metadata() -> Value {
+    Value::initial_metadata_carrier(&crate::core::test_value_factory())
+}
+
 fn closed_net(build: impl FnOnce(&mut NetBuilder<CoreSpecialization>) -> Port) -> NetValue {
     let mut builder = NetBuilder::new();
     let exposed = build(&mut builder);
@@ -138,13 +146,13 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
         "successful source release",
         move |_| {
             let _keep_signal_captured = &success_signal;
-            Ok((*keys::UNIT_VALUE).clone())
+            Ok(unit_value())
         },
     );
 
     assert_eq!(
         eval_lazy(&context, &success).expect("lazy source should succeed"),
-        (*keys::UNIT_VALUE).clone()
+        unit_value()
     );
     assert!(success.source_snapshot().is_none());
     assert!(
@@ -180,7 +188,7 @@ fn evaluation_context_frames_use_an_atom_operation_and_optional_named_arguments(
             (*keys::EVAL).clone(),
             Value::Dict(Dict::new_sync().insert(
                 (*keys::OP).clone(),
-                Key::atom_from_text("list_index").to_value(),
+                Key::atom_from_text("list_index").to_value_with(&crate::core::test_value_factory()),
             )),
         ))
     );
@@ -195,7 +203,8 @@ fn evaluation_context_frames_use_an_atom_operation_and_optional_named_arguments(
                     Dict::new_sync()
                         .insert(
                             (*keys::OP).clone(),
-                            Key::atom_from_text("path_lookup").to_value(),
+                            Key::atom_from_text("path_lookup")
+                                .to_value_with(&crate::core::test_value_factory()),
                         )
                         .insert((*keys::ARGS).clone(), Value::Dict(args)),
                 ),
@@ -1932,7 +1941,7 @@ fn equality_errors_when_dictionary_comparison_reaches_functions() {
 
 #[test]
 fn ordinary_observers_do_not_unseal_metadata_carriers() {
-    let carrier = Value::initial_metadata_carrier();
+    let carrier = initial_metadata();
 
     for builtin in [Builtin::Equal, Builtin::NotEqual, Builtin::Greater] {
         let error = eval_closed_expr(&builtin2_expr(
@@ -1948,7 +1957,7 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
     }
 
     assert!(
-        run_pattern_equal((*keys::UNIT_VALUE).clone(), carrier.clone())
+        run_pattern_equal(unit_value(), carrier.clone())
             .expect("a sealed carrier should be an ordinary pattern mismatch")
             .is_empty()
     );
@@ -2138,7 +2147,7 @@ fn compiler_pattern_list_predicates_return_pass_fail_effects() {
         assert_eq!(
             run_pattern_builtin(Builtin::PatternIsList, value)
                 .expect("logical list values should match"),
-            [(*keys::UNIT_VALUE).clone()]
+            [unit_value()]
         );
     }
     assert!(
@@ -2151,7 +2160,7 @@ fn compiler_pattern_list_predicates_return_pass_fail_effects() {
         assert_eq!(
             run_pattern_builtin(Builtin::PatternListIsEmpty, value)
                 .expect("empty logical lists should match"),
-            [(*keys::UNIT_VALUE).clone()]
+            [unit_value()]
         );
     }
     for value in [
@@ -2171,7 +2180,7 @@ fn compiler_pattern_list_predicates_return_pass_fail_effects() {
 fn compiler_pattern_equality_mismatches_incompatible_values() {
     let atom = key_value(&Key::atom_from_text("tag"));
     for (expected, actual) in [
-        ((*keys::UNIT_VALUE).clone(), (*keys::UNIT_VALUE).clone()),
+        (unit_value(), unit_value()),
         (n(42), n(42)),
         (atom.clone(), atom),
         (
@@ -2181,7 +2190,7 @@ fn compiler_pattern_equality_mismatches_incompatible_values() {
     ] {
         assert_eq!(
             run_pattern_equal(expected, actual).expect("matching literals should succeed"),
-            [(*keys::UNIT_VALUE).clone()]
+            [unit_value()]
         );
     }
 
@@ -2221,7 +2230,7 @@ fn compiler_pattern_path_equality_matches_keyable_lists_directionally() {
             Value::List(List::from_values(vec![foo.clone(), n(42)])),
         )
         .expect("equal computed paths should match"),
-        [(*keys::UNIT_VALUE).clone()]
+        [unit_value()]
     );
     for actual in [
         Value::List(List::from_values(vec![foo, n(43)])),
@@ -2312,7 +2321,7 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
     assert_eq!(
         run_pattern_builtin(Builtin::PatternIsDict, Value::Dict(Dict::new_sync()))
             .expect("dictionary values should pass the kind check"),
-        [(*keys::UNIT_VALUE).clone()]
+        [unit_value()]
     );
     assert!(
         run_pattern_builtin(Builtin::PatternIsDict, n(1))
@@ -2331,7 +2340,7 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
     assert_eq!(
         run_pattern_builtin(Builtin::PatternDictIsEmpty, Value::Dict(logically_empty))
             .expect("nested and deferred undefined values should be logically empty"),
-        [(*keys::UNIT_VALUE).clone()]
+        [unit_value()]
     );
     assert!(
         run_pattern_builtin(
@@ -2848,7 +2857,7 @@ fn non_callable_application_reports_semantic_value_kinds() {
             "application requires a function value, received Undefined",
         ),
         (
-            (*keys::UNIT_VALUE).clone(),
+            unit_value(),
             "application requires a function value, received Unit",
         ),
         (
@@ -3420,7 +3429,7 @@ fn assert_unit_builtin_uses_its_diagnostic_context() {
     let value = eval_closed_expr(&builtin3_expr(
         Builtin::AssertUnit,
         TestExpr::Value(Value::binary_from_text("test operation result")),
-        TestExpr::Value((*keys::UNIT_VALUE).clone()),
+        TestExpr::Value(unit_value()),
         TestExpr::Value(target.clone()),
     ))
     .expect("unit assertion should return its target");
@@ -3724,7 +3733,7 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
         "metadata annotation unit",
         move |_| {
             counted_target_forces.fetch_add(1, Ordering::SeqCst);
-            Ok((*keys::UNIT_VALUE).clone())
+            Ok(unit_value())
         },
     );
 
@@ -3737,13 +3746,13 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
     let second = apply_values(
         &context,
         Value::Builtin(Builtin::Anno),
-        vec![annotation(), (*keys::UNIT_VALUE).clone()],
+        vec![annotation(), unit_value()],
     )
     .expect("metadata annotation should reuse its canonical carrier");
 
     assert_eq!(target_forces.load(Ordering::SeqCst), 1);
-    assert_eq!(first, Value::initial_metadata_carrier());
-    assert_eq!(second, Value::initial_metadata_carrier());
+    assert_eq!(first, initial_metadata());
+    assert_eq!(second, initial_metadata());
     assert_eq!(first, second);
     assert_eq!(
         first.associated_metadata(),
@@ -3775,7 +3784,7 @@ fn metadata_annotation_rejects_non_unit_and_existing_carriers() {
     for (target, expected_kind) in [
         (n(42), "Number"),
         (Value::Dict(Dict::new_sync()), "Undefined"),
-        (Value::initial_metadata_carrier(), "Sealed"),
+        (initial_metadata(), "Sealed"),
     ] {
         let error = apply_values(
             &context,
@@ -3966,10 +3975,7 @@ fn metadata_update_preserves_input_arity_without_validating_output_length() {
             1,
             TestExpr::Value(Value::List(List::from_values(vec![n(7)]))),
         ),
-        vec![
-            Value::initial_metadata_carrier(),
-            Value::initial_metadata_carrier(),
-        ],
+        vec![initial_metadata(), initial_metadata()],
     )
     .expect("a short update list should remain latent inside output carriers");
     assert_eq!(too_short.len(), 2);
@@ -4001,7 +4007,7 @@ fn metadata_update_preserves_input_arity_without_validating_output_length() {
             1,
             TestExpr::Value(Value::List(List::from_values(vec![n(8), extra]))),
         ),
-        vec![Value::initial_metadata_carrier()],
+        vec![initial_metadata()],
     )
     .expect("extra update values should be ignored");
     assert_eq!(too_long.len(), 1);
@@ -4102,10 +4108,7 @@ fn metadata_update_shares_update_failures_between_projections() {
     let result = run_metadata_update(
         &context,
         function,
-        vec![
-            Value::initial_metadata_carrier(),
-            Value::initial_metadata_carrier(),
-        ],
+        vec![initial_metadata(), initial_metadata()],
     )
     .expect("update failure should remain latent inside output carriers");
     assert_eq!(update_forces.load(Ordering::SeqCst), 0);
@@ -4128,7 +4131,7 @@ fn metadata_update_delegates_output_interpretation_to_list_at() {
     let binary = run_metadata_update(
         &context,
         closed_function_value(1, TestExpr::Value(Value::binary_from_text("x"))),
-        vec![Value::initial_metadata_carrier()],
+        vec![initial_metadata()],
     )
     .expect("binary update output should remain indexable");
     assert_eq!(
@@ -4139,7 +4142,7 @@ fn metadata_update_delegates_output_interpretation_to_list_at() {
     let number = run_metadata_update(
         &context,
         closed_function_value(1, TestExpr::Value(n(42))),
-        vec![Value::initial_metadata_carrier()],
+        vec![initial_metadata()],
     )
     .expect("an unindexable update result should remain latent");
     let error =
@@ -4208,7 +4211,7 @@ fn metadata_reflection_update_blocks_and_resumes_on_its_shared_task() {
     let outputs = run_metadata_reflection_update(
         &context,
         Value::error(&crate::core::test_value_factory(), "unlaunched effect"),
-        vec![Value::initial_metadata_carrier()],
+        vec![initial_metadata()],
     )
     .expect("effectful metadata update should remain latent");
 
@@ -4235,12 +4238,8 @@ fn metadata_reflection_update_propagates_task_failure_and_cancellation() {
             result_policies: Arc::new(Mutex::new(Vec::new())),
         }))
         .expect("fresh test session should accept its reflection launcher");
-    let failed = run_metadata_reflection_update(
-        &failed_context,
-        n(0),
-        vec![Value::initial_metadata_carrier()],
-    )
-    .expect("task failure should remain latent in its output carrier");
+    let failed = run_metadata_reflection_update(&failed_context, n(0), vec![initial_metadata()])
+        .expect("task failure should remain latent in its output carrier");
     let error = evaluated_metadata(&failed_context, &failed[0])
         .expect_err("demanding failed effectful metadata must propagate its failure");
     assert_eq!(error.to_string(), "metadata reflection task failed");
@@ -4260,12 +4259,9 @@ fn metadata_reflection_update_propagates_task_failure_and_cancellation() {
             result_policies: Arc::new(Mutex::new(Vec::new())),
         }))
         .expect("fresh test session should accept its reflection launcher");
-    let cancelled = run_metadata_reflection_update(
-        &cancelled_context,
-        n(0),
-        vec![Value::initial_metadata_carrier()],
-    )
-    .expect("task cancellation should remain latent in its output carrier");
+    let cancelled =
+        run_metadata_reflection_update(&cancelled_context, n(0), vec![initial_metadata()])
+            .expect("task cancellation should remain latent in its output carrier");
     let error = evaluated_metadata(&cancelled_context, &cancelled[0])
         .expect_err("demanding cancelled effectful metadata must fail");
     assert_eq!(error.to_string(), "reflection result task was cancelled");
@@ -4284,10 +4280,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
     let short = run_metadata_reflection_update(
         &short_context,
         n(0),
-        vec![
-            Value::initial_metadata_carrier(),
-            Value::initial_metadata_carrier(),
-        ],
+        vec![initial_metadata(), initial_metadata()],
     )
     .expect("a short result should remain latent");
     assert_eq!(evaluated_metadata(&short_context, &short[0]).unwrap(), n(7));
@@ -4314,12 +4307,8 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
             result_policies: Arc::new(Mutex::new(Vec::new())),
         }))
         .expect("fresh test session should accept its reflection launcher");
-    let long = run_metadata_reflection_update(
-        &long_context,
-        n(0),
-        vec![Value::initial_metadata_carrier()],
-    )
-    .expect("an extra result should be ignored");
+    let long = run_metadata_reflection_update(&long_context, n(0), vec![initial_metadata()])
+        .expect("an extra result should be ignored");
     assert_eq!(evaluated_metadata(&long_context, &long[0]).unwrap(), n(8));
 
     let non_list_context = test_context();
@@ -4330,12 +4319,9 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
             result_policies: Arc::new(Mutex::new(Vec::new())),
         }))
         .expect("fresh test session should accept its reflection launcher");
-    let non_list = run_metadata_reflection_update(
-        &non_list_context,
-        n(0),
-        vec![Value::initial_metadata_carrier()],
-    )
-    .expect("an unindexable result should remain latent");
+    let non_list =
+        run_metadata_reflection_update(&non_list_context, n(0), vec![initial_metadata()])
+            .expect("an unindexable result should remain latent");
     assert_eq!(
         evaluated_metadata(&non_list_context, &non_list[0])
             .expect_err("the projection should delegate its error to list.at")
@@ -4360,10 +4346,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
     let partial = run_metadata_reflection_update(
         &partial_context,
         n(0),
-        vec![
-            Value::initial_metadata_carrier(),
-            Value::initial_metadata_carrier(),
-        ],
+        vec![initial_metadata(), initial_metadata()],
     )
     .expect("individual failed results should remain latent");
     assert_eq!(
@@ -4415,8 +4398,7 @@ fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
         }))
         .expect("fresh test session should accept its reflection launcher");
     let seq_outputs =
-        run_metadata_reflection_update(&seq_context, n(0), vec![Value::initial_metadata_carrier()])
-            .unwrap();
+        run_metadata_reflection_update(&seq_context, n(0), vec![initial_metadata()]).unwrap();
     assert_eq!(
         apply_values(
             &seq_context,
@@ -4439,12 +4421,8 @@ fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
             result_policies: Arc::new(Mutex::new(Vec::new())),
         }))
         .expect("fresh test session should accept its reflection launcher");
-    let spark_outputs = run_metadata_reflection_update(
-        &spark_context,
-        n(0),
-        vec![Value::initial_metadata_carrier()],
-    )
-    .unwrap();
+    let spark_outputs =
+        run_metadata_reflection_update(&spark_context, n(0), vec![initial_metadata()]).unwrap();
     let result = apply_values(
         &spark_context,
         Value::Builtin(Builtin::Spark),
@@ -5160,7 +5138,7 @@ fn strategies_stop_at_nested_metadata_carriers() {
             finished_sender
                 .send(())
                 .expect("sentinel receiver should remain open");
-            Ok((*keys::UNIT_VALUE).clone())
+            Ok(unit_value())
         },
     );
     context.spark(Value::Lazy(sentinel.clone()));
@@ -5210,7 +5188,7 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
             finished_sender
                 .send(())
                 .expect("sentinel receiver should remain open");
-            Ok((*keys::UNIT_VALUE).clone())
+            Ok(unit_value())
         },
     );
     context.spark(Value::Lazy(sentinel.clone()));

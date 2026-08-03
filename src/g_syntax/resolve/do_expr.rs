@@ -630,7 +630,7 @@ mod tests {
                 arguments,
             } if parameters.len() == 1
                 && matches!(body.as_ref(), ResolvedExpr::Embedded(value)
-                    if *value == *crate::core::keys::UNIT_VALUE)
+                    if *value == crate::core::keys::unit_value())
                 && matches!(arguments.as_slice(),
                     [ResolvedExpr::Embedded(Value::Number(number))]
                         if *number == Number::from(42_i64))

@@ -6,7 +6,7 @@
 //! lowered once, then cloned through its shared backing value.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use super::*;
 
@@ -26,31 +26,40 @@ struct GCompilerValues {
     pure_if_runner: Value,
     pure_match_runner: Value,
     macro_environment: Value,
-}
-
-struct GCompilerCache {
-    values: OnceLock<GCompilerValues>,
     effects: Mutex<HashMap<Key, Value>>,
 }
 
-fn cache(values: &CoreValueFactory) -> Arc<GCompilerCache> {
-    values.cached(|| GCompilerCache {
-        values: OnceLock::new(),
-        effects: Mutex::new(HashMap::new()),
-    })
+trait EffectValueCache {
+    fn effects(&self) -> &Mutex<HashMap<Key, Value>>;
+}
+
+impl EffectValueCache for GCompilerValues {
+    fn effects(&self) -> &Mutex<HashMap<Key, Value>> {
+        &self.effects
+    }
+}
+
+struct BuildingEffectValues<'a>(&'a Mutex<HashMap<Key, Value>>);
+
+impl EffectValueCache for BuildingEffectValues<'_> {
+    fn effects(&self) -> &Mutex<HashMap<Key, Value>> {
+        self.0
+    }
+}
+
+fn cache(values: &CoreValueFactory) -> Arc<GCompilerValues> {
+    values.cached(|| GCompilerValues::build(values))
 }
 
 fn with_values<R>(values: &CoreValueFactory, use_values: impl FnOnce(&GCompilerValues) -> R) -> R {
-    let cache = cache(values);
-    let compiler_values = cache
-        .values
-        .get_or_init(|| GCompilerValues::build(values, &cache));
-    use_values(compiler_values)
+    use_values(&cache(values))
 }
 
 impl GCompilerValues {
-    fn build(values: &CoreValueFactory, cache: &GCompilerCache) -> Self {
-        let not = build_not(values, cache);
+    fn build(values: &CoreValueFactory) -> Self {
+        let effects = Mutex::new(HashMap::new());
+        let build_cache = BuildingEffectValues(&effects);
+        let not = build_not(values, &build_cache);
         let could = build_could(values, not.clone());
         let constant_object_defs = build_constant_object_defs(values);
 
@@ -113,10 +122,11 @@ impl GCompilerValues {
             std: make_module(std_value),
             empty_object_defs: build_empty_object_defs(values),
             constant_object_defs,
-            reflection_annotator: build_reflection_annotator(values, cache),
+            reflection_annotator: build_reflection_annotator(values, &build_cache),
             pure_if_runner: build_pure_conditional_runner(values, Builtin::IfResult),
             pure_match_runner: build_pure_conditional_runner(values, Builtin::MatchResult),
             macro_environment: build_macro_environment(values),
+            effects,
         }
     }
 
@@ -203,7 +213,7 @@ pub(in crate::g_syntax) fn run_pure_match_resolved(
     let cache = cache(values);
     let exhausted = effect_call(
         values,
-        &cache,
+        cache.as_ref(),
         "r",
         [ResolvedExpr::Embedded(Value::error(
             values,
@@ -212,9 +222,14 @@ pub(in crate::g_syntax) fn run_pure_match_resolved(
     );
     let operation = effect_call(
         values,
-        &cache,
+        cache.as_ref(),
         "cut",
-        [effect_call(values, &cache, "alt", [search, exhausted])],
+        [effect_call(
+            values,
+            cache.as_ref(),
+            "alt",
+            [search, exhausted],
+        )],
     );
     ResolvedExpr::apply(
         ResolvedExpr::Embedded(with_values(values, |compiler| {
@@ -249,18 +264,18 @@ pub(in crate::g_syntax) fn effect_value(values: &CoreValueFactory, name: &str) -
 
 pub(in crate::g_syntax) fn effect_path_value(values: &CoreValueFactory, path: &[&str]) -> Value {
     let cache = cache(values);
-    effect_path_value_with_cache(values, &cache, path)
+    effect_path_value_with_cache(values, cache.as_ref(), path)
 }
 
 fn effect_path_value_with_cache(
     values: &CoreValueFactory,
-    cache: &GCompilerCache,
+    cache: &dyn EffectValueCache,
     path: &[&str],
 ) -> Value {
     let path: Arc<[Key]> = path.iter().map(Key::atom_from_text).collect();
     let cache_key = Key::List(path.clone());
     let mut effects = cache
-        .effects
+        .effects()
         .lock()
         .expect("g compiler effect-value cache must not be poisoned");
     effects
@@ -309,7 +324,7 @@ fn apply_builtin(
 
 fn effect_call(
     values: &CoreValueFactory,
-    cache: &GCompilerCache,
+    cache: &dyn EffectValueCache,
     name: &str,
     arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
 ) -> ResolvedExpr<Value> {
@@ -321,7 +336,7 @@ fn effect_call(
 
 fn effect_path_call(
     values: &CoreValueFactory,
-    cache: &GCompilerCache,
+    cache: &dyn EffectValueCache,
     path: &[&str],
     arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
 ) -> ResolvedExpr<Value> {
@@ -348,7 +363,7 @@ fn assert_unit(
 
 fn effect_then(
     values: &CoreValueFactory,
-    cache: &GCompilerCache,
+    cache: &dyn EffectValueCache,
     operation: ResolvedExpr<Value>,
     next: ResolvedExpr<Value>,
     diagnostic_context: &'static str,
@@ -381,17 +396,12 @@ fn build_effect_path_value(values: &CoreValueFactory, path: Arc<[Key]>) -> Value
     evaluate_closed(values, effect)
 }
 
-fn build_not(values: &CoreValueFactory, cache: &GCompilerCache) -> Value {
+fn build_not(values: &CoreValueFactory, cache: &dyn EffectValueCache) -> Value {
     let mut locals = ResolverContext::default();
     let condition = locals.push_internal_binding("<not-condition>");
     let fail_operation =
         ResolvedExpr::Embedded(effect_path_value_with_cache(values, cache, &["fail"]));
-    let true_operation = effect_call(
-        values,
-        cache,
-        "r",
-        [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())],
-    );
+    let true_operation = effect_call(values, cache, "r", [ResolvedExpr::Embedded(values.unit())]);
     let returned_failure = effect_call(values, cache, "r", [fail_operation]);
     let fail_if_condition_succeeds = effect_then(
         values,
@@ -536,7 +546,7 @@ fn build_constant_object_defs(values: &CoreValueFactory) -> Value {
     )
 }
 
-fn build_reflection_annotator(values: &CoreValueFactory, cache: &GCompilerCache) -> Value {
+fn build_reflection_annotator(values: &CoreValueFactory, cache: &dyn EffectValueCache) -> Value {
     let mut locals = ResolverContext::default();
     let guard = locals.push_internal_binding("<reflection-guard>");
     let final_defs = locals.push_internal_binding("<reflection-final-definitions>");
@@ -562,12 +572,7 @@ fn build_reflection_annotator(values: &CoreValueFactory, cache: &GCompilerCache)
         values,
         cache,
         item_field("value"),
-        effect_call(
-            values,
-            cache,
-            "r",
-            [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())],
-        ),
+        effect_call(values, cache, "r", [ResolvedExpr::Embedded(values.unit())]),
         "`refl.*` task result",
         &mut locals,
     );
@@ -669,12 +674,7 @@ fn build_reflection_annotator(values: &CoreValueFactory, cache: &GCompilerCache)
         "automatic reflection boundary claim test",
         &mut locals,
     );
-    let already_started = effect_call(
-        values,
-        cache,
-        "r",
-        [ResolvedExpr::Embedded((*keys::UNIT_VALUE).clone())],
-    );
+    let already_started = effect_call(values, cache, "r", [ResolvedExpr::Embedded(values.unit())]);
     let choose = effect_call(values, cache, "alt", [start_if_missing, already_started]);
     let ensure_tasks = effect_call(
         values,
@@ -728,6 +728,23 @@ mod tests {
             assert!(matches!(compiler.pure_match_runner, Value::Function(_)));
             assert!(matches!(compiler.macro_environment, Value::Function(_)));
         });
+    }
+
+    #[test]
+    fn compiler_bundle_is_runtime_local_and_resolved_once_per_compilation_scope() {
+        let first_runtime = CoreValueFactory::new(crate::runtime::RuntimeIds::new());
+        let second_runtime = CoreValueFactory::new(crate::runtime::RuntimeIds::new());
+        assert!(!Arc::ptr_eq(
+            &cache(&first_runtime),
+            &cache(&second_runtime)
+        ));
+
+        let compilation = first_runtime.scoped();
+        let before = compilation.extension_lookup_count();
+        let _ = effect_value(&compilation, "r");
+        let _ = effect_value(&compilation, "seq");
+        let _ = builtin_module(&compilation, "std");
+        assert_eq!(compilation.extension_lookup_count() - before, 1);
     }
 
     #[test]

@@ -94,9 +94,14 @@ are unique only within their runtime. Runtime and assembler construction expose
 a `Values` factory so identity-bearing values are never created in an
 unscoped domain. Production evaluation likewise has no standalone session or
 context constructor; isolated work still receives the selected runtime's core
-factory. Compiler-generated closed values are cached through that same runtime
-factory, so they cannot silently introduce identities from another runtime.
-Phase 1B will finish the broader cache-ownership and rooting audit.
+factory. The runtime cache owns canonical protocol values, the initial
+metadata carrier, and complete type-indexed compiler bundles. Attachments are
+built outside synchronization and publish one completed winner; each
+`CompileContext` keeps a compilation-local lookup view without duplicating the
+runtime bundle. Process-global protocol keys remain immutable descriptions,
+but no production static retains a constructed value. Runtime resources and
+the sealed default reflection profile remain acyclic sibling roots so an
+escaped evaluation context can keep both usable without retaining a cycle.
 The runtime transaction domain also owns registered admitted-input FIFOs.
 Rust hosts create a typed sender plus a runtime-bound transactional reader with
 `EvaluationRuntime::input_endpoint`; conversion occurs before admission, while

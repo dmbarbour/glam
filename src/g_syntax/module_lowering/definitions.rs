@@ -411,7 +411,7 @@ pub(in crate::g_syntax) fn update_module_dict_entries(
 ) -> Value {
     dict.iter().fold(definitions, |definitions, (key, value)| {
         let mut path = prefix.clone();
-        path.push(key_to_value(key));
+        path.push(key_to_value(values, key));
         match value {
             Value::Dict(nested) if !nested.is_empty() => {
                 update_module_dict_entries(values, definitions, path, nested)
@@ -440,8 +440,8 @@ pub(in crate::g_syntax) fn path_value(target: &str) -> Value {
     ))
 }
 
-pub(in crate::g_syntax) fn key_to_value(key: &Key) -> Value {
-    key.to_value()
+pub(in crate::g_syntax) fn key_to_value(values: &CoreValueFactory, key: &Key) -> Value {
+    key.to_value_with(values)
 }
 
 pub(in crate::g_syntax) fn path_value_in_definitions(

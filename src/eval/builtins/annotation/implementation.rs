@@ -36,7 +36,7 @@ pub(super) fn eval_anno_builtin(
             target,
         ),
         RecognizedAnnotation::MetadataInitialize => {
-            let carrier = Value::initial_metadata_carrier();
+            let carrier = Value::initial_metadata_carrier(context.values());
             super::super::assertion::assert_unit(context, None, target, &carrier)
         }
         RecognizedAnnotation::MetadataPure { function } => {

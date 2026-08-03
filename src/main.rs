@@ -1039,7 +1039,10 @@ impl LoggerTaskHost {
     fn write_diagnostic(&self, diagnostic: Diagnostic) -> Result<(), Error> {
         let (_generation, store, snapshot) = self.input.runtime.logger_transaction_snapshot();
         let mut events = RuntimeEventJournal::new(snapshot.events().clone());
-        events.write(&self.diagnostic_writer, diagnostic.transport_value())?;
+        events.write(
+            &self.diagnostic_writer,
+            diagnostic.transport_value(&self.input.runtime.values()),
+        )?;
         match self.input.runtime.try_commit_logger_transaction(
             &glam::reflection::StoreJournal::new(store),
             &snapshot,
@@ -1200,8 +1203,10 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
             .events
             .unwrap_or_else(|| RuntimeEventJournal::new(snapshot.events().clone()));
         for diagnostic in journal.reflection.diagnostics() {
-            if let Err(error) = events.write(&self.diagnostic_writer, diagnostic.transport_value())
-            {
+            if let Err(error) = events.write(
+                &self.diagnostic_writer,
+                diagnostic.transport_value(&self.input.runtime.values()),
+            ) {
                 self.diagnostics.publish(error.diagnostic().clone());
                 return CommitResult::Closed;
             }
@@ -1228,13 +1233,16 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
-        let (_, _, snapshot) = self.input.runtime.logger_transaction_snapshot();
-        if snapshot.cancelled() || snapshot.input_closed() {
+        let (generation, _, snapshot) = self.input.runtime.logger_transaction_snapshot();
+        if snapshot.cancelled() {
             return false;
         }
+        if snapshot.input_closed() {
+            return generation != observed_generation;
+        }
         self.input.runtime.wait_for_change(observed_generation);
-        let (_, _, snapshot) = self.input.runtime.logger_transaction_snapshot();
-        !snapshot.cancelled() && !snapshot.input_closed()
+        let (generation, _, snapshot) = self.input.runtime.logger_transaction_snapshot();
+        !snapshot.cancelled() && (!snapshot.input_closed() || generation != observed_generation)
     }
 
     fn evaluation_runtime_id(&self) -> Option<glam::EvaluationRuntimeId> {
@@ -2291,6 +2299,35 @@ mod tests {
         assert!(retained.take_diagnostic().is_some());
         assert_eq!(diagnostics.counts().errors(), 2);
         retained.close_input();
+    }
+
+    #[test]
+    fn logger_wait_retries_an_unseen_stream_closure_once() {
+        let diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&diagnostics));
+        let assembler = Assembler::builder()
+            .evaluation_runtime(input.runtime.clone())
+            .build()
+            .expect("logger test assembler should build");
+        let host = LoggerTaskHost::new(
+            input.clone(),
+            DiagnosticBus::new(),
+            assembler.reflection_environment_for_role("logger"),
+        );
+        let (open_generation, _, _) = input.runtime.logger_transaction_snapshot();
+
+        input.close_input();
+
+        assert!(<LoggerTaskHost as TaskHost<MainEffects>>::wait_for_change(
+            &host,
+            open_generation
+        ));
+        let (closed_generation, _, snapshot) = input.runtime.logger_transaction_snapshot();
+        assert!(snapshot.input_closed());
+        assert!(!<LoggerTaskHost as TaskHost<MainEffects>>::wait_for_change(
+            &host,
+            closed_generation
+        ));
     }
 
     #[test]

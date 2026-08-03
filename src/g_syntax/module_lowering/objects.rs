@@ -168,7 +168,7 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
         bindings.bind(
             locals,
             "<object-reflection-guard>",
-            object_reflection_guard_resolved(object_final_defs.expr()),
+            object_reflection_guard_resolved(context.values(), object_final_defs.expr()),
         )
     });
     let reflection_annotator = reflection_guard.map(|guard| {
@@ -304,13 +304,16 @@ pub(in crate::g_syntax) fn remove_object_spec_resolved(
     )
 }
 
-fn object_reflection_guard_resolved(object_final_defs: ResolvedExpr<Value>) -> ResolvedExpr<Value> {
+fn object_reflection_guard_resolved(
+    values: &CoreValueFactory,
+    object_final_defs: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
     let object_name = ResolvedExpr::Access {
         base: Box::new(object_spec_resolved(object_final_defs)),
         path: vec![ResolvedPathPart::Key(name_as_key("name"))],
     };
     ResolvedExpr::List(vec![
-        ResolvedExpr::Embedded((*keys::OBJECT_REFLECTION_GUARD_VALUE).clone()),
+        ResolvedExpr::Embedded(values.object_reflection_guard()),
         object_name,
     ])
 }

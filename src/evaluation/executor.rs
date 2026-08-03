@@ -361,7 +361,7 @@ mod tests {
         let job = SparkJob {
             session_id,
             session: Arc::downgrade(&session),
-            value: (*crate::core::keys::UNIT_VALUE).clone(),
+            value: crate::core::keys::unit_value(),
             observed_generation: 0,
         };
 

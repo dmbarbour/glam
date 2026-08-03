@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::api::{CompilationExecution, Diagnostic, Value as PublicValue};
-use crate::core::{Value, keys};
+use crate::core::Value;
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::EvaluationPumpOutcome;
@@ -166,7 +166,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
             branch.journal().active_cases.iter().cloned(),
         )
     })?;
-    if value != *keys::UNIT_VALUE {
+    if value != execution.macro_context().values().unit() {
         return Err(macro_error(format!(
             "macro effect terminated with {}, expected unit",
             value.diagnostic_kind_name()

@@ -13,7 +13,7 @@ use std::sync::{Arc, LazyLock, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use crate::api::Value as PublicValue;
-use crate::core::{Atom, Builtin, CoreValueFactory, Dict, Key, LazyValue, List, Value, keys};
+use crate::core::{Builtin, CoreValueFactory, Dict, Key, LazyValue, List, Value};
 use crate::core_net::CoreDataKey;
 use crate::number::Number;
 
@@ -549,14 +549,14 @@ impl StoreJournal {
 
     #[cfg(test)]
     pub(crate) fn reserve_query(&mut self) -> Result<Arc<EvaluationQueryHandle>, Arc<str>> {
-        self.reserve_query_state(pending_query_value())
+        self.reserve_query_state(pending_query_value(&self.snapshot.values))
     }
 
     pub(crate) fn reserve_query_with(
         &mut self,
         result: PublicValue,
     ) -> Result<Arc<EvaluationQueryHandle>, Arc<str>> {
-        self.reserve_query_state(complete_query_value(result))
+        self.reserve_query_state(complete_query_value(&self.snapshot.values, result))
     }
 
     fn reserve_query_state(
@@ -782,7 +782,7 @@ impl ReflectionStore {
         journal.write_volume(
             self.runtime_volume,
             query_path(handle.id),
-            complete_query_value(result),
+            complete_query_value(&self.values, result),
         );
         matches!(self.try_commit(&journal), StoreCommitResult::Committed)
     }
@@ -942,16 +942,16 @@ fn query_path(id: EvaluationQueryId) -> Vec<Key> {
 }
 
 #[cfg(test)]
-fn pending_query_value() -> PublicValue {
+fn pending_query_value(values: &CoreValueFactory) -> PublicValue {
     PublicValue::from_core(Value::Dict(
-        Dict::new_sync().insert(QUERY_PENDING.clone(), (*keys::UNIT_VALUE).clone()),
+        Dict::new_sync().insert(QUERY_PENDING.clone(), values.unit()),
     ))
 }
 
-fn complete_query_value(result: PublicValue) -> PublicValue {
+fn complete_query_value(values: &CoreValueFactory, result: PublicValue) -> PublicValue {
     let payload = Value::Dict(
         Dict::new_sync()
-            .insert(QUERY_PRESENT.clone(), (*keys::UNIT_VALUE).clone())
+            .insert(QUERY_PRESENT.clone(), values.unit())
             .insert(QUERY_RESULT.clone(), result.into_core()),
     );
     PublicValue::from_core(Value::Dict(
@@ -1014,7 +1014,10 @@ fn apply_value_at_path(
         return PublicValue::from_core(value);
     }
     let path = Value::List(List::from_values(
-        path.keys().iter().cloned().map(key_value).collect(),
+        path.keys()
+            .iter()
+            .map(|key| key.to_value_with(values))
+            .collect(),
     ));
     PublicValue::from_core(Value::builtin_call(
         values,
@@ -1037,28 +1040,6 @@ fn lazy_core_value_path(values: &CoreValueFactory, value: Value, path: &[Key]) -
         ),
         Arc::from([value]),
     ))
-}
-
-fn key_value(key: Key) -> Value {
-    match key {
-        Key::Atom(atom) => Value::Atom(atom),
-        Key::Number(number) => Value::Number(number),
-        Key::Binary(bytes) => Value::Binary(bytes),
-        Key::AbstractGlobalPath(parts) => {
-            Value::Atom(Atom::from_key(&Key::AbstractGlobalPath(parts)))
-        }
-        Key::List(items) => Value::List(List::from_values(
-            items.iter().cloned().map(key_value).collect(),
-        )),
-        Key::Dict(entries) => Value::Dict(
-            entries
-                .iter()
-                .cloned()
-                .fold(Dict::new_sync(), |dict, (key, value)| {
-                    dict.insert(key, key_value(value))
-                }),
-        ),
-    }
 }
 
 #[cfg(test)]

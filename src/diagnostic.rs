@@ -174,11 +174,11 @@ impl fmt::Display for Severity {
 }
 
 impl Severity {
-    pub(crate) fn value(self) -> Value {
+    pub(crate) fn value(self, values: &CoreValueFactory) -> Value {
         match self {
-            Self::Info => (*keys::INFO_VALUE).clone(),
-            Self::Warning => (*keys::WARN_VALUE).clone(),
-            Self::Error => (*keys::ERROR_VALUE).clone(),
+            Self::Info => values.info(),
+            Self::Warning => values.warn(),
+            Self::Error => values.error(),
         }
     }
 }
@@ -200,8 +200,12 @@ pub(crate) fn text_message(line: Option<usize>, message: impl AsRef<str>) -> Val
     Value::Dict(Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message_dict)))
 }
 
-pub(crate) fn assembler_metadata(severity: Severity, origin: Option<Value>) -> Dict {
-    let mut message = Dict::new_sync().insert((*keys::SEVERITY).clone(), severity.value());
+pub(crate) fn assembler_metadata(
+    values: &CoreValueFactory,
+    severity: Severity,
+    origin: Option<Value>,
+) -> Dict {
+    let mut message = Dict::new_sync().insert((*keys::SEVERITY).clone(), severity.value(values));
     if let Some(origin) = origin {
         message = message.insert((*keys::ORIGIN).clone(), origin);
     }
@@ -322,7 +326,7 @@ pub(crate) fn enrich(
     apply_updates(
         values,
         message,
-        Value::Dict(assembler_metadata(severity, origin)),
+        Value::Dict(assembler_metadata(values, severity, origin)),
     )
 }
 

@@ -197,11 +197,11 @@ fn macro_api_omits_heap_tasks_and_full_reflection_requests() {
 fn unstarted_reflection_gate_runs_inside_the_macro_session() {
     let assembler = Assembler::default();
     let execution = assembler.test_compilation_execution();
-    let reflection = return_effect((*keys::UNIT_VALUE).clone());
+    let reflection = return_effect(keys::unit_value());
     let gate = Value::reflection_gate(
         &crate::core::test_value_factory(),
         reflection,
-        (*keys::UNIT_VALUE).clone(),
+        keys::unit_value(),
     );
     let macro_effect = PublicValue::from_core(return_effect(gate));
 
@@ -216,7 +216,7 @@ fn assembler_owned_reflection_gate_is_foreign_to_macro_execution() {
     let gate = Value::reflection_gate(
         &crate::core::test_value_factory(),
         reflection.as_core().clone(),
-        (*keys::UNIT_VALUE).clone(),
+        keys::unit_value(),
     );
     let error = eval::eval_value(&assembler.eval_context(), &gate)
         .expect_err("assembler observation should start and block the gate");

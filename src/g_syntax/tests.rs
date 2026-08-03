@@ -209,7 +209,7 @@ fn reflection_test_module(
     });
     let prior = prior.insert(
         Key::atom_from_text("object_refl_marker"),
-        (*keys::OBJECT_REFLECTION_GUARD_VALUE).clone(),
+        keys::object_reflection_guard_value(),
     );
     let context = CompileContext::from_module_path(module_path.iter().copied())
         .with_prior_defs(Value::Dict(prior));
@@ -1984,7 +1984,7 @@ fn braced_do_evaluates_like_layout_do_and_supports_empty_blocks() {
     for path in ["empty", "commented"] {
         assert_eq!(
             fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
-            (*crate::core::keys::UNIT_VALUE).clone(),
+            crate::core::keys::unit_value(),
             "{path}"
         );
     }

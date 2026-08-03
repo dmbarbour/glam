@@ -32,6 +32,30 @@ environment, diagnostic destination, and shared host resources. This keeps
 child-task inheritance distinct from annotation policy: annotations select the
 runtime default, while their own children inherit that selected default.
 
+### Runtime-owned constructed values
+
+Each runtime owns one `RuntimeValueCache` behind its core value factory. It
+contains canonical protocol values, the initial sealed metadata carrier, and
+complete type-indexed bundles supplied by optional compiler layers. Static
+protocol `Key`s remain process-wide immutable descriptions; production
+statics do not retain constructed `Value`s.
+
+An attachment is built completely outside the cache mutex, then installed as
+one `Arc`. Concurrent first users may construct duplicate candidates, but
+only the installed winner is observed. A `CompileContext` uses a scoped view
+of the same factory which remembers attachment resolution for that compilation
+without copying the bundle. The built-in `.g` compiler can consequently share
+all lowered helpers, effect values, builtin modules, and its diagnostic
+formatter across modules in one runtime while consulting the runtime
+attachment map once per compilation.
+
+The runtime resource state and immutable default reflection profile remain
+sibling roots owned by `EvaluationRuntime`. A profile launcher retains its
+host, and that host may retain the resource state; placing the profile inside
+that state would therefore create a direct cycle. The sibling arrangement lets
+an escaped `EvalContext` keep both resources usable and releases both when the
+last context disappears.
+
 Lazy values retain computation and a stable identity, not a captured evaluator
 session. The observing `EvalContext` supplies host and scheduling behavior when
 the value is forced. There is no production `EvaluationSession::new` or

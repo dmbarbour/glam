@@ -5,26 +5,12 @@
 
 use std::sync::LazyLock;
 
-use super::{Atom, Key, Value};
+use super::Key;
 
 macro_rules! protocol_key {
     ($name:ident, $text:literal) => {
         pub(crate) static $name: LazyLock<Key> = LazyLock::new(|| Key::atom_from_text($text));
     };
-}
-
-macro_rules! protocol_value {
-    ($name:ident, $val:ident) => {
-        pub(crate) static $name: LazyLock<Value> =
-            LazyLock::new(|| Value::Atom(Atom::from_key(&$val)));
-    };
-}
-
-fn atom_value(key: &Key) -> Value {
-    match key {
-        Key::Atom(atom) => Value::Atom(*atom),
-        _ => unreachable!("protocol atom key was not an atom"),
-    }
 }
 
 protocol_key!(APPLY, "apply");
@@ -73,7 +59,6 @@ protocol_key!(INIT, "init");
 protocol_key!(LAST, "last");
 protocol_key!(REST, "rest");
 protocol_key!(TUPLE, "tuple");
-pub(crate) static TUPLE_VALUE: LazyLock<Value> = LazyLock::new(|| atom_value(&TUPLE));
 
 protocol_key!(R, "r");
 protocol_key!(SEQ, "seq");
@@ -84,37 +69,22 @@ protocol_key!(FIX, "fix");
 
 pub(crate) static UNIT: LazyLock<Key> =
     LazyLock::new(|| Key::abstract_global_path(["builtin", "unit"]));
-protocol_value!(UNIT_VALUE, UNIT);
 
 pub(crate) static OBJECT_REFLECTION_GUARD: LazyLock<Key> =
     LazyLock::new(|| Key::abstract_global_path(["builtin", "reflection", "object_guard"]));
-protocol_value!(OBJECT_REFLECTION_GUARD_VALUE, OBJECT_REFLECTION_GUARD);
 
 protocol_key!(INFO, "info");
 protocol_key!(WARN, "warn");
 protocol_key!(ERROR, "error");
 
-// These are the value forms of the atom keys above. Do not use
-// `protocol_value!`: that would wrap an already-atomic key in another atom.
-pub(crate) static INFO_VALUE: LazyLock<Value> = LazyLock::new(|| atom_value(&INFO));
-pub(crate) static WARN_VALUE: LazyLock<Value> = LazyLock::new(|| atom_value(&WARN));
-pub(crate) static ERROR_VALUE: LazyLock<Value> = LazyLock::new(|| atom_value(&ERROR));
-
 protocol_key!(FILE, "file");
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) fn unit_value() -> super::Value {
+    super::test_value_factory().unit()
+}
 
-    #[test]
-    fn atom_values_convert_back_to_their_cached_keys() {
-        for (value, key) in [
-            (&*INFO_VALUE, &*INFO),
-            (&*WARN_VALUE, &*WARN),
-            (&*ERROR_VALUE, &*ERROR),
-            (&*TUPLE_VALUE, &*TUPLE),
-        ] {
-            assert_eq!(Key::from_value(value).as_ref(), Some(key));
-        }
-    }
+#[cfg(test)]
+pub(crate) fn object_reflection_guard_value() -> super::Value {
+    super::test_value_factory().object_reflection_guard()
 }

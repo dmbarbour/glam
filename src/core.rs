@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU64;
 #[cfg(test)]
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::LazyLock;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
 use internment::Intern;
@@ -269,13 +271,50 @@ pub(crate) struct TaskPromise {
 pub(crate) struct CoreValueFactory {
     ids: Arc<RuntimeIds>,
     cache: Arc<RuntimeValueCache>,
+    local_extensions: Option<SharedExtensionMap>,
 }
 
-/// Runtime-owned storage for closed values constructed by optional compiler
-/// layers. The core does not depend on those layers: `TypeId` supplies the
-/// private namespace, while each layer owns the concrete cached type.
+type ExtensionMap = HashMap<TypeId, Box<dyn Any + Send + Sync>>;
+type SharedExtensionMap = Arc<Mutex<ExtensionMap>>;
+
+/// Small canonical value set owned directly by one runtime.
+struct CoreValues {
+    unit: Value,
+    object_reflection_guard: Value,
+    tuple: Value,
+    info: Value,
+    warn: Value,
+    error: Value,
+    initial_metadata: Value,
+}
+
+impl CoreValues {
+    fn new() -> Self {
+        let atom = |key: &Key| match key {
+            Key::Atom(atom) => Value::Atom(*atom),
+            _ => Value::Atom(Atom::from_key(key)),
+        };
+        Self {
+            unit: atom(&keys::UNIT),
+            object_reflection_guard: atom(&keys::OBJECT_REFLECTION_GUARD),
+            tuple: atom(&keys::TUPLE),
+            info: atom(&keys::INFO),
+            warn: atom(&keys::WARN),
+            error: atom(&keys::ERROR),
+            initial_metadata: Value::Metadata(MetadataCarrier::new(Value::Dict(Dict::new_sync()))),
+        }
+    }
+}
+
+/// Runtime-owned storage for canonical core values and closed values
+/// constructed by optional compiler layers. The core does not depend on those
+/// layers: `TypeId` supplies the private namespace, while each layer owns the
+/// concrete cached type.
 struct RuntimeValueCache {
-    values: Mutex<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
+    core: CoreValues,
+    extensions: Mutex<ExtensionMap>,
+    #[cfg(test)]
+    extension_lookups: AtomicUsize,
 }
 
 impl CoreValueFactory {
@@ -283,8 +322,22 @@ impl CoreValueFactory {
         Self {
             ids,
             cache: Arc::new(RuntimeValueCache {
-                values: Mutex::new(HashMap::new()),
+                core: CoreValues::new(),
+                extensions: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                extension_lookups: AtomicUsize::new(0),
             }),
+            local_extensions: None,
+        }
+    }
+
+    /// Creates a compilation-local view which remembers resolved runtime
+    /// attachments without duplicating the runtime-owned values themselves.
+    pub(crate) fn scoped(&self) -> Self {
+        Self {
+            ids: self.ids.clone(),
+            cache: self.cache.clone(),
+            local_extensions: Some(Arc::new(Mutex::new(HashMap::new()))),
         }
     }
 
@@ -296,6 +349,56 @@ impl CoreValueFactory {
         self.ids.deferred_value()
     }
 
+    pub(crate) fn unit(&self) -> Value {
+        self.cache.core.unit.clone()
+    }
+
+    pub(crate) fn object_reflection_guard(&self) -> Value {
+        self.cache.core.object_reflection_guard.clone()
+    }
+
+    pub(crate) fn tuple(&self) -> Value {
+        self.cache.core.tuple.clone()
+    }
+
+    pub(crate) fn info(&self) -> Value {
+        self.cache.core.info.clone()
+    }
+
+    pub(crate) fn warn(&self) -> Value {
+        self.cache.core.warn.clone()
+    }
+
+    pub(crate) fn error(&self) -> Value {
+        self.cache.core.error.clone()
+    }
+
+    pub(crate) fn initial_metadata(&self) -> Value {
+        self.cache.core.initial_metadata.clone()
+    }
+
+    fn atom(&self, atom: Atom) -> Value {
+        if atom == Atom::from_key(&keys::UNIT) {
+            self.unit()
+        } else if atom == Atom::from_key(&keys::OBJECT_REFLECTION_GUARD) {
+            self.object_reflection_guard()
+        } else if atom == Atom::from_key(&keys::TUPLE) {
+            self.tuple()
+        } else if atom == Atom::from_key(&keys::INFO) {
+            self.info()
+        } else if atom == Atom::from_key(&keys::WARN) {
+            self.warn()
+        } else if atom == Atom::from_key(&keys::ERROR) {
+            self.error()
+        } else {
+            Value::Atom(atom)
+        }
+    }
+
+    pub(crate) fn key_value(&self, key: &Key) -> Value {
+        key.to_value_with(self)
+    }
+
     /// Returns one runtime-local cache entry, allowing harmless duplicate
     /// construction when callers race. Only the completed value is installed.
     pub(crate) fn cached<T>(&self, build: impl FnOnce() -> T) -> Arc<T>
@@ -303,30 +406,65 @@ impl CoreValueFactory {
         T: Any + Send + Sync,
     {
         let type_id = TypeId::of::<T>();
+        if let Some(value) = self.local_extensions.as_ref().and_then(|extensions| {
+            extensions
+                .lock()
+                .expect("local value-cache mutex should not be poisoned")
+                .get(&type_id)
+                .and_then(|value| value.downcast_ref::<Arc<T>>())
+                .cloned()
+        }) {
+            return value;
+        }
+        #[cfg(test)]
+        self.cache.extension_lookups.fetch_add(1, Ordering::Relaxed);
         if let Some(value) = self
             .cache
-            .values
+            .extensions
             .lock()
             .expect("runtime value-cache mutex should not be poisoned")
             .get(&type_id)
             .and_then(|value| value.downcast_ref::<Arc<T>>())
             .cloned()
         {
+            self.remember_local(type_id, value.clone());
             return value;
         }
 
         let candidate = Arc::new(build());
-        let mut values = self
-            .cache
-            .values
-            .lock()
-            .expect("runtime value-cache mutex should not be poisoned");
-        values
-            .entry(type_id)
-            .or_insert_with(|| Box::new(candidate.clone()))
-            .downcast_ref::<Arc<T>>()
-            .expect("a runtime value-cache type ID has one concrete type")
-            .clone()
+        let value = {
+            let mut values = self
+                .cache
+                .extensions
+                .lock()
+                .expect("runtime value-cache mutex should not be poisoned");
+            values
+                .entry(type_id)
+                .or_insert_with(|| Box::new(candidate.clone()))
+                .downcast_ref::<Arc<T>>()
+                .expect("a runtime value-cache type ID has one concrete type")
+                .clone()
+        };
+        self.remember_local(type_id, value.clone());
+        value
+    }
+
+    fn remember_local<T>(&self, type_id: TypeId, value: Arc<T>)
+    where
+        T: Any + Send + Sync,
+    {
+        if let Some(extensions) = &self.local_extensions {
+            extensions
+                .lock()
+                .expect("local value-cache mutex should not be poisoned")
+                .entry(type_id)
+                .or_insert_with(|| Box::new(value));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn extension_lookup_count(&self) -> usize {
+        self.cache.extension_lookups.load(Ordering::Relaxed)
     }
 }
 
@@ -637,20 +775,23 @@ impl Key {
         }
     }
 
-    pub(crate) fn to_value(&self) -> Value {
+    pub(crate) fn to_value_with(&self, values: &CoreValueFactory) -> Value {
         match self {
-            Self::Atom(atom) => Value::Atom(*atom),
+            Self::Atom(atom) => values.atom(*atom),
             Self::Number(number) => Value::Number(number.clone()),
             Self::Binary(bytes) => Value::Binary(bytes.clone()),
             Self::AbstractGlobalPath(parts) => {
-                Value::Atom(Atom::from_key(&Self::AbstractGlobalPath(parts.clone())))
+                values.atom(Atom::from_key(&Self::AbstractGlobalPath(parts.clone())))
             }
             Self::List(items) => Value::List(List::from_values(
-                items.iter().map(Self::to_value).collect(),
+                items
+                    .iter()
+                    .map(|item| item.to_value_with(values))
+                    .collect(),
             )),
             Self::Dict(entries) => {
                 Value::Dict(entries.iter().fold(Dict::new_sync(), |dict, (key, value)| {
-                    dict.insert(key.clone(), value.to_value())
+                    dict.insert(key.clone(), value.to_value_with(values))
                 }))
             }
         }
@@ -755,9 +896,6 @@ impl PartialEq for MetadataCarrier {
 }
 
 impl Eq for MetadataCarrier {}
-
-static INITIAL_METADATA_CARRIER: LazyLock<Value> =
-    LazyLock::new(|| Value::Metadata(MetadataCarrier::new(Value::Dict(Dict::new_sync()))));
 
 /// Type-erased storage for internal handles that must participate in ordinary
 /// [`Value`] ownership without exposing forgeable identifiers to Glam code.
@@ -1316,8 +1454,8 @@ impl Value {
     }
 
     /// Returns the canonical carrier whose associated metadata is `{}`.
-    pub(crate) fn initial_metadata_carrier() -> Self {
-        INITIAL_METADATA_CARRIER.clone()
+    pub(crate) fn initial_metadata_carrier(values: &CoreValueFactory) -> Self {
+        values.initial_metadata()
     }
 
     /// Returns a sealed carrier's associated metadata for privileged clients.
@@ -1394,13 +1532,16 @@ impl Value {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     fn values() -> CoreValueFactory {
         test_value_factory()
     }
 
     struct DropSignal(Arc<AtomicBool>);
+
+    struct CachedProbe;
 
     impl Drop for DropSignal {
         fn drop(&mut self) {
@@ -1409,20 +1550,54 @@ mod tests {
     }
 
     #[test]
+    fn runtime_cache_installs_one_complete_winner_after_racing_construction() {
+        let factory = CoreValueFactory::new(RuntimeIds::new());
+        let barrier = Arc::new(Barrier::new(2));
+        let builds = Arc::new(AtomicUsize::new(0));
+        let handles = (0..2)
+            .map(|_| {
+                let factory = factory.clone();
+                let barrier = barrier.clone();
+                let builds = builds.clone();
+                std::thread::spawn(move || {
+                    factory.cached(|| {
+                        builds.fetch_add(1, Ordering::Relaxed);
+                        barrier.wait();
+                        CachedProbe
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut winners = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("cache race should finish"));
+        let left = winners.next().expect("first cache winner");
+        let right = winners.next().expect("second cache winner");
+        assert_eq!(builds.load(Ordering::Relaxed), 2);
+        assert!(Arc::ptr_eq(&left, &right));
+    }
+
+    #[test]
+    fn distinct_runtime_caches_do_not_share_constructed_extensions() {
+        let first = CoreValueFactory::new(RuntimeIds::new()).cached(|| CachedProbe);
+        let second = CoreValueFactory::new(RuntimeIds::new()).cached(|| CachedProbe);
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
     fn terminal_lazy_cache_releases_its_shared_source_after_active_snapshots() {
         let dropped = Arc::new(AtomicBool::new(false));
         let signal = DropSignal(dropped.clone());
         let lazy = LazyValue::deferred(&values(), "source release", move |_| {
             let _keep_signal_captured = &signal;
-            Ok((*keys::UNIT_VALUE).clone())
+            Ok(values().unit())
         });
         let observer = lazy.clone();
         let active_snapshot = lazy
             .source_snapshot()
             .expect("an unresolved lazy should expose a source snapshot");
 
-        let result = EvaluatedValue::try_from((*keys::UNIT_VALUE).clone())
-            .expect("unit is already evaluated");
+        let result = EvaluatedValue::try_from(values().unit()).expect("unit is already evaluated");
         assert!(observer.cache(Ok(result)).is_ok());
         assert!(
             lazy.source_snapshot().is_none(),
@@ -1530,8 +1705,8 @@ mod tests {
 
     #[test]
     fn metadata_carriers_hide_unit_and_associated_metadata() {
-        let first = Value::initial_metadata_carrier();
-        let second = Value::initial_metadata_carrier();
+        let first = Value::initial_metadata_carrier(&values());
+        let second = Value::initial_metadata_carrier(&values());
         let Value::Metadata(first_carrier) = &first else {
             panic!("initial metadata value should be a sealed carrier");
         };
@@ -1543,7 +1718,7 @@ mod tests {
             Arc::ptr_eq(&first_carrier.metadata, &second_carrier.metadata),
             "initial metadata carriers should share one allocation"
         );
-        assert_ne!(first, *keys::UNIT_VALUE);
+        assert_ne!(first, values().unit());
         assert_eq!(
             first.associated_metadata(),
             Some(Value::Dict(Dict::new_sync()))
@@ -1558,7 +1733,7 @@ mod tests {
 
     #[test]
     fn metadata_carriers_transport_through_ordinary_containers() {
-        let carrier = Value::initial_metadata_carrier();
+        let carrier = Value::initial_metadata_carrier(&values());
         let list = Value::List(List::from_values(vec![carrier.clone()]));
         let dict =
             Value::Dict(Dict::new_sync().insert(Key::atom_from_text("trace"), carrier.clone()));
@@ -1585,7 +1760,7 @@ mod tests {
         let promise = PromisedValue::new(&values(), "promised field");
         let container =
             Value::Dict(Dict::new_sync().insert(Key::atom_from_text("field"), field.clone()));
-        let sealed = Value::initial_metadata_carrier();
+        let sealed = Value::initial_metadata_carrier(&values());
 
         let evaluated = EvaluatedValue::try_from(container.clone())
             .expect("a container with a lazy field is in outer WHNF");

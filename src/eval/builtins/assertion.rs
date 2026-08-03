@@ -14,7 +14,7 @@ pub(in crate::eval) fn assert_unit(
     target: &Value,
 ) -> Result<Value, EvaluationHalt> {
     let value = eval_value(context, value)?;
-    if value == *keys::UNIT_VALUE {
+    if value == context.values().unit() {
         return Ok(target.clone());
     }
 

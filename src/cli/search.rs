@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::api::{Assembler, Diagnostic, Value};
-use crate::core::keys;
 use crate::reflection::{IsolatedEffectSearch, IsolatedSearchBranch, IsolatedSearchPoll};
 
 use super::completion::{
@@ -190,7 +189,7 @@ fn completion_candidate_viable(
     Ok(branches.iter().any(|branch| {
         let journal = branch.journal();
         branch.value().is_some_and(|value| {
-            value.as_core() == &*keys::UNIT_VALUE
+            value.as_core() == &assembler.core_values().unit()
                 && journal.cursor == argument_count
                 && plan_is_valid(journal, cli_arguments.clone())
         }) || journal
@@ -227,7 +226,7 @@ fn select_branch(
             }
             continue;
         };
-        if value.as_core() != &*keys::UNIT_VALUE {
+        if value.as_core() != &assembler.core_values().unit() {
             retain_invalid(
                 assembler,
                 &mut best_invalid,

@@ -68,7 +68,7 @@ impl Default for CompileContext {
 impl CompileContext {
     pub(crate) fn new(values: CoreValueFactory) -> Self {
         Self {
-            values: values.clone(),
+            values: values.scoped(),
             importer_source: None,
             compilation_trace: None,
             opaque_origin: None,
@@ -200,7 +200,7 @@ impl CompileContext {
     }
 
     pub(crate) fn unit_value(&self) -> Value {
-        (*keys::UNIT_VALUE).clone()
+        self.values.unit()
     }
 
     /// Requests a module import in the current or a relative child namespace.

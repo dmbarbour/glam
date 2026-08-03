@@ -59,7 +59,7 @@ pub(super) fn apply(
 
 fn pattern_is_list(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
     Ok(match eval_value(context, value)? {
-        Value::Binary(_) | Value::List(_) => pattern_success((*keys::UNIT_VALUE).clone()),
+        Value::Binary(_) | Value::List(_) => pattern_success(context.values().unit()),
         _ => pattern_failure(),
     })
 }
@@ -117,7 +117,7 @@ fn pattern_list_is_empty(context: &EvalContext, value: &Value) -> Result<Value, 
         _ => false,
     };
     Ok(if empty {
-        pattern_success((*keys::UNIT_VALUE).clone())
+        pattern_success(context.values().unit())
     } else {
         pattern_failure()
     })
@@ -145,7 +145,7 @@ fn pattern_equal(
         }
     };
     Ok(if equal {
-        pattern_success((*keys::UNIT_VALUE).clone())
+        pattern_success(context.values().unit())
     } else {
         pattern_failure()
     })
@@ -161,7 +161,7 @@ fn pattern_path_equal(
         return Ok(pattern_failure());
     };
     Ok(if expected == value {
-        pattern_success((*keys::UNIT_VALUE).clone())
+        pattern_success(context.values().unit())
     } else {
         pattern_failure()
     })
@@ -231,7 +231,7 @@ fn pattern_value_key(context: &EvalContext, value: &Value) -> Result<Option<Key>
 
 fn pattern_is_dict(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
     Ok(match eval_value(context, value)? {
-        Value::Dict(_) => pattern_success((*keys::UNIT_VALUE).clone()),
+        Value::Dict(_) => pattern_success(context.values().unit()),
         _ => pattern_failure(),
     })
 }
@@ -314,7 +314,7 @@ fn pattern_dict_is_empty(context: &EvalContext, value: &Value) -> Result<Value, 
         _ => false,
     };
     Ok(if empty {
-        pattern_success((*keys::UNIT_VALUE).clone())
+        pattern_success(context.values().unit())
     } else {
         pattern_failure()
     })

@@ -7,6 +7,11 @@ control-flow overview.
 
 ## Values and Forcing
 
+- Constructed protocol values and compiler-layer bundles belong to one
+  runtime's `CoreValueFactory`/`RuntimeValueCache`. Keep immutable global
+  `Key` descriptions if useful, but do not add a production static which
+  retains a constructed `Value`. Optional compiler caches publish one complete
+  type-indexed bundle rather than exposing partially initialized entries.
 - Production evaluation starts from closed `Value`s. The small fixture IR in
   `src/eval/test_support.rs` must lower to nets before evaluation; do not add a
   second expression interpreter or local environment.
