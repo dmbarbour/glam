@@ -103,14 +103,14 @@ covering set can still make that widened dependency entirely local.
 updaters therefore remain latent evaluator errors, which `.eval` can observe
 as data.
 
-The runtime transaction lock makes store and temporary logger-specialization
-changes atomic. The logger validates its input-stream revision and heap
-journal before applying either, then consumes input and accepts buffered
-stderr output. A failed validation therefore cannot partially edit the heap or
-duplicate a diagnostic. The outer runtime mutation gate spans authoritative
-publication through the broad observation-epoch advance; diagnostics,
-condition-variable notification, and stderr delivery occur after it is
-released.
+The runtime transaction lock makes reflection-store and generic event changes
+atomic. The logger reads its ordered diagnostic input endpoint and buffers
+diagnostic or stderr output in the same event journal as its heap edits. A
+failed validation therefore cannot partially edit the heap, consume a
+diagnostic, or leak output from an abandoned choice. The outer runtime mutation
+gate spans authoritative publication through the broad observation-epoch
+advance; diagnostic subscribers, condition-variable notification, decoding,
+and stderr delivery run only after it is released.
 
 ## Protected Client Volumes
 

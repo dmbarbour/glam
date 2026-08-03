@@ -79,19 +79,23 @@ forwarding, and indexing policy. Changing an assembler's default subscription
 does not rebuild its reasoning session.
 
 `Assembler` does not render diagnostics. Before compiling configuration, the
-CLI subscribes its own unbounded queue to the assembler bus so bootstrap
-messages are observable by `conf.log`. The embedding facade itself is silent
-by default and owns no retention policy. Queue consumption does not change the
-bus's authoritative counters.
+CLI binds the assembler bus to its runtime and installs one ordered diagnostic
+ingress backed by a generic runtime input endpoint. Bootstrap messages are
+therefore observable by `conf.log` without placing a typed diagnostic queue in
+runtime state. The embedding facade itself is silent by default and owns no
+retention policy. FIFO consumption does not change the bus's authoritative
+counters.
 
 If configured, `conf.log` runs in its own evaluation session and owns a
 separate diagnostic bus, while sharing the assembler's executor. It reads the
-sealed-or-open assembler-bus subscription through main-only effects. Its own
-`.log` writes and synthetic logger failures publish to the logger bus, whose
-default subscriber enriches them with terminal `viewer` context, applies the
-cached closed Glam formatter, and writes stderr. Logger output therefore cannot
-feed back into assembler input. Formatter failure falls back to a minimal Rust
-renderer.
+assembler bus's runtime FIFO through main-only effects. Its own `.log` writes
+and `.write_stderr` calls are buffered output intents: commit installs them in
+runtime outboxes, then lock-free delivery publishes to the logger bus or writes
+the OS stream. The logger bus's default subscriber enriches messages with
+terminal `viewer` context and applies the cached closed Glam formatter. Logger
+output therefore cannot feed back into assembler input, and abandoned choices
+cannot leak diagnostics or bytes. Formatter failure falls back to a minimal
+Rust renderer.
 
 The default subscriber projects conventional context frames through the
 public reflection inspector and stores the selected wording and indentation in

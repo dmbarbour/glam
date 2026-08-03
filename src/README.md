@@ -107,10 +107,13 @@ in a persistent Rust-layer failure snapshot until explicitly acknowledged;
 queued or running records count as delivery activity, while retained failures
 and unused input do not.
 The configured logger attaches another demand host to that same runtime. Its
-temporary diagnostic-input and buffered-stderr state commits atomically with
-the runtime store until the generic endpoints replace that compatibility path
-in the logger-integration phase; its environment and output diagnostic bus
-remain role-specific.
+source diagnostic bus has one ordered runtime ingress backed by a generic
+input endpoint; `.read_log` consumes that FIFO through the ordinary event
+journal. Logger `.log` and `.write_stderr` calls become runtime-rooted output
+intents and reach their bus or OS adapter only after combined store/event
+commit. The explicit close/cancel flags remain a temporary lifecycle shim
+until runtime settlement replaces them; the logger environment and output
+diagnostic bus remain role-specific.
 For a bare command, the CLI first loads configuration with a dormant runtime,
 runs `conf.cli` as an isolated all-results search, resolves the promised
 canonical argument environment, and only then activates the selected worker

@@ -17,15 +17,15 @@ mod text_pattern;
 
 pub use api::{
     Assembler, AssemblerBuilder, BuiltModule, Diagnostic, DiagnosticBus, DiagnosticCounts,
-    DiagnosticEvent, DiagnosticSubscriber, DiagnosticSubscription, Error, EvaluationRuntime,
-    EvaluationRuntimeId, ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort,
-    PromiseResolver, ReasoningFailure, ReasoningReport, ReasoningStatus, ReasoningTask,
-    ReasoningTaskState, ReasoningVolume, ReflectionEnvironmentBuilder, ReflectionInspector,
-    RuntimeCompatibilitySnapshot, RuntimeDeliveryFailure, RuntimeDeliveryFailureKind,
+    DiagnosticEvent, DiagnosticIngress, DiagnosticSubscriber, DiagnosticSubscription, Error,
+    EvaluationRuntime, EvaluationRuntimeId, ModuleBuilder, ModuleInput, NetBind, NetBuilder,
+    NetCopy, NetPort, PromiseResolver, ReasoningFailure, ReasoningReport, ReasoningStatus,
+    ReasoningTask, ReasoningTaskState, ReasoningVolume, ReflectionEnvironmentBuilder,
+    ReflectionInspector, RuntimeDeliveryFailure, RuntimeDeliveryFailureKind,
     RuntimeDeliveryFailureSnapshot, RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeEventJournal,
     RuntimeEventSnapshot, RuntimeInputEndpoint, RuntimeInputReader, RuntimeInputSender,
-    RuntimeOutputDelivery, RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter,
-    Value, ValueKind,
+    RuntimeLoggerSnapshot, RuntimeOutputDelivery, RuntimeOutputEndpoint, RuntimeOutputEndpointId,
+    RuntimeOutputWriter, Value, ValueKind,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

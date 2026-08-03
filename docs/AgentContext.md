@@ -109,10 +109,9 @@ notes instead of appending history; put subsystem details in
   (`eff = entry`).
 - One top-level module build creates one `CompilationExecution` and propagates
   it through every input and recursive import. Macro effects use its private
-  evaluation/reflection session, not assembler reasoning: heaps, tasks, and
-  diagnostic counts remain distinct even though both sessions share an
-  executor. Direct macro journals backtrack; committed `anno refl:` work does
-  not.
+  evaluation/reflection session, not assembler reasoning: tasks and diagnostic
+  counts remain distinct, while the runtime reflection heap and executor are
+  shared. Direct macro journals backtrack; committed `anno refl:` work does not.
 - Source inspection is intentionally non-evaluating. Macro-bearing
   declarations are `MacroDeferred` summaries; they are not parsed as partial
   `.g` expressions and macro values are never looked up. The whole-file

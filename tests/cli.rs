@@ -575,6 +575,45 @@ fn configured_logger_composes_reusable_reflection_requests() {
 }
 
 #[test]
+fn configured_logger_abandons_diagnostics_and_stderr_from_failed_choices() {
+    let dir = unique_temp_dir("glam-conf-log-abandoned-output");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    let invalid = dir.join("invalid.g");
+    fs::write(
+        &config,
+        concat!(
+            "language g0\n",
+            "object conf.env\n",
+            "conf.log = .cut (.alt ",
+            "((.log 'warn {msg:{text:\"ABANDONED DIAGNOSTIC\"}}) =>> ",
+            "(.write_stderr (\"ABANDONED STDERR\" ++ [10]) =>> .fail)) ",
+            "(.read_log >>= (\\_message -> .write_stderr (\"COMMITTED\" ++ [10]))))\n",
+        ),
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+    fs::write(&invalid, b"language g0\nvalue = \xff\n")
+        .unwrap_or_else(|err| panic!("failed to write {}: {err}", invalid.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--file")
+        .arg(&invalid)
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("COMMITTED\n"), "stderr:\n{stderr}");
+    assert!(
+        !stderr.contains("ABANDONED DIAGNOSTIC"),
+        "stderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("ABANDONED STDERR"), "stderr:\n{stderr}");
+}
+
+#[test]
 fn configured_logger_can_join_a_restricted_reflection_task() {
     let dir = unique_temp_dir("glam-conf-log-task");
     fs::create_dir_all(&dir)

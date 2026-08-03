@@ -605,6 +605,78 @@ impl Diagnostic {
         )
     }
 
+    /// Encodes this Rust envelope as one runtime-local value for buffered
+    /// transport. The configured logger decodes the envelope before applying
+    /// its own enrichment and viewing policy.
+    #[doc(hidden)]
+    pub fn transport_value(&self) -> Value {
+        let mut fields = vec![
+            ("emission", self.emission.clone()),
+            ("severity", Value::from_core(self.severity.value())),
+        ];
+        if let Some(origin) = &self.origin {
+            fields.push(("origin", origin.clone()));
+        }
+        if let Some(source) = &self.source {
+            fields.push(("source", Value::text(source.as_ref())));
+        }
+        if let Some(line) = self.line {
+            fields.push(("line", Value::integer(line as i64)));
+        }
+        Value::record(fields)
+    }
+
+    #[doc(hidden)]
+    pub fn from_transport_value(value: &Value) -> Result<Self, Error> {
+        let ValueKind::Dict = value.kind() else {
+            return Err(Error::new("diagnostic transport requires a dictionary"));
+        };
+        let field = |name: &str| {
+            let CoreValue::Dict(fields) = value.as_core() else {
+                unreachable!()
+            };
+            fields
+                .get(&Key::atom_from_text(name))
+                .cloned()
+                .map(Value::from_core)
+        };
+        let emission = field("emission")
+            .ok_or_else(|| Error::new("diagnostic transport is missing `emission`"))?;
+        let severity = match field("severity") {
+            Some(value) if value.as_core() == &*crate::core::keys::INFO_VALUE => Severity::Info,
+            Some(value) if value.as_core() == &*crate::core::keys::WARN_VALUE => Severity::Warning,
+            Some(value) if value.as_core() == &*crate::core::keys::ERROR_VALUE => Severity::Error,
+            _ => return Err(Error::new("diagnostic transport has an invalid severity")),
+        };
+        let source = field("source")
+            .map(|source| {
+                source
+                    .as_binary()
+                    .and_then(|source| std::str::from_utf8(source).ok())
+                    .map(Arc::<str>::from)
+                    .ok_or_else(|| Error::new("diagnostic transport source must be text"))
+            })
+            .transpose()?;
+        let line = field("line")
+            .map(|line| {
+                line.as_i64()
+                    .and_then(|line| usize::try_from(line).ok())
+                    .ok_or_else(|| Error::new("diagnostic transport line must be nonnegative"))
+            })
+            .transpose()?;
+        let origin = field("origin");
+        let (projected_line, message) = crate::diagnostic::conventional_summary(emission.as_core());
+        Ok(Self {
+            emission,
+            origin,
+            source,
+            severity,
+            line: line.or(projected_line),
+            message: message
+                .unwrap_or_else(|| Arc::from("<diagnostic has no immediate text view>")),
+        })
+    }
+
     pub fn source(&self) -> Option<&str> {
         self.source.as_deref()
     }
@@ -739,6 +811,9 @@ struct DiagnosticBusState {
     next_subscriber: u64,
     counts: DiagnosticCounts,
     subscribers: BTreeMap<u64, Arc<dyn DiagnosticSubscriber>>,
+    runtime: Option<EvaluationRuntimeId>,
+    ingress: Option<Weak<DiagnosticIngressInner>>,
+    ingress_installed: bool,
 }
 
 struct DiagnosticBusInner {
@@ -765,9 +840,92 @@ impl DiagnosticBus {
                     next_subscriber: 1,
                     counts: DiagnosticCounts::default(),
                     subscribers: BTreeMap::new(),
+                    runtime: None,
+                    ingress: None,
+                    ingress_installed: false,
                 }),
             }),
         }
+    }
+
+    /// Constructs a diagnostic bus whose values belong to `runtime`.
+    pub fn for_runtime(runtime: &EvaluationRuntime) -> Self {
+        let bus = Self::new();
+        bus.bind_runtime(runtime)
+            .expect("a fresh diagnostic bus accepts its runtime");
+        bus
+    }
+
+    /// Binds this bus to one evaluation runtime. Repeating the same binding is
+    /// harmless; attempting to move a bus to another runtime is rejected.
+    pub fn bind_runtime(&self, runtime: &EvaluationRuntime) -> Result<(), Error> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("diagnostic bus mutex should not be poisoned");
+        match state.runtime {
+            Some(owner) if owner != runtime.id() => Err(Error::new(format!(
+                "diagnostic bus belongs to evaluation runtime {}, not {}",
+                owner.get(),
+                runtime.id().get()
+            ))),
+            Some(_) => Ok(()),
+            None => {
+                state.runtime = Some(runtime.id());
+                Ok(())
+            }
+        }
+    }
+
+    /// Installs the single ordered runtime ingress for this bus.
+    ///
+    /// The ingress receives publications before ordinary subscribers, admits
+    /// only runtime-rooted values to its FIFO, and remains registered weakly so
+    /// neither the bus nor an escaping handle keeps the runtime alive.
+    pub fn diagnostic_ingress(
+        &self,
+        runtime: &EvaluationRuntime,
+    ) -> Result<(DiagnosticIngress, RuntimeInputReader), Error> {
+        self.bind_runtime(runtime)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("diagnostic bus mutex should not be poisoned");
+        if state.runtime != Some(runtime.id()) {
+            return Err(Error::new(
+                "diagnostic ingress runtime changed during setup",
+            ));
+        }
+        if state.ingress_installed {
+            return Err(Error::new("diagnostic bus already has a runtime ingress"));
+        }
+        // Setup holds the bus lock so no publication can obtain a sequence
+        // between the baseline capture and ingress installation. Endpoint
+        // registration invokes no host callback and no runtime path acquires
+        // the bus in the opposite direction.
+        let endpoint = runtime.input_endpoint::<Value, _>(Ok)?;
+        let (sender, reader) = endpoint.into_parts();
+        let ingress = DiagnosticIngress {
+            inner: Arc::new(DiagnosticIngressInner {
+                sender,
+                state: Mutex::new(DiagnosticIngressState {
+                    next_sequence: state.counts.next_sequence,
+                    pending: BTreeMap::new(),
+                    failure: None,
+                }),
+            }),
+        };
+        state.ingress = Some(Arc::downgrade(&ingress.inner));
+        state.ingress_installed = true;
+        runtime
+            .state
+            .diagnostic_ingresses
+            .lock()
+            .expect("runtime diagnostic-ingress mutex should not be poisoned")
+            .push(ingress.inner.clone());
+        Ok((ingress, reader))
     }
 
     /// Publishes one event, updating authoritative counts before notifying the
@@ -775,7 +933,38 @@ impl DiagnosticBus {
     /// the bus lock; sequence numbers, rather than callback completion order,
     /// define the order of concurrent publications.
     pub fn publish(&self, diagnostic: Diagnostic) -> DiagnosticEvent {
-        let (event, subscribers) = {
+        self.publish_validated(diagnostic)
+    }
+
+    /// Publishes a diagnostic produced by runtime-owned work after checking
+    /// that its explicit transitional provenance matches this bus. Phase 1C
+    /// moves the same invariant into every runtime value.
+    pub fn publish_from_runtime(
+        &self,
+        runtime: EvaluationRuntimeId,
+        diagnostic: Diagnostic,
+    ) -> Result<DiagnosticEvent, Error> {
+        let owner = self
+            .inner
+            .state
+            .lock()
+            .expect("diagnostic bus mutex should not be poisoned")
+            .runtime;
+        if owner != Some(runtime) {
+            return Err(Error::new(match owner {
+                Some(owner) => format!(
+                    "diagnostic bus belongs to evaluation runtime {}, not {}",
+                    owner.get(),
+                    runtime.get()
+                ),
+                None => "diagnostic bus is not bound to an evaluation runtime".to_owned(),
+            }));
+        }
+        Ok(self.publish_validated(diagnostic))
+    }
+
+    fn publish_validated(&self, diagnostic: Diagnostic) -> DiagnosticEvent {
+        let (event, ingress, subscribers) = {
             let mut state = self
                 .inner
                 .state
@@ -795,9 +984,13 @@ impl DiagnosticBus {
                 sequence,
                 diagnostic: Arc::new(diagnostic),
             };
+            let ingress = state.ingress.as_ref().and_then(Weak::upgrade);
             let subscribers = state.subscribers.values().cloned().collect::<Vec<_>>();
-            (event, subscribers)
+            (event, ingress, subscribers)
         };
+        if let Some(ingress) = ingress {
+            ingress.receive(event.clone());
+        }
         for subscriber in subscribers {
             subscriber.receive(event.clone());
         }
@@ -842,6 +1035,81 @@ impl DiagnosticBus {
                 id,
             }),
         }
+    }
+}
+
+struct DiagnosticIngressState {
+    next_sequence: u64,
+    pending: BTreeMap<u64, RuntimePreparedInput>,
+    failure: Option<Error>,
+}
+
+struct DiagnosticIngressInner {
+    sender: RuntimeInputSender<Value>,
+    state: Mutex<DiagnosticIngressState>,
+}
+
+impl DiagnosticIngressInner {
+    fn receive(&self, event: DiagnosticEvent) {
+        let sequence = event.sequence();
+        let value = event.diagnostic().transport_value();
+        let prepared = match self.sender.prepare(value) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.state
+                    .lock()
+                    .expect("diagnostic ingress mutex should not be poisoned")
+                    .failure = Some(error);
+                return;
+            }
+        };
+        let mut state = self
+            .state
+            .lock()
+            .expect("diagnostic ingress mutex should not be poisoned");
+        if state.failure.is_some() || sequence < state.next_sequence {
+            return;
+        }
+        state.pending.insert(sequence, prepared);
+        loop {
+            let next = state.next_sequence;
+            let Some(prepared) = state.pending.remove(&next) else {
+                break;
+            };
+            match prepared.admit() {
+                Ok(_) => {
+                    state.next_sequence = next
+                        .checked_add(1)
+                        .expect("diagnostic sequence numbers exhausted");
+                }
+                Err(error) => {
+                    state.failure = Some(error);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Keeps one diagnostic bus routed to its runtime FIFO.
+///
+/// The bus retains this ingress weakly and the runtime retains its routing
+/// state. Dropping this escaping handle therefore neither detaches nor permits
+/// a replacement lifecycle.
+pub struct DiagnosticIngress {
+    inner: Arc<DiagnosticIngressInner>,
+}
+
+impl DiagnosticIngress {
+    /// Returns the first terminal admission failure, if the runtime vanished
+    /// while a publication was being routed.
+    pub fn failure(&self) -> Option<Error> {
+        self.inner
+            .state
+            .lock()
+            .expect("diagnostic ingress mutex should not be poisoned")
+            .failure
+            .clone()
     }
 }
 
@@ -910,7 +1178,7 @@ impl CompilationExecution {
         reasoning: &ReasoningSession,
         build_diagnostics: Arc<Mutex<Vec<Diagnostic>>>,
     ) -> Result<Self, Error> {
-        let diagnostics = DiagnosticBus::new();
+        let diagnostics = DiagnosticBus::for_runtime(&reasoning.runtime());
         let host = Arc::new(AssemblerReflectionHost::new_unsealed(
             &reasoning.runtime(),
             diagnostics.clone(),
@@ -1134,6 +1402,7 @@ struct RuntimeState {
     transactions: RuntimeTransactionState,
     observations: RuntimeObservationState,
     ids: RuntimeIds,
+    diagnostic_ingresses: Mutex<Vec<Arc<DiagnosticIngressInner>>>,
     settlement_gate: RwLock<()>,
 }
 
@@ -1144,7 +1413,7 @@ struct RuntimeTransactionState {
 struct RuntimeTransactionData {
     reflection: ReflectionStore,
     events: RuntimeEventState,
-    compatibility: RuntimeCompatibilityState,
+    logger_lifecycle: RuntimeLoggerLifecycleState,
 }
 
 struct RuntimeObservationState {
@@ -1575,6 +1844,13 @@ impl<T> RuntimeInputSender<T> {
     /// Converts and admits one host value. Conversion happens before runtime
     /// mutation admission, so failure publishes neither state nor a wake.
     pub fn admit(&self, input: T) -> Result<RuntimeInputSequence, Error> {
+        self.prepare(input)?.admit()
+    }
+
+    /// Converts and roots one input without admitting it. This supports
+    /// ordering adapters which must briefly retain out-of-order values without
+    /// placing typed host payloads in runtime-owned state.
+    fn prepare(&self, input: T) -> Result<RuntimePreparedInput, Error> {
         let owner = self.owner.upgrade().ok_or_else(|| {
             Error::new(format!(
                 "evaluation runtime {} for input endpoint {} has been dropped",
@@ -1583,8 +1859,32 @@ impl<T> RuntimeInputSender<T> {
             ))
         })?;
         let value = (self.convert)(input)?;
-        let root = owner.values.root(value);
-        admit_runtime_input(&owner, self.endpoint, root)
+        Ok(RuntimePreparedInput {
+            runtime: self.runtime,
+            owner: Arc::downgrade(&owner),
+            endpoint: self.endpoint,
+            payload: owner.values.root(value),
+        })
+    }
+}
+
+struct RuntimePreparedInput {
+    runtime: EvaluationRuntimeId,
+    owner: Weak<RuntimeState>,
+    endpoint: RuntimeInputEndpointId,
+    payload: RuntimeValueRoot,
+}
+
+impl RuntimePreparedInput {
+    fn admit(self) -> Result<RuntimeInputSequence, Error> {
+        let owner = self.owner.upgrade().ok_or_else(|| {
+            Error::new(format!(
+                "evaluation runtime {} for input endpoint {} has been dropped",
+                self.runtime.get(),
+                self.endpoint.get()
+            ))
+        })?;
+        admit_runtime_input(&owner, self.endpoint, self.payload)
     }
 }
 
@@ -1785,33 +2085,37 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
 }
 
 #[derive(Default)]
-struct RuntimeCompatibilityState {
-    input_revision: u64,
-    diagnostics: std::collections::VecDeque<DiagnosticEvent>,
-    stderr: std::collections::VecDeque<Bytes>,
+struct RuntimeLoggerLifecycleState {
+    revision: u64,
     input_closed: bool,
     cancelled: bool,
 }
 
-/// Temporary transactional logger-input snapshot used until Phase 0D installs
-/// generic runtime event endpoints.
+/// Temporary logger lifecycle state retained until coordinated runtime
+/// settlement replaces explicit close and cancellation in Phase 10D.
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct RuntimeCompatibilitySnapshot {
-    diagnostics: Arc<[DiagnosticEvent]>,
+pub struct RuntimeLoggerSnapshot {
+    events: RuntimeEventSnapshot,
     input_closed: bool,
-    input_revision: u64,
+    cancelled: bool,
+    lifecycle_revision: u64,
 }
 
-impl RuntimeCompatibilitySnapshot {
+impl RuntimeLoggerSnapshot {
     #[doc(hidden)]
-    pub fn diagnostics(&self) -> &[DiagnosticEvent] {
-        &self.diagnostics
+    pub fn events(&self) -> &RuntimeEventSnapshot {
+        &self.events
     }
 
     #[doc(hidden)]
     pub fn input_closed(&self) -> bool {
         self.input_closed
+    }
+
+    #[doc(hidden)]
+    pub fn cancelled(&self) -> bool {
+        self.cancelled
     }
 }
 
@@ -2086,7 +2390,7 @@ impl EvaluationRuntime {
                     state: Mutex::new(RuntimeTransactionData {
                         reflection: ReflectionStore::new(conflict_analysis),
                         events: RuntimeEventState::new(event_conflict_analysis),
-                        compatibility: RuntimeCompatibilityState::default(),
+                        logger_lifecycle: RuntimeLoggerLifecycleState::default(),
                     }),
                 },
                 observations: RuntimeObservationState {
@@ -2099,6 +2403,7 @@ impl EvaluationRuntime {
                     next_output_endpoint: AtomicU64::new(1),
                     next_delivery: AtomicU64::new(1),
                 },
+                diagnostic_ingresses: Mutex::new(Vec::new()),
                 settlement_gate: RwLock::new(()),
             }),
             default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
@@ -2511,16 +2816,12 @@ impl EvaluationRuntime {
         true
     }
 
-    /// Captures the runtime reflection store and temporary logger input state
-    /// under one transaction lock.
+    /// Captures the reflection store, generic events, and temporary logger
+    /// lifecycle flags under one transaction lock.
     #[doc(hidden)]
-    pub fn compatibility_snapshot(
+    pub fn logger_transaction_snapshot(
         &self,
-    ) -> (
-        u64,
-        crate::reflection::StoreSnapshot,
-        RuntimeCompatibilitySnapshot,
-    ) {
+    ) -> (u64, crate::reflection::StoreSnapshot, RuntimeLoggerSnapshot) {
         let generation = *self
             .state
             .observations
@@ -2536,66 +2837,60 @@ impl EvaluationRuntime {
         (
             generation,
             state.reflection.snapshot(),
-            RuntimeCompatibilitySnapshot {
-                diagnostics: Arc::from(
-                    state
-                        .compatibility
-                        .diagnostics
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                ),
-                input_closed: state.compatibility.input_closed,
-                input_revision: state.compatibility.input_revision,
+            RuntimeLoggerSnapshot {
+                events: state.events.snapshot(self.id()),
+                input_closed: state.logger_lifecycle.input_closed,
+                cancelled: state.logger_lifecycle.cancelled,
+                lifecycle_revision: state.logger_lifecycle.revision,
             },
         )
     }
 
-    /// Atomically validates and applies one reflection-store journal together
-    /// with the temporary logger input/output journal.
+    /// Atomically validates and applies one logger transaction across the
+    /// reflection store and generic event endpoints. Lifecycle validation is
+    /// included only when `.log_status` observed the close state.
     #[doc(hidden)]
-    pub fn compatibility_try_commit(
+    pub fn try_commit_logger_transaction(
         &self,
         store: &crate::reflection::StoreJournal,
-        snapshot: &RuntimeCompatibilitySnapshot,
-        observed_input: bool,
-        consumed_diagnostics: usize,
-        stderr: &[Bytes],
+        snapshot: &RuntimeLoggerSnapshot,
+        observed_lifecycle: bool,
+        events: &RuntimeEventJournal,
     ) -> crate::reflection::StoreCommitResult {
+        if events.runtime != self.id() || snapshot.events.runtime != self.id() {
+            return crate::reflection::StoreCommitResult::Conflict;
+        }
         let mutation = self.mutation_guard();
-        let result = {
+        let (result, changed) = {
             let mut state = self
                 .state
                 .transactions
                 .state
                 .lock()
                 .expect("runtime transaction mutex should not be poisoned");
-            if (observed_input && state.compatibility.input_revision != snapshot.input_revision)
-                || state.compatibility.diagnostics.len() < consumed_diagnostics
+            if observed_lifecycle && state.logger_lifecycle.revision != snapshot.lifecycle_revision
             {
                 return crate::reflection::StoreCommitResult::Conflict;
             }
-            let result = state.reflection.try_commit(store);
+            let result = state.reflection.validate(store);
             if !matches!(result, crate::reflection::StoreCommitResult::Committed) {
                 return result;
             }
-            state
-                .compatibility
-                .diagnostics
-                .drain(..consumed_diagnostics);
-            if consumed_diagnostics != 0 {
-                state.compatibility.input_revision =
-                    state.compatibility.input_revision.wrapping_add(1);
+            if !state.events.validate(events) {
+                return crate::reflection::StoreCommitResult::Conflict;
             }
-            state.compatibility.stderr.extend(stderr.iter().cloned());
-            result
+            let reflection_changed = state.reflection.commit_validated(store);
+            let event_changed = state.events.commit_validated(events);
+            (result, reflection_changed || event_changed)
         };
-        self.publish_observation(mutation);
+        if changed {
+            self.publish_observation(mutation);
+        }
         result
     }
 
     #[doc(hidden)]
-    pub fn compatibility_publish_diagnostic(&self, event: DiagnosticEvent) {
+    pub fn close_logger_input(&self) {
         let mutation = self.mutation_guard();
         {
             let mut state = self
@@ -2604,14 +2899,14 @@ impl EvaluationRuntime {
                 .state
                 .lock()
                 .expect("runtime transaction mutex should not be poisoned");
-            state.compatibility.diagnostics.push_back(event);
-            state.compatibility.input_revision = state.compatibility.input_revision.wrapping_add(1);
+            state.logger_lifecycle.input_closed = true;
+            state.logger_lifecycle.revision = state.logger_lifecycle.revision.wrapping_add(1);
         }
         self.publish_observation(mutation);
     }
 
     #[doc(hidden)]
-    pub fn compatibility_close_input(&self) {
+    pub fn cancel_logger(&self) {
         let mutation = self.mutation_guard();
         {
             let mut state = self
@@ -2620,105 +2915,10 @@ impl EvaluationRuntime {
                 .state
                 .lock()
                 .expect("runtime transaction mutex should not be poisoned");
-            state.compatibility.input_closed = true;
-            state.compatibility.input_revision = state.compatibility.input_revision.wrapping_add(1);
+            state.logger_lifecycle.cancelled = true;
+            state.logger_lifecycle.revision = state.logger_lifecycle.revision.wrapping_add(1);
         }
         self.publish_observation(mutation);
-    }
-
-    #[doc(hidden)]
-    pub fn compatibility_cancel(&self) {
-        let mutation = self.mutation_guard();
-        {
-            let mut state = self
-                .state
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned");
-            state.compatibility.cancelled = true;
-            state.compatibility.input_revision = state.compatibility.input_revision.wrapping_add(1);
-        }
-        self.publish_observation(mutation);
-    }
-
-    #[doc(hidden)]
-    pub fn compatibility_take_diagnostic(&self) -> Option<DiagnosticEvent> {
-        let mutation = self.mutation_guard();
-        let diagnostic = {
-            let mut state = self
-                .state
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned");
-            let diagnostic = state.compatibility.diagnostics.pop_front()?;
-            state.compatibility.input_revision = state.compatibility.input_revision.wrapping_add(1);
-            diagnostic
-        };
-        self.publish_observation(mutation);
-        Some(diagnostic)
-    }
-
-    #[doc(hidden)]
-    pub fn compatibility_finished(&self) -> bool {
-        let state = self
-            .state
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned");
-        state.compatibility.cancelled
-            || (state.compatibility.input_closed && state.compatibility.diagnostics.is_empty())
-    }
-
-    #[doc(hidden)]
-    pub fn compatibility_wait_for_change(&self, observed_generation: u64) -> bool {
-        let current_generation = || {
-            *self
-                .state
-                .observations
-                .epoch
-                .lock()
-                .expect("runtime observation mutex should not be poisoned")
-        };
-        if current_generation() != observed_generation {
-            return true;
-        }
-        if self.compatibility_finished() {
-            // Recheck after inspecting the terminal condition so a concurrent
-            // close cannot hide the final retry which observes `closed`.
-            return current_generation() != observed_generation;
-        }
-        self.wait_for_change(observed_generation)
-    }
-
-    #[doc(hidden)]
-    pub fn compatibility_buffer_stderr(&self, bytes: Bytes) {
-        let mutation = self.mutation_guard();
-        self.state
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned")
-            .compatibility
-            .stderr
-            .push_back(bytes);
-        self.publish_observation(mutation);
-    }
-
-    #[doc(hidden)]
-    pub fn compatibility_drain_stderr(&self) -> Vec<Bytes> {
-        let _mutation = self.mutation_guard();
-        self.state
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned")
-            .compatibility
-            .stderr
-            .drain(..)
-            .collect()
     }
 
     #[cfg(test)]
@@ -3371,6 +3571,25 @@ impl AssemblerBuilder {
         self
     }
 
+    /// Selects the diagnostic bus used by this assembler.
+    ///
+    /// This is a construction-time boundary because the reflection host keeps
+    /// the bus as part of its immutable task profile.
+    pub fn diagnostic_bus(mut self, diagnostics: DiagnosticBus) -> Self {
+        if self.runtime_locked || !self.diagnostic_attachments.is_empty() {
+            self.record_construction_error(
+                "the diagnostic bus must be selected before reflection environment construction or subscriber attachment",
+            );
+            return self;
+        }
+        self.diagnostics = diagnostics;
+        self.host = Arc::new(AssemblerReflectionHost::new_unsealed(
+            &self.runtime,
+            self.diagnostics.clone(),
+        ));
+        self
+    }
+
     pub fn conflict_analysis(mut self, strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
         if self.runtime_locked {
             self.record_construction_error(
@@ -3459,6 +3678,7 @@ impl AssemblerBuilder {
         if let Some(error) = self.construction_error.take() {
             return Err(Error::new(error));
         }
+        self.diagnostics.bind_runtime(&self.runtime)?;
         let environment = match self.reflection_environment.take() {
             Some(environment) => environment,
             None => authoritative_reflection_environment(Value::empty_record(), "assembler")?.0,
@@ -5575,39 +5795,52 @@ mod tests {
     }
 
     #[test]
-    fn runtime_combines_reflection_and_compatibility_input_commit() {
+    fn runtime_combines_reflection_and_logger_event_commit() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let assembler = Assembler::builder()
             .evaluation_runtime(runtime.clone())
             .build()
             .expect("assembler should build");
-        let (initial_generation, store, input) = runtime.compatibility_snapshot();
+        let input = runtime
+            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .expect("input endpoint should register");
+        let (initial_generation, store, snapshot) = runtime.logger_transaction_snapshot();
         let mut stale = crate::reflection::StoreJournal::new(store);
         stale.write(vec![Key::atom_from_text("atomic")], Value::text("stale"));
-        let event = DiagnosticBus::new().publish(Diagnostic::new(Severity::Info, "input"));
-        runtime.compatibility_publish_diagnostic(event);
-        let (input_generation, _, _) = runtime.compatibility_snapshot();
+        let mut stale_events = RuntimeEventJournal::new(snapshot.events().clone());
+        assert_eq!(stale_events.read(&input.reader()).unwrap(), None);
+        input.sender().admit(7).expect("input should be admitted");
+        let (input_generation, _, _) = runtime.logger_transaction_snapshot();
         assert_ne!(input_generation, initial_generation);
 
         assert_eq!(
-            runtime.compatibility_try_commit(&stale, &input, true, 0, &[]),
+            runtime.try_commit_logger_transaction(&stale, &snapshot, false, &stale_events),
             crate::reflection::StoreCommitResult::Conflict
         );
         assert!(assembler.get(&runtime.reflection_root(), "atomic").is_err());
 
-        let (_, store, input) = runtime.compatibility_snapshot();
+        let (_, store, snapshot) = runtime.logger_transaction_snapshot();
         let mut committed = crate::reflection::StoreJournal::new(store);
         committed.write(
             vec![Key::atom_from_text("atomic")],
             Value::text("committed"),
         );
+        let mut events = RuntimeEventJournal::new(snapshot.events().clone());
         assert_eq!(
-            runtime.compatibility_try_commit(&committed, &input, true, 1, &[]),
+            events
+                .read(&input.reader())
+                .expect("admitted input should be readable")
+                .and_then(|value| value.as_i64()),
+            Some(7)
+        );
+        assert_eq!(
+            runtime.try_commit_logger_transaction(&committed, &snapshot, false, &events),
             crate::reflection::StoreCommitResult::Committed
         );
-        let (committed_generation, _, input) = runtime.compatibility_snapshot();
+        let (committed_generation, _, snapshot) = runtime.logger_transaction_snapshot();
         assert_ne!(committed_generation, input_generation);
-        assert!(input.diagnostics().is_empty());
+        let mut empty = RuntimeEventJournal::new(snapshot.events().clone());
+        assert_eq!(empty.read(&input.reader()).unwrap(), None);
         assert_eq!(
             assembler
                 .get(&runtime.reflection_root(), "atomic")
@@ -6030,6 +6263,127 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(2, "second"), (3, "third")]
         );
+    }
+
+    #[test]
+    fn diagnostic_ingress_is_runtime_bound_and_installed_once() {
+        let owner = EvaluationRuntime::new(0).expect("owner runtime should build");
+        let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+        let bus = DiagnosticBus::for_runtime(&owner);
+        let (_ingress, _reader) = bus
+            .diagnostic_ingress(&owner)
+            .expect("first ingress should attach");
+
+        assert!(bus.diagnostic_ingress(&owner).is_err());
+        assert!(bus.bind_runtime(&foreign).is_err());
+        assert!(
+            bus.publish_from_runtime(
+                foreign.id(),
+                Diagnostic::new(Severity::Error, "foreign diagnostic"),
+            )
+            .is_err()
+        );
+        assert_eq!(bus.counts().total(), 0);
+    }
+
+    #[test]
+    fn diagnostic_ingress_admits_in_bus_sequence_order() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let bus = DiagnosticBus::for_runtime(&runtime);
+        let (_ingress, reader) = bus
+            .diagnostic_ingress(&runtime)
+            .expect("ingress should attach");
+        let before = runtime.transaction_snapshot().0;
+        let published = (0..24)
+            .map(|index| {
+                let bus = bus.clone();
+                std::thread::spawn(move || {
+                    let message = format!("message {index}");
+                    let event = bus.publish(Diagnostic::new(Severity::Info, message.clone()));
+                    (event.sequence(), message)
+                })
+            })
+            .map(|thread| thread.join().expect("publisher should not panic"))
+            .collect::<BTreeMap<_, _>>();
+        assert_ne!(runtime.transaction_snapshot().0, before);
+
+        let (_, store, snapshot) = runtime.transaction_snapshot();
+        let mut journal = RuntimeEventJournal::new(snapshot);
+        let mut received = Vec::new();
+        while let Some(value) = journal.read(&reader).expect("ingress should be readable") {
+            received.push(
+                Diagnostic::from_transport_value(&value)
+                    .expect("ingress should retain diagnostic envelopes")
+                    .message()
+                    .to_owned(),
+            );
+        }
+        assert_eq!(
+            received,
+            published.values().cloned().collect::<Vec<_>>(),
+            "runtime FIFO order must follow bus sequence, not callback arrival"
+        );
+        assert_eq!(
+            runtime.try_commit_transaction(&crate::reflection::StoreJournal::new(store), &journal),
+            crate::reflection::StoreCommitResult::Committed
+        );
+    }
+
+    #[test]
+    fn runtime_retains_the_installed_diagnostic_ingress() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let bus = DiagnosticBus::for_runtime(&runtime);
+        let (ingress, reader) = bus
+            .diagnostic_ingress(&runtime)
+            .expect("ingress should attach");
+        drop(ingress);
+
+        bus.publish(Diagnostic::new(Severity::Info, "still routed"));
+        let (_, _, snapshot) = runtime.transaction_snapshot();
+        let mut journal = RuntimeEventJournal::new(snapshot);
+        let value = journal
+            .read(&reader)
+            .expect("retained ingress should remain readable")
+            .expect("publication should reach the stable ingress");
+        assert_eq!(
+            Diagnostic::from_transport_value(&value)
+                .expect("ingress should retain a diagnostic envelope")
+                .message(),
+            "still routed"
+        );
+    }
+
+    #[test]
+    fn diagnostic_subscribers_run_after_runtime_admission_is_released() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let bus = DiagnosticBus::for_runtime(&runtime);
+        let (_ingress, _reader) = bus
+            .diagnostic_ingress(&runtime)
+            .expect("ingress should attach");
+        let callback_runtime = runtime.clone();
+        let _subscription = bus.subscribe(DiagnosticCallback(move |_| {
+            assert!(
+                callback_runtime.exclusive_admission_available(),
+                "ordinary callbacks must run outside runtime mutation admission"
+            );
+        }));
+
+        bus.publish(Diagnostic::new(Severity::Info, "ordered"));
+    }
+
+    #[test]
+    fn diagnostic_bus_and_ingress_do_not_retain_the_runtime() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let retained = Arc::downgrade(&runtime.state);
+        let bus = DiagnosticBus::for_runtime(&runtime);
+        let (ingress, _reader) = bus
+            .diagnostic_ingress(&runtime)
+            .expect("ingress should attach");
+
+        drop(runtime);
+        assert!(retained.upgrade().is_none());
+        bus.publish(Diagnostic::new(Severity::Info, "after runtime"));
+        assert!(ingress.failure().is_some());
     }
 
     #[test]

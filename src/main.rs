@@ -14,16 +14,17 @@ use glam::cli::{
     format_parse_summary, parse_worker_count, route_completion,
 };
 use glam::reflection::{
-    CommitResult, EffectRequestSpec, EffectRun, HostSnapshot, ReflectionEffects, ReflectionJournal,
-    ReflectionRequest, ReflectionServices, ReflectionTransaction, RequestContext, RequestResult,
-    TaskCommit, TaskEnvironment, TaskHost, TaskOutcome, TaskSpecialization,
-    handle_reflection_request, reflection_request_specs,
+    CommitResult, EffectRequestSpec, EffectRun, HostSnapshot, ReflectionJournal, ReflectionRequest,
+    ReflectionServices, ReflectionTransaction, RequestContext, RequestResult, TaskCommit,
+    TaskEnvironment, TaskHost, TaskOutcome, TaskSpecialization, handle_reflection_request,
+    reflection_request_specs,
 };
 use glam::{
-    Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, Error,
-    EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, ReasoningReport,
-    ReasoningStatus, ReasoningTaskState, RuntimeCompatibilitySnapshot, Severity, Value,
-    check_local_manifest, inspect_g_source,
+    Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticIngress, DiagnosticSubscriber,
+    Error, EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, ReasoningReport,
+    ReasoningStatus, ReasoningTaskState, RuntimeDeliveryOutcome, RuntimeEventJournal,
+    RuntimeInputReader, RuntimeLoggerSnapshot, RuntimeOutputDelivery, RuntimeOutputWriter,
+    Severity, Value, check_local_manifest, inspect_g_source,
 };
 
 fn main() -> ExitCode {
@@ -323,13 +324,14 @@ fn prepare_assembly(
 ) -> Result<PreparedAssembly, ExitCode> {
     let local_files = FileSourceSystem::default();
     let runtime = EvaluationRuntime::new(0).expect("a dormant evaluation runtime is valid");
-    let log_host = Arc::new(LogHost::with_runtime(runtime.clone()));
+    let diagnostics = DiagnosticBus::for_runtime(&runtime);
+    let log_host = Arc::new(LogHost::with_runtime(runtime.clone(), &diagnostics));
     let mut process_args = None;
     let mut reflection_args = None;
     let assembler = Assembler::builder()
         .source_system(local_files.clone())
         .evaluation_runtime(runtime.clone())
-        .diagnostic_subscriber(log_host.clone())
+        .diagnostic_bus(diagnostics)
         .reflection_environment(|environment| {
             let (process_value, process_resolver) =
                 environment.promise("canonical process arguments");
@@ -686,7 +688,8 @@ fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Erro
 
 fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost>) -> LoggerRun {
     let logger = Arc::new(DefaultLogger::new(assembler.clone()));
-    let diagnostics = DiagnosticBus::new();
+    let evaluation_runtime = assembler.evaluation_runtime();
+    let diagnostics = DiagnosticBus::for_runtime(&evaluation_runtime);
     let subscription = diagnostics.subscribe(logger.clone());
     let host = Arc::new(LoggerTaskHost::new(
         input.clone(),
@@ -694,7 +697,6 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
         assembler.reflection_environment_for_role("logger"),
     ));
     let effect_assembler = assembler.clone();
-    let evaluation_runtime = assembler.evaluation_runtime();
     let custom = match assembler.get_optional(configuration, "conf.log") {
         Ok(Some(logger)) if !logger.is_undefined() => Some(logger),
         Ok(Some(_)) | Ok(None) => None,
@@ -773,20 +775,28 @@ enum MainRequest {
     WriteStderr,
 }
 
-type MainSnapshot = RuntimeCompatibilitySnapshot;
+type MainSnapshot = RuntimeLoggerSnapshot;
 
 #[derive(Clone, Default)]
 struct MainJournal {
     reflection: ReflectionJournal,
-    consumed_diagnostics: usize,
-    stderr: Vec<Bytes>,
-    observed_input: bool,
+    events: Option<RuntimeEventJournal>,
+    observed_lifecycle: bool,
 }
 
 impl ReflectionTransaction for MainJournal {
     fn reflection_journal(&mut self) -> &mut ReflectionJournal {
         &mut self.reflection
     }
+}
+
+fn event_journal<'a>(
+    snapshot: &MainSnapshot,
+    journal: &'a mut MainJournal,
+) -> &'a mut RuntimeEventJournal {
+    journal
+        .events
+        .get_or_insert_with(|| RuntimeEventJournal::new(snapshot.events().clone()))
 }
 
 impl TaskSpecialization for MainEffects {
@@ -844,10 +854,18 @@ impl TaskSpecialization for MainEffects {
                     .assembler
                     .to_binary(&value)
                     .map_err(glam::reflection::TaskHalt::from)?;
+                let stderr_writer = context.host().stderr_writer.clone();
                 if let Some(mut transaction) = context.transaction() {
-                    transaction.parts().1.stderr.push(bytes);
+                    let (snapshot, journal) = transaction.parts();
+                    let value = Value::binary(bytes);
+                    event_journal(snapshot, journal)
+                        .write(&stderr_writer, value)
+                        .map_err(glam::reflection::TaskHalt::from)?;
                 } else {
-                    context.host().input.write_stderr(bytes);
+                    context
+                        .host()
+                        .write_stderr(bytes)
+                        .map_err(glam::reflection::TaskHalt::from)?;
                     context.committed();
                 }
                 Ok(RequestResult::ReturnUnit)
@@ -870,7 +888,7 @@ fn log_status(
             .transaction()
             .expect("checked active reflection transaction");
         let (snapshot, journal) = transaction.parts();
-        journal.observed_input = true;
+        journal.observed_lifecycle = true;
         (generation, snapshot.input_closed())
     } else {
         let snapshot = <LoggerTaskHost as TaskHost<MainEffects>>::snapshot(context.host());
@@ -885,17 +903,19 @@ fn log_status(
 fn read_log(
     context: &mut RequestContext<'_, MainEffects>,
 ) -> Result<RequestResult, glam::reflection::TaskHalt> {
+    let diagnostic_reader = context.host().input.diagnostic_reader.clone();
     if let Some(generation) = context.transaction_generation() {
         context.observe_host_generation(generation);
         let mut transaction = context
             .transaction()
             .expect("checked active reflection transaction");
         let (snapshot, journal) = transaction.parts();
-        journal.observed_input = true;
-        if let Some(diagnostic) = snapshot.diagnostics().get(journal.consumed_diagnostics) {
-            journal.consumed_diagnostics += 1;
-            return diagnostic
-                .enrich()
+        if let Some(value) = event_journal(snapshot, journal)
+            .read(&diagnostic_reader)
+            .map_err(glam::reflection::TaskHalt::from)?
+        {
+            return Diagnostic::from_transport_value(&value)
+                .and_then(|diagnostic| diagnostic.enrich())
                 .map(RequestResult::Return)
                 .map_err(glam::reflection::TaskHalt::from);
         }
@@ -907,20 +927,23 @@ fn read_log(
     loop {
         let snapshot = <LoggerTaskHost as TaskHost<MainEffects>>::snapshot(context.host());
         context.observe_host_generation(snapshot.generation());
-        let Some(diagnostic) = snapshot.extra().diagnostics().first() else {
+        let mut events = RuntimeEventJournal::new(snapshot.extra().events().clone());
+        let Some(value) = events
+            .read(&diagnostic_reader)
+            .map_err(glam::reflection::TaskHalt::from)?
+        else {
             return Ok(RequestResult::Fail);
         };
-        let value = diagnostic
-            .enrich()
+        let value = Diagnostic::from_transport_value(&value)
+            .and_then(|diagnostic| diagnostic.enrich())
             .map_err(glam::reflection::TaskHalt::from)?;
         let commit = TaskCommit::new(
             glam::reflection::StoreJournal::new(snapshot.store().clone()),
             snapshot.extra().clone(),
             MainJournal {
                 reflection: ReflectionJournal::default(),
-                consumed_diagnostics: 1,
-                stderr: Vec::new(),
-                observed_input: true,
+                events: Some(events),
+                observed_lifecycle: false,
             },
         );
         match <LoggerTaskHost as TaskHost<MainEffects>>::commit(context.host(), commit) {
@@ -942,6 +965,8 @@ fn read_log(
 
 struct LogHost {
     runtime: EvaluationRuntime,
+    _diagnostic_ingress: DiagnosticIngress,
+    diagnostic_reader: RuntimeInputReader,
 }
 
 /// Capabilities and mutable state belonging to the logger's evaluation
@@ -951,79 +976,189 @@ struct LoggerTaskHost {
     input: Arc<LogHost>,
     diagnostics: DiagnosticBus,
     reflection_environment: Value,
+    diagnostic_writer: RuntimeOutputWriter,
+    diagnostic_delivery: RuntimeOutputDelivery<Diagnostic>,
+    stderr_writer: RuntimeOutputWriter,
+    stderr_delivery: RuntimeOutputDelivery<Bytes>,
 }
 
 impl LoggerTaskHost {
     fn new(input: Arc<LogHost>, diagnostics: DiagnosticBus, reflection_environment: Value) -> Self {
+        diagnostics
+            .bind_runtime(&input.runtime)
+            .expect("logger output bus must belong to the logger runtime");
+        let diagnostic_bus = diagnostics.clone();
+        let runtime_id = input.runtime.id();
+        let diagnostic_output = input
+            .runtime
+            .output_endpoint(
+                |value| Diagnostic::from_transport_value(&value),
+                move |diagnostic| {
+                    diagnostic_bus.publish_from_runtime(runtime_id, diagnostic)?;
+                    Ok(())
+                },
+            )
+            .expect("logger diagnostic output endpoint should be constructible");
+        let stderr_output = input
+            .runtime
+            .output_endpoint(
+                |value| {
+                    value
+                        .as_binary()
+                        .map(Bytes::copy_from_slice)
+                        .ok_or_else(|| Error::new("stderr output requires binary data"))
+                },
+                |bytes: Bytes| {
+                    io::stderr()
+                        .write_all(&bytes)
+                        .map_err(|error| Error::new(error.to_string()))
+                },
+            )
+            .expect("logger stderr output endpoint should be constructible");
+        let (diagnostic_writer, diagnostic_delivery) = diagnostic_output.into_parts();
+        let (stderr_writer, stderr_delivery) = stderr_output.into_parts();
         Self {
             input,
             diagnostics,
             reflection_environment,
+            diagnostic_writer,
+            diagnostic_delivery,
+            stderr_writer,
+            stderr_delivery,
         }
     }
 
-    fn emit_output(&self, diagnostic: Diagnostic) {
-        self.diagnostics.publish(diagnostic);
+    fn write_diagnostic(&self, diagnostic: Diagnostic) -> Result<(), Error> {
+        let (_generation, store, snapshot) = self.input.runtime.logger_transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(snapshot.events().clone());
+        events.write(&self.diagnostic_writer, diagnostic.transport_value())?;
+        match self.input.runtime.try_commit_logger_transaction(
+            &glam::reflection::StoreJournal::new(store),
+            &snapshot,
+            false,
+            &events,
+        ) {
+            glam::reflection::StoreCommitResult::Committed => self.deliver_outputs(),
+            glam::reflection::StoreCommitResult::Conflict => Err(Error::new(
+                "logger output conflicted during immediate commit",
+            )),
+            glam::reflection::StoreCommitResult::MissingVolume(volume) => Err(Error::new(format!(
+                "reflection volume {} was revoked before logger output committed",
+                volume.get()
+            ))),
+        }
+    }
+
+    fn write_stderr(&self, bytes: Bytes) -> Result<(), Error> {
+        let (_generation, store, snapshot) = self.input.runtime.logger_transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(snapshot.events().clone());
+        events.write(&self.stderr_writer, Value::binary(bytes))?;
+        match self.input.runtime.try_commit_logger_transaction(
+            &glam::reflection::StoreJournal::new(store),
+            &snapshot,
+            false,
+            &events,
+        ) {
+            glam::reflection::StoreCommitResult::Committed => self.deliver_outputs(),
+            glam::reflection::StoreCommitResult::Conflict => Err(Error::new(
+                "stderr output conflicted during immediate commit",
+            )),
+            glam::reflection::StoreCommitResult::MissingVolume(volume) => Err(Error::new(format!(
+                "reflection volume {} was revoked before stderr output committed",
+                volume.get()
+            ))),
+        }
+    }
+
+    fn deliver_outputs(&self) -> Result<(), Error> {
+        loop {
+            let mut delivered = false;
+            if let Some(outcome) = self.diagnostic_delivery.deliver_next()? {
+                delivered = true;
+                if let RuntimeDeliveryOutcome::Failed(failure) = outcome {
+                    return Err(failure.error().clone());
+                }
+            }
+            if let Some(outcome) = self.stderr_delivery.deliver_next()? {
+                delivered = true;
+                if let RuntimeDeliveryOutcome::Failed(failure) = outcome {
+                    return Err(failure.error().clone());
+                }
+            }
+            if !delivered {
+                return Ok(());
+            }
+        }
     }
 }
 
 impl LogHost {
     #[cfg(test)]
-    fn new() -> Self {
-        Self::with_runtime(
-            EvaluationRuntime::new(0).expect("test logger runtime should be constructible"),
-        )
+    fn new(diagnostics: &DiagnosticBus) -> Self {
+        let runtime =
+            EvaluationRuntime::new(0).expect("test logger runtime should be constructible");
+        Self::with_runtime(runtime, diagnostics)
     }
 
-    fn with_runtime(runtime: EvaluationRuntime) -> Self {
-        Self { runtime }
+    fn with_runtime(runtime: EvaluationRuntime, diagnostics: &DiagnosticBus) -> Self {
+        let (ingress, diagnostic_reader) = diagnostics
+            .diagnostic_ingress(&runtime)
+            .expect("logger diagnostic ingress should be constructible");
+        Self {
+            runtime,
+            _diagnostic_ingress: ingress,
+            diagnostic_reader,
+        }
     }
 
     fn close_input(&self) {
-        self.runtime.compatibility_close_input();
+        self.runtime.close_logger_input();
     }
 
     fn cancel(&self) {
-        self.runtime.compatibility_cancel();
+        self.runtime.cancel_logger();
     }
 
     fn drain_default(&self, logger: &DefaultLogger) {
         while let Some(diagnostic) = self.take_diagnostic() {
             logger.emit(&diagnostic);
         }
-        self.flush_stderr();
     }
 
-    fn take_diagnostic(&self) -> Option<DiagnosticEvent> {
+    fn take_diagnostic(&self) -> Option<Diagnostic> {
         loop {
-            let (generation, _store, _input) = self.runtime.compatibility_snapshot();
-            if let Some(diagnostic) = self.runtime.compatibility_take_diagnostic() {
-                return Some(diagnostic);
+            let (generation, store, snapshot) = self.runtime.logger_transaction_snapshot();
+            let mut events = RuntimeEventJournal::new(snapshot.events().clone());
+            let value = events
+                .read(&self.diagnostic_reader)
+                .expect("logger diagnostic endpoint should match its runtime");
+            if let Some(value) = value {
+                match self.runtime.try_commit_logger_transaction(
+                    &glam::reflection::StoreJournal::new(store),
+                    &snapshot,
+                    false,
+                    &events,
+                ) {
+                    glam::reflection::StoreCommitResult::Committed => {
+                        return Some(
+                            Diagnostic::from_transport_value(&value)
+                                .expect("diagnostic ingress stores transport envelopes"),
+                        );
+                    }
+                    glam::reflection::StoreCommitResult::Conflict => continue,
+                    glam::reflection::StoreCommitResult::MissingVolume(volume) => {
+                        panic!(
+                            "unchanged logger reflection snapshot lost volume {}",
+                            volume.get()
+                        );
+                    }
+                }
             }
-            if self.runtime.compatibility_finished() {
+            if snapshot.cancelled() || snapshot.input_closed() {
                 return None;
             }
             self.runtime.wait_for_change(generation);
         }
-    }
-
-    fn flush_stderr(&self) {
-        let output = self.runtime.compatibility_drain_stderr();
-        let mut stderr = io::stderr().lock();
-        for bytes in output {
-            let _ = stderr.write_all(&bytes);
-        }
-    }
-
-    fn write_stderr(&self, bytes: Bytes) {
-        self.runtime.compatibility_buffer_stderr(bytes);
-        self.flush_stderr();
-    }
-}
-
-impl DiagnosticSubscriber for LogHost {
-    fn receive(&self, event: DiagnosticEvent) {
-        self.runtime.compatibility_publish_diagnostic(event);
     }
 }
 
@@ -1035,7 +1170,9 @@ impl TaskEnvironment for LoggerTaskHost {
 
 impl ReflectionServices for LoggerTaskHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
-        self.emit_output(diagnostic);
+        if let Err(error) = self.write_diagnostic(diagnostic) {
+            self.diagnostics.publish(error.diagnostic().clone());
+        }
     }
 
     fn update_query(&self, handle: &Arc<glam::reflection::EvaluationQueryHandle>, result: Value) {
@@ -1045,18 +1182,27 @@ impl ReflectionServices for LoggerTaskHost {
 
 impl TaskHost<MainEffects> for LoggerTaskHost {
     fn snapshot(&self) -> HostSnapshot<MainEffects> {
-        let (generation, store, input) = self.input.runtime.compatibility_snapshot();
+        let (generation, store, input) = self.input.runtime.logger_transaction_snapshot();
         HostSnapshot::new(generation, store, input)
     }
 
     fn commit(&self, commit: TaskCommit<MainEffects>) -> CommitResult {
         let (store, snapshot, journal) = commit.into_parts();
-        match self.input.runtime.compatibility_try_commit(
+        let mut events = journal
+            .events
+            .unwrap_or_else(|| RuntimeEventJournal::new(snapshot.events().clone()));
+        for diagnostic in journal.reflection.diagnostics() {
+            if let Err(error) = events.write(&self.diagnostic_writer, diagnostic.transport_value())
+            {
+                self.diagnostics.publish(error.diagnostic().clone());
+                return CommitResult::Closed;
+            }
+        }
+        match self.input.runtime.try_commit_logger_transaction(
             &store,
             &snapshot,
-            journal.observed_input,
-            journal.consumed_diagnostics,
-            &journal.stderr,
+            journal.observed_lifecycle,
+            &events,
         ) {
             glam::reflection::StoreCommitResult::Committed => {}
             glam::reflection::StoreCommitResult::Conflict => {
@@ -1066,53 +1212,15 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
                 return CommitResult::MissingVolume(volume);
             }
         }
-        let diagnostics = journal.reflection.diagnostics().to_vec();
-        for diagnostic in diagnostics {
-            self.emit_output(diagnostic);
-        }
         journal.reflection.commit_updates();
-        self.input.flush_stderr();
+        if let Err(error) = self.deliver_outputs() {
+            self.diagnostics.publish(error.diagnostic().clone());
+        }
         CommitResult::Committed
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
-        self.input
-            .runtime
-            .compatibility_wait_for_change(observed_generation)
-    }
-
-    fn evaluation_runtime_id(&self) -> Option<glam::EvaluationRuntimeId> {
-        Some(self.input.runtime.id())
-    }
-}
-
-impl TaskHost<ReflectionEffects> for LoggerTaskHost {
-    fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
-        let (generation, store) = self.input.runtime.reflection_snapshot();
-        HostSnapshot::new(generation, store, ())
-    }
-
-    fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
-        let (store, _snapshot, journal) = commit.into_parts();
-        match self.input.runtime.commit_reflection(&store) {
-            glam::reflection::StoreCommitResult::Committed => {}
-            glam::reflection::StoreCommitResult::Conflict => {
-                return CommitResult::Conflict;
-            }
-            glam::reflection::StoreCommitResult::MissingVolume(volume) => {
-                return CommitResult::MissingVolume(volume);
-            }
-        }
-        let diagnostics = journal.diagnostics().to_vec();
-        for diagnostic in diagnostics {
-            self.emit_output(diagnostic);
-        }
-        journal.commit_updates();
-        CommitResult::Committed
-    }
-
-    fn wait_for_change(&self, observed_generation: u64) -> bool {
-        <LoggerTaskHost as TaskHost<MainEffects>>::wait_for_change(self, observed_generation)
+        self.input.runtime.wait_for_change(observed_generation)
     }
 
     fn evaluation_runtime_id(&self) -> Option<glam::EvaluationRuntimeId> {
@@ -1738,8 +1846,7 @@ mod tests {
             .expect("assembly read should succeed");
         fs::write(&path, "later edit").expect("test input should be changed");
         let diagnostics = DiagnosticBus::new();
-        let queue = Arc::new(LogHost::new());
-        let _subscription = diagnostics.subscribe(queue.clone());
+        let queue = Arc::new(LogHost::new(&diagnostics));
 
         assert!(!finish_local_files(&files, None, &diagnostics));
         let warning = queue
@@ -2155,8 +2262,7 @@ mod tests {
         diagnostics.publish(Diagnostic::new(Severity::Error, "dropped"));
         assert_eq!(diagnostics.counts().errors(), 1);
 
-        let retained = Arc::new(LogHost::new());
-        let _retained_subscription = diagnostics.subscribe(retained.clone());
+        let retained = Arc::new(LogHost::new(&diagnostics));
         diagnostics.publish(Diagnostic::new(Severity::Error, "retained"));
         assert!(retained.take_diagnostic().is_some());
         assert_eq!(diagnostics.counts().errors(), 2);
@@ -2165,10 +2271,21 @@ mod tests {
 
     #[test]
     fn logger_session_output_is_separate_from_assembler_input() {
-        let input = Arc::new(LogHost::new());
+        struct Capture(Arc<std::sync::Mutex<Vec<DiagnosticEvent>>>);
+        impl DiagnosticSubscriber for Capture {
+            fn receive(&self, event: DiagnosticEvent) {
+                self.0
+                    .lock()
+                    .expect("output capture should not be poisoned")
+                    .push(event);
+            }
+        }
+
+        let input_diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&input_diagnostics));
         let diagnostics = DiagnosticBus::new();
-        let output = Arc::new(LogHost::new());
-        let _subscription = diagnostics.subscribe(output.clone());
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _subscription = diagnostics.subscribe(Capture(output.clone()));
         let host = LoggerTaskHost::new(
             input.clone(),
             diagnostics.clone(),
@@ -2180,16 +2297,18 @@ mod tests {
             Diagnostic::new(Severity::Error, "session output"),
         );
 
-        assert!(
-            input
-                .runtime
-                .compatibility_snapshot()
-                .2
-                .diagnostics()
-                .is_empty()
+        let (_generation, _store, snapshot) = input.runtime.logger_transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(snapshot.events().clone());
+        assert_eq!(
+            events.read(&input.diagnostic_reader).unwrap(),
+            None,
+            "logger output must not return to assembler diagnostic input"
         );
         let output = output
-            .take_diagnostic()
+            .lock()
+            .expect("output capture should not be poisoned")
+            .first()
+            .cloned()
             .expect("logger output bus should publish the diagnostic");
         assert_eq!(output.message(), "session output");
         assert_eq!(diagnostics.counts().errors(), 1);
